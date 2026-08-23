@@ -5073,9 +5073,11 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                     expected_topology_revision,
                     dojo_id: requested,
                     name,
+                    promote_transient_lair,
                 } if expected_topology_revision.get() == 7
                     && requested == dojo_id
-                    && name == "renamed" =>
+                    && name == "renamed"
+                    && !promote_transient_lair =>
                 {
                     Response::TopologyCommitted {
                         topology_revision: TopologyRevision::new(8),

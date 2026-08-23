@@ -3,7 +3,7 @@ title: Troubleshooting
 description: Diagnose common local Splinterm installation, daemon, session, and configuration problems.
 ---
 
-This page covers the first local checks. Splinterm is a public alpha with a narrow validated Omarchy/Arch environment, so failures outside that target may not have a supported resolution.
+This page covers the first local checks. Splinterm is a public beta with a narrow validated Omarchy/Arch environment, so failures outside that target may not have a supported resolution.
 
 ## Check the installed command
 
@@ -28,6 +28,33 @@ systemctl --user start splinterd.service
 ```
 
 The default socket is `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`. A development instance may use another path through `SPLINTERM_SOCKET`.
+
+## The daemon restarted after a heavy workload
+
+Check whether systemd recorded an out-of-memory result and inspect the daemon's independent control-plane limits:
+
+```bash
+systemctl --user show splinterd.service \
+  -p Result -p NRestarts -p TasksCurrent -p TasksMax \
+  -p MemoryCurrent -p MemoryHigh -p MemoryMax
+journalctl --user-unit splinterd.service -n 50 --no-pager
+```
+
+The packaged task ceiling protects the daemon from unbounded process creation, while `MemoryHigh` causes reclaim and throttling rather than imposing a hard memory ceiling. Terminal workloads run in a separate aggregate slice with nested per-Dojo and per-Splint boundaries, so they do not share the daemon's task or memory-pressure budget. `MemoryCurrent` includes charged page cache, some of which may be reclaimable under pressure.
+
+After a daemon restart, inspect exited topology with `splinterm list --all`. Restoration is explicit because Splinterm never reruns saved commands automatically.
+
+## A new Splint reports an internal launch failure
+
+The packaged daemon fails closed when it cannot place a terminal helper in its exact systemd scope before executing the shell. Inspect the daemon and workload hierarchy:
+
+```bash
+journalctl --user-unit splinterd.service -n 40 --no-pager
+systemctl --user status app-splinterm.slice
+systemd-cgls --user-unit app-splinterm.slice
+```
+
+The aggregate slice can be inactive when no Splints are running. Do not work around placement failure by launching the packaged daemon manually: that removes the package's required-containment contract. A direct development daemon may fall back with a bounded warning, but it does not claim workload isolation.
 
 ## A window exits as unauthorized
 

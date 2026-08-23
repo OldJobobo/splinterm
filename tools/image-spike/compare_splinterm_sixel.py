@@ -19,8 +19,8 @@ import time
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / "docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
-FOOT_CAPTURES = ROOT / "docs/spikes/artifacts/0025-terminal-images/foot-sixel-captures"
+FIXTURES = ROOT / "fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
+FOOT_CAPTURES = ROOT / "fixtures/terminal-images/v1/foot-sixel-oracle"
 GUARD_PATH = ROOT / "tools/foot-oracle/run-final-buffer-comparison.py"
 APP_ID = "com.oldjobobo.splinterm"
 WORKSPACE = 8
@@ -70,11 +70,15 @@ def sha256(path: Path) -> str:
 
 def foot_cell_rgb(case_id: str) -> tuple[int, int, bytes, dict[str, Any]]:
     directory = FOOT_CAPTURES / case_id
-    report = json.loads((directory / "report.json").read_text(encoding="utf-8"))
-    if not report.get("exact") or report.get("foot_commit") != PINNED_FOOT:
-        raise RuntimeError("retained Foot Sixel evidence is not exact and pinned")
     metadata = json.loads((directory / "foot.json").read_text(encoding="utf-8"))
-    source = (directory / "foot.argb").read_bytes()
+    if metadata.get("provenance", {}).get("commit") != PINNED_FOOT:
+        raise RuntimeError("Foot Sixel oracle fixture is not pinned")
+    source_path = directory / "foot.argb"
+    if sha256(source_path) != metadata.get("framebuffer_sha256"):
+        raise RuntimeError("Foot Sixel oracle framebuffer checksum differs")
+    source = source_path.read_bytes()
+    if len(source) != int(metadata["height"]) * int(metadata["stride"]):
+        raise RuntimeError("Foot Sixel oracle framebuffer size differs")
     cell_width = int(metadata["cell"]["width"])
     cell_height = int(metadata["cell"]["height"])
     origin_x = int(metadata["origin"]["x"])

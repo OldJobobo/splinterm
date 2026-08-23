@@ -1,8 +1,0 @@
-action tests: 10 passed
-topology manager tests: 7 passed
-splinterm library: 268 passed, 1 ignored
-splinterd end-to-end: 16 passed
-cargo check -p splinterm --all-targets: passed
-cargo fmt --all --check: passed
-git diff --check: passed
-cargo test --workspace -- --test-threads=1: passed

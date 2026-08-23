@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-04
-- **Plan:** [Lair/Dojo topology migration](../plans/0018-lair-dojo-topology-migration.md)
 - **Amends:** [ADR 0006](0006-multiplexing-lifecycle.md), [ADR 0007](0007-supported-automation-policy.md)
 
 ## Context

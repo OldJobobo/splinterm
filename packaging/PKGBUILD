@@ -1,7 +1,7 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm
 pkgname=('splinterm' 'splinterm-mcp')
-pkgver=0.1.0alpha3.3
+pkgver=0.1.0beta2
 pkgrel=1
 arch=('x86_64')
 url='https://github.com/oldjobobo/splinterm'
@@ -32,6 +32,7 @@ check() {
   python -m unittest tools/automation/test_dojo_picker.py
   python -m unittest tools/package/test_installer_safety.py
   python -m unittest tools/package/test_omarchy_screensaver_integration.py
+  python -m unittest tools/package/test_workload_units.py
 }
 
 package_splinterm() {
@@ -79,6 +80,8 @@ package_splinterm() {
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg"
   install -Dm644 dist/systemd/user/splinterd.service \
     "$pkgdir/usr/lib/systemd/user/splinterd.service"
+  install -Dm644 dist/systemd/user/app-splinterm.slice \
+    "$pkgdir/usr/lib/systemd/user/app-splinterm.slice"
   install -Dm755 dist/omarchy/omarchy-launch-screensaver \
     "$pkgdir/usr/lib/splinterm/integrations/omarchy-launch-screensaver"
   install -Dm644 dist/omarchy/screensaver.ini \

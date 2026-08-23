@@ -3,9 +3,11 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is a **public alpha**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
+Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-alpha3.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.2) is the current public prerelease. It retains the Alpha3 command/keymap, scrollback, saved-Lair, Wayland file-drop, and Omarchy integration scope while preventing held Backspace and other ordinary input from terminating the Wayland client when a bounded pane command queue is temporarily saturated.
+[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1) is the current public prerelease. It adds wide-grid support through `480×128`, bounded sparse terminal publication frames, and active-tab contrast that remains independent from terminal selection colors, while retaining the accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
+
+Beta 2 candidate preparation is in progress. Its source tree adds configurable ordinary graphical lifetime, owner-only promotion when users organize tabs, and corrected startup font-family resolution. Complete non-graphical, clean-package, and isolated staged-package graphical validation has passed. Fresh review approved the complete implementation and bounded post-graphical naming fix with no blocker or fix worth doing now. No Beta 2 tag, package publication, AUR update, or installed-package acceptance is claimed yet.
 
 ## What that means
 
@@ -21,7 +23,7 @@ Splinterm is a **public alpha**. Source, documentation, and immutable versioned 
 | --- | --- |
 | Native Wayland presentation | Keyboard, pointer, clipboard, IME, scaling, and damage-driven rendering validated on the documented Hyprland target |
 | Persistent sessions and explicit restore | Implemented and validated |
-| XDG command lifecycle | Commandless launches remain persistent; command-bearing launches use trusted client-bound transient Lairs |
+| Graphical terminal lifecycle | Ordinary unnamed commandless launches are configurable persistent or Window-owned; command-bearing XDG launches remain client-bound |
 | Pane layouts and multiple Dojos | Implemented and validated |
 | Window-local Dojo tabs, tab strip, and context menus | Implemented and validated |
 | Configurable keymaps and Omarchy controls | Implemented and validated |
@@ -35,7 +37,7 @@ Splinterm is a **public alpha**. Source, documentation, and immutable versioned 
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0alpha3.2-1` |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta1-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
@@ -47,4 +49,4 @@ Persistent topology is also separate from graphical presentation. Creating or mu
 
 ## Before depending on it
 
-Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public alpha availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public beta availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.

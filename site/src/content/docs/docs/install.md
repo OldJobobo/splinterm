@@ -1,9 +1,9 @@
 ---
 title: Installation
-description: Install or update the current Splinterm public alpha on Arch Linux and Omarchy.
+description: Install or update the current Splinterm public beta on Arch Linux and Omarchy.
 ---
 
-The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public alpha, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
+The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public beta, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
 
 ## Install the prebuilt AUR package
 
@@ -23,7 +23,9 @@ Source-built `splinterm` and `splinterm-mcp` packages remain available. Migratin
 
 ## Install the current versioned release directly
 
-For the newest published versioned package, clone the public repository and run the release installer:
+Run the release installer from Foot or another terminal not owned by `splinterd`. The installer refuses a Splinterm-owned shell because stopping the daemon would terminate the installer before package installation completes.
+
+Then clone the public repository and run:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git
@@ -61,5 +63,11 @@ The installer does not:
 - edit Omarchy or Hyprland configuration;
 - enable persistent systemd user lingering; or
 - opt a fresh installation into the optional MCP package.
+
+To enable the complete reversible Omarchy default-terminal, terminal-tag, and screensaver integration explicitly:
+
+```bash
+splinterm integration omarchy enable
+```
 
 Continue to the [quickstart](/docs/quickstart/) after installation. If an MCP host needs bounded access, follow the separate [MCP adapter setup](/docs/mcp/); installing the adapter alone grants no authority.

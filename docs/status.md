@@ -1,20 +1,20 @@
 # Current product status
 
 This document is the repository authority for Splinterm's current maturity,
-validated product scope, availability, and release gates. Historical plans and
-evidence explain how a capability was accepted; the [product roadmap](product-roadmap.md)
-owns strategic direction, the [engineering roadmap](roadmap.md) owns delivery
-sequence, and this page owns what the product is today.
+validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
+owns strategic direction, and this page owns what the product is today.
+Maintainer sequencing, handoffs, reviews, and acceptance records are tracked
+outside the public product repository.
 
 ## Maturity
 
-**Splinterm is a public alpha.**
+**Splinterm is a public beta.**
 
 Source, documentation, and immutable versioned GitHub and AUR packages are
 publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
 native Wayland presentation, Arch packaging, and bounded automation workflows
 are implemented and validated in the scopes named below. Public availability is
-not a stable-support promise: alpha interfaces may change, the validated target
+not a stable-support promise: beta interfaces may change, the validated target
 remains narrow, and broader compatibility guarantees have not been released.
 
 Splinterm is **security-conscious**, not absolutely secure. Automation is
@@ -31,17 +31,100 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Alpha3.2 `0.1.0alpha3.2-1` Arch packages built from clean committed
+- public Beta 1 `0.1.0beta1-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
-  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows, isolated
-  exact-package acceptance for the Alpha3.1 transient-tab hotfixes, and
-  non-graphical release/package validation for the Alpha3.2 input-queue fix.
+  saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
+  exact-package acceptance for the Alpha3.1 transient-tab hotfixes; and accepted
+  Beta 1 graphical, package, provenance, wide-grid, sparse-publication, and
+  active-tab contrast evidence.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
-graphical environment, but its packaged and remote workflows remain alpha
+graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
+
+## Beta 2 candidate preparation
+
+The `0.1.0-beta2` source and package metadata are under review. The candidate
+adds backward-compatible graphical lifetime settings, owner-only atomic
+promotion through Dojo creation or explicit Dojo naming, and the startup
+font-family correction for newly opened Windows. It also separates the daemon
+from terminal workload resource boundaries through an aggregate workload slice,
+per-Dojo slices, per-Splint scopes, and a pre-exec placement gate. Packaged
+startup fails closed when that placement capability is unavailable. Complete
+non-graphical workspace, package, release-tooling, portable-provenance,
+documentation, real-systemd, local installed-package, and isolated staged-package
+graphical validation has passed. Final release review and protected publication
+remain pending. No Beta 2 tag, public release, or AUR update exists yet; Beta 1
+remains the current public release.
+
+## Beta 1 release
+
+[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1)
+was published as a GitHub prerelease on 2026-08-17 and distributed through both
+AUR package bases as `0.1.0beta1-1`. Beta 1 accepts wide terminal grids through
+`480×128`, bounds sparse terminal publication ownership and accounting, and
+separates active-tab contrast from terminal selection colors while retaining the
+accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
+
+- Release-state PR #29 merged as
+  `40ac9d7bb803fc71495e36eb760174de7fcdfff0`; candidate-metadata correction
+  PR #30 merged as `8d95e75704104750f8e8e4585e629010855963c8`.
+- Candidate run `32004316406` built corrected commit `8d95e75` once. Candidate
+  manifest SHA-256:
+  `a09bef84812c2da3cfe729099d5bcdec2c4a809b234c8a6dc8d1c7f2ccbf018e`.
+- Protected promotion run `32004973522` created the immutable tag, published and
+  redownloaded the exact five public assets, verified every hash, and retained
+  publication receipt artifact `9279942672`.
+- Source archive SHA-256:
+  `72bd626474f2f660cf5cf595f4e9dd040dafacd2f3087d58a81f01a32d39f5ef`.
+  Main package SHA-256:
+  `fb25323ca2edbb61243c942c84de4d1f4cb52280fbc7dbd4369243f603288eda`.
+  MCP package SHA-256:
+  `ededfa71a10b1bb3f199e78d56c4bfc32c5633f5188c3e89790980bf3803fecc`.
+- AUR source package commit: `2052214554e25218f7329e299a3fc0f076d76756`.
+  AUR prebuilt package commit: `d902f0bf49f7b454480724612613dd2f35d13bd4`.
+  Both public recipes passed `makepkg --verifysource` against the immutable
+  GitHub assets before publication.
+- Complete serialized workspace tests, warnings-denied Clippy, release/package
+  automation, portable Foot provenance, package-content/runtime validation, and
+  accepted Plans 0041–0043 evidence passed. Independent candidate review found
+  alpha-specific install wording and a binary split-package recommendation;
+  both were corrected and regression-covered before the replacement candidate
+  was built or promoted.
+
+## Alpha3.3 release
+
+[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3)
+was published as a GitHub prerelease on 2026-08-14 and distributed through both
+AUR package bases as `0.1.0alpha3.3-1`. New persistent and transient Lairs start
+with `Dojo 1`; later implicit Dojo names advance from the highest exact canonical
+`Dojo N` in that Lair without reusing gaps. Explicit and persisted names remain
+unchanged, generated Lair names remain collision-resistant, and bounded
+exhaustion is reported as a stable machine `invalid_argument`.
+
+- Candidate workflow run `31859941186` built commit
+  `0c4276703eaa01b347fdbeb6327669b2b109e8b6` once. Candidate manifest SHA-256:
+  `da995d5f0fe7dcd3993ebdc289160d1ef9fd1fcf325a3c46c353a2967f29cce6`.
+- Protected promotion workflow run `31860432730` created the versioned tag,
+  published and downloaded the exact five-asset set, verified every hash, and
+  retained publication receipt artifact `9240460284`.
+- Source archive SHA-256:
+  `cf6726439a2b8977610453edd3368700304727027753f88e39ed88302dea1093`.
+  Main package SHA-256:
+  `5104941b47776b1a06aea044c50a4179afcc9fa6c843a663d47ac728d99bc456`.
+  MCP package SHA-256:
+  `a5b8e5ac5c583df75275881e2527940d3a999c20cb33e2521a366840d2abc4c2`.
+- AUR source package commit: `8f373bf27f14831722c59fcd6e3f7f3ac2cd1907`.
+  AUR prebuilt package commit: `b618d457bcc43a9a1993b596479c9d22c9cd1f25`.
+  Both public recipes passed `makepkg --verifysource` against the immutable
+  GitHub assets before publication.
+- Full serialized workspace tests, Clippy with warnings denied, release/package
+  automation tests, portable Foot provenance, exact package-content checks, and
+  two fresh read-only release reviews passed. An isolated development build on
+  freeside confirmed `Dojo 1` without stealing focus; no installed Alpha3.3
+  graphical acceptance was run.
 
 ## Alpha3.2 release
 
@@ -127,8 +210,8 @@ AUR package bases as `0.1.0alpha3-1`.
 - AUR source package commit: `ca1f80f40c94e3e469973cbee81b3a210419ffce`.
   AUR prebuilt package commit: `fbe9878af3938e5df87df79ecae05d4ec39b9667`.
 - Before candidate construction, the adjacent installed package matrix passed
-  Plans 0032–0036 against the final runtime implementation, including package
-  integrity, daemon health, exact trusted-client identity, and complete cleanup.
+  against the final runtime implementation, including package integrity, daemon
+  health, exact trusted-client identity, and complete cleanup.
 
 Full user-defined tab identity, behavior, and appearance remain a separate
 post-alpha3, pre-1.0 roadmap milestone.
@@ -137,19 +220,19 @@ post-alpha3, pre-1.0 roadmap milestone.
 
 | Area | Classification | Current boundary and evidence |
 | --- | --- | --- |
-| Native Wayland presentation | Implemented and validated | Keyboard, pointer, selection, clipboard, IME, scaling, damage-driven SHM rendering, and guarded Hyprland matrices are accepted within the documented target. See [Architecture](architecture.md) and [Plan 0002](plans/0002-omarchy-terminal-mvp.md). |
-| Native blur | Implemented and validated | Optional, compositor-capability-gated blur for translucent themes; unsupported protocol capability falls back to ordinary transparency. See [Plan 0013](plans/0013-native-background-blur.md). |
+| Native Wayland presentation | Implemented and validated | Keyboard, pointer, selection, clipboard, IME, scaling, damage-driven SHM rendering, and guarded Hyprland matrices are accepted within the documented target. See [Architecture](architecture.md). |
+| Native blur | Implemented and validated | Optional, compositor-capability-gated blur for translucent themes; unsupported protocol capability falls back to ordinary transparency. See [Configuration](configuration.md). |
 | Persistent sessions and explicit restore | Implemented and validated | `splinterd` owns shells, terminal state, layouts, and metadata. Client detachment does not end them; exited processes restart only through explicit restore. See [Architecture](architecture.md) and [Headless operation](headless.md). |
-| Panes and multiple Dojos | Implemented and validated | Persistent split trees, focus, ratios, lifecycle operations, search, and multiple simultaneous clients are accepted. See [Roadmap](roadmap.md). |
-| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [Plan 0019 closure evidence](plans/artifacts/0019-dojo-tabs/closure-2026-08-09/EVIDENCE.md). |
+| Panes and multiple Dojos | Implemented and validated | Persistent split trees, focus, ratios, lifecycle operations, search, and multiple simultaneous clients are accepted. See [Usage](usage.md). |
+| Window-local Dojo tabs | Implemented and validated | Up to 32 client-local tabs may span Lairs; closing a tab detaches the view and does not close daemon topology. See [Usage](usage.md). |
 | Multi-client control | Implemented and validated | Exclusive controller ownership, transfer, denial, trusted forced takeover, disconnect cleanup, and observer fallback are bounded. See [Automation](automation.md). |
 | JSON/NDJSON automation | Implemented and validated | Versioned schema-major-2 one-shot and subscription contracts with stable exit categories and checked-in schemas. See [Automation](automation.md) and [CLI reference](cli.md). |
 | SSH relay | Implemented and validated | Policy-scoped stdio automation relay and private human graphical relay; no daemon network listener. See [Remote access](remote.md). |
-| Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Plan 0028](plans/0028-remote-graphical-client.md). |
+| Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Remote access](remote.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Public alpha packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0alpha3.2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0alpha3.2-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
@@ -177,14 +260,13 @@ behavior; deferred means intentionally outside the present product.
 - Image compatibility is deliberately narrower than full Kitty graphics; external
   file and shared-memory media are rejected.
 - Configuration is focused rather than arbitrary `foot.ini` compatibility.
-- Current benchmark gates document remaining performance work. In particular,
-  [Plan 0011](plans/0011-burst-output-memory-retention.md) retains its final
-  client-performance no-go and [Plan 0012](plans/0012-bounded-compact-publication-frames.md)
-  remains blocked on a sparse bounded-frame ownership redesign.
+- The accepted bounded sparse-publication design supersedes earlier rejected
+  client-retention and compact-frame experiments. Stable-release performance and
+  support gates remain separate.
 
 ## Stable-release gates
 
-Before Splinterm can graduate from public alpha to a supported stable release,
+Before Splinterm can graduate from public beta to a supported stable release,
 maintainers must make and validate explicit decisions about:
 
 - release channels, signed/immutable source publication, upgrades, and rollback;
@@ -213,9 +295,9 @@ capabilities above; none may be inferred as a stable-support promise.
 | MCP integration | [MCP](mcp.md) |
 | Image compatibility | [Images](images.md) |
 | Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
-| Public alpha package installation and upgrades | [Packaging](packaging.md) |
+| Public beta package installation and upgrades | [Packaging](packaging.md) |
 | Product direction, audiences, and outcome horizons | [Product roadmap](product-roadmap.md) |
-| Engineering phases, dependencies, and future delivery work | [Engineering roadmap](roadmap.md) |
+| Maintainer sequencing, reviews, and acceptance records | Tracked outside the public product repository |
 | Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 
 The public website may summarize these sources for readers, but it does not

@@ -2,7 +2,6 @@
 
 - **Status:** Accepted; hierarchy and naming amended by [ADR 0009](0009-topology-lair-dojo-migration.md)
 - **Date:** 2026-07-20
-- **Plan:** [Persistent multiplexing](../plans/0004-phase3-multiplexing.md)
 
 ## Context
 

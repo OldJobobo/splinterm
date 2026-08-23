@@ -65,8 +65,6 @@ is absent, integer output scaling remains the fallback.
 
 ## Validation
 
-Evidence is recorded in
-[Spike 0001](../spikes/0001-native-wayland-window.md) and
-[Spike 0005](../spikes/0005-integer-scale-nested-wayland.md). Pure tests cover
-checked 1×/2× dimensions, stride, zero scale, and overflow. Human graphical
+Retained validation evidence and pure tests cover checked 1×/2× dimensions,
+stride, zero scale, and overflow. Human graphical
 launches use workspace-safe scripts targeting workspace 8 on DP-2.

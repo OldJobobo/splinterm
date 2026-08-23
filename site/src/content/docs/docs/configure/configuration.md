@@ -15,7 +15,7 @@ Start from the repository example at `config/splinterm/config.ini`. Set `SPLINTE
 
 ```ini
 [main]
-font=JetBrains Mono Nerd Font:style=Regular
+font=monospace:style=Regular
 font-pixelsize=14
 font-sizing-policy=output-scale
 padding-left=12
@@ -30,6 +30,8 @@ login-shell=yes
 lines=1000
 
 [multiplexer]
+persistent-by-default=yes
+persist-on-tab-organization=yes
 divider-style=line
 frame-title=splint
 
@@ -53,16 +55,18 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 
 | Key | Meaning | Default or range |
 | --- | --- | --- |
-| `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
+| `main.font` | fontconfig pattern; styles remain in its resolved family | Fontconfig `monospace` Regular |
 | `main.font-pixelsize` | pixel font size | 6–96; 14 |
 | `main.font-point-size` | alternative point size | 6–96; unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` | `output-scale` |
 | `main.padding-*` | four independent logical edges | 0–10000; 12 |
-| `main.initial-columns` | initial grid columns | 2–240; 80 |
-| `main.initial-rows` | initial grid rows | 2–80; 24 |
+| `main.initial-columns` | initial grid columns | 2–480; 80 |
+| `main.initial-rows` | initial grid rows | 2–128; 24 |
 | `main.shell` | executable for an empty launch | account login shell |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | `block` |
+| `multiplexer.persistent-by-default` | ordinary unnamed local graphical Lairs are persistent (`yes`) or Window-owned (`no`) | `yes` |
+| `multiplexer.persist-on-tab-organization` | create/name/rename a tab atomically promotes its transient Lair | `yes` |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
 | `key-bindings.profile` | `splinterm` or `omarchy-tmux` | `splinterm` |
@@ -70,6 +74,12 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `key-bindings.prefix-timeout-ms` | prefix timeout in milliseconds | 250–5000; 1000 |
 | `presets.file` | optional strict preset catalog | unset |
 | `presets.allow-unrestricted-commands` | enable packaged `c`, `cx`, `cy` aliases | `no` |
+
+## Terminal lifetime
+
+`persistent-by-default=no` applies to commandless desktop/SUPER+ENTER launches, bare `splinterm launch`, picker **New**, and in-Window **New Terminal**. Closing the owning Window terminates an unpromoted transient Lair. Explicitly named, command-bearing, preset, restore/relaunch, remote, automation, and MCP creation remains persistent.
+
+With `persist-on-tab-organization=yes`, creating another Dojo or explicitly naming/renaming a Dojo atomically promotes the complete Lair. Promotion is permanent, so a later Window close detaches normally. Set it to `no` to keep organized and multi-tab Lairs Window-owned. Generated Lair and `Dojo 1` names do not promote, and unpromoted transient Dojos never enter Recent Dojos.
 
 ## Font sizing and Wayland scale
 

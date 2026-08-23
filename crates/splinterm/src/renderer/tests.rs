@@ -1553,12 +1553,14 @@ fn expand_sixel_fixture_pixels(expected: &serde_json::Value) -> Vec<u8> {
 
 #[test]
 fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
+    use sha2::{Digest as _, Sha256};
+
     let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../docs/spikes/artifacts/0025-terminal-images/fixtures/sixel-v1.json"
+        "../../../../fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
     ))
     .unwrap();
     let artifact_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/spikes/artifacts/0025-terminal-images/foot-sixel-captures");
+        .join("../../fixtures/terminal-images/v1/foot-sixel-oracle");
 
     for case in fixtures["cases"].as_array().unwrap() {
         let id = case["id"].as_str().unwrap();
@@ -1569,6 +1571,16 @@ fn sixel_identity_pixels_match_every_retained_foot_final_buffer() {
             serde_json::from_slice(&fs::read(artifact_root.join(id).join("foot.json")).unwrap())
                 .unwrap();
         let foot = fs::read(artifact_root.join(id).join("foot.argb")).unwrap();
+        assert_eq!(
+            foot_metadata["provenance"]["commit"].as_str().unwrap(),
+            "3c5b584b0eafa772eb4376fb6eaf6643399e190e",
+            "{id} Foot oracle commit"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&foot)),
+            foot_metadata["framebuffer_sha256"].as_str().unwrap(),
+            "{id} framebuffer checksum"
+        );
         let foot_stride = usize::try_from(foot_metadata["stride"].as_u64().unwrap()).unwrap();
         let foot_origin_x =
             usize::try_from(foot_metadata["origin"]["x"].as_u64().unwrap()).unwrap();

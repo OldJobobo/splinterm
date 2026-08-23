@@ -10,7 +10,7 @@ The `splinterm` CLI serves both people and structured clients. Human output is t
 ```bash
 splinterm dojos                    # open Recent Dojos
 splinterm reopen                   # reopen the last still-running Dojo
-splinterm launch                   # create a fresh persistent graphical Lair
+splinterm launch                   # fresh graphical Lair; lifetime follows configuration
 splinterm window --lair-id L --dojo-id D
 ```
 

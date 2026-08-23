@@ -5,7 +5,7 @@ description: Open a new Splinterm terminal, detach from work, and return to the 
 
 This first workflow demonstrates Splinterm's central behavior: the graphical window can close while the daemon-owned terminal session continues running.
 
-## 1. Install the public alpha
+## 1. Install the public beta
 
 Follow [Installation](/docs/install/) from an x86_64 Omarchy/Arch system.
 
@@ -17,7 +17,7 @@ Use the installed desktop entry or run:
 splinterm-xdg-terminal-exec
 ```
 
-A commandless launch creates a fresh persistent **Lair**, one **Dojo**, and one **Splint**. A working directory is preserved exactly. If another application supplies a command through the XDG terminal contract, Splinterm preserves its structured argv without rebuilding shell text and creates a transient client-bound Lair instead. That Lair and all its processes disappear when the command exits or the owning Window disconnects. Native `splinterm launch -- COMMAND...` remains persistent.
+A commandless launch creates a fresh **Lair**, one **Dojo**, and one **Splint**. It is persistent by default; `multiplexer.persistent-by-default=no` instead makes ordinary unnamed graphical Lairs belong to their Window. Creating or explicitly naming another Dojo promotes that Lair by default. A working directory is preserved exactly. If another application supplies a command through the XDG terminal contract, Splinterm preserves its structured argv without rebuilding shell text and always creates a transient client-bound Lair. Explicitly named and native command-bearing launches remain persistent.
 
 ## 3. Leave the work running
 

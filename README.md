@@ -5,7 +5,7 @@
 
 **A persistent, security-conscious terminal substrate for humans and bounded automation.**
 
-[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
+[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Beta 2 release notes draft](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
 
 </div>
 
@@ -14,7 +14,7 @@ Splinterm combines a native Wayland terminal with a headless daemon that keeps s
 Humans use that persistent topology through native windows, tabs, and panes. Authorized tools can reach the same sessions through bounded JSON/NDJSON, SSH relay, and MCP interfaces. Splinterm is built in Rust from [Foot](https://codeberg.org/dnkl/foot)'s terminal behavior and designed first for Omarchy and Arch Linux.
 
 > [!IMPORTANT]
-> **Status: public alpha.** Source, immutable versioned GitHub and AUR packages, and documentation are public. Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated for the current x86_64 Omarchy/Arch Linux target. The alpha may make breaking changes; broader compatibility guarantees and stable support have not been released.
+> **Status: public beta.** Source, immutable versioned GitHub and AUR packages, and documentation are public. Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated for the current x86_64 Omarchy/Arch Linux target. The beta may make breaking changes; broader compatibility guarantees and stable support have not been released.
 >
 > See the repository-authoritative [current status](docs/status.md) for the exact capability and availability boundaries.
 
@@ -53,7 +53,7 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Sixel, practical Kitty static images, and inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0alpha3.2-1` |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0beta1-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 
@@ -69,9 +69,10 @@ yay -S splinterm-bin
 yay -S splinterm-mcp-bin
 ```
 
-The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain alpha software with no stable compatibility or support-duration guarantee.
+The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain beta software with no stable compatibility or support-duration guarantee.
 
-For the newest published versioned release package, clone the public repository and run:
+For the newest published versioned release package, use Foot or another terminal
+not owned by `splinterd`, then clone the public repository and run:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git
@@ -81,8 +82,7 @@ cd splinterm
 
 The release installer selects the newest published SemVer `v…` release, verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
 
-To build and package the current committed checkout locally, run the installer
-from Foot or another terminal not owned by `splinterd`:
+To build and package the current committed checkout locally, run:
 
 ```bash
 ./install.sh --source
@@ -102,7 +102,9 @@ Open a fresh terminal from the installed desktop entry or the XDG terminal launc
 splinterm-xdg-terminal-exec
 ```
 
-A commandless desktop/XDG launch creates a persistent Lair with one Dojo and one Splint. Closing its window detaches the graphical client while `splinterd` keeps the session running. When another application asks the XDG terminal to host a command, Splinterm instead creates a transient client-bound Lair: command exit or owner-window disconnect terminates its processes and removes it from topology. Native `splinterm launch -- COMMAND...` remains persistent.
+Ordinary unnamed graphical terminals are persistent by default. Set `multiplexer.persistent-by-default=no` to make commandless desktop/SUPER+ENTER, bare `splinterm launch`, picker **New**, and in-Window **New Terminal** belong to their Window instead; closing it then terminates and removes the unpromoted Lair. Explicit names, command-bearing native launches, presets, remote creation, restore/relaunch, automation, and MCP remain persistent.
+
+`multiplexer.persist-on-tab-organization=yes` is also the default. Creating another Dojo or explicitly naming/renaming a Dojo atomically promotes the complete transient Lair, after which Window close detaches normally. Command-bearing XDG launches retain their existing client-bound behavior regardless of configuration.
 
 Return through the native Dojo picker:
 
@@ -240,7 +242,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [development guide](https://sp
 
 ## Design authority and lineage
 
-Splinterm's emulator half is derived from Foot's architecture and behavior. Translated or adapted code records its source provenance and retains the relevant MIT attribution. See [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md), [`THIRD_PARTY.md`](THIRD_PARTY.md), and [`docs/pre-planning-research.md`](docs/pre-planning-research.md).
+Splinterm's emulator half is derived from Foot's architecture and behavior. Translated or adapted code records its source provenance and retains the relevant MIT attribution. See [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
 ## Support Splinterm
 

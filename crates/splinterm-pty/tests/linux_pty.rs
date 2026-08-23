@@ -3,6 +3,10 @@ use std::{
     io::{ErrorKind, Read},
     os::unix::process::ExitStatusExt,
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -183,6 +187,59 @@ async fn spawn_after_runtime_start_and_async_fd_read_work() {
     }
     assert!(String::from_utf8_lossy(&output).contains("TTY=111"));
     assert!(session.wait().unwrap().success());
+}
+
+#[test]
+fn placement_completes_before_target_exec_and_returns_owned_state() {
+    let marker = test_directory();
+    let script = format!(
+        "test -f '{}' && printf 'PLACED\\n'",
+        marker.to_string_lossy()
+    );
+    let spec =
+        PtyCommand::new("/bin/sh", std::env::current_dir().unwrap()).args(["-c", script.as_str()]);
+    let placement_marker = marker.clone();
+    let (mut session, placed_pid) = backend()
+        .spawn_with_placement(&spec, PtySize::cells(40, 10), move |identity| {
+            fs::write(&placement_marker, b"placed")?;
+            Ok(identity.child_pid())
+        })
+        .unwrap();
+
+    assert_eq!(placed_pid, session.child_id());
+    assert!(read_until(&mut session, "PLACED").contains("PLACED"));
+    assert!(session.wait().unwrap().success());
+    fs::remove_file(marker).unwrap();
+}
+
+#[test]
+fn placement_failure_prevents_target_exec_and_reaps_helper() {
+    let executed = test_directory();
+    let script = format!("printf executed > '{}'", executed.to_string_lossy());
+    let spec =
+        PtyCommand::new("/bin/sh", std::env::current_dir().unwrap()).args(["-c", script.as_str()]);
+    let child_pid = Arc::new(AtomicU32::new(0));
+    let observed_pid = Arc::clone(&child_pid);
+    let result = backend().spawn_with_placement(
+        &spec,
+        PtySize::cells(40, 10),
+        move |identity| -> std::io::Result<()> {
+            observed_pid.store(identity.child_pid(), Ordering::SeqCst);
+            Err(std::io::Error::other("injected placement failure"))
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(PtyError::Io {
+            operation: "place PTY child",
+            ..
+        })
+    ));
+    assert!(!executed.exists());
+    let child_pid = child_pid.load(Ordering::SeqCst);
+    assert_ne!(child_pid, 0);
+    assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
 }
 
 #[test]

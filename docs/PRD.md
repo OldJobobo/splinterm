@@ -1,12 +1,12 @@
 # Splinterm Product Requirements Document
 
 - **Status:** Draft
-- **Product maturity:** Public alpha
+- **Product maturity:** Public beta
 - **As of:** 2026-08-11
 - **Strategic direction authority:** [Product roadmap](product-roadmap.md)
 - **Normative requirements authority:** This PRD after review and acceptance
 - **Current maturity authority:** [Status](status.md)
-- **Related documents:** [Product roadmap](product-roadmap.md), [Engineering roadmap](roadmap.md), [Product positioning](plans/0021-product-positioning-and-public-documentation.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
+- **Related documents:** [Product roadmap](product-roadmap.md), [Architecture](architecture.md), [Usage](usage.md), [CLI](cli.md), [Configuration](configuration.md), [Automation](automation.md), and [Packaging](packaging.md)
 
 ## 1. Purpose
 
@@ -17,9 +17,10 @@ This PRD is not an implementation plan or architecture decision log:
 - this document owns normative product requirements and release criteria;
 - [architecture.md](architecture.md) owns system boundaries and technical invariants;
 - [ADRs](adr/) own accepted architectural decisions;
-- [plans](plans/) own dependency-ordered implementation work and evidence gates;
 - specialist documents own detailed user and compatibility contracts; and
-- accepted plans and retained evidence remain authoritative for whether a feature has been validated.
+- retained tests, benchmark evidence, and release records establish whether a feature has been validated.
+
+Maintainer implementation sequencing and handoffs are tracked outside the public product repository. Decisions needed to understand shipped behavior are promoted into public ADRs and specialist documentation.
 
 When this draft conflicts with the current implementation or an accepted ADR, treat the conflict as a product-documentation defect to resolve rather than silently changing behavior.
 
@@ -106,7 +107,7 @@ They need:
 
 ### 4.4 Evaluators and contributors
 
-**Evaluators** need to understand the product, differentiator, validated environment, current maturity, and first workflow quickly. **Contributors** need clear architecture, ADRs, plans, test authorities, and scope boundaries.
+**Evaluators** need to understand the product, differentiator, validated environment, current maturity, and first workflow quickly. **Contributors** need clear architecture, ADRs, test authorities, and scope boundaries.
 
 ## 5. Jobs to be done
 
@@ -134,7 +135,7 @@ They need:
 
 ## 7. Current product baseline
 
-The following table summarizes the current repository state. “Validated” means accepted plans or retained evidence record the required checks; it does not imply a public compatibility guarantee beyond the documented scope.
+The following table summarizes the current repository state. “Validated” means retained tests or evidence record the required checks; it does not imply a public compatibility guarantee beyond the documented scope.
 
 | Area | Current status |
 |---|---|
@@ -144,20 +145,20 @@ The following table summarizes the current repository state. “Validated” mea
 | Multi-pane graphical layouts | Implemented and validated. |
 | Window-local Dojo tabs | Implemented; a Window supports up to 32 distinct Dojo attachments and may mix Lairs. |
 | Recent Dojos picker and reopen-last workflow | Implemented. |
-| Searchable closed command palette and trusted tab context menu | Alpha2 scope is packaged and accepted; the bounded alpha3 expansion and keymap-closure matrix are implemented and non-graphically validated, with packaged graphical acceptance pending under Plan 0033. |
+| Searchable closed command palette and trusted tab context menu | Alpha2 scope is packaged and accepted; the bounded alpha3 expansion and keymap-closure matrix are implemented and non-graphically validated, with packaged graphical acceptance still pending. |
 | Multi-client observation and exclusive control transfer | Implemented and validated. |
 | Scrollback, literal search, selection, clipboard, IME, and scaling | Implemented within the documented contracts. |
 | Omarchy theme discovery and live reload | Implemented. |
 | Sixel | Supported Foot-compatible bounded implementation. |
 | Kitty graphics | Supported practical static-image subset; not full Kitty compatibility. |
 | iTerm2 inline images | Supported bounded inline-PNG subset. |
-| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; alpha compatibility remains versioned and may change between releases. |
+| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; beta compatibility remains versioned and may change between releases. |
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
-| Native remote graphical transport | Implemented and validated through Plan 0028: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
+| Native remote graphical transport | Implemented and validated: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
 | Arch/Omarchy package and release installer | Immutable versioned GitHub/AUR packages and installation paths implemented and validated. |
 | Public source and documentation | Available. |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0alpha3.2-1`; stable support remains unreleased. |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0beta1-1`; stable support remains unreleased. |
 | Stable support policy | Not released. |
 | Nix and broader distribution | Planned. |
 | Public product/documentation website | Implemented and build/link validated; repository `docs/status.md` remains the maturity authority. |
@@ -174,8 +175,8 @@ The following table summarizes the current repository state. “Validated” mea
 - Keep human consent, trusted UI, automation policy, and control ownership visibly distinct.
 - Preserve Foot-derived behavior with reproducible differential evidence.
 - Keep ordinary text-only terminal use efficient and ensure optional image support has bounded resource cost.
-- Package and upgrade the public alpha without silently changing user-owned desktop configuration.
-- Keep current-status, usage, CLI, security, and release documentation explicit throughout the alpha.
+- Package and upgrade the public beta without silently changing user-owned desktop configuration.
+- Keep current-status, usage, CLI, security, and release documentation explicit throughout the beta.
 
 ### 8.2 Stable-release goals
 
@@ -243,7 +244,7 @@ Priority meanings:
 | `FR-UI-07` | P0 | Destructive actions must be explicit, exactly targeted, and confirmed where documented; cancellation must be the safe default. | Implemented |
 | `FR-UI-08` | P1 | Modal actions must capture exact resource identities and availability when opened and must never retarget because asynchronous state changes. | Implemented |
 | `FR-UI-09` | P1 | Native application controls must remain usable without exposing shell-, plugin-, terminal-content-, or automation-provided trusted commands. | Implemented |
-| `FR-UI-10` | P1 | Before alpha3 publication, the curated command palette, bindable action registry, resolved shortcut labels, built-in `splinterm` and `omarchy-tmux` profiles, safe context-sensitive `Super+C/V/X/Z` behavior, custom-overlay reload, and runtime dispatch must satisfy the Plan 0033 closure matrix without permitting externally registered trusted commands or capturing terminal-pane `Super+X/Z`. | Implemented and non-graphically validated; packaged graphical acceptance pending |
+| `FR-UI-10` | P1 | Before alpha3 publication, the curated command palette, bindable action registry, resolved shortcut labels, built-in `splinterm` and `omarchy-tmux` profiles, safe context-sensitive `Super+C/V/X/Z` behavior, custom-overlay reload, and runtime dispatch must work as one closed validated surface without permitting externally registered trusted commands or capturing terminal-pane `Super+X/Z`. | Implemented and non-graphically validated; packaged graphical acceptance pending |
 | `FR-UI-11` | P2 | In a post-alpha3 update before supported 1.0, provide strictly validated user-defined tab identity, behavior, and appearance: presentation labels/icons/pinning, deterministic ordering and default actions, per-tab shortcuts limited to the closed typed action registry, and bounded theme-aware visual overrides. Customization must preserve accessibility, exact targeting, non-destructive tab semantics, and trusted-UI isolation. | Planned post-alpha3, pre-1.0 |
 | `FR-UI-12` | P1 | Before alpha3 publication, a bounded Wayland `text/uri-list` drop of one or more local regular files must insert one deterministic POSIX-shell-escaped path payload into the exact accepted, live, controlled Splint. It must reject malformed, remote, stale, modal, unsupported, or unauthorized drops without PTY input; never read or persist file bodies or paths; preserve bracketed paste; and append no submission bytes. | Implemented and non-graphically validated; packaged graphical acceptance pending |
 
@@ -276,7 +277,7 @@ Priority meanings:
 | ID | Priority | Requirement | Current state |
 |---|---:|---|---|
 | `FR-TERM-01` | P0 | Terminal semantics and renderer behavior must retain Foot provenance and use the pinned Foot oracle for claimed compatibility. | Implemented and validated within recorded scopes |
-| `FR-TERM-02` | P0 | Full-frame, incremental, scroll-copy, cache, resize, and reattach paths must preserve equivalent visible results for equivalent terminal state. | Implemented and validated within accepted plans |
+| `FR-TERM-02` | P0 | Full-frame, incremental, scroll-copy, cache, resize, and reattach paths must preserve equivalent visible results for equivalent terminal state. | Implemented and covered by retained tests and evidence |
 | `FR-IMG-01` | P1 | Image semantics must remain daemon-owned and protocol-independent while pixel bodies use a separate bounded trusted-client transfer path. | Implemented |
 | `FR-IMG-02` | P1 | Support the documented bounded Sixel, practical Kitty static-image, and inline iTerm2 PNG subsets without claiming broader compatibility. | Implemented and documented |
 | `FR-IMG-03` | P0 | Image support must not enlarge every terminal cell, place pixel bodies in public automation/audit records, or create unbounded decode, cache, queue, or scrollback storage. | Implemented |
@@ -307,7 +308,7 @@ Priority meanings:
 | `FR-PKG-02` | P0 | Installation and upgrade must verify exact artifacts, warn before ending daemon-owned shells, and report the lack of cross-version process continuity. | Implemented |
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
-| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public alpha GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
+| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public beta GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
 
 ## 11. Security and privacy requirements
 
@@ -342,7 +343,7 @@ Detailed scope and policy behavior remain authoritative in [automation.md](autom
 - Idle behavior must remain event-driven; optional features must not add material idle work when unused.
 - Memory ownership and high-water behavior must be measurable for terminal history, publication queues, image content, transfers, and renderer caches.
 - Performance work must preserve correctness, bounded memory, small-write latency, and resynchronization contracts.
-- Quantitative gates and retained evidence belong in the relevant accepted plan and benchmark documentation rather than being duplicated here.
+- Quantitative gates and retained evidence belong in public benchmark and validation records rather than being duplicated here.
 
 ### 12.3 Compatibility
 
@@ -403,7 +404,7 @@ Splinterm meets its defining product promise when:
 
 ### 14.2 Stable-release readiness
 
-Graduation from public alpha to a supported stable release is blocked until all
+Graduation from public beta to a supported stable release is blocked until all
 of the following are true:
 
 1. a current status document defines supported environments, validated capabilities, known limitations, deferred work, and open gates;
@@ -425,7 +426,7 @@ A new evaluator should be able to answer within one minute:
 - Why does daemon-owned persistence matter?
 - How do humans and bounded automation share one topology?
 - Which environment and capabilities are validated?
-- Why is it a public alpha rather than a stable release?
+- Why is it a public beta rather than a stable release?
 - What is the first safe workflow?
 
 ## 15. Risks and mitigations
@@ -439,7 +440,7 @@ A new evaluator should be able to answer within one minute:
 | Multiplexer concepts become harder than tmux | Primary workflow becomes inaccessible | Lead with user outcomes, native controls, clear vocabulary, and discoverable trusted menus. |
 | Optional images or history regress ordinary use | Core terminal responsiveness and memory suffer | Preserve explicit budgets, no-image gates, event-driven expiry, and benchmark matrices. |
 | Trusted UI and terminal content blur together | Spoofing or accidental authority | Keep trusted chrome visually distinct and input-isolated; never derive authority from terminal content. |
-| Public alpha packaging is mistaken for stable support | Users depend on compatibility the alpha does not promise | Keep public-alpha labeling and upgrade/lifetime warnings prominent until stable-release gates are met. |
+| Public beta packaging is mistaken for stable support | Users depend on compatibility the beta does not promise | Keep public-beta labeling and upgrade/lifetime warnings prominent until stable-release gates are met. |
 | Platform expansion dilutes the validated Omarchy path | More environments than the project can test | Require separate evidence and support decisions for each platform. |
 
 ## 16. Open product decisions
@@ -458,7 +459,7 @@ These decisions remain outside the current accepted product baseline:
 10. whether any safe extension model for trusted commands should exist beyond the closed application-owned catalog; and
 11. the exact persistence scope, icon source policy, ordering semantics, action allowlist, and theme precedence for the planned post-alpha3 user-customizable tab system.
 
-Each material decision should receive an ADR or a scoped product/implementation plan before changing compatibility or authority boundaries.
+Each material decision should receive an ADR or a scoped PRD/roadmap change before changing compatibility or authority boundaries.
 
 ## 17. Documentation authority map
 
@@ -472,7 +473,6 @@ Each material decision should receive an ADR or a scoped product/implementation 
 | Architecture and ownership | [architecture.md](architecture.md) |
 | Architecture decisions | [docs/adr/](adr/) |
 | Product direction, audiences, and outcome horizons | [product-roadmap.md](product-roadmap.md) |
-| Engineering phases and dependency-ordered delivery | [roadmap.md](roadmap.md) |
 | Human configuration and bindings | [configuration.md](configuration.md) |
 | Machine contracts and policy | [automation.md](automation.md) |
 | MCP integration | [mcp.md](mcp.md) |
@@ -481,7 +481,7 @@ Each material decision should receive an ADR or a scoped product/implementation 
 | Terminal images | [images.md](images.md) |
 | Packaging and installation | [packaging.md](packaging.md) |
 | Integration-author workflows | [integrations.md](integrations.md) |
-| Implementation sequencing and evidence | [docs/plans/](plans/) and [docs/spikes/](spikes/) |
+| Validation evidence | Retained tests, benchmark artifacts, and release records |
 | Foot lineage and licenses | [ADR 0001](adr/0001-foot-rust-port.md), [THIRD_PARTY.md](../THIRD_PARTY.md), and [LICENSE](../LICENSE) |
 
 ## 18. Source documents used for this draft
@@ -490,25 +490,11 @@ This draft synthesizes the current implementation and, principally:
 
 - [README](../README.md)
 - [Architecture](architecture.md)
-- [Pre-planning research](pre-planning-research.md)
 - [Product roadmap](product-roadmap.md)
-- [Engineering roadmap](roadmap.md)
-- [Plan 0001: terminal kernel](plans/0001-terminal-kernel.md)
-- [Plan 0002: Omarchy-native terminal MVP](plans/0002-omarchy-terminal-mvp.md)
-- [Plan 0004: persistent multiplexing](plans/0004-phase3-multiplexing.md)
-- [Plan 0006: headless automation](plans/0006-phase4-headless-automation.md)
-- [Plan 0007: MCP adapter](plans/0007-phase4-mcp-adapter.md)
-- [Plan 0008: terminal image protocols](plans/0008-terminal-image-protocols.md)
-- [Plan 0021: product positioning](plans/0021-product-positioning-and-public-documentation.md)
-- [Plan 0025: command palette and tab menus](plans/0025-command-palette-and-tab-context-menus.md)
-- [Plan 0026: public website and documentation site](plans/0026-public-website-and-documentation-site.md)
-- [Plan 0033: alpha3 command-palette and keymap closure](plans/0033-alpha3-command-palette-and-keymap-closure.md)
-- [Plan 0034: alpha3 saved Lair layouts](plans/0034-alpha3-saved-lair-layouts.md)
-- [Plan 0035: alpha3 scrollback Enter safety](plans/0035-alpha3-scrollback-enter-safety.md)
-- [Plan 0036: alpha3 Wayland file-drop path insertion](plans/0036-alpha3-wayland-file-drop-path-insertion.md)
+- [ADRs](adr/)
 - [Supported automation contracts](automation.md)
 - [Configuration and Foot migration](configuration.md)
-- [Public alpha packaging](packaging.md)
+- [Public beta packaging](packaging.md)
 - [Terminal image compatibility](images.md)
 
 ## 19. Draft review questions

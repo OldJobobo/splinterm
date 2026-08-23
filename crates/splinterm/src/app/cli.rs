@@ -495,6 +495,7 @@ async fn run_headless(
                 name,
                 cwd,
                 command,
+                false,
                 config,
             )?;
             print_response(connection.request(request).await?)
@@ -530,6 +531,7 @@ async fn run_headless(
                         expected_topology_revision,
                         dojo_id,
                         name,
+                        promote_transient_lair: false,
                     })
                     .await?,
             )

@@ -60,12 +60,10 @@ Protocol SDK for its bounded local stdio server.
 - Protocol accepted by the shipped adapter: exactly MCP `2025-11-25`
 
 The selected production feature tree contains no HTTP, SSE, OAuth, JWT, client,
-child-process, tower, or elicitation dependency. The exact resolved dependency
-and license inventory, feature-tree commands, and the reason the workspace MSRV
-rose to Rust 1.88 are recorded in
-[`docs/spikes/0021-mcp-sdk.md`](docs/spikes/0021-mcp-sdk.md). The Rust crate has
-`publish = false`; its executable is distributed only through the explicit
-`splinterm-mcp` split package.
+child-process, tower, or elicitation dependency. The locked dependency and
+license inventory and package validation retain that boundary. The workspace
+MSRV is Rust 1.88. The Rust crate has `publish = false`; its executable is
+distributed only through the explicit `splinterm-mcp` split package.
 
 Slice 9 interoperability uses ephemeral `npx` executions of MCP Inspector 1.0.0
 and the official conformance runner 0.1.16. Both are test/documentation tooling,
@@ -81,6 +79,17 @@ owned-file-descriptor operations in `splinterm-pty`.
 - Source: <https://github.com/bytecodealliance/rustix>
 - Version: 1.1.4
 - License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+
+## zbus
+
+The daemon uses the safe Rust `zbus` client to create and verify transient
+systemd user-manager slices and scopes before terminal commands execute.
+
+- Source: <https://github.com/z-galaxy/zbus>
+- Resolved version: 5.19.0
+- License: MIT
+- Transport: the existing per-user D-Bus session bus only
+- No first-party unsafe block or direct cgroup-filesystem mutation is used
 
 ## fontdb
 

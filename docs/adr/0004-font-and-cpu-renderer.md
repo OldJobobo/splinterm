@@ -131,9 +131,8 @@ Release budgets are enforced by `tools/performance/phase9-thresholds.json`.
 Notable limits are 10/300 ms full-paint p95 at 80×24/240×80, 1/10 ms one-row
 paint p95, 128/256 MiB renderer RSS, 256 MiB graphical RSS, 128 MiB SHM, five
 idle CPU ticks over two seconds, 100 ms post-output input response, two seconds
-for twelve resizes, and three seconds for reattach. The accepted reference-host
-measurements and host manifest are archived under
-`docs/spikes/artifacts/0017/slice9-performance/`.
+for twelve resizes, and three seconds for reattach. Reference-host measurements
+are maintainer records rather than public product documentation.
 
 Intentional or deferred Foot divergences are:
 
@@ -154,11 +153,9 @@ Intentional or deferred Foot divergences are:
 - Sixels, synthetic styled fallback, advanced URL/configuration behavior, and
   other declared MVP non-goals remain deferred.
 
-The accepted evidence is indexed in
-`docs/spikes/artifacts/0017/README.md`; Slice 10 additionally proved real
-Hyprland/Omarchy lifecycle behavior, Fcitx5/Mozc preedit/commit, clipboard
-paths, live theme integration, focus-safe history, and application-keypad text
-input.
+The accepted implementation additionally covers real Hyprland/Omarchy lifecycle
+behavior, Fcitx5/Mozc preedit/commit, clipboard paths, live theme integration,
+focus-safe history, and application-keypad text input.
 
 ## Consequences
 
@@ -182,11 +179,8 @@ input.
 
 ## Validation
 
-[Spike 0003](../spikes/0003-font-stack-inventory.md) records discovery evidence.
-[Spike 0004](../spikes/0004-deterministic-text-row-comparison.md) records the
-initial visual, direct fcft-mask, style, ink-bound, and release timing evidence.
-[Spike 0016](../spikes/0016-phase8.1-ascii-raster-baseline.md) records the strict
-95-character correction and supersedes Spike 0004 for grayscale-mask parity.
-Unit tests cover
-deterministic blending, clipping, shaped placement, mask/color ink bounds,
-Foot-derived box geometry, cache reuse, and capture encoding.
+Maintainer-private validation records cover font discovery, initial visual,
+direct fcft-mask, style, ink-bound, release timing, and strict 95-character
+grayscale-mask parity. Public unit and oracle tests enforce deterministic
+blending, clipping, shaped placement, mask/color ink bounds, Foot-derived box
+geometry, cache reuse, and capture encoding.

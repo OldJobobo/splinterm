@@ -269,6 +269,7 @@ fn machine_new_dojo_request(
         lair_id,
         name,
         launch,
+        promote_transient_lair: false,
     })
 }
 
@@ -355,6 +356,7 @@ fn machine_mutation_request(
                 expected_topology_revision,
                 dojo_id: *dojo_id,
                 name: name.clone(),
+                promote_transient_lair: false,
             }
         }
         MachineMutation::Focus { dojo_id, splint_id } => {

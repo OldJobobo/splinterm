@@ -31,6 +31,7 @@ REQUIRED = {
     "usr/bin/splinterm-pty-child",
     "usr/bin/splinterm-xdg-terminal-exec",
     "usr/lib/splinterm/integrations/omarchy-launch-screensaver",
+    "usr/lib/systemd/user/app-splinterm.slice",
     "usr/lib/systemd/user/splinterd.service",
     "usr/share/applications/com.oldjobobo.splinterm.desktop",
     "usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg",
@@ -192,14 +193,19 @@ def validate_systemd_unit(root: Path) -> None:
     required = {
         "EnvironmentFile=-%h/.config/splinterm/daemon.env",
         "UnsetEnvironment=SPLINTERM_ENABLE_DEV_ATTACH",
-        "ExecStart=/usr/bin/splinterd",
+        "ExecStart=/usr/bin/splinterd --require-workload-cgroups",
         "ExecReload=/usr/bin/kill -HUP $MAINPID",
+        "TasksMax=2048",
+        "MemoryHigh=75%",
         "KillSignal=SIGINT",
         "KillMode=mixed",
         "TimeoutStopSec=90",
     }
     missing = {line for line in required if line not in unit.splitlines()}
-    assert not missing, f"systemd unit is missing headless safety settings: {sorted(missing)}"
+    assert not missing, (
+        "systemd unit is missing headless safety or resource settings: "
+        f"{sorted(missing)}"
+    )
     assert "graphical-session.target" not in unit
     unset_environment = {
         name
@@ -215,6 +221,23 @@ def validate_systemd_unit(root: Path) -> None:
         "UMask=",
     ):
         assert inherited_shell_restriction not in unit
+
+    workload_slice = (
+        root / "usr/lib/systemd/user/app-splinterm.slice"
+    ).read_text(encoding="utf-8")
+    slice_lines = set(workload_slice.splitlines())
+    required_slice = {
+        "StopWhenUnneeded=yes",
+        "[Slice]",
+        "TasksMax=2048",
+        "MemoryHigh=75%",
+    }
+    missing_slice = required_slice - slice_lines
+    assert not missing_slice, (
+        "workload slice is missing aggregate guards: "
+        f"{sorted(missing_slice)}"
+    )
+    assert not any(line.startswith("MemoryMax=") for line in slice_lines)
 
 
 def validate_headless_runtime(daemon: Path, client: Path, picker: Path) -> None:

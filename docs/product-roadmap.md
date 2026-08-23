@@ -2,9 +2,9 @@
 
 - **Status:** Active strategic direction
 - **Horizon model:** Now / Next / Later / Explore; no date promise
-- **Product maturity:** Public alpha
+- **Product maturity:** Public beta
 - **Current-state authority:** [Current product status](status.md)
-- **Delivery authority:** [Engineering roadmap](roadmap.md) and accepted [plans](plans/)
+- **Delivery authority:** Maintainer sequencing and acceptance records are tracked outside the public product repository
 
 This roadmap explains where Splinterm is going as a product: who it serves,
 which user outcomes matter next, how the audience expands, and what must become
@@ -56,9 +56,9 @@ product; it does not redefine Splinterm as an “AI terminal.”
 
 The labels in this document have deliberate meanings:
 
-- **Now** — product outcomes required to turn the public alpha into a confident
+- **Now** — product outcomes required to turn the public beta into a confident
   daily driver on the validated Omarchy/Arch target.
-- **Next** — outcomes required for a supported 1.0 after the alpha/beta gates are
+- **Next** — outcomes required for a supported 1.0 after the beta gates are
   satisfied.
 - **Later** — strategic expansion that follows a trustworthy primary product.
 - **Explore** — options worth researching, not commitments.
@@ -67,7 +67,7 @@ Moving an item between horizons is a product decision. Implementation plans may
 change without changing the product outcome, but they may not silently promote
 an Explore option into a promise.
 
-## Horizon 1 — Public alpha: prove the foundation (Now)
+## Horizon 1 — Public beta: earn daily-driver confidence (Now)
 
 ### Product promise
 
@@ -89,8 +89,8 @@ work only through explicit bounded authority.
   trustworthy outside the maintainer's own machine.
 - Bounded automation is demonstrable through a calm consent-to-revocation
   journey, not only through protocol tests.
-- Known client memory and responsiveness limits have a passing result or an
-  explicit product disposition before beta is claimed.
+- Known client memory and responsiveness limits retain a current passing result
+  or receive an explicit product disposition before a release claim advances.
 
 ### Current product bets
 
@@ -98,8 +98,9 @@ work only through explicit bounded authority.
   restorable, and expired work should be recognizable and manageable.
 - Finish the fit-and-finish gaps that make the terminal feel native to Omarchy,
   including exact theme fidelity and supported desktop integration.
-- Improve ordinary desktop workflows such as inserting local file and saved
-  image paths without weakening terminal input or privacy boundaries.
+- Build on delivered bounded local-file path insertion with separately designed
+  saved-image paths and other desktop workflows that preserve terminal input
+  and privacy boundaries.
 - Turn the existing CLI, SSH, and MCP capability into understandable user and
   integration-author journeys.
 - Keep release, website, package, and support language synchronized with actual
@@ -114,9 +115,9 @@ Horizon 1 is successful when:
 - users can distinguish detached, exited, restorable, and destructive states;
 - packaged upgrade and recovery behavior is tested and understood;
 - daily-driver blockers on the validated target have explicit dispositions;
-- the beta performance gate passes without moving cost from daemon to client or
-  regressing responsiveness; and
-- alpha feedback identifies workflow problems rather than basic uncertainty
+- accepted performance and memory gates remain passing without moving cost from
+  daemon to client or regressing responsiveness; and
+- beta feedback identifies workflow problems rather than basic uncertainty
   about what the product is.
 
 This horizon does **not** promise broad compositor support, reboot-transparent
@@ -280,12 +281,12 @@ understandable, less supportable, or less trustworthy.
 ## Relationship to delivery planning
 
 This document owns strategic direction, audience sequence, product outcomes, and
-horizon priority. The [engineering roadmap](roadmap.md) translates the active
-horizon into technical workstreams and dependency order. The [PRD](PRD.md) owns
-normative product requirements and release criteria. [Current status](status.md)
-owns what exists and is validated today. Accepted [plans](plans/) own
-implementation scope, gates, evidence, and completion claims.
+horizon priority. The [PRD](PRD.md) owns normative product requirements and
+release criteria. [Current status](status.md) owns what exists and is validated
+today. Maintainer implementation sequencing, reviews, and acceptance records are
+tracked outside the public product repository; decisions needed to understand
+shipped behavior are promoted into public documentation and ADRs.
 
-When these documents disagree, resolve strategy and horizon priority here, then
-update the PRD only when normative requirements or release criteria change. Do
-not rewrite historical evidence to make it resemble the current strategy.
+When these authorities disagree, resolve strategy and horizon priority here,
+then update the PRD only when normative requirements or release criteria change.
+Do not rewrite historical records to make them resemble the current strategy.

@@ -1,3 +1,0 @@
-PASS: current source help exposes all 38 documented top-level commands
-PASS: post-review human/machine confirmation wording matches dispatcher contract
-PASS: documented application actions match effective built-in keymap

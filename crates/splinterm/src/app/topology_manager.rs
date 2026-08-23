@@ -26,8 +26,9 @@ use tokio::sync::mpsc;
 use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane},
     session_catalog::{
-        automation_launch, create_request, launch_parameters, new_dojo_request_for,
-        recent_dojo_ids, remember_dojo, select_dojo_from, session_picker_item,
+        GraphicalLairLifetime, automation_launch, graphical_create_request, launch_parameters,
+        new_dojo_request_for, recent_dojo_ids, remember_dojo, select_dojo_from,
+        session_picker_item,
     },
 };
 
@@ -753,26 +754,34 @@ async fn create_daily_dojo(
     connection: &mut Connection,
     config: &AppConfig,
     cwd: std::path::PathBuf,
-) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
+) -> Result<ManagedWindowOpen> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_nanos();
     let expected = connection.topology_revision().await?;
+    let (request, lifetime) = graphical_create_request(
+        factory,
+        expected,
+        format!("terminal-{stamp}-{}", std::process::id()),
+        false,
+        Some(cwd),
+        Vec::new(),
+        config,
+    )?;
+    let (response, transient_owner) = match lifetime {
+        GraphicalLairLifetime::Persistent => (connection.request(request).await?, None),
+        GraphicalLairLifetime::ClientBound => {
+            let mut owner = factory.connect().await?;
+            let response = owner.request(request).await?;
+            (response, Some(owner))
+        }
+    };
     let Response::LairCreated {
         lair,
         topology_revision,
         ..
-    } = connection
-        .request(create_request(
-            factory,
-            expected,
-            format!("terminal-{stamp}-{}", std::process::id()),
-            Some(cwd),
-            Vec::new(),
-            config,
-        )?)
-        .await?
+    } = response
     else {
         bail!("splinterd did not create the requested terminal");
     };
@@ -781,16 +790,26 @@ async fn create_daily_dojo(
         .first()
         .cloned()
         .context("new Lair did not contain a Dojo")?;
-    Ok((window_dojo_identity(topology_revision, &lair, &dojo), dojo))
+    Ok(ManagedWindowOpen {
+        identity: window_dojo_identity(topology_revision, &lair, &dojo),
+        dojo,
+        remember: transient_owner.is_none(),
+        transient_owner,
+    })
 }
 
 async fn create_dojo_in_lair(
     factory: &ConnectionFactory,
-    connection: &mut Connection,
+    persistent_connection: &mut Connection,
+    transient_owner: Option<&mut Connection>,
     config: &AppConfig,
     lair_id: LairId,
     cwd: std::path::PathBuf,
-) -> Result<(WindowDojoIdentity, splinterm_core::Dojo)> {
+) -> Result<(WindowDojoIdentity, splinterm_core::Dojo, bool)> {
+    let (connection, uses_transient_owner) = match transient_owner {
+        Some(owner) => (owner, true),
+        None => (persistent_connection, false),
+    };
     let Response::Lairs {
         lairs,
         topology_revision: expected_topology_revision,
@@ -806,12 +825,18 @@ async fn create_dojo_in_lair(
         None,
         Some(cwd),
         Vec::new(),
+        tab_organization_promotes(config, uses_transient_owner),
         config,
     )?;
     let Response::DojoStarted { dojo_id, .. } = connection.request(request).await? else {
         bail!("splinterd did not create the requested Dojo");
     };
-    reopenable_dojo(connection, lair_id, dojo_id).await
+    let (identity, dojo) = reopenable_dojo(connection, lair_id, dojo_id).await?;
+    Ok((
+        identity,
+        dojo,
+        tab_organization_promotes(config, uses_transient_owner),
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1088,6 +1113,35 @@ enum TopologyManagerCommandOutcome {
 
 struct TopologyManagerState {
     tabs: WindowTabSet<ManagedDojo>,
+    transient_owners: HashMap<LairId, Connection>,
+}
+
+struct ManagedWindowOpen {
+    identity: WindowDojoIdentity,
+    dojo: splinterm_core::Dojo,
+    transient_owner: Option<Connection>,
+    remember: bool,
+}
+
+impl ManagedWindowOpen {
+    fn persistent((identity, dojo): (WindowDojoIdentity, splinterm_core::Dojo)) -> Self {
+        Self {
+            identity,
+            dojo,
+            transient_owner: None,
+            remember: true,
+        }
+    }
+}
+
+fn persistent_window_open(
+    target: Result<(WindowDojoIdentity, splinterm_core::Dojo)>,
+) -> Result<ManagedWindowOpen> {
+    target.map(ManagedWindowOpen::persistent)
+}
+
+fn tab_organization_promotes(config: &AppConfig, transient_owned: bool) -> bool {
+    transient_owned && config.multiplexer_lifetime.persist_on_tab_organization
 }
 
 const fn window_has_tab_capacity(tab_count: usize) -> bool {
@@ -1100,16 +1154,25 @@ fn topology_edit_target<T>(tabs: &mut WindowTabSet<T>, dojo_id: DojoId) -> Optio
 
 async fn finish_managed_window_open(
     factory: &ConnectionFactory,
-    target: Result<(WindowDojoIdentity, splinterm_core::Dojo)>,
+    target: Result<ManagedWindowOpen>,
     state: &mut TopologyManagerState,
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
 ) -> TopologyManagerCommandOutcome {
-    let target_id = target.as_ref().ok().map(|(_, dojo)| dojo.id);
+    let target_id = target.as_ref().ok().map(|target| target.dojo.id);
     let result = async {
-        let (identity, dojo) = target?;
+        let ManagedWindowOpen {
+            identity,
+            dojo,
+            transient_owner,
+            remember,
+        } = target?;
         if state.tabs.activate(dojo.id) {
+            anyhow::ensure!(
+                transient_owner.is_none(),
+                "new transient Lair collided with an existing Window tab"
+            );
             remember_dojo(factory, dojo.id);
             updates
                 .send(WindowTopologyUpdate::ActivateTab { dojo_id: dojo.id })
@@ -1161,7 +1224,15 @@ async fn finish_managed_window_open(
                 pane_tasks: prepared.pane_tasks,
             },
         ))?;
-        remember_dojo(factory, dojo_id);
+        if let Some(owner) = transient_owner {
+            anyhow::ensure!(
+                state.transient_owners.insert(lair_id, owner).is_none(),
+                "Window already owns the transient Lair"
+            );
+        }
+        if remember {
+            remember_dojo(factory, dojo_id);
+        }
         Ok(OpenTabOutcome::Opened)
     }
     .await;
@@ -1279,7 +1350,8 @@ async fn handle_session_manager_command(
             lair_id,
             dojo_id: target_id,
         } => {
-            let target = reopenable_dojo(connection, lair_id, target_id).await;
+            let target =
+                persistent_window_open(reopenable_dojo(connection, lair_id, target_id).await);
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::NewLair { cwd } => {
@@ -1376,7 +1448,7 @@ async fn handle_session_manager_command(
                 if matches!(
                     finish_managed_window_open(
                         factory,
-                        Ok(target),
+                        Ok(ManagedWindowOpen::persistent(target)),
                         state,
                         config,
                         image_cache,
@@ -1403,15 +1475,36 @@ async fn handle_session_manager_command(
                     .await;
                 return TopologyManagerCommandOutcome::Continue;
             }
-            let target = create_dojo_in_lair(factory, connection, config, lair_id, cwd).await;
+            let transient_owned = state.transient_owners.contains_key(&lair_id);
+            let created = if transient_owned {
+                let owner = state
+                    .transient_owners
+                    .get_mut(&lair_id)
+                    .expect("checked transient owner remains present");
+                create_dojo_in_lair(factory, connection, Some(owner), config, lair_id, cwd).await
+            } else {
+                create_dojo_in_lair(factory, connection, None, config, lair_id, cwd).await
+            };
+            let target = created.map(|(identity, dojo, promoted)| {
+                if promoted {
+                    state.transient_owners.remove(&lair_id);
+                }
+                ManagedWindowOpen {
+                    identity,
+                    dojo,
+                    transient_owner: None,
+                    remember: !transient_owned || promoted,
+                }
+            });
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::NavigateLair {
             current_lair_id,
             direction,
         } => {
-            let target =
-                navigate_lair(factory, connection, &state.tabs, current_lair_id, direction).await;
+            let target = persistent_window_open(
+                navigate_lair(factory, connection, &state.tabs, current_lair_id, direction).await,
+            );
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
         WindowTopologyCommand::RequestLairPrompt { lair_id, kind } => {
@@ -1660,22 +1753,37 @@ async fn handle_session_manager_command(
         }
         WindowTopologyCommand::RenameDojo { dojo_id, name } => {
             let result = async {
-                anyhow::ensure!(
-                    state.tabs.get(dojo_id).is_some(),
-                    "rename targeted a closed Dojo tab"
-                );
-                let expected_topology_revision = connection.topology_revision().await?;
-                let response = connection
-                    .request(Request::RenameDojo {
-                        expected_topology_revision,
-                        dojo_id,
-                        name,
-                    })
-                    .await?;
+                let lair_id = state
+                    .tabs
+                    .get(dojo_id)
+                    .map(|tab| tab.lair_id)
+                    .context("rename targeted a closed Dojo tab")?;
+                let transient_owned = state.transient_owners.contains_key(&lair_id);
+                let promote_transient_lair = tab_organization_promotes(config, transient_owned);
+                let request = Request::RenameDojo {
+                    expected_topology_revision: connection.topology_revision().await?,
+                    dojo_id,
+                    name,
+                    promote_transient_lair,
+                };
+                let response = if transient_owned {
+                    state
+                        .transient_owners
+                        .get_mut(&lair_id)
+                        .expect("checked transient owner remains present")
+                        .request(request)
+                        .await?
+                } else {
+                    connection.request(request).await?
+                };
                 anyhow::ensure!(
                     matches!(response, Response::TopologyCommitted { .. }),
                     "splinterd did not acknowledge Dojo rename"
                 );
+                if promote_transient_lair {
+                    state.transient_owners.remove(&lair_id);
+                    remember_dojo(factory, dojo_id);
+                }
                 Ok::<(), anyhow::Error>(())
             }
             .await;
@@ -1935,6 +2043,7 @@ pub(in crate::app) async fn run_topology_manager(
     mut commands: mpsc::Receiver<WindowTopologyCommand>,
     updates: mpsc::Sender<WindowTopologyUpdate>,
     pane_tasks: HashMap<SplintId, PaneTask>,
+    initial_transient_owner: Option<Connection>,
 ) -> Result<()> {
     let mut connection = factory.connect().await?;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -1942,6 +2051,10 @@ pub(in crate::app) async fn run_topology_manager(
     let mut poll_priority = false;
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
+    let mut transient_owners = HashMap::new();
+    if let Some(owner) = initial_transient_owner {
+        transient_owners.insert(initial_lair_id, owner);
+    }
     let mut state = TopologyManagerState {
         tabs: WindowTabSet::new(DojoTab::new(
             initial_lair_id,
@@ -1953,6 +2066,7 @@ pub(in crate::app) async fn run_topology_manager(
                 pane_tasks,
             },
         )),
+        transient_owners,
     };
     loop {
         let command =
@@ -2165,10 +2279,19 @@ mod tests {
         close_other_tab_targets, collect_lair_targets, command_has_pending_split,
         lair_navigation_target, materialized_dojo_targets, next_topology_manager_wake,
         parent_ratio, pending_focus_for_observation, refreshed_close_state, select_live_dojo_from,
-        topology_command_outcome, topology_edit_target, topology_identity_diff,
-        validate_exited_close_target, window_has_tab_capacity,
+        tab_organization_promotes, topology_command_outcome, topology_edit_target,
+        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
+
+    #[test]
+    fn tab_organization_promotion_requires_both_config_and_transient_ownership() {
+        let mut config = splinterm::config::AppConfig::default();
+        assert!(tab_organization_promotes(&config, true));
+        assert!(!tab_organization_promotes(&config, false));
+        config.multiplexer_lifetime.persist_on_tab_organization = false;
+        assert!(!tab_organization_promotes(&config, true));
+    }
 
     #[test]
     fn live_dojo_selection_accepts_transient_tabs_but_rejects_exited_layouts() {

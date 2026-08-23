@@ -40,6 +40,8 @@ use thiserror::Error;
 
 #[doc(hidden)]
 pub const CHILD_READY_MARKER: &[u8] = b"\0splinterm-pty-ready\0";
+#[doc(hidden)]
+pub const CHILD_READY_ACK: u8 = 0xa5;
 
 const FOREIGN_TERMINAL_ENV: &[&str] = &[
     "ALACRITTY_LOG",
@@ -201,6 +203,8 @@ pub enum PtyError {
     },
     #[error("child process id is outside the supported pid range")]
     InvalidChildId,
+    #[error("PTY child identity does not match its session and controlling terminal")]
+    IdentityMismatch,
     #[error("PTY child helper did not complete session setup")]
     HelperHandshake,
     #[error("target command could not be executed")]
@@ -272,6 +276,24 @@ impl LinuxPtyBackend {
     /// # Errors
     /// Returns an error when PTY setup, slave configuration, or helper spawn fails.
     pub fn spawn(&self, command: &PtyCommand, size: PtySize) -> Result<LinuxPtySession> {
+        self.spawn_with_placement(command, size, |_| Ok(()))
+            .map(|(session, ())| session)
+    }
+
+    /// Starts a command only after `place` accepts the helper's validated identity.
+    ///
+    /// The helper has established its session and controlling terminal when
+    /// `place` runs, but remains blocked before target execution.
+    ///
+    /// # Errors
+    /// Returns an error and kills and reaps the helper when PTY setup, placement,
+    /// acknowledgement, or target execution fails.
+    pub fn spawn_with_placement<T>(
+        &self,
+        command: &PtyCommand,
+        size: PtySize,
+        place: impl FnOnce(LinuxPtyIdentity) -> io::Result<T>,
+    ) -> Result<(LinuxPtySession, T)> {
         let master = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)
             .map_err(|error| PtyError::io("open master", error))?;
         pty::grantpt(&master).map_err(|error| PtyError::io("grant slave", error))?;
@@ -319,11 +341,6 @@ impl LinuxPtyBackend {
         let mut child = child_command
             .spawn()
             .map_err(|error| PtyError::io("spawn PTY helper", error))?;
-        let Some(process_group) = i32::try_from(child.id()).ok().and_then(Pid::from_raw) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(PtyError::InvalidChildId);
-        };
         let Ok(mut exec_status) = accept_exec_status(&status_listener) else {
             let _ = child.kill();
             let _ = child.wait();
@@ -335,18 +352,101 @@ impl LinuxPtyBackend {
             let _ = child.wait();
             return Err(PtyError::HelperHandshake);
         }
+        let identity = match LinuxPtyIdentity::observe(child.id(), &master) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let placement = match place(identity) {
+            Ok(placement) => placement,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PtyError::io("place PTY child", error));
+            }
+        };
+        if !acknowledge_child_ready(&mut exec_status) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PtyError::HelperHandshake);
+        }
         if !target_exec_succeeded(&mut exec_status) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(PtyError::TargetExec);
         }
 
-        Ok(LinuxPtySession {
-            master,
+        Ok((
+            LinuxPtySession {
+                master,
+                child,
+                process_group: identity.process_group,
+            },
+            placement,
+        ))
+    }
+}
+
+/// Validated process identity presented before target execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxPtyIdentity {
+    child_raw: u32,
+    child: Pid,
+    process_group: Pid,
+    session: Pid,
+}
+
+impl LinuxPtyIdentity {
+    fn observe(child_id: u32, master: &File) -> Result<Self> {
+        let child = pid_from_u32(child_id)?;
+        let process_group = process::getpgid(Some(child))
+            .map_err(|error| PtyError::io("read child process group", error))?;
+        let session = process::getsid(Some(child))
+            .map_err(|error| PtyError::io("read child session", error))?;
+        let identity = Self {
+            child_raw: child_id,
             child,
             process_group,
+            session,
+        };
+        if child != process_group
+            || child != session
+            || termios::tcgetsid(master)
+                .map_err(|error| PtyError::io("read controlling terminal session", error))?
+                != session
+        {
+            return Err(PtyError::IdentityMismatch);
+        }
+        Ok(identity)
+    }
+
+    /// Constructs a bounded identity for deterministic manager tests.
+    ///
+    /// # Errors
+    /// Returns an error unless every identifier is a supported positive PID.
+    pub fn from_raw(child: u32, process_group: u32, session: u32) -> Result<Self> {
+        Ok(Self {
+            child_raw: child,
+            child: pid_from_u32(child)?,
+            process_group: pid_from_u32(process_group)?,
+            session: pid_from_u32(session)?,
         })
     }
+
+    #[must_use]
+    pub const fn child_pid(self) -> u32 {
+        self.child_raw
+    }
+}
+
+fn pid_from_u32(raw: u32) -> Result<Pid> {
+    i32::try_from(raw)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(PtyError::InvalidChildId)
 }
 
 #[derive(Debug)]
@@ -464,6 +564,10 @@ fn accept_exec_status(listener: &UnixListener) -> io::Result<UnixStream> {
             Err(error) => return Err(error),
         }
     }
+}
+
+fn acknowledge_child_ready(status: &mut UnixStream) -> bool {
+    status.write_all(&[CHILD_READY_ACK]).is_ok() && status.flush().is_ok()
 }
 
 fn target_exec_succeeded(status: &mut UnixStream) -> bool {

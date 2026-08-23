@@ -1779,6 +1779,7 @@ async fn dispatch_mutation_to(
                     expected_topology_revision: preparation.topology_revision,
                     dojo_id,
                     name: name.to_owned(),
+                    promote_transient_lair: false,
                 })
                 .await?
             {

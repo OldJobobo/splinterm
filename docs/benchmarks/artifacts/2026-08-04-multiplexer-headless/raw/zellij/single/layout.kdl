@@ -1,5 +1,0 @@
-layout {
-    pane name="pane-0" command="/usr/bin/python" close_on_exit=true {
-        args "/home/oldjobobo/Projects/splinterm/tools/benchmark/workloads/bench-child.py" "idle" "--ready-file" "/home/oldjobobo/Projects/splinterm/docs/benchmarks/artifacts/2026-08-04-multiplexer-headless/raw/zellij/single/pane-0-ready.json" "--idle-seconds" "15.0"
-    }
-}

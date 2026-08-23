@@ -1,9 +1,0 @@
-Selected primary: JetBrainsMono Nerd Font,JetBrainsMono NF Regular (face 0, /usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf)
-Selected primary bold: JetBrainsMono Nerd Font,JetBrainsMono NF Bold (face 0, /usr/share/fonts/TTF/JetBrainsMonoNerdFont-Bold.ttf)
-Selected primary italic: JetBrainsMono Nerd Font,JetBrainsMono NF Italic (face 0, /usr/share/fonts/TTF/JetBrainsMonoNerdFont-Italic.ttf)
-Selected primary bold italic: JetBrainsMono Nerd Font,JetBrainsMono NF Bold Italic (face 0, /usr/share/fonts/TTF/JetBrainsMonoNerdFont-BoldItalic.ttf)
-Selected CJK fallback: Noto Sans CJK JP Regular (face 0, /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc)
-Selected emoji fallback: Noto Color Emoji Regular (face 0, /usr/share/fonts/noto/NotoColorEmoji.ttf)
-capture image paint: tier=1, image_tier=1, anchor=(12,12), destination=3x6, clip=(12,12)-(943,573)
-capture image diagnostic: Some((1, [0, 0, 255, 255], 0, 0, -1, (3, 6), Some((7, 17)))), backing red pixels: 18
-Wrote deterministic row capture at 1x scale to /home/oldjobobo/Projects/splinterm/docs/spikes/artifacts/0025-terminal-images/slice2-splinterm-sixel-2026-07-25-v12/raster-attributes-repeat-red-3x6/splinterm.ppm

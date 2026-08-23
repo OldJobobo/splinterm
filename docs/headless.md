@@ -37,6 +37,55 @@ service account, or enable the unit. For a dedicated service account, the
 administrator must provision the account, its home/runtime ownership, login or
 lingering policy, and the exact automation executable policy independently.
 
+## Resource guards and workload containment
+
+The packaged daemon separates its control plane from terminal workloads before
+commands execute:
+
+```text
+splinterd.service                  daemon control plane
+app-splinterm.slice                all terminal workloads
+└── one transient slice per Dojo
+    └── one transient scope per live Splint
+```
+
+Both `splinterd.service` and the aggregate workload slice have `TasksMax=2048`
+and `MemoryHigh=75%`. The independent daemon boundary keeps a workload failure
+from consuming the daemon's task or memory-pressure budget. Transient Dojo
+slices use 1024 tasks and 50% memory pressure; Splint scopes use 512 tasks and
+25% memory pressure. These are task ceilings and soft memory-pressure
+thresholds. `MemoryHigh` asks the kernel to reclaim and throttle under sustained
+pressure; Splinterm does not install a `MemoryMax` hard kill boundary in this
+release.
+
+A new Splint is rejected if its exact helper PID cannot be verified inside its
+scope while still blocked before target execution. Existing Dojos are not
+retargeted or silently launched inside the daemon service. Direct development
+launches use containment when a user manager is available and otherwise emit a
+bounded warning; only the packaged service passes the strict
+`--require-workload-cgroups` mode.
+
+Inspect both boundaries without changing them:
+
+```bash
+systemctl --user show splinterd.service \
+  -p TasksCurrent -p TasksMax -p MemoryCurrent -p MemoryHigh -p MemoryMax
+systemctl --user status app-splinterm.slice
+systemd-cgls --user-unit app-splinterm.slice
+systemd-cgtop
+```
+
+`MemoryCurrent` includes page cache charged to each cgroup. Inactive file cache
+is normally reclaimable under pressure, but it is neither immediately free nor
+excluded from cgroup accounting. Do not use `drop_caches` as routine Splinterm
+recovery.
+
+The aggregate workload slice may be inactive when no Splints are running. Empty
+transient Splint scopes and Dojo slices are collected after runtime cleanup.
+Packaged Dojo slices are also `PartOf=splinterd.service`: stopping or failing the
+daemon service stops its workload hierarchy, while a Splint or Dojo stopping
+does not propagate failure back to the daemon.
+
 ## Install an owner-only policy
 
 The unit optionally reads `%h/.config/splinterm/daemon.env`. `EnvironmentFile`

@@ -9,7 +9,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 
 | Section/key | Meaning | Range/default |
 | --- | --- | --- |
-| `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
+| `main.font` | fontconfig pattern; regular/bold/italic variants stay within its resolved family | Fontconfig `monospace` Regular |
 | `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
@@ -28,6 +28,8 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
+| `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
+| `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically | yes |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
@@ -39,7 +41,15 @@ outside terminal hit-testing, and emits one bounded `grid_capped` diagnostic for
 the pane instead of silently treating the residual as terminal cells.
 
 Malformed supported values fail startup. Unknown sections and keys print
-line-numbered diagnostics. By default, palette roles come directly from the
+line-numbered diagnostics. The default `monospace` pattern follows Omarchy's
+effective Fontconfig terminal-family selection for each newly launched client.
+An explicit `main.font` pattern remains the client-local authority. Splinterm
+resolves regular, bold, italic, and bold-italic from the selected regular
+family; when a styled face is missing, substituted to another family, or has
+incompatible terminal-cell metrics, Splinterm warns and deliberately reuses the
+regular face instead of refusing to open a Window.
+
+By default, palette roles come directly from the
 active Omarchy theme's `colors.toml` and effective `foot.ini`; `[colors] alpha`
 and `[colors] blur` are explicit user overrides. Whichever alpha source wins follows Foot's default
 alpha mode: only cells whose background source is default are translucent;
@@ -323,14 +333,28 @@ remote-path, no-image, and disconnect behavior.
 
 ## Daily launch and Dojo reopening
 
-The normal desktop/XDG command remains `splinterm-xdg-terminal-exec`. Without a
-command it creates a fresh persistent Lair with one Dojo. When an application
-supplies `-- COMMAND...`, the same adapter creates a transient client-bound Lair
-that is removed when the command exits or its owning Window disconnects. These
-command-bearing XDG windows start with the Dojo tab strip hidden; the normal
-strip-toggle action can still reveal it. Native `splinterm launch -- COMMAND...`
-remains persistent. Dojo reopening is
-deliberately separate, and transient XDG commands never enter Recent Dojos:
+The normal desktop/XDG command remains `splinterm-xdg-terminal-exec`. Its
+commandless form, bare `splinterm launch`, picker **New**, and in-Window **New
+Terminal** use `multiplexer.persistent-by-default`. The compatibility default is
+`yes`. With `no`, an ordinary unnamed local graphical launch is owned by its
+Window: closing that Window terminates its processes and removes the Lair unless
+it was promoted first.
+
+An explicit Lair name, `splinterm new NAME`, `splinterm launch --name NAME`, a
+command-bearing native launch, a preset, restore/relaunch, remote creation, or
+automation/MCP creation remains persistent. Generated collision-resistant Lair
+names and the generated initial `Dojo 1` label do not count as explicit naming.
+When an application supplies `splinterm-xdg-terminal-exec -- COMMAND...`, the
+adapter retains its existing client-bound lifetime regardless of the setting;
+these Windows start with the tab strip hidden.
+
+With `multiplexer.persist-on-tab-organization=yes`, creating another Dojo tab or
+explicitly naming/renaming a Dojo atomically promotes the complete transient
+Lair before the tab mutation commits. Promotion is permanent: closing the
+Window afterward detaches instead of terminating it. With `no`, organized and
+multi-tab Lairs remain Window-owned and are removed together when that Window
+closes. Unpromoted transient Dojos never enter Recent Dojos. Dojo reopening is
+deliberately separate:
 
 ```text
 splinterm-dojos     → native Recent Dojos picker
