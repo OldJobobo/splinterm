@@ -194,12 +194,17 @@ def validate_systemd_unit(root: Path) -> None:
         "UnsetEnvironment=SPLINTERM_ENABLE_DEV_ATTACH",
         "ExecStart=/usr/bin/splinterd",
         "ExecReload=/usr/bin/kill -HUP $MAINPID",
+        "TasksMax=2048",
+        "MemoryHigh=75%",
         "KillSignal=SIGINT",
         "KillMode=mixed",
         "TimeoutStopSec=90",
     }
     missing = {line for line in required if line not in unit.splitlines()}
-    assert not missing, f"systemd unit is missing headless safety settings: {sorted(missing)}"
+    assert not missing, (
+        "systemd unit is missing headless safety or resource settings: "
+        f"{sorted(missing)}"
+    )
     assert "graphical-session.target" not in unit
     unset_environment = {
         name
