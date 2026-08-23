@@ -29,8 +29,8 @@ a current sanitizer-backed parser fuzz run, and installed-system validation.
   correlation and the live-history fast path.
 - [Plan 0023](../2026-08-06-plan0023-ansi-history-throughput/README.md) owns the
   reducer optimization and focused graphical ANSI confirmation.
-- [Plan 0024](../../../plans/0024-resize-preparation.md) proves that resize has
-  no duplicate expensive content preparation worth changing.
+- [Resize preparation evidence](../2026-08-06-plan0024-resize-preparation/README.md)
+  proves that resize has no duplicate expensive content preparation worth changing.
 
 No new broad graphical matrix was run for installation. Existing evidence is
 preserved rather than reinterpreted as presentation timing.

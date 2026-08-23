@@ -3,7 +3,7 @@
 d81618c950019a03029ea6427904a4869dcca0a727002c0cb3bfb1bc40e941f4  docs/spikes/artifacts/0026-performance-optimization-pass/baseline-output-summary.md
 337d9a5299b623a3049cb1adccc3d206fa7842d1fbcc83eadcc86a111ed81557  docs/spikes/artifacts/0026-performance-optimization-pass/final-binary-sha256.txt
 e62388db37afbb64c98150f87c3b1255fab248f3456412dfbe4664f41bdbc652  docs/spikes/artifacts/0026-performance-optimization-pass/final-daemon-summary.json
-c9585ca5c0ac33af2432aec8c5941d95d116481a96882c83bb537cb7ad8caeb7  docs/spikes/artifacts/0026-performance-optimization-pass/README.md
+a9083c8bab089acc2cbdadbda45201be41ec68c245ff8385abf6653d560c522e  docs/spikes/artifacts/0026-performance-optimization-pass/README.md
 2d1d88d5e3ab62d9ee5d28e5c8f144839ade0b44446ba2a3547d8dbeeebc3a46  docs/spikes/artifacts/0026-performance-optimization-pass/slice1/instrumentation-overhead.json
 fa246d95b600e4d1ca9a4de60b1391f8e66a1f2308b957f68cee22425c9e8088  docs/spikes/artifacts/0026-performance-optimization-pass/slice1/slice1-wire-release-4118556.jsonl
 d204987746a14686a511435c97911674e1502ef9e8f601cfdf104b8c102e80b4  docs/spikes/artifacts/0026-performance-optimization-pass/slice1/wire-release-summary.json

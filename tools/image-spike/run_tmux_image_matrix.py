@@ -24,7 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 IMAGE_SPIKE = pathlib.Path(__file__).resolve().parent
 TOOLS = ROOT / "tools/benchmark"
 SYNTHETIC = IMAGE_SPIKE / "fixtures/real-client-static.png"
-UI_DETAIL = ROOT / "docs/plans/artifacts/0025-action-menus/palette-filter-split.png"
+UI_DETAIL = ROOT / "docs/evidence/artifacts/0025-action-menus/palette-filter-split.png"
 DEFAULT_PHOTO = (
     pathlib.Path.home()
     / "Pictures/wallpaper/Mountain Dew/lake-lucerne-landscape-mountains-sunset-switzerland-3840x2160-49.jpg"

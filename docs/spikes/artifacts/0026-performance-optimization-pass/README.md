@@ -1,8 +1,8 @@
 # Plan 0010 performance optimization — measured Slice 0, partial Slice 1, and Slice 3 development pass
 
-This directory records development evidence from the first implementation pass of
-[Plan 0010](../../../plans/0010-full-performance-optimization-pass.md). It is not
-integrated closure or release-grade comparative evidence. The provisional Foot
+This directory records development evidence from the first full-performance
+optimization implementation pass. It is not integrated closure or release-grade
+comparative evidence. The provisional Foot
 parity gates are not yet met.
 
 ## Scope

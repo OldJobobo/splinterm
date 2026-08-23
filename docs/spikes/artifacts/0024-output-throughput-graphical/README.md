@@ -1,7 +1,6 @@
 # Plan 0009 guarded graphical output evidence
 
-This directory records the guarded five-terminal output matrix for
-[Plan 0009](../../../plans/0009-output-throughput-optimization.md) after the
+This directory records the guarded five-terminal output matrix after the
 terminal damage-accounting and bounded subscription-draining fixes.
 
 ## Run shape
