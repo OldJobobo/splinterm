@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     process::Command,
     sync::{Arc, OnceLock},
@@ -31,6 +31,7 @@ pub(super) const EMOJI_FONT: &str = "Noto Color Emoji";
 pub(super) const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
 pub(super) const SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 pub(super) const SNAPSHOT_RASTER_FACE_BUDGET: usize = 24;
+pub(super) const SNAPSHOT_FALLBACK_MAPPING_BUDGET: usize = 24;
 
 pub(super) const SNAPSHOT_PRIMARY_REGULAR: usize = 0;
 pub(super) const SNAPSHOT_PRIMARY_BOLD: usize = 1;
@@ -38,8 +39,35 @@ pub(super) const SNAPSHOT_PRIMARY_ITALIC: usize = 2;
 pub(super) const SNAPSHOT_PRIMARY_BOLD_ITALIC: usize = 3;
 pub(super) const SNAPSHOT_CJK: usize = 4;
 pub(super) const SNAPSHOT_EMOJI: usize = 5;
+pub(super) const SNAPSHOT_FALLBACK_START: usize = 6;
 
-pub(super) static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 6], String>> = OnceLock::new();
+pub(super) static SNAPSHOT_FACES: OnceLock<Result<Vec<FontFace>, String>> = OnceLock::new();
+
+#[derive(Default)]
+pub(super) struct PersistentFontMappingCache {
+    pub(super) mappings: HashMap<PathBuf, Arc<ReadOnlyFileMap>>,
+    pub(super) order: VecDeque<PathBuf>,
+    pub(super) hits: u64,
+    pub(super) misses: u64,
+    pub(super) evictions: u64,
+}
+
+impl PersistentFontMappingCache {
+    fn insert(&mut self, key: PathBuf, mapping: Arc<ReadOnlyFileMap>) -> Arc<ReadOnlyFileMap> {
+        while self.mappings.len() >= SNAPSHOT_FALLBACK_MAPPING_BUDGET {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if self.mappings.remove(&oldest).is_some() {
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.mappings.insert(key, Arc::clone(&mapping));
+        mapping
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PersistentGlyphCache {
     pub(super) raster_faces: HashMap<(isize, usize), RasterFace>,
@@ -116,10 +144,15 @@ impl PersistentGlyphCache {
 thread_local! {
     pub(super) static SNAPSHOT_GLYPH_CACHE: RefCell<PersistentGlyphCache> =
         RefCell::new(PersistentGlyphCache::default());
+    pub(super) static SNAPSHOT_FALLBACK_MAPPING_CACHE: RefCell<PersistentFontMappingCache> =
+        RefCell::new(PersistentFontMappingCache::default());
 }
 
 pub(super) fn clear_snapshot_caches() {
     SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+    SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|cache| {
+        *cache.borrow_mut() = PersistentFontMappingCache::default();
+    });
 }
 
 pub(super) const CORPUS: &[(CorpusKind, &str)] = &[
@@ -158,7 +191,9 @@ pub(super) struct FontFace {
     pub(super) weight: i32,
     pub(super) slant: i32,
     pub(super) selected_pixel_size_26_6: isize,
-    pub(super) data: OnceLock<Result<ReadOnlyFileMap, String>>,
+    pub(super) outline: bool,
+    pub(super) coverage: Box<[(u32, u32)]>,
+    pub(super) data: Option<OnceLock<Result<ReadOnlyFileMap, String>>>,
 }
 
 impl FontFace {
@@ -172,12 +207,23 @@ impl FontFace {
             weight: self.weight,
             slant: self.slant,
             selected_pixel_size_26_6: self.selected_pixel_size_26_6,
-            data: OnceLock::new(),
+            outline: self.outline,
+            coverage: self.coverage.clone(),
+            data: Some(OnceLock::new()),
         }
     }
 
     fn identity(&self) -> (&std::path::Path, usize) {
         (&self.path, self.index)
+    }
+
+    pub(super) fn covers_text(&self, text: &str) -> bool {
+        text.chars().all(|character| {
+            let codepoint = u32::from(character);
+            self.coverage
+                .iter()
+                .any(|(start, end)| (*start..=*end).contains(&codepoint))
+        })
     }
 }
 
@@ -498,13 +544,13 @@ pub(super) fn cache_glyph(
     Ok(())
 }
 
-pub(super) fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
+pub(super) fn snapshot_faces() -> Result<&'static [FontFace]> {
     SNAPSHOT_FACES
         .get_or_init(|| {
+            let primary_pattern = &renderer_options().font;
             let [regular, bold, italic, bold_italic] =
-                resolve_primary_faces(&renderer_options().font)
-                    .map_err(|error| error.to_string())?;
-            Ok([
+                resolve_primary_faces(primary_pattern).map_err(|error| error.to_string())?;
+            let mut faces = Vec::from([
                 regular,
                 bold,
                 italic,
@@ -513,9 +559,22 @@ pub(super) fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
                     .map_err(|error| error.to_string())?,
                 resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")
                     .map_err(|error| error.to_string())?,
-            ])
+            ]);
+            let excluded = faces
+                .iter()
+                .map(|face| (face.path.clone(), face.index))
+                .collect::<HashSet<_>>();
+            let fallback_faces = resolve_fallback_faces(primary_pattern, &excluded)
+                .map_err(|error| error.to_string())?;
+            eprintln!(
+                "Resolved {} ordered Fontconfig fallback faces",
+                fallback_faces.len()
+            );
+            faces.extend(fallback_faces);
+            Ok(faces)
         })
         .as_ref()
+        .map(Vec::as_slice)
         .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
@@ -635,7 +694,7 @@ pub(super) fn snapshot_color_advance(
 }
 
 pub(super) fn reset_snapshot_cache() {
-    SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+    clear_snapshot_caches();
 }
 
 pub(super) fn evict_snapshot_glyphs() -> usize {
@@ -668,20 +727,28 @@ pub(super) fn process_rss_bytes() -> Option<u64> {
 /// Returns bounded persistent snapshot-glyph-cache metrics.
 #[must_use]
 pub fn snapshot_cache_metrics() -> serde_json::Value {
-    SNAPSHOT_GLYPH_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        serde_json::json!({
-            "entries": cache.glyphs.len(),
-            "raster_faces": cache.raster_faces.len(),
-            "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
-            "glyph_budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
-            "glyph_byte_budget": SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET,
-            "raster_face_budget": SNAPSHOT_RASTER_FACE_BUDGET,
-            "hits": cache.hits,
-            "misses": cache.misses,
-            "evictions": cache.evictions,
-            "raster_face_evictions": cache.raster_face_evictions,
-            "approximate_bytes": cache.glyph_bytes,
+    SNAPSHOT_GLYPH_CACHE.with(|glyph_cache| {
+        SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|mapping_cache| {
+            let glyph_cache = glyph_cache.borrow();
+            let mapping_cache = mapping_cache.borrow();
+            serde_json::json!({
+                "entries": glyph_cache.glyphs.len(),
+                "raster_faces": glyph_cache.raster_faces.len(),
+                "fallback_mappings": mapping_cache.mappings.len(),
+                "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+                "glyph_budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+                "glyph_byte_budget": SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET,
+                "raster_face_budget": SNAPSHOT_RASTER_FACE_BUDGET,
+                "fallback_mapping_budget": SNAPSHOT_FALLBACK_MAPPING_BUDGET,
+                "hits": glyph_cache.hits,
+                "misses": glyph_cache.misses,
+                "evictions": glyph_cache.evictions,
+                "raster_face_evictions": glyph_cache.raster_face_evictions,
+                "fallback_mapping_hits": mapping_cache.hits,
+                "fallback_mapping_misses": mapping_cache.misses,
+                "fallback_mapping_evictions": mapping_cache.evictions,
+                "approximate_bytes": glyph_cache.glyph_bytes,
+            })
         })
     })
 }
@@ -1109,17 +1176,106 @@ pub(super) fn ceil_to_i32(value: f32) -> i32 {
     value.ceil() as i32
 }
 
-pub(super) fn resolve_face(
-    label: &'static str,
-    pattern: &str,
-    expected_family_fragment: &str,
-) -> Result<FontFace> {
-    let output = Command::new("fc-match")
-        .args([
-            "-f",
-            "%{file}\\n%{index}\\n%{family[0]}\\n%{style}\\n%{weight}\\n%{slant}\\n%{pixelsize}\\n",
-            pattern,
-        ])
+const FONTCONFIG_FACE_FORMAT: &str = "%{file}\\n%{index}\\n%{family[0]}\\n%{style}\\n%{weight}\\n%{slant}\\n%{pixelsize}\\n%{outline}\\n%{charset}\\n--record--\\n";
+
+fn parse_fontconfig_charset(value: &str) -> Result<Box<[(u32, u32)]>> {
+    value
+        .split_whitespace()
+        .map(|range| {
+            let (start, end) = range.split_once('-').unwrap_or((range, range));
+            let start = u32::from_str_radix(start, 16)
+                .with_context(|| format!("invalid Fontconfig charset start {start:?}"))?;
+            let end = u32::from_str_radix(end, 16)
+                .with_context(|| format!("invalid Fontconfig charset end {end:?}"))?;
+            anyhow::ensure!(
+                start <= end && end <= u32::from(char::MAX),
+                "invalid Fontconfig charset range {range:?}"
+            );
+            Ok((start, end))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Vec::into_boxed_slice)
+}
+
+fn parse_fontconfig_faces(label: &'static str, stdout: &[u8]) -> Result<Vec<FontFace>> {
+    let stdout = std::str::from_utf8(stdout).context("fc-match output is not UTF-8")?;
+    stdout
+        .split("--record--\n")
+        .filter(|record| !record.trim().is_empty())
+        .map(|record| {
+            let mut lines = record.lines();
+            let path = PathBuf::from(
+                lines
+                    .next()
+                    .with_context(|| format!("fc-match returned no font path for {label}"))?,
+            );
+            let index = lines
+                .next()
+                .with_context(|| format!("fc-match returned no face index for {label}"))?
+                .parse::<usize>()
+                .with_context(|| {
+                    format!("fc-match returned a non-numeric face index for {label}")
+                })?;
+            let family = lines
+                .next()
+                .with_context(|| format!("fc-match returned no font family for {label}"))?
+                .to_owned();
+            let style = lines
+                .next()
+                .with_context(|| format!("fc-match returned no style for {label}"))?
+                .to_owned();
+            let weight = lines
+                .next()
+                .with_context(|| format!("fc-match returned no weight for {label}"))?
+                .parse::<i32>()
+                .with_context(|| format!("fc-match returned a non-numeric weight for {label}"))?;
+            let slant = lines
+                .next()
+                .with_context(|| format!("fc-match returned no slant for {label}"))?
+                .parse::<i32>()
+                .with_context(|| format!("fc-match returned a non-numeric slant for {label}"))?;
+            let selected_pixel_size = lines
+                .next()
+                .with_context(|| format!("fc-match returned no pixel size for {label}"))?
+                .parse::<f32>()
+                .with_context(|| format!("fc-match returned an invalid pixel size for {label}"))?;
+            let outline = match lines
+                .next()
+                .with_context(|| format!("fc-match returned no outline flag for {label}"))?
+            {
+                "True" => true,
+                "False" => false,
+                value => bail!("fc-match returned an invalid outline flag {value:?} for {label}"),
+            };
+            let coverage = parse_fontconfig_charset(
+                lines
+                    .next()
+                    .with_context(|| format!("fc-match returned no charset for {label}"))?,
+            )?;
+            Ok(FontFace {
+                label,
+                family,
+                style,
+                path,
+                index,
+                weight,
+                slant,
+                selected_pixel_size_26_6: pixel_size_26_6(selected_pixel_size)?,
+                outline,
+                coverage,
+                data: Some(OnceLock::new()),
+            })
+        })
+        .collect()
+}
+
+fn run_fontconfig_faces(label: &'static str, pattern: &str, sorted: bool) -> Result<Vec<FontFace>> {
+    let mut command = Command::new("fc-match");
+    if sorted {
+        command.arg("-s");
+    }
+    let output = command
+        .args(["-f", FONTCONFIG_FACE_FORMAT, pattern])
         .output()
         .with_context(|| format!("run fc-match for {label}"))?;
     if !output.status.success() {
@@ -1128,58 +1284,26 @@ pub(super) fn resolve_face(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let stdout = String::from_utf8(output.stdout).context("fc-match output is not UTF-8")?;
-    let mut lines = stdout.lines();
-    let path = PathBuf::from(
-        lines
-            .next()
-            .with_context(|| format!("fc-match returned no font path for {label}"))?,
-    );
-    let index = lines
+    parse_fontconfig_faces(label, &output.stdout)
+}
+
+pub(super) fn resolve_face(
+    label: &'static str,
+    pattern: &str,
+    expected_family_fragment: &str,
+) -> Result<FontFace> {
+    let face = run_fontconfig_faces(label, pattern, false)?
+        .into_iter()
         .next()
-        .with_context(|| format!("fc-match returned no face index for {label}"))?
-        .parse::<usize>()
-        .with_context(|| format!("fc-match returned a non-numeric face index for {label}"))?;
-    let family = lines
-        .next()
-        .with_context(|| format!("fc-match returned no font family for {label}"))?
-        .to_owned();
-    let style = lines
-        .next()
-        .with_context(|| format!("fc-match returned no style for {label}"))?
-        .to_owned();
-    let weight = lines
-        .next()
-        .with_context(|| format!("fc-match returned no weight for {label}"))?
-        .parse::<i32>()
-        .with_context(|| format!("fc-match returned a non-numeric weight for {label}"))?;
-    let slant = lines
-        .next()
-        .with_context(|| format!("fc-match returned no slant for {label}"))?
-        .parse::<i32>()
-        .with_context(|| format!("fc-match returned a non-numeric slant for {label}"))?;
-    let selected_pixel_size = lines
-        .next()
-        .with_context(|| format!("fc-match returned no pixel size for {label}"))?
-        .parse::<f32>()
-        .with_context(|| format!("fc-match returned an invalid pixel size for {label}"))?;
-    let selected_pixel_size_26_6 = pixel_size_26_6(selected_pixel_size)?;
-    let normalized_family = normalize_family(&family);
+        .with_context(|| format!("fc-match returned no face for {label}"))?;
+    let normalized_family = normalize_family(&face.family);
     let normalized_expected = normalize_family(expected_family_fragment);
     if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
-        bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
+        bail!(
+            "explicit {label} pattern {pattern:?} resolved unexpectedly to {:?}",
+            face.family
+        );
     }
-    let face = FontFace {
-        label,
-        family,
-        style,
-        path,
-        index,
-        weight,
-        slant,
-        selected_pixel_size_26_6,
-        data: OnceLock::new(),
-    };
     eprintln!(
         "Resolved {label}: {} {} (face {}, {})",
         face.family,
@@ -1188,6 +1312,21 @@ pub(super) fn resolve_face(
         face.path.display()
     );
     Ok(face)
+}
+
+fn resolve_fallback_faces(
+    pattern: &str,
+    excluded: &HashSet<(PathBuf, usize)>,
+) -> Result<Vec<FontFace>> {
+    let mut identities = excluded.clone();
+    Ok(run_fontconfig_faces("fontconfig fallback", pattern, true)?
+        .into_iter()
+        .filter(|face| face.outline && identities.insert((face.path.clone(), face.index)))
+        .map(|mut face| {
+            face.data = None;
+            face
+        })
+        .collect())
 }
 
 #[derive(Clone, Copy)]
@@ -1326,6 +1465,8 @@ fn resolve_primary_faces(pattern: &str) -> Result<[FontFace; 4]> {
 
 pub(super) fn font_data(face: &FontFace) -> Result<&[u8]> {
     face.data
+        .as_ref()
+        .context("fallback font data requires the bounded mapping cache")?
         .get_or_init(|| {
             ReadOnlyFileMap::open(&face.path)
                 .with_context(|| format!("map {}", face.path.display()))
@@ -1346,6 +1487,41 @@ pub(super) fn font_ref(face: &FontFace) -> Result<FontRef<'_>> {
     })
 }
 
+fn fallback_font_mapping(face: &FontFace) -> Result<Arc<ReadOnlyFileMap>> {
+    let key = face.path.clone();
+    SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(mapping) = cache.mappings.get(&key).cloned() {
+            cache.hits = cache.hits.saturating_add(1);
+            return Ok(mapping);
+        }
+        cache.misses = cache.misses.saturating_add(1);
+        let mapping = Arc::new(
+            ReadOnlyFileMap::open(&face.path)
+                .with_context(|| format!("map fallback font {}", face.path.display()))?,
+        );
+        Ok(cache.insert(key, mapping))
+    })
+}
+
+pub(super) fn with_font_ref<T>(
+    face: &FontFace,
+    use_font: impl FnOnce(FontRef<'_>) -> Result<T>,
+) -> Result<T> {
+    if face.data.is_some() {
+        return use_font(font_ref(face)?);
+    }
+    let mapping = fallback_font_mapping(face)?;
+    let font = FontRef::from_index(&mapping, face.index).with_context(|| {
+        format!(
+            "parse fallback {} face {} with Swash",
+            face.path.display(),
+            face.index
+        )
+    })?;
+    use_font(font)
+}
+
 pub(super) fn select_glyph(
     faces: &[FontFace; 3],
     kind: CorpusKind,
@@ -1359,7 +1535,11 @@ pub(super) fn select_glyph(
     order
         .iter()
         .find_map(|face_index| {
-            let glyph = font_ref(&faces[*face_index]).ok()?.charmap().map(character);
+            let face = &faces[*face_index];
+            if !face.covers_text(&character.to_string()) {
+                return None;
+            }
+            let glyph = font_ref(face).ok()?.charmap().map(character);
             (glyph != 0).then_some((*face_index, glyph))
         })
         .with_context(|| format!("no explicit font covers U+{:04X}", u32::from(character)))
@@ -1453,8 +1633,47 @@ mod tests {
             weight,
             slant,
             selected_pixel_size_26_6: 12 * 64,
-            data: OnceLock::new(),
+            outline: true,
+            coverage: Box::new([]),
+            data: Some(OnceLock::new()),
         }
+    }
+
+    #[test]
+    fn fontconfig_charset_parser_covers_singletons_ranges_and_non_bmp_codepoints() {
+        let coverage = parse_fontconfig_charset("20-7e 21d5 1f4e6-1f4e7").unwrap();
+        let mut face = synthetic_face("fallback", "Chosen Mono", "/fonts/fallback.ttf", 80, 0);
+        face.coverage = coverage;
+        assert!(face.covers_text("A⇕📦"));
+        assert!(!face.covers_text("A🦀"));
+        assert!(parse_fontconfig_charset("7e-20").is_err());
+        assert!(parse_fontconfig_charset("110000").is_err());
+    }
+
+    #[test]
+    fn fallback_font_mapping_cache_is_bounded_across_face_churn() {
+        reset_snapshot_cache();
+        let faces = snapshot_faces().unwrap();
+        let mut paths = HashSet::new();
+        let mut mapped = 0;
+        for face in faces.iter().skip(SNAPSHOT_FALLBACK_START) {
+            if !paths.insert(face.path.clone()) {
+                continue;
+            }
+            fallback_font_mapping(face).unwrap();
+            mapped += 1;
+            if mapped > SNAPSHOT_FALLBACK_MAPPING_BUDGET {
+                break;
+            }
+        }
+        assert_eq!(mapped, SNAPSHOT_FALLBACK_MAPPING_BUDGET + 1);
+        let metrics = snapshot_cache_metrics();
+        assert_eq!(
+            metrics["fallback_mappings"].as_u64(),
+            Some(SNAPSHOT_FALLBACK_MAPPING_BUDGET as u64)
+        );
+        assert_eq!(metrics["fallback_mapping_evictions"].as_u64(), Some(1));
+        reset_snapshot_cache();
     }
 
     #[test]

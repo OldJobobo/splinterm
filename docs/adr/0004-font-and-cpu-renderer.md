@@ -34,18 +34,22 @@ Use a client-owned CPU renderer backed by:
 - Swash 0.2 for shaping and the current provisional outline/bitmap raster path;
   production grayscale rasterization remains subject to the Phase 8.1 decision
   below;
-- explicit primary, CJK, and emoji fallback ordering;
+- explicit primary, CJK, and emoji ordering followed by Fontconfig's ordered
+  outline fallback set;
 - fixed terminal cell spans independent of fractional glyph advances;
 - scale-specific glyph-image caches;
 - Foot-derived custom geometry for supported box-drawing characters; and
 - direct blending into premultiplied ARGB8888 SHM buffers, opaque by default
   with Foot-compatible default-background alpha when configured.
 
-The current discovery adapter invokes `fc-match` for explicit patterns and
-validates the resolved family/style before reading only the selected files. It
+The current discovery adapter invokes `fc-match` for explicit patterns and once
+for the ordered fallback set. It validates resolved family/style and records
+Fontconfig charset coverage before opening only candidate files whose metadata
+covers a rendered cell. Primary, CJK, and emoji mappings remain immutable;
+dynamic fallback mappings use an evictable 24-entry cache. Fontconfig discovery
 must not run repeatedly on the Wayland dispatch path. Production configuration
-will supply the requested primary pattern; generic `fontdb` monospace selection
-is not authoritative.
+supplies the requested primary pattern; generic `fontdb` monospace selection is
+not authoritative.
 
 Regular, Bold, Italic, and Bold Italic faces must resolve to distinct identities
 and preserve the terminal advance contract. Combining sequences are shaped as

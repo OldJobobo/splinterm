@@ -1,4 +1,4 @@
-use super::*;
+use super::{frame::select_face_for_text, *};
 
 fn synthetic_row() -> TextRow {
     let key = GlyphKey { face: 0, glyph: 1 };
@@ -734,6 +734,33 @@ fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
 }
 
 #[test]
+fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
+    let faces = snapshot_faces().unwrap();
+    let attributes = CellAttributes::default();
+    let face_index = select_face_for_text(faces, "⇕", &attributes).unwrap();
+    assert!(
+        face_index >= SNAPSHOT_FALLBACK_START,
+        "the pinned primary, CJK, and emoji faces do not cover U+21D5"
+    );
+    assert!(
+        faces[face_index].data.is_none(),
+        "dynamic fallbacks must use the bounded mapping cache"
+    );
+    let glyph_id = with_font_ref(&faces[face_index], |font| Ok(font.charmap().map('⇕'))).unwrap();
+    assert_ne!(glyph_id, 0);
+
+    let mut snapshot = incremental_snapshot();
+    snapshot.visible_rows[0].cells[0].content = "⇕".to_owned();
+    let frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+    assert!(
+        frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.column == 0 && glyph.row == 0 && glyph.key.face == face_index)
+    );
+}
+
+#[test]
 fn snapshot_styles_select_distinct_primary_faces_and_cache_keys() {
     let mut snapshot = incremental_snapshot();
     snapshot.visible_rows[0].cells[0].content = "A".to_owned();
@@ -843,9 +870,10 @@ fn underline_style_color_partial_mutation_matches_clean_full_rebuild() {
 #[test]
 fn selected_font_bytes_are_loaded_only_when_the_face_is_used() {
     let face = resolve_face("lazy CJK test", CJK_FONT, "noto sans cjk").unwrap();
-    assert!(face.data.get().is_none());
+    let data = face.data.as_ref().expect("explicit face owns stable data");
+    assert!(data.get().is_none());
     assert_ne!(font_ref(&face).unwrap().charmap().map('界'), 0);
-    assert!(face.data.get().is_some_and(Result::is_ok));
+    assert!(data.get().is_some_and(Result::is_ok));
 }
 
 #[test]
