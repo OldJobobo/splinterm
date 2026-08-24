@@ -89,6 +89,13 @@ represents the requested weight and slant, and has compatible terminal-cell
 metrics. When no compatible style exists, Splinterm warns and deliberately
 reuses the regular face instead of refusing to open a Window.
 
+New clients also resolve Fontconfig's ordered outline fallback set once during
+renderer initialization. Symbols missing from the primary, CJK, and emoji faces
+now use the first installed fallback face that covers the complete cell instead
+of immediately rendering the replacement character. Fallback files are lazily
+mapped through a 24-entry evictable cache alongside the existing bounded glyph
+and raster-face caches.
+
 This corrects startup for families such as CaskaydiaMono and for regular-only
 families. Already-open Windows still retain immutable renderer resources; live
 font-family replacement remains planned for the 0.2 line.
