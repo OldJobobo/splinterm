@@ -95,9 +95,9 @@ pub(crate) use overlays::history::{
     paint_history_overlay, paint_snapshot_overlays,
 };
 pub(crate) use overlays::picker::{
-    SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem,
-    paint_session_picker_overlay, session_picker_hit_test, session_picker_overlay_layout,
-    session_picker_palette,
+    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
+    SessionPickerTextItem, paint_session_picker_overlay, session_picker_hit_test,
+    session_picker_overlay_layout, session_picker_palette,
 };
 #[cfg(test)]
 use raster::pixel_index;
