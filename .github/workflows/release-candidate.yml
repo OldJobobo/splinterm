@@ -7,6 +7,10 @@ on:
         description: Exact Cargo SemVer to prepare (for example 0.1.0-alpha3)
         required: true
         type: string
+      previous_version_tag:
+        description: Exact existing predecessor tag (for example v0.1.0-beta1)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -64,11 +68,13 @@ jobs:
       - name: Fail fast on candidate identity or recipe drift
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
+          PREVIOUS_VERSION_TAG: ${{ inputs.previous_version_tag }}
         run: |
           python tools/release/prepare-candidate.py check \
             --repository "$GITHUB_REPOSITORY" \
             --commit "${GITHUB_SHA,,}" \
-            --version "$CANDIDATE_VERSION"
+            --version "$CANDIDATE_VERSION" \
+            --previous-version-tag "$PREVIOUS_VERSION_TAG"
 
       - name: Build and validate split packages once
         run: |
@@ -79,6 +85,7 @@ jobs:
       - name: Assemble closed candidate artifact
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
+          PREVIOUS_VERSION_TAG: ${{ inputs.previous_version_tag }}
         run: |
           main_package=$(find packaging -maxdepth 1 -type f -name 'splinterm-[0-9]*.pkg.tar.zst' -print -quit)
           mcp_package=$(find packaging -maxdepth 1 -type f -name 'splinterm-mcp-[0-9]*.pkg.tar.zst' -print -quit)
@@ -89,6 +96,7 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --commit "${GITHUB_SHA,,}" \
             --version "$CANDIDATE_VERSION" \
+            --previous-version-tag "$PREVIOUS_VERSION_TAG" \
             --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --splinterm "$main_package" \
             --splinterm-mcp "$mcp_package" \

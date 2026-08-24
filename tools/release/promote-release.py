@@ -26,6 +26,7 @@ EXPECTED_KINDS = {
     "release-notes-draft": 1,
 }
 RELEASE_BRANCHES = {"main", "maint/0.1"}
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def sha256(path: Path) -> str:
@@ -48,6 +49,16 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def current_public_release_tag() -> str:
+    state = load_json(ROOT / "packaging/release-state.json", "release state")
+    if set(state) != {"schema", "current_version_tag"} or state["schema"] != 1:
+        raise ValueError("release state has an unexpected shape")
+    tag = state["current_version_tag"]
+    if not isinstance(tag, str) or not tag.startswith("v") or SEMVER.fullmatch(tag[1:]) is None:
+        raise ValueError("current public release tag is malformed")
+    return tag
 
 
 def safe_relative(value: Any) -> str:
@@ -174,8 +185,10 @@ def verify_candidate(
     if manifest["tag"] != f"v{version}" or manifest["architecture"] != "x86_64":
         raise ValueError("candidate tag or architecture does not match")
     previous = manifest["previous_version_tag"]
-    if previous is not None and (not isinstance(previous, str) or not previous.startswith("v") or SEMVER.fullmatch(previous[1:]) is None):
+    if not isinstance(previous, str) or not previous.startswith("v") or SEMVER.fullmatch(previous[1:]) is None:
         raise ValueError("candidate previous version tag is malformed")
+    if previous != current_public_release_tag():
+        raise ValueError("candidate predecessor does not match current public release state")
     run_match = RUN_URL.fullmatch(manifest["workflow_run"] if isinstance(manifest["workflow_run"], str) else "")
     if run_match is None or run_match.group(1).lower() != repository.lower() or int(run_match.group(2)) != run_id:
         raise ValueError("candidate workflow run does not match approval input")
