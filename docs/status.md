@@ -31,18 +31,54 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Beta 1 `0.1.0beta1-1` Arch packages built from clean committed
+- public Beta 2 `0.1.0beta2-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
-  exact-package acceptance for the Alpha3.1 transient-tab hotfixes; and accepted
+  exact-package acceptance for the Alpha3.1 transient-tab hotfixes; accepted
   Beta 1 graphical, package, provenance, wide-grid, sparse-publication, and
-  active-tab contrast evidence.
+  active-tab contrast evidence; and accepted Beta 2 terminal-lifetime,
+  font-family, workload-isolation, package, and release evidence.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
+
+## Beta 2 release
+
+[`v0.1.0-beta2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta2)
+was published as a GitHub prerelease on 2026-08-24 and distributed through both
+AUR package bases as `0.1.0beta2-1`. Beta 2 adds configurable Window-owned
+terminal lifetimes with atomic promotion to persistent Lairs, follows the
+selected Fontconfig family for newly opened Windows, and places packaged
+terminal workloads in verified nested systemd user units so the daemon retains
+an independent resource-failure boundary.
+
+- Release commit `f0c5dd176e36ce88abc1328c8e67839da263e56a` passed exact-SHA CI
+  run `32684539475`. Candidate run `32685119499` built the release once, and
+  protected promotion run `32690770541` published and reverified the exact
+  five public assets; publication receipt artifact `9507412607` remains the
+  release record.
+- Source archive SHA-256:
+  `ba8f953c2bf7562923af0c2e131b86a469ab2b4788c352ab3cfaec521125a1f2`.
+  Main package SHA-256:
+  `1e7060fea06867743a88a0021ad33385f32f5cc4a20a22afb45448130ebdded5`.
+  MCP package SHA-256:
+  `889b7a6457789ee601f095dfaf8e208172177fa93aba232fa20394e07ff3eacd`.
+- AUR source package commit: `0dfb8e31fcb8dcefebff9b1735bcd9e8b0b33093`.
+  AUR prebuilt package commit: `eae0d825a0331f5494eb61dfd9e01734374025f2`.
+  Both visible recipes identify `0.1.0beta2-1` and pin the immutable GitHub
+  source or package assets to the release hashes above.
+- Complete serialized workspace, package, release-tooling, portable Foot
+  provenance, documentation, independent review, disposable real-systemd
+  placement, local package-integrity, and guarded staged-package graphical
+  boundaries passed before publication. Beta 2 does not claim to fix the
+  separately observed client-side Tokio panic.
+
+Upgrading from Beta 1 restarts the `0.1` daemon and ends active Dojos. The
+[packaging guide](packaging.md) documents the required external-terminal
+upgrade and rollback workflow.
 
 ## Beta 1 release
 
@@ -218,7 +254,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta2-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
@@ -246,8 +282,10 @@ behavior; deferred means intentionally outside the present product.
 - Image compatibility is deliberately narrower than full Kitty graphics; external
   file and shared-memory media are rejected.
 - Configuration is focused rather than arbitrary `foot.ini` compatibility.
-- Current benchmark gates document remaining performance work, including the
-  retained burst-output client-performance no-go.
+- Beta 1's sparse-publication implementation passed its exact reconstruction,
+  bounded-retention, responsiveness, review, integration, and guarded graphical
+  comparison gates. Earlier burst-output no-go evidence remains historical; new
+  performance concerns require fresh attribution against the current baseline.
 
 ## Stable-release gates
 
@@ -258,11 +296,12 @@ maintainers must make and validate explicit decisions about:
 - supported architectures, distributions, compositor versions, and compatibility
   duration;
 - support and security-reporting processes;
-- completion or explicit disposition of release-blocking performance gates;
+- continued performance validation against the accepted Beta 1 baseline and
+  explicit disposition of any new release-blocking regression;
 - public installation and recovery testing beyond the maintainer workflow; and
 - any promised Nix, sandboxed package, or broader Linux support.
 
-None of those unresolved decisions weakens the accepted public-alpha
+None of those unresolved decisions weakens the accepted public-beta
 capabilities above; none may be inferred as a stable-support promise.
 
 ## Documentation authority
