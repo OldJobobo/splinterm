@@ -366,7 +366,7 @@ impl KeyboardHandler for App {
                 ActionId::LairChooser => {
                     self.modal.session_picker_requested = true;
                     WindowTopologyCommand::RequestSelector {
-                        kind: super::super::SelectorKind::LairDojo,
+                        kind: super::super::SelectorKind::Lair,
                         lair_id: self.tab_state.active_identity.lair_id,
                     }
                 }

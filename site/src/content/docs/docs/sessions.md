@@ -57,6 +57,8 @@ Reset moves the complete session database to a timestamped backup, restarts the 
 
 The visible tab strip supports activation, detach-only close, and a `+` action for Recent Dojos. Right-click a tab to Rename Tab, Activate Tab, create a New Dojo in its Lair, Close Tab, Close Other Tabs, or open confirmed Terminate Dojo. Opening the menu does not activate the target tab first.
 
+The command palette separates the hierarchy: **Choose Lair** lists Lairs and switches through the selected Lair's most recently used Dojo, while **Choose Dojo** lists only Dojos in the active Lair. **Recent Dojos** remains a global cross-Lair list.
+
 These are trusted application controls. Terminal content cannot paint, rename, or activate them.
 
 ## Remote Dojos

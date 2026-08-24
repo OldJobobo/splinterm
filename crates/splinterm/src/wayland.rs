@@ -149,15 +149,16 @@ use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
     ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
     DojoPromptLayout, HistoryOverlayStatus, PickerHitTarget, RenderContext,
-    SessionPickerOverlayLayout, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
-    SnapshotOverlays, TabContextMenuLayout, TextRow, background_bgra, command_palette_hit_test,
-    command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout, fill_rect,
-    history_overlay_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
-    paint_session_picker_overlay, paint_snapshot_overlays, paint_snapshot_presented,
-    paint_snapshot_region_presented, paint_snapshot_rows_presented, paint_tab_context_menu,
-    premultiplied_theme_rgba, scroll_snapshot_pixels, session_picker_hit_test,
-    session_picker_overlay_layout, session_picker_palette, snapshot_row_rect,
-    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
+    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
+    SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
+    background_bgra, command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test,
+    dojo_prompt_layout, fill_rect, history_overlay_layout, paint, paint_command_palette,
+    paint_dojo_prompt, paint_history_overlay, paint_session_picker_overlay,
+    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
+    paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
+    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
+    session_picker_palette, snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout,
+    write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -2774,6 +2775,33 @@ fn tab_strip_height(managed_tabs: bool, visible: bool, surface_height: u32) -> u
     }
 }
 
+const fn session_picker_purpose(selector_kind: Option<SelectorKind>) -> SessionPickerPurpose {
+    match selector_kind {
+        Some(SelectorKind::Dojo) => SessionPickerPurpose::Dojos,
+        Some(SelectorKind::Lair) => SessionPickerPurpose::Lairs,
+        None => SessionPickerPurpose::RecentDojos,
+    }
+}
+
+const fn session_picker_title(selector_kind: Option<SelectorKind>) -> &'static str {
+    match selector_kind {
+        Some(SelectorKind::Dojo) => "Splinterm — Dojos",
+        Some(SelectorKind::Lair) => "Splinterm — Lairs",
+        None => "Splinterm — Recent Dojos",
+    }
+}
+
+fn session_picker_new_command(
+    selector_kind: Option<SelectorKind>,
+    lair_id: LairId,
+    cwd: PathBuf,
+) -> WindowTopologyCommand {
+    match selector_kind {
+        Some(SelectorKind::Dojo) => WindowTopologyCommand::NewDojo { lair_id, cwd },
+        Some(SelectorKind::Lair) | None => WindowTopologyCommand::NewLair { cwd },
+    }
+}
+
 impl App {
     fn content_rect(&self) -> Rect {
         let y = tab_strip_height(
@@ -5345,11 +5373,9 @@ impl App {
         self.modal.session_picker_reconcile_pending = false;
         self.modal.session_picker_open_focus = Some(self.input.keyboard_focused);
         self.modal.session_picker_requested = false;
-        self.surface.window.set_title(match selector_kind {
-            Some(SelectorKind::Dojo) => "Splinterm — Dojos",
-            Some(SelectorKind::LairDojo) => "Splinterm — Lairs and Dojos",
-            None => "Splinterm — Recent Dojos",
-        });
+        self.surface
+            .window
+            .set_title(session_picker_title(selector_kind));
         self.presentation.full_redraw = true;
         Ok(())
     }
@@ -6191,15 +6217,11 @@ impl App {
                             return;
                         }
                     };
-                    match selector_kind {
-                        Some(SelectorKind::Dojo) => WindowTopologyCommand::NewDojo {
-                            lair_id: self.tab_state.active_identity.lair_id,
-                            cwd,
-                        },
-                        Some(SelectorKind::LairDojo) | None => {
-                            WindowTopologyCommand::NewLair { cwd }
-                        }
-                    }
+                    session_picker_new_command(
+                        selector_kind,
+                        self.tab_state.active_identity.lair_id,
+                        cwd,
+                    )
                 }
                 SessionPickerDecision::Open(index) => {
                     let Some((lair_id, dojo_id)) =
@@ -8934,6 +8956,7 @@ impl App {
                 self.presentation.renderer_generation,
                 layout,
                 session_picker_palette(self.presentation.theme),
+                session_picker_purpose(self.modal.selector_kind),
                 &items,
                 picker.selected_target(),
                 picker.hovered(),
@@ -9315,6 +9338,46 @@ mod tests {
         );
         assert_eq!(tab_strip_height(true, false, 200), 0);
         assert_eq!(tab_strip_height(false, true, 200), 0);
+    }
+
+    #[test]
+    fn picker_hierarchy_routes_copy_and_new_actions_at_the_selected_level() {
+        let lair_id = LairId::new();
+        let cwd = PathBuf::from("/work");
+        assert_eq!(
+            session_picker_purpose(None),
+            SessionPickerPurpose::RecentDojos
+        );
+        assert_eq!(
+            session_picker_purpose(Some(SelectorKind::Dojo)),
+            SessionPickerPurpose::Dojos
+        );
+        assert_eq!(
+            session_picker_purpose(Some(SelectorKind::Lair)),
+            SessionPickerPurpose::Lairs
+        );
+        assert_eq!(session_picker_title(None), "Splinterm — Recent Dojos");
+        assert_eq!(
+            session_picker_title(Some(SelectorKind::Dojo)),
+            "Splinterm — Dojos"
+        );
+        assert_eq!(
+            session_picker_title(Some(SelectorKind::Lair)),
+            "Splinterm — Lairs"
+        );
+        assert_eq!(
+            session_picker_new_command(Some(SelectorKind::Dojo), lair_id, cwd.clone()),
+            WindowTopologyCommand::NewDojo {
+                lair_id,
+                cwd: cwd.clone(),
+            }
+        );
+        for selector_kind in [None, Some(SelectorKind::Lair)] {
+            assert_eq!(
+                session_picker_new_command(selector_kind, lair_id, cwd.clone()),
+                WindowTopologyCommand::NewLair { cwd: cwd.clone() }
+            );
+        }
     }
 
     #[test]

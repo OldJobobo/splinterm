@@ -19,6 +19,54 @@ pub(crate) enum SessionPickerPresentationMode {
     Minimal,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionPickerPurpose {
+    RecentDojos,
+    Dojos,
+    Lairs,
+}
+
+impl SessionPickerPurpose {
+    const fn heading(self, minimal: bool) -> &'static str {
+        match (self, minimal) {
+            (Self::RecentDojos, _) => "RECENT DOJOS",
+            (Self::Dojos, _) => "DOJOS",
+            (Self::Lairs, _) => "LAIRS",
+        }
+    }
+
+    const fn guidance(self) -> &'static str {
+        match self {
+            Self::RecentDojos => "Open a recent running Dojo.",
+            Self::Dojos => "Switch to a Dojo in this Lair.",
+            Self::Lairs => "Switch to a Lair.",
+        }
+    }
+
+    const fn new_title(self) -> &'static str {
+        match self {
+            Self::RecentDojos => "+ New terminal",
+            Self::Dojos => "+ New Dojo",
+            Self::Lairs => "+ New Lair",
+        }
+    }
+
+    const fn new_description(self) -> &'static str {
+        match self {
+            Self::RecentDojos => "Start a fresh shell",
+            Self::Dojos => "Add a Dojo to this Lair",
+            Self::Lairs => "Start a fresh workspace",
+        }
+    }
+
+    const fn selection_verb(self) -> &'static str {
+        match self {
+            Self::RecentDojos => "open",
+            Self::Dojos | Self::Lairs => "switch",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerRowLayout {
     pub(crate) target: PickerHitTarget,
@@ -640,6 +688,7 @@ pub(crate) fn paint_session_picker_overlay(
     renderer_generation: u64,
     layout: &SessionPickerOverlayLayout,
     palette: SessionPickerPalette,
+    purpose: SessionPickerPurpose,
     items: &[SessionPickerTextItem<'_>],
     selected: PickerHitTarget,
     hovered: Option<PickerHitTarget>,
@@ -759,11 +808,7 @@ pub(crate) fn paint_session_picker_overlay(
         canvas,
         canvas_width,
         canvas_height,
-        if layout.mode == SessionPickerPresentationMode::Minimal {
-            "DOJOS"
-        } else {
-            "RECENT DOJOS"
-        },
+        purpose.heading(layout.mode == SessionPickerPresentationMode::Minimal),
         ChromeTextStyle::Bold,
         scale_120,
         renderer_generation,
@@ -801,7 +846,7 @@ pub(crate) fn paint_session_picker_overlay(
             canvas,
             canvas_width,
             canvas_height,
-            "Switch to a running Dojo.",
+            purpose.guidance(),
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
@@ -910,7 +955,11 @@ pub(crate) fn paint_session_picker_overlay(
             height: row_buffer.height,
         };
         let (title, working_directory, status) = match row.target {
-            PickerHitTarget::New => ("+ New terminal", "", "Start a fresh shell".to_owned()),
+            PickerHitTarget::New => (
+                purpose.new_title(),
+                "",
+                purpose.new_description().to_owned(),
+            ),
             PickerHitTarget::Open(index) => {
                 let Some(item) = items.get(index) else {
                     continue;
@@ -1043,11 +1092,17 @@ pub(crate) fn paint_session_picker_overlay(
 
     let footer = picker_buffer_rect(layout.footer, scale_120);
     let footer_text = match layout.mode {
-        SessionPickerPresentationMode::Normal => {
-            "↑↓ / J K navigate   Enter open   N new   Esc cancel"
+        SessionPickerPresentationMode::Normal => format!(
+            "↑↓ / J K navigate   Enter {}   N new   Esc cancel",
+            purpose.selection_verb()
+        ),
+        SessionPickerPresentationMode::Compact => format!(
+            "↑↓ navigate   Enter {}   Esc cancel",
+            purpose.selection_verb()
+        ),
+        SessionPickerPresentationMode::Minimal => {
+            format!("Enter {}   Esc cancel", purpose.selection_verb())
         }
-        SessionPickerPresentationMode::Compact => "↑↓ navigate   Enter open   Esc cancel",
-        SessionPickerPresentationMode::Minimal => "Enter open   Esc cancel",
     };
     paint_picker_text(
         cache,
@@ -1056,7 +1111,7 @@ pub(crate) fn paint_session_picker_overlay(
         canvas,
         canvas_width,
         canvas_height,
-        footer_text,
+        &footer_text,
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -1083,6 +1138,47 @@ mod tests {
             "e\u{301}e\u{301}…"
         );
         assert_eq!(truncate_picker_text("anything", 0), "");
+    }
+
+    #[test]
+    fn picker_purpose_keeps_hierarchy_copy_distinct() {
+        let cases = [
+            (
+                SessionPickerPurpose::RecentDojos,
+                "RECENT DOJOS",
+                "RECENT DOJOS",
+                "Open a recent running Dojo.",
+                "+ New terminal",
+                "Start a fresh shell",
+                "open",
+            ),
+            (
+                SessionPickerPurpose::Dojos,
+                "DOJOS",
+                "DOJOS",
+                "Switch to a Dojo in this Lair.",
+                "+ New Dojo",
+                "Add a Dojo to this Lair",
+                "switch",
+            ),
+            (
+                SessionPickerPurpose::Lairs,
+                "LAIRS",
+                "LAIRS",
+                "Switch to a Lair.",
+                "+ New Lair",
+                "Start a fresh workspace",
+                "switch",
+            ),
+        ];
+        for (purpose, normal, minimal, guidance, new_title, new_description, verb) in cases {
+            assert_eq!(purpose.heading(false), normal);
+            assert_eq!(purpose.heading(true), minimal);
+            assert_eq!(purpose.guidance(), guidance);
+            assert_eq!(purpose.new_title(), new_title);
+            assert_eq!(purpose.new_description(), new_description);
+            assert_eq!(purpose.selection_verb(), verb);
+        }
     }
 
     #[test]
@@ -1286,6 +1382,7 @@ mod tests {
             1,
             &layout,
             palette,
+            SessionPickerPurpose::RecentDojos,
             &items,
             PickerHitTarget::New,
             None,
@@ -1343,6 +1440,7 @@ mod tests {
             1,
             &layout,
             palette,
+            SessionPickerPurpose::RecentDojos,
             &items,
             PickerHitTarget::Open(0),
             None,
@@ -1398,6 +1496,7 @@ mod tests {
                 1,
                 &layout,
                 session_picker_palette(theme),
+                SessionPickerPurpose::RecentDojos,
                 &items,
                 PickerHitTarget::Open(selected),
                 None,
