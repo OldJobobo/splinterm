@@ -2,7 +2,6 @@
 
 - **Status:** Accepted; hierarchy, selectors, and public schema amended by [ADR 0009](0009-topology-lair-dojo-migration.md)
 - **Date:** 2026-07-23
-- **Plan:** [Headless access and supported automation](../plans/0006-phase4-headless-automation.md)
 - **Supersedes:** the persistent-policy deferral in [ADR 0005](0005-trusted-consent-broker.md)
 
 ## Context
@@ -36,9 +35,9 @@ that open file. It rejects a missing, non-regular, oversized, unreadable, or
 changed-while-hashing executable. The open descriptor, not a later path lookup,
 is authoritative.
 
-[Spike 0020](../spikes/0020-persistent-executable-identity.md) established that
-the pidfd must identify the same PID, remain alive across the bounded hash, and
-be monitored for the connection lifetime. Peer exit closes the connection even
+Adversarial executable-identity validation established that the pidfd must
+identify the same PID, remain alive across the bounded hash, and be monitored
+for the connection lifetime. Peer exit closes the connection even
 if its socket descriptor was passed elsewhere. Persistent-policy authorization
 fails closed when `SO_PEERPIDFD` is unavailable; it never falls back to a reused
 numeric PID. Hashing runs outside daemon locks on a bounded blocking worker.

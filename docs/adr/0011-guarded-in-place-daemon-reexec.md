@@ -2,7 +2,6 @@
 
 - **Status:** Accepted for `0.2.0`; implementation pending
 - **Date:** 2026-08-14
-- **Plan:** [0.2.0 persistence expansion and PTY upgrade handoff](../plans/0037-0.2-persistence-and-upgrade-handoff.md)
 
 ## Context
 
@@ -183,7 +182,7 @@ not part of this ADR.
 
 ## Validation requirements
 
-Implementation may proceed only through the gated milestones in Plan 0037. At
+Implementation must proceed through bounded dependency-ordered milestones. At
 minimum, retained evidence must prove:
 
 - shell PID, session, process group, PTY identity, reaping, signaling, resize,

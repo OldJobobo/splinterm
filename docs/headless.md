@@ -213,8 +213,9 @@ unknown files or weaken ownership checks to force startup.
 
 ## Accepted 0.2 upgrade contract (not implemented)
 
-The preceding restart procedure remains authoritative until Plan 0037 is
-implemented and released. The accepted `0.2.0` target distinguishes four paths:
+The preceding restart procedure remains authoritative until the guarded
+in-place re-exec contract in [ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md)
+is implemented and released. The accepted `0.2.0` target distinguishes four paths:
 
 - **matching** — the installed and running build identities match;
 - **compatible** — explicit handoff and checkpoint ranges overlap, so the next
@@ -243,6 +244,5 @@ lingering, reboot, or host loss. Under ADR 0012, body-bearing handoff checkpoint
 use only anonymous sealed memory-backed descriptors, and `0.2.0` durable recovery
 remains recipe-only and stores no terminal grids, scrollback bodies, image
 bodies, parser state, replies, or input. See
-[Plan 0037](plans/0037-0.2-persistence-and-upgrade-handoff.md),
-[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md), and
+[ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) and
 [ADR 0012](adr/0012-defer-durable-terminal-archives.md).

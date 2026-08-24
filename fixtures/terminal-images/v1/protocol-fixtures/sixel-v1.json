@@ -1,0 +1,97 @@
+{
+  "schema": "splinterm.phase5.sixel-fixtures.v1",
+  "authority": {
+    "project": "foot",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+  },
+  "pixel_format": "premultiplied-bgra8",
+  "cases": [
+    {
+      "id": "opaque-red-column-1x6",
+      "input_hex": "1b50373b303b307122313b313b313b3623313b323b3130303b303b3023317e1b5c",
+      "expected": {
+        "width": 1,
+        "height": 6,
+        "opaque": true,
+        "rows": [
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]]
+        ]
+      }
+    },
+    {
+      "id": "transparent-green-trailing-trim",
+      "input_hex": "1b50373b313b307122313b313b313b3123323b323b303b3130303b302332401b5c",
+      "expected": {
+        "width": 1,
+        "height": 1,
+        "opaque": false,
+        "rows": [[[1, "00ff00ff"]]],
+        "rule": "transparent trailing rows are trimmed at unhook"
+      }
+    },
+    {
+      "id": "raster-attributes-repeat-red-3x6",
+      "input_hex": "1b50373b303b307122313b313b333b3623313b323b3130303b303b30233121337e1b5c",
+      "expected": {
+        "width": 3,
+        "height": 6,
+        "opaque": true,
+        "rows": [
+          [[3, "0000ffff"]],
+          [[3, "0000ffff"]],
+          [[3, "0000ffff"]],
+          [[3, "0000ffff"]],
+          [[3, "0000ffff"]],
+          [[3, "0000ffff"]]
+        ]
+      }
+    },
+    {
+      "id": "carriage-return-overlap-and-graphical-newline",
+      "input_hex": "1b50373b303b307122313b313b323b313223313b323b3130303b303b3023317e7e2423323b323b303b3130303b30233240402d23333b323b303b303b31303023337e7e1b5c",
+      "expected": {
+        "width": 2,
+        "height": 12,
+        "opaque": true,
+        "rows": [
+          [[2, "00ff00ff"]],
+          [[2, "0000ffff"]],
+          [[2, "0000ffff"]],
+          [[2, "0000ffff"]],
+          [[2, "0000ffff"]],
+          [[2, "0000ffff"]],
+          [[2, "ff0000ff"]],
+          [[2, "ff0000ff"]],
+          [[2, "ff0000ff"]],
+          [[2, "ff0000ff"]],
+          [[2, "ff0000ff"]],
+          [[2, "ff0000ff"]]
+        ],
+        "rules": ["dollar returns the graphics cursor to column zero", "dash advances one sixel band"]
+      }
+    },
+    {
+      "id": "hls-primary-remap-red",
+      "input_hex": "1b50373b303b307122313b313b313b3623313b313b3132303b35303b31303023317e1b5c",
+      "expected": {
+        "width": 1,
+        "height": 6,
+        "opaque": true,
+        "rows": [
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]],
+          [[1, "0000ffff"]]
+        ],
+        "rule": "Sixel HLS hue 120 maps to standard HSL red"
+      }
+    }
+  ]
+}
