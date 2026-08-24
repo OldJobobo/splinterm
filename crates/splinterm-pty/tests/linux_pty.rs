@@ -1,8 +1,9 @@
 use std::{
     fs,
     io::{ErrorKind, Read},
-    os::unix::process::ExitStatusExt,
+    os::{fd::OwnedFd, unix::process::ExitStatusExt},
     path::Path,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -241,6 +242,101 @@ fn live_session_identity_and_single_master_adoption_round_trip() {
     let status = adopted.wait().unwrap();
     assert!(status.success());
     assert_eq!(adopted.try_wait().unwrap(), Some(status));
+}
+
+#[test]
+fn failed_post_exec_adoption_retains_the_canonical_master() {
+    let cwd = std::env::current_dir().unwrap();
+    let session = backend()
+        .spawn(&command("resize", &cwd), PtySize::cells(40, 10))
+        .unwrap();
+    let identity = session.identity();
+    let adoptable = session.try_into_adoptable().unwrap();
+    let master_raw_fd = adoptable.master_raw_fd();
+    let (manifest_identity, master) = adoptable.into_parts();
+    let mismatched_identity = splinterm_pty::LinuxPtyIdentity::from_raw(
+        manifest_identity.child_pid(),
+        manifest_identity.child_pid().saturating_add(1),
+        manifest_identity.session_id(),
+    )
+    .unwrap();
+    let (error, retained) =
+        splinterm_pty::AdoptableLinuxPtySession::from_parts(mismatched_identity, master)
+            .try_adopt()
+            .unwrap_err();
+    assert!(matches!(error, PtyError::IdentityMismatch));
+    assert_eq!(retained.master_raw_fd(), master_raw_fd);
+
+    let (_, master) = retained.into_parts();
+    let mut recovered = splinterm_pty::AdoptableLinuxPtySession::from_parts(identity, master)
+        .adopt()
+        .unwrap();
+    recovered.signal_process_group(PtySignal::Hangup).unwrap();
+    assert_eq!(recovered.wait().unwrap().signal(), Some(1));
+}
+
+#[test]
+fn adoption_reaps_a_child_that_exits_while_the_master_is_held() {
+    let cwd = std::env::current_dir().unwrap();
+    let session = backend()
+        .spawn(
+            &PtyCommand::new("/bin/sh", cwd).args(["-c", "sleep 0.05; exit 7"]),
+            PtySize::cells(40, 10),
+        )
+        .unwrap();
+    let child_pid = session.child_id();
+    let adoptable = session.try_into_adoptable().unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let mut adopted = adoptable.try_adopt().unwrap();
+    assert_eq!(adopted.wait().unwrap().code(), Some(7));
+    assert_eq!(adopted.try_wait().unwrap().unwrap().code(), Some(7));
+    assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+}
+
+#[test]
+fn failed_recovery_kills_and_reaps_a_verified_exact_child() {
+    let cwd = std::env::current_dir().unwrap();
+    let session = backend()
+        .spawn(
+            &PtyCommand::new("/bin/sh", cwd).args(["-c", "trap '' HUP TERM; sleep 30"]),
+            PtySize::cells(40, 10),
+        )
+        .unwrap();
+    let child_pid = session.child_id();
+    let status = session
+        .try_into_adoptable()
+        .unwrap()
+        .kill_child_and_wait()
+        .unwrap();
+    assert_eq!(status.signal(), Some(9));
+    assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+}
+
+#[test]
+fn failed_recovery_refuses_to_signal_without_child_authority() {
+    let output = Command::new("/bin/sh")
+        .args(["-c", "sleep 30 </dev/null >/dev/null 2>&1 & printf '%s' $!"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let unrelated_pid = String::from_utf8(output.stdout)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let identity =
+        splinterm_pty::LinuxPtyIdentity::from_raw(unrelated_pid, unrelated_pid, unrelated_pid)
+            .unwrap();
+    let master: OwnedFd = fs::File::open("/dev/null").unwrap().into();
+    let error = splinterm_pty::AdoptableLinuxPtySession::from_parts(identity, master)
+        .kill_child_and_wait()
+        .unwrap_err();
+    assert!(matches!(error, PtyError::Io { .. }));
+    assert!(Path::new(&format!("/proc/{unrelated_pid}")).exists());
+
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &unrelated_pid.to_string()])
+        .status();
 }
 
 #[test]

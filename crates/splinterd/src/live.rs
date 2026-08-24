@@ -11,11 +11,14 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use std::os::fd::AsRawFd;
+
 use splinterm_core::SplintId;
 use splinterm_protocol::perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled};
 use splinterm_pty::{
-    LinuxPtyBackend, LinuxPtyIdentity, LinuxPtySession, PtyCommand, PtyError, PtySession,
-    PtySignal, PtySize,
+    AdoptableLinuxPtySession, LinuxPtyBackend, LinuxPtyIdentity, LinuxPtySession, PtyCommand,
+    PtyError, PtySession, PtySignal, PtySize,
 };
 use splinterm_terminal::{
     ActiveScreen, CellAttributesSnapshot, CellSnapshotContent, CursorSnapshot, Dimensions,
@@ -2433,6 +2436,76 @@ pub enum LiveError {
 
 type Reply<T> = oneshot::Sender<Result<T, LiveError>>;
 
+#[derive(Debug)]
+struct PtyResume {
+    session: AdoptableLinuxPtySession,
+    acknowledged: Option<Reply<()>>,
+}
+
+/// Exclusive ownership of one quiesced actor's canonical PTY master.
+///
+/// The actor stops reading commands and PTY I/O until this lease is resumed or
+/// dropped. Dropping it returns the unchanged descriptor automatically, keeping
+/// cancellation before daemon exec recoverable.
+#[derive(Debug)]
+pub struct PreparedPtyHandoff {
+    identity: LinuxPtyIdentity,
+    master_raw_fd: i32,
+    #[cfg(test)]
+    retired_reader_raw_fd: i32,
+    session: Option<AdoptableLinuxPtySession>,
+    resume: Option<oneshot::Sender<PtyResume>>,
+}
+
+impl PreparedPtyHandoff {
+    #[must_use]
+    pub const fn identity(&self) -> LinuxPtyIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub const fn master_raw_fd(&self) -> i32 {
+        self.master_raw_fd
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    const fn retired_reader_raw_fd(&self) -> i32 {
+        self.retired_reader_raw_fd
+    }
+
+    /// Returns the unchanged canonical PTY master to its actor and waits until
+    /// one replacement async reader is active.
+    ///
+    /// # Errors
+    /// Returns [`LiveError::Closed`] when the actor ends or cannot restore its
+    /// validated PTY session and replacement reader.
+    pub async fn resume(mut self) -> Result<(), LiveError> {
+        let session = self.session.take().ok_or(LiveError::Closed)?;
+        let resume = self.resume.take().ok_or(LiveError::Closed)?;
+        let (acknowledged, receiver) = oneshot::channel();
+        resume
+            .send(PtyResume {
+                session,
+                acknowledged: Some(acknowledged),
+            })
+            .map_err(|_| LiveError::Closed)?;
+        receiver.await.map_err(|_| LiveError::Closed)?
+    }
+}
+
+impl Drop for PreparedPtyHandoff {
+    fn drop(&mut self) {
+        let (Some(session), Some(resume)) = (self.session.take(), self.resume.take()) else {
+            return;
+        };
+        let _ = resume.send(PtyResume {
+            session,
+            acknowledged: None,
+        });
+    }
+}
+
 enum Command {
     Input(Vec<u8>, Reply<()>),
     Resize(PtySize, Reply<()>),
@@ -2444,6 +2517,7 @@ enum Command {
     Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     SubscribeCompact(usize, usize, Reply<CompactSubscription>),
     AttachCompact(usize, usize, Reply<(LiveSnapshot, CompactSubscription)>),
+    PreparePtyHandoff(Reply<PreparedPtyHandoff>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -3064,6 +3138,19 @@ impl LiveSplintHandle {
         }
     }
 
+    /// Fences later commands, drains accepted PTY writes, closes the cloned
+    /// async reader, and returns exclusive ownership of the canonical master.
+    ///
+    /// Dropping the returned lease resumes the actor automatically. Call
+    /// [`PreparedPtyHandoff::resume`] when recovery must be acknowledged.
+    ///
+    /// # Errors
+    /// Returns a PTY identity/exit error when the live session cannot be safely
+    /// converted, or [`LiveError::Closed`] when the actor has ended.
+    pub async fn prepare_pty_handoff(&self) -> Result<PreparedPtyHandoff, LiveError> {
+        self.request(Command::PreparePtyHandoff).await
+    }
+
     pub async fn shutdown(&self) -> Result<(), LiveError> {
         let (sender, receiver) = oneshot::channel();
         self.commands
@@ -3496,6 +3583,10 @@ enum ShutdownStage {
     Kill,
 }
 
+fn restore_actor_io(session: &LinuxPtySession) -> Result<AsyncFd<std::fs::File>, LiveError> {
+    Ok(AsyncFd::new(session.try_clone_reader()?)?)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the actor exclusively owns its runtime state"
@@ -3503,7 +3594,7 @@ enum ShutdownStage {
 async fn run_actor(
     splint_id: SplintId,
     incarnation: ProcessIncarnation,
-    mut session: LinuxPtySession,
+    session: LinuxPtySession,
     io: AsyncFd<std::fs::File>,
     terminal: Terminal,
     commands: mpsc::Receiver<Command>,
@@ -3512,6 +3603,7 @@ async fn run_actor(
     metrics: Arc<RuntimeMetrics>,
     exit_sender: watch::Sender<Option<ProcessExit>>,
 ) -> Result<ProcessExit, LiveError> {
+    let mut session = Some(session);
     let result = run_actor_body(
         splint_id,
         incarnation,
@@ -3525,7 +3617,11 @@ async fn run_actor(
     )
     .await;
     let forced_status = if result.is_err() {
-        force_reap(&mut session).await
+        if let Some(session) = session.as_mut() {
+            force_reap(session).await
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -3543,7 +3639,7 @@ async fn run_actor(
 async fn run_actor_body(
     splint_id: SplintId,
     incarnation: ProcessIncarnation,
-    session: &mut LinuxPtySession,
+    session: &mut Option<LinuxPtySession>,
     io: AsyncFd<std::fs::File>,
     mut terminal: Terminal,
     mut commands: mpsc::Receiver<Command>,
@@ -3564,8 +3660,97 @@ async fn run_actor_body(
     let mut shutdown_replies = Vec::new();
     let mut read_buffer = vec![0_u8; READ_BUFFER];
     let mut commands_open = true;
+    let mut io = Some(io);
+    let mut pending_handoff = None::<Reply<PreparedPtyHandoff>>;
 
     loop {
+        if pending_handoff
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
+        {
+            pending_handoff = None;
+        }
+        if pending_handoff.is_some() && user_writes.is_empty() && reply_writes.is_empty() {
+            let reply = pending_handoff
+                .take()
+                .expect("pending PTY handoff checked as present");
+            #[cfg(test)]
+            let retired_reader_raw_fd = io
+                .as_ref()
+                .expect("active actor owns one PTY reader")
+                .get_ref()
+                .as_raw_fd();
+            drop(io.take().expect("active actor owns one PTY reader"));
+            let active_session = session
+                .take()
+                .expect("active actor owns one canonical PTY session");
+            let adoptable = match active_session.try_into_adoptable() {
+                Ok(adoptable) => adoptable,
+                Err((error, active_session)) => {
+                    let restored_io = match restore_actor_io(&active_session) {
+                        Ok(restored_io) => restored_io,
+                        Err(error) => {
+                            *session = Some(active_session);
+                            return Err(error);
+                        }
+                    };
+                    *session = Some(active_session);
+                    io = Some(restored_io);
+                    let _ = reply.send(Err(error.into()));
+                    continue;
+                }
+            };
+            let identity = adoptable.identity();
+            let master_raw_fd = adoptable.master_raw_fd();
+            let (resume, resumed) = oneshot::channel();
+            let prepared = PreparedPtyHandoff {
+                identity,
+                master_raw_fd,
+                #[cfg(test)]
+                retired_reader_raw_fd,
+                session: Some(adoptable),
+                resume: Some(resume),
+            };
+            if let Err(returned) = reply.send(Ok(prepared))
+                && let Ok(prepared) = returned
+            {
+                drop(prepared);
+            }
+            let PtyResume {
+                session: adoptable,
+                acknowledged,
+            } = resumed.await.map_err(|_| LiveError::Closed)?;
+            let active_session = match adoptable.try_adopt() {
+                Ok(active_session) => active_session,
+                Err((_error, retained)) => {
+                    let status =
+                        tokio::task::spawn_blocking(move || retained.kill_child_and_wait())
+                            .await??;
+                    child_exit = Some(status.into());
+                    if let Some(acknowledged) = acknowledged {
+                        let _ = acknowledged.send(Err(LiveError::Closed));
+                    }
+                    break;
+                }
+            };
+            let restored_io = match restore_actor_io(&active_session) {
+                Ok(restored_io) => restored_io,
+                Err(error) => {
+                    *session = Some(active_session);
+                    if let Some(acknowledged) = acknowledged {
+                        let _ = acknowledged.send(Err(LiveError::Closed));
+                    }
+                    return Err(error);
+                }
+            };
+            *session = Some(active_session);
+            io = Some(restored_io);
+            if let Some(acknowledged) = acknowledged {
+                let _ = acknowledged.send(Ok(()));
+            }
+            continue;
+        }
+
         let shutdown_settled = shutdown.is_none() || matches!(shutdown, Some(ShutdownStage::Kill));
         if child_exit.is_some()
             && (eof
@@ -3576,13 +3761,24 @@ async fn run_actor_body(
         }
 
         tokio::select! {
-            command = commands.recv(), if commands_open => {
-                if let Some(command) = command {
+            () = async {
+                pending_handoff
+                    .as_mut()
+                    .expect("pending handoff branch requires a sender")
+                    .closed()
+                    .await;
+            }, if pending_handoff.is_some() => {
+                pending_handoff = None;
+            }
+            command = commands.recv(), if commands_open && pending_handoff.is_none() => {
+                if let Some(Command::PreparePtyHandoff(reply)) = command {
+                    pending_handoff = Some(reply);
+                } else if let Some(command) = command {
                     handle_command(
                         command,
                         splint_id,
                         incarnation,
-                        session,
+                        session.as_mut().expect("active actor owns its PTY session"),
                         &mut terminal,
                         &mut subscribers,
                         &mut publication,
@@ -3601,12 +3797,15 @@ async fn run_actor_body(
                 } else {
                     commands_open = false;
                     if shutdown.is_none() {
-                        let _ = session.signal_process_group(PtySignal::Hangup);
+                        let _ = session
+                            .as_ref()
+                            .expect("active actor owns its PTY session")
+                            .signal_process_group(PtySignal::Hangup);
                         shutdown = Some(ShutdownStage::Hangup(Instant::now() + config.hangup_grace));
                     }
                 }
             }
-            ready = io.readable(), if !eof => {
+            ready = io.as_ref().expect("active actor owns one PTY reader").readable(), if !eof => {
                 let mut ready = ready?;
                 let result = ready.try_io(|inner| inner.get_ref().read(&mut read_buffer));
                 if let Ok(result) = result {
@@ -3676,7 +3875,7 @@ async fn run_actor_body(
                     }
                 }
             }
-            ready = io.writable(), if !reply_writes.is_empty() || !user_writes.is_empty() => {
+            ready = io.as_ref().expect("active actor owns one PTY reader").writable(), if !reply_writes.is_empty() || !user_writes.is_empty() => {
                 let mut ready = ready?;
                 let queue = if reply_writes.is_empty() {
                     &mut user_writes
@@ -3710,6 +3909,9 @@ async fn run_actor_body(
                 );
             }
             _ = interval.tick() => {
+                let session = session
+                    .as_mut()
+                    .expect("active actor owns its PTY session");
                 if child_exit.is_none() && let Some(status) = session.try_wait()? {
                     child_exit = Some(status.into());
                     drain_deadline = Some(Instant::now() + config.exit_drain_timeout);
@@ -4088,6 +4290,9 @@ fn handle_command(
                 materialization: Box::new(materialization),
             };
             let _ = reply.send(Ok((snapshot, subscription)));
+        }
+        Command::PreparePtyHandoff(_) => {
+            unreachable!("PTY handoff is intercepted by the actor loop")
         }
         Command::Shutdown(reply) => {
             shutdown_replies.push(reply);
@@ -8051,6 +8256,199 @@ mod tests {
         let snapshot = handle.snapshot().await.unwrap();
         assert!(snapshot_text(&snapshot).contains("detached-marker"));
         assert!(snapshot.revision.value() > 0);
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepared_pty_handoff_fences_commands_and_resumes_one_reader() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell(
+                "printf ready; read first; printf '<%s>' \"$first\"; read second; printf '<%s>' \"$second\"; sleep 0.2",
+            ),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(snapshot_text(&handle.snapshot().await.unwrap()).contains("ready"));
+
+        handle.input(b"before-handoff\n".to_vec()).await.unwrap();
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        assert_eq!(prepared.identity().child_pid(), handle.child_pid());
+        assert!(PathBuf::from(format!("/proc/self/fd/{}", prepared.master_raw_fd())).exists());
+        assert!(
+            !PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                prepared.retired_reader_raw_fd()
+            ))
+            .exists(),
+            "the actor reader must be closed before the PTY master is exposed"
+        );
+
+        let resize_handle = handle.clone();
+        let mut queued_resize =
+            tokio::spawn(async move { resize_handle.resize(PtySize::cells(55, 9)).await });
+        assert!(
+            time::timeout(Duration::from_millis(40), &mut queued_resize)
+                .await
+                .is_err(),
+            "commands after handoff preparation must remain fenced"
+        );
+
+        prepared.resume().await.unwrap();
+        queued_resize.await.unwrap().unwrap();
+        handle.input(b"after-handoff\n".to_vec()).await.unwrap();
+        time::sleep(Duration::from_millis(50)).await;
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.dimensions,
+            Dimensions {
+                columns: 55,
+                rows: 9,
+            }
+        );
+        let text = snapshot_text(&snapshot);
+        assert!(text.contains("<before-handoff>"));
+        assert!(text.contains("<after-handoff>"));
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_exit_while_handoff_is_held_is_published_and_reaped() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("sleep 0.5; exit 7"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let child_pid = handle.child_pid();
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        time::sleep(Duration::from_millis(650)).await;
+
+        prepared.resume().await.unwrap();
+        assert_eq!(runtime.wait().await.unwrap().code, Some(7));
+        assert!(!PathBuf::from(format!("/proc/{child_pid}")).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_handoff_recovery_kills_and_reaps_only_the_exact_child() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("trap '' HUP TERM; sleep 30"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let child_pid = handle.child_pid();
+        let mut prepared = handle.prepare_pty_handoff().await.unwrap();
+        let adoptable = prepared
+            .session
+            .take()
+            .expect("prepared test lease owns the canonical master");
+        let (_, master) = adoptable.into_parts();
+        let mismatched =
+            LinuxPtyIdentity::from_raw(child_pid, child_pid.checked_add(1).unwrap(), child_pid)
+                .unwrap();
+        prepared.identity = mismatched;
+        prepared.session = Some(AdoptableLinuxPtySession::from_parts(mismatched, master));
+
+        assert!(matches!(prepared.resume().await, Err(LiveError::Closed)));
+        assert_eq!(runtime.wait().await.unwrap().signal, Some(9));
+        assert!(!PathBuf::from(format!("/proc/{child_pid}")).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_preparation_unfences_a_saturated_writer() {
+        let mut config = fast_config();
+        config.command_capacity = 4;
+        config.input_byte_limit = 1024 * 1024;
+        config.poll_interval = Duration::from_millis(500);
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("trap '' HUP TERM; sleep 30"),
+            config,
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let child_pid = handle.child_pid();
+        handle.input(vec![b'x'; 256 * 1024]).await.unwrap();
+
+        let prepare_handle = handle.clone();
+        let prepare = tokio::spawn(async move { prepare_handle.prepare_pty_handoff().await });
+        time::sleep(Duration::from_millis(50)).await;
+        let resize_handle = handle.clone();
+        let mut resize =
+            tokio::spawn(async move { resize_handle.resize(PtySize::cells(57, 11)).await });
+        assert!(
+            time::timeout(Duration::from_millis(40), &mut resize)
+                .await
+                .is_err(),
+            "the handoff request must fence commands while accepted writes are blocked"
+        );
+
+        prepare.abort();
+        assert!(prepare.await.unwrap_err().is_cancelled());
+        time::timeout(Duration::from_millis(300), &mut resize)
+            .await
+            .expect("cancelling preparation must release the actor fence directly")
+            .unwrap()
+            .unwrap();
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.dimensions,
+            Dimensions {
+                columns: 57,
+                rows: 11,
+            }
+        );
+        drop(handle);
+        drop(runtime);
+        let process = PathBuf::from(format!("/proc/{child_pid}"));
+        time::timeout(Duration::from_secs(3), async {
+            while process.exists() {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled preparation cleanup must reap the blocked child");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_prepared_pty_handoff_recovers_the_actor() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("printf ready; read value; printf '<%s>' \"$value\"; sleep 0.2"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        assert!(PathBuf::from(format!("/proc/self/fd/{}", prepared.master_raw_fd())).exists());
+        assert!(
+            !PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                prepared.retired_reader_raw_fd()
+            ))
+            .exists()
+        );
+        drop(prepared);
+
+        handle.input(b"drop-recovers\n".to_vec()).await.unwrap();
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(snapshot_text(&handle.snapshot().await.unwrap()).contains("<drop-recovers>"));
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
     }
 
