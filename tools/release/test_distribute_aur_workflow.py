@@ -19,6 +19,10 @@ class DistributeAurWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(value, workflow)
         self.assertIn("refs/heads/main|refs/heads/maint/0.1", workflow)
+        self.assertIn(
+            "publication_receipt_sha256: ${{ steps.candidate.outputs.publication_receipt_sha256 }}",
+            workflow,
+        )
 
     def test_distribution_is_separately_protected_and_policy_is_fail_closed(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -92,6 +96,13 @@ class DistributeAurWorkflowTests(unittest.TestCase):
             self.assertIn(value, protected_step)
         self.assertEqual(protected_step.count("\n      - name:"), 1)
         self.assertIn("retention-days: 90", workflow[receipt:])
+        receipt_creation = workflow.index("Create retained AUR distribution receipt")
+        receipt_retention = workflow.index("Retain AUR distribution receipt")
+        receipt_step = workflow[receipt_creation:receipt_retention]
+        self.assertIn(
+            "needs.verify.outputs.publication_receipt_sha256", receipt_step
+        )
+        self.assertNotIn("inputs.publication_receipt_sha256", receipt_step)
 
     def test_distribution_tests_are_in_ci(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

@@ -21,6 +21,11 @@ AUR_BASES = {"splinterm": "aur-source", "splinterm-bin": "aur-bin"}
 AUR_FILES = {"PKGBUILD", ".SRCINFO", "splinterm.install"}
 COMMIT = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+SEMVER = re.compile(
+    r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)\.(?P<patch>[0-9]+)"
+    r"(?:-(?P<prerelease>[0-9A-Za-z.-]+))?"
+)
+RELEASE_TAG = re.compile(r"/releases/download/v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)/")
 
 
 def load_object(path: Path, label: str) -> dict[str, Any]:
@@ -84,10 +89,83 @@ def verify_live_publication(
 
 
 def recipe_version(path: Path) -> str:
-    match = re.search(r"^pkgver=([^\n]+)$", path.read_text(encoding="utf-8"), re.MULTILINE)
-    if match is None:
-        raise ValueError(f"{path} has no pkgver")
-    return match.group(1).strip("'\"")
+    matches = re.findall(
+        r"^pkgver=([^\n]+)$", path.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    if len(matches) != 1:
+        raise ValueError(f"{path} must define pkgver exactly once")
+    return matches[0].strip("'\"")
+
+
+def srcinfo_version(path: Path) -> str:
+    matches = re.findall(
+        r"^\s*pkgver\s*=\s*([^\n]+)$", path.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    if len(matches) != 1:
+        raise ValueError(f"{path} must define pkgver exactly once")
+    return matches[0].strip()
+
+
+def recipe_release_version(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    upstream = re.findall(r"^_upstream_ver=([^\n]+)$", text, re.MULTILINE)
+    if len(upstream) > 1:
+        raise ValueError(f"{path} must not duplicate _upstream_ver")
+    versions = set(RELEASE_TAG.findall(text))
+    if upstream:
+        versions.add(upstream[0].strip("'\""))
+    if len(versions) != 1:
+        raise ValueError(f"{path} does not identify exactly one release version")
+    version = versions.pop()
+    if SEMVER.fullmatch(version) is None:
+        raise ValueError(f"{path} release version is not complete SemVer")
+    return version
+
+
+def recipe_identity(directory: Path) -> tuple[str, str]:
+    package = directory / "PKGBUILD"
+    srcinfo = directory / ".SRCINFO"
+    version = recipe_version(package)
+    if srcinfo_version(srcinfo) != version:
+        raise ValueError("PKGBUILD and .SRCINFO pkgver identities differ")
+    release = recipe_release_version(package)
+    if recipe_release_version(srcinfo) != release:
+        raise ValueError("PKGBUILD and .SRCINFO release identities differ")
+    if version != release.replace("-", ""):
+        raise ValueError("AUR pkgver differs from its release identity")
+    return version, release
+
+
+def compare_semver(left: str, right: str) -> int:
+    def parsed(value: str) -> tuple[tuple[int, int, int], list[tuple[int, int | str]] | None]:
+        match = SEMVER.fullmatch(value)
+        if match is None:
+            raise ValueError(f"release version is not complete SemVer: {value}")
+        core = tuple(int(match.group(name)) for name in ("major", "minor", "patch"))
+        prerelease = match.group("prerelease")
+        if prerelease is None:
+            return core, None
+        identifiers: list[tuple[int, int | str]] = []
+        for identifier in prerelease.split("."):
+            identifiers.append(
+                (0, int(identifier)) if identifier.isdigit() else (1, identifier)
+            )
+        return core, identifiers
+
+    left_core, left_pre = parsed(left)
+    right_core, right_pre = parsed(right)
+    if left_core != right_core:
+        return 1 if left_core > right_core else -1
+    if left_pre is None or right_pre is None:
+        if left_pre is right_pre:
+            return 0
+        return 1 if left_pre is None else -1
+    for left_identifier, right_identifier in zip(left_pre, right_pre):
+        if left_identifier != right_identifier:
+            return 1 if left_identifier > right_identifier else -1
+    if len(left_pre) == len(right_pre):
+        return 0
+    return 1 if len(left_pre) > len(right_pre) else -1
 
 
 def exact_recipe_files(directory: Path) -> dict[str, str]:
@@ -106,12 +184,14 @@ def exact_recipe_files(directory: Path) -> dict[str, str]:
 def inspect_aur_state(current: Path, draft: Path) -> dict[str, Any]:
     expected = exact_recipe_files(draft)
     current_files = exact_recipe_files(current)
-    version = recipe_version(draft / "PKGBUILD")
-    current_version = recipe_version(current / "PKGBUILD")
+    version, draft_release = recipe_identity(draft)
+    current_version, current_release = recipe_identity(current)
     if current_files == expected:
         return {"state": "already-current", "version": version, "files": expected}
-    if current_version == version:
-        raise ValueError("existing AUR version differs from the closed candidate draft")
+    if current_version == version or compare_semver(draft_release, current_release) <= 0:
+        raise ValueError(
+            "candidate AUR release is not newer than the differing existing recipe"
+        )
     return {"state": "update-required", "version": version, "files": expected}
 
 

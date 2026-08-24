@@ -35,14 +35,14 @@ class RecoverReleaseWorkflowTests(unittest.TestCase):
     def test_uppercase_promotion_digest_is_normalized_once_and_reused(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(workflow.count("${PROMOTION_RECORD_SHA256,,}"), 1)
-        normalization = "promotion_record_sha256=${PROMOTION_RECORD_SHA256,,}"
+        normalization = "normalized_digest=${PROMOTION_RECORD_SHA256,,}"
         self.assertIn(normalization, workflow)
         uppercase = "ABCDEF" * 10 + "ABCD"
         result = subprocess.run(
             [
                 "bash", "-c",
                 f"PROMOTION_RECORD_SHA256={uppercase}; {normalization}; "
-                'printf %s "$promotion_record_sha256"',
+                'printf %s "$normalized_digest"',
             ],
             check=True,
             capture_output=True,

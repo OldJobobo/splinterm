@@ -193,8 +193,9 @@ hashes, and binds all identities. After approval, the protected job first
 validates the live `aur-release` Environment policy, then immediately repeats
 that exact public tag, release, asset, and hash verification before cloning and
 inspecting current AUR state. It permits an already-exact recipe as an idempotent no-op,
-refuses a different recipe at the same version, otherwise commits the candidate's
-three closed draft files and pushes normally to `master`. It never rebuilds or
+refuses a different recipe at the same version, and fails closed unless the candidate's
+canonical SemVer release is newer than the current AUR release. Only then does it commit
+the candidate's three closed draft files and push normally to `master`. It never rebuilds or
 uses a forced push. Fresh anonymous clones must expose the exact versions,
 commits, and file hashes before a 90-day `aur-distribution-receipt-*` artifact is
 created. Environment and credential configuration, dispatch, and first live

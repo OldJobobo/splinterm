@@ -38,6 +38,7 @@ jobs:
     outputs:
       commit: ${{ steps.candidate.outputs.commit }}
       tag: ${{ steps.candidate.outputs.tag }}
+      publication_receipt_sha256: ${{ steps.candidate.outputs.publication_receipt_sha256 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,6 +132,10 @@ jobs:
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               stream.write(f"commit={promotion['commit']}\n")
               stream.write(f"tag={promotion['tag']}\n")
+              stream.write(
+                  "publication_receipt_sha256="
+                  f"{os.environ['PUBLICATION_RECEIPT_SHA256'].lower()}\n"
+              )
           PY
 
       - name: Download and reverify exact public tag, metadata, assets, and hashes
@@ -298,7 +303,7 @@ jobs:
           python tools/release/distribute-aur.py receipt \
             --publication verified/publication/release-receipt.json \
             --publication-run-id "${{ inputs.publication_run_id }}" \
-            --publication-receipt-sha256 "${{ inputs.publication_receipt_sha256 }}" \
+            --publication-receipt-sha256 "${{ needs.verify.outputs.publication_receipt_sha256 }}" \
             --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --package-record splinterm-record.json \
             --package-record splinterm-bin-record.json \

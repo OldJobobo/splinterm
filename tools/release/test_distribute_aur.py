@@ -58,10 +58,17 @@ def receipt(value: dict) -> dict:
     }
 
 
-def write_recipe(directory: Path, version: str, marker: str = "same") -> None:
+def write_recipe(directory: Path, release: str, marker: str = "same") -> None:
     directory.mkdir()
-    (directory / "PKGBUILD").write_text(f"pkgver={version}\n# {marker}\n")
-    (directory / ".SRCINFO").write_text(f"pkgver = {version}\n# {marker}\n")
+    version = release.replace("-", "")
+    (directory / "PKGBUILD").write_text(
+        f"pkgver={version}\n_upstream_ver={release}\n# {marker}\n"
+    )
+    (directory / ".SRCINFO").write_text(
+        f"pkgver = {version}\n"
+        f"source = https://github.com/OldJobobo/splinterm/releases/download/v{release}/asset\n"
+        f"# {marker}\n"
+    )
     (directory / "splinterm.install").write_text(f"# {marker}\n")
 
 
@@ -118,19 +125,78 @@ class DistributeAurTests(unittest.TestCase):
             root = Path(value)
             current = root / "current"
             draft = root / "draft"
-            write_recipe(current, "1.2.3alpha4")
-            write_recipe(draft, "1.2.3alpha4")
+            write_recipe(current, "1.2.3-alpha4")
+            write_recipe(draft, "1.2.3-alpha4")
             self.assertEqual(
                 MODULE.inspect_aur_state(current, draft)["state"], "already-current"
             )
-            (current / "PKGBUILD").write_text("pkgver=1.2.3alpha4\n# altered\n")
-            with self.assertRaisesRegex(ValueError, "differs"):
+            (current / "PKGBUILD").write_text(
+                "pkgver=1.2.3alpha4\n_upstream_ver=1.2.3-alpha4\n# altered\n"
+            )
+            with self.assertRaisesRegex(ValueError, "not newer"):
                 MODULE.inspect_aur_state(current, draft)
-            write_recipe(root / "old", "1.2.3alpha3", "old")
+            write_recipe(root / "old", "1.2.3-alpha3", "old")
             self.assertEqual(
                 MODULE.inspect_aur_state(root / "old", draft)["state"],
                 "update-required",
             )
+
+    def test_aur_inspection_refuses_downgrades_and_allows_stable_promotion(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="splinterm-aur-order-") as value:
+            root = Path(value)
+            newer = root / "newer"
+            older = root / "older"
+            stable = root / "stable"
+            write_recipe(newer, "1.2.3-alpha5", "newer")
+            write_recipe(older, "1.2.3-alpha4", "older")
+            write_recipe(stable, "1.2.3", "stable")
+            with self.assertRaisesRegex(ValueError, "not newer"):
+                MODULE.inspect_aur_state(newer, older)
+            with self.assertRaisesRegex(ValueError, "not newer"):
+                MODULE.inspect_aur_state(stable, newer)
+            self.assertEqual(
+                MODULE.inspect_aur_state(newer, stable)["state"],
+                "update-required",
+            )
+
+    def test_aur_inspection_rejects_mismatched_and_duplicate_recipe_identity(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="splinterm-aur-identity-") as value:
+            root = Path(value)
+            current = root / "current"
+            draft = root / "draft"
+            write_recipe(current, "1.2.3-alpha3", "current")
+            write_recipe(draft, "1.2.3-alpha4", "draft")
+            (current / ".SRCINFO").write_text(
+                "pkgver = 1.2.3alpha5\n"
+                "source = https://github.com/OldJobobo/splinterm/releases/download/"
+                "v1.2.3-alpha5/asset\n"
+            )
+            with self.assertRaisesRegex(ValueError, "pkgver identities differ"):
+                MODULE.inspect_aur_state(current, draft)
+
+            release_mismatch = root / "release-mismatch"
+            write_recipe(release_mismatch, "1.2.3-alpha3", "release-mismatch")
+            (release_mismatch / ".SRCINFO").write_text(
+                "pkgver = 1.2.3alpha3\n"
+                "source = https://github.com/OldJobobo/splinterm/releases/download/"
+                "v1.2.3-alpha5/asset\n"
+            )
+            with self.assertRaisesRegex(ValueError, "release identities differ"):
+                MODULE.inspect_aur_state(release_mismatch, draft)
+
+            duplicate_package = root / "duplicate-package"
+            write_recipe(duplicate_package, "1.2.3-alpha3", "duplicate-package")
+            package = duplicate_package / "PKGBUILD"
+            package.write_text(package.read_text() + "pkgver=1.2.3alpha3\n")
+            with self.assertRaisesRegex(ValueError, "exactly once"):
+                MODULE.inspect_aur_state(duplicate_package, draft)
+
+            duplicate_srcinfo = root / "duplicate-srcinfo"
+            write_recipe(duplicate_srcinfo, "1.2.3-alpha3", "duplicate-srcinfo")
+            srcinfo = duplicate_srcinfo / ".SRCINFO"
+            srcinfo.write_text(srcinfo.read_text() + "pkgver = 1.2.3alpha3\n")
+            with self.assertRaisesRegex(ValueError, "exactly once"):
+                MODULE.inspect_aur_state(duplicate_srcinfo, draft)
 
     def test_distribution_receipt_requires_both_exact_package_bases(self) -> None:
         publication = receipt(promotion())

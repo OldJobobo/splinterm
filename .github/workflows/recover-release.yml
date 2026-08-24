@@ -89,10 +89,10 @@ jobs:
         env:
           PROMOTION_RECORD_SHA256: ${{ inputs.promotion_record_sha256 }}
         run: |
-          promotion_record_sha256=${PROMOTION_RECORD_SHA256,,}
-          [[ $promotion_record_sha256 =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum retained/promotion.json | cut -d' ' -f1)" = "$promotion_record_sha256"
-          printf 'promotion_record_sha256=%s\n' "$promotion_record_sha256" >>"$GITHUB_OUTPUT"
+          normalized_digest=${PROMOTION_RECORD_SHA256,,}
+          [[ $normalized_digest =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum retained/promotion.json | cut -d' ' -f1)" = "$normalized_digest"
+          printf 'promotion_record_sha256=%s\n' "$normalized_digest" >>"$GITHUB_OUTPUT"
           python - <<'PY'
           import json
           import os

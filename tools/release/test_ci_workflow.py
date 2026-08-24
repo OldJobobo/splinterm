@@ -24,8 +24,14 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("if: ${{ always() }}", check)
         for job in MANDATORY:
             self.assertIn(f"- {job}", check)
-            self.assertIn(f"needs.{job}.result != 'success'", check)
-            self.assertIn(f"needs.{job}.result == 'success'", check)
+        failed = " || ".join(
+            f"needs.{job}.result != 'success'" for job in MANDATORY
+        )
+        succeeded = " && ".join(
+            f"needs.{job}.result == 'success'" for job in MANDATORY
+        )
+        self.assertIn(f"if: ${{{{ {failed} }}}}", check)
+        self.assertIn(f"if: ${{{{ {succeeded} }}}}", check)
 
     def test_aggregator_model_rejects_failed_cancelled_and_skipped_dependencies(self) -> None:
         def succeeds(results: dict[str, str]) -> bool:
