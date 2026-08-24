@@ -22,7 +22,7 @@ pub struct WindowDojoIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectorKind {
     Dojo,
-    LairDojo,
+    Lair,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
