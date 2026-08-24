@@ -1,0 +1,16 @@
+{
+  "workflow_runs": [
+    {
+      "id": 4242,
+      "name": "CI",
+      "path": ".github/workflows/ci.yml",
+      "event": "push",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "html_url": "https://github.com/OldJobobo/splinterm/actions/runs/4242",
+      "repository": {"full_name": "OldJobobo/splinterm"}
+    }
+  ]
+}

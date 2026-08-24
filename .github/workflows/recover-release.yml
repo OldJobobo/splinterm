@@ -1,0 +1,261 @@
+name: Recover exact release publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      promotion_run_id:
+        description: Unsuccessful original Promote release candidate workflow run ID
+        required: true
+        type: string
+      promotion_record_sha256:
+        description: SHA-256 of promotion.json retained by that run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  RELEASE_REPOSITORY: OldJobobo/splinterm
+
+concurrency:
+  group: versioned-release-promotion
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Inspect retained exact bytes
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+      tag: ${{ steps.identity.outputs.tag }}
+      candidate_run_id: ${{ steps.identity.outputs.candidate_run_id }}
+      candidate_manifest_sha256: ${{ steps.identity.outputs.candidate_manifest_sha256 }}
+      promotion_record_sha256: ${{ steps.identity.outputs.promotion_record_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require recovery dispatch from a release authority branch
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          case "$DISPATCH_REF" in
+            refs/heads/main|refs/heads/maint/0.1) ;;
+            *) printf 'recovery dispatch branch is not authorized: %s\n' "$DISPATCH_REF" >&2; exit 1 ;;
+          esac
+
+      - name: Inspect failed promotion run and retained artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_RUN_ID: ${{ inputs.promotion_run_id }}
+        run: |
+          [[ $PROMOTION_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$RELEASE_REPOSITORY/actions/runs/$PROMOTION_RUN_ID" >promotion-run.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$PROMOTION_RUN_ID/artifacts?per_page=100" \
+            >promotion-artifacts.json
+          source_record=$(python tools/release/promote-release.py retained-run \
+            --run promotion-run.json --artifacts promotion-artifacts.json \
+            --repository "$RELEASE_REPOSITORY" --run-id "$PROMOTION_RUN_ID" \
+            --expected-branch "$GITHUB_REF_NAME" --kind promotion)
+          python - "$source_record" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          value = json.loads(sys.argv[1])
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              stream.write(f"artifact_name={value['artifact_name']}\n")
+              stream.write(f"commit={value['commit']}\n")
+          PY
+
+      - name: Download exact retained verified-candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          path: retained
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.promotion_run_id }}
+
+      - name: Reverify promotion record and exact candidate bytes
+        id: identity
+        env:
+          PROMOTION_RECORD_SHA256: ${{ inputs.promotion_record_sha256 }}
+        run: |
+          normalized_digest=${PROMOTION_RECORD_SHA256,,}
+          [[ $normalized_digest =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum retained/promotion.json | cut -d' ' -f1)" = "$normalized_digest"
+          printf 'promotion_record_sha256=%s\n' "$normalized_digest" >>"$GITHUB_OUTPUT"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          promotion = json.loads(Path("retained/promotion.json").read_text())
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              for key in ("commit", "tag", "candidate_run_id", "candidate_manifest_sha256"):
+                  stream.write(f"{key}={promotion[key]}\n")
+          PY
+          python tools/release/promote-release.py verify-candidate \
+            --directory retained/candidate \
+            --repository "$RELEASE_REPOSITORY" \
+            --run-id "$(python -c 'import json; print(json.load(open("retained/promotion.json"))["candidate_run_id"])')" \
+            --expected-commit "$(python -c 'import json; print(json.load(open("retained/promotion.json"))["commit"])')" \
+            --expected-branch "$GITHUB_REF_NAME" \
+            --manifest-sha256 "$(python -c 'import json; print(json.load(open("retained/promotion.json"))["candidate_manifest_sha256"])')" \
+            --output promotion-reverified.json >/dev/null
+          cmp retained/promotion.json promotion-reverified.json
+
+      - name: Transfer verified recovery input to protected job
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-recovery-input-${{ inputs.promotion_run_id }}
+          path: retained
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  recover:
+    name: Perform approved missing operations only
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-recovery-input-${{ inputs.promotion_run_id }}
+          path: verified
+
+      - name: Reverify exact transferred input after approval
+        env:
+          PROMOTION_RECORD_SHA256: ${{ needs.verify.outputs.promotion_record_sha256 }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(sha256sum verified/promotion.json | cut -d' ' -f1)" = "$PROMOTION_RECORD_SHA256"
+          python tools/release/promote-release.py verify-candidate \
+            --directory verified/candidate --repository "$RELEASE_REPOSITORY" \
+            --run-id "${{ needs.verify.outputs.candidate_run_id }}" \
+            --expected-commit "${{ needs.verify.outputs.commit }}" \
+            --expected-branch "$GITHUB_REF_NAME" \
+            --manifest-sha256 "${{ needs.verify.outputs.candidate_manifest_sha256 }}" \
+            --output protected-promotion.json >/dev/null
+          cmp verified/promotion.json protected-promotion.json
+
+      - name: Require configured protected release environment
+        env:
+          GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
+        run: |
+          gh api "repos/$RELEASE_REPOSITORY/environments/release" >release-environment.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/environments/release/deployment-branch-policies?per_page=100" \
+            >release-branch-policies.json
+          python tools/release/promote-release.py environment \
+            --environment release-environment.json \
+            --branch-policies release-branch-policies.json --name release
+
+      - name: Inspect live partial state without mutation
+        id: remote
+        env:
+          GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
+        run: |
+          python tools/release/promote-release.py fetch-release-state \
+            --repository "$RELEASE_REPOSITORY" --tag "${{ needs.verify.outputs.tag }}" \
+            --ref-output recovery-ref.json --release-output recovery-release.json \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Download every existing asset for exact hash inspection
+        if: ${{ steps.remote.outputs.release_exists == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
+        run: |
+          mkdir existing-assets
+          if python - <<'PY'
+          import json
+          assets = json.load(open("recovery-release.json")).get("assets")
+          raise SystemExit(0 if isinstance(assets, list) and assets else 1)
+          PY
+          then
+            gh release download "${{ needs.verify.outputs.tag }}" \
+              --repo "$RELEASE_REPOSITORY" --dir existing-assets
+          fi
+
+      - name: Compute fail-closed recovery plan
+        run: |
+          mkdir -p existing-assets
+          python tools/release/promote-release.py inspect-recovery \
+            --promotion verified/promotion.json --ref recovery-ref.json \
+            --release recovery-release.json --downloads existing-assets \
+            --output recovery-plan.json
+
+      - name: Apply only inspected missing idempotent operations
+        env:
+          GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          has_operation() {
+            python - "$1" <<'PY'
+          import json, sys
+          plan = json.load(open("recovery-plan.json"))
+          raise SystemExit(0 if any(item["operation"] == sys.argv[1] for item in plan["operations"]) else 1)
+          PY
+          }
+          if has_operation create-release; then
+            title=$(python -c 'import json; print(json.load(open("verified/promotion.json"))["release_title"])')
+            gh release create "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
+              --target "$RELEASE_COMMIT" --prerelease --title "$title" \
+              --notes-file verified/candidate/RELEASE-NOTES.md
+          fi
+          mapfile -t assets < <(python - <<'PY'
+          import json
+          from pathlib import Path
+          plan = json.load(open("recovery-plan.json"))
+          for operation in plan["operations"]:
+              if operation["operation"] == "upload-assets":
+                  for name in operation["assets"]:
+                      print(Path("verified/candidate") / name)
+          PY
+          )
+          if (( ${#assets[@]} )); then
+            gh release upload "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" "${assets[@]}"
+          fi
+
+      - name: Reverify completed public release and create recovery receipt
+        env:
+          GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
+        run: |
+          mkdir published
+          gh release download "${{ needs.verify.outputs.tag }}" \
+            --repo "$RELEASE_REPOSITORY" --dir published
+          gh release view "${{ needs.verify.outputs.tag }}" --repo "$RELEASE_REPOSITORY" \
+            --json assets,body,isDraft,isPrerelease,name,tagName,url >published-release.json
+          gh api "repos/$RELEASE_REPOSITORY/git/ref/tags/${{ needs.verify.outputs.tag }}" >published-ref.json
+          python tools/release/promote-release.py receipt \
+            --promotion verified/promotion.json --release published-release.json \
+            --ref published-ref.json --downloads published \
+            --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --promotion-run-id "${{ inputs.promotion_run_id }}" \
+            --promotion-record-sha256 "${{ needs.verify.outputs.promotion_record_sha256 }}" \
+            --output release-receipt.json
+
+      - name: Retain completed recovery receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-receipt-${{ needs.verify.outputs.tag }}
+          path: release-receipt.json
+          if-no-files-found: error
+          retention-days: 90

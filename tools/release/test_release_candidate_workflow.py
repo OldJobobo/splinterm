@@ -13,11 +13,20 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertNotIn("\n  push:", workflow)
         self.assertNotIn("\n  pull_request:", workflow)
-        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("permissions:\n  actions: read\n  contents: read", workflow)
         self.assertIn("refs/heads/main|refs/heads/maint/0.1", workflow)
         self.assertNotIn("contents: write", workflow)
         self.assertNotIn("environment:", workflow)
         self.assertNotIn("secrets.", workflow)
+        self.assertIn("actions/workflows/ci.yml/runs", workflow)
+        for query in (
+            '-f branch="$GITHUB_REF_NAME"',
+            "-f event=push",
+            '-f head_sha="${GITHUB_SHA,,}"',
+            "-f status=completed",
+        ):
+            self.assertIn(query, workflow)
+        self.assertIn("tools/release/ci-attestation.py attest", workflow)
 
     def test_candidate_has_no_publication_surface(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -43,10 +52,12 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
             'git config --global --add safe.directory "$GITHUB_WORKSPACE"', workflow
         )
         self.assertIn("useradd --create-home validator", workflow)
+        doctor = workflow.index("python tools/release/release-doctor.py --version")
         provenance = workflow.index(
             "runuser -u validator -- python tools/foot-oracle/check-provenance.py --portable"
         )
         candidate_check = workflow.index("prepare-candidate.py check")
+        self.assertLess(doctor, provenance)
         self.assertLess(provenance, candidate_check)
         self.assertIn("runuser -u validator -- python -m unittest", workflow)
         self.assertNotIn("safe.directory '*'", workflow)
@@ -59,11 +70,14 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
             1,
         )
         preflight = workflow.index("prepare-candidate.py check")
+        attestation = workflow.index("name: Attest exact successful authority-branch CI push")
         build = workflow.index("name: Build and validate split packages once")
         create = workflow.index("prepare-candidate.py create")
-        self.assertLess(preflight, build)
+        self.assertLess(preflight, attestation)
+        self.assertLess(attestation, build)
         self.assertLess(build, create)
         self.assertIn("runuser -u builder -- python tools/release/prepare-candidate.py create", workflow)
+        self.assertIn('--ci-attestation "$GITHUB_WORKSPACE/ci-attestation.json"', workflow)
         self.assertIn("uses: actions/upload-artifact@v4", workflow)
         self.assertIn("include-hidden-files: true", workflow)
         self.assertIn("retention-days: 14", workflow)

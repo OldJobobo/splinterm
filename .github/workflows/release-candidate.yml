@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -44,7 +45,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
-            appstream desktop-file-utils fontconfig freetype2 git hicolor-icon-theme \
+            appstream desktop-file-utils fontconfig freetype2 git github-cli hicolor-icon-theme \
             libxkbcommon noto-fonts-cjk noto-fonts-emoji pixman pkgconf python rust \
             shellcheck ttf-jetbrains-mono-nerd wayland
 
@@ -54,6 +55,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           useradd --create-home validator
           chown -R validator:validator "$GITHUB_WORKSPACE"
+          runuser -u validator -- python tools/release/release-doctor.py --version "${{ inputs.version }}"
           runuser -u validator -- python tools/foot-oracle/check-provenance.py --portable
           runuser -u validator -- python -m unittest \
             tools/package/test_installer_safety.py \
@@ -69,6 +71,35 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --commit "${GITHUB_SHA,,}" \
             --version "$CANDIDATE_VERSION"
+
+      - name: Attest exact successful authority-branch CI push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp -X GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f branch="$GITHUB_REF_NAME" \
+            -f event=push \
+            -f head_sha="${GITHUB_SHA,,}" \
+            -f status=completed \
+            -f per_page=100 >ci-runs.json
+          ci_run_id=$(python tools/release/ci-attestation.py select \
+            --runs ci-runs.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "${GITHUB_SHA,,}" \
+            --branch "$GITHUB_REF_NAME")
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id" >ci-run.json
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" \
+            >ci-jobs.json
+          python tools/release/ci-attestation.py attest \
+            --run ci-run.json \
+            --jobs ci-jobs.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "${GITHUB_SHA,,}" \
+            --branch "$GITHUB_REF_NAME" \
+            --run-id "$ci_run_id" \
+            --output ci-attestation.json
 
       - name: Build and validate split packages once
         run: |
@@ -90,6 +121,7 @@ jobs:
             --commit "${GITHUB_SHA,,}" \
             --version "$CANDIDATE_VERSION" \
             --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --ci-attestation "$GITHUB_WORKSPACE/ci-attestation.json" \
             --splinterm "$main_package" \
             --splinterm-mcp "$mcp_package" \
             --output "$output"
@@ -114,6 +146,7 @@ jobs:
           with summary.open("a", encoding="utf-8") as stream:
               stream.write(f"# Splinterm {manifest['version']} candidate\n\n")
               stream.write(f"Commit: `{manifest['commit']}`  \n")
+              stream.write(f"Attested CI run: `{manifest['ci']['run_id']}`  \n")
               stream.write(f"Manifest SHA-256: `{manifest_sha256}`\n\n")
               stream.write("**Nothing was published.** Review the private candidate artifact before a separately approved release workflow.\n\n")
               stream.write("## Assets\n\n")

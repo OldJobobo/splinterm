@@ -76,14 +76,14 @@ jobs:
 
           record = json.loads(sys.argv[1])
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
-              stream.write(f"artifact_id={record['artifact_id']}\n")
+              stream.write(f"artifact_name={record['artifact_name']}\n")
               stream.write(f"commit={record['commit']}\n")
           PY
 
       - name: Download exact private candidate artifact
         uses: actions/download-artifact@v4
         with:
-          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          name: ${{ steps.source.outputs.artifact_name }}
           path: candidate
           merge-multiple: true
           github-token: ${{ github.token }}
@@ -101,6 +101,7 @@ jobs:
             --repository "$RELEASE_REPOSITORY" \
             --run-id "$CANDIDATE_RUN_ID" \
             --expected-commit "${{ steps.source.outputs.commit }}" \
+            --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
             --output promotion.json
           python - <<'PY'
@@ -119,8 +120,37 @@ jobs:
               stream.write(f"Commit: `{promotion['commit']}`  \n")
               stream.write(f"Tag to create: `{promotion['tag']}`  \n")
               stream.write(f"Candidate run: `{promotion['candidate_run_id']}`  \n")
+              stream.write(f"CI run: `{promotion['ci']['run_id']}`  \n")
               stream.write(f"Manifest: `{promotion['candidate_manifest_sha256']}`\n\n")
               stream.write("The publish job now waits for approval in the protected GitHub `release` environment.\n")
+          PY
+
+      - name: Reattest candidate CI provenance through the Actions API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ci_run_id=$(python -c 'import json; print(json.load(open("promotion.json"))["ci"]["run_id"])')
+          commit=$(python -c 'import json; print(json.load(open("promotion.json"))["commit"])')
+          gh api "repos/$RELEASE_REPOSITORY/actions/runs/$ci_run_id" >promotion-ci-run.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" \
+            >promotion-ci-jobs.json
+          python tools/release/ci-attestation.py attest \
+            --run promotion-ci-run.json \
+            --jobs promotion-ci-jobs.json \
+            --repository "$RELEASE_REPOSITORY" \
+            --commit "$commit" \
+            --branch "$GITHUB_REF_NAME" \
+            --run-id "$ci_run_id" \
+            --output promotion-ci-attestation.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          promotion = json.loads(Path("promotion.json").read_text())
+          attestation = json.loads(Path("promotion-ci-attestation.json").read_text())
+          if promotion["ci"] != attestation:
+              raise SystemExit("candidate CI provenance differs from live Actions metadata")
           PY
 
       - name: Transfer verified candidate to protected job
@@ -132,7 +162,8 @@ jobs:
             promotion.json
           if-no-files-found: error
           include-hidden-files: true
-          retention-days: 3
+          # Recovery is possible only while these exact verified bytes remain retained.
+          retention-days: 14
 
   publish:
     name: Publish approved versioned release
@@ -163,6 +194,7 @@ jobs:
             --repository "$RELEASE_REPOSITORY" \
             --run-id "$CANDIDATE_RUN_ID" \
             --expected-commit "${{ needs.verify.outputs.commit }}" \
+            --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
             --output promotion-reverified.json >/dev/null
           cmp verified/promotion.json promotion-reverified.json
@@ -176,60 +208,21 @@ jobs:
           gh api --paginate --slurp \
             "repos/$RELEASE_REPOSITORY/environments/release/deployment-branch-policies?per_page=100" \
             >release-branch-policies.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          environment = json.loads(Path("release-environment.json").read_text())
-          branch_pages = json.loads(Path("release-branch-policies.json").read_text())
-          rules = environment.get("protection_rules")
-          if not isinstance(rules, list):
-              raise SystemExit("release environment protection rules are unavailable")
-          reviewer_rules = [rule for rule in rules if rule.get("type") == "required_reviewers"]
-          if len(reviewer_rules) != 1 or not reviewer_rules[0].get("reviewers"):
-              raise SystemExit("release environment requires at least one reviewer")
-          policy = environment.get("deployment_branch_policy")
-          if not isinstance(policy, dict) or policy != {
-              "protected_branches": False,
-              "custom_branch_policies": True,
-          }:
-              raise SystemExit("release environment requires custom deployment branch policies")
-          policies = [
-              item
-              for page in branch_pages
-              if isinstance(page, dict)
-              for item in page.get("branch_policies", [])
-              if isinstance(item, dict)
-          ]
-          if sorted(item.get("name") for item in policies) != ["main", "maint/0.1"]:
-              raise SystemExit(
-                  "release environment must permit exactly main and maint/0.1"
-              )
-          PY
+          python tools/release/promote-release.py environment \
+            --environment release-environment.json \
+            --branch-policies release-branch-policies.json \
+            --name release
 
       - name: Refuse existing tag or release and fail closed on API errors
         env:
           GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
         run: |
-          require_absent() {
-            local endpoint=$1 label=$2 response status
-            set +e
-            response=$(gh api -i "$endpoint" 2>&1)
-            status=$?
-            set -e
-            if [[ $status -eq 0 ]]; then
-              printf 'refusing to replace existing %s %s\n' "$label" "$RELEASE_TAG" >&2
-              exit 1
-            fi
-            if ! grep -Fq 'HTTP/2.0 404' <<<"$response" && \
-               ! grep -Fq 'HTTP/1.1 404' <<<"$response"; then
-              printf 'could not prove %s %s is absent\n%s\n' "$label" "$RELEASE_TAG" "$response" >&2
-              exit 1
-            fi
-          }
-          require_absent "repos/$RELEASE_REPOSITORY/git/ref/tags/$RELEASE_TAG" tag
-          require_absent "repos/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" release
+          python tools/release/promote-release.py fetch-release-state \
+            --repository "$RELEASE_REPOSITORY" --tag "$RELEASE_TAG" \
+            --ref-output prepublish-ref.json --release-output prepublish-release.json
+          python tools/release/promote-release.py require-absent \
+            --ref prepublish-ref.json --release prepublish-release.json
 
       - name: Create versioned tag and prerelease
         env:
@@ -240,11 +233,12 @@ jobs:
           gh api --method POST "repos/$RELEASE_REPOSITORY/git/refs" \
             -f ref="refs/tags/$RELEASE_TAG" \
             -f sha="$RELEASE_COMMIT"
+          release_title=$(python -c 'import json; print(json.load(open("verified/promotion.json"))["release_title"])')
           gh release create "$RELEASE_TAG" \
             --repo "$RELEASE_REPOSITORY" \
             --target "$RELEASE_COMMIT" \
             --prerelease \
-            --title "Splinterm ${{ needs.verify.outputs.version }}" \
+            --title "$release_title" \
             --notes-file verified/candidate/RELEASE-NOTES.md
 
       - name: Upload exact approved assets without replacement
@@ -270,7 +264,7 @@ jobs:
           mkdir published
           gh release download "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --dir published
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
-            --json assets,isDraft,isPrerelease,tagName,url >published-release.json
+            --json assets,body,isDraft,isPrerelease,name,tagName,url >published-release.json
           gh api "repos/$RELEASE_REPOSITORY/git/ref/tags/$RELEASE_TAG" >published-ref.json
           python tools/release/promote-release.py receipt \
             --promotion verified/promotion.json \
@@ -278,6 +272,8 @@ jobs:
             --ref published-ref.json \
             --downloads published \
             --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --promotion-run-id "$GITHUB_RUN_ID" \
+            --promotion-record-sha256 "$(sha256sum verified/promotion.json | cut -d' ' -f1)" \
             --output release-receipt.json
 
       - name: Retain durable publication receipt

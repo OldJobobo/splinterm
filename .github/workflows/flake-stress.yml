@@ -1,0 +1,50 @@
+name: Daemon and MCP flake stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: Sequential repetitions; first failure stops the run (1-25)
+        required: true
+        default: "10"
+        type: string
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: Serialized daemon/MCP stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
+      - name: Run bounded repetitions and stop on first failure
+        env:
+          REQUESTED_ITERATIONS: ${{ inputs.iterations || '10' }}
+        run: |
+          [[ $REQUESTED_ITERATIONS =~ ^[0-9]+$ ]]
+          (( REQUESTED_ITERATIONS >= 1 && REQUESTED_ITERATIONS <= 25 ))
+          set -o pipefail
+          for ((iteration = 1; iteration <= REQUESTED_ITERATIONS; iteration++)); do
+            echo "iteration $iteration/$REQUESTED_ITERATIONS: splinterd end_to_end"
+            cargo test --frozen -p splinterd --test end_to_end -- --test-threads=1 \
+              2>&1 | tee -a flake-stress.log
+            echo "iteration $iteration/$REQUESTED_ITERATIONS: splinterm-mcp stdio_protocol"
+            cargo test --frozen -p splinterm-mcp --test stdio_protocol -- --test-threads=1 \
+              2>&1 | tee -a flake-stress.log
+          done
+      - name: Retain stress evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-mcp-flake-stress-${{ github.run_id }}
+          path: flake-stress.log
+          if-no-files-found: warn
+          retention-days: 14

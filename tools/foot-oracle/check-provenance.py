@@ -60,11 +60,19 @@ def load_manifest() -> dict[str, Any]:
 
 def check_repository_files(manifest: dict[str, Any]) -> None:
     expected_lock = manifest["rust"]["cargo_lock_sha256"]
+    remediation = (
+        "run 'python tools/foot-oracle/update-provenance.py' to review the change, "
+        "then rerun with --write"
+    )
     if sha256(ROOT / "Cargo.lock") != expected_lock:
-        raise ProvenanceError("Cargo.lock drifted from pinned provenance")
+        raise ProvenanceError(
+            f"Cargo.lock drifted from pinned provenance; {remediation}"
+        )
     profile_lock = manifest["default_final_buffer_profile"]["cargo_lock_sha256"]
     if profile_lock != expected_lock:
-        raise ProvenanceError("profile and Rust Cargo.lock identities disagree")
+        raise ProvenanceError(
+            f"profile and Rust Cargo.lock identities disagree; {remediation}"
+        )
     for patch in manifest["oracle"]["patches"]:
         path = ROOT / patch["path"]
         if not path.is_file() or sha256(path) != patch["sha256"]:

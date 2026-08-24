@@ -45,6 +45,14 @@ def test_manifest_declares_complete_faces_and_review_policy():
     assert len(manifest["reference_update_policy"]["required_review"]) >= 4
 
 
+def test_lock_drift_names_the_atomic_refresh_command(monkeypatch):
+    checker = load_checker()
+    manifest = checker.load_manifest()
+    monkeypatch.setattr(checker, "sha256", lambda _path: "0" * 64)
+    with pytest.raises(checker.ProvenanceError, match="update-provenance.py"):
+        checker.check_repository_files(manifest)
+
+
 def test_non_reference_worker_is_an_explicit_unsupported_host(monkeypatch):
     checker = load_checker()
     manifest = checker.load_manifest()

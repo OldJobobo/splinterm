@@ -1,0 +1,23 @@
+[
+  {
+    "expected_operations": [
+      "create-release",
+      "upload-assets"
+    ],
+    "name": "exact-tag-release-missing",
+    "ref": "exact",
+    "release": null
+  },
+  {
+    "error": "no partial publication",
+    "name": "publication-absent",
+    "ref": null,
+    "release": null
+  },
+  {
+    "error": "tag target differs",
+    "name": "altered-tag",
+    "ref": "altered",
+    "release": null
+  }
+]
