@@ -25,6 +25,13 @@ class SystemdUnitTest(unittest.TestCase):
         target = root / "usr/lib/systemd/user/splinterd.service"
         target.parent.mkdir(parents=True)
         target.write_text(unit, encoding="utf-8")
+        workload_slice = root / "usr/lib/systemd/user/app-splinterm.slice"
+        workload_slice.write_text(
+            (ROOT / "dist/systemd/user/app-splinterm.slice").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
         return root
 
     def test_packaged_unit_passes_resource_validation(self) -> None:
