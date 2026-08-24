@@ -1,0 +1,34 @@
+{
+  "environment": {
+    "deployment_branch_policy": {
+      "custom_branch_policies": true,
+      "protected_branches": false
+    },
+    "name": "aur-release",
+    "protection_rules": [
+      {
+        "reviewers": [
+          {
+            "reviewer": {
+              "login": "release-reviewer"
+            },
+            "type": "User"
+          }
+        ],
+        "type": "required_reviewers"
+      }
+    ]
+  },
+  "policies": [
+    {
+      "branch_policies": [
+        {
+          "name": "main"
+        },
+        {
+          "name": "maint/0.1"
+        }
+      ]
+    }
+  ]
+}

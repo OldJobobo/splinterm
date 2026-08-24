@@ -127,6 +127,12 @@ def check_workflows(root: Path) -> list[str]:
         promotion = (root / ".github/workflows/promote-release.yml").read_text(
             encoding="utf-8"
         )
+        recovery = (root / ".github/workflows/recover-release.yml").read_text(
+            encoding="utf-8"
+        )
+        aur = (root / ".github/workflows/distribute-aur.yml").read_text(
+            encoding="utf-8"
+        )
     except OSError as error:
         return [f"release workflow unavailable: {error}"]
     requirements = {
@@ -138,6 +144,15 @@ def check_workflows(root: Path) -> list[str]:
         "candidate read-only contents": ("contents: read", candidate),
         "promotion authority branches": ("refs/heads/main|refs/heads/maint/0.1", promotion),
         "promotion protected environment": ("environment: release", promotion),
+        "pinned executable actionlint": (
+            "docker://rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9",
+            ci,
+        ),
+        "recovery exact promotion digest": ("promotion_record_sha256:", recovery),
+        "recovery protected environment": ("environment: release", recovery),
+        "AUR exact publication receipt digest": ("publication_receipt_sha256:", aur),
+        "AUR protected environment": ("environment: aur-release", aur),
+        "AUR pinned SSH host identity": ("aur.archlinux.org ssh-ed25519", aur),
     }
     return [f"release authority configuration missing {label}" for label, (token, text) in requirements.items() if token not in text]
 

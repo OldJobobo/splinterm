@@ -1,0 +1,313 @@
+name: Distribute verified release to AUR
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Release candidate workflow run ID
+        required: true
+        type: string
+      candidate_manifest_sha256:
+        description: SHA-256 of candidate-manifest.json from that run
+        required: true
+        type: string
+      publication_run_id:
+        description: Successful promotion or completed recovery workflow run ID
+        required: true
+        type: string
+      publication_receipt_sha256:
+        description: SHA-256 of release-receipt.json from that run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  RELEASE_REPOSITORY: OldJobobo/splinterm
+
+concurrency:
+  group: aur-release-distribution
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Reverify candidate, receipt, and public release
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+      tag: ${{ steps.candidate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require distribution dispatch from a release authority branch
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          case "$DISPATCH_REF" in
+            refs/heads/main|refs/heads/maint/0.1) ;;
+            *) printf 'AUR dispatch branch is not authorized: %s\n' "$DISPATCH_REF" >&2; exit 1 ;;
+          esac
+
+      - name: Inspect candidate and publication receipt runs
+        id: sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          PUBLICATION_RUN_ID: ${{ inputs.publication_run_id }}
+        run: |
+          [[ $CANDIDATE_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          [[ $PUBLICATION_RUN_ID =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$RELEASE_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" >candidate-run.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" \
+            >candidate-artifacts.json
+          gh api "repos/$RELEASE_REPOSITORY/actions/runs/$PUBLICATION_RUN_ID" >publication-run.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$PUBLICATION_RUN_ID/artifacts?per_page=100" \
+            >publication-artifacts.json
+          candidate=$(python tools/release/promote-release.py source-run \
+            --run candidate-run.json --artifacts candidate-artifacts.json \
+            --repository "$RELEASE_REPOSITORY" --run-id "$CANDIDATE_RUN_ID" \
+            --expected-branch "$GITHUB_REF_NAME")
+          publication=$(python tools/release/distribute-aur.py receipt-run \
+            --run publication-run.json --artifacts publication-artifacts.json \
+            --repository "$RELEASE_REPOSITORY" --run-id "$PUBLICATION_RUN_ID" \
+            --expected-branch "$GITHUB_REF_NAME")
+          python - "$candidate" "$publication" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          candidate, publication = map(json.loads, sys.argv[1:])
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              stream.write(f"candidate_artifact_name={candidate['artifact_name']}\n")
+              stream.write(f"publication_artifact_name={publication['artifact_name']}\n")
+              stream.write(f"candidate_commit={candidate['commit']}\n")
+          PY
+
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.sources.outputs.candidate_artifact_name }}
+          path: candidate
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Download exact publication receipt artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.sources.outputs.publication_artifact_name }}
+          path: publication
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.publication_run_id }}
+
+      - name: Reverify candidate and receipt binding
+        id: candidate
+        env:
+          CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+          PUBLICATION_RECEIPT_SHA256: ${{ inputs.publication_receipt_sha256 }}
+        run: |
+          [[ ${CANDIDATE_MANIFEST_SHA256,,} =~ ^[0-9a-f]{64}$ ]]
+          [[ ${PUBLICATION_RECEIPT_SHA256,,} =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum publication/release-receipt.json | cut -d' ' -f1)" = "${PUBLICATION_RECEIPT_SHA256,,}"
+          python tools/release/promote-release.py verify-candidate \
+            --directory candidate --repository "$RELEASE_REPOSITORY" \
+            --run-id "${{ inputs.candidate_run_id }}" \
+            --expected-commit "${{ steps.sources.outputs.candidate_commit }}" \
+            --expected-branch "$GITHUB_REF_NAME" \
+            --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --output promotion.json >/dev/null
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          promotion = json.load(open("promotion.json"))
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              stream.write(f"commit={promotion['commit']}\n")
+              stream.write(f"tag={promotion['tag']}\n")
+          PY
+
+      - name: Download and reverify exact public tag, metadata, assets, and hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python tools/release/promote-release.py fetch-release-state \
+            --repository "$RELEASE_REPOSITORY" --tag "${{ steps.candidate.outputs.tag }}" \
+            --ref-output public-ref.json --release-output public-release.json
+          mkdir public-assets
+          gh release download "${{ steps.candidate.outputs.tag }}" \
+            --repo "$RELEASE_REPOSITORY" --dir public-assets
+          python tools/release/distribute-aur.py verify-publication \
+            --receipt publication/release-receipt.json --promotion promotion.json \
+            --release public-release.json --ref public-ref.json --downloads public-assets
+
+      - name: Transfer closed drafts and receipts to protected distribution job
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-aur-input-${{ inputs.candidate_run_id }}-${{ inputs.publication_run_id }}
+          path: |
+            candidate
+            promotion.json
+            publication/release-receipt.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  distribute:
+    name: Push approved exact drafts and verify visible AUR state
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: aur-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-aur-input-${{ inputs.candidate_run_id }}-${{ inputs.publication_run_id }}
+          path: verified
+
+      - name: Require live protected aur-release environment policy
+        env:
+          GH_TOKEN: ${{ secrets.SPLINTERM_AUR_POLICY_TOKEN }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          gh api "repos/$RELEASE_REPOSITORY/environments/aur-release" >aur-environment.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/environments/aur-release/deployment-branch-policies?per_page=100" \
+            >aur-branch-policies.json
+          python tools/release/promote-release.py environment \
+            --environment aur-environment.json --branch-policies aur-branch-policies.json \
+            --name aur-release
+
+      - name: Reverify exact live public release immediately before AUR inspection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python tools/release/promote-release.py fetch-release-state \
+            --repository "$RELEASE_REPOSITORY" --tag "${{ needs.verify.outputs.tag }}" \
+            --ref-output protected-public-ref.json \
+            --release-output protected-public-release.json
+          mkdir protected-public-assets
+          gh release download "${{ needs.verify.outputs.tag }}" \
+            --repo "$RELEASE_REPOSITORY" --dir protected-public-assets
+          python tools/release/distribute-aur.py verify-publication \
+            --receipt verified/publication/release-receipt.json \
+            --promotion verified/promotion.json \
+            --release protected-public-release.json \
+            --ref protected-public-ref.json \
+            --downloads protected-public-assets
+
+      - name: Inspect live AUR repositories before credentials are available
+        run: |
+          git clone --branch master https://aur.archlinux.org/splinterm.git aur-splinterm
+          git clone --branch master https://aur.archlinux.org/splinterm-bin.git aur-splinterm-bin
+          python tools/release/distribute-aur.py inspect-recipe \
+            --current aur-splinterm --draft verified/candidate/aur-source \
+            --output source-plan.json
+          python tools/release/distribute-aur.py inspect-recipe \
+            --current aur-splinterm-bin --draft verified/candidate/aur-bin \
+            --output bin-plan.json
+
+      - name: Push source package without replacement
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.SPLINTERM_AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if grep -Fq '"state": "update-required"' source-plan.json; then
+            install -m 700 -d .aur-ssh
+            printf '%s\n' "$AUR_SSH_PRIVATE_KEY" >.aur-ssh/id_ed25519
+            chmod 600 .aur-ssh/id_ed25519
+            printf '%s\n' 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' >.aur-ssh/known_hosts
+            trap 'rm -rf .aur-ssh' EXIT
+            cp verified/candidate/aur-source/PKGBUILD verified/candidate/aur-source/.SRCINFO \
+              verified/candidate/aur-source/splinterm.install aur-splinterm/
+            git -C aur-splinterm config user.name 'Splinterm release automation'
+            git -C aur-splinterm config user.email 'release@oldjobobo.com'
+            git -C aur-splinterm add PKGBUILD .SRCINFO splinterm.install
+            git -C aur-splinterm commit -m "Release ${{ needs.verify.outputs.tag }}"
+            git -C aur-splinterm remote set-url origin ssh://aur@aur.archlinux.org/splinterm.git
+            GIT_SSH_COMMAND="ssh -i $PWD/.aur-ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PWD/.aur-ssh/known_hosts" \
+              git -C aur-splinterm push origin HEAD:master
+          fi
+
+      - name: Push binary package without replacement
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.SPLINTERM_AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if grep -Fq '"state": "update-required"' bin-plan.json; then
+            install -m 700 -d .aur-ssh
+            printf '%s\n' "$AUR_SSH_PRIVATE_KEY" >.aur-ssh/id_ed25519
+            chmod 600 .aur-ssh/id_ed25519
+            printf '%s\n' 'aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN' >.aur-ssh/known_hosts
+            trap 'rm -rf .aur-ssh' EXIT
+            cp verified/candidate/aur-bin/PKGBUILD verified/candidate/aur-bin/.SRCINFO \
+              verified/candidate/aur-bin/splinterm.install aur-splinterm-bin/
+            git -C aur-splinterm-bin config user.name 'Splinterm release automation'
+            git -C aur-splinterm-bin config user.email 'release@oldjobobo.com'
+            git -C aur-splinterm-bin add PKGBUILD .SRCINFO splinterm.install
+            git -C aur-splinterm-bin commit -m "Release ${{ needs.verify.outputs.tag }}"
+            git -C aur-splinterm-bin remote set-url origin ssh://aur@aur.archlinux.org/splinterm-bin.git
+            GIT_SSH_COMMAND="ssh -i $PWD/.aur-ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PWD/.aur-ssh/known_hosts" \
+              git -C aur-splinterm-bin push origin HEAD:master
+          fi
+
+      - name: Reclone and verify visible AUR commits, versions, and checksums
+        run: |
+          rm -rf visible-splinterm visible-splinterm-bin
+          git clone --branch master https://aur.archlinux.org/splinterm.git visible-splinterm
+          git clone --branch master https://aur.archlinux.org/splinterm-bin.git visible-splinterm-bin
+          python tools/release/distribute-aur.py inspect-recipe \
+            --current visible-splinterm --draft verified/candidate/aur-source \
+            --output visible-source.json
+          python tools/release/distribute-aur.py inspect-recipe \
+            --current visible-splinterm-bin --draft verified/candidate/aur-bin \
+            --output visible-bin.json
+          grep -Fq '"state": "already-current"' visible-source.json
+          grep -Fq '"state": "already-current"' visible-bin.json
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          for package_base, directory, state in (
+              ("splinterm", "visible-splinterm", "visible-source.json"),
+              ("splinterm-bin", "visible-splinterm-bin", "visible-bin.json"),
+          ):
+              value = json.load(open(state))
+              value = {
+                  "package_base": package_base,
+                  "commit": subprocess.check_output(["git", "-C", directory, "rev-parse", "HEAD"], text=True).strip(),
+                  "version": value["version"],
+                  "files": value["files"],
+              }
+              Path(f"{package_base}-record.json").write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Create retained AUR distribution receipt
+        run: |
+          python tools/release/distribute-aur.py receipt \
+            --publication verified/publication/release-receipt.json \
+            --publication-run-id "${{ inputs.publication_run_id }}" \
+            --publication-receipt-sha256 "${{ inputs.publication_receipt_sha256 }}" \
+            --workflow-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --package-record splinterm-record.json \
+            --package-record splinterm-bin-record.json \
+            --output aur-distribution-receipt.json
+
+      - name: Retain AUR distribution receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-distribution-receipt-${{ needs.verify.outputs.tag }}
+          path: aur-distribution-receipt.json
+          if-no-files-found: error
+          retention-days: 90
