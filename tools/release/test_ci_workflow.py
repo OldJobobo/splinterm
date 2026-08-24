@@ -45,6 +45,21 @@ class CiWorkflowTests(unittest.TestCase):
                 changed["daemon-tests"] = result
                 self.assertFalse(succeeds(changed))
 
+    def test_each_frozen_rust_job_fetches_the_locked_graph_first(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        jobs = ("static", "workspace-tests", "daemon-tests", "mcp-tests")
+        boundaries = (*jobs, "package-automation")
+        self.assertEqual(workflow.count("run: cargo fetch --locked"), len(jobs))
+        for job, following in zip(jobs, boundaries[1:]):
+            block = workflow[
+                workflow.index(f"  {job}:") : workflow.index(f"  {following}:")
+            ]
+            self.assertLess(
+                block.index("run: cargo fetch --locked"),
+                block.index("cargo ", block.index("run: cargo fetch --locked") + 1),
+            )
+            self.assertIn("--frozen", block)
+
     def test_every_rust_integration_target_is_named_exactly_once(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         targets = []

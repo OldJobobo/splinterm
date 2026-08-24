@@ -41,6 +41,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked
       - run: cargo fmt --all --check
       - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh
       - run: cargo clippy --frozen --workspace --all-targets -- -D warnings
@@ -55,6 +57,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked
       - name: Install pinned renderer test fonts
         run: |
           font_dir="$HOME/.local/share/fonts/splinterm-ci"
@@ -118,6 +122,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked
       - name: Run daemon integration target without retry
         run: |
           set -o pipefail
@@ -142,6 +148,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
+      - name: Fetch the locked dependency graph
+        run: cargo fetch --locked
       - name: Run MCP integration targets without retry
         run: |
           set -o pipefail
