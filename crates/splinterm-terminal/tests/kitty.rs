@@ -31,7 +31,7 @@ fn writes(terminal: &mut Terminal) -> Vec<Vec<u8>> {
 )]
 fn recorded_spec_fixture_manifest_executes_every_case() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../docs/spikes/artifacts/0025-terminal-images/fixtures/kitty-static-v1.json"
+        "../../../fixtures/terminal-images/v1/protocol-fixtures/kitty-static-v1.json"
     ))
     .unwrap();
     assert_eq!(

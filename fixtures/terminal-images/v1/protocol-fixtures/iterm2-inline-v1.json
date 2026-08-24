@@ -1,0 +1,139 @@
+{
+  "schema": "splinterm.phase5.iterm2-inline-fixtures.v1",
+  "wire_context": {
+    "prefix": "\u001b]1337;File=",
+    "screen_columns": 8,
+    "screen_rows": 4,
+    "cell_width_pixels": 2,
+    "cell_height_pixels": 2,
+    "png_width": 2,
+    "png_height": 1,
+    "png_sha256": "7ff4d717b675c449e6de6948351a7a461e86d900bf038c1576f225f1ac9795cd",
+    "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAC0lEQVR4nGP4DwUAI+UH+Yo0eLMAAAAASUVORK5CYII=",
+    "canonical_bgra_hex": "ffffffffffffffff"
+  },
+  "advertised_subset": {
+    "command": "OSC 1337;File=...:<base64> BEL/ESC-ST",
+    "formats": ["png"],
+    "extent_units": ["cells", "pixels", "percent", "auto"],
+    "inline_only": true,
+    "multipart": false,
+    "failure_reply": null
+  },
+  "divergences": [
+    "size is validated as exact decoded file bytes rather than treated only as progress metadata",
+    "unknown and duplicate metadata fields fail closed",
+    "download transfers and non-PNG image formats are disabled",
+    "name must be valid base64 but is discarded and never interpreted as a path",
+    "C1 ST is accepted as a bounded string-termination extension",
+    "doNotMoveCursor is accepted as a bounded compatibility extension"
+  ],
+  "cases": [
+    {
+      "id": "auto-inline-png-bel",
+      "metadata": "inline=1",
+      "terminator_hex": "07",
+      "accepted": true,
+      "columns": 1,
+      "rows": 1,
+      "cursor_row": 1,
+      "cursor_column": 0
+    },
+    {
+      "id": "auto-inline-png-esc-st",
+      "prelude": "ABC",
+      "metadata": "inline=1;doNotMoveCursor=1",
+      "terminator_hex": "1b5c",
+      "accepted": true,
+      "columns": 1,
+      "rows": 1,
+      "cursor_row": 0,
+      "cursor_column": 3
+    },
+    {
+      "id": "auto-inline-png-c1-st-extension",
+      "metadata": "inline=1;doNotMoveCursor=1",
+      "terminator_hex": "9c",
+      "accepted": true,
+      "columns": 1,
+      "rows": 1,
+      "cursor_row": 0,
+      "cursor_column": 0
+    },
+    {
+      "id": "nonzero-column-default-moves-to-line-start",
+      "prelude": "ABC",
+      "metadata": "inline=1",
+      "terminator_hex": "07",
+      "accepted": true,
+      "columns": 1,
+      "rows": 1,
+      "cursor_row": 1,
+      "cursor_column": 0
+    },
+    {
+      "id": "cell-box-preserves-aspect",
+      "metadata": "inline=1;width=2;height=2;preserveAspectRatio=1;doNotMoveCursor=1",
+      "terminator_hex": "07",
+      "accepted": true,
+      "columns": 2,
+      "rows": 1,
+      "cursor_row": 0,
+      "cursor_column": 0
+    },
+    {
+      "id": "pixel-box-can-stretch",
+      "metadata": "inline=1;width=4px;height=4px;preserveAspectRatio=0",
+      "terminator_hex": "07",
+      "accepted": true,
+      "columns": 2,
+      "rows": 2,
+      "cursor_row": 2,
+      "cursor_column": 0
+    },
+    {
+      "id": "percentage-width",
+      "metadata": "inline=1;width=50%;height=auto;doNotMoveCursor=1",
+      "terminator_hex": "07",
+      "accepted": true,
+      "columns": 4,
+      "rows": 2,
+      "cursor_row": 0,
+      "cursor_column": 0
+    },
+    {
+      "id": "exact-declared-size",
+      "metadata": "inline=1;size={size}",
+      "terminator_hex": "07",
+      "accepted": true,
+      "columns": 1,
+      "rows": 1,
+      "cursor_row": 1,
+      "cursor_column": 0
+    },
+    {
+      "id": "download-disabled",
+      "metadata": "inline=0",
+      "terminator_hex": "07",
+      "accepted": false
+    },
+    {
+      "id": "duplicate-field-fails-closed",
+      "metadata": "inline=1;inline=1",
+      "terminator_hex": "07",
+      "accepted": false
+    },
+    {
+      "id": "unknown-field-fails-closed",
+      "metadata": "inline=1;unknown=1",
+      "terminator_hex": "07",
+      "accepted": false
+    },
+    {
+      "id": "invalid-base64-name-fails-closed",
+      "metadata": "inline=1;name=*",
+      "terminator_hex": "07",
+      "accepted": false
+    }
+  ]
+}

@@ -4,7 +4,7 @@
 - **Horizon model:** Now / Next / Later / Explore; no date promise
 - **Product maturity:** Public beta
 - **Current-state authority:** [Current product status](status.md)
-- **Delivery authority:** [Engineering roadmap](roadmap.md) and accepted [plans](plans/)
+- **Delivery authority:** Maintainer-controlled delivery coordination; accepted public decisions are promoted to the PRD, ADRs, and specialist documentation
 
 This roadmap explains where Splinterm is going as a product: who it serves,
 which user outcomes matter next, how the audience expands, and what must become
@@ -280,11 +280,11 @@ understandable, less supportable, or less trustworthy.
 ## Relationship to delivery planning
 
 This document owns strategic direction, audience sequence, product outcomes, and
-horizon priority. The [engineering roadmap](roadmap.md) translates the active
+horizon priority. Maintainer-controlled delivery records translate the active
 horizon into technical workstreams and dependency order. The [PRD](PRD.md) owns
 normative product requirements and release criteria. [Current status](status.md)
-owns what exists and is validated today. Accepted [plans](plans/) own
-implementation scope, gates, evidence, and completion claims.
+owns what exists and is validated today. Public ADRs and specialist documents
+own the decisions needed to understand shipped behavior.
 
 When these documents disagree, resolve strategy and horizon priority here, then
 update the PRD only when normative requirements or release criteria change. Do

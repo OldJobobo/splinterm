@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-18
-- **Plan:** [Omarchy-native terminal MVP](../plans/0002-omarchy-terminal-mvp.md)
 
 ## Context
 

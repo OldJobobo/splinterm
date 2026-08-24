@@ -1,0 +1,15 @@
+{
+  "schema": "splinterm.foot-framebuffer-fixture.v1",
+  "width": 560,
+  "height": 408,
+  "stride": 2304,
+  "format": "argb8888",
+  "byte_order": "bgra",
+  "cell": {"width": 7, "height": 17},
+  "origin": {"x": 12, "y": 12},
+  "framebuffer_sha256": "6831e9fee617f5b5b204e690901d0f180f7af3c731a31097f51a687e0545c321",
+  "provenance": {
+    "implementation": "foot",
+    "commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+  }
+}

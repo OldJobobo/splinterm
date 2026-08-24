@@ -3,8 +3,8 @@
 //! Bounded stdio MCP adapter for Splinterm.
 //!
 //! Provides the reviewed 32-tool catalog and three bounded resource forms over
-//! policy-scoped daemon connections. Adversarial closure and packaging evidence
-//! remain tracked by Plan 0007 Slices 8 and 9.
+//! policy-scoped daemon connections. Adversarial behavior and packaging remain
+//! regression-covered by the adapter and package test suites.
 
 mod control;
 mod dispatch;

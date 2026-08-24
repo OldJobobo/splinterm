@@ -2467,17 +2467,14 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
     jsonschema = pytest.importorskip("jsonschema")
     report = build_report(_successful_correctness_run)
 
+    assert report["schema"] == "splinterm.benchmark.correctness.v2"
     assert report["valid"] is True
     assert report["oracle"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
     assert report["semantic_fixtures"]["fixture_count"] == 5
-    assert all(item["exact"] for item in report["final_buffer_evidence"])
+    assert "final_buffer_evidence" not in report
     assert report["fuzzing"]["status"] == "available-not-run"
     assert report["fuzzing"]["recorded_duration_seconds"] is None
-    assert {item["status"] for item in report["external_observations"]} == {"observed"}
-    assert all(
-        "private" in item["claim_limit"] or "does not prove" in item["claim_limit"]
-        for item in report["external_observations"]
-    )
+    assert "external_observations" not in report
     sixel = next(
         item for item in report["capability_matrix"] if item["capability"] == "sixel"
     )

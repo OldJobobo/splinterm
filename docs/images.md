@@ -55,17 +55,13 @@ geometry. Sixel emitted before pixel geometry is available is rejected rather
 than guessed. Kitty static placement remains visible in active and inactive
 panes because its accepted placement dimensions are explicit terminal cells.
 
-## Evidence
+## Verification
 
-- Sixel oracle: Foot 1.27.0 commit
-  `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
-- Five exact Sixel comparisons:
-  `spikes/artifacts/0025-terminal-images/slice2-splinterm-sixel-2026-07-25-reviewed/`.
-- Final Slice 8 scale/pane matrix:
-  `spikes/artifacts/0025-terminal-images/slice8-graphical-final/`.
-- Resource contracts and probes:
-  `spikes/artifacts/0025-terminal-images/contracts.json` and
-  `spikes/artifacts/0025-terminal-images/budget-probe.json`.
+Sixel behavior is regression-tested against Foot 1.27.0 commit
+`3c5b584b0eafa772eb4376fb6eaf6643399e190e`. Executable protocol and pixel-oracle
+fixtures live under `fixtures/terminal-images/v1/`; benchmark runs, graphical
+captures, and acceptance records are maintainer material and are not shipped in
+the public repository.
 
 The strict no-image RSS and one-tick p95 idle CPU gates pass after release Thin
 LTO, event-driven token expiry, and unchanged-theme fingerprinting. Clean

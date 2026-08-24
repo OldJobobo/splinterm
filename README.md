@@ -240,7 +240,7 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [development guide](https://sp
 
 ## Design authority and lineage
 
-Splinterm's emulator half is derived from Foot's architecture and behavior. Translated or adapted code records its source provenance and retains the relevant MIT attribution. See [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md), [`THIRD_PARTY.md`](THIRD_PARTY.md), and [`docs/pre-planning-research.md`](docs/pre-planning-research.md).
+Splinterm's emulator half is derived from Foot's architecture and behavior. Translated or adapted code records its source provenance and retains the relevant MIT attribution. See [`docs/adr/0001-foot-rust-port.md`](docs/adr/0001-foot-rust-port.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
 ## Support Splinterm
 

@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-14
-- **Plan:** [0.2.0 persistence expansion and PTY upgrade handoff](../plans/0037-0.2-persistence-and-upgrade-handoff.md)
 
 ## Context
 
@@ -11,8 +10,8 @@ recipes, working directories, proportional layout, and bounded geometry hints.
 It deliberately excludes terminal grids, scrollback bodies, image bodies,
 clipboard data, input, process memory, and shell state.
 
-Plan 0037 considered adding an owner-only, default-off terminal archive so a
-saved Lair could display historical terminal content after reboot. Such an
+The persistence design considered an owner-only, default-off terminal archive
+so a saved Lair could display historical terminal content after reboot. Such an
 archive would persist sensitive output that may contain credentials, private
 messages, paths, source code, logs, and command results. It would require
 separate decisions for retention, deletion, export, trusted-human and machine
@@ -53,7 +52,7 @@ that decide, before implementation:
 - truncation, generation labeling, corruption, and schema migration behavior;
 - archive behavior before and after explicit relaunch;
 - encryption claims and key ownership, if encryption is proposed; and
-- amendments to `FR-PERSIST-05`, ADR 0006, and Plan 0034.
+- amendments to `FR-PERSIST-05`, ADR 0006, and the public saved-Lair contract.
 
 No future implementation may infer commands, authority, process identity, or
 relaunch intent from archived terminal content.
