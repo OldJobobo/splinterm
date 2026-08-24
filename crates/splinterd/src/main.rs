@@ -9869,9 +9869,14 @@ mod tests {
         cleanup_connection(&state, owner_id).await;
         assert!(state.topology.read().await.find_lair(lair.id).is_some());
         let runtimes = state.runtimes.lock().await.drain();
+        state.exit_observers.close();
         for runtime in runtimes {
             let _ = runtime.shutdown().await;
         }
+        time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
+            .await
+            .expect("exit observers did not finish before metadata cleanup");
+        drop(state);
         std::fs::remove_dir_all(base).unwrap();
     }
 
