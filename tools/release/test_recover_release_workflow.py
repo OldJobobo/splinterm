@@ -62,6 +62,16 @@ class RecoverReleaseWorkflowTests(unittest.TestCase):
             2,
         )
 
+    def test_empty_existing_release_skips_asset_download_but_reaches_planning(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        download = workflow.index("Download every existing asset")
+        planning = workflow.index("Compute fail-closed recovery plan")
+        step = workflow[download:planning]
+        self.assertIn('json.load(open("recovery-release.json")).get("assets")', step)
+        self.assertIn("isinstance(assets, list) and assets", step)
+        self.assertIn("then\n            gh release download", step)
+        self.assertLess(download, planning)
+
     def test_recovery_never_replaces_or_rebuilds(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         forbidden = (

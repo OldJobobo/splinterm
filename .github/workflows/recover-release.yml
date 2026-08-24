@@ -183,8 +183,15 @@ jobs:
           GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
         run: |
           mkdir existing-assets
-          gh release download "${{ needs.verify.outputs.tag }}" \
-            --repo "$RELEASE_REPOSITORY" --dir existing-assets
+          if python - <<'PY'
+          import json
+          assets = json.load(open("recovery-release.json")).get("assets")
+          raise SystemExit(0 if isinstance(assets, list) and assets else 1)
+          PY
+          then
+            gh release download "${{ needs.verify.outputs.tag }}" \
+              --repo "$RELEASE_REPOSITORY" --dir existing-assets
+          fi
 
       - name: Compute fail-closed recovery plan
         run: |
