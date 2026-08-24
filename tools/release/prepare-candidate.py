@@ -186,6 +186,12 @@ def current_public_release_tag() -> str:
     tag = state["current_version_tag"]
     if not isinstance(tag, str) or not tag.startswith("v") or SEMVER.fullmatch(tag[1:]) is None:
         raise ValueError("current public release tag must be a complete v-prefixed SemVer value")
+    status = (ROOT / "docs/status.md").read_text(encoding="utf-8")
+    matches = re.findall(
+        r"^- \*\*Current public version tag:\*\* `([^`]+)`$", status, re.MULTILINE
+    )
+    if matches != [tag]:
+        raise ValueError("documented and machine-readable public release tags disagree")
     return tag
 
 

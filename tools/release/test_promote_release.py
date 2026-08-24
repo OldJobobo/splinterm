@@ -21,7 +21,9 @@ RUN_ID = 12345
 
 
 class CandidateFixture:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, previous_version_tag: str = "v0.1.0-beta1"
+    ) -> None:
         self.root = root
         self.assets = MODULE.expected_assets(COMMIT, VERSION)
         records = []
@@ -43,7 +45,7 @@ class CandidateFixture:
             "package_version": VERSION.replace("-", ""),
             "tag": f"v{VERSION}",
             "architecture": "x86_64",
-            "previous_version_tag": "v1.2.3-alpha3",
+            "previous_version_tag": previous_version_tag,
             "workflow_run": f"https://github.com/{REPOSITORY}/actions/runs/{RUN_ID}",
             "assets": records,
         }
@@ -122,6 +124,18 @@ class PromoteReleaseTests(unittest.TestCase):
             self.assertIn("candidate-manifest.json", promotion["public_assets"])
             self.assertIn("SHA256SUMS", promotion["public_assets"])
             self.assertNotIn("aur-source/PKGBUILD", promotion["public_assets"])
+
+    def test_candidate_rejects_a_stale_predecessor_even_when_well_formed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:
+            fixture = CandidateFixture(Path(value), "v0.1.0-alpha3.3")
+            with self.assertRaisesRegex(ValueError, "current public release state"):
+                MODULE.verify_candidate(
+                    fixture.root,
+                    REPOSITORY,
+                    RUN_ID,
+                    COMMIT,
+                    fixture.manifest_sha256,
+                )
 
     def test_candidate_rejects_tampering_extra_files_and_unsafe_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:

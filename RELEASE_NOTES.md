@@ -1,9 +1,5 @@
 # Splinterm 0.1.0 Beta 2 — Persistence With an Exit
 
-> **Release state:** candidate preparation. Beta 1 remains the current public
-> release until the reviewed Beta 2 candidate passes graphical acceptance and
-> protected promotion.
-
 Splinterm remains persistent by default. Beta 2 adds a deliberate alternative:
 an ordinary unnamed graphical terminal can belong to its Window and disappear
 when that Window closes. The moment you organize that terminal into a named or
@@ -132,10 +128,9 @@ reopen Splinterm windows after the package replacement.
 - Beta 1 tags and packages remain immutable.
 - Beta 2 still targets x86_64 Omarchy/Arch Linux with native Wayland.
 
-## Before publication
+## Validation boundary
 
-The Beta 2 implementation has passed serialized workspace, package,
+The Beta 2 implementation passed serialized workspace, package,
 release-tooling, portable Foot-provenance, documentation, independent review,
-and guarded staged-package graphical boundaries. Candidate construction,
-protected GitHub promotion, AUR distribution, and local system installation
-remain separate approval-gated operations.
+real-systemd workload-placement, local installation, and guarded staged-package
+graphical boundaries before publication.

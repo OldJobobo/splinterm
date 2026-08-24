@@ -179,6 +179,10 @@ class PrepareCandidateTests(unittest.TestCase):
         )
         self.assertEqual(set(state), {"schema", "current_version_tag"})
         self.assertEqual(state["schema"], 1)
+        status = (ROOT / "docs/status.md").read_text(encoding="utf-8")
+        self.assertEqual(
+            status.count("**Current public version tag:** `v0.1.0-beta1`"), 1
+        )
 
     def test_release_notes_are_read_from_the_exact_candidate_commit(self) -> None:
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
