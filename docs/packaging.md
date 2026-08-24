@@ -7,7 +7,10 @@ Splinterm's `packaging/PKGBUILD` prepares the `0.1.0beta2` split packages for
 reviewed local and CI candidate builds. Its local source archive and `SKIP` checksum are
 valid only in that workflow. The current public versioned release is
 [`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1),
-and both AUR package bases publish `0.1.0beta1-1`.
+and both AUR package bases publish `0.1.0beta1-1`. The closed
+`packaging/release-state.json` record is the machine-readable authority for that
+current public predecessor; candidate construction rejects a different supplied
+tag even when it exists.
 
 The source-built AUR authority is `packaging/aur/PKGBUILD`; candidate
 construction replaces its source-archive checksum with the exact immutable

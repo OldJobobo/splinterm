@@ -175,11 +175,27 @@ def create_source_archive(commit: str, version: str, output: Path) -> None:
         raise ValueError("source archive is missing package build inputs")
 
 
+def current_public_release_tag() -> str:
+    path = ROOT / "packaging/release-state.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("packaging/release-state.json is invalid") from error
+    if set(state) != {"schema", "current_version_tag"} or state["schema"] != 1:
+        raise ValueError("packaging/release-state.json has an unexpected shape")
+    tag = state["current_version_tag"]
+    if not isinstance(tag, str) or not tag.startswith("v") or SEMVER.fullmatch(tag[1:]) is None:
+        raise ValueError("current public release tag must be a complete v-prefixed SemVer value")
+    return tag
+
+
 def validate_previous_version_tag(previous: str, release_tag: str) -> str:
     if not previous.startswith("v") or SEMVER.fullmatch(previous[1:]) is None:
         raise ValueError("previous version tag must be a complete v-prefixed SemVer value")
     if previous == release_tag:
         raise ValueError("previous version tag must differ from the candidate tag")
+    if previous != current_public_release_tag():
+        raise ValueError("previous version tag does not match the current public release")
     resolved = run(["git", "rev-parse", f"refs/tags/{previous}^{{commit}}"])
     if COMMIT.fullmatch(resolved) is None:
         raise ValueError("previous version tag does not resolve to a commit")

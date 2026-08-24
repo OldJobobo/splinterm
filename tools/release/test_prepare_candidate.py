@@ -164,11 +164,21 @@ class PrepareCandidateTests(unittest.TestCase):
             MODULE.validate_previous_version_tag("0.1.0-beta1", release_tag)
         with self.assertRaisesRegex(ValueError, "must differ"):
             MODULE.validate_previous_version_tag(release_tag, release_tag)
+        with self.assertRaisesRegex(ValueError, "current public release"):
+            MODULE.validate_previous_version_tag("v0.1.0-alpha3.3", release_tag)
         with (
             mock.patch.object(MODULE, "run", side_effect=ValueError("missing tag")),
             self.assertRaisesRegex(ValueError, "missing tag"),
         ):
-            MODULE.validate_previous_version_tag("v9.9.9-beta1", release_tag)
+            MODULE.validate_previous_version_tag("v0.1.0-beta1", release_tag)
+
+    def test_public_release_state_is_closed_and_versioned(self) -> None:
+        self.assertEqual(MODULE.current_public_release_tag(), "v0.1.0-beta1")
+        state = json.loads(
+            (ROOT / "packaging/release-state.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(state), {"schema", "current_version_tag"})
+        self.assertEqual(state["schema"], 1)
 
     def test_release_notes_are_read_from_the_exact_candidate_commit(self) -> None:
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
