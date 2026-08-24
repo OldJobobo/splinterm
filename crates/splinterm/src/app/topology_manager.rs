@@ -677,7 +677,14 @@ fn lair_selector_catalog<T>(
                     .copied()
                     .find(|entry| entry.dojo_id == dojo_id)
             })
-            .or_else(|| lair_entries.first().copied());
+            .or_else(|| {
+                lair.dojos.iter().find_map(|dojo| {
+                    lair_entries
+                        .iter()
+                        .copied()
+                        .find(|entry| entry.dojo_id == dojo.id)
+                })
+            });
         let Some(representative) = representative else {
             continue;
         };
@@ -2250,6 +2257,30 @@ mod tests {
         }
     }
 
+    fn selector_dojo(id: DojoId, name: &str) -> splinterm_core::Dojo {
+        let splint = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        splinterm_core::Dojo {
+            id,
+            name: name.to_owned(),
+            default_focus: splint.id,
+            root: LayoutNode::Leaf(splint),
+        }
+    }
+
+    fn selector_lair_with_dojos(
+        id: LairId,
+        name: &str,
+        lifetime: splinterm_core::LairLifetime,
+        dojos: &[(DojoId, &str)],
+    ) -> splinterm_core::Lair {
+        let mut lair = selector_lair(id, name, lifetime);
+        lair.dojos = dojos
+            .iter()
+            .map(|(id, name)| selector_dojo(*id, name))
+            .collect();
+        lair
+    }
+
     fn selector_entry(
         lair_id: LairId,
         dojo_id: DojoId,
@@ -2632,54 +2663,28 @@ mod tests {
     #[test]
     fn selectors_keep_lair_and_dojo_levels_separate() {
         let first_lair = LairId::new();
-        let empty_lair = LairId::new();
         let second_lair = LairId::new();
-        let fallback_lair = LairId::new();
-        let transient_lair = LairId::new();
         let first_dojo = DojoId::new();
         let second_dojo = DojoId::new();
         let recent_second_dojo = DojoId::new();
-        let fallback_dojo = DojoId::new();
-        let unrelated_dojo = DojoId::new();
         let lairs = vec![
-            selector_lair(
+            selector_lair_with_dojos(
                 first_lair,
                 "First Lair",
                 splinterm_core::LairLifetime::Persistent,
+                &[(first_dojo, "first")],
             ),
-            selector_lair(
-                empty_lair,
-                "Empty Lair",
-                splinterm_core::LairLifetime::Persistent,
-            ),
-            selector_lair(
+            selector_lair_with_dojos(
                 second_lair,
                 "Second Lair",
                 splinterm_core::LairLifetime::Persistent,
-            ),
-            selector_lair(
-                fallback_lair,
-                "Fallback Lair",
-                splinterm_core::LairLifetime::Persistent,
-            ),
-            selector_lair(
-                transient_lair,
-                "Transient Lair",
-                splinterm_core::LairLifetime::Transient,
+                &[(second_dojo, "second"), (recent_second_dojo, "recent")],
             ),
         ];
         let entries = vec![
             selector_entry(first_lair, first_dojo, "First Lair", "first", 1),
             selector_entry(second_lair, recent_second_dojo, "Second Lair", "recent", 2),
             selector_entry(second_lair, second_dojo, "Second Lair", "second", 3),
-            selector_entry(fallback_lair, fallback_dojo, "Fallback Lair", "fallback", 1),
-            selector_entry(
-                transient_lair,
-                unrelated_dojo,
-                "Transient Lair",
-                "transient",
-                1,
-            ),
         ];
         let mut tabs = WindowTabSet::new(DojoTab::new(first_lair, first_dojo, ()));
         tabs.open_or_activate(DojoTab::new(second_lair, recent_second_dojo, ()))
@@ -2690,24 +2695,18 @@ mod tests {
         assert!(tabs.activate(first_dojo));
 
         let (lair_items, lair_targets) = lair_selector_catalog(&lairs, &entries, &tabs);
-        assert_eq!(lair_items.len(), 3);
+        assert_eq!(lair_items.len(), 2);
         assert_eq!(lair_items[0].display_title, "First Lair");
         assert_eq!(lair_items[1].display_title, "Second Lair");
-        assert_eq!(lair_items[2].display_title, "Fallback Lair");
         assert_eq!(lair_items[1].working_directory, "/tmp/recent");
         assert_eq!(lair_items[1].pane_count, 5);
         assert_eq!(lair_items[1].running_pane_count, 5);
         assert_eq!(
             lair_targets,
-            vec![
-                (first_lair, first_dojo),
-                (second_lair, recent_second_dojo),
-                (fallback_lair, fallback_dojo),
-            ]
+            vec![(first_lair, first_dojo), (second_lair, recent_second_dojo),]
         );
 
         let (dojo_items, dojo_targets) = dojo_selector_catalog(&entries, second_lair);
-        assert_eq!(dojo_items.len(), 2);
         assert_eq!(
             dojo_items
                 .iter()
@@ -2722,6 +2721,69 @@ mod tests {
                 (second_lair, second_dojo)
             ]
         );
+    }
+
+    #[test]
+    fn lair_selector_fallback_uses_daemon_order_and_filters_ineligible_lairs() {
+        let fallback_lair = LairId::new();
+        let transient_lair = LairId::new();
+        let fallback_first_dojo = DojoId::new();
+        let fallback_recent_dojo = DojoId::new();
+        let transient_dojo = DojoId::new();
+        let lairs = vec![
+            selector_lair(
+                LairId::new(),
+                "Empty Lair",
+                splinterm_core::LairLifetime::Persistent,
+            ),
+            selector_lair_with_dojos(
+                fallback_lair,
+                "Fallback Lair",
+                splinterm_core::LairLifetime::Persistent,
+                &[
+                    (fallback_first_dojo, "first fallback"),
+                    (fallback_recent_dojo, "recent fallback"),
+                ],
+            ),
+            selector_lair_with_dojos(
+                transient_lair,
+                "Transient Lair",
+                splinterm_core::LairLifetime::Transient,
+                &[(transient_dojo, "transient")],
+            ),
+        ];
+        let entries = vec![
+            selector_entry(
+                fallback_lair,
+                fallback_recent_dojo,
+                "Fallback Lair",
+                "recent fallback",
+                2,
+            ),
+            selector_entry(
+                fallback_lair,
+                fallback_first_dojo,
+                "Fallback Lair",
+                "first fallback",
+                1,
+            ),
+            selector_entry(
+                transient_lair,
+                transient_dojo,
+                "Transient Lair",
+                "transient",
+                1,
+            ),
+        ];
+        let tabs = WindowTabSet::new(DojoTab::new(LairId::new(), DojoId::new(), ()));
+
+        let (items, targets) = lair_selector_catalog(&lairs, &entries, &tabs);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].display_title, "Fallback Lair");
+        assert_eq!(items[0].working_directory, "/tmp/first fallback");
+        assert_eq!(items[0].pane_count, 3);
+        assert_eq!(items[0].running_pane_count, 3);
+        assert_eq!(targets, vec![(fallback_lair, fallback_first_dojo)]);
     }
 
     #[test]
