@@ -127,6 +127,8 @@ class PrepareCandidateTests(unittest.TestCase):
         self.assertIn('"state": "candidate"', source)
         self.assertIn('"publishable": False', source)
         self.assertIn('"workflow_run": arguments.workflow_run', source)
+        self.assertIn('"ci": ci_attestation', source)
+        self.assertIn('create.add_argument("--ci-attestation"', source)
         self.assertNotIn("gh release", source)
         self.assertNotIn("git push", source)
 
@@ -144,6 +146,35 @@ class PrepareCandidateTests(unittest.TestCase):
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
         with self.assertRaisesRegex(ValueError, "does not match Cargo.toml"):
             MODULE.validate_candidate("OldJobobo/splinterm", commit, "9.9.9-alpha9")
+
+    def test_ci_attestation_is_exact_and_authority_bound(self) -> None:
+        value = {
+            "workflow": "CI",
+            "workflow_path": ".github/workflows/ci.yml",
+            "event": "push",
+            "branch": "main",
+            "commit": "a" * 40,
+            "run_id": 42,
+            "run_url": "https://github.com/OldJobobo/splinterm/actions/runs/42",
+            "check_job": "check",
+            "status": "completed",
+            "conclusion": "success",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ci.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual(
+                MODULE.validate_ci_attestation(
+                    path, "OldJobobo/splinterm", "a" * 40
+                ),
+                value,
+            )
+            value["event"] = "pull_request"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "event"):
+                MODULE.validate_ci_attestation(
+                    path, "OldJobobo/splinterm", "a" * 40
+                )
 
     def test_manifest_example_is_json_serializable(self) -> None:
         manifest = {

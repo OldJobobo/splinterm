@@ -140,6 +140,7 @@ def verify_candidate(
     repository: str,
     run_id: int,
     expected_commit: str,
+    expected_branch: str,
     manifest_sha256: str,
 ) -> dict[str, Any]:
     if SHA256.fullmatch(manifest_sha256) is None:
@@ -151,7 +152,7 @@ def verify_candidate(
     expected_keys = {
         "schema", "state", "publishable", "repository", "commit", "version",
         "package_version", "tag", "architecture", "previous_version_tag",
-        "workflow_run", "assets",
+        "workflow_run", "ci", "assets",
     }
     if set(manifest) != expected_keys:
         raise ValueError("candidate manifest has an unexpected top-level shape")
@@ -179,6 +180,34 @@ def verify_candidate(
     run_match = RUN_URL.fullmatch(manifest["workflow_run"] if isinstance(manifest["workflow_run"], str) else "")
     if run_match is None or run_match.group(1).lower() != repository.lower() or int(run_match.group(2)) != run_id:
         raise ValueError("candidate workflow run does not match approval input")
+    ci = manifest["ci"]
+    expected_ci = {
+        "workflow": "CI",
+        "workflow_path": ".github/workflows/ci.yml",
+        "event": "push",
+        "branch": expected_branch,
+        "commit": commit,
+        "check_job": "check",
+        "status": "completed",
+        "conclusion": "success",
+    }
+    if expected_branch not in RELEASE_BRANCHES:
+        raise ValueError("candidate CI branch is not a release authority")
+    if not isinstance(ci, dict) or set(ci) != set(expected_ci) | {"run_id", "run_url"}:
+        raise ValueError("candidate CI provenance has an unexpected shape")
+    for key, expected_value in expected_ci.items():
+        if ci.get(key) != expected_value:
+            raise ValueError(f"candidate CI provenance {key} does not match")
+    ci_run_id = ci.get("run_id")
+    ci_match = RUN_URL.fullmatch(ci.get("run_url", ""))
+    if (
+        not isinstance(ci_run_id, int)
+        or ci_run_id <= 0
+        or ci_match is None
+        or ci_match.group(1).lower() != repository.lower()
+        or int(ci_match.group(2)) != ci_run_id
+    ):
+        raise ValueError("candidate CI provenance run identity is malformed")
 
     expected = expected_assets(commit, version)
     records = manifest["assets"]
@@ -233,6 +262,7 @@ def verify_candidate(
         "commit": commit,
         "version": version,
         "tag": manifest["tag"],
+        "ci": ci,
         "release_notes": "RELEASE-NOTES.md",
         "public_assets": public_assets,
     }
@@ -288,6 +318,7 @@ def create_receipt(
         "commit": promotion["commit"],
         "version": promotion["version"],
         "tag": promotion["tag"],
+        "ci": promotion["ci"],
         "release_url": release.get("url"),
         "workflow_run": workflow_run,
         "assets": records,
@@ -310,6 +341,9 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--repository", required=True)
     verify.add_argument("--run-id", type=int, required=True)
     verify.add_argument("--expected-commit", required=True)
+    verify.add_argument(
+        "--expected-branch", choices=sorted(RELEASE_BRANCHES), required=True
+    )
     verify.add_argument("--manifest-sha256", required=True)
     verify.add_argument("--output", type=Path, required=True)
     receipt = commands.add_parser("receipt")
@@ -344,6 +378,7 @@ def main() -> int:
                 arguments.repository,
                 arguments.run_id,
                 arguments.expected_commit,
+                arguments.expected_branch,
                 arguments.manifest_sha256,
             )
             write_json(arguments.output, promotion)

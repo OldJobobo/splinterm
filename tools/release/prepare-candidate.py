@@ -18,6 +18,7 @@ SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+CI_RUN_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/actions/runs/([1-9][0-9]*)")
 SCHEMA = 1
 
 
@@ -213,9 +214,47 @@ def validate_candidate(repository: str, commit: str, version: str) -> tuple[str,
     return commit, package_version
 
 
+def validate_ci_attestation(
+    path: Path, repository: str, commit: str
+) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    expected = {
+        "workflow": "CI",
+        "workflow_path": ".github/workflows/ci.yml",
+        "event": "push",
+        "commit": commit,
+        "check_job": "check",
+        "status": "completed",
+        "conclusion": "success",
+    }
+    if not isinstance(value, dict) or set(value) != set(expected) | {
+        "branch", "run_id", "run_url"
+    }:
+        raise ValueError("CI attestation has an unexpected shape")
+    for key, expected_value in expected.items():
+        if value.get(key) != expected_value:
+            raise ValueError(f"CI attestation {key} does not match the candidate")
+    if value.get("branch") not in {"main", "maint/0.1"}:
+        raise ValueError("CI attestation branch is not a release authority")
+    run_id = value.get("run_id")
+    match = CI_RUN_URL.fullmatch(value.get("run_url", ""))
+    if (
+        not isinstance(run_id, int)
+        or run_id <= 0
+        or match is None
+        or match.group(1).lower() != repository.lower()
+        or int(match.group(2)) != run_id
+    ):
+        raise ValueError("CI attestation run identity is malformed")
+    return value
+
+
 def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
     commit, package_version = validate_candidate(
         arguments.repository, arguments.commit, arguments.version
+    )
+    ci_attestation = validate_ci_attestation(
+        arguments.ci_attestation, arguments.repository, commit
     )
     tag = f"v{arguments.version}"
     output = arguments.output.resolve()
@@ -281,6 +320,7 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
         "architecture": "x86_64",
         "previous_version_tag": previous_tag,
         "workflow_run": arguments.workflow_run,
+        "ci": ci_attestation,
         "assets": assets,
     }
     manifest_path = output / "candidate-manifest.json"
@@ -303,6 +343,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--commit", required=True)
         command.add_argument("--version", required=True)
     create.add_argument("--workflow-run", required=True)
+    create.add_argument("--ci-attestation", type=Path, required=True)
     create.add_argument("--splinterm", type=Path, required=True)
     create.add_argument("--splinterm-mcp", type=Path, required=True)
     create.add_argument("--output", type=Path, required=True)

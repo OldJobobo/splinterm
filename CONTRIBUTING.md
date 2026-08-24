@@ -84,7 +84,30 @@ cargo test --workspace -- --test-threads=1
 ```
 
 Serialized execution is required for suites that own process, socket, signal,
-or service state. A clean package build after this complete pass should normally
+or service state. Before release-sensitive work, run the repository-owned cheap
+preflight before compiling Rust:
+
+```bash
+python tools/release/release-doctor.py
+```
+
+It checks version and generated package metadata agreement, portable pinned Foot
+provenance, release authority/workflow structure, local Markdown links, and
+prohibited private coordination paths. Maintainers may add `--version X.Y.Z-…`
+to validate the candidate tag, predecessor, and release-note range. When
+`Cargo.lock` changes, review every proposed duplicate provenance identity and
+then apply the same update atomically:
+
+```bash
+python tools/foot-oracle/update-provenance.py
+python tools/foot-oracle/update-provenance.py --write
+python tools/foot-oracle/check-provenance.py --portable
+```
+
+The first command is always a dry run. Neither command regenerates oracle
+references or changes the pinned Foot 1.27.0 authority.
+
+A clean package build after this complete pass should normally
 use `tools/package/build-local-package.sh --no-check`; omit `--no-check` only
 when the package build itself is the selected complete test boundary. This
 avoids compiling and running the same workspace suite twice.

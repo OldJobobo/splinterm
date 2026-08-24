@@ -34,9 +34,11 @@ A failure never advances the state. Retrying candidate construction creates a ne
 `.github/workflows/release-candidate.yml` is deliberately non-publishing:
 
 - manual `workflow_dispatch` only from `main` or `maint/0.1`;
-- protected push CI runs the complete workspace boundary on both authority
-  branches before a merged commit can become a candidate;
-- repository permission limited to `contents: read`;
+- candidate construction queries the Actions API with `actions: read` and proves
+  that the exact candidate commit has a completed successful `CI / check` push
+  run on the same authority branch; pending, failed, cancelled, skipped,
+  pull-request-only, stale-SHA, other-branch, and missing runs are rejected;
+- repository permission limited to `actions: read` and `contents: read`;
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
 - the requested version must exactly match Cargo and all three Arch recipes;
@@ -46,7 +48,67 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - package validation runs against extracted package contents;
 - all output is uploaded as one private, retention-bounded workflow artifact.
 
-The candidate manifest binds the repository, commit, version, tag, architecture, prior version tag, workflow run identity, and SHA-256 digest of every proposed release asset. A later publisher must consume this manifest and these exact artifacts rather than rebuilding.
+The candidate manifest binds the repository, commit, version, tag, architecture, prior version tag, candidate workflow identity, exact CI run ID/URL/branch/SHA/event and successful `check` job, and SHA-256 digest of every proposed release asset. A later publisher validates and preserves this CI provenance and must consume this manifest and these exact artifacts rather than rebuilding. Package construction may use `--no-check` only after the exact CI attestation succeeds.
+
+## Deterministic preflight and provenance refresh
+
+Run the same cheap release checks locally and in CI before Rust compilation:
+
+```bash
+python tools/release/release-doctor.py
+python tools/release/release-doctor.py --version 0.2.0-alpha1
+```
+
+The optional version check additionally refuses an existing candidate tag and
+validates the predecessor/release-note commit range. On an Arch host with
+`makepkg`, the doctor also compares each checked-in AUR `.SRCINFO` with
+`makepkg --printsrcinfo` output.
+
+A `Cargo.lock` change does not authorize reference regeneration. Refresh only
+the repository-owned lock identities with an inspect-then-write sequence:
+
+```bash
+python tools/foot-oracle/update-provenance.py
+python tools/foot-oracle/update-provenance.py --write
+python tools/foot-oracle/check-provenance.py --portable
+```
+
+The default update command does not write. `--write` replaces the provenance
+manifest atomically and updates every duplicate lock identity while preserving
+the pinned Foot commit and reference policy.
+
+## CI boundaries and package-check equivalence
+
+`CI / check` remains the required branch-protection context. It runs under
+`always()` and fails unless every mandatory dependency result is exactly
+`success`, so a failed, cancelled, or skipped boundary cannot turn the required
+context green.
+
+| Boundary | Exact responsibility |
+| --- | --- |
+| `preflight` | `release-doctor.py` before compilation |
+| `static` | `cargo fmt`, ShellCheck, and frozen workspace clippy |
+| `workspace-tests` | workspace lib/bin/example/doc tests plus every Rust integration target except the separately isolated daemon and MCP targets |
+| `daemon-tests` | `splinterd` `end_to_end`, serialized, no retry-to-green |
+| `mcp-tests` | `schema_inventory` and `stdio_protocol`, serialized, no retry-to-green |
+| `package-automation` | all four `packaging/PKGBUILD::check()` Python suites plus package/release workflow and helper tests |
+| `oracle-fixtures` | portable Foot provenance, fixture schemas, public contract fixtures, Foot Python tests, and benchmark contracts |
+
+Together, the split Rust commands are equivalent to
+`cargo test --frozen --workspace -- --test-threads=1`: workspace unit, binary,
+example, and documentation tests run once, and every checked-in integration
+target is named exactly once. The package automation boundary runs each of the
+four Python commands from `packaging/PKGBUILD::check()` exactly once. The policy
+test in `tools/release/test_ci_workflow.py` keeps this matrix synchronized with
+current integration targets and the package recipe.
+
+Failed workspace, daemon, MCP, package/release, and oracle boundaries retain the
+focused captured output as 14-day artifacts. Automatic retries are not used.
+`.github/workflows/flake-stress.yml` is a non-publishing weekly/manual diagnostic
+that runs 1–25 serialized daemon/MCP repetitions and stops on the first failure;
+a failure remains a failed run rather than being retried to green. Manual use is
+for maintainers investigating flakes and does not grant candidate or publication
+authority.
 
 ## Human approval boundary
 

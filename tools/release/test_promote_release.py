@@ -18,6 +18,7 @@ REPOSITORY = "OldJobobo/splinterm"
 COMMIT = "a" * 40
 VERSION = "1.2.3-alpha4"
 RUN_ID = 12345
+BRANCH = "main"
 
 
 class CandidateFixture:
@@ -45,6 +46,18 @@ class CandidateFixture:
             "architecture": "x86_64",
             "previous_version_tag": "v1.2.3-alpha3",
             "workflow_run": f"https://github.com/{REPOSITORY}/actions/runs/{RUN_ID}",
+            "ci": {
+                "workflow": "CI",
+                "workflow_path": ".github/workflows/ci.yml",
+                "event": "push",
+                "branch": BRANCH,
+                "commit": COMMIT,
+                "run_id": 67890,
+                "run_url": f"https://github.com/{REPOSITORY}/actions/runs/67890",
+                "check_job": "check",
+                "status": "completed",
+                "conclusion": "success",
+            },
             "assets": records,
         }
         manifest_path = root / "candidate-manifest.json"
@@ -115,7 +128,12 @@ class PromoteReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:
             fixture = CandidateFixture(Path(value))
             promotion = MODULE.verify_candidate(
-                fixture.root, REPOSITORY, RUN_ID, COMMIT, fixture.manifest_sha256
+                fixture.root,
+                REPOSITORY,
+                RUN_ID,
+                COMMIT,
+                BRANCH,
+                fixture.manifest_sha256,
             )
             self.assertEqual(promotion["commit"], COMMIT)
             self.assertEqual(len(promotion["public_assets"]), 5)
@@ -129,27 +147,57 @@ class PromoteReleaseTests(unittest.TestCase):
             (fixture.root / f"splinterm-{VERSION}.tar.gz").write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "changed"):
                 MODULE.verify_candidate(
-                    fixture.root, REPOSITORY, RUN_ID, COMMIT, fixture.manifest_sha256
+                    fixture.root,
+                    REPOSITORY,
+                    RUN_ID,
+                    COMMIT,
+                    BRANCH,
+                    fixture.manifest_sha256,
                 )
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:
             fixture = CandidateFixture(Path(value))
             (fixture.root / "extra").write_text("unexpected", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "unexpected files"):
                 MODULE.verify_candidate(
-                    fixture.root, REPOSITORY, RUN_ID, COMMIT, fixture.manifest_sha256
+                    fixture.root,
+                    REPOSITORY,
+                    RUN_ID,
+                    COMMIT,
+                    BRANCH,
+                    fixture.manifest_sha256,
                 )
         for unsafe in ("../asset", "/asset", "a/../../asset"):
             with self.assertRaisesRegex(ValueError, "unsafe"):
                 MODULE.safe_relative(unsafe)
 
+    def test_ci_provenance_must_match_promotion_authority_branch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:
+            fixture = CandidateFixture(Path(value))
+            with self.assertRaisesRegex(ValueError, "branch"):
+                MODULE.verify_candidate(
+                    fixture.root,
+                    REPOSITORY,
+                    RUN_ID,
+                    COMMIT,
+                    "maint/0.1",
+                    fixture.manifest_sha256,
+                )
+
     def test_manifest_hash_and_source_commit_are_explicit_approval_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:
             fixture = CandidateFixture(Path(value))
             with self.assertRaisesRegex(ValueError, "approval input"):
-                MODULE.verify_candidate(fixture.root, REPOSITORY, RUN_ID, COMMIT, "b" * 64)
+                MODULE.verify_candidate(
+                    fixture.root, REPOSITORY, RUN_ID, COMMIT, BRANCH, "b" * 64
+                )
             with self.assertRaisesRegex(ValueError, "source run"):
                 MODULE.verify_candidate(
-                    fixture.root, REPOSITORY, RUN_ID, "b" * 40, fixture.manifest_sha256
+                    fixture.root,
+                    REPOSITORY,
+                    RUN_ID,
+                    "b" * 40,
+                    BRANCH,
+                    fixture.manifest_sha256,
                 )
 
     def test_receipt_requires_exact_tag_commit_and_public_assets(self) -> None:
@@ -158,7 +206,12 @@ class PromoteReleaseTests(unittest.TestCase):
             candidate.mkdir()
             fixture = CandidateFixture(candidate)
             promotion = MODULE.verify_candidate(
-                candidate, REPOSITORY, RUN_ID, COMMIT, fixture.manifest_sha256
+                candidate,
+                REPOSITORY,
+                RUN_ID,
+                COMMIT,
+                BRANCH,
+                fixture.manifest_sha256,
             )
             downloads = Path(value) / "downloads"
             downloads.mkdir()
@@ -178,6 +231,7 @@ class PromoteReleaseTests(unittest.TestCase):
                 promotion, release, ref, downloads, "https://example.invalid/run/1"
             )
             self.assertEqual(receipt["state"], "published")
+            self.assertEqual(receipt["ci"], promotion["ci"])
             self.assertEqual(len(receipt["assets"]), 5)
             (downloads / f"splinterm-{VERSION}.tar.gz").write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "differs from approved"):

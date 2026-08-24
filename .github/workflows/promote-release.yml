@@ -101,6 +101,7 @@ jobs:
             --repository "$RELEASE_REPOSITORY" \
             --run-id "$CANDIDATE_RUN_ID" \
             --expected-commit "${{ steps.source.outputs.commit }}" \
+            --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
             --output promotion.json
           python - <<'PY'
@@ -119,8 +120,37 @@ jobs:
               stream.write(f"Commit: `{promotion['commit']}`  \n")
               stream.write(f"Tag to create: `{promotion['tag']}`  \n")
               stream.write(f"Candidate run: `{promotion['candidate_run_id']}`  \n")
+              stream.write(f"CI run: `{promotion['ci']['run_id']}`  \n")
               stream.write(f"Manifest: `{promotion['candidate_manifest_sha256']}`\n\n")
               stream.write("The publish job now waits for approval in the protected GitHub `release` environment.\n")
+          PY
+
+      - name: Reattest candidate CI provenance through the Actions API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ci_run_id=$(python -c 'import json; print(json.load(open("promotion.json"))["ci"]["run_id"])')
+          commit=$(python -c 'import json; print(json.load(open("promotion.json"))["commit"])')
+          gh api "repos/$RELEASE_REPOSITORY/actions/runs/$ci_run_id" >promotion-ci-run.json
+          gh api --paginate --slurp \
+            "repos/$RELEASE_REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" \
+            >promotion-ci-jobs.json
+          python tools/release/ci-attestation.py attest \
+            --run promotion-ci-run.json \
+            --jobs promotion-ci-jobs.json \
+            --repository "$RELEASE_REPOSITORY" \
+            --commit "$commit" \
+            --branch "$GITHUB_REF_NAME" \
+            --run-id "$ci_run_id" \
+            --output promotion-ci-attestation.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          promotion = json.loads(Path("promotion.json").read_text())
+          attestation = json.loads(Path("promotion-ci-attestation.json").read_text())
+          if promotion["ci"] != attestation:
+              raise SystemExit("candidate CI provenance differs from live Actions metadata")
           PY
 
       - name: Transfer verified candidate to protected job
@@ -163,6 +193,7 @@ jobs:
             --repository "$RELEASE_REPOSITORY" \
             --run-id "$CANDIDATE_RUN_ID" \
             --expected-commit "${{ needs.verify.outputs.commit }}" \
+            --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
             --output promotion-reverified.json >/dev/null
           cmp verified/promotion.json promotion-reverified.json
