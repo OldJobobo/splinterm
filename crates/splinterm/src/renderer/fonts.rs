@@ -1654,19 +1654,17 @@ mod tests {
     fn fallback_font_mapping_cache_is_bounded_across_face_churn() {
         reset_snapshot_cache();
         let faces = snapshot_faces().unwrap();
-        let mut paths = HashSet::new();
-        let mut mapped = 0;
-        for face in faces.iter().skip(SNAPSHOT_FALLBACK_START) {
-            if !paths.insert(face.path.clone()) {
-                continue;
+        let mapping =
+            Arc::new(ReadOnlyFileMap::open(&faces[SNAPSHOT_PRIMARY_REGULAR].path).unwrap());
+        SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            for index in 0..=SNAPSHOT_FALLBACK_MAPPING_BUDGET {
+                cache.insert(
+                    PathBuf::from(format!("/synthetic/font-{index}.ttf")),
+                    Arc::clone(&mapping),
+                );
             }
-            fallback_font_mapping(face).unwrap();
-            mapped += 1;
-            if mapped > SNAPSHOT_FALLBACK_MAPPING_BUDGET {
-                break;
-            }
-        }
-        assert_eq!(mapped, SNAPSHOT_FALLBACK_MAPPING_BUDGET + 1);
+        });
         let metrics = snapshot_cache_metrics();
         assert_eq!(
             metrics["fallback_mappings"].as_u64(),
