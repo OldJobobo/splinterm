@@ -60,6 +60,19 @@ class CiWorkflowTests(unittest.TestCase):
             )
             self.assertIn("--frozen", block)
 
+    def test_daemon_test_jobs_build_the_required_pty_helper_first(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        helper = "cargo build --frozen -p splinterm-pty --bin splinterm-pty-child"
+        self.assertEqual(workflow.count(helper), 2)
+        for job, following, test_step in (
+            ("workspace-tests", "daemon-tests", "Run workspace unit"),
+            ("daemon-tests", "mcp-tests", "Run daemon integration target"),
+        ):
+            block = workflow[
+                workflow.index(f"  {job}:") : workflow.index(f"  {following}:")
+            ]
+            self.assertLess(block.index(helper), block.index(test_step))
+
     def test_every_rust_integration_target_is_named_exactly_once(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         targets = []

@@ -81,6 +81,8 @@ jobs:
           fc-cache --force
           fc-match 'JetBrains Mono Nerd Font:style=Bold' | grep -F 'JetBrainsMonoNerdFont-Bold.ttf'
           fc-match 'Noto Sans CJK JP:style=Regular' | grep -F 'NotoSansCJK-Regular.ttc'
+      - name: Build the PTY child helper required by daemon live tests
+        run: cargo build --frozen -p splinterm-pty --bin splinterm-pty-child
       - name: Run workspace unit, binary, example, and documentation tests
         run: |
           set -o pipefail
@@ -124,6 +126,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
       - name: Fetch the locked dependency graph
         run: cargo fetch --locked
+      - name: Build the PTY child helper required by daemon integration tests
+        run: cargo build --frozen -p splinterm-pty --bin splinterm-pty-child
       - name: Run daemon integration target without retry
         run: |
           set -o pipefail
