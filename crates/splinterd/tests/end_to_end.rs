@@ -3874,6 +3874,13 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .await
             .expect("drained subscriber did not observe the overflow marker")
             .expect("drained subscriber task failed");
+        let _pre_pressure_snapshot = stable_snapshot_after_marker(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "overflow-finished",
+        )
+        .await;
 
         // The actively drained client has exited. Create a fresh unread
         // MAX_SUBSCRIPTIONS connection so the following unpaced pressure stream
@@ -3906,6 +3913,13 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             incarnation,
             "pressure-finished",
             Duration::from_secs(60),
+        )
+        .await;
+        let final_snapshot = stable_snapshot_after_marker(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "pressure-finished",
         )
         .await;
 
@@ -3942,7 +3956,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     assert_eq!(sequence, *expected_sequence);
                     *expected_sequence += 1;
                     apply_terminal_update(reconstructed, update);
-                    if snapshot_text(reconstructed).contains("pressure-finished") {
+                    if reconstructed.revision == final_snapshot.revision
+                        && snapshot_text(reconstructed).contains("pressure-finished")
+                    {
                         caught_up = true;
                         break;
                     }
@@ -3954,7 +3970,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     assert_eq!(snapshot.splint_id, splint_id);
                     assert_eq!(snapshot.incarnation, incarnation);
                     *reconstructed = snapshot;
-                    if snapshot_text(reconstructed).contains("pressure-finished") {
+                    if reconstructed.revision == final_snapshot.revision
+                        && snapshot_text(reconstructed).contains("pressure-finished")
+                    {
                         caught_up = true;
                         break;
                     }
@@ -3975,14 +3993,6 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             "slow subscriber neither received final state, required resync, nor disconnected"
         );
         drop(producer);
-
-        let final_snapshot = stable_snapshot_after_marker(
-            &mut reattached,
-            splint_id,
-            incarnation,
-            "pressure-finished",
-        )
-        .await;
         assert!(final_snapshot.revision > detached.revision);
 
         let mut before_row_id = final_snapshot
