@@ -30,6 +30,8 @@ check() {
   export RUSTUP_TOOLCHAIN=stable
   cargo test --frozen --workspace -- --test-threads=1
   python -m unittest tools/automation/test_dojo_picker.py
+  python -m unittest tools/testbed/test_omarchy_vm.py
+  python -m unittest tools/testbed/test_qmp_input.py
   python -m unittest tools/package/test_installer_safety.py
   python -m unittest tools/package/test_omarchy_screensaver_integration.py
   python -m unittest tools/package/test_validate_mcp_package.py

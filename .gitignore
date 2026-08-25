@@ -4,10 +4,12 @@ target/
 *.swp
 *.swo
 __pycache__/
+/.splinterm-testbed.env
 *.py[cod]
 .DS_Store
 .env
 /graphify-out/
+/.worktrees/
 /.pi-subagents/
 /.pi/subagents/
 /site/node_modules/

@@ -225,52 +225,65 @@ Do not repeat a failed, expensive command until both of the following have occur
 
 ### 2.6 Graphical Test Matrices
 
-   Request approval once for the complete bounded graphical sequence, identifying
-   the target window, permitted focus/input actions, smoke test, gated matrix, and
-   cleanup plan.
+Request approval once for the complete bounded graphical sequence, identifying
+the guest target Window, permitted focus/input actions, smoke test, gated matrix,
+and cleanup plan. Use the repository Omarchy VM testbed described in Section 3.
 
-   Run one guarded smoke case first. If it succeeds, continue with the approved
-
+Run one guarded guest smoke case first. If it succeeds, continue with the
+approved matrix.
 
 ## 3. Graphical Testing
 
-### 3.1 Allowed Test Targets
+### 3.1 VM-First Graphical Authority
 
-Graphical tests may use either:
+Run every Splinterm graphical smoke, matrix, capture, benchmark, and packaged
+acceptance case in the configured persistent Omarchy VM through
+`tools/testbed/omarchy-vm.sh`. The default target is an isolated guest Window on
+guest workspace 8 / `Virtual-1`; workstation workspace 8 / DP-2 is not the
+default graphical test surface.
 
-* An isolated test window on workspace 8 / DP-2.
-* An existing active user window when the user explicitly approves a bounded
-  sequence and identifies the intended window.
+Host graphical testing is an exception. It requires separate explicit user
+approval for the complete host sequence and must identify either an isolated
+host test Window or the exact existing active user Window. Permission to watch
+the QEMU viewer does not authorize focusing it, moving it, or sending it host
+input; prefer guest-native `input` control and use bounded QMP input only as a
+fallback.
 
-### 3.2 Active-Window Authorization
+### 3.2 Guest-Window Authorization
 
-After explicit approval, the agent may focus, raise, resize, and send bounded
-keyboard or pointer input to the identified active window. Authorization applies
-only to the named test sequence and target window.
+After explicit approval for a bounded graphical sequence, the agent may focus,
+raise, resize, and send bounded keyboard or pointer input only to the identified
+guest test Window. Authorization applies only to the named sequence and target.
 
-Before manipulating an active window:
+Before manipulating a guest Window:
 
-* Record its address, process ID, workspace, monitor, and current focus.
+* Record its address, process ID, workspace, monitor, geometry, current focus,
+  cursor, scale, and transform.
 * State the exact actions and expected cleanup.
-* Target actions by window address whenever possible.
-* Preserve unrelated windows and user processes.
+* Target actions by exact guest Window address whenever possible.
+* Preserve unrelated guest Windows and processes and every workstation Window.
 
-Do not close the window, terminate its shell, restart its daemon, move unrelated
-windows, or enter terminal commands unless those actions were explicitly
-approved.
+Do not close a pre-existing guest Window, terminate its shell/daemon, enter
+commands into it, or manipulate production topology unless that exact action was
+explicitly approved.
 
 ### 3.3 Abort and Cleanup
 
-Abort immediately if input reaches the wrong window, an unrelated window moves,
-or the approved target cannot be identified reliably.
+Abort immediately if input reaches the wrong guest Window, an unrelated Window
+moves, the QEMU viewer receives unintended host input, or the approved target
+cannot be identified reliably.
 
-After testing, restore the original focus, workspace, monitor, size, and position
-when practical, and report anything that could not be restored.
+After every case, close only disposable test Windows, stop private test daemons,
+remove private runtime artifacts, restore the original guest workspace, focus,
+monitor state, cursor, size, and position, and verify the guest test workspace is
+empty. Report anything that could not be restored.
 
-### 3.4 Isolated Testing
+### 3.4 Host Exception
 
-When active-window manipulation was not explicitly approved, retain the existing
-workspace 8 / DP-2 placement and no-focus isolation requirements.
+When the user explicitly approves host graphical testing as an exception, retain
+the existing workspace 8 / DP-2 no-focus isolation requirements unless the user
+names an existing active Window. Apply the same exact-target, abort, and cleanup
+rules, and never treat VM authorization as host authorization.
 
 ## 4. Repository Safety
 
@@ -310,16 +323,23 @@ desktop launcher is installed. The packaged desktop wrapper resolves
 system daemon's trusted-UI inode and exits as unauthorized before mapping a
 window.
 
-For local installation work:
+For packaged graphical acceptance, use the Omarchy VM actions
+`package-build`, `package-status`, `package-install --confirm-guest-install`,
+`package-launch`, and `package-stop`. Do not install or replace a workstation
+package merely to run graphical acceptance.
+
+For installation work:
 
 * First inspect `command -v splinterm`, the desktop-launcher process `PATH`, the
   running daemon executable, and both executable device/inode identities.
-* Remember that `./install.sh` deliberately packages only a clean committed
-  `HEAD`; it cannot install an uncommitted worktree implementation.
-* Ask before replacing the Pacman-owned `/usr/bin/splinterm`. When approved,
-  save a rollback copy, use `pkexec` for the privileged replacement, remove any
-  shadowing user-local client, and disclose that Pacman integrity checks will
-  report the file as altered until reinstall or upgrade.
+* Remember that `./install.sh` and VM `package-build` deliberately package only a
+  clean committed `HEAD`; neither can install an uncommitted implementation.
+* Ask before replacing an existing Pacman-owned `/usr/bin/splinterm`, including
+  inside the guest. The confirmed VM install path saves guest rollback copies
+  and uses passwordless guest `sudo`; a separately approved host exception must
+  save a rollback copy, use `pkexec`, remove any shadowing user-local client, and
+  disclose that Pacman integrity checks will report the host file as altered
+  until reinstall or upgrade.
 * Reopen existing Splinterm windows after replacement. Their running executable
   retains the old inode and no longer matches the newly installed trusted UI.
 * Validate non-graphically with normal human-mode `/usr/bin/splinterm list`,

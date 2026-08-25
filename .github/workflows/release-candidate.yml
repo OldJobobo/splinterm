@@ -51,7 +51,7 @@ jobs:
 
       - name: Validate candidate automation
         run: |
-          shellcheck install.sh tools/package/build-local-package.sh
+          shellcheck install.sh tools/package/build-local-package.sh tools/testbed/omarchy-vm.sh
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           useradd --create-home validator
           chown -R validator:validator "$GITHUB_WORKSPACE"
