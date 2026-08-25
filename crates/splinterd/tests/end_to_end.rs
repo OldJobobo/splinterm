@@ -3876,8 +3876,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .expect("drained subscriber task failed");
 
         // The actively drained client has exited. Create a fresh unread
-        // MAX_SUBSCRIPTIONS connection so only the following unpaced pressure
-        // stream can force its resynchronization or disconnection.
+        // MAX_SUBSCRIPTIONS connection so the following unpaced pressure stream
+        // must resolve through exact coalesced delivery, resynchronization, or
+        // disconnection.
         let mut slow = daemon.connect().await;
         nix::sys::socket::setsockopt(
             &slow.stream,
@@ -3904,6 +3905,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         )
         .await;
 
+        let mut caught_up = false;
         let mut saw_resync = false;
         let mut disconnected = false;
         let slow_read_deadline = Instant::now() + Duration::from_secs(30);
@@ -3920,18 +3922,32 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 disconnected = true;
                 break;
             };
-            if let ServerFrame::Event {
-                event: SubscriptionEvent::ResyncRequired { .. },
-                ..
-            } = frame
-            {
-                saw_resync = true;
-                break;
+            let ServerFrame::Event { event, .. } = frame else {
+                continue;
+            };
+            match event {
+                SubscriptionEvent::Update { update }
+                    if update_text(&update).contains("pressure-finished") =>
+                {
+                    caught_up = true;
+                    break;
+                }
+                SubscriptionEvent::Snapshot { snapshot }
+                    if snapshot_text(&snapshot).contains("pressure-finished") =>
+                {
+                    caught_up = true;
+                    break;
+                }
+                SubscriptionEvent::ResyncRequired { .. } => {
+                    saw_resync = true;
+                    break;
+                }
+                _ => {}
             }
         }
         assert!(
-            saw_resync || disconnected,
-            "slow subscriber was neither forced to resynchronize nor disconnected"
+            caught_up || saw_resync || disconnected,
+            "slow subscriber neither received final state, required resync, nor disconnected"
         );
         drop(producer);
 
