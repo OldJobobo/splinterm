@@ -452,7 +452,8 @@ stop_matching() {
   local expected=$1 process executable
   for process in /proc/[0-9]*; do
     [[ -r $process/environ ]] || continue
-    tr '\0' '\n' <"$process/environ" 2>/dev/null | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
+    cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+      | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
     executable=$(readlink -f "$process/exe" 2>/dev/null || true)
     [[ $executable == "$expected" ]] && kill "${process##*/}" 2>/dev/null || true
   done
@@ -463,7 +464,8 @@ for _ in $(seq 1 100); do
   alive=false
   for process in /proc/[0-9]*; do
     [[ -r $process/environ ]] || continue
-    if tr '\0' '\n' <"$process/environ" 2>/dev/null | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
+    if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+      | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
       executable=$(readlink -f "$process/exe" 2>/dev/null || true)
       case $executable in /usr/bin/splinterm|/usr/bin/splinterd) alive=true ;; esac
     fi
