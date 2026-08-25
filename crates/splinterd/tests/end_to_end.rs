@@ -3886,8 +3886,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             &4096,
         )
         .unwrap();
+        let mut slow_subscriptions = std::collections::BTreeMap::new();
         for _ in 0..MAX_SUBSCRIPTIONS {
-            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+            let (subscription_id, snapshot) = slow.attach(splint_id, incarnation).await;
+            assert!(slow_subscriptions
+                .insert(subscription_id, (snapshot, 1_u64))
+                .is_none());
         }
         producer
             .input(
@@ -3922,21 +3926,36 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 disconnected = true;
                 break;
             };
-            let ServerFrame::Event { event, .. } = frame else {
+            let ServerFrame::Event {
+                subscription_id,
+                sequence,
+                event,
+            } = frame
+            else {
                 continue;
             };
+            let (reconstructed, expected_sequence) = slow_subscriptions
+                .get_mut(&subscription_id)
+                .expect("slow connection emitted an event for an unknown subscription");
+            assert_eq!(sequence, *expected_sequence);
+            *expected_sequence += 1;
             match event {
-                SubscriptionEvent::Update { update }
-                    if update_text(&update).contains("pressure-finished") =>
-                {
-                    caught_up = true;
-                    break;
+                SubscriptionEvent::Update { update } => {
+                    apply_terminal_update(reconstructed, update);
+                    if snapshot_text(reconstructed).contains("pressure-finished") {
+                        caught_up = true;
+                        break;
+                    }
                 }
-                SubscriptionEvent::Snapshot { snapshot }
-                    if snapshot_text(&snapshot).contains("pressure-finished") =>
-                {
-                    caught_up = true;
-                    break;
+                SubscriptionEvent::Snapshot { snapshot } => {
+                    snapshot.validate().expect("slow subscriber snapshot is valid");
+                    assert_eq!(snapshot.splint_id, splint_id);
+                    assert_eq!(snapshot.incarnation, incarnation);
+                    *reconstructed = snapshot;
+                    if snapshot_text(reconstructed).contains("pressure-finished") {
+                        caught_up = true;
+                        break;
+                    }
                 }
                 SubscriptionEvent::ResyncRequired { .. } => {
                     saw_resync = true;
