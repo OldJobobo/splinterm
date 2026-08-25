@@ -3937,10 +3937,10 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             let (reconstructed, expected_sequence) = slow_subscriptions
                 .get_mut(&subscription_id)
                 .expect("slow connection emitted an event for an unknown subscription");
-            assert_eq!(sequence, *expected_sequence);
-            *expected_sequence += 1;
             match event {
                 SubscriptionEvent::Update { update } => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
                     apply_terminal_update(reconstructed, update);
                     if snapshot_text(reconstructed).contains("pressure-finished") {
                         caught_up = true;
@@ -3948,6 +3948,8 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     }
                 }
                 SubscriptionEvent::Snapshot { snapshot } => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
                     snapshot.validate().expect("slow subscriber snapshot is valid");
                     assert_eq!(snapshot.splint_id, splint_id);
                     assert_eq!(snapshot.incarnation, incarnation);
@@ -3958,10 +3960,14 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     }
                 }
                 SubscriptionEvent::ResyncRequired { .. } => {
+                    assert!(sequence >= *expected_sequence);
                     saw_resync = true;
                     break;
                 }
-                _ => {}
+                _ => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                }
             }
         }
         assert!(
