@@ -102,6 +102,10 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertIn("/usr/bin/splinterm launch", runner)
         self.assertIn('XDG_STATE_HOME="$state"', runner)
         self.assertIn('XDG_CONFIG_HOME="$config"', runner)
+        self.assertIn("splinterm-package-install-check", runner)
+        self.assertIn(
+            'SPLINTERM_SOCKET="$socket" /usr/bin/splinterm list', runner
+        )
         self.assertIn("--exclude=/.testbed-package/", runner)
 
     def test_status_uses_pinned_noninteractive_ssh(self) -> None:

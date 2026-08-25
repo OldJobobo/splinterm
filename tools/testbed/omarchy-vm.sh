@@ -359,7 +359,32 @@ command -v splinterm | grep -Fx /usr/bin/splinterm
 pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
 stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
 desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
-/usr/bin/splinterm list >/dev/null
+runtime="/run/user/$(id -u)/splinterm-package-install-check"
+socket="$runtime/splinterd.sock"
+state="$package_root/install-check-state"
+rm -rf "$runtime" "$state"
+mkdir -m 700 "$runtime" "$state"
+SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" \
+  /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &
+daemon_pid=$!
+cleanup_install_check() {
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$runtime" "$state"
+}
+trap cleanup_install_check EXIT
+for _ in $(seq 1 100); do
+  if SPLINTERM_SOCKET="$socket" /usr/bin/splinterm ping >/dev/null 2>&1; then break; fi
+  kill -0 "$daemon_pid" 2>/dev/null || {
+    cat "$runtime/daemon.log" >&2
+    exit 1
+  }
+  sleep 0.05
+done
+SPLINTERM_SOCKET="$socket" /usr/bin/splinterm ping >/dev/null
+SPLINTERM_SOCKET="$socket" /usr/bin/splinterm list >/dev/null
+cleanup_install_check
+trap - EXIT
 REMOTE
     ;;
   package-launch)
