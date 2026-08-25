@@ -186,6 +186,7 @@ jobs:
             tools/package/test_installer_safety.py \
             tools/package/test_omarchy_screensaver_integration.py \
             tools/package/test_systemd_unit.py \
+            tools/package/test_validate_mcp_package.py \
             tools/package/test_workload_units.py \
             tools/release/test_ci_attestation.py \
             tools/release/test_prepare_candidate.py \

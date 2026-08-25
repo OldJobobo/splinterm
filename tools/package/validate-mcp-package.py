@@ -15,6 +15,9 @@ import tempfile
 import time
 
 
+MAXIMUM_MCP_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
 class McpHost:
     def __init__(self, executable: Path, environment: dict[str, str]):
         self.process = subprocess.Popen(
@@ -23,25 +26,41 @@ class McpHost:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
         assert self.process.stdin is not None and self.process.stdout is not None
+        self.buffer = bytearray()
         self.next_id = 1
         self.notifications: list[dict[str, object]] = []
 
     def send(self, document: dict[str, object]) -> None:
         assert self.process.stdin is not None
-        self.process.stdin.write(json.dumps(document, separators=(",", ":")) + "\n")
-        self.process.stdin.flush()
+        payload = (json.dumps(document, separators=(",", ":")) + "\n").encode()
+        assert self.process.stdin.write(payload) == len(payload)
 
     def receive(self, timeout: float = 15) -> dict[str, object]:
         assert self.process.stdout is not None
-        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
-        assert ready, "timed out reading MCP response"
-        line = self.process.stdout.readline()
-        assert line, "MCP server closed stdout"
-        return json.loads(line)
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "timed out reading MCP response"
+            ready, _, _ = select.select([self.process.stdout], [], [], remaining)
+            assert ready, "timed out reading MCP response"
+            chunk = os.read(self.process.stdout.fileno(), 64 * 1024)
+            assert chunk, "MCP server closed stdout"
+            self.buffer.extend(chunk)
+            if b"\n" not in self.buffer:
+                assert (
+                    len(self.buffer) < MAXIMUM_MCP_RESPONSE_BYTES
+                ), "MCP response exceeds line limit"
+        line, _, remainder = self.buffer.partition(b"\n")
+        assert (
+            len(line) + 1 <= MAXIMUM_MCP_RESPONSE_BYTES
+        ), "MCP response exceeds line limit"
+        self.buffer = bytearray(remainder)
+        document = json.loads(line)
+        assert isinstance(document, dict), "MCP response is not an object"
+        return document
 
     def request(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
         request_id = self.next_id
@@ -68,20 +87,28 @@ class McpHost:
         })
         assert "error" not in response, response
         self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        return response["result"]
+        result = response["result"]
+        assert isinstance(result, dict), "MCP initialize result is not an object"
+        return result
 
     def tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         response = self.request("tools/call", {"name": name, "arguments": arguments})
         assert "error" not in response, response
-        return response["result"]
+        result = response["result"]
+        assert isinstance(result, dict), "MCP tool result is not an object"
+        return result
 
     def close(self) -> None:
         if self.process.stdin is not None and not self.process.stdin.closed:
             self.process.stdin.close()
         self.process.wait(timeout=15)
+        stderr = self.process.stderr.read() if self.process.stderr else b""
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+        if self.process.stderr is not None:
+            self.process.stderr.close()
         assert self.process.returncode == 0
-        stderr = self.process.stderr.read() if self.process.stderr else ""
-        assert not stderr, stderr
+        assert not stderr, stderr.decode(errors="replace")
 
 
 def write_policy(path: Path, executable: Path, scopes: list[str], resources: list[dict[str, object]]) -> None:
