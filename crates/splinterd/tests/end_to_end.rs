@@ -3874,10 +3874,18 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .await
             .expect("drained subscriber did not observe the overflow marker")
             .expect("drained subscriber task failed");
+        let _pre_pressure_snapshot = stable_snapshot_after_marker(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "overflow-finished",
+        )
+        .await;
 
         // The actively drained client has exited. Create a fresh unread
-        // MAX_SUBSCRIPTIONS connection so only the following unpaced pressure
-        // stream can force its resynchronization or disconnection.
+        // MAX_SUBSCRIPTIONS connection so the following unpaced pressure stream
+        // must resolve through exact coalesced delivery, resynchronization, or
+        // disconnection.
         let mut slow = daemon.connect().await;
         nix::sys::socket::setsockopt(
             &slow.stream,
@@ -3885,8 +3893,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             &4096,
         )
         .unwrap();
+        let mut slow_subscriptions = std::collections::BTreeMap::new();
         for _ in 0..MAX_SUBSCRIPTIONS {
-            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+            let (subscription_id, snapshot) = slow.attach(splint_id, incarnation).await;
+            assert!(slow_subscriptions
+                .insert(subscription_id, (snapshot, 1_u64))
+                .is_none());
         }
         producer
             .input(
@@ -3903,7 +3915,15 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             Duration::from_secs(60),
         )
         .await;
+        let final_snapshot = stable_snapshot_after_marker(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "pressure-finished",
+        )
+        .await;
 
+        let mut caught_up = false;
         let mut saw_resync = false;
         let mut disconnected = false;
         let slow_read_deadline = Instant::now() + Duration::from_secs(30);
@@ -3920,28 +3940,59 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 disconnected = true;
                 break;
             };
-            if let ServerFrame::Event {
-                event: SubscriptionEvent::ResyncRequired { .. },
-                ..
+            let ServerFrame::Event {
+                subscription_id,
+                sequence,
+                event,
             } = frame
-            {
-                saw_resync = true;
-                break;
+            else {
+                continue;
+            };
+            let (reconstructed, expected_sequence) = slow_subscriptions
+                .get_mut(&subscription_id)
+                .expect("slow connection emitted an event for an unknown subscription");
+            match event {
+                SubscriptionEvent::Update { update } => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                    apply_terminal_update(reconstructed, update);
+                    if reconstructed.revision == final_snapshot.revision
+                        && snapshot_text(reconstructed).contains("pressure-finished")
+                    {
+                        caught_up = true;
+                        break;
+                    }
+                }
+                SubscriptionEvent::Snapshot { snapshot } => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                    snapshot.validate().expect("slow subscriber snapshot is valid");
+                    assert_eq!(snapshot.splint_id, splint_id);
+                    assert_eq!(snapshot.incarnation, incarnation);
+                    *reconstructed = snapshot;
+                    if reconstructed.revision == final_snapshot.revision
+                        && snapshot_text(reconstructed).contains("pressure-finished")
+                    {
+                        caught_up = true;
+                        break;
+                    }
+                }
+                SubscriptionEvent::ResyncRequired { .. } => {
+                    assert!(sequence >= *expected_sequence);
+                    saw_resync = true;
+                    break;
+                }
+                _ => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                }
             }
         }
         assert!(
-            saw_resync || disconnected,
-            "slow subscriber was neither forced to resynchronize nor disconnected"
+            caught_up || saw_resync || disconnected,
+            "slow subscriber neither received final state, required resync, nor disconnected"
         );
         drop(producer);
-
-        let final_snapshot = stable_snapshot_after_marker(
-            &mut reattached,
-            splint_id,
-            incarnation,
-            "pressure-finished",
-        )
-        .await;
         assert!(final_snapshot.revision > detached.revision);
 
         let mut before_row_id = final_snapshot
