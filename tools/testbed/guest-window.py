@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -256,10 +255,11 @@ def restore(path: Path) -> None:
     x, y = cursor.get("x"), cursor.get("y")
     if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
         fail(f"recorded cursor is invalid: {cursor!r}")
-    ydotool_socket = Path(os.environ.get("YDOTOOL_SOCKET", ""))
-    if not ydotool_socket.is_socket():
-        fail(f"ydotool socket is unavailable: {ydotool_socket}")
-    command("ydotool", "mousemove", "--absolute", "-x", str(round(x)), "-y", str(round(y)))
+    command(
+        "hyprctl",
+        "dispatch",
+        f"hl.dsp.cursor.move({{ x = {round(x)}, y = {round(y)} }})",
+    )
     path.unlink()
     print(f"guest workspace {TARGET_WORKSPACE} is empty; prior focus and cursor restored")
 

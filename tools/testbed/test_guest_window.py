@@ -172,9 +172,7 @@ class GuestWindowTests(unittest.TestCase):
             mock.patch.object(guest_window, "clients", return_value=remaining),
             mock.patch.object(guest_window, "hypr_json", return_value=[]),
             mock.patch.object(guest_window, "monitor_record", return_value=monitor),
-            mock.patch.object(Path, "is_socket", return_value=True),
             mock.patch.object(guest_window, "command") as command,
-            mock.patch.dict(guest_window.os.environ, {"YDOTOOL_SOCKET": "/run/socket"}),
         ):
             guest_window.restore(path)
 
@@ -184,7 +182,11 @@ class GuestWindowTests(unittest.TestCase):
         self.assertIn("address:0xabc", calls[1][2])
         self.assertEqual(
             calls[2],
-            ("ydotool", "mousemove", "--absolute", "-x", "12", "-y", "34"),
+            (
+                "hyprctl",
+                "dispatch",
+                "hl.dsp.cursor.move({ x = 12, y = 34 })",
+            ),
         )
 
 
