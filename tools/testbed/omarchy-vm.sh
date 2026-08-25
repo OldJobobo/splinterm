@@ -279,24 +279,63 @@ REMOTE
     ssh "${ssh_options[@]}" "$target" \
       "SPLINTERM_TESTBED_ROOT=$(printf '%q' "$remote_root") bash -s" <<'REMOTE'
 set -euo pipefail
-instance=$(hyprctl instances -j | jq -er '.[0]')
-wayland_display=$(jq -r '.wl_socket' <<<"$instance")
-hyprland_signature=$(jq -r '.instance' <<<"$instance")
+instance=$(hyprctl instances -j | jq -er \
+  'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
 runtime_dir="/run/user/$(id -u)"
 log_dir="$runtime_dir/splinterm-test"
-mkdir -p "$log_dir"
+window_state="$log_dir/guest-window.json"
+mkdir -m 700 -p "$log_dir"
+export XDG_RUNTIME_DIR="$runtime_dir"
+export WAYLAND_DISPLAY
+WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
+export HYPRLAND_INSTANCE_SIGNATURE
+HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+export YDOTOOL_SOCKET="$runtime_dir/.ydotool_socket"
 cd "$SPLINTERM_TESTBED_ROOT"
-XDG_RUNTIME_DIR="$runtime_dir" \
-WAYLAND_DISPLAY="$wayland_display" \
-HYPRLAND_INSTANCE_SIGNATURE="$hyprland_signature" \
-DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+[[ ! -e $window_state ]] || {
+  printf 'development guest window state exists; run stop first\n' >&2
+  exit 1
+}
+client_pid=
+cleanup_failed_launch() {
+  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
+  SPLINTERM_REPO="$SPLINTERM_TESTBED_ROOT" ./splinterm-test stop || true
+  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
+  [[ ! -e $window_state ]] \
+    || python tools/testbed/guest-window.py restore --state "$window_state" || true
+}
+trap cleanup_failed_launch ERR
+python tools/testbed/guest-window.py prepare --state "$window_state"
 SPLINTERM_REPO="$SPLINTERM_TESTBED_ROOT" \
   nohup ./splinterm-test launch >"$log_dir/client.log" 2>&1 </dev/null &
-printf 'guest client pid=%s log=%s\n' "$!" "$log_dir/client.log"
+client_pid=$!
+python tools/testbed/guest-window.py place --state "$window_state"
+printf 'guest client pid=%s log=%s\n' "$client_pid" "$log_dir/client.log"
+trap - ERR
 REMOTE
     ;;
   stop)
-    remote_command ./splinterm-test stop
+    ssh "${ssh_options[@]}" "$target" \
+      "SPLINTERM_TESTBED_ROOT=$(printf '%q' "$remote_root") bash -s" <<'REMOTE'
+set -euo pipefail
+instance=$(hyprctl instances -j | jq -er \
+  'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
+runtime_dir="/run/user/$(id -u)"
+window_state="$runtime_dir/splinterm-test/guest-window.json"
+export XDG_RUNTIME_DIR="$runtime_dir"
+export WAYLAND_DISPLAY
+WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
+export HYPRLAND_INSTANCE_SIGNATURE
+HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+export YDOTOOL_SOCKET="$runtime_dir/.ydotool_socket"
+cd "$SPLINTERM_TESTBED_ROOT"
+./splinterm-test stop
+if [[ -e $window_state ]]; then
+  python tools/testbed/guest-window.py restore --state "$window_state"
+fi
+REMOTE
     ;;
   package-build)
     (($# == 0)) || fail 'package-build takes no arguments'
@@ -397,27 +436,56 @@ resolved=$(command -v splinterm 2>/dev/null || true)
 [[ $resolved == /usr/bin/splinterm ]]
 pacman -Qo /usr/bin/splinterm /usr/bin/splinterd >/dev/null
 package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
-test -d "$package_root"
+test -d "$package_root/source/.git"
 test ! -L "$package_root"
 runtime="/run/user/$(id -u)/splinterm-package-test"
 socket="$runtime/splinterd.sock"
+window_state="$runtime/guest-window.json"
 state="$package_root/acceptance-state"
 config="$package_root/acceptance-config"
+for process in /proc/[0-9]*; do
+  [[ -r $process/environ ]] || continue
+  cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
+    | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
+  executable=$(readlink -f "$process/exe" 2>/dev/null || true)
+  case $executable in
+    /usr/bin/splinterm|/usr/bin/splinterd)
+      printf 'packaged test is already active; run package-stop first\n' >&2
+      exit 1
+      ;;
+  esac
+done
+[[ ! -e $window_state ]] || {
+  printf 'packaged guest window state exists; run package-stop first\n' >&2
+  exit 1
+}
 rm -rf "$runtime" "$state" "$config"
 mkdir -m 700 "$runtime" "$state" "$config"
-instance=$(hyprctl instances -j | jq -er '.[0]')
-wayland_display=$(jq -r '.wl_socket' <<<"$instance")
-hyprland_signature=$(jq -r '.instance' <<<"$instance")
+instance=$(hyprctl instances -j | jq -er \
+  'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export WAYLAND_DISPLAY
+WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
+export HYPRLAND_INSTANCE_SIGNATURE
+HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+export YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket"
+daemon_pid=
+client_pid=
+cleanup_failed_launch() {
+  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
+  [[ -z $daemon_pid ]] || kill "$daemon_pid" 2>/dev/null || true
+  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
+  [[ -z $daemon_pid ]] || wait "$daemon_pid" 2>/dev/null || true
+  [[ ! -e $window_state ]] \
+    || python "$package_root/source/tools/testbed/guest-window.py" restore \
+      --state "$window_state" || true
+}
+trap cleanup_failed_launch ERR
+python "$package_root/source/tools/testbed/guest-window.py" prepare --state "$window_state"
 SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &
 daemon_pid=$!
-cleanup_failed_launch() {
-  kill "$daemon_pid" 2>/dev/null || true
-  wait "$daemon_pid" 2>/dev/null || true
-}
-trap cleanup_failed_launch ERR
 for _ in $(seq 1 100); do
   if SPLINTERM_SOCKET="$socket" /usr/bin/splinterm ping >/dev/null 2>&1; then break; fi
   kill -0 "$daemon_pid" 2>/dev/null || {
@@ -427,16 +495,13 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 SPLINTERM_SOCKET="$socket" /usr/bin/splinterm ping >/dev/null
-XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-WAYLAND_DISPLAY="$wayland_display" \
-HYPRLAND_INSTANCE_SIGNATURE="$hyprland_signature" \
-DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
-SPLINTERM_SOCKET="$socket" \
-XDG_STATE_HOME="$state" \
-XDG_CONFIG_HOME="$config" \
+SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterm launch --working-directory "$SPLINTERM_TESTBED_ROOT" \
     >"$runtime/client.log" 2>&1 </dev/null &
-printf 'guest packaged client pid=%s daemon=%s log=%s\n' "$!" "$daemon_pid" "$runtime/client.log"
+client_pid=$!
+python "$package_root/source/tools/testbed/guest-window.py" place --state "$window_state"
+printf 'guest packaged client pid=%s daemon=%s log=%s\n' \
+  "$client_pid" "$daemon_pid" "$runtime/client.log"
 trap - ERR
 REMOTE
     ;;
@@ -448,6 +513,7 @@ REMOTE
 set -euo pipefail
 runtime="/run/user/$(id -u)/splinterm-package-test"
 socket="$runtime/splinterd.sock"
+window_state="$runtime/guest-window.json"
 stop_matching() {
   local expected=$1 process executable
   for process in /proc/[0-9]*; do
@@ -474,6 +540,19 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 [[ $alive == false ]]
+if [[ -e $window_state ]]; then
+  instance=$(hyprctl instances -j | jq -er \
+    'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export WAYLAND_DISPLAY
+  WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
+  export HYPRLAND_INSTANCE_SIGNATURE
+  HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  export YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket"
+  python "$SPLINTERM_TESTBED_PACKAGE_ROOT/source/tools/testbed/guest-window.py" restore \
+    --state "$window_state"
+fi
 rm -rf "$runtime" "$SPLINTERM_TESTBED_PACKAGE_ROOT/acceptance-state" \
   "$SPLINTERM_TESTBED_PACKAGE_ROOT/acceptance-config"
 REMOTE

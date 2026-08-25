@@ -96,7 +96,7 @@ class CiWorkflowTests(unittest.TestCase):
         pkgbuild = (ROOT / "packaging/PKGBUILD").read_text(encoding="utf-8")
         check_body = pkgbuild.split("check() {", 1)[1].split("\n}", 1)[0]
         python_targets = re.findall(r"python -m unittest ([^\s]+)", check_body)
-        self.assertEqual(len(python_targets), 7)
+        self.assertEqual(len(python_targets), 8)
         for target in python_targets:
             with self.subTest(target=target):
                 self.assertEqual(workflow.count(target), 1)

@@ -107,6 +107,31 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             'SPLINTERM_SOCKET="$socket" /usr/bin/splinterm list', runner
         )
         self.assertIn("--exclude=/.testbed-package/", runner)
+        active_guard = "packaged test is already active; run package-stop first"
+        self.assertIn(active_guard, runner)
+        package_launch = runner.split("  package-launch)", 1)[1].split(
+            "  package-stop)", 1
+        )[0]
+        self.assertLess(
+            package_launch.index(active_guard),
+            package_launch.index('rm -rf "$runtime"'),
+        )
+
+    def test_graphical_launches_use_guarded_guest_window_lifecycle(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        self.assertEqual(runner.count("guest-window.py prepare"), 1)
+        self.assertEqual(runner.count("guest-window.py place"), 1)
+        self.assertGreaterEqual(runner.count("guest-window.py restore"), 2)
+        self.assertIn('"$package_root/source/tools/testbed/guest-window.py" prepare', runner)
+        self.assertIn('"$package_root/source/tools/testbed/guest-window.py" place', runner)
+        self.assertIn(
+            '"$SPLINTERM_TESTBED_PACKAGE_ROOT/source/tools/testbed/guest-window.py" restore',
+            runner,
+        )
+        self.assertIn("expected exactly one Hyprland instance", runner)
+        development_launch = runner.split("  launch)", 1)[1].split("  stop)", 1)[0]
+        self.assertIn('kill "$client_pid"', development_launch)
+        self.assertIn('wait "$client_pid"', development_launch)
 
     def test_status_uses_pinned_noninteractive_ssh(self) -> None:
         result, log = self.run_runner("status")

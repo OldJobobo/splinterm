@@ -182,6 +182,7 @@ jobs:
           set -o pipefail
           python -m unittest \
             tools/automation/test_dojo_picker.py \
+            tools/testbed/test_guest_window.py \
             tools/testbed/test_omarchy_vm.py \
             tools/testbed/test_qmp_input.py \
             tools/package/test_release_manifest.py \
