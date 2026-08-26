@@ -450,6 +450,11 @@ impl LinuxPtyIdentity {
     }
 
     fn validate(self, master: &File) -> Result<()> {
+        self.validate_process()?;
+        self.validate_terminal(master)
+    }
+
+    fn validate_process(self) -> Result<()> {
         if self.child != self.process_group || self.child != self.session {
             return Err(PtyError::IdentityMismatch);
         }
@@ -457,12 +462,7 @@ impl LinuxPtyIdentity {
             .map_err(|error| PtyError::io("validate child process group", error))?;
         let observed_session = process::getsid(Some(self.child))
             .map_err(|error| PtyError::io("validate child session", error))?;
-        let terminal_session = termios::tcgetsid(master)
-            .map_err(|error| PtyError::io("validate controlling terminal session", error))?;
-        if observed_group != self.process_group
-            || observed_session != self.session
-            || terminal_session != self.session
-        {
+        if observed_group != self.process_group || observed_session != self.session {
             return Err(PtyError::IdentityMismatch);
         }
         process::waitid(
@@ -472,6 +472,15 @@ impl LinuxPtyIdentity {
                 | process::WaitIdOptions::NOWAIT,
         )
         .map_err(|error| PtyError::io("validate direct child authority", error))?;
+        Ok(())
+    }
+
+    fn validate_terminal(self, master: &File) -> Result<()> {
+        let terminal_session = termios::tcgetsid(master)
+            .map_err(|error| PtyError::io("validate controlling terminal session", error))?;
+        if terminal_session != self.session {
+            return Err(PtyError::IdentityMismatch);
+        }
         Ok(())
     }
 }
@@ -493,6 +502,11 @@ impl AdoptableLinuxPtySession {
     }
 
     #[must_use]
+    pub fn master_raw_fd(&self) -> i32 {
+        self.master.as_raw_fd()
+    }
+
+    #[must_use]
     pub fn into_parts(self) -> (LinuxPtyIdentity, OwnedFd) {
         (self.identity, self.master)
     }
@@ -508,14 +522,111 @@ impl AdoptableLinuxPtySession {
     /// Returns an error when process, parent/reaping, session, process-group, or
     /// controlling-terminal identity no longer matches the manifest.
     pub fn adopt(self) -> Result<LinuxPtySession> {
+        self.try_adopt().map_err(|(error, _)| error)
+    }
+
+    /// Validates and reconstructs runtime PTY authority without discarding the
+    /// inherited descriptor when validation fails.
+    ///
+    /// # Errors
+    /// Returns the error together with the unchanged adoptable session so a
+    /// coordinator can retain descriptor ownership while choosing rollback.
+    pub fn try_adopt(
+        self,
+    ) -> std::result::Result<LinuxPtySession, (PtyError, AdoptableLinuxPtySession)> {
+        let identity = self.identity;
         let master = File::from(self.master);
-        self.identity.validate(&master)?;
-        ensure_close_on_exec(&master)?;
+        if let Err(error) = identity.validate_process() {
+            return Err((
+                error,
+                AdoptableLinuxPtySession {
+                    identity,
+                    master: master.into(),
+                },
+            ));
+        }
+        let child_exited = match process::waitid(
+            process::WaitId::Pid(identity.child),
+            process::WaitIdOptions::EXITED
+                | process::WaitIdOptions::NOHANG
+                | process::WaitIdOptions::NOWAIT,
+        ) {
+            Ok(status) => status.is_some(),
+            Err(error) => {
+                return Err((
+                    PtyError::io("inspect adopted child", error),
+                    AdoptableLinuxPtySession {
+                        identity,
+                        master: master.into(),
+                    },
+                ));
+            }
+        };
+        if !child_exited && let Err(error) = identity.validate_terminal(&master) {
+            return Err((
+                error,
+                AdoptableLinuxPtySession {
+                    identity,
+                    master: master.into(),
+                },
+            ));
+        }
+        let observed_exit = match restore_descriptor_before_status_consumption(
+            || ensure_close_on_exec(&master),
+            || {
+                if child_exited {
+                    match process::waitpid(Some(identity.child), process::WaitOptions::NOHANG) {
+                        Ok(Some((_, status))) => Ok(Some(ExitStatus::from_raw(status.as_raw()))),
+                        Ok(None) => Err(PtyError::IdentityMismatch),
+                        Err(error) => Err(PtyError::io("reap adopted child", error)),
+                    }
+                } else {
+                    Ok(None)
+                }
+            },
+        ) {
+            Ok(observed_exit) => observed_exit,
+            Err(error) => {
+                return Err((
+                    error,
+                    AdoptableLinuxPtySession {
+                        identity,
+                        master: master.into(),
+                    },
+                ));
+            }
+        };
         Ok(LinuxPtySession {
             master,
-            identity: self.identity,
-            exit_status: None,
+            identity,
+            exit_status: observed_exit,
         })
+    }
+
+    /// Kills and reaps the exact retained child when adoption cannot safely
+    /// restore the live session.
+    ///
+    /// This fallback targets the child PID rather than a potentially changed or
+    /// reused process group. It is reserved for failed recovery paths.
+    ///
+    /// # Errors
+    /// Returns an error when the exact child cannot be signaled or reaped.
+    pub fn kill_child_and_wait(self) -> Result<ExitStatus> {
+        if let Some((_, status)) =
+            process::waitpid(Some(self.identity.child), process::WaitOptions::NOHANG)
+                .map_err(|error| PtyError::io("verify adopted child authority", error))?
+        {
+            return Ok(ExitStatus::from_raw(status.as_raw()));
+        }
+        match process::kill_process(self.identity.child, PtySignal::Kill.rustix()) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(PtyError::io("kill adopted child", error)),
+        }
+        let (_, status) =
+            process::waitpid(Some(self.identity.child), process::WaitOptions::empty())
+                .map_err(|error| PtyError::io("reap adopted child", error))?
+                .ok_or(PtyError::IdentityMismatch)?;
+        Ok(ExitStatus::from_raw(status.as_raw()))
     }
 }
 
@@ -653,6 +764,14 @@ fn pid_from_u32(raw: u32) -> Result<Pid> {
 
 fn pid_to_u32(pid: Pid) -> u32 {
     u32::try_from(pid.as_raw_pid()).expect("positive Linux PID fits u32")
+}
+
+fn restore_descriptor_before_status_consumption<T>(
+    restore: impl FnOnce() -> Result<()>,
+    consume_status: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    restore()?;
+    consume_status()
 }
 
 fn ensure_close_on_exec(fd: &impl std::os::fd::AsFd) -> Result<()> {
@@ -816,6 +935,21 @@ mod tests {
     }
 
     use std::ffi::OsStr;
+
+    #[test]
+    fn descriptor_restore_failure_precedes_exit_status_consumption() {
+        let status_consumed = std::cell::Cell::new(false);
+        let result = restore_descriptor_before_status_consumption(
+            || Err(PtyError::IdentityMismatch),
+            || {
+                status_consumed.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(PtyError::IdentityMismatch)));
+        assert!(!status_consumed.get());
+    }
 
     #[test]
     fn default_terminal_type_matches_the_supported_keyboard_contract() {
