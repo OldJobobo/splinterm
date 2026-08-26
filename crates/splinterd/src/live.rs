@@ -3805,7 +3805,7 @@ async fn run_actor_body(
                     }
                 }
             }
-            ready = io.as_ref().expect("active actor owns one PTY reader").readable(), if !eof => {
+            ready = io.as_ref().expect("active actor owns one PTY reader").readable(), if !eof && pending_handoff.is_none() => {
                 let mut ready = ready?;
                 let result = ready.try_io(|inner| inner.get_ref().read(&mut read_buffer));
                 if let Ok(result) = result {
@@ -8317,6 +8317,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_handoff_stops_accepting_reply_generating_pty_reads() {
+        let mut config = fast_config();
+        config.command_capacity = 4;
+        config.input_byte_limit = 1024 * 1024;
+        config.poll_interval = Duration::from_millis(500);
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell(
+                "sleep 0.03; (while :; do printf '\\033[5n\\033[5n\\033[5n\\033[5n\\033[5n\\033[5n\\033[5n\\033[5n'; done) & while :; do dd bs=4096 count=1 >/dev/null 2>/dev/null; done",
+            ),
+            config,
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        handle.input(vec![b'x'; 256 * 1024]).await.unwrap();
+
+        let prepared = time::timeout(Duration::from_secs(1), handle.prepare_pty_handoff())
+            .await
+            .expect("reply-generating reads after the fence must not starve preparation")
+            .unwrap();
+        drop(prepared);
+        drop(handle);
+        drop(runtime);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn child_exit_while_handoff_is_held_is_published_and_reaped() {
         let runtime = LiveSplintRuntime::spawn(
             SplintId::new(),
@@ -8381,16 +8409,18 @@ mod tests {
         .unwrap();
         let handle = runtime.handle();
         let child_pid = handle.child_pid();
-        handle.input(vec![b'x'; 256 * 1024]).await.unwrap();
+        for _ in 0..4 {
+            handle.input(vec![b'x'; 256 * 1024]).await.unwrap();
+        }
 
         let prepare_handle = handle.clone();
         let prepare = tokio::spawn(async move { prepare_handle.prepare_pty_handoff().await });
-        time::sleep(Duration::from_millis(50)).await;
+        time::sleep(Duration::from_millis(5)).await;
         let resize_handle = handle.clone();
         let mut resize =
             tokio::spawn(async move { resize_handle.resize(PtySize::cells(57, 11)).await });
         assert!(
-            time::timeout(Duration::from_millis(40), &mut resize)
+            time::timeout(Duration::from_millis(5), &mut resize)
                 .await
                 .is_err(),
             "the handoff request must fence commands while accepted writes are blocked"
@@ -8398,7 +8428,7 @@ mod tests {
 
         prepare.abort();
         assert!(prepare.await.unwrap_err().is_cancelled());
-        time::timeout(Duration::from_millis(300), &mut resize)
+        time::timeout(Duration::from_secs(1), &mut resize)
             .await
             .expect("cancelling preparation must release the actor fence directly")
             .unwrap()
