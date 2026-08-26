@@ -108,7 +108,7 @@ desktop_command() {
   local command
   command=$(quote_command "$@")
   ssh "${ssh_options[@]}" "$target" \
-    "set -euo pipefail; instance=\$(hyprctl instances -j | jq -er '.[0]'); runtime=/run/user/\$(id -u); export XDG_RUNTIME_DIR=\$runtime WAYLAND_DISPLAY=\$(jq -r .wl_socket <<<\"\$instance\") HYPRLAND_INSTANCE_SIGNATURE=\$(jq -r .instance <<<\"\$instance\") DBUS_SESSION_BUS_ADDRESS=unix:path=\$runtime/bus; cd $(printf '%q' "$remote_root"); exec $command"
+    "set -euo pipefail; instance=\$(hyprctl instances -j | jq -er 'if length == 1 then .[0] else error(\"expected exactly one Hyprland instance\") end'); runtime=/run/user/\$(id -u); export XDG_RUNTIME_DIR=\$runtime WAYLAND_DISPLAY=\$(jq -r .wl_socket <<<\"\$instance\") HYPRLAND_INSTANCE_SIGNATURE=\$(jq -r .instance <<<\"\$instance\") DBUS_SESSION_BUS_ADDRESS=unix:path=\$runtime/bus; cd $(printf '%q' "$remote_root"); exec $command"
 }
 
 input_command() {
@@ -307,10 +307,13 @@ cleanup_failed_launch() {
 }
 trap cleanup_failed_launch ERR
 python tools/testbed/guest-window.py prepare --state "$window_state"
+client_token=$(python -c 'import secrets; print(secrets.token_hex(16))')
+SPLINTERM_TEST_WINDOW_TOKEN="$client_token" \
 SPLINTERM_REPO="$SPLINTERM_TESTBED_ROOT" \
   nohup ./splinterm-test launch >"$log_dir/client.log" 2>&1 </dev/null &
 client_pid=$!
-python tools/testbed/guest-window.py place --state "$window_state"
+python tools/testbed/guest-window.py place --state "$window_state" \
+  --client-pid "$client_pid" --client-token "$client_token"
 printf 'guest client pid=%s log=%s\n' "$client_pid" "$log_dir/client.log"
 trap - ERR
 REMOTE
@@ -495,11 +498,14 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 SPLINTERM_SOCKET="$socket" /usr/bin/splinterm ping >/dev/null
+client_token=$(python -c 'import secrets; print(secrets.token_hex(16))')
+SPLINTERM_TEST_WINDOW_TOKEN="$client_token" \
 SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterm launch --working-directory "$SPLINTERM_TESTBED_ROOT" \
     >"$runtime/client.log" 2>&1 </dev/null &
 client_pid=$!
-python "$package_root/source/tools/testbed/guest-window.py" place --state "$window_state"
+python "$package_root/source/tools/testbed/guest-window.py" place --state "$window_state" \
+  --client-pid "$client_pid" --client-token "$client_token"
 printf 'guest packaged client pid=%s daemon=%s log=%s\n' \
   "$client_pid" "$daemon_pid" "$runtime/client.log"
 trap - ERR

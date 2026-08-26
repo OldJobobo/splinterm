@@ -80,6 +80,41 @@ class GuestWindowTests(unittest.TestCase):
                 [{"address": "0xabc", "workspace": {"id": 8}}]
             )
 
+    def test_process_token_survives_reparenting_and_requires_exact_value(self) -> None:
+        token = "a" * 32
+        environment = f"PATH=/usr/bin\0SPLINTERM_TEST_WINDOW_TOKEN={token}\0".encode()
+        with mock.patch.object(Path, "read_bytes", return_value=environment):
+            self.assertTrue(guest_window.process_has_launch_token(300, token))
+            self.assertFalse(guest_window.process_has_launch_token(300, "b" * 32))
+            self.assertFalse(guest_window.process_has_launch_token(300, "invalid"))
+
+    def test_fresh_candidates_reject_an_unrelated_splinterm_window(self) -> None:
+        current = [
+            {
+                "address": "0xaaa",
+                "initialClass": guest_window.APP_ID,
+                "pid": 100,
+            },
+            {
+                "address": "0xbbb",
+                "initialClass": guest_window.APP_ID,
+                "pid": 200,
+            },
+        ]
+        with (
+            mock.patch.object(guest_window, "clients", return_value=current),
+            mock.patch.object(
+                guest_window,
+                "process_has_launch_token",
+                side_effect=lambda pid, token: pid == 200 and token == "a" * 32,
+            ),
+        ):
+            candidates = guest_window.fresh_candidates(
+                {"before_addresses": []},
+                client_token="a" * 32,
+            )
+        self.assertEqual([candidate["address"] for candidate in candidates], ["0xbbb"])
+
     def test_place_targets_one_fresh_window_by_exact_address(self) -> None:
         path = self.state_path()
         guest_window.write_state(
@@ -113,7 +148,7 @@ class GuestWindowTests(unittest.TestCase):
             ),
             mock.patch.object(guest_window, "command") as command,
         ):
-            guest_window.place(path)
+            guest_window.place(path, client_pid=1234, client_token="a" * 32)
 
         calls = [call.args for call in command.call_args_list]
         self.assertEqual(len(calls), 2)
@@ -121,6 +156,7 @@ class GuestWindowTests(unittest.TestCase):
         self.assertIn('monitor = "Virtual-1"', calls[0][2])
         self.assertIn('workspace = "8"', calls[1][2])
         state = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(state["launch_pid"], 1234)
         self.assertEqual(state["target_address"], "0xdef")
         self.assertEqual(
             state["target_initial"],
@@ -146,7 +182,7 @@ class GuestWindowTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "expected one fresh"),
         ):
-            guest_window.place(path)
+            guest_window.place(path, client_pid=1234, client_token="a" * 32)
 
     def test_restore_verifies_cleanup_and_restores_workspace_focus_and_cursor(self) -> None:
         path = self.state_path()

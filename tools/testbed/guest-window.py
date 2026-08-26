@@ -17,6 +17,7 @@ APP_ID = "com.oldjobobo.splinterm"
 TARGET_MONITOR = "Virtual-1"
 TARGET_WORKSPACE = 8
 ADDRESS = re.compile(r"^0x[0-9A-Fa-f]+$")
+LAUNCH_TOKEN = re.compile(r"^[0-9a-f]{32}$")
 
 
 def fail(message: str) -> NoReturn:
@@ -150,7 +151,20 @@ def prepare(path: Path) -> None:
         fail(f"could not activate workspace {TARGET_WORKSPACE} on {TARGET_MONITOR}")
 
 
-def fresh_candidates(state: dict[str, Any]) -> list[dict[str, Any]]:
+def process_has_launch_token(pid: int, token: str) -> bool:
+    if pid < 1 or not LAUNCH_TOKEN.fullmatch(token):
+        return False
+    try:
+        environment = Path(f"/proc/{pid}/environ").read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return False
+    expected = f"SPLINTERM_TEST_WINDOW_TOKEN={token}".encode()
+    return expected in environment.split(b"\0")
+
+
+def fresh_candidates(
+    state: dict[str, Any], client_token: str
+) -> list[dict[str, Any]]:
     before = set(state.get("before_addresses", []))
     return [
         client
@@ -158,15 +172,19 @@ def fresh_candidates(state: dict[str, Any]) -> list[dict[str, Any]]:
         if client.get("address") not in before
         and client.get("initialClass") == APP_ID
         and ADDRESS.fullmatch(str(client.get("address", "")))
+        and isinstance(client.get("pid"), int)
+        and process_has_launch_token(client["pid"], client_token)
     ]
 
 
-def place(path: Path) -> None:
+def place(path: Path, client_pid: int, client_token: str) -> None:
     state = read_state(path)
+    state["launch_pid"] = client_pid
+    write_state(path, state)
     candidates: list[dict[str, Any]] = []
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        candidates = fresh_candidates(state)
+        candidates = fresh_candidates(state, client_token)
         if len(candidates) == 1:
             break
         if len(candidates) > 1:
@@ -268,13 +286,24 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("action", choices=("prepare", "place", "restore"))
     result.add_argument("--state", required=True, type=Path)
+    result.add_argument("--client-pid", type=int)
+    result.add_argument("--client-token")
     return result
 
 
 def main() -> int:
     arguments = parser().parse_args()
     try:
-        {"prepare": prepare, "place": place, "restore": restore}[arguments.action](arguments.state)
+        if arguments.action == "place":
+            if arguments.client_pid is None or arguments.client_pid < 1:
+                fail("place requires a positive --client-pid")
+            if arguments.client_token is None or not LAUNCH_TOKEN.fullmatch(
+                arguments.client_token
+            ):
+                fail("place requires a 32-character lowercase hexadecimal --client-token")
+            place(arguments.state, arguments.client_pid, arguments.client_token)
+        else:
+            {"prepare": prepare, "restore": restore}[arguments.action](arguments.state)
     except (RuntimeError, subprocess.CalledProcessError) as error:
         if isinstance(error, subprocess.CalledProcessError) and error.stderr:
             print(error.stderr.rstrip(), file=sys.stderr)

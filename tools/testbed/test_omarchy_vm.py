@@ -129,6 +129,9 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             runner,
         )
         self.assertIn("expected exactly one Hyprland instance", runner)
+        self.assertEqual(runner.count('--client-pid "$client_pid"'), 2)
+        self.assertEqual(runner.count('--client-token "$client_token"'), 2)
+        self.assertEqual(runner.count('SPLINTERM_TEST_WINDOW_TOKEN="$client_token"'), 2)
         development_launch = runner.split("  launch)", 1)[1].split("  stop)", 1)[0]
         self.assertIn('kill "$client_pid"', development_launch)
         self.assertIn('wait "$client_pid"', development_launch)
@@ -155,6 +158,8 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         call = log.read_text()
         self.assertIn("hyprctl instances -j", call)
+        self.assertIn("if length == 1 then .[0]", call)
+        self.assertIn("expected exactly one Hyprland instance", call)
         self.assertIn("XDG_RUNTIME_DIR=", call)
         self.assertIn("WAYLAND_DISPLAY=", call)
         self.assertIn("HYPRLAND_INSTANCE_SIGNATURE=", call)
