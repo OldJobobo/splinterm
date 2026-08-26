@@ -239,6 +239,72 @@ Do not claim fuzz coverage for code paths the target does not reach. Diagnose a
 crash or timeout before retrying, minimize retained reproducers without changing
 the failure, and never discard a corpus/finding to make a gate pass.
 
+## Omarchy VM testbed
+
+Maintainers must run Splinterm graphical smokes, matrices, captures, benchmarks,
+and packaged acceptance in the persistent Omarchy VM over SSH by default. Host
+graphical testing is an explicitly approved exception, not a fallback chosen for
+convenience. Copy the example settings, then record the VM's independently
+verified SSH host key in a dedicated known-hosts file:
+
+```bash
+cp tools/testbed/omarchy-vm.env.example .splinterm-testbed.env
+$EDITOR .splinterm-testbed.env
+tools/testbed/omarchy-vm.sh status
+tools/testbed/omarchy-vm.sh bootstrap
+tools/testbed/omarchy-vm.sh check
+```
+
+The settings file is ignored by Git. The runner pins the configured host-key
+file and requires a Bash-login Omarchy guest. Its destructive sync destination
+is restricted to `/home/<user>/Projects/splinterm-testbed[-suffix]`; existing
+symlink destinations are rejected. It mirrors the current worktree there while
+excluding host build artifacts, Git metadata, private Pi state, local environment
+files, and retained benchmark results. `cargo ARGS...` runs a focused Cargo
+command after syncing; `ping`
+checks an isolated development daemon. When a local QMP socket is configured,
+`qmp status`, `qmp type TEXT`, `qmp key QCODE`, `qmp move X Y WIDTH HEIGHT`, and
+`qmp click BUTTON` provide bounded guest-only input without focusing the host
+QEMU Window. The QMP helper caps typed text at 4 KiB and inbound frames at 1 MiB,
+and rejects unsupported text, unterminated frames, and out-of-range pointer
+coordinates rather than guessing. `desktop-exec COMMAND...` runs guest-native
+Wayland tools such as `wtype`, `grim`, and exact-target `hyprctl` commands with
+the active guest compositor identity discovered at execution time. When the
+guest has its owner-only `ydotoold` user service enabled, `input ARGS...` routes
+keyboard and pointer events through the guest's private runtime socket and
+`uinput`; this remains usable while QEMU/SDL lacks host focus and is the preferred
+interactive test path. QMP remains useful for VM status and low-level fallback.
+
+`launch` maps a development Window only on the guest Wayland desktop and writes
+its client log below the guest's private `splinterm-test` runtime directory. It
+still counts as graphical testing: obtain approval for the bounded sequence
+below before using `launch`, capture, or input commands. `stop` tears down the
+isolated guest daemon and its attached test client.
+
+Packaged acceptance uses a separate clean-commit path:
+
+```bash
+tools/testbed/omarchy-vm.sh package-build
+tools/testbed/omarchy-vm.sh package-status
+tools/testbed/omarchy-vm.sh package-install --confirm-guest-install
+# After graphical approval:
+tools/testbed/omarchy-vm.sh package-launch
+tools/testbed/omarchy-vm.sh package-stop
+```
+
+`package-build` refuses tracked or untracked package-input changes, transfers a
+Git bundle for exact `HEAD`, and builds inside an isolated guest package checkout.
+`package-install` requires the explicit confirmation argument, rejects shadowing
+clients, and preserves rollback copies before replacing an existing guest
+package. It never installs on the workstation. `package-launch` runs the exact
+Pacman-owned `/usr/bin/splinterm` and adjacent `/usr/bin/splinterd` with private
+guest socket, state, and config paths; `package-stop` removes only that isolated
+runtime. This is the trusted-UI path for packaged graphical acceptance.
+
+`bootstrap` installs Rust and the guest-only ydotool user service. Development
+launches never install a Splinterm binary or change Omarchy, Hyprland, terminal,
+or default-terminal configuration.
+
 ## Graphical test guardrails
 
 Graphical testing requires separate explicit approval for the complete bounded
@@ -247,22 +313,33 @@ to map, focus, move, resize, capture, or send input to a Window.
 
 Approved tests must:
 
-- use an isolated test Window on workspace 8 / DP-2 unless the user explicitly
-  names an existing active Window;
-- record the target address, PID, workspace, monitor, geometry, original focus,
-  cursor, scale, and transform before input;
-- target the exact fresh address and abort if identity, focus, placement, or
-  cleanup differs;
-- use private daemon/socket/state/config paths and development binaries;
-- run one guarded smoke before any approved matrix;
-- preserve unrelated Windows and user processes; and
-- restore focus, cursor, monitor state, an empty workspace 8, processes, and
-  private paths after every case.
+- use an isolated guest test Window on guest workspace 8 / `Virtual-1` unless
+  the user explicitly approves a host exception or names an existing guest
+  Window for the bounded sequence;
+- record the guest target address, PID, workspace, monitor, geometry, original
+  focus, cursor, scale, and transform before input;
+- target the exact fresh guest address and abort if identity, focus, placement,
+  or cleanup differs;
+- use private guest daemon/socket/state/config paths and development binaries,
+  or the runner's reviewed packaged-acceptance path when installed identity is
+  part of the test;
+- run one guarded guest smoke before any approved matrix;
+- preserve unrelated guest Windows and processes and every workstation Window;
+  and
+- restore guest focus, cursor, monitor state, workspace, processes, and private
+  paths, leaving the guest test workspace empty after every case.
 
-Do not close a user Window, terminate its shell/daemon, enter commands into it,
-or manipulate production topology unless that exact action was separately
-approved. A failed expensive or graphical command must be diagnosed before a
-bounded retry.
+Watching the QEMU viewer does not authorize focusing, moving, resizing, or
+sending host input to that Window. Prefer guest-native `input`; use bounded QMP
+input only as a fallback. Do not close a pre-existing guest Window, terminate its
+shell/daemon, enter commands into it, or manipulate production topology unless
+that exact action was separately approved. A failed expensive or graphical
+command must be diagnosed before a bounded retry.
+
+Host graphical testing requires a separately approved complete exception
+sequence. The request must identify the host target, permitted focus/input,
+smoke, matrix, and cleanup; existing workspace 8 / DP-2 no-focus isolation rules
+remain in force unless the user explicitly names an active host Window.
 
 ## Packaging and installation
 

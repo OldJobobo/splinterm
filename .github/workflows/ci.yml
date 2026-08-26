@@ -44,7 +44,7 @@ jobs:
       - name: Fetch the locked dependency graph
         run: cargo fetch --locked
       - run: cargo fmt --all --check
-      - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh
+      - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh tools/testbed/omarchy-vm.sh
       - run: cargo clippy --frozen --workspace --all-targets -- -D warnings
 
   workspace-tests:
@@ -182,6 +182,9 @@ jobs:
           set -o pipefail
           python -m unittest \
             tools/automation/test_dojo_picker.py \
+            tools/testbed/test_guest_window.py \
+            tools/testbed/test_omarchy_vm.py \
+            tools/testbed/test_qmp_input.py \
             tools/package/test_release_manifest.py \
             tools/package/test_installer_safety.py \
             tools/package/test_omarchy_screensaver_integration.py \
