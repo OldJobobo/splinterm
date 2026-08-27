@@ -52,6 +52,8 @@ const DESCRIPTOR_MANIFEST_VERSION: u16 = 1;
 const TEST_EXEC_NAME: &str =
     "handoff_preflight::tests::sealed_exec_authenticates_all_four_snapshots";
 #[cfg(test)]
+const TEST_CLEAN_STAGE: &str = "SPLINTERM_PREFLIGHT_TEST_CLEAN_STAGE";
+#[cfg(test)]
 const TEST_STAGE: &str = "SPLINTERM_PREFLIGHT_TEST_STAGE";
 #[cfg(test)]
 const TEST_ROLE: &str = "SPLINTERM_PREFLIGHT_TEST_ROLE";
@@ -765,8 +767,29 @@ mod tests {
         }
     }
 
+    fn clean_test_generation() {
+        let status = Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
+            )
+            .arg(std::env::current_exe().unwrap())
+            .arg(TEST_EXEC_NAME)
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(TEST_CLEAN_STAGE, "clean")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn sealed_exec_authenticates_all_four_snapshots() {
+        if std::env::var_os(TEST_CLEAN_STAGE).is_none() && std::env::var_os(TEST_STAGE).is_none() {
+            clean_test_generation();
+            return;
+        }
         match std::env::var(TEST_STAGE).as_deref() {
             Ok("launcher") => launch_sealed_target(),
             Ok("child") => {
