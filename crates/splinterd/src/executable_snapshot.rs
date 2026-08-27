@@ -5,7 +5,10 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
-        unix::{ffi::OsStrExt, fs::MetadataExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{FileExt, MetadataExt},
+        },
     },
     path::{Component, Path, PathBuf},
 };
@@ -144,6 +147,9 @@ pub struct HandoffExecutableSnapshots {
 impl HandoffExecutableSnapshots {
     /// Materializes complete forward and rollback daemon/client snapshot pairs.
     ///
+    /// The rollback pair is copied from caller-owned descriptors opened for the
+    /// running daemon and its adjacent client, so package-path replacement cannot
+    /// retarget either image.
     /// No partial authority escapes when any of the four sources fails.
     /// Compatibility preflight remains a separate coordinator step.
     ///
@@ -153,9 +159,18 @@ impl HandoffExecutableSnapshots {
     pub fn materialize(
         forward: &ExecutableSourcePair,
         rollback: &ExecutableSourcePair,
+        running_daemon: BorrowedFd<'_>,
+        running_client: BorrowedFd<'_>,
         policy: ExecutableSnapshotPolicy,
     ) -> Result<Self, ExecutableSnapshotError> {
-        materialize_with_hook(forward, rollback, policy, |_| Ok(()))
+        materialize_with_hook(
+            forward,
+            rollback,
+            running_daemon,
+            running_client,
+            policy,
+            |_| Ok(()),
+        )
     }
 
     #[must_use]
@@ -210,6 +225,8 @@ pub enum ExecutableSnapshotError {
 fn materialize_with_hook(
     forward: &ExecutableSourcePair,
     rollback: &ExecutableSourcePair,
+    running_daemon: BorrowedFd<'_>,
+    running_client: BorrowedFd<'_>,
     policy: ExecutableSnapshotPolicy,
     mut after_copy: impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<HandoffExecutableSnapshots, ExecutableSnapshotError> {
@@ -217,7 +234,13 @@ fn materialize_with_hook(
     validate_pair_paths(rollback)?;
 
     let forward = materialize_pair(forward, policy, &mut after_copy)?;
-    let rollback = materialize_pair(rollback, policy, &mut after_copy)?;
+    let rollback = materialize_running_pair(
+        rollback,
+        running_daemon,
+        running_client,
+        policy,
+        &mut after_copy,
+    )?;
     Ok(HandoffExecutableSnapshots { forward, rollback })
 }
 
@@ -231,14 +254,64 @@ fn materialize_pair(
     Ok(SealedExecutablePair { daemon, client })
 }
 
+fn materialize_running_pair(
+    pair: &ExecutableSourcePair,
+    running_daemon: BorrowedFd<'_>,
+    running_client: BorrowedFd<'_>,
+    policy: ExecutableSnapshotPolicy,
+    after_copy: &mut impl FnMut(&Path) -> io::Result<()>,
+) -> Result<SealedExecutablePair, ExecutableSnapshotError> {
+    let descriptor = rustix::io::dup(running_daemon)
+        .map_err(errno_error)
+        .map_err(|source| ExecutableSnapshotError::InspectSource {
+            path: pair.daemon.clone(),
+            source,
+        })?;
+    let descriptor = File::from(descriptor);
+    let daemon = materialize_open_source(
+        &pair.daemon,
+        "splinterd-daemon",
+        policy,
+        after_copy,
+        &descriptor,
+        false,
+    )?;
+    let descriptor = rustix::io::dup(running_client)
+        .map_err(errno_error)
+        .map_err(|source| ExecutableSnapshotError::InspectSource {
+            path: pair.client.clone(),
+            source,
+        })?;
+    let descriptor = File::from(descriptor);
+    let client = materialize_open_source(
+        &pair.client,
+        "splinterd-client",
+        policy,
+        after_copy,
+        &descriptor,
+        false,
+    )?;
+    Ok(SealedExecutablePair { daemon, client })
+}
+
 fn materialize_one(
     path: &Path,
     snapshot_name: &str,
     policy: ExecutableSnapshotPolicy,
     after_copy: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<SealedExecutableSnapshot, ExecutableSnapshotError> {
-    let descriptor = open_source(path)?;
-    let mut source = File::from(descriptor);
+    let descriptor = File::from(open_source(path)?);
+    materialize_open_source(path, snapshot_name, policy, after_copy, &descriptor, true)
+}
+
+fn materialize_open_source(
+    path: &Path,
+    snapshot_name: &str,
+    policy: ExecutableSnapshotPolicy,
+    after_copy: &mut impl FnMut(&Path) -> io::Result<()>,
+    source: &File,
+    revalidate_path: bool,
+) -> Result<SealedExecutableSnapshot, ExecutableSnapshotError> {
     let metadata_before =
         source
             .metadata()
@@ -254,7 +327,7 @@ fn materialize_one(
     )
     .map_err(errno_error)
     .map_err(ExecutableSnapshotError::CreateSnapshot)?;
-    let source_digest = copy_and_hash(path, &mut source, &snapshot, metadata_before.len())?;
+    let source_digest = copy_and_hash(path, source, &snapshot, metadata_before.len())?;
     after_copy(path).map_err(|_| ExecutableSnapshotError::SourceChanged(path.to_path_buf()))?;
 
     let metadata_after =
@@ -267,13 +340,15 @@ fn materialize_one(
     if metadata_fingerprint(&metadata_before) != metadata_fingerprint(&metadata_after) {
         return Err(ExecutableSnapshotError::SourceChanged(path.to_path_buf()));
     }
-    let reopened = open_source(path)
-        .map_err(|_| ExecutableSnapshotError::SourceChanged(path.to_path_buf()))?;
-    let reopened_metadata = File::from(reopened)
-        .metadata()
-        .map_err(|_| ExecutableSnapshotError::SourceChanged(path.to_path_buf()))?;
-    if metadata_fingerprint(&metadata_after) != metadata_fingerprint(&reopened_metadata) {
-        return Err(ExecutableSnapshotError::SourceChanged(path.to_path_buf()));
+    if revalidate_path {
+        let reopened = open_source(path)
+            .map_err(|_| ExecutableSnapshotError::SourceChanged(path.to_path_buf()))?;
+        let reopened_metadata = File::from(reopened)
+            .metadata()
+            .map_err(|_| ExecutableSnapshotError::SourceChanged(path.to_path_buf()))?;
+        if metadata_fingerprint(&metadata_after) != metadata_fingerprint(&reopened_metadata) {
+            return Err(ExecutableSnapshotError::SourceChanged(path.to_path_buf()));
+        }
     }
 
     let snapshot_digest = hash_descriptor(&snapshot, metadata_before.len())?;
@@ -383,27 +458,20 @@ fn validate_source(
 
 fn copy_and_hash(
     path: &Path,
-    source: &mut File,
+    source: &File,
     snapshot: &OwnedFd,
     expected_size: u64,
 ) -> Result<[u8; 32], ExecutableSnapshotError> {
-    source
-        .seek(SeekFrom::Start(0))
-        .map_err(|source| ExecutableSnapshotError::CopySource {
-            path: path.to_path_buf(),
-            source,
-        })?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES].into_boxed_slice();
     let mut total = 0_u64;
     loop {
-        let count =
-            source
-                .read(&mut buffer)
-                .map_err(|source| ExecutableSnapshotError::CopySource {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+        let count = source.read_at(&mut buffer, total).map_err(|source| {
+            ExecutableSnapshotError::CopySource {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
         if count == 0 {
             break;
         }
@@ -567,13 +635,28 @@ mod tests {
         bytes
     }
 
+    fn materialize(
+        forward: &ExecutableSourcePair,
+        rollback: &ExecutableSourcePair,
+        policy: ExecutableSnapshotPolicy,
+    ) -> Result<HandoffExecutableSnapshots, ExecutableSnapshotError> {
+        let running_daemon = open_source(rollback.daemon()).unwrap();
+        let running_client = open_source(rollback.client()).unwrap();
+        HandoffExecutableSnapshots::materialize(
+            forward,
+            rollback,
+            running_daemon.as_fd(),
+            running_client.as_fd(),
+            policy,
+        )
+    }
+
     #[test]
     fn materializes_four_distinct_complete_snapshot_identities() {
         let directory = TestDirectory::new();
         let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
         let rollback = directory.pair("rollback", b"rollback-daemon", b"rollback-client");
-        let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).unwrap();
+        let snapshots = materialize(&forward, &rollback, policy()).unwrap();
         let all = [
             snapshots.forward().daemon(),
             snapshots.forward().client(),
@@ -606,8 +689,7 @@ mod tests {
         let directory = TestDirectory::new();
         let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
         let rollback = directory.pair("rollback", b"rollback-daemon", b"rollback-client");
-        let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).unwrap();
+        let snapshots = materialize(&forward, &rollback, policy()).unwrap();
         fs::write(forward.daemon(), b"changed").unwrap();
         fs::remove_file(forward.client()).unwrap();
         assert_eq!(
@@ -621,6 +703,61 @@ mod tests {
     }
 
     #[test]
+    fn rollback_pair_is_bound_to_running_descriptors_not_replaced_paths() {
+        let directory = TestDirectory::new();
+        let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
+        let rollback = directory.pair("rollback", b"running-daemon", b"rollback-client");
+        let mut running_daemon = File::from(open_source(rollback.daemon()).unwrap());
+        let mut running_client = File::from(open_source(rollback.client()).unwrap());
+        running_daemon.seek(SeekFrom::Start(3)).unwrap();
+        running_client.seek(SeekFrom::Start(4)).unwrap();
+        let running_stat = fstat(&running_daemon).unwrap();
+        let client_stat = fstat(&running_client).unwrap();
+
+        let displaced_daemon = rollback.daemon().with_file_name("old-splinterd");
+        fs::rename(rollback.daemon(), displaced_daemon).unwrap();
+        write_executable(rollback.daemon(), b"incoming-daemon");
+        let displaced_client = rollback.client().with_file_name("old-splinterm");
+        fs::rename(rollback.client(), displaced_client).unwrap();
+        write_executable(rollback.client(), b"incoming-client");
+
+        let snapshots = HandoffExecutableSnapshots::materialize(
+            &forward,
+            &rollback,
+            running_daemon.as_fd(),
+            running_client.as_fd(),
+            policy(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot_bytes(snapshots.rollback().daemon()),
+            b"running-daemon"
+        );
+        assert_eq!(
+            snapshot_bytes(snapshots.rollback().client()),
+            b"rollback-client"
+        );
+        assert_eq!(running_daemon.stream_position().unwrap(), 3);
+        assert_eq!(running_client.stream_position().unwrap(), 4);
+        assert_eq!(
+            snapshots.rollback().daemon().source().inode,
+            running_stat.st_ino
+        );
+        assert_ne!(
+            snapshots.rollback().daemon().source().inode,
+            fs::metadata(rollback.daemon()).unwrap().ino()
+        );
+        assert_eq!(
+            snapshots.rollback().client().source().inode,
+            client_stat.st_ino
+        );
+        assert_ne!(
+            snapshots.rollback().client().source().inode,
+            fs::metadata(rollback.client()).unwrap().ino()
+        );
+    }
+
+    #[test]
     fn rejects_invalid_pair_paths_authority_and_bounds() {
         let directory = TestDirectory::new();
         let forward = directory.pair("forward", b"daemon", b"client");
@@ -630,10 +767,10 @@ mod tests {
         assert!(ExecutableSourcePair::new("splinterd", "splinterm").is_err());
 
         fs::set_permissions(forward.daemon(), fs::Permissions::from_mode(0o775)).unwrap();
-        assert!(HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).is_err());
+        assert!(materialize(&forward, &rollback, policy()).is_err());
         fs::set_permissions(forward.daemon(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
-            HandoffExecutableSnapshots::materialize(
+            materialize(
                 &forward,
                 &rollback,
                 ExecutableSnapshotPolicy {
@@ -644,13 +781,13 @@ mod tests {
         );
 
         fs::write(forward.daemon(), []).unwrap();
-        assert!(HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).is_err());
+        assert!(materialize(&forward, &rollback, policy()).is_err());
         let file = OpenOptions::new()
             .write(true)
             .open(forward.daemon())
             .unwrap();
         file.set_len(MAX_EXECUTABLE_SNAPSHOT_BYTES + 1).unwrap();
-        assert!(HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).is_err());
+        assert!(materialize(&forward, &rollback, policy()).is_err());
     }
 
     #[test]
@@ -663,13 +800,13 @@ mod tests {
         let real = forward.daemon().with_file_name("real-daemon");
         fs::rename(forward.daemon(), &real).unwrap();
         symlink(&real, forward.daemon()).unwrap();
-        assert!(HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).is_err());
+        assert!(materialize(&forward, &rollback, policy()).is_err());
 
         let link = directory.0.join("linked-parent");
         symlink(forward.daemon().parent().unwrap(), &link).unwrap();
         let linked =
             ExecutableSourcePair::new(link.join("splinterd"), link.join("splinterm")).unwrap();
-        assert!(HandoffExecutableSnapshots::materialize(&linked, &rollback, policy()).is_err());
+        assert!(materialize(&linked, &rollback, policy()).is_err());
     }
 
     #[test]
@@ -680,7 +817,7 @@ mod tests {
         fs::set_permissions(rollback.client(), fs::Permissions::from_mode(0o644)).unwrap();
         let before = fs::read_dir("/proc/self/fd").unwrap().count();
 
-        assert!(HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()).is_err());
+        assert!(materialize(&forward, &rollback, policy()).is_err());
 
         let after = fs::read_dir("/proc/self/fd").unwrap().count();
         assert_eq!(after, before);
@@ -693,25 +830,35 @@ mod tests {
             let forward = directory.pair("forward", b"daemon", b"client");
             let rollback = directory.pair("rollback", b"daemon", b"client");
             let target = forward.daemon().to_path_buf();
-            let result = materialize_with_hook(&forward, &rollback, policy(), |path| {
-                if path != target {
-                    return Ok(());
-                }
-                match mutation {
-                    "replace" => {
-                        let displaced = path.with_file_name("old-daemon");
-                        fs::rename(path, displaced)?;
-                        write_executable(path, b"replacement");
+            let running_daemon = open_source(rollback.daemon()).unwrap();
+            let running_client = open_source(rollback.client()).unwrap();
+            let result = materialize_with_hook(
+                &forward,
+                &rollback,
+                running_daemon.as_fd(),
+                running_client.as_fd(),
+                policy(),
+                |path| {
+                    if path != target {
+                        return Ok(());
                     }
-                    "delete" => fs::remove_file(path)?,
-                    "rewrite" => {
-                        let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
-                        file.write_all(b"change")?;
+                    match mutation {
+                        "replace" => {
+                            let displaced = path.with_file_name("old-daemon");
+                            fs::rename(path, displaced)?;
+                            write_executable(path, b"replacement");
+                        }
+                        "delete" => fs::remove_file(path)?,
+                        "rewrite" => {
+                            let mut file =
+                                OpenOptions::new().write(true).truncate(true).open(path)?;
+                            file.write_all(b"change")?;
+                        }
+                        _ => unreachable!(),
                     }
-                    _ => unreachable!(),
-                }
-                Ok(())
-            });
+                    Ok(())
+                },
+            );
             assert!(matches!(
                 result,
                 Err(ExecutableSnapshotError::SourceChanged(_))
