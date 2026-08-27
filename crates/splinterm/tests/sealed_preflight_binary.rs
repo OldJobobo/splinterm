@@ -5,6 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const CLEAN_STAGE: &str = "SPLINTERM_PREFLIGHT_BINARY_TEST_CLEAN_STAGE";
+const TEST_NAME: &str = "actual_splinterm_entrypoint_runs_sealed_preflight_before_runtime";
+
 use splinterd::{
     executable_snapshot::{
         ExecutableSnapshotPolicy, ExecutableSourcePair, HandoffExecutableSnapshots,
@@ -63,8 +66,29 @@ fn pair(root: &Path, generation: &str, executable: &Path) -> ExecutableSourcePai
     ExecutableSourcePair::new(daemon, client).unwrap()
 }
 
+fn run_clean_test_generation() {
+    let status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
+        )
+        .arg(std::env::current_exe().unwrap())
+        .arg(TEST_NAME)
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CLEAN_STAGE, "clean")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 #[test]
 fn actual_splinterm_entrypoint_runs_sealed_preflight_before_runtime() {
+    if std::env::var_os(CLEAN_STAGE).is_none() {
+        run_clean_test_generation();
+        return;
+    }
     let executable = Path::new(env!("CARGO_BIN_EXE_splinterm"));
     let fixture = Fixture::new(executable);
     preflight_sealed_snapshot_for_integration_test(

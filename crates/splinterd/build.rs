@@ -34,7 +34,13 @@ fn main() {
     .into_iter()
     .flatten()
     {
-        println!("cargo:rerun-if-changed={git_path}");
+        let git_path = PathBuf::from(git_path);
+        let git_path = if git_path.is_absolute() {
+            git_path
+        } else {
+            workspace.join(git_path)
+        };
+        println!("cargo:rerun-if-changed={}", git_path.display());
     }
     let declared = env::var("SPLINTERM_BUILD_COMMIT")
         .ok()
