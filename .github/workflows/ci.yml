@@ -94,6 +94,8 @@ jobs:
         run: |
           set -o pipefail
           {
+            cargo test --frozen -p splinterd \
+              --test handoff_descriptors_exec -- --test-threads=1
             cargo test --frozen -p splinterm-pty \
               --test linux_pty --test pty_adoption_exec -- --test-threads=1
             cargo test --frozen -p splinterm-relay --test stdio -- --test-threads=1
