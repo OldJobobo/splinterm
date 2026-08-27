@@ -251,13 +251,19 @@ impl ServerLimits {
     /// uses any advertised dimensions or frame budget.
     ///
     /// # Errors
-    /// Returns `InvalidArgument` when the fixed frame limit or endpoint-local
-    /// grid bounds are outside the protocol's absolute envelope.
+    /// Returns `InvalidArgument` when the fixed frame limit, input limit, or
+    /// endpoint-local grid bounds are outside the protocol's absolute envelope.
     pub fn validate_terminal_transport(self) -> Result<(), ProtocolError> {
         if self.maximum_frame_bytes != MAX_FRAME_BYTES {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "server frame limit does not match the protocol version",
+            ));
+        }
+        if !(1..=MAX_INPUT_BYTES).contains(&self.maximum_input_bytes) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "server input limit is outside the protocol envelope",
             ));
         }
         if !(2..=MAX_COLUMNS).contains(&self.maximum_columns)
@@ -3655,6 +3661,14 @@ mod tests {
             },
             ServerLimits {
                 maximum_frame_bytes: MAX_FRAME_BYTES + 1,
+                ..limits
+            },
+            ServerLimits {
+                maximum_input_bytes: 0,
+                ..limits
+            },
+            ServerLimits {
+                maximum_input_bytes: MAX_INPUT_BYTES + 1,
                 ..limits
             },
             ServerLimits {

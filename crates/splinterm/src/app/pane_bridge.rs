@@ -3,6 +3,8 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+#[cfg(test)]
+use splinterm::automation::response_protocol_error;
 use splinterm::automation::{
     Connection, ImageContentLeaseSet, SharedImageContentCache, protocol_error,
 };
@@ -370,6 +372,31 @@ pub(in crate::app) async fn wait_for_resize_deadline(deadline: Option<tokio::tim
     }
 }
 
+fn input_requests(
+    controller_id: u64,
+    splint_id: SplintId,
+    incarnation: u64,
+    bytes: &[u8],
+    maximum_input_bytes: usize,
+) -> Result<Vec<Request>> {
+    if maximum_input_bytes == 0 {
+        bail!("splinterd advertised a zero terminal input limit");
+    }
+    Ok(bytes
+        .chunks(maximum_input_bytes)
+        .map(|chunk| Request::Input {
+            controller_id,
+            splint_id,
+            incarnation,
+            bytes: chunk.to_vec(),
+        })
+        .collect())
+}
+
+fn recoverable_input_error(error: &anyhow::Error) -> bool {
+    protocol_error(error).is_some_and(|error| error.code == ErrorCode::ResourceLimit)
+}
+
 pub(in crate::app) fn terminal_action_matches(
     response: &Response,
     splint_id: SplintId,
@@ -716,12 +743,30 @@ pub(in crate::app) async fn run_controller(
                     else {
                         continue;
                     };
-                    Request::Input {
+                    let maximum_input_bytes = control.limits().maximum_input_bytes;
+                    for request in input_requests(
                         controller_id,
                         splint_id,
                         incarnation,
-                        bytes,
+                        &bytes,
+                        maximum_input_bytes,
+                    )? {
+                        match control.request(request).await {
+                            Ok(response)
+                                if terminal_action_matches(&response, splint_id, incarnation) => {}
+                            Ok(_) => {
+                                bail!("splinterd did not acknowledge a window input command");
+                            }
+                            Err(error) if recoverable_input_error(&error) => {
+                                eprintln!(
+                                    "splinterm input queue saturated; dropping remaining terminal input"
+                                );
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
+                    continue;
                 }
                 WindowCommand::Resynchronize => {
                     if outputs.resyncs.send(()).await.is_err() {
@@ -1369,6 +1414,50 @@ mod tests {
         });
         assert_eq!(limits.maximum_columns, 120);
         assert_eq!(limits.maximum_rows, 64);
+    }
+
+    #[test]
+    fn terminal_input_is_chunked_to_the_negotiated_server_limit() {
+        let splint_id = SplintId::new();
+        let bytes = vec![7; 17];
+        let requests = input_requests(3, splint_id, 9, &bytes, 8).unwrap();
+
+        assert_eq!(requests.len(), 3);
+        let chunks = requests
+            .into_iter()
+            .map(|request| match request {
+                Request::Input {
+                    controller_id,
+                    splint_id: request_splint_id,
+                    incarnation,
+                    bytes,
+                } => {
+                    assert_eq!(controller_id, 3);
+                    assert_eq!(request_splint_id, splint_id);
+                    assert_eq!(incarnation, 9);
+                    bytes
+                }
+                _ => panic!("expected an input request"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [8, 8, 1]);
+        assert_eq!(chunks.concat(), bytes);
+        assert!(input_requests(3, splint_id, 9, &bytes, 0).is_err());
+    }
+
+    #[test]
+    fn input_resource_saturation_is_recoverable() {
+        let error = response_protocol_error(splinterm_protocol::ProtocolError::new(
+            ErrorCode::ResourceLimit,
+            "input queue limit exceeded",
+        ));
+        assert!(recoverable_input_error(&error));
+
+        let error = response_protocol_error(splinterm_protocol::ProtocolError::new(
+            ErrorCode::Internal,
+            "operation failed",
+        ));
+        assert!(!recoverable_input_error(&error));
     }
 
     #[test]

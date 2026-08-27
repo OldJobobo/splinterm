@@ -237,7 +237,8 @@ const SCALE_DENOMINATOR: u32 = 120;
 const MIN_SCALE_120: u32 = 120;
 const MAX_SCALE_120: u32 = 960;
 const MAX_PREEDIT_BYTES: usize = 4 * 1024;
-const MAX_PENDING_TERMINAL_INPUT_BYTES: usize = splinterm_protocol::MAX_INPUT_BYTES;
+const MAX_PENDING_TERMINAL_INPUT_BYTES: usize =
+    clipboard::MAX_CLIPBOARD_BYTES + clipboard::BRACKETED_PASTE_OVERHEAD;
 const PENDING_INPUT_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const SIGNOFF_TICK_INTERVAL: Duration = Duration::from_millis(50);
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);

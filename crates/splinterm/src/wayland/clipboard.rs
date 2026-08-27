@@ -20,7 +20,8 @@ use super::{
 };
 
 pub(super) const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
-const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+pub(super) const BRACKETED_PASTE_OVERHEAD: usize = 12;
 const MAX_CLIPBOARD_WORKERS: usize = 4;
 pub(super) const CLIPBOARD_IO_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
@@ -66,7 +67,7 @@ pub fn encode_bracketed_paste(bytes: &[u8], enabled: bool) -> Vec<u8> {
     if !enabled {
         return bytes.to_vec();
     }
-    let mut encoded = Vec::with_capacity(bytes.len() + 12);
+    let mut encoded = Vec::with_capacity(bytes.len() + BRACKETED_PASTE_OVERHEAD);
     encoded.extend_from_slice(b"\x1b[200~");
     encoded.extend_from_slice(bytes);
     encoded.extend_from_slice(b"\x1b[201~");
