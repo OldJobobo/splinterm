@@ -140,6 +140,35 @@ impl SealedExecutablePair {
     }
 }
 
+/// Open authority for the running daemon/client generation retained before
+/// package replacement is allowed to begin.
+#[derive(Debug)]
+pub struct RetainedRollbackExecutables {
+    source: ExecutableSourcePair,
+    daemon: OwnedFd,
+    client: OwnedFd,
+}
+
+impl RetainedRollbackExecutables {
+    /// Captures the installed pair while the caller excludes package replacement.
+    ///
+    /// The daemon is opened through `/proc/self/exe` and must still identify the
+    /// declared installed daemon. Keeping this opaque authority across replacement
+    /// prevents later path lookup from mixing generations or substituting fds.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid paths, authority, source identity, or a daemon other than
+    /// the executable running this process.
+    pub fn capture(
+        source: &ExecutableSourcePair,
+        policy: ExecutableSnapshotPolicy,
+    ) -> Result<Self, ExecutableSnapshotError> {
+        let daemon = open_running_executable()?;
+        capture_rollback_executables(source, daemon, policy)
+    }
+}
+
 #[derive(Debug)]
 pub struct HandoffExecutableSnapshots {
     forward: SealedExecutablePair,
@@ -149,10 +178,9 @@ pub struct HandoffExecutableSnapshots {
 impl HandoffExecutableSnapshots {
     /// Materializes complete forward and rollback daemon/client snapshot pairs.
     ///
-    /// The rollback daemon is copied from `/proc/self/exe` after proving that it
-    /// matches the declared installed daemon. The adjacent client is opened here
-    /// before either image is copied, so callers cannot substitute descriptors and
-    /// later package-path replacement cannot retarget either retained image.
+    /// Rollback authority must have been retained before package replacement was
+    /// allowed to begin. Both rollback images are copied from that opaque retained
+    /// pair, so later package-path replacement cannot retarget either image.
     /// No partial authority escapes when any of the four sources fails.
     /// Compatibility preflight remains a separate coordinator step.
     ///
@@ -161,24 +189,14 @@ impl HandoffExecutableSnapshots {
     /// Rejects invalid source identity, mutation, copy, digest, descriptor, or seal state.
     pub fn materialize(
         forward: &ExecutableSourcePair,
-        rollback: &ExecutableSourcePair,
+        rollback: &RetainedRollbackExecutables,
         policy: ExecutableSnapshotPolicy,
     ) -> Result<Self, ExecutableSnapshotError> {
-        validate_pair_paths(forward)?;
-        validate_pair_paths(rollback)?;
-        let running_daemon = open_running_executable()?;
-        let installed_daemon = open_source(rollback.daemon())?;
-        if descriptor_fingerprint(&running_daemon, rollback.daemon())?
-            != descriptor_fingerprint(&installed_daemon, rollback.daemon())?
-        {
-            return Err(ExecutableSnapshotError::RunningExecutableMismatch);
-        }
-        let running_client = open_source(rollback.client())?;
         materialize_with_hook(
             forward,
-            rollback,
-            running_daemon.as_fd(),
-            running_client.as_fd(),
+            &rollback.source,
+            rollback.daemon.as_fd(),
+            rollback.client.as_fd(),
             policy,
             |_| Ok(()),
         )
@@ -434,6 +452,47 @@ fn validate_path(path: &Path) -> Result<(), ExecutableSnapshotError> {
     Ok(())
 }
 
+fn capture_rollback_executables(
+    source: &ExecutableSourcePair,
+    daemon: OwnedFd,
+    policy: ExecutableSnapshotPolicy,
+) -> Result<RetainedRollbackExecutables, ExecutableSnapshotError> {
+    validate_pair_paths(source)?;
+    let installed_daemon = open_source(source.daemon())?;
+    if descriptor_fingerprint(&daemon, source.daemon())?
+        != descriptor_fingerprint(&installed_daemon, source.daemon())?
+    {
+        return Err(ExecutableSnapshotError::RunningExecutableMismatch);
+    }
+    let client = open_source(source.client())?;
+    validate_descriptor(source.daemon(), &daemon, policy)?;
+    validate_descriptor(source.client(), &client, policy)?;
+    Ok(RetainedRollbackExecutables {
+        source: source.clone(),
+        daemon,
+        client,
+    })
+}
+
+fn validate_descriptor(
+    path: &Path,
+    descriptor: &OwnedFd,
+    policy: ExecutableSnapshotPolicy,
+) -> Result<(), ExecutableSnapshotError> {
+    let metadata = File::from(rustix::io::dup(descriptor).map_err(errno_error).map_err(
+        |source| ExecutableSnapshotError::InspectSource {
+            path: path.to_path_buf(),
+            source,
+        },
+    )?)
+    .metadata()
+    .map_err(|source| ExecutableSnapshotError::InspectSource {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    validate_source(path, &metadata, policy)
+}
+
 fn open_running_executable() -> Result<OwnedFd, ExecutableSnapshotError> {
     rustix::fs::open(
         RUNNING_EXECUTABLE_PATH,
@@ -679,21 +738,30 @@ mod tests {
         bytes
     }
 
+    fn descriptors_under(path: &Path) -> usize {
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|target| target.starts_with(path))
+            .count()
+    }
+
+    fn retain(
+        rollback: &ExecutableSourcePair,
+        policy: ExecutableSnapshotPolicy,
+    ) -> Result<RetainedRollbackExecutables, ExecutableSnapshotError> {
+        let running_daemon = open_source(rollback.daemon())?;
+        capture_rollback_executables(rollback, running_daemon, policy)
+    }
+
     fn materialize(
         forward: &ExecutableSourcePair,
         rollback: &ExecutableSourcePair,
         policy: ExecutableSnapshotPolicy,
     ) -> Result<HandoffExecutableSnapshots, ExecutableSnapshotError> {
-        let running_daemon = open_source(rollback.daemon()).unwrap();
-        let running_client = open_source(rollback.client()).unwrap();
-        materialize_with_hook(
-            forward,
-            rollback,
-            running_daemon.as_fd(),
-            running_client.as_fd(),
-            policy,
-            |_| Ok(()),
-        )
+        let rollback = retain(rollback, policy)?;
+        HandoffExecutableSnapshots::materialize(forward, &rollback, policy)
     }
 
     #[test]
@@ -748,13 +816,12 @@ mod tests {
     }
 
     #[test]
-    fn production_materialization_rejects_a_declared_daemon_that_is_not_running() {
+    fn production_capture_rejects_a_declared_daemon_that_is_not_running() {
         let directory = TestDirectory::new();
-        let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
         let rollback = directory.pair("rollback", b"not-running", b"rollback-client");
 
         assert!(matches!(
-            HandoffExecutableSnapshots::materialize(&forward, &rollback, policy()),
+            RetainedRollbackExecutables::capture(&rollback, policy()),
             Err(ExecutableSnapshotError::RunningExecutableMismatch)
         ));
     }
@@ -764,12 +831,13 @@ mod tests {
         let directory = TestDirectory::new();
         let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
         let rollback = directory.pair("rollback", b"running-daemon", b"rollback-client");
-        let mut running_daemon = File::from(open_source(rollback.daemon()).unwrap());
-        let mut running_client = File::from(open_source(rollback.client()).unwrap());
+        let retained = retain(&rollback, policy()).unwrap();
+        let mut running_daemon = File::from(rustix::io::dup(&retained.daemon).unwrap());
+        let mut running_client = File::from(rustix::io::dup(&retained.client).unwrap());
         running_daemon.seek(SeekFrom::Start(3)).unwrap();
         running_client.seek(SeekFrom::Start(4)).unwrap();
-        let running_stat = fstat(&running_daemon).unwrap();
-        let client_stat = fstat(&running_client).unwrap();
+        let running_stat = fstat(&retained.daemon).unwrap();
+        let client_stat = fstat(&retained.client).unwrap();
 
         let displaced_daemon = rollback.daemon().with_file_name("old-splinterd");
         fs::rename(rollback.daemon(), displaced_daemon).unwrap();
@@ -778,15 +846,8 @@ mod tests {
         fs::rename(rollback.client(), displaced_client).unwrap();
         write_executable(rollback.client(), b"incoming-client");
 
-        let snapshots = materialize_with_hook(
-            &forward,
-            &rollback,
-            running_daemon.as_fd(),
-            running_client.as_fd(),
-            policy(),
-            |_| Ok(()),
-        )
-        .unwrap();
+        let snapshots =
+            HandoffExecutableSnapshots::materialize(&forward, &retained, policy()).unwrap();
         assert_eq!(
             snapshot_bytes(snapshots.rollback().daemon()),
             b"running-daemon"
@@ -873,12 +934,9 @@ mod tests {
         let forward = directory.pair("forward", b"daemon", b"client");
         let rollback = directory.pair("rollback", b"daemon", b"client");
         fs::set_permissions(rollback.client(), fs::Permissions::from_mode(0o644)).unwrap();
-        let before = fs::read_dir("/proc/self/fd").unwrap().count();
-
+        assert_eq!(descriptors_under(&directory.0), 0);
         assert!(materialize(&forward, &rollback, policy()).is_err());
-
-        let after = fs::read_dir("/proc/self/fd").unwrap().count();
-        assert_eq!(after, before);
+        assert_eq!(descriptors_under(&directory.0), 0);
     }
 
     #[test]
