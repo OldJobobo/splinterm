@@ -12,9 +12,11 @@ integration-test = []
 
 [dependencies]
 anyhow.workspace = true
+libc.workspace = true
 nix = { workspace = true, features = ["fs", "process", "uio"] }
 serde.workspace = true
 serde_json.workspace = true
+seccompiler.workspace = true
 sha2.workspace = true
 splinterm-core = { path = "../splinterm-core" }
 splinterm-filemap = { path = "../splinterm-filemap" }
