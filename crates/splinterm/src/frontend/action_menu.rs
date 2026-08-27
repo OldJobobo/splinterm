@@ -926,6 +926,15 @@ pub(crate) struct BuiltInCommandDescriptor {
     shortcut_action: Option<ActionId>,
 }
 
+pub(crate) fn action_search_metadata(
+    action: ActionId,
+) -> Option<(&'static str, &'static [&'static str])> {
+    BUILT_IN_COMMANDS
+        .iter()
+        .find(|descriptor| descriptor.shortcut_action == Some(action))
+        .map(|descriptor| (descriptor.title, descriptor.keywords))
+}
+
 impl BuiltInCommandDescriptor {
     pub(crate) fn shortcut(self, keymap: &ResolvedKeymap) -> &str {
         self.shortcut_action
