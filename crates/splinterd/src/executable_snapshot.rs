@@ -401,6 +401,11 @@ fn materialize_open_source(
     {
         return Err(ExecutableSnapshotError::SnapshotMismatch);
     }
+    let snapshot_len = usize::try_from(snapshot_size).map_err(|error| {
+        ExecutableSnapshotError::VerifySnapshot(io::Error::new(io::ErrorKind::InvalidData, error))
+    })?;
+    splinterm_filemap::verify_writable_shared_mapping_rejected(snapshot.as_fd(), snapshot_len)
+        .map_err(ExecutableSnapshotError::VerifySnapshot)?;
 
     Ok(SealedExecutableSnapshot {
         source: ExecutableSourceIdentity {
