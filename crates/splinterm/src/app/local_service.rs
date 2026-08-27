@@ -78,12 +78,12 @@ pub(in crate::app) fn run_relay_command(stdio: bool, graphical_stdio: bool) -> R
 pub(in crate::app) fn run_policy_command(command: PolicyCommand) -> Result<()> {
     match command {
         PolicyCommand::Validate { path } => {
-            let (rule_count, _) = splinterd::inspect_policy_file(&path)
+            let (rule_count, _) = splinterm_policy::inspect_policy_file(&path)
                 .with_context(|| format!("policy validation failed for {}", path.display()))?;
             println!("valid splinterm.policy.v2 policy ({rule_count} rules)");
         }
         PolicyCommand::Inspect { path } => {
-            let (_, document) = splinterd::inspect_policy_file(&path)
+            let (_, document) = splinterm_policy::inspect_policy_file(&path)
                 .with_context(|| format!("policy inspection failed for {}", path.display()))?;
             serde_json::to_writer_pretty(io::stdout().lock(), &document)
                 .context("failed to write validated policy")?;

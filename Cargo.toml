@@ -13,6 +13,7 @@ members = [
     "crates/splinterm-pixman",
     "crates/splinterm-filemap",
     "crates/splinterm-mcp",
+    "crates/splinterm-policy",
 ]
 resolver = "3"
 
