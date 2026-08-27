@@ -378,9 +378,11 @@ fn input_requests(
     incarnation: u64,
     bytes: &[u8],
     maximum_input_bytes: usize,
-) -> Vec<Request> {
-    debug_assert!(maximum_input_bytes > 0);
-    bytes
+) -> Result<Vec<Request>> {
+    if maximum_input_bytes == 0 {
+        bail!("splinterd advertised a zero terminal input limit");
+    }
+    Ok(bytes
         .chunks(maximum_input_bytes)
         .map(|chunk| Request::Input {
             controller_id,
@@ -388,7 +390,7 @@ fn input_requests(
             incarnation,
             bytes: chunk.to_vec(),
         })
-        .collect()
+        .collect())
 }
 
 fn recoverable_input_error(error: &anyhow::Error) -> bool {
@@ -748,7 +750,7 @@ pub(in crate::app) async fn run_controller(
                         incarnation,
                         &bytes,
                         maximum_input_bytes,
-                    ) {
+                    )? {
                         match control.request(request).await {
                             Ok(response)
                                 if terminal_action_matches(&response, splint_id, incarnation) => {}
@@ -1418,7 +1420,7 @@ mod tests {
     fn terminal_input_is_chunked_to_the_negotiated_server_limit() {
         let splint_id = SplintId::new();
         let bytes = vec![7; 17];
-        let requests = input_requests(3, splint_id, 9, &bytes, 8);
+        let requests = input_requests(3, splint_id, 9, &bytes, 8).unwrap();
 
         assert_eq!(requests.len(), 3);
         let chunks = requests
@@ -1440,6 +1442,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [8, 8, 1]);
         assert_eq!(chunks.concat(), bytes);
+        assert!(input_requests(3, splint_id, 9, &bytes, 0).is_err());
     }
 
     #[test]

@@ -2402,6 +2402,13 @@ impl Default for LiveSplintConfig {
     }
 }
 
+impl LiveSplintConfig {
+    #[must_use]
+    pub fn maximum_input_message_bytes(&self) -> usize {
+        self.input_byte_limit / self.command_capacity.max(1)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum LiveError {
     #[error(transparent)]
@@ -3378,7 +3385,7 @@ impl LiveSplintRuntime {
             commands: sender,
             default_snapshot_rows: config.max_scrollback_snapshot_rows,
             default_subscriber_capacity: config.subscriber_capacity,
-            max_input_message_bytes: config.input_byte_limit / config.command_capacity.max(1),
+            max_input_message_bytes: config.maximum_input_message_bytes(),
             metrics: Arc::clone(&metrics),
             exit,
         };

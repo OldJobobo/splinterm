@@ -1710,7 +1710,7 @@ async fn serve_authenticated(
         control,
         ServerFrame::Hello {
             version: PROTOCOL_VERSION,
-            limits: ServerLimits::default(),
+            limits: server_limits(),
             development_terminal_access: state.development_terminal_access,
         },
     )
@@ -7805,6 +7805,12 @@ fn encode_search_cursor(offset: usize) -> String {
 fn internal() -> ProtocolError {
     ProtocolError::new(ErrorCode::Internal, "operation failed")
 }
+fn server_limits() -> ServerLimits {
+    ServerLimits {
+        maximum_input_bytes: LiveSplintConfig::default().maximum_input_message_bytes(),
+        ..ServerLimits::default()
+    }
+}
 fn input_error(error: &LiveError) -> ProtocolError {
     match error {
         LiveError::InputQueueFull => {
@@ -8351,6 +8357,19 @@ mod tests {
         assert_eq!(error.message, "input queue limit exceeded");
 
         assert_eq!(input_error(&LiveError::Closed).code, ErrorCode::Internal);
+    }
+
+    #[test]
+    fn advertised_input_limit_matches_live_actor_admission() {
+        let config = LiveSplintConfig::default();
+        let limits = server_limits();
+
+        assert_eq!(limits.maximum_input_bytes, 16 * 1024);
+        assert_eq!(
+            limits.maximum_input_bytes,
+            config.maximum_input_message_bytes()
+        );
+        limits.validate_terminal_transport().unwrap();
     }
 
     #[test]
