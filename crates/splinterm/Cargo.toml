@@ -34,6 +34,7 @@ wayland-protocols.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true
+splinterd = { path = "../splinterd", features = ["integration-test"] }
 
 [lints]
 workspace = true

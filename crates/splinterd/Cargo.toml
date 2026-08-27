@@ -7,9 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+integration-test = []
+
 [dependencies]
 anyhow.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["fs", "process", "uio"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
