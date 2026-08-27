@@ -2453,8 +2453,6 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
 async fn sigterm_shutdown_removes_daemon_socket() {
     let daemon = Daemon::start().await;
     let socket = daemon.socket.clone();
-    let connection = daemon.connect().await;
-    drop(connection);
 
     tokio::task::spawn_blocking(move || {
         daemon.shutdown_with_signal(rustix::process::Signal::TERM);

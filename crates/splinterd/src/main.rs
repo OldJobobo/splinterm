@@ -832,6 +832,13 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    let mut interrupt_signal = signal::unix::signal(signal::unix::SignalKind::interrupt())
+        .context("failed to listen for interrupt signal")?;
+    let mut terminate_signal = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .context("failed to listen for termination signal")?;
+    let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
+        .context("failed to listen for policy reload signal")?;
+
     let metadata = MetadataStore::discover()?;
     let loaded = tokio::task::spawn_blocking({
         let metadata = metadata.clone();
@@ -960,12 +967,6 @@ async fn main() -> Result<()> {
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
     info!(socket = %socket.display(), image_socket = %image_socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
-    let shutdown_signal = signal::ctrl_c();
-    tokio::pin!(shutdown_signal);
-    let mut terminate_signal = signal::unix::signal(signal::unix::SignalKind::terminate())
-        .context("failed to listen for termination signal")?;
-    let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
-        .context("failed to listen for policy reload signal")?;
     let image_transfer_expiry =
         time::sleep_until(image_transfer_expiry_deadline(&state, false).await);
     tokio::pin!(image_transfer_expiry);
@@ -973,8 +974,10 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             biased;
-            result = &mut shutdown_signal => {
-                result.context("failed to listen for shutdown signal")?;
+            received = interrupt_signal.recv() => {
+                if received.is_none() {
+                    bail!("interrupt signal stream closed");
+                }
                 break;
             }
             received = terminate_signal.recv() => {
