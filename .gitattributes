@@ -2,6 +2,9 @@
 tools/foot-oracle/patches/*.patch whitespace=-blank-at-eol
 tools/image-spike/*.patch whitespace=-blank-at-eol
 
+# Preserve the exact source commit in Git and GitHub-generated archives.
+/.splinterm-build-commit export-subst
+
 # Website sources and deployment automation are not package release inputs.
 /site/ export-ignore
 /.github/workflows/site.yml export-ignore
