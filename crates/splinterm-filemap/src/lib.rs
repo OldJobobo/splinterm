@@ -5,7 +5,13 @@
 //! The unsafe operating-system mapping boundary stays in this leaf crate. Callers
 //! receive only an immutable byte slice and cannot mutate or resize the mapping.
 
-use std::{fs::File, io, ops::Deref, os::fd::OwnedFd, path::Path};
+use std::{
+    fs::File,
+    io,
+    ops::Deref,
+    os::fd::{BorrowedFd, OwnedFd},
+    path::Path,
+};
 
 use memmap2::{Mmap, MmapOptions};
 use rustix::fs::{SealFlags, fcntl_get_seals, fstat};
@@ -78,6 +84,56 @@ impl ReadOnlyFileMap {
     }
 }
 
+/// Verifies that a sealed descriptor rejects a new writable shared mapping.
+///
+/// This unsafe operating-system probe remains inside the leaf mapping crate and
+/// never exposes a mutable mapping. Only the kernel's expected permission denial
+/// counts as proof; unrelated mapping failures are returned unchanged.
+///
+/// # Errors
+///
+/// Returns an error for invalid size/seals, an unexpectedly successful writable
+/// mapping, or a denial other than `EPERM`/`EACCES`.
+pub fn verify_writable_shared_mapping_rejected(
+    fd: BorrowedFd<'_>,
+    expected_len: usize,
+) -> io::Result<()> {
+    let seals = fcntl_get_seals(fd)?;
+    let size = usize::try_from(fstat(fd)?.st_size)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if expected_len == 0 || size != expected_len || !seals.contains(REQUIRED_IMMUTABLE_SEALS) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "writable mapping probe requires exact immutable descriptor metadata",
+        ));
+    }
+
+    let duplicate = rustix::io::dup(fd)?;
+    let file = File::from(duplicate);
+    // SAFETY: The mapping is never exposed. The descriptor's immutable seals and
+    // exact nonzero extent were verified above. An unexpected successful shared
+    // writable map is dropped immediately and reported as an invariant failure.
+    match unsafe { MmapOptions::new().len(expected_len).map_mut(&file) } {
+        Ok(mapping) => {
+            drop(mapping);
+            Err(io::Error::other(
+                "sealed descriptor unexpectedly allowed a writable shared mapping",
+            ))
+        }
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code)
+                    if code == rustix::io::Errno::PERM.raw_os_error()
+                        || code == rustix::io::Errno::ACCESS.raw_os_error()
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl Deref for ReadOnlyFileMap {
     type Target = [u8];
 
@@ -138,6 +194,44 @@ mod tests {
         write(&unsealed, b"mutable").unwrap();
         assert_eq!(
             ReadOnlyFileMap::from_sealed_fd(unsealed, 7)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn immutable_seals_reject_new_writable_shared_mappings() {
+        use std::os::fd::AsFd;
+
+        use rustix::{
+            fs::{MemfdFlags, fcntl_add_seals, memfd_create},
+            io::write,
+        };
+
+        let sealed = memfd_create(
+            "splinterm-filemap-writable-probe",
+            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        write(&sealed, b"immutable").unwrap();
+        fcntl_add_seals(&sealed, REQUIRED_IMMUTABLE_SEALS).unwrap();
+        verify_writable_shared_mapping_rejected(sealed.as_fd(), 9).unwrap();
+
+        let unsealed = memfd_create(
+            "splinterm-filemap-writable-probe-unsealed",
+            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        write(&unsealed, b"mutable").unwrap();
+        assert_eq!(
+            verify_writable_shared_mapping_rejected(unsealed.as_fd(), 7)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            verify_writable_shared_mapping_rejected(sealed.as_fd(), 8)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData

@@ -1410,6 +1410,7 @@ dependencies = [
  "sha2",
  "splinterm-automation-client",
  "splinterm-core",
+ "splinterm-filemap",
  "splinterm-mcp",
  "splinterm-protocol",
  "splinterm-pty",
