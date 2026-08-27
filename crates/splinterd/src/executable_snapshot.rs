@@ -144,17 +144,15 @@ impl SealedExecutablePair {
 /// package replacement is allowed to begin.
 #[derive(Debug)]
 pub struct RetainedRollbackExecutables {
-    source: ExecutableSourcePair,
-    daemon: OwnedFd,
-    client: OwnedFd,
+    pair: SealedExecutablePair,
 }
 
 impl RetainedRollbackExecutables {
     /// Captures the installed pair while the caller excludes package replacement.
     ///
     /// The daemon is opened through `/proc/self/exe` and must still identify the
-    /// declared installed daemon. Keeping this opaque authority across replacement
-    /// prevents later path lookup from mixing generations or substituting fds.
+    /// declared installed daemon. Both images are copied and sealed before capture
+    /// returns, so later replacement or in-place writes cannot affect rollback.
     ///
     /// # Errors
     ///
@@ -165,7 +163,7 @@ impl RetainedRollbackExecutables {
         policy: ExecutableSnapshotPolicy,
     ) -> Result<Self, ExecutableSnapshotError> {
         let daemon = open_running_executable()?;
-        capture_rollback_executables(source, daemon, policy)
+        capture_rollback_executables(source, &daemon, policy)
     }
 }
 
@@ -179,8 +177,8 @@ impl HandoffExecutableSnapshots {
     /// Materializes complete forward and rollback daemon/client snapshot pairs.
     ///
     /// Rollback authority must have been retained before package replacement was
-    /// allowed to begin. Both rollback images are copied from that opaque retained
-    /// pair, so later package-path replacement cannot retarget either image.
+    /// allowed to begin. Both rollback images are already sealed inside that
+    /// opaque authority, so later replacement or writes cannot affect either image.
     /// No partial authority escapes when any of the four sources fails.
     /// Compatibility preflight remains a separate coordinator step.
     ///
@@ -189,17 +187,15 @@ impl HandoffExecutableSnapshots {
     /// Rejects invalid source identity, mutation, copy, digest, descriptor, or seal state.
     pub fn materialize(
         forward: &ExecutableSourcePair,
-        rollback: &RetainedRollbackExecutables,
+        rollback: RetainedRollbackExecutables,
         policy: ExecutableSnapshotPolicy,
     ) -> Result<Self, ExecutableSnapshotError> {
-        materialize_with_hook(
+        validate_pair_paths(forward)?;
+        let forward = materialize_pair(forward, policy, &mut |_| Ok(()))?;
+        Ok(Self {
             forward,
-            &rollback.source,
-            rollback.daemon.as_fd(),
-            rollback.client.as_fd(),
-            policy,
-            |_| Ok(()),
-        )
+            rollback: rollback.pair,
+        })
     }
 
     #[must_use]
@@ -253,6 +249,7 @@ pub enum ExecutableSnapshotError {
     SnapshotMismatch,
 }
 
+#[cfg(test)]
 fn materialize_with_hook(
     forward: &ExecutableSourcePair,
     rollback: &ExecutableSourcePair,
@@ -454,24 +451,24 @@ fn validate_path(path: &Path) -> Result<(), ExecutableSnapshotError> {
 
 fn capture_rollback_executables(
     source: &ExecutableSourcePair,
-    daemon: OwnedFd,
+    daemon: &OwnedFd,
     policy: ExecutableSnapshotPolicy,
 ) -> Result<RetainedRollbackExecutables, ExecutableSnapshotError> {
     validate_pair_paths(source)?;
     let installed_daemon = open_source(source.daemon())?;
-    if descriptor_fingerprint(&daemon, source.daemon())?
+    if descriptor_fingerprint(daemon, source.daemon())?
         != descriptor_fingerprint(&installed_daemon, source.daemon())?
     {
         return Err(ExecutableSnapshotError::RunningExecutableMismatch);
     }
     let client = open_source(source.client())?;
-    validate_descriptor(source.daemon(), &daemon, policy)?;
+    validate_descriptor(source.daemon(), daemon, policy)?;
     validate_descriptor(source.client(), &client, policy)?;
-    Ok(RetainedRollbackExecutables {
-        source: source.clone(),
-        daemon,
-        client,
-    })
+    let pair =
+        materialize_running_pair(source, daemon.as_fd(), client.as_fd(), policy, &mut |_| {
+            Ok(())
+        })?;
+    Ok(RetainedRollbackExecutables { pair })
 }
 
 fn validate_descriptor(
@@ -752,7 +749,7 @@ mod tests {
         policy: ExecutableSnapshotPolicy,
     ) -> Result<RetainedRollbackExecutables, ExecutableSnapshotError> {
         let running_daemon = open_source(rollback.daemon())?;
-        capture_rollback_executables(rollback, running_daemon, policy)
+        capture_rollback_executables(rollback, &running_daemon, policy)
     }
 
     fn materialize(
@@ -761,7 +758,7 @@ mod tests {
         policy: ExecutableSnapshotPolicy,
     ) -> Result<HandoffExecutableSnapshots, ExecutableSnapshotError> {
         let rollback = retain(rollback, policy)?;
-        HandoffExecutableSnapshots::materialize(forward, &rollback, policy)
+        HandoffExecutableSnapshots::materialize(forward, rollback, policy)
     }
 
     #[test]
@@ -832,12 +829,8 @@ mod tests {
         let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
         let rollback = directory.pair("rollback", b"running-daemon", b"rollback-client");
         let retained = retain(&rollback, policy()).unwrap();
-        let mut running_daemon = File::from(rustix::io::dup(&retained.daemon).unwrap());
-        let mut running_client = File::from(rustix::io::dup(&retained.client).unwrap());
-        running_daemon.seek(SeekFrom::Start(3)).unwrap();
-        running_client.seek(SeekFrom::Start(4)).unwrap();
-        let running_stat = fstat(&retained.daemon).unwrap();
-        let client_stat = fstat(&retained.client).unwrap();
+        let running_stat = retained.pair.daemon().source().inode;
+        let client_stat = retained.pair.client().source().inode;
 
         let displaced_daemon = rollback.daemon().with_file_name("old-splinterd");
         fs::rename(rollback.daemon(), displaced_daemon).unwrap();
@@ -847,7 +840,7 @@ mod tests {
         write_executable(rollback.client(), b"incoming-client");
 
         let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, &retained, policy()).unwrap();
+            HandoffExecutableSnapshots::materialize(&forward, retained, policy()).unwrap();
         assert_eq!(
             snapshot_bytes(snapshots.rollback().daemon()),
             b"running-daemon"
@@ -856,23 +849,37 @@ mod tests {
             snapshot_bytes(snapshots.rollback().client()),
             b"rollback-client"
         );
-        assert_eq!(running_daemon.stream_position().unwrap(), 3);
-        assert_eq!(running_client.stream_position().unwrap(), 4);
-        assert_eq!(
-            snapshots.rollback().daemon().source().inode,
-            running_stat.st_ino
-        );
+        assert_eq!(snapshots.rollback().daemon().source().inode, running_stat);
         assert_ne!(
             snapshots.rollback().daemon().source().inode,
             fs::metadata(rollback.daemon()).unwrap().ino()
         );
-        assert_eq!(
-            snapshots.rollback().client().source().inode,
-            client_stat.st_ino
-        );
+        assert_eq!(snapshots.rollback().client().source().inode, client_stat);
         assert_ne!(
             snapshots.rollback().client().source().inode,
             fs::metadata(rollback.client()).unwrap().ino()
+        );
+    }
+
+    #[test]
+    fn rollback_pair_is_sealed_before_in_place_package_writes() {
+        let directory = TestDirectory::new();
+        let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
+        let rollback = directory.pair("rollback", b"running-daemon", b"rollback-client");
+        let retained = retain(&rollback, policy()).unwrap();
+
+        fs::write(rollback.daemon(), b"incoming-daemon").unwrap();
+        fs::write(rollback.client(), b"incoming-client").unwrap();
+
+        let snapshots =
+            HandoffExecutableSnapshots::materialize(&forward, retained, policy()).unwrap();
+        assert_eq!(
+            snapshot_bytes(snapshots.rollback().daemon()),
+            b"running-daemon"
+        );
+        assert_eq!(
+            snapshot_bytes(snapshots.rollback().client()),
+            b"rollback-client"
         );
     }
 
