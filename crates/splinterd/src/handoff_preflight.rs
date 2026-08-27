@@ -399,8 +399,22 @@ fn run_child(expected_role: PreflightRole) -> Result<(), PreflightError> {
 
 fn compiled_contract() -> Result<(BuildIdentity, BuildVersion, HandoffCapabilities), PreflightError>
 {
+    compiled_contract_for_commit(env!("SPLINTERM_BUILD_COMMIT"))
+}
+
+fn compiled_contract_for_commit(
+    build_commit: &str,
+) -> Result<(BuildIdentity, BuildVersion, HandoffCapabilities), PreflightError> {
+    if build_commit.len() != 40
+        || !build_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PreflightError::InvalidFrame);
+    }
     let mut hasher = Sha256::new();
     hasher.update(b"splinterm-handoff-pair-v1\0");
+    hasher.update(build_commit.as_bytes());
     hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
     hasher.update(splinterm_protocol::PROTOCOL_VERSION.to_be_bytes());
     hasher.update(HANDOFF_PROTOCOL_VERSION.to_be_bytes());
@@ -1001,6 +1015,19 @@ mod tests {
         ] {
             assert_eq!(range.minimum(), range.maximum());
             assert_ne!(range.minimum(), 0);
+        }
+    }
+
+    #[test]
+    fn compiled_pair_identity_is_bound_to_exact_build_commit() {
+        let first = compiled_contract_for_commit(&"a".repeat(40)).unwrap();
+        let second = compiled_contract_for_commit(&"b".repeat(40)).unwrap();
+        assert_ne!(first.0, second.0);
+        for invalid in ["", &"a".repeat(39), &"A".repeat(40), &"g".repeat(40)] {
+            assert!(matches!(
+                compiled_contract_for_commit(invalid),
+                Err(PreflightError::InvalidFrame)
+            ));
         }
     }
 }
