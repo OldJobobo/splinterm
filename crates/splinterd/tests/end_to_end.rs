@@ -182,9 +182,13 @@ impl Daemon {
         rustix::process::kill_process(pid, rustix::process::Signal::HUP).unwrap();
     }
 
-    fn shutdown(mut self) {
+    fn shutdown(self) {
+        self.shutdown_with_signal(rustix::process::Signal::INT);
+    }
+
+    fn shutdown_with_signal(mut self, signal: rustix::process::Signal) {
         let pid = rustix::process::Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
-        rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+        rustix::process::kill_process(pid, signal).unwrap();
         let status = self.child.wait().unwrap();
         self.assert_success(status);
         assert!(!self.socket.exists());
@@ -2443,6 +2447,21 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
     })
     .await
     .expect("parent policy snapshot integration timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_shutdown_removes_daemon_socket() {
+    let daemon = Daemon::start().await;
+    let socket = daemon.socket.clone();
+    let connection = daemon.connect().await;
+    drop(connection);
+
+    tokio::task::spawn_blocking(move || {
+        daemon.shutdown_with_signal(rustix::process::Signal::TERM);
+    })
+    .await
+    .unwrap();
+    assert!(!socket.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

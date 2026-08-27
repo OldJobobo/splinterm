@@ -962,6 +962,8 @@ async fn main() -> Result<()> {
     info!(socket = %socket.display(), image_socket = %image_socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
     let shutdown_signal = signal::ctrl_c();
     tokio::pin!(shutdown_signal);
+    let mut terminate_signal = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .context("failed to listen for termination signal")?;
     let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
         .context("failed to listen for policy reload signal")?;
     let image_transfer_expiry =
@@ -973,6 +975,12 @@ async fn main() -> Result<()> {
             biased;
             result = &mut shutdown_signal => {
                 result.context("failed to listen for shutdown signal")?;
+                break;
+            }
+            received = terminate_signal.recv() => {
+                if received.is_none() {
+                    bail!("termination signal stream closed");
+                }
                 break;
             }
             () = &mut image_transfer_expiry => {
@@ -6575,7 +6583,10 @@ async fn handle_authorized_request(
             let handle =
                 controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
                     .await?;
-            handle.input(bytes).await.map_err(|_| internal())?;
+            handle
+                .input(bytes)
+                .await
+                .map_err(|error| input_error(&error))?;
             terminal_action_acknowledgement(state, &handle).await?
         }
         Request::Resize {
@@ -7794,6 +7805,14 @@ fn encode_search_cursor(offset: usize) -> String {
 fn internal() -> ProtocolError {
     ProtocolError::new(ErrorCode::Internal, "operation failed")
 }
+fn input_error(error: &LiveError) -> ProtocolError {
+    match error {
+        LiveError::InputQueueFull => {
+            ProtocolError::new(ErrorCode::ResourceLimit, "input queue limit exceeded")
+        }
+        _ => internal(),
+    }
+}
 fn not_found() -> ProtocolError {
     ProtocolError::new(ErrorCode::NotFound, "resource not found")
 }
@@ -8323,6 +8342,15 @@ mod tests {
             assert_eq!(debug_test_shutdown_grace(Some(invalid.into())), None);
         }
         assert_eq!(debug_test_shutdown_grace(None), None);
+    }
+
+    #[test]
+    fn input_queue_saturation_is_a_recoverable_resource_limit() {
+        let error = input_error(&LiveError::InputQueueFull);
+        assert_eq!(error.code, ErrorCode::ResourceLimit);
+        assert_eq!(error.message, "input queue limit exceeded");
+
+        assert_eq!(input_error(&LiveError::Closed).code, ErrorCode::Internal);
     }
 
     #[test]

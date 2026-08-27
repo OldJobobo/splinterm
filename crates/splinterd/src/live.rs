@@ -2418,8 +2418,6 @@ pub enum LiveError {
     InvalidSubscriberCapacity,
     #[error("terminal publication memory limit exceeded")]
     PublicationMemoryFull,
-    #[error("PTY reply queue limit exceeded")]
-    ReplyQueueFull,
     #[error("child process has already exited")]
     ProcessExited,
     #[error("image content does not exist on the active screen")]
@@ -2526,6 +2524,8 @@ pub struct LiveRuntimeMetrics {
     pub command_queue_high_water: usize,
     pub user_write_queue_high_water_bytes: usize,
     pub reply_write_queue_high_water_bytes: usize,
+    /// Terminal-generated PTY reply bytes dropped after the bounded reply queue fills.
+    pub reply_write_queue_dropped_bytes: u64,
     /// Maximum active subscribers observed while publication attribution was enabled.
     pub subscriber_count_high_water: usize,
     /// Compact events whose ownership was admitted by a reserved queue permit
@@ -2607,6 +2607,7 @@ struct RuntimeMetrics {
     command_queue_high_water: AtomicUsize,
     user_write_queue_high_water_bytes: AtomicUsize,
     reply_write_queue_high_water_bytes: AtomicUsize,
+    reply_write_queue_dropped_bytes: AtomicU64,
     subscriber_count_high_water: AtomicUsize,
     subscriber_queue_events_current: AtomicUsize,
     subscriber_queue_events_high_water: AtomicUsize,
@@ -2815,6 +2816,9 @@ impl RuntimeMetrics {
                 .load(Ordering::Relaxed),
             reply_write_queue_high_water_bytes: self
                 .reply_write_queue_high_water_bytes
+                .load(Ordering::Relaxed),
+            reply_write_queue_dropped_bytes: self
+                .reply_write_queue_dropped_bytes
                 .load(Ordering::Relaxed),
             subscriber_count_high_water: self.subscriber_count_high_water.load(Ordering::Relaxed),
             subscriber_queue_events_current: self
@@ -3829,7 +3833,7 @@ async fn run_actor_body(
                                 &mut publication,
                                 metrics,
                                 config.reply_byte_limit,
-                            )?;
+                            );
                             metrics.output_parse_batches.fetch_add(
                                 output.parse_batches,
                                 Ordering::Relaxed,
@@ -4481,7 +4485,7 @@ fn process_output(
     publication: &mut SynchronizedPublication,
     runtime_metrics: &Arc<RuntimeMetrics>,
     reply_limit: usize,
-) -> Result<ProcessOutputMetrics, LiveError> {
+) -> ProcessOutputMetrics {
     let _compact_batch = CompactProducerBatch::begin(subscribers);
     let mut metrics = ProcessOutputMetrics::default();
     let trace_enabled = perf_trace_enabled();
@@ -4553,9 +4557,13 @@ fn process_output(
         }
         for event in terminal.drain_events() {
             if let TerminalEvent::PtyWrite(bytes) = event {
-                reply_writes
-                    .push(bytes, reply_limit)
-                    .map_err(|_| LiveError::ReplyQueueFull)?;
+                let dropped_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                if reply_writes.push(bytes, reply_limit).is_err() {
+                    RuntimeMetrics::add_saturating(
+                        &runtime_metrics.reply_write_queue_dropped_bytes,
+                        dropped_bytes,
+                    );
+                }
             }
         }
     }
@@ -4588,7 +4596,7 @@ fn process_output(
             },
         );
     }
-    Ok(metrics)
+    metrics
 }
 
 #[allow(
@@ -5232,8 +5240,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
         assert!(publication.active && !publication.timed_out);
         assert_eq!(metrics.terminal_updates, 0);
         assert!(matches!(
@@ -5256,8 +5263,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
         assert!(!publication.active);
         let LiveEvent::Update {
             updates, snapshot, ..
@@ -5281,6 +5287,39 @@ mod tests {
     }
 
     #[test]
+    fn reply_queue_saturation_drops_excess_replies_without_stopping_output() {
+        let incarnation = ProcessIncarnation::allocate();
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        let mut subscribers = Vec::new();
+        let mut publication = SynchronizedPublication::new(terminal.revision());
+        let mut replies = WriteQueue::default();
+        let metrics = Arc::new(RuntimeMetrics::default());
+
+        process_output(
+            b"\x1b[5n\x1b[5nZ",
+            SplintId::new(),
+            incarnation,
+            None,
+            &mut terminal,
+            &mut replies,
+            &mut subscribers,
+            &mut publication,
+            &metrics,
+            4,
+        );
+
+        assert_eq!(replies.bytes, 4);
+        assert_eq!(metrics.snapshot().reply_write_queue_dropped_bytes, 4);
+        let snapshot = terminal.snapshot(SnapshotRequest::default());
+        let first_cell = snapshot
+            .visible_rows()
+            .next()
+            .and_then(|row| row.cells().next())
+            .expect("terminal has a first visible cell");
+        assert_eq!(first_cell.content(), CellSnapshotContent::Scalar('Z'));
+    }
+
+    #[test]
     fn completed_cava_frame_publishes_when_batch_begins_next_frame() {
         let incarnation = ProcessIncarnation::allocate();
         let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
@@ -5301,8 +5340,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
 
         assert!(terminal.synchronized_updates());
         assert!(publication.active && !publication.timed_out);
@@ -5347,8 +5385,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
         process_output(
             b"\x1b\\",
             SplintId::new(),
@@ -5360,8 +5397,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -5377,8 +5413,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
 
         assert_eq!(metrics.terminal_updates, 2);
         let LiveEvent::Update {
@@ -6172,8 +6207,7 @@ mod tests {
             &mut publication,
             &attribution,
             1024,
-        )
-        .unwrap();
+        );
         assert_eq!(terminal.revision(), initial_revision);
         let deadline = publication.deadline.unwrap();
         publication.observe(true, started + Duration::from_millis(900));
