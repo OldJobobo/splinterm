@@ -7,6 +7,7 @@ use anyhow::Result;
 pub mod authorization;
 pub mod executable_identity;
 pub mod executable_snapshot;
+pub mod handoff_compatibility;
 pub mod handoff_descriptors;
 pub mod image_transport;
 mod live;
