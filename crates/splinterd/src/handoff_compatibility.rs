@@ -251,6 +251,7 @@ mod tests {
 
     use crate::executable_snapshot::{
         ExecutableSnapshotPolicy, ExecutableSourcePair, HandoffExecutableSnapshots,
+        RetainedRollbackExecutables,
     };
 
     use super::*;
@@ -276,14 +277,13 @@ mod tests {
             fs::create_dir(&directory).unwrap();
             let forward = pair(&directory, "forward");
             let rollback = pair(&directory, "rollback");
-            let snapshots = HandoffExecutableSnapshots::materialize(
-                &forward,
-                &rollback,
-                ExecutableSnapshotPolicy {
-                    expected_owner_uid: rustix::process::geteuid().as_raw(),
-                },
-            )
-            .unwrap();
+            let policy = ExecutableSnapshotPolicy {
+                expected_owner_uid: rustix::process::geteuid().as_raw(),
+            };
+            let rollback =
+                RetainedRollbackExecutables::capture_declared_for_test(&rollback, policy).unwrap();
+            let snapshots =
+                HandoffExecutableSnapshots::materialize(&forward, rollback, policy).unwrap();
             Self {
                 directory,
                 snapshots,

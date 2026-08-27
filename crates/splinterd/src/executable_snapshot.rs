@@ -165,6 +165,15 @@ impl RetainedRollbackExecutables {
         let daemon = open_running_executable()?;
         capture_rollback_executables(source, &daemon, policy)
     }
+
+    #[cfg(test)]
+    pub(crate) fn capture_declared_for_test(
+        source: &ExecutableSourcePair,
+        policy: ExecutableSnapshotPolicy,
+    ) -> Result<Self, ExecutableSnapshotError> {
+        let daemon = open_source(source.daemon())?;
+        capture_rollback_executables(source, &daemon, policy)
+    }
 }
 
 #[derive(Debug)]
