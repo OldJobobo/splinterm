@@ -166,8 +166,13 @@ impl RetainedRollbackExecutables {
         capture_rollback_executables(source, &daemon, policy)
     }
 
-    #[cfg(test)]
-    pub(crate) fn capture_declared_for_test(
+    /// Captures a declared executable pair for isolated test binaries.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid paths, authority, source identity, or snapshot state.
+    #[cfg(any(test, feature = "integration-test"))]
+    pub fn capture_declared_for_test(
         source: &ExecutableSourcePair,
         policy: ExecutableSnapshotPolicy,
     ) -> Result<Self, ExecutableSnapshotError> {

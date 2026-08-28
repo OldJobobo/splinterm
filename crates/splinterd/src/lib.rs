@@ -9,6 +9,7 @@ pub mod executable_identity;
 pub mod executable_snapshot;
 pub mod handoff_compatibility;
 pub mod handoff_descriptors;
+pub mod handoff_preflight;
 pub mod image_transport;
 mod live;
 pub mod policy;
