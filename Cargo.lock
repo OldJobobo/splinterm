@@ -1423,6 +1423,7 @@ dependencies = [
  "splinterm-core",
  "splinterm-filemap",
  "splinterm-mcp",
+ "splinterm-policy",
  "splinterm-protocol",
  "splinterm-pty",
  "splinterm-terminal",
@@ -1453,6 +1454,7 @@ dependencies = [
  "splinterm-filemap",
  "splinterm-freetype",
  "splinterm-graphical-relay",
+ "splinterm-policy",
  "splinterm-protocol",
  "swash",
  "tokio",
@@ -1538,6 +1540,19 @@ dependencies = [
  "libc",
  "pixman-sys",
  "thiserror",
+]
+
+[[package]]
+name = "splinterm-policy"
+version = "0.1.0-beta1"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "splinterm-core",
+ "splinterm-protocol",
 ]
 
 [[package]]

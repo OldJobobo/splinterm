@@ -14,8 +14,9 @@ use anyhow::{Context, Result, bail};
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, Topology};
+use splinterm_protocol::AutomationScope as OperationScope;
 
-use crate::{authorization::OperationScope, executable_identity::ExecutableIdentity};
+use crate::executable_identity::ExecutableIdentity;
 
 const MAX_POLICY_BYTES: u64 = 256 * 1024;
 const MAX_RULES: usize = 64;

@@ -1,0 +1,20 @@
+[package]
+name = "splinterm-policy"
+description = "Bounded persistent automation policy loading for Splinterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+splinterm-core = { path = "../splinterm-core" }
+splinterm-protocol = { path = "../splinterm-protocol" }
+
+[lints]
+workspace = true
