@@ -58,10 +58,10 @@ memory-pressure boundaries remain intact.
 
 The candidate also places the New Dojo control immediately after the final
 visible tab, gives inactive tabs exact semantic dividers, and presents the strict
-historical unnamed `terminal-<timestamp>[-<pid>]` initial-Dojo shape as `Dojo 1`
-without changing ordinary explicit names or daemon-owned topology. Focused
-implementation tests have passed; complete non-graphical release validation,
-independent review, candidate construction,
+historical initial Dojo `terminal` under Lair `terminal-<epoch-seconds>-<pid>`
+as `Dojo 1` without changing ordinary explicit names or daemon-owned topology.
+Focused implementation tests have passed; complete non-graphical release
+validation, independent review, candidate construction,
 protected publication, installation, and AUR updates remain pending. Beta 2
 remains the current public release.
 

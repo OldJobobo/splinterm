@@ -162,17 +162,18 @@ fn is_legacy_generated_lair_name(value: &str) -> bool {
     let Some(stamp) = components.next() else {
         return false;
     };
-    let process = components.next();
+    let Some(process) = components.next() else {
+        return false;
+    };
     components.next().is_none()
-        && (15..=20).contains(&stamp.len())
+        && stamp.len() == 10
         && stamp.bytes().all(|byte| byte.is_ascii_digit())
-        && process.is_none_or(|process| {
-            (1..=10).contains(&process.len()) && process.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        && (1..=10).contains(&process.len())
+        && process.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn uses_legacy_generated_dojo_label(identity: &WindowDojoIdentity) -> bool {
-    identity.dojo_name == identity.lair_name && is_legacy_generated_lair_name(&identity.lair_name)
+    identity.dojo_name == "terminal" && is_legacy_generated_lair_name(&identity.lair_name)
 }
 
 fn tab_dojo_label(identity: &WindowDojoIdentity) -> String {
@@ -815,18 +816,17 @@ mod tests {
 
     #[test]
     fn legacy_generated_initial_dojo_names_have_a_stable_friendly_tab_label() {
-        assert!(is_legacy_generated_lair_name("terminal-324324573264238"));
-        assert!(is_legacy_generated_lair_name(
-            "terminal-324324573264238-4132"
-        ));
+        assert!(is_legacy_generated_lair_name("terminal-1787899189-4132"));
         for explicit in [
             "terminal",
             "terminal-123",
             "terminal-work",
             "terminal-123-work",
-            "terminal-123-456-extra",
-            "terminal-12345678901234-456",
-            "terminal-123456789012345-12345678901",
+            "terminal-1787899189",
+            "terminal-178789918-4132",
+            "terminal-17878991890-4132",
+            "terminal-1787899189-12345678901",
+            "terminal-1787899189-4132-extra",
         ] {
             assert!(!is_legacy_generated_lair_name(explicit));
         }
@@ -835,15 +835,24 @@ mod tests {
             topology_revision: TopologyRevision::new(1),
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
-            lair_name: "terminal-324324573264238-4132".to_owned(),
+            lair_name: "terminal-1787899189-4132".to_owned(),
             lair_retention: splinterm_core::LairRetention::Disposable,
-            dojo_name: "terminal-324324573264238-4132".to_owned(),
+            dojo_name: "terminal".to_owned(),
         };
         assert_eq!(tab_dojo_label(&identity), "Dojo 1");
 
         assert_eq!(ambiguous_tab_label(&identity, "Dojo 1", 0), "Dojo 1 (1)");
         assert_eq!(ambiguous_tab_label(&identity, "Dojo 1", 1), "Dojo 1 (2)");
         assert!(!ambiguous_tab_label(&identity, "Dojo 1", 1).contains("terminal-"));
+
+        let explicitly_generated_looking = WindowDojoIdentity {
+            dojo_name: "terminal-1787899189-4132".to_owned(),
+            ..identity.clone()
+        };
+        assert_eq!(
+            tab_dojo_label(&explicitly_generated_looking),
+            "terminal-1787899189-4132"
+        );
 
         let explicitly_named = WindowDojoIdentity {
             lair_name: "terminal-123".to_owned(),

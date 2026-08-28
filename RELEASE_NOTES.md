@@ -76,7 +76,8 @@ restart the user service.
 - Persistent topology, restore, history, remote, automation, MCP, preset, and
   terminal protocol contracts are unchanged.
 - Exact cgroup placement and workload cleanup remain mandatory in packaged mode.
-- Explicit Dojo names remain authoritative; only the strict historical
-  `terminal-<timestamp>[-<pid>]` compatibility shape is presented as unnamed.
+- Explicit Dojo names remain authoritative; only the strict historical pair of
+  initial Dojo `terminal` under Lair `terminal-<epoch-seconds>-<pid>` is
+  presented as unnamed.
 - Beta 2 tags and packages remain immutable.
 - Beta 3 continues to target x86_64 Omarchy/Arch Linux with native Wayland.
