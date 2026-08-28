@@ -150,30 +150,30 @@ class PrepareCandidateTests(unittest.TestCase):
                 "OldJobobo/splinterm",
                 commit,
                 "9.9.9-alpha9",
-                "v0.1.0-beta1",
+                "v0.1.0-beta2",
             )
 
     def test_previous_release_is_explicit_existing_and_distinct(self) -> None:
-        release_tag = "v9.9.9-beta2"
+        release_tag = "v9.9.9-beta3"
         with mock.patch.object(MODULE, "run", return_value="a" * 40):
             self.assertEqual(
-                MODULE.validate_previous_version_tag("v0.1.0-beta1", release_tag),
-                "v0.1.0-beta1",
+                MODULE.validate_previous_version_tag("v0.1.0-beta2", release_tag),
+                "v0.1.0-beta2",
             )
         with self.assertRaisesRegex(ValueError, "v-prefixed SemVer"):
-            MODULE.validate_previous_version_tag("0.1.0-beta1", release_tag)
+            MODULE.validate_previous_version_tag("0.1.0-beta2", release_tag)
         with self.assertRaisesRegex(ValueError, "must differ"):
             MODULE.validate_previous_version_tag(release_tag, release_tag)
         with self.assertRaisesRegex(ValueError, "current public release"):
-            MODULE.validate_previous_version_tag("v0.1.0-alpha3.3", release_tag)
+            MODULE.validate_previous_version_tag("v0.1.0-beta1", release_tag)
         with (
             mock.patch.object(MODULE, "run", side_effect=ValueError("missing tag")),
             self.assertRaisesRegex(ValueError, "missing tag"),
         ):
-            MODULE.validate_previous_version_tag("v0.1.0-beta1", release_tag)
+            MODULE.validate_previous_version_tag("v0.1.0-beta2", release_tag)
 
     def test_public_release_state_is_closed_and_versioned(self) -> None:
-        self.assertEqual(MODULE.current_public_release_tag(), "v0.1.0-beta1")
+        self.assertEqual(MODULE.current_public_release_tag(), "v0.1.0-beta2")
         state = json.loads(
             (ROOT / "packaging/release-state.json").read_text(encoding="utf-8")
         )
@@ -181,7 +181,7 @@ class PrepareCandidateTests(unittest.TestCase):
         self.assertEqual(state["schema"], 1)
         status = (ROOT / "docs/status.md").read_text(encoding="utf-8")
         self.assertEqual(
-            status.count("**Current public version tag:** `v0.1.0-beta1`"), 1
+            status.count("**Current public version tag:** `v0.1.0-beta2`"), 1
         )
 
     def test_release_notes_are_read_from_the_exact_candidate_commit(self) -> None:
@@ -193,7 +193,7 @@ class PrepareCandidateTests(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
                 MODULE.run(["git", "show", f"{commit}:RELEASE_NOTES.md"]) + "\n",
             )
-            self.assertIn("Workload isolation", output.read_text(encoding="utf-8"))
+            self.assertIn("Room to Work", output.read_text(encoding="utf-8"))
 
     def test_manifest_example_is_json_serializable(self) -> None:
         manifest = {

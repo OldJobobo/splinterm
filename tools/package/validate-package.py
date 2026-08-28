@@ -229,13 +229,15 @@ def validate_systemd_unit(root: Path) -> None:
     required_slice = {
         "StopWhenUnneeded=yes",
         "[Slice]",
-        "TasksMax=2048",
         "MemoryHigh=75%",
     }
     missing_slice = required_slice - slice_lines
     assert not missing_slice, (
         "workload slice is missing aggregate guards: "
         f"{sorted(missing_slice)}"
+    )
+    assert not any(line.startswith("TasksMax=") for line in slice_lines), (
+        "workload units must inherit the user manager task limit"
     )
     assert not any(line.startswith("MemoryMax=") for line in slice_lines)
 

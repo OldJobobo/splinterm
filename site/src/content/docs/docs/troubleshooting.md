@@ -40,7 +40,7 @@ systemctl --user show splinterd.service \
 journalctl --user-unit splinterd.service -n 50 --no-pager
 ```
 
-The packaged task ceiling protects the daemon from unbounded process creation, while `MemoryHigh` causes reclaim and throttling rather than imposing a hard memory ceiling. Terminal workloads run in a separate aggregate slice with nested per-Dojo and per-Splint boundaries, so they do not share the daemon's task or memory-pressure budget. `MemoryCurrent` includes charged page cache, some of which may be reclaimable under pressure.
+The packaged task ceiling protects the daemon control plane from unbounded process creation, while `MemoryHigh` causes reclaim and throttling rather than imposing a hard memory ceiling. Terminal workloads run in a separate aggregate slice with nested per-Dojo and per-Splint boundaries. Workload units do not set `TasksMax`; Splint scopes receive the systemd user manager's normal `DefaultTasksMax`, subject to stricter administrator or ancestor policy. `EffectiveTasksMax` is the authoritative runtime value. `MemoryCurrent` includes charged page cache, some of which may be reclaimable under pressure.
 
 After a daemon restart, inspect exited topology with `splinterm list --all`. Restoration is explicit because Splinterm never reruns saved commands automatically.
 
@@ -50,7 +50,10 @@ The packaged daemon fails closed when it cannot place a terminal helper in its e
 
 ```bash
 journalctl --user-unit splinterd.service -n 40 --no-pager
+systemctl --user show -p DefaultTasksMax
 systemctl --user status app-splinterm.slice
+systemctl --user show <splint.scope> \
+  -p TasksCurrent -p TasksMax -p EffectiveTasksMax
 systemd-cgls --user-unit app-splinterm.slice
 ```
 

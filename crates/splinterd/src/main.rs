@@ -22,7 +22,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use cgroup::{WorkloadResourcePolicy, WorkloadUnitManager};
+use cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
@@ -894,7 +894,7 @@ async fn main() -> Result<()> {
         inode: Some(daemon_identity.inode),
     };
     let workload_units = match WorkloadUnitManager::connect(
-        WorkloadResourcePolicy::default(),
+        WorkloadMemoryPolicy::default(),
         require_workload_cgroups.then_some("splinterd.service"),
     ) {
         Ok(manager) => Some(manager),

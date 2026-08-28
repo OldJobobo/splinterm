@@ -4,5 +4,4 @@ Documentation=file:///usr/share/doc/splinterm/headless.md
 StopWhenUnneeded=yes
 
 [Slice]
-TasksMax=2048
 MemoryHigh=75%
