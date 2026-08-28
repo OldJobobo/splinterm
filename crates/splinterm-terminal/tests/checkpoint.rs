@@ -198,23 +198,19 @@ fn shared_runtime_budgets_are_rebound_from_matching_restore_config() {
 }
 
 #[test]
-fn image_history_and_event_overflow_remain_explicitly_unsupported() {
-    let (mut image_terminal, _) = terminal();
-    let image = image_terminal
-        .insert_image_content(NewImageContent {
-            width: 1,
-            height: 1,
-            source_format: ImageSourceFormat::KittyRgba,
-            alpha_mode: ImageAlphaMode::Premultiplied,
-            pixels: &[0, 0, 0, 0],
-            retention: ImageRetention::ExplicitDelete,
-        })
-        .unwrap();
-    image_terminal.remove_image_content(image).unwrap();
-    assert!(matches!(
-        image_terminal.encode_checkpoint(),
-        Err(CheckpointError::UnsupportedState)
-    ));
+fn active_image_transfers_and_event_overflow_remain_explicitly_unsupported() {
+    for prefix in [
+        b"\x1bPq".as_slice(),
+        b"\x1b_Ga=T,f=24,s=1,v=1;".as_slice(),
+        b"\x1b]1337;File=name=x:".as_slice(),
+    ] {
+        let (mut active, _) = terminal();
+        active.advance(prefix);
+        assert!(matches!(
+            active.encode_checkpoint(),
+            Err(CheckpointError::UnsupportedState)
+        ));
+    }
 
     let overflow_config = TerminalConfig {
         event_limit: 1,
@@ -226,6 +222,141 @@ fn image_history_and_event_overflow_remain_explicitly_unsupported() {
         overflow.encode_checkpoint(),
         Err(CheckpointError::UnsupportedState)
     ));
+}
+
+#[test]
+fn completed_images_and_kitty_mappings_round_trip_and_continue() {
+    let (mut original, config) = terminal();
+    original.set_cell_pixel_size(2, 2);
+    original.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\");
+    original.advance(b"\x1b[?1049h");
+    original.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=8;AP8A/w==\x1b\\");
+    let _ = original.drain_events().count();
+
+    let checkpoint = original.encode_checkpoint().unwrap();
+    let mut restored = Terminal::restore_checkpoint(&checkpoint, config).unwrap();
+    assert_eq!(restored.encode_checkpoint().unwrap(), checkpoint);
+    assert_eq!(
+        format!("{:?}", restored.snapshot(SnapshotRequest::default())),
+        format!("{:?}", original.snapshot(SnapshotRequest::default()))
+    );
+
+    for continuation in [
+        b"\x1b_Ga=p,i=8,p=9,C=1\x1b\\".as_slice(),
+        b"\x1b[?1049l".as_slice(),
+        b"\x1b_Ga=p,i=7,p=10,C=1\x1b\\".as_slice(),
+    ] {
+        original.advance(continuation);
+        restored.advance(continuation);
+    }
+    assert_eq!(
+        restored.drain_events().collect::<Vec<_>>(),
+        original.drain_events().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        restored.encode_checkpoint().unwrap(),
+        original.encode_checkpoint().unwrap()
+    );
+}
+
+#[test]
+fn every_completed_image_source_format_round_trips_across_screens() {
+    let (mut original, config) = terminal();
+    let formats = [
+        ImageSourceFormat::Sixel,
+        ImageSourceFormat::KittyRgb,
+        ImageSourceFormat::KittyRgba,
+        ImageSourceFormat::KittyPng,
+        ImageSourceFormat::Iterm2,
+    ];
+    for (index, source_format) in formats.into_iter().enumerate() {
+        if index == 3 {
+            original.advance(b"\x1b[?1049h");
+        }
+        let channel = u8::try_from(index).unwrap();
+        original
+            .insert_image_content(NewImageContent {
+                width: 1,
+                height: 1,
+                source_format,
+                alpha_mode: ImageAlphaMode::Premultiplied,
+                pixels: &[channel, channel, channel, channel],
+                retention: ImageRetention::ExplicitDelete,
+            })
+            .unwrap();
+    }
+    let checkpoint = original.encode_checkpoint().unwrap();
+    let restored = Terminal::restore_checkpoint(&checkpoint, config).unwrap();
+    assert_eq!(restored.encode_checkpoint().unwrap(), checkpoint);
+}
+
+#[test]
+fn completed_sixel_checkpoint_preserves_pixels_anchor_and_text_continuation() {
+    let (mut original, config) = terminal();
+    original.set_cell_pixel_size(1, 6);
+    original.advance(b"\x1bP7;0;0q\"1;1;1;6#2~\x1b\\");
+    let checkpoint = original.encode_checkpoint().unwrap();
+    let mut restored = Terminal::restore_checkpoint(&checkpoint, config).unwrap();
+    assert_eq!(restored.encode_checkpoint().unwrap(), checkpoint);
+
+    original.advance(b"X");
+    restored.advance(b"X");
+    assert_eq!(
+        restored.encode_checkpoint().unwrap(),
+        original.encode_checkpoint().unwrap()
+    );
+}
+
+#[test]
+fn image_restore_rebinds_and_rolls_back_shared_budget_reservations() {
+    let source_budget = SharedImageBudget::new(8);
+    let source_config = TerminalConfig {
+        shared_image_budget: Some(source_budget),
+        ..TerminalConfig::default()
+    };
+    let mut source = Terminal::new(4, 2, source_config.clone());
+    for pixel in [[0, 0, 0, 0], [1, 2, 3, 4]] {
+        source
+            .insert_image_content(NewImageContent {
+                width: 1,
+                height: 1,
+                source_format: ImageSourceFormat::KittyRgba,
+                alpha_mode: ImageAlphaMode::Premultiplied,
+                pixels: &pixel,
+                retention: ImageRetention::ExplicitDelete,
+            })
+            .unwrap();
+    }
+    let bytes = source.encode_checkpoint().unwrap();
+
+    let target_budget = SharedImageBudget::new(8);
+    let target_config = TerminalConfig {
+        shared_image_budget: Some(target_budget.clone()),
+        ..TerminalConfig::default()
+    };
+    let restored = Terminal::restore_checkpoint(&bytes, target_config.clone()).unwrap();
+    assert_eq!(target_budget.metrics().content_bytes, 8);
+    assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
+    drop(restored);
+    assert_eq!(target_budget.metrics().content_bytes, 0);
+
+    let mut occupant = Terminal::new(4, 2, target_config.clone());
+    occupant
+        .insert_image_content(NewImageContent {
+            width: 1,
+            height: 1,
+            source_format: ImageSourceFormat::KittyRgba,
+            alpha_mode: ImageAlphaMode::Premultiplied,
+            pixels: &[9, 9, 9, 9],
+            retention: ImageRetention::ExplicitDelete,
+        })
+        .unwrap();
+    assert_eq!(target_budget.metrics().content_bytes, 4);
+    assert!(matches!(
+        Terminal::restore_checkpoint(&bytes, target_config),
+        Err(CheckpointError::InvalidState)
+    ));
+    assert_eq!(target_budget.metrics().content_bytes, 4);
 }
 
 #[test]

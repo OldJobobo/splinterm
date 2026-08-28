@@ -1,8 +1,10 @@
-//! Canonical, bounded terminal checkpoint schema v1.
+//! Canonical, bounded terminal checkpoint schemas.
 //!
-//! This format owns terminal/parser state only. Descriptor storage, sealing,
-//! actor write queues, PTY state, and image bodies belong to later handoff
-//! boundaries.
+//! Schema v1 owns terminal/parser state only. Schema v2 adds completed image
+//! contents, placements, and Kitty application-image mappings as one separately
+//! digested component restored atomically with the grids. Descriptor storage,
+//! sealing, actor write queues, PTY state, and active image transfers belong to
+//! later handoff boundaries.
 
 use std::{
     fmt,
@@ -17,17 +19,23 @@ use serde::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::SharedImageBudget;
+use crate::{
+    ImageContentId, SharedImageBudget,
+    image::{ImageCheckpointV1, MAX_IMAGE_CHECKPOINT_CONTENTS},
+};
 
 use super::{
-    ActiveScreen, Attributes, ChangeSet, ComposedTable, Grid, ImageMetrics, ImagePlane,
-    KittyImageIds, MAX_SIXEL_COLORS, Parser, ScrollRegion, SharedKittyUploadBudget,
-    SixelPaletteMode, Terminal, TerminalConfig, TerminalEvent, TerminalModes, TerminalRevision,
+    ActiveScreen, Attributes, ChangeSet, ComposedTable, Grid, ImagePlane, ImageRetention,
+    ImageSourceFormat, KittyImageIds, MAX_SIXEL_COLORS, Parser, ScrollRegion,
+    SharedKittyUploadBudget, SixelPaletteMode, Terminal, TerminalConfig, TerminalEvent,
+    TerminalModes, TerminalRevision,
 };
 
 pub const TERMINAL_CHECKPOINT_SCHEMA_V1: u16 = 1;
+pub const TERMINAL_CHECKPOINT_SCHEMA_V2: u16 = 2;
 pub const MAX_TERMINAL_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
-const CHECKPOINT_MAGIC: [u8; 8] = *b"SPLTCP01";
+const CHECKPOINT_MAGIC_V1: [u8; 8] = *b"SPLTCP01";
+const CHECKPOINT_MAGIC_V2: [u8; 8] = *b"SPLTCP02";
 const MAX_CHECKPOINT_TITLE_BYTES: usize = 64 * 1024;
 const MAX_CHECKPOINT_EVENT_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CHECKPOINT_EVENTS: usize = 1 << 16;
@@ -48,6 +56,12 @@ pub enum CheckpointError {
     InvalidState,
 }
 
+#[derive(Deserialize)]
+struct CheckpointHeader {
+    magic: [u8; 8],
+    schema: u16,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CheckpointEnvelopeV1 {
@@ -55,6 +69,46 @@ struct CheckpointEnvelopeV1 {
     schema: u16,
     body_sha256: [u8; 32],
     body: TerminalCheckpointV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointEnvelopeV2 {
+    magic: [u8; 8],
+    schema: u16,
+    body_sha256: [u8; 32],
+    body: TerminalCheckpointV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalCheckpointV2 {
+    terminal: TerminalCheckpointV1,
+    image_sha256: [u8; 32],
+    images: ImageStateCheckpointV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ImageStateCheckpointV1 {
+    plane: ImageCheckpointV1,
+    kitty_image_ids: KittyImageIdsCheckpointV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KittyImageIdsCheckpointV1 {
+    #[serde(deserialize_with = "deserialize_kitty_image_ids")]
+    normal: Vec<KittyImageIdCheckpoint>,
+    #[serde(deserialize_with = "deserialize_kitty_image_ids")]
+    alternate: Vec<KittyImageIdCheckpoint>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KittyImageIdCheckpoint {
+    application_id: u32,
+    content_id: ImageContentId,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -219,19 +273,103 @@ impl CheckpointEvent {
     }
 }
 
+impl KittyImageIdsCheckpointV1 {
+    fn capture(ids: &KittyImageIds) -> Self {
+        let capture = |entries: &std::collections::BTreeMap<u32, ImageContentId>| {
+            entries
+                .iter()
+                .map(|(application_id, content_id)| KittyImageIdCheckpoint {
+                    application_id: *application_id,
+                    content_id: *content_id,
+                })
+                .collect()
+        };
+        Self {
+            normal: capture(&ids.normal),
+            alternate: capture(&ids.alternate),
+        }
+    }
+
+    fn restore(self, images: &ImagePlane) -> Result<KittyImageIds, CheckpointError> {
+        let restore = |screen: ActiveScreen,
+                       entries: Vec<KittyImageIdCheckpoint>|
+         -> Result<
+            std::collections::BTreeMap<u32, ImageContentId>,
+            CheckpointError,
+        > {
+            let mut restored = std::collections::BTreeMap::new();
+            let mut previous_application_id = None;
+            for entry in entries {
+                let is_kitty_content =
+                    images
+                        .content(screen, entry.content_id)
+                        .is_some_and(|content| {
+                            content.metadata().retention == ImageRetention::ExplicitDelete
+                                && matches!(
+                                    content.metadata().source_format,
+                                    ImageSourceFormat::KittyRgb
+                                        | ImageSourceFormat::KittyRgba
+                                        | ImageSourceFormat::KittyPng
+                                )
+                        });
+                if entry.application_id == 0
+                    || previous_application_id
+                        .is_some_and(|previous| previous >= entry.application_id)
+                    || !is_kitty_content
+                    || restored
+                        .insert(entry.application_id, entry.content_id)
+                        .is_some()
+                {
+                    return Err(CheckpointError::InvalidState);
+                }
+                previous_application_id = Some(entry.application_id);
+            }
+            Ok(restored)
+        };
+        Ok(KittyImageIds {
+            normal: restore(ActiveScreen::Normal, self.normal)?,
+            alternate: restore(ActiveScreen::Alternate, self.alternate)?,
+        })
+    }
+}
+
+impl TerminalCheckpointV2 {
+    fn capture(terminal: &Terminal) -> Result<Self, CheckpointError> {
+        let terminal_body = TerminalCheckpointV1::capture(terminal)?;
+        let normal_row_ids = terminal.normal.retained_row_ids();
+        let alternate_row_ids = terminal.alternate.retained_row_ids();
+        let images = ImageStateCheckpointV1 {
+            plane: terminal
+                .images
+                .capture_checkpoint(&normal_row_ids, &alternate_row_ids)
+                .map_err(|_| CheckpointError::InvalidState)?,
+            kitty_image_ids: KittyImageIdsCheckpointV1::capture(&terminal.kitty_image_ids),
+        };
+        let image_sha256 = Sha256::digest(encode_json(&images)?).into();
+        Ok(Self {
+            terminal: terminal_body,
+            image_sha256,
+            images,
+        })
+    }
+
+    fn restore(self, config: TerminalConfig) -> Result<Terminal, CheckpointError> {
+        if <[u8; 32]>::from(Sha256::digest(encode_json(&self.images)?)) != self.image_sha256 {
+            return Err(CheckpointError::InvalidState);
+        }
+        self.terminal.restore(config, Some(self.images))
+    }
+}
+
 impl TerminalCheckpointV1 {
     fn capture(terminal: &Terminal) -> Result<Self, CheckpointError> {
-        let image_metrics = terminal.images.metrics();
         if terminal.synchronized_updates
             || !terminal.synchronized_change.is_empty()
             || terminal.current_change.is_some()
-            || image_metrics != ImageMetrics::default()
             || terminal.sixel_decoder.is_some()
             || terminal.kitty_chunk.is_some()
             || terminal.kitty_upload.is_some()
             || terminal.iterm_transfer.is_some()
-            || !terminal.kitty_image_ids.normal.is_empty()
-            || !terminal.kitty_image_ids.alternate.is_empty()
             || terminal.event_overflowed
         {
             return Err(CheckpointError::UnsupportedState);
@@ -301,7 +439,11 @@ impl TerminalCheckpointV1 {
         clippy::too_many_lines,
         reason = "all-or-nothing validation and construction keep decoded checkpoint state local"
     )]
-    fn restore(mut self, config: TerminalConfig) -> Result<Terminal, CheckpointError> {
+    fn restore(
+        mut self,
+        config: TerminalConfig,
+        image_state: Option<ImageStateCheckpointV1>,
+    ) -> Result<Terminal, CheckpointError> {
         if !self.config.matches(&config) {
             return Err(CheckpointError::IncompatibleConfig);
         }
@@ -378,10 +520,26 @@ impl TerminalCheckpointV1 {
             .initial_palette
             .try_into()
             .map_err(|_| CheckpointError::InvalidState)?;
-        let images = ImagePlane::new_with_shared_budget(
-            config.image_limits,
-            config.shared_image_budget.clone(),
-        );
+        let (images, kitty_image_ids) = if let Some(image_state) = image_state {
+            let images = ImagePlane::restore_checkpoint(
+                image_state.plane,
+                config.image_limits,
+                config.shared_image_budget.clone(),
+                &self.normal.retained_row_ids(),
+                &self.alternate.retained_row_ids(),
+            )
+            .map_err(|_| CheckpointError::InvalidState)?;
+            let kitty_image_ids = image_state.kitty_image_ids.restore(&images)?;
+            (images, kitty_image_ids)
+        } else {
+            (
+                ImagePlane::new_with_shared_budget(
+                    config.image_limits,
+                    config.shared_image_budget.clone(),
+                ),
+                KittyImageIds::default(),
+            )
+        };
         let kitty_upload_budget = config
             .shared_kitty_upload_budget
             .clone()
@@ -408,7 +566,7 @@ impl TerminalCheckpointV1 {
             kitty_upload: None,
             iterm_transfer: None,
             kitty_upload_budget,
-            kitty_image_ids: KittyImageIds::default(),
+            kitty_image_ids,
             cell_pixels: self.cell_pixels,
             sixel_scrolling: self.sixel_scrolling,
             sixel_cursor_right: self.sixel_cursor_right,
@@ -436,24 +594,24 @@ impl TerminalCheckpointV1 {
 }
 
 impl Terminal {
-    /// Encodes the terminal into canonical checkpoint schema v1 bytes.
+    /// Encodes the terminal into canonical checkpoint schema v2 bytes.
     ///
     /// # Errors
-    /// Rejects active transactions, image state/transfers, unsupported pending
-    /// events, invalid state, or an aggregate larger than the hard byte bound.
+    /// Rejects active transactions/transfers, unsupported pending events,
+    /// invalid state, or an aggregate larger than the hard byte bound.
     pub fn encode_checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
-        let body = TerminalCheckpointV1::capture(self)?;
+        let body = TerminalCheckpointV2::capture(self)?;
         let body_bytes = encode_json(&body)?;
-        let envelope = CheckpointEnvelopeV1 {
-            magic: CHECKPOINT_MAGIC,
-            schema: TERMINAL_CHECKPOINT_SCHEMA_V1,
+        let envelope = CheckpointEnvelopeV2 {
+            magic: CHECKPOINT_MAGIC_V2,
+            schema: TERMINAL_CHECKPOINT_SCHEMA_V2,
             body_sha256: Sha256::digest(&body_bytes).into(),
             body,
         };
         encode_json(&envelope)
     }
 
-    /// Restores canonical checkpoint schema v1 under the supplied configuration.
+    /// Restores canonical checkpoint schema v1 or v2 under the supplied configuration.
     ///
     /// # Errors
     /// Rejects oversized, malformed, noncanonical, incompatible, unsupported,
@@ -465,20 +623,35 @@ impl Terminal {
         if bytes.len() > MAX_TERMINAL_CHECKPOINT_BYTES {
             return Err(CheckpointError::TooLarge);
         }
-        let envelope: CheckpointEnvelopeV1 =
+        let header: CheckpointHeader =
             serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
-        let canonical = encode_json(&envelope)?;
-        if canonical != bytes {
-            return Err(CheckpointError::NonCanonical);
+        match (header.magic, header.schema) {
+            (CHECKPOINT_MAGIC_V1, TERMINAL_CHECKPOINT_SCHEMA_V1) => {
+                let envelope: CheckpointEnvelopeV1 =
+                    serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+                if encode_json(&envelope)? != bytes {
+                    return Err(CheckpointError::NonCanonical);
+                }
+                let body_bytes = encode_json(&envelope.body)?;
+                if <[u8; 32]>::from(Sha256::digest(&body_bytes)) != envelope.body_sha256 {
+                    return Err(CheckpointError::InvalidState);
+                }
+                envelope.body.restore(config, None)
+            }
+            (CHECKPOINT_MAGIC_V2, TERMINAL_CHECKPOINT_SCHEMA_V2) => {
+                let envelope: CheckpointEnvelopeV2 =
+                    serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+                if encode_json(&envelope)? != bytes {
+                    return Err(CheckpointError::NonCanonical);
+                }
+                let body_bytes = encode_json(&envelope.body)?;
+                if <[u8; 32]>::from(Sha256::digest(&body_bytes)) != envelope.body_sha256 {
+                    return Err(CheckpointError::InvalidState);
+                }
+                envelope.body.restore(config)
+            }
+            _ => Err(CheckpointError::InvalidState),
         }
-        if envelope.magic != CHECKPOINT_MAGIC || envelope.schema != TERMINAL_CHECKPOINT_SCHEMA_V1 {
-            return Err(CheckpointError::InvalidState);
-        }
-        let body_bytes = encode_json(&envelope.body)?;
-        if <[u8; 32]>::from(Sha256::digest(&body_bytes)) != envelope.body_sha256 {
-            return Err(CheckpointError::InvalidState);
-        }
-        envelope.body.restore(config)
     }
 }
 
@@ -489,6 +662,19 @@ fn encode_json(value: &impl Serialize) -> Result<Vec<u8>, CheckpointError> {
         Err(_) if writer.exceeded => Err(CheckpointError::TooLarge),
         Err(error) => Err(CheckpointError::Encoding(error)),
     }
+}
+
+fn deserialize_kitty_image_ids<'de, D>(
+    deserializer: D,
+) -> Result<Vec<KittyImageIdCheckpoint>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_sequence(
+        deserializer,
+        MAX_IMAGE_CHECKPOINT_CONTENTS,
+        "Kitty application image mappings",
+    )
 }
 
 fn deserialize_tab_stops<'de, D>(deserializer: D) -> Result<Vec<bool>, D::Error>
@@ -634,10 +820,27 @@ mod tests {
         let terminal = Terminal::new(4, 2, config());
         let bytes = terminal.encode_checkpoint().unwrap();
         let mut value: Value = serde_json::from_slice(&bytes).unwrap();
-        mutate(value.get_mut("body").unwrap());
-        let mut envelope: CheckpointEnvelopeV1 = serde_json::from_value(value).unwrap();
+        mutate(&mut value["body"]["terminal"]);
+        let mut envelope: CheckpointEnvelopeV2 = serde_json::from_value(value).unwrap();
+        envelope.body.image_sha256 =
+            Sha256::digest(encode_json(&envelope.body.images).unwrap()).into();
         let body_bytes = encode_json(&envelope.body).unwrap();
         envelope.body_sha256 = Sha256::digest(&body_bytes).into();
+        encode_json(&envelope).unwrap()
+    }
+
+    fn mutate_image(mut mutate: impl FnMut(&mut Value)) -> Vec<u8> {
+        let mut terminal = Terminal::new(4, 2, config());
+        terminal.set_cell_pixel_size(1, 1);
+        terminal.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\");
+        terminal.advance(b"\x1b_Ga=p,i=7,p=9,C=1\x1b\\");
+        let bytes = terminal.encode_checkpoint().unwrap();
+        let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+        mutate(&mut value["body"]["images"]);
+        let mut envelope: CheckpointEnvelopeV2 = serde_json::from_value(value).unwrap();
+        envelope.body.image_sha256 =
+            Sha256::digest(encode_json(&envelope.body.images).unwrap()).into();
+        envelope.body_sha256 = Sha256::digest(encode_json(&envelope.body).unwrap()).into();
         encode_json(&envelope).unwrap()
     }
 
@@ -683,16 +886,62 @@ mod tests {
     }
 
     #[test]
+    fn digest_consistent_image_corruption_fails_without_partial_restore() {
+        let corruptions = [
+            mutate_image(|images| {
+                images["plane"]["contents"][0]["pixels"] = json!("AAAAAA==");
+            }),
+            mutate_image(|images| {
+                let byte = images["plane"]["contents"][0]["metadata"]["digest"][0]
+                    .as_u64()
+                    .unwrap();
+                images["plane"]["contents"][0]["metadata"]["digest"][0] = json!(byte ^ 1);
+            }),
+            mutate_image(|images| {
+                let duplicate = images["plane"]["contents"][0].clone();
+                images["plane"]["contents"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(duplicate);
+            }),
+            mutate_image(|images| images["plane"]["next_content_id"] = json!(1)),
+            mutate_image(|images| {
+                images["plane"]["placements"][0]["row_id"] = json!(u64::MAX);
+            }),
+            mutate_image(|images| {
+                images["kitty_image_ids"]["normal"][0]["content_id"] = json!(u64::MAX);
+            }),
+            mutate_image(|images| {
+                images["plane"]["contents"][0]["metadata"]["retention"] = json!("while_placed");
+            }),
+            mutate_image(|images| {
+                let mut out_of_order = images["kitty_image_ids"]["normal"][0].clone();
+                out_of_order["application_id"] = json!(6);
+                images["kitty_image_ids"]["normal"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(out_of_order);
+            }),
+        ];
+        for bytes in corruptions {
+            assert!(matches!(
+                Terminal::restore_checkpoint(&bytes, config()),
+                Err(CheckpointError::InvalidState)
+            ));
+        }
+    }
+
+    #[test]
     fn wrong_magic_schema_and_body_digest_fail_closed() {
         for mutate in [
-            (|envelope: &mut CheckpointEnvelopeV1| envelope.magic[0] ^= 1)
-                as fn(&mut CheckpointEnvelopeV1),
+            (|envelope: &mut CheckpointEnvelopeV2| envelope.magic[0] ^= 1)
+                as fn(&mut CheckpointEnvelopeV2),
             |envelope| envelope.schema += 1,
             |envelope| envelope.body_sha256[0] ^= 1,
         ] {
             let terminal = Terminal::new(4, 2, config());
             let bytes = terminal.encode_checkpoint().unwrap();
-            let mut envelope: CheckpointEnvelopeV1 = serde_json::from_slice(&bytes).unwrap();
+            let mut envelope: CheckpointEnvelopeV2 = serde_json::from_slice(&bytes).unwrap();
             mutate(&mut envelope);
             let corrupted = encode_json(&envelope).unwrap();
             assert!(matches!(
@@ -700,5 +949,23 @@ mod tests {
                 Err(CheckpointError::InvalidState)
             ));
         }
+    }
+
+    #[test]
+    fn schema_v1_text_checkpoints_remain_restorable() {
+        let terminal = Terminal::new(4, 2, config());
+        let body = TerminalCheckpointV1::capture(&terminal).unwrap();
+        let body_sha256 = Sha256::digest(encode_json(&body).unwrap()).into();
+        let envelope = CheckpointEnvelopeV1 {
+            magic: CHECKPOINT_MAGIC_V1,
+            schema: TERMINAL_CHECKPOINT_SCHEMA_V1,
+            body_sha256,
+            body,
+        };
+        let restored =
+            Terminal::restore_checkpoint(&encode_json(&envelope).unwrap(), config()).unwrap();
+        assert_eq!(restored.normal, terminal.normal);
+        assert_eq!(restored.alternate, terminal.alternate);
+        assert_eq!(restored.images.metrics(), crate::ImageMetrics::default());
     }
 }

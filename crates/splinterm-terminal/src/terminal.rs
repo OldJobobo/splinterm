@@ -8,6 +8,7 @@ mod checkpoint;
 
 pub use checkpoint::{
     CheckpointError, MAX_TERMINAL_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1,
+    TERMINAL_CHECKPOINT_SCHEMA_V2,
 };
 
 use std::{
