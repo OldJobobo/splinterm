@@ -129,6 +129,31 @@ fn tab_strip_background_rgba(theme: ResolvedTheme) -> [u8; 4] {
     premultiplied_theme_rgba(theme.background, theme.background_alpha)
 }
 
+fn paint_inactive_tab_divider(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: Rect,
+    scale_120: u32,
+    theme: ResolvedTheme,
+) -> Result<()> {
+    let divider = logical_extent_to_buffer(1, scale_120)?.max(1);
+    fill_rect(
+        canvas,
+        width,
+        height,
+        (
+            i32::try_from(rect.x.saturating_add(rect.width).saturating_sub(divider))
+                .unwrap_or(i32::MAX),
+            i32::try_from(rect.y).unwrap_or(i32::MAX),
+            divider.min(rect.width),
+            rect.height,
+        ),
+        opaque_rgba(theme.pane_border),
+    );
+    Ok(())
+}
+
 fn is_legacy_generated_lair_name(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix("terminal-") else {
         return false;
@@ -550,19 +575,7 @@ impl App {
                     opaque_rgba(theme.ui_accent),
                 );
             } else {
-                let divider = logical_extent_to_buffer(1, scale_120)?.max(1);
-                fill_rect(
-                    canvas,
-                    width,
-                    height,
-                    (
-                        position(rect.x.saturating_add(rect.width).saturating_sub(divider)),
-                        position(rect.y),
-                        divider.min(rect.width),
-                        rect.height,
-                    ),
-                    opaque_rgba(theme.pane_border),
-                );
+                paint_inactive_tab_divider(canvas, width, height, rect, scale_120, theme)?;
             }
             let label_rect = Self::buffer_rect(tab.label_rect, scale_120)?;
             if let Some(label) = labels.get(&tab.dojo_id) {
