@@ -617,6 +617,10 @@ mod tests {
                 ActionId::RecentSessions => "Dojo picker boundary",
                 ActionId::NewSession
                 | ActionId::RenameCurrentLair
+                | ActionId::SaveCurrentLair
+                | ActionId::ToggleCurrentLairPin
+                | ActionId::PreviewCurrentLair
+                | ActionId::RestoreCurrentLair
                 | ActionId::TerminateCurrentLair
                 | ActionId::PreviousLair
                 | ActionId::NextLair

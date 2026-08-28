@@ -418,6 +418,8 @@ mod tests {
             ("pane.split-right", ActionId::SplitVertical),
             ("Prefix ?", ActionId::BindingHelp),
             ("maximize", ActionId::TogglePaneZoom),
+            ("favorite", ActionId::ToggleCurrentLairPin),
+            ("lair restore", ActionId::RestoreCurrentLair),
         ];
         for (query, expected) in cases {
             let mut help = BindingHelpUi::new(&keymap);

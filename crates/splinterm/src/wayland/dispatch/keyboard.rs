@@ -5,8 +5,8 @@ use super::super::{
     KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
     WindowTopologyCommand, close_other_tabs_command, command_palette_shortcut_action,
-    consume_detached_enter_press, font_zoom_action, keymap_press_for, pane_focus_action,
-    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
+    consume_detached_enter_press, font_zoom_action, keymap_press_for, lair_lifecycle_command,
+    pane_focus_action, pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
     tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
@@ -318,6 +318,10 @@ impl KeyboardHandler for App {
             Some(
                 ActionId::NewSession
                     | ActionId::RenameCurrentLair
+                    | ActionId::SaveCurrentLair
+                    | ActionId::ToggleCurrentLairPin
+                    | ActionId::PreviewCurrentLair
+                    | ActionId::RestoreCurrentLair
                     | ActionId::TerminateCurrentLair
                     | ActionId::PreviousLair
                     | ActionId::NextLair
@@ -347,6 +351,22 @@ impl KeyboardHandler for App {
                         lair_id: self.tab_state.active_identity.lair_id,
                         kind: super::super::LairPromptKind::Rename,
                     }
+                }
+                action @ (ActionId::SaveCurrentLair
+                | ActionId::ToggleCurrentLairPin
+                | ActionId::PreviewCurrentLair
+                | ActionId::RestoreCurrentLair) => {
+                    let Some(command) = lair_lifecycle_command(
+                        action,
+                        self.tab_state.active_identity.lair_id,
+                        self.tab_state.active_identity.lair_retention,
+                    ) else {
+                        return;
+                    };
+                    if matches!(command, WindowTopologyCommand::RequestLairPrompt { .. }) {
+                        self.modal.session_picker_requested = true;
+                    }
+                    command
                 }
                 ActionId::TerminateCurrentLair => {
                     self.modal.session_picker_requested = true;
