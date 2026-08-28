@@ -134,8 +134,11 @@ profile and TOML overlay. Configuration can bind only closed application actions
 it cannot register shell commands or callbacks.
 
 With the `omarchy-tmux` profile, `Prefix+B` toggles the Dojo tab strip,
-`Prefix+?` opens trusted read-only help generated from the resolved keymap, and
-`Prefix+[` enters client-local vi copy mode.
+`Prefix+?` opens trusted searchable help generated from the resolved keymap, and
+`Prefix+[` enters client-local vi copy mode. In keybinding help, type to search
+labels, configuration names, shortcuts, sources, and closed keywords; use
+Up/Down or PageUp/PageDown to navigate, `Ctrl+U` to clear, and Escape once to
+clear a query or again to close.
 Move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown; press `v` to begin a
 selection, `y` or `Super+C` to publish it to the Wayland clipboard and exit, or
 Escape to cancel. Copy-mode `Super+V/X/Z` are consumed locally; copy mode never
@@ -227,7 +230,11 @@ for intent.
 
 The command palette exposes exact-target actions to **Save current Lair layout**,
 **Pin/Unpin current Lair**, **Preview saved Lair layout**, and explicitly restore
-a saved Lair or one selected Dojo. Saving preserves the durable Lair/Dojo/Splint
+a saved Lair or one selected Dojo. The same current-Lair paths are closed keymap
+actions: `lair.save`, `lair.pin-toggle`, `lair.preview`, and `lair.restore`.
+The `omarchy-tmux` defaults are `Prefix Shift+S/F/V/O`, respectively; the
+`splinterm` profile leaves them available to strict overlays without adding
+more direct chords. Saving preserves the durable Lair/Dojo/Splint
 tree, split axes and proportional ratios, default focus, names, validated launch
 working directories, known structured argv, shell policy, scrollback policy, and
 bounded last-known rows and columns. Ratios—not prior pixel dimensions—are the

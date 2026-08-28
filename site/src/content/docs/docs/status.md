@@ -24,7 +24,7 @@ Splinterm is a **public beta**. Source, documentation, and immutable versioned G
 | XDG command lifecycle | Commandless launches remain persistent; command-bearing launches use trusted client-bound transient Lairs |
 | Pane layouts and multiple Dojos | Implemented and validated |
 | Window-local Dojo tabs, tab strip, and context menus | Implemented and validated |
-| Configurable keymaps and Omarchy controls | Implemented and validated |
+| Configurable keymaps, searchable help, and current-Lair controls | Implemented and non-graphically validated; packaged graphical acceptance pending |
 | Atomic Dojo presets and optional Bash helpers | Implemented and validated |
 | Vi copy mode and trusted local field editing | Implemented and validated |
 | Multi-client controller transfer | Implemented and validated |

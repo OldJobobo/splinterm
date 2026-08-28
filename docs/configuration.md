@@ -116,9 +116,13 @@ its direct and prefixed pane controls, exact five-cell directional resize,
 client-local pane zoom, Dojo/Lair creation and selection, numeric and reordered
 Window-local tabs, stable-ID trusted choosers, confirmed rename/termination,
 Lair navigation, clean Window detach, a per-Window `Prefix+B` Dojo tab-strip
-toggle, a generated trusted `Prefix+?` help overlay, vi copy mode, and
-transactional config reload. New Dojos and Lairs
-inherit the focused Splint cwd.
+toggle, a generated searchable trusted `Prefix+?` help overlay, vi copy mode,
+transactional config reload, and current-Lair lifecycle bindings:
+`Prefix Shift+S` saves, `Prefix Shift+F` toggles pinned state,
+`Prefix Shift+V` previews, and `Prefix Shift+O` opens the existing restore
+confirmation path. These are Splinterm additions; the checked stock Omarchy tmux
+profile defines no actions on those four shifted prefix keys. New Dojos and
+Lairs inherit the focused Splint cwd.
 
 `Prefix+[` enters copy mode at the live cursor or current history viewport.
 `h/j/k/l` and arrows move over visible and loaded historical rows; Home/End move
@@ -129,6 +133,12 @@ Escape cancels. Copy mode isolates terminal input, paste, pointer actions, IME,
 and application mouse reporting, and cancels safely on focus, topology, pane
 identity, or history-generation changes.
 
+`Prefix+?` opens help for the effective resolved keymap. Type to search action
+labels, configuration names, shortcuts, sources, and closed keywords; use
+Up/Down or PageUp/PageDown to navigate, `Ctrl+U` to clear, and Escape once to
+clear a non-empty query or again to close. The owned query never reaches the
+terminal.
+
 Outside copy mode, both built-in profiles map `Super+C` to terminal-selection
 copy and `Super+V` to the existing safe/bracketed paste while both profiles
 retain `Ctrl+Shift+C/V` aliases. Omarchy's universal binding injects
@@ -138,8 +148,8 @@ without that classification its universal copy branch injects ordinary
 `Ctrl+C`, which remains terminal interrupt. In copy mode, `Super+C` copies the active
 selection and exits; `Super+V/X/Z` are consumed locally without pasting or
 sending PTY input. These Super shortcuts work only when the compositor delivers
-the chord to the Splinterm Window. Splinterm-owned command palette, search, and
-rename fields support `Super+A` selection, `Super+C/V/X/Z`
+the chord to the Splinterm Window. Splinterm-owned command palette, keybinding
+help, search, and rename fields support `Super+A` selection, `Super+C/V/X/Z`
 copy/paste/cut/undo, and Shift+Left/Right selection. Their Unicode-safe undo
 history is limited to 16 states and disappears with the field. Terminal-pane
 `Super+X` and `Super+Z` are not claimed as universal cut or undo actions because
@@ -186,6 +196,8 @@ dojo.select-6             dojo.select-7
 dojo.select-8             dojo.select-9
 dojo.move-left            dojo.move-right
 lair.new                  lair.rename
+lair.save                 lair.pin-toggle
+lair.preview              lair.restore
 lair.terminate-confirmed  lair.previous
 lair.next                 lair.choose
 window.detach             pane.split-below

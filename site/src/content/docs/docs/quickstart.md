@@ -61,6 +61,6 @@ Super shortcuts work only when the compositor delivers the chord to the Splinter
 Reopening attaches to processes that are still running. If a Splint has exited, starting it again from saved launch metadata is an explicit restore operation.
 :::
 
-The optional `omarchy-tmux` profile adds `Ctrl+Space` / `Ctrl+B` prefixes, trusted `Prefix+?` key help, and `Prefix+[` vi copy mode. See [Configuration and keymaps](/docs/configure/configuration/).
+The optional `omarchy-tmux` profile adds `Ctrl+Space` / `Ctrl+B` prefixes, trusted searchable `Prefix+?` key help, `Prefix+[` vi copy mode, and `Prefix Shift+S/F/V/O` for Save, pin toggle, Preview, and Restore of the current Lair. See [Configuration and keymaps](/docs/configure/configuration/).
 
 Next, learn the [core concepts](/docs/concepts/), read about [sessions and persistence](/docs/sessions/), or create complete layouts with [Dojo presets](/docs/presets/).
