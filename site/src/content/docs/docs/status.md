@@ -5,9 +5,9 @@ description: What is implemented, validated, limited, planned, and unreleased in
 
 Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1) is the current public prerelease. It adds wide-grid support through `480×128`, bounded sparse terminal publication frames, and active-tab contrast that remains independent from terminal selection colors, while retaining the accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
+[`v0.1.0-beta2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta2) is the current public prerelease. It adds configurable Window-owned terminal lifetimes, corrected startup font-family and glyph fallback resolution, and verified nested systemd workload isolation.
 
-Beta 2 candidate preparation is in progress. Its source tree adds configurable ordinary graphical lifetime, owner-only promotion when users organize tabs, and corrected startup font-family resolution. Complete non-graphical, clean-package, and isolated staged-package graphical validation has passed. Fresh review approved the complete implementation and bounded post-graphical naming fix with no blocker or fix worth doing now. No Beta 2 tag, package publication, AUR update, or installed-package acceptance is claimed yet.
+Beta 3 candidate preparation is in progress. It removes provisional per-workload task ceilings so terminal applications inherit the user manager's normal task policy while the daemon retains its independent guard. It also places the New Dojo control beside the final tab, separates inactive tabs with semantic dividers, and gives legacy unnamed Dojos a stable `Dojo 1` tab label. Focused tests pass; complete release validation, review, publication, installation, and AUR updates remain pending.
 
 ## What that means
 
@@ -37,7 +37,7 @@ Beta 2 candidate preparation is in progress. Its source tree adds configurable o
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta1-1` |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta2-1` |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 

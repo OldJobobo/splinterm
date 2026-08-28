@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0-beta1`
+- **Current public version tag:** `v0.1.0-beta2`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -33,33 +33,71 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Beta 1 `0.1.0beta1-1` Arch packages built from clean committed
+- public Beta 2 `0.1.0beta2-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
-  exact-package acceptance for the Alpha3.1 transient-tab hotfixes; and accepted
+  exact-package acceptance for the Alpha3.1 transient-tab hotfixes; accepted
   Beta 1 graphical, package, provenance, wide-grid, sparse-publication, and
-  active-tab contrast evidence.
+  active-tab contrast evidence; and accepted Beta 2 terminal-lifetime,
+  font-family, workload-isolation, package, and release evidence.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
-## Beta 2 candidate preparation
+## Beta 3 candidate preparation
 
-The `0.1.0-beta2` source and package metadata are under review. The candidate
-adds backward-compatible graphical lifetime settings, owner-only atomic
-promotion through Dojo creation or explicit Dojo naming, and the startup
-font-family correction for newly opened Windows. It also separates the daemon
-from terminal workload resource boundaries through an aggregate workload slice,
-per-Dojo slices, per-Splint scopes, and a pre-exec placement gate. Packaged
-startup fails closed when that placement capability is unavailable. Complete
-non-graphical workspace, package, release-tooling, portable-provenance,
-documentation, real-systemd, local installed-package, and isolated staged-package
-graphical validation has passed. Final release review and protected publication
-remain pending. No Beta 2 tag, public release, or AUR update exists yet; Beta 1
+The `0.1.0-beta3` maintenance candidate removes Splinterm's provisional
+512/1024/2048 task ceilings from terminal workload scopes and slices so ordinary
+Chromium, Node, editor, build, and agent workloads inherit the surrounding
+systemd user manager's `DefaultTasksMax`. The daemon retains its independent
+`TasksMax=2048` control-plane guard and the existing nested workload and
+memory-pressure boundaries remain intact.
+
+The candidate also places the New Dojo control immediately after the final
+visible tab, gives inactive tabs exact semantic dividers, and presents legacy
+unnamed `terminal-…` initial Dojos as `Dojo 1` without changing explicit names
+or daemon-owned topology. Focused implementation tests have passed; complete
+non-graphical release validation, independent review, candidate construction,
+protected publication, installation, and AUR updates remain pending. Beta 2
 remains the current public release.
+
+## Beta 2 release
+
+[`v0.1.0-beta2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta2)
+was published as a GitHub prerelease on 2026-08-24 and distributed through both
+AUR package bases as `0.1.0beta2-1`. Beta 2 adds configurable Window-owned
+terminal lifetimes with atomic promotion to persistent Lairs, follows the
+selected Fontconfig family for newly opened Windows, and places packaged
+terminal workloads in verified nested systemd user units so the daemon retains
+an independent resource-failure boundary.
+
+- Release commit `f0c5dd176e36ce88abc1328c8e67839da263e56a` passed exact-SHA CI
+  run `32684539475`. Candidate run `32685119499` built the release once, and
+  protected promotion run `32690770541` published and reverified the exact
+  five public assets; publication receipt artifact `9507412607` remains the
+  release record.
+- Source archive SHA-256:
+  `ba8f953c2bf7562923af0c2e131b86a469ab2b4788c352ab3cfaec521125a1f2`.
+  Main package SHA-256:
+  `1e7060fea06867743a88a0021ad33385f32f5cc4a20a22afb45448130ebdded5`.
+  MCP package SHA-256:
+  `889b7a6457789ee601f095dfaf8e208172177fa93aba232fa20394e07ff3eacd`.
+- AUR source package commit: `0dfb8e31fcb8dcefebff9b1735bcd9e8b0b33093`.
+  AUR prebuilt package commit: `eae0d825a0331f5494eb61dfd9e01734374025f2`.
+  Both visible recipes identify `0.1.0beta2-1` and pin the immutable GitHub
+  source or package assets to the release hashes above.
+- Complete serialized workspace, package, release-tooling, portable Foot
+  provenance, documentation, independent review, disposable real-systemd
+  placement, local package-integrity, and guarded staged-package graphical
+  boundaries passed before publication.
+
+Upgrading Beta 2 to Beta 3 recreates the `0.1` daemon and workload hierarchy and
+therefore ends active Dojos. The [packaging guide](packaging.md) documents the
+required external-terminal upgrade and rollback workflow; package installation
+does not restart the user service automatically.
 
 ## Beta 1 release
 
