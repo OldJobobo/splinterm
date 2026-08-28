@@ -5,8 +5,11 @@
 //! and `scroll_region`. Signed coordinates are retained because later Foot
 //! grid and scrollback operations use signed row positions.
 
+use serde::{Deserialize, Serialize};
+
 /// A zero-based terminal-grid coordinate.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Coordinate {
     /// Zero-based column.
     pub column: i32,
@@ -23,7 +26,8 @@ impl Coordinate {
 }
 
 /// An inclusive pair of terminal coordinates.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoordinateRange {
     /// First coordinate in the range.
     pub start: Coordinate,
@@ -40,7 +44,8 @@ impl CoordinateRange {
 }
 
 /// A half-open vertical region used by terminal scrolling operations.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScrollRegion {
     start: i32,
     end: i32,

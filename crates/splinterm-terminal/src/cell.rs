@@ -6,6 +6,8 @@
 //! representation preserves Foot's compact eight-byte baseline without Rust
 //! bitfields or unsafe code.
 
+use serde::{Deserialize, Serialize};
+
 const COLOR_MASK: u32 = 0x00ff_ffff;
 const COMPOSED_BASE: u32 = 0x0020_0000;
 const COMPOSED_KEY_MAX: u32 = 0x3fff_ffff;
@@ -32,8 +34,9 @@ const URL: u32 = 1 << 7;
 const BACKGROUND_SHIFT: u32 = 8;
 
 /// Identifies how a cell color value should be interpreted.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[repr(u8)]
+#[serde(rename_all = "snake_case")]
 pub enum ColorSource {
     /// Use the terminal's configured default color.
     #[default]
@@ -59,7 +62,8 @@ impl ColorSource {
 }
 
 /// A 24-bit value paired with its interpretation source.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Color {
     source: ColorSource,
     value: u32,
@@ -97,8 +101,9 @@ impl Color {
 }
 
 /// Terminal underline rendition carried independently from glyph styling.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[repr(u8)]
+#[serde(rename_all = "snake_case")]
 pub enum UnderlineStyle {
     #[default]
     None = 0,
@@ -115,7 +120,8 @@ pub enum UnderlineStyle {
 /// renderer flags, both color sources, and the background in another. Keeping
 /// the same logical packing makes this type eight bytes while leaving its API
 /// independent of the physical representation.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Attributes {
     style_and_foreground: u32,
     state_and_background: u32,
@@ -226,6 +232,27 @@ impl Attributes {
             | (color.value << BACKGROUND_SHIFT)
             | ((color.source as u32) << BACKGROUND_SOURCE_SHIFT);
     }
+
+    pub(crate) const fn checkpoint_is_valid(self) -> bool {
+        let style_mask = BOLD
+            | DIM
+            | ITALIC
+            | STRIKETHROUGH
+            | BLINK
+            | CONCEAL
+            | REVERSE
+            | (COLOR_MASK << FOREGROUND_SHIFT);
+        let state_mask = CLEAN
+            | (SOURCE_MASK << FOREGROUND_SOURCE_SHIFT)
+            | (SOURCE_MASK << BACKGROUND_SOURCE_SHIFT)
+            | CONFINED
+            | SELECTED
+            | URL
+            | (COLOR_MASK << BACKGROUND_SHIFT);
+        self.style_and_foreground & !style_mask == 0
+            && self.state_and_background & !state_mask == 0
+            && self.underline_color.value <= COLOR_MASK
+    }
 }
 
 /// Semantic content encoded in a cell's compact content word.
@@ -245,7 +272,8 @@ pub enum CellContent {
 }
 
 /// One terminal grid cell.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cell {
     content: u32,
     attributes: Attributes,
@@ -327,6 +355,18 @@ impl Cell {
     #[must_use]
     pub const fn is_spacer(self) -> bool {
         self.content >= SPACER_BASE
+    }
+
+    pub(crate) fn checkpoint_is_valid(self, composed_entries: usize) -> bool {
+        let content_is_valid = match self.content {
+            0 => true,
+            value if value < COMPOSED_BASE => char::from_u32(value).is_some(),
+            value if value <= COMPOSED_END => {
+                usize::try_from(value - COMPOSED_BASE).is_ok_and(|key| key < composed_entries)
+            }
+            _ => true,
+        };
+        content_is_valid && self.attributes.checkpoint_is_valid()
     }
 }
 

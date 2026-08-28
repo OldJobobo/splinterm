@@ -6,14 +6,27 @@
 //! a hard linebreak, and contains clean empty cells. URI, underline, and shell-integration metadata
 //! remain deferred until the phases that consume them.
 
-use std::ops::{Index, IndexMut, Range};
+use std::{
+    fmt,
+    marker::PhantomData,
+    ops::{Index, IndexMut, Range},
+};
+
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{SeqAccess, Visitor},
+};
 
 use crate::{Attributes, Cell, CellContent, Color};
 
+pub(crate) const MAX_CHECKPOINT_COLUMNS: usize = 1 << 16;
+
 /// A terminal row and the metadata needed to distinguish hard line endings
 /// from soft wrapping.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Row {
+    #[serde(deserialize_with = "deserialize_cells")]
     cells: Vec<Cell>,
     dirty: bool,
     linebreak: bool,
@@ -325,6 +338,19 @@ impl Row {
         self.linebreak = true;
     }
 
+    pub(crate) fn checkpoint_is_valid(&self, composed_entries: usize) -> bool {
+        if !self
+            .cells
+            .iter()
+            .all(|cell| cell.checkpoint_is_valid(composed_entries))
+        {
+            return false;
+        }
+        let mut repaired = self.clone();
+        repaired.repair_wide_cells();
+        repaired == *self
+    }
+
     fn mark_cells_clean(&mut self) {
         for cell in &mut self.cells {
             cell.attributes_mut().set_clean(true);
@@ -351,14 +377,18 @@ impl Row {
             let expected_width = usize::try_from(remaining)
                 .unwrap_or(usize::MAX)
                 .saturating_add(1);
+            let end = leader
+                .checked_add(expected_width)
+                .filter(|end| *end <= self.cells.len());
             let valid = leader < column
-                && leader + expected_width <= self.cells.len()
-                && (1..expected_width).all(|offset| {
-                    self.cells[leader + offset].content()
-                        == CellContent::Spacer(u32::try_from(expected_width - offset).unwrap())
+                && end.is_some_and(|end| {
+                    (1..end - leader).all(|offset| {
+                        self.cells[leader + offset].content()
+                            == CellContent::Spacer(u32::try_from(expected_width - offset).unwrap())
+                    })
                 });
             if valid {
-                column = leader + expected_width;
+                column = end.expect("validated wide-cell end");
             } else {
                 self.cells[column].set_content(CellContent::Empty);
                 column += 1;
@@ -372,6 +402,52 @@ impl Row {
             "cell range must fit within the row"
         );
     }
+}
+
+fn deserialize_cells<'de, D>(deserializer: D) -> Result<Vec<Cell>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct CellsVisitor(PhantomData<Cell>);
+
+    impl<'de> Visitor<'de> for CellsVisitor {
+        type Value = Vec<Cell>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "at most {MAX_CHECKPOINT_COLUMNS} terminal cells")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if sequence
+                .size_hint()
+                .is_some_and(|length| length > MAX_CHECKPOINT_COLUMNS)
+            {
+                return Err(serde::de::Error::custom(
+                    "terminal row exceeds checkpoint bound",
+                ));
+            }
+            let mut cells = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_CHECKPOINT_COLUMNS),
+            );
+            while let Some(cell) = sequence.next_element()? {
+                if cells.len() == MAX_CHECKPOINT_COLUMNS {
+                    return Err(serde::de::Error::custom(
+                        "terminal row exceeds checkpoint bound",
+                    ));
+                }
+                cells.push(cell);
+            }
+            Ok(cells)
+        }
+    }
+
+    deserializer.deserialize_seq(CellsVisitor(PhantomData))
 }
 
 impl Index<usize> for Row {

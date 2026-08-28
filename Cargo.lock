@@ -1652,8 +1652,10 @@ dependencies = [
  "base64",
  "flate2",
  "png",
+ "serde",
  "serde_json",
  "sha2",
+ "thiserror",
  "unicode-width",
 ]
 

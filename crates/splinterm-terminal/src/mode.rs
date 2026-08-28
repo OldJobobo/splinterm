@@ -3,8 +3,11 @@
 //! Derived from Foot 1.27.0 `terminal.h` and DEC mode handling in `csi.c` at
 //! commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
+use serde::{Deserialize, Serialize};
+
 /// Currently selected screen buffer.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActiveScreen {
     /// Normal screen with scrollback.
     #[default]
@@ -14,7 +17,8 @@ pub enum ActiveScreen {
 }
 
 /// Mouse reporting trigger mode.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MouseTracking {
     #[default]
     None,
@@ -28,7 +32,8 @@ pub enum MouseTracking {
     clippy::struct_excessive_bools,
     reason = "these independent DEC and ANSI modes mirror terminal protocol state"
 )]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalModes {
     pub insert: bool,
     pub origin: bool,

@@ -7,11 +7,20 @@
 //! is intentionally bounded; overflow consumes through the terminator without
 //! desynchronizing subsequent input.
 
+use std::{fmt, marker::PhantomData};
+
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{SeqAccess, Visitor},
+};
+
 const PARAM_LIMIT: usize = 16;
 const SUBPARAM_LIMIT: usize = 16;
 const INTERMEDIATE_LIMIT: usize = 4;
+const MAX_CHECKPOINT_PARSER_STRING_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Param {
     value: u32,
     present: bool,
@@ -39,7 +48,8 @@ impl Param {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Params {
     values: [Param; PARAM_LIMIT],
     count: usize,
@@ -108,7 +118,8 @@ pub(crate) enum Action {
     StringTruncated(&'static str),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum State {
     #[default]
     Ground,
@@ -140,7 +151,8 @@ enum State {
     Utf8,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Parser {
     state: State,
     private: Option<u8>,
@@ -150,6 +162,7 @@ pub(crate) struct Parser {
     current_param: usize,
     current_subparam: Option<usize>,
     parameter_overflow: bool,
+    #[serde(deserialize_with = "deserialize_parser_string")]
     string: Vec<u8>,
     string_limit: usize,
     string_truncated: bool,
@@ -184,6 +197,50 @@ impl Parser {
             utf8_remaining: 0,
             string_utf8_remaining: 0,
         }
+    }
+
+    pub(crate) fn checkpoint_is_valid(&self, osc_limit: usize, dcs_limit: usize) -> bool {
+        if self.osc_limit != osc_limit
+            || self.dcs_limit != dcs_limit
+            || self.intermediate_count > INTERMEDIATE_LIMIT
+            || self.intermediates[self.intermediate_count..]
+                .iter()
+                .any(|byte| *byte != 0)
+            || self.intermediates[..self.intermediate_count]
+                .iter()
+                .any(|byte| !(0x20..=0x2f).contains(byte))
+            || self.params.count > PARAM_LIMIT
+            || self.current_param >= PARAM_LIMIT
+            || self
+                .current_subparam
+                .is_some_and(|index| index >= SUBPARAM_LIMIT)
+            || self
+                .private
+                .is_some_and(|byte| !(0x3c..=0x3f).contains(&byte))
+            || self.string.len() > self.string_limit
+            || self.string.len() > MAX_CHECKPOINT_PARSER_STRING_BYTES
+            || self.string_limit > osc_limit.max(dcs_limit).max(1024)
+            || self.sixel_streaming
+            || self.utf8_remaining > 3
+            || (self.state == State::Utf8 && self.utf8_remaining == 0)
+        {
+            return false;
+        }
+        for (index, param) in self.params.values.iter().enumerate() {
+            if param.subparam_count > SUBPARAM_LIMIT
+                || (!param.present && param.value != 0)
+                || param.subparams[param.subparam_count..]
+                    .iter()
+                    .any(|value| *value != 0)
+                || param.subparam_present[param.subparam_count..]
+                    .iter()
+                    .any(|present| *present)
+                || (index >= self.params.count && *param != Param::default())
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Returns an action and whether the same byte must be reprocessed.
@@ -804,6 +861,55 @@ impl Parser {
             self.params.count = self.params.count.max(self.current_param + 1);
         }
     }
+}
+
+fn deserialize_parser_string<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BytesVisitor(PhantomData<u8>);
+
+    impl<'de> Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_CHECKPOINT_PARSER_STRING_BYTES} parser string bytes"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if sequence
+                .size_hint()
+                .is_some_and(|length| length > MAX_CHECKPOINT_PARSER_STRING_BYTES)
+            {
+                return Err(serde::de::Error::custom(
+                    "parser string exceeds checkpoint bound",
+                ));
+            }
+            let mut bytes = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_CHECKPOINT_PARSER_STRING_BYTES),
+            );
+            while let Some(byte) = sequence.next_element()? {
+                if bytes.len() == MAX_CHECKPOINT_PARSER_STRING_BYTES {
+                    return Err(serde::de::Error::custom(
+                        "parser string exceeds checkpoint bound",
+                    ));
+                }
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+
+    deserializer.deserialize_seq(BytesVisitor(PhantomData))
 }
 
 #[cfg(test)]

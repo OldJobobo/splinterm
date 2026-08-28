@@ -11,7 +11,16 @@
 
 mod reflow;
 
-use crate::{Color, Coordinate, Cursor, Row, ScrollRegion};
+use std::{collections::HashSet, fmt, marker::PhantomData};
+
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{SeqAccess, Visitor},
+};
+
+use crate::{Color, Coordinate, Cursor, Row, ScrollRegion, row::MAX_CHECKPOINT_COLUMNS};
+
+pub(crate) const MAX_CHECKPOINT_GRID_ROWS: usize = 1 << 18;
 
 /// Direction of a grid scroll operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,8 +53,10 @@ pub(crate) type ScrollbackRows<'a> = (Vec<(u64, &'a Row)>, usize, usize, Option<
 /// The grid owns row storage, cursor and viewport coordinates, scrolling, and
 /// resize/reflow behavior. It remains independent of renderer damage, PTYs,
 /// protocols, and higher terminal features.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Grid {
+    #[serde(deserialize_with = "deserialize_rows")]
     rows: Vec<Option<Row>>,
     columns: usize,
     offset: usize,
@@ -54,6 +65,7 @@ pub struct Grid {
     cursor: Cursor,
     saved_cursor: Cursor,
     generation: u64,
+    #[serde(deserialize_with = "deserialize_row_ids")]
     row_ids: Vec<u64>,
     next_row_id: u64,
     history_generation: u64,
@@ -124,6 +136,57 @@ impl Grid {
 
     pub(crate) const fn history_namespace(&self) -> (u64, u64) {
         (self.next_row_id, self.history_generation)
+    }
+
+    pub(crate) fn checkpoint_is_valid(&self, composed_entries: usize) -> bool {
+        let capacity = self.rows.len();
+        if !capacity.is_power_of_two()
+            || capacity > MAX_CHECKPOINT_GRID_ROWS
+            || self.row_ids.len() != capacity
+            || self.columns == 0
+            || self.columns > MAX_CHECKPOINT_COLUMNS
+            || self.screen_rows == 0
+            || self.screen_rows > capacity
+            || self.offset >= capacity
+            || self.view >= capacity
+            || self.history_generation == 0
+            || self.next_row_id == 0
+        {
+            return false;
+        }
+        let cursor_is_valid = |cursor: Cursor| {
+            let position = cursor.position();
+            position.column >= 0
+                && usize::try_from(position.column).is_ok_and(|column| column < self.columns)
+                && position.row >= 0
+                && usize::try_from(position.row).is_ok_and(|row| row < self.screen_rows)
+        };
+        if !cursor_is_valid(self.cursor) || !cursor_is_valid(self.saved_cursor) {
+            return false;
+        }
+        let mut seen_ids = HashSet::new();
+        let mut maximum_id = 0_u64;
+        for (row, id) in self.rows.iter().zip(&self.row_ids) {
+            match row {
+                Some(row) => {
+                    if *id == 0
+                        || row.len() != self.columns
+                        || !seen_ids.insert(*id)
+                        || !row.checkpoint_is_valid(composed_entries)
+                    {
+                        return false;
+                    }
+                    maximum_id = maximum_id.max(*id);
+                }
+                None if *id == 0 => {}
+                None => return false,
+            }
+        }
+        if self.next_row_id <= maximum_id {
+            return false;
+        }
+        let mask = capacity - 1;
+        (0..self.screen_rows).all(|row| self.rows[(self.offset + row) & mask].is_some())
     }
 
     pub(crate) fn continue_history_namespace(&mut self, namespace: (u64, u64)) {
@@ -840,6 +903,84 @@ impl Grid {
             "cursor must fit within the screen"
         );
     }
+}
+
+fn deserialize_rows<'de, D>(deserializer: D) -> Result<Vec<Option<Row>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_sequence(deserializer, MAX_CHECKPOINT_GRID_ROWS, "grid rows")
+}
+
+fn deserialize_row_ids<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_sequence(
+        deserializer,
+        MAX_CHECKPOINT_GRID_ROWS,
+        "grid row identities",
+    )
+}
+
+fn deserialize_bounded_sequence<'de, D, T>(
+    deserializer: D,
+    maximum: usize,
+    name: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVisitor<T> {
+        maximum: usize,
+        name: &'static str,
+        marker: PhantomData<T>,
+    }
+
+    impl<'de, T> Visitor<'de> for BoundedVisitor<T>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "at most {} {}", self.maximum, self.name)
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if sequence
+                .size_hint()
+                .is_some_and(|length| length > self.maximum)
+            {
+                return Err(serde::de::Error::custom(format_args!(
+                    "{} exceed checkpoint bound",
+                    self.name
+                )));
+            }
+            let mut values =
+                Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.maximum));
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == self.maximum {
+                    return Err(serde::de::Error::custom(format_args!(
+                        "{} exceed checkpoint bound",
+                        self.name
+                    )));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVisitor {
+        maximum,
+        name,
+        marker: PhantomData,
+    })
 }
 
 #[cfg(test)]
