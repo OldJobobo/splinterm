@@ -821,12 +821,21 @@ fn require_workload_cgroups() -> Result<bool> {
 
 // Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
 // glibc per-thread allocator arenas after sustained terminal output.
+fn main() -> Result<()> {
+    if splinterd::handoff_preflight::dispatch_internal_preflight(
+        splinterd::handoff_preflight::PreflightRole::Daemon,
+    )? {
+        return Ok(());
+    }
+    run_daemon()
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "startup, owned connection lifetime, and ordered shutdown remain one daemon boundary"
 )]
 #[tokio::main(worker_threads = 2)]
-async fn main() -> Result<()> {
+async fn run_daemon() -> Result<()> {
     let require_workload_cgroups = require_workload_cgroups()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

@@ -71,6 +71,18 @@ not package dependencies. Inspector is MIT licensed. The conformance framework
 is MIT licensed; its server runner currently accepts URL transports only, so it
 cannot execute Splinterm's stdio-only profile and no HTTP transport is added.
 
+## seccompiler
+
+The daemon's sealed offline handoff preflight uses `seccompiler` to install an
+inherited seccomp-BPF rule that denies process and thread creation before an
+untrusted candidate image executes.
+
+- Source: <https://github.com/rust-vmm/seccompiler>
+- Version: 0.5.0
+- License: Apache-2.0 OR BSD-3-Clause
+- Filter policy: allow all other syscalls; return `EPERM` for `fork`, `vfork`,
+  `clone`, and `clone3`
+
 ## rustix
 
 Splinterm uses `rustix` for safe Linux PTY, termios, process, signal, and

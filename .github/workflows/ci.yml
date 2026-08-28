@@ -96,6 +96,8 @@ jobs:
           {
             cargo test --frozen -p splinterd \
               --test handoff_descriptors_exec -- --test-threads=1
+            cargo test --frozen --workspace --features splinterd/integration-test \
+              --test sealed_preflight_binary -- --test-threads=1
             cargo test --frozen -p splinterm-pty \
               --test linux_pty --test pty_adoption_exec -- --test-threads=1
             cargo test --frozen -p splinterm-relay --test stdio -- --test-threads=1

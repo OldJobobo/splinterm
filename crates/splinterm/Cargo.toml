@@ -7,14 +7,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+font-stack-spike = ["dep:fontdb"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-fontdb.workspace = true
+fontdb = { workspace = true, optional = true }
 libc.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+splinterd = { path = "../splinterd" }
 splinterm-automation-client = { path = "../splinterm-automation-client" }
 splinterm-core = { path = "../splinterm-core" }
 splinterm-filemap = { path = "../splinterm-filemap" }
@@ -34,6 +38,11 @@ wayland-protocols.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true
+splinterd = { path = "../splinterd", features = ["integration-test"] }
+
+[[example]]
+name = "font-stack-spike"
+required-features = ["font-stack-spike"]
 
 [lints]
 workspace = true
