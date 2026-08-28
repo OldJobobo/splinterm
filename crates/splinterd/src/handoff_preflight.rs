@@ -24,6 +24,7 @@ use rustix::{
     io::{FdFlags, fcntl_getfd, fcntl_setfd},
     rand::{GetRandomFlags, getrandom},
 };
+use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch, apply_filter};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -57,6 +58,9 @@ const TEST_CLEAN_STAGE: &str = "SPLINTERM_PREFLIGHT_TEST_CLEAN_STAGE";
 const TEST_STAGE: &str = "SPLINTERM_PREFLIGHT_TEST_STAGE";
 #[cfg(test)]
 const TEST_ROLE: &str = "SPLINTERM_PREFLIGHT_TEST_ROLE";
+#[cfg(test)]
+const TEST_SECCOMP_NAME: &str =
+    "handoff_preflight::tests::sealed_launcher_denies_descendant_creation";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -367,6 +371,10 @@ fn launch_sealed_target() -> ! {
     .into_iter()
     .map(|value| CString::new(value).expect("test environment has no NUL"))
     .collect::<Vec<_>>();
+    #[cfg(not(test))]
+    if install_no_descendants_filter().is_err() {
+        std::process::exit(125);
+    }
     let _ = nix::unistd::execveat(
         target.as_fd(),
         &empty_path,
@@ -375,6 +383,41 @@ fn launch_sealed_target() -> ! {
         nix::fcntl::AtFlags::AT_EMPTY_PATH,
     );
     std::process::exit(126)
+}
+
+fn install_no_descendants_filter() -> Result<(), String> {
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    return Err("unsupported seccomp architecture".to_owned());
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    ))]
+    {
+        let mut denied = vec![libc::SYS_clone, libc::SYS_clone3];
+        #[cfg(target_arch = "x86_64")]
+        denied.extend([libc::SYS_fork, libc::SYS_vfork]);
+        let architecture =
+            TargetArch::try_from(std::env::consts::ARCH).map_err(|error| error.to_string())?;
+        let filter: BpfProgram = SeccompFilter::new(
+            denied
+                .into_iter()
+                .map(|syscall| (syscall, Vec::new()))
+                .collect(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EPERM as u32),
+            architecture,
+        )
+        .map_err(|error| error.to_string())?
+        .try_into()
+        .map_err(|error: seccompiler::BackendError| error.to_string())?;
+        apply_filter(&filter).map_err(|error| error.to_string())
+    }
 }
 
 fn run_child(expected_role: PreflightRole) -> Result<(), PreflightError> {
@@ -835,6 +878,30 @@ mod tests {
             reports.rollback.pair_build_version
         );
         assert_eq!(reports.forward.capabilities, reports.rollback.capabilities);
+    }
+
+    #[test]
+    fn sealed_launcher_denies_descendant_creation() {
+        if std::env::var(TEST_STAGE).as_deref() == Ok("seccomp-probe") {
+            install_no_descendants_filter().unwrap();
+            let error = Command::new("/bin/true").status().unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            return;
+        }
+        let status = Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
+            )
+            .arg(std::env::current_exe().unwrap())
+            .arg(TEST_SECCOMP_NAME)
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(TEST_STAGE, "seccomp-probe")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]
