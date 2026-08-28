@@ -291,6 +291,11 @@ impl CommandPaletteTextCache {
     fn len(&self) -> usize {
         self.entries.len()
     }
+
+    #[cfg(test)]
+    fn contains_source(&self, source: &str) -> bool {
+        self.entries.keys().any(|(text, _)| text == source)
+    }
 }
 
 fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
@@ -476,13 +481,19 @@ pub(crate) fn paint_command_palette(
         palette.primary,
         false,
     )?;
-    let query = if binding_help.is_some() {
-        format!("{} profile · generated bindings", keymap.profile().name())
+    let query = if let Some(help) = binding_help {
+        if help.query().is_empty() {
+            "> Search keybindings".to_owned()
+        } else {
+            format!("> {}_", help.query())
+        }
     } else if state.query().is_empty() {
         "> Type a command".to_owned()
     } else {
         format!("> {}_", state.query())
     };
+    let query_is_placeholder =
+        binding_help.map_or_else(|| state.query().is_empty(), |help| help.query().is_empty());
     paint_text(
         cache,
         context,
@@ -502,7 +513,7 @@ pub(crate) fn paint_command_palette(
                 .saturating_sub(title_width),
             height: header.height,
         },
-        if binding_help.is_some() || state.query().is_empty() {
+        if query_is_placeholder {
             palette.secondary
         } else {
             palette.primary
@@ -510,7 +521,14 @@ pub(crate) fn paint_command_palette(
         false,
     )?;
 
-    if state.filtered().is_empty() {
+    let empty_label = if binding_help.is_some_and(|help| help.rows().is_empty()) {
+        Some("No matching keybindings")
+    } else if binding_help.is_none() && state.filtered().is_empty() {
+        Some("No matching commands")
+    } else {
+        None
+    };
+    if let Some(empty_label) = empty_label {
         let empty = buffer_rect(layout.list, scale_120);
         paint_text(
             cache,
@@ -518,7 +536,7 @@ pub(crate) fn paint_command_palette(
             canvas,
             width,
             height,
-            "No matching commands",
+            empty_label,
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
@@ -779,7 +797,7 @@ pub(crate) fn paint_command_palette(
         width,
         height,
         if binding_help.is_some() {
-            "↑↓/Pg navigate · Prefix+[ copy · v/y · Super+C/V · fields X/Z · Esc"
+            "Type to search · ↑↓/Pg navigate · Ctrl+U clear · Esc clear/close"
         } else {
             "↑↓ navigate   Enter run   Esc close"
         },
@@ -1909,7 +1927,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cache.len(), shaped);
-        let help = BindingHelpUi::new(&keymap);
+        let mut help = BindingHelpUi::new(&keymap);
         paint_command_palette(
             &mut cache,
             &RenderContext::new(u16::MAX),
@@ -1929,5 +1947,29 @@ mod tests {
         )
         .unwrap();
         assert!(cache.len() > shaped);
+        assert!(cache.contains_source("> Search keybindings"));
+
+        assert!(help.append_text("definitely absent xyz"));
+        let empty_layout = command_palette_layout(content, &[], 0, 0).unwrap();
+        paint_command_palette(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &empty_layout,
+            session_picker_palette(theme),
+            &state,
+            &keymap,
+            None,
+            true,
+            Some(&help),
+        )
+        .unwrap();
+        assert!(cache.contains_source("> definitely absent xyz_"));
+        assert!(cache.contains_source("No matching keybindings"));
     }
 }

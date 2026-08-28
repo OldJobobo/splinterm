@@ -26,6 +26,7 @@ pub(crate) struct BindingHelpUi {
     all_rows: Vec<BindingHelpRow>,
     rows: Vec<BindingHelpRow>,
     editor: BoundedTextEditor,
+    filtered_query: String,
     selected: usize,
     visible_start: usize,
 }
@@ -99,6 +100,7 @@ impl BindingHelpUi {
                 MAX_QUERY_SCALARS,
                 false,
             ),
+            filtered_query: String::new(),
             selected: 0,
             visible_start: 0,
         };
@@ -106,9 +108,18 @@ impl BindingHelpUi {
         ui
     }
 
-    #[allow(dead_code, reason = "used by the next binding-help input slice")]
     pub(crate) fn query(&self) -> &str {
         self.editor.text()
+    }
+
+    pub(crate) fn editor_mut(&mut self) -> &mut BoundedTextEditor {
+        &mut self.editor
+    }
+
+    pub(crate) fn editor_changed(&mut self) {
+        if self.editor.text() != self.filtered_query {
+            self.refilter();
+        }
     }
 
     pub(crate) fn rows(&self) -> &[BindingHelpRow] {
@@ -123,7 +134,7 @@ impl BindingHelpUi {
         self.visible_start
     }
 
-    #[allow(dead_code, reason = "used by the next binding-help input slice")]
+    #[cfg(test)]
     pub(crate) fn append_text(&mut self, text: &str) -> bool {
         if !self.editor.insert(text) {
             return false;
@@ -132,7 +143,7 @@ impl BindingHelpUi {
         true
     }
 
-    #[allow(dead_code, reason = "used by the next binding-help input slice")]
+    #[cfg(test)]
     pub(crate) fn backspace(&mut self) -> bool {
         if !self.editor.backspace() {
             return false;
@@ -141,7 +152,6 @@ impl BindingHelpUi {
         true
     }
 
-    #[allow(dead_code, reason = "used by the next binding-help input slice")]
     pub(crate) fn clear_query(&mut self) -> bool {
         if self.editor.text().is_empty() {
             return false;
@@ -188,14 +198,17 @@ impl BindingHelpUi {
     }
 
     fn refilter(&mut self) {
-        let query = self.editor.text();
+        let query = self.editor.text().to_owned();
+        self.filtered_query.clone_from(&query);
         if query.is_empty() {
             self.rows.clone_from(&self.all_rows);
         } else {
             let mut matches = self
                 .all_rows
                 .iter()
-                .filter_map(|row| match_fields(&row.search_fields, query).map(|score| (score, row)))
+                .filter_map(|row| {
+                    match_fields(&row.search_fields, &query).map(|score| (score, row))
+                })
                 .collect::<Vec<_>>();
             matches.sort_by_key(|(score, row)| (*score, row.id));
             self.rows = matches.into_iter().map(|(_, row)| row.clone()).collect();
@@ -483,6 +496,20 @@ mod tests {
         assert!(help.query().is_empty());
         assert_eq!(help.rows().len(), keymap.bindings().len() + 3);
         assert!(!help.clear_query());
+    }
+
+    #[test]
+    fn shared_editor_refilters_only_when_query_text_changes() {
+        let keymap = built_in_keymap(KeymapProfile::OmarchyTmux);
+        let mut help = BindingHelpUi::new(&keymap);
+        assert!(help.editor_mut().insert("pane"));
+        help.editor_changed();
+        assert!(!help.rows().is_empty());
+        assert!(help.move_selection(1));
+        let selected = help.selected_index();
+        assert!(help.editor_mut().move_left(false));
+        help.editor_changed();
+        assert_eq!(help.selected_index(), selected);
     }
 
     #[test]

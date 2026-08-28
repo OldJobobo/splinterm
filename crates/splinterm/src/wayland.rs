@@ -4260,9 +4260,10 @@ impl App {
     }
 
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
-        if self.modal.binding_help.is_none()
-            && let Some(palette) = self.modal.command_palette.as_mut()
-        {
+        if let Some(help) = self.modal.binding_help.as_mut() {
+            return Some((OwnedFieldTarget::BindingHelp, help.editor_mut()));
+        }
+        if let Some(palette) = self.modal.command_palette.as_mut() {
             return Some((OwnedFieldTarget::CommandPalette, palette.editor_mut()));
         }
         if let Some(prompt) = self.modal.dojo_prompt.as_mut()
@@ -4283,6 +4284,11 @@ impl App {
         target: OwnedFieldTarget,
     ) -> Option<&mut BoundedTextEditor> {
         match target {
+            OwnedFieldTarget::BindingHelp => self
+                .modal
+                .binding_help
+                .as_mut()
+                .map(BindingHelpUi::editor_mut),
             OwnedFieldTarget::CommandPalette => self
                 .modal
                 .command_palette
@@ -4299,6 +4305,12 @@ impl App {
 
     fn refresh_owned_field(&mut self, target: OwnedFieldTarget) {
         match target {
+            OwnedFieldTarget::BindingHelp => {
+                if let Some(help) = self.modal.binding_help.as_mut() {
+                    help.editor_changed();
+                }
+                self.refresh_command_palette();
+            }
             OwnedFieldTarget::CommandPalette => {
                 if let Some(palette) = self.modal.command_palette.as_mut() {
                     palette.editor_changed();
@@ -4315,12 +4327,14 @@ impl App {
 
     fn owned_field_defers_to_modal(target: OwnedFieldTarget, keysym: Keysym) -> bool {
         match target {
-            OwnedFieldTarget::CommandPalette => matches!(
+            OwnedFieldTarget::BindingHelp | OwnedFieldTarget::CommandPalette => matches!(
                 keysym,
                 Keysym::Up
                     | Keysym::Down
                     | Keysym::Home
                     | Keysym::End
+                    | Keysym::Page_Up
+                    | Keysym::Page_Down
                     | Keysym::Return
                     | Keysym::KP_Enter
                     | Keysym::Escape
@@ -6460,7 +6474,20 @@ impl App {
                             isize::try_from(BINDING_HELP_PAGE_ITEMS).unwrap_or(isize::MAX),
                         );
                     }
-                    Keysym::Escape => close = true,
+                    Keysym::u | Keysym::U
+                        if self.input.modifiers.ctrl
+                            && !self.input.modifiers.alt
+                            && !self.input.modifiers.logo =>
+                    {
+                        changed = help.clear_query();
+                    }
+                    Keysym::Escape => {
+                        if help.query().is_empty() {
+                            close = true;
+                        } else {
+                            changed = help.clear_query();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -9290,19 +9317,23 @@ mod tests {
 
     #[test]
     fn owned_fields_defer_modal_control_keys_before_text_editing() {
-        for keysym in [
-            Keysym::Up,
-            Keysym::Down,
-            Keysym::Home,
-            Keysym::End,
-            Keysym::Return,
-            Keysym::KP_Enter,
-            Keysym::Escape,
+        for target in [
+            OwnedFieldTarget::BindingHelp,
+            OwnedFieldTarget::CommandPalette,
         ] {
-            assert!(App::owned_field_defers_to_modal(
-                OwnedFieldTarget::CommandPalette,
-                keysym
-            ));
+            for keysym in [
+                Keysym::Up,
+                Keysym::Down,
+                Keysym::Home,
+                Keysym::End,
+                Keysym::Page_Up,
+                Keysym::Page_Down,
+                Keysym::Return,
+                Keysym::KP_Enter,
+                Keysym::Escape,
+            ] {
+                assert!(App::owned_field_defers_to_modal(target, keysym));
+            }
         }
         for target in [OwnedFieldTarget::DojoPrompt, OwnedFieldTarget::Search] {
             for keysym in [Keysym::Return, Keysym::KP_Enter, Keysym::Escape] {
@@ -9311,10 +9342,13 @@ mod tests {
             assert!(!App::owned_field_defers_to_modal(target, Keysym::Left));
             assert!(!App::owned_field_defers_to_modal(target, Keysym::BackSpace));
         }
-        assert!(!App::owned_field_defers_to_modal(
+        for target in [
+            OwnedFieldTarget::BindingHelp,
             OwnedFieldTarget::CommandPalette,
-            Keysym::BackSpace
-        ));
+        ] {
+            assert!(!App::owned_field_defers_to_modal(target, Keysym::BackSpace));
+            assert!(!App::owned_field_defers_to_modal(target, Keysym::Left));
+        }
     }
 
     #[test]
