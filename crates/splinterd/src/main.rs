@@ -789,6 +789,7 @@ struct DaemonState {
     shared_kitty_upload_budget: SharedKittyUploadBudget,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
+    _rollback_handoff: Option<splinterd::handoff_coordinator::RollbackHandoffAuthority>,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
 }
@@ -835,7 +836,9 @@ fn main() -> Result<()> {
     )? {
         return Ok(());
     }
-    run_daemon()
+    let rollback_handoff =
+        splinterd::handoff_coordinator::RollbackHandoffAuthority::prepare_installed();
+    run_daemon(rollback_handoff)
 }
 
 #[allow(
@@ -843,11 +846,23 @@ fn main() -> Result<()> {
     reason = "startup, owned connection lifetime, and ordered shutdown remain one daemon boundary"
 )]
 #[tokio::main(worker_threads = 2)]
-async fn run_daemon() -> Result<()> {
+async fn run_daemon(
+    rollback_handoff: Result<
+        splinterd::handoff_coordinator::RollbackHandoffAuthority,
+        splinterd::handoff_coordinator::HandoffCoordinatorError,
+    >,
+) -> Result<()> {
     let require_workload_cgroups = require_workload_cgroups()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    let rollback_handoff = match rollback_handoff {
+        Ok(authority) => Some(authority),
+        Err(error) => {
+            warn!(%error, "packaged rollback handoff authority is unavailable");
+            None
+        }
+    };
 
     let mut interrupt_signal = signal::unix::signal(signal::unix::SignalKind::interrupt())
         .context("failed to listen for interrupt signal")?;
@@ -973,6 +988,7 @@ async fn run_daemon() -> Result<()> {
         ),
         pty_backend: LinuxPtyBackend::installed()?,
         workload_units,
+        _rollback_handoff: rollback_handoff,
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
@@ -9644,6 +9660,7 @@ mod tests {
             ),
             pty_backend,
             workload_units: None,
+            _rollback_handoff: None,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
         })
