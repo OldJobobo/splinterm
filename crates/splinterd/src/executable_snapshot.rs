@@ -27,7 +27,7 @@ pub const MAX_EXECUTABLE_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
 const RUNNING_EXECUTABLE_PATH: &str = "/proc/self/exe";
 const MAX_EXECUTABLE_PATH_BYTES: usize = 4096;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
-const REQUIRED_EXECUTABLE_SEALS: SealFlags = SealFlags::WRITE
+pub const REQUIRED_EXECUTABLE_SEALS: SealFlags = SealFlags::WRITE
     .union(SealFlags::GROW)
     .union(SealFlags::SHRINK)
     .union(SealFlags::SEAL);

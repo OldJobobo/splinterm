@@ -15,17 +15,21 @@ use rustix::{
     fs::OFlags,
     io::{FdFlags, fcntl_getfd, fcntl_setfd},
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Maximum number of descriptors one handoff preparation may expose.
 pub const MAX_HANDOFF_DESCRIPTORS: usize = 1024;
 
 /// Closed set of descriptor roles understood by the pre-exec boundary.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "role", content = "index", rename_all = "snake_case")]
 pub enum HandoffDescriptorSlot {
     PtyMaster(u16),
     Listener,
+    ImageListener,
     CheckpointManifest,
+    RollbackManifest,
     TerminalCheckpoint(u16),
     ImageState(u16),
     ForwardClient,

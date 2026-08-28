@@ -5,6 +5,11 @@ pub mod executable_snapshot;
 pub mod handoff_compatibility;
 pub mod handoff_coordinator;
 pub mod handoff_descriptors;
+#[allow(
+    dead_code,
+    reason = "the bounded manifest ABI lands before its coordinator adoption slice"
+)]
+pub(crate) mod handoff_manifest;
 pub mod handoff_preflight;
 pub mod image_transport;
 mod live;

@@ -215,6 +215,7 @@ impl PackageProvenanceRecord {
             pair_build_identity: self.pair_build_identity,
             daemon_sha256: self.daemon_sha256,
             client_sha256: self.client_sha256,
+            snapshots: preflight.snapshots,
         })
     }
 }
@@ -276,8 +277,86 @@ pub fn validate_handoff_package_provenance(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedHandoffPackageProvenance {
-    pub forward: ValidatedPackageProvenance,
-    pub rollback: ValidatedPackageProvenance,
+    forward: ValidatedPackageProvenance,
+    rollback: ValidatedPackageProvenance,
+}
+
+impl ValidatedHandoffPackageProvenance {
+    /// Rebinds this opaque package-validation result to the exact snapshots and
+    /// authenticated reports used by a later coordinator stage.
+    ///
+    /// # Errors
+    ///
+    /// Rejects pair substitution or any build identity, version, or executable
+    /// digest that differs from the records validated earlier.
+    #[allow(
+        dead_code,
+        reason = "the manifest acceptance boundary precedes coordinator adoption"
+    )]
+    pub(crate) fn validate_against(
+        &self,
+        snapshots: &HandoffExecutableSnapshots,
+        forward_preflight: ExecutablePairPreflight,
+        rollback_preflight: ExecutablePairPreflight,
+    ) -> Result<(), PackageProvenanceError> {
+        validate_package_binding(&self.forward, snapshots.forward(), forward_preflight)?;
+        validate_package_binding(&self.rollback, snapshots.rollback(), rollback_preflight)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_verified_for_test(
+        snapshots: &HandoffExecutableSnapshots,
+        forward_preflight: ExecutablePairPreflight,
+        rollback_preflight: ExecutablePairPreflight,
+    ) -> Self {
+        Self {
+            forward: validated_for_test(snapshots.forward(), forward_preflight),
+            rollback: validated_for_test(snapshots.rollback(), rollback_preflight),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the manifest acceptance boundary precedes coordinator adoption"
+)]
+fn validate_package_binding(
+    provenance: &ValidatedPackageProvenance,
+    pair: &SealedExecutablePair,
+    preflight: ExecutablePairPreflight,
+) -> Result<(), PackageProvenanceError> {
+    if preflight.snapshots != ExecutablePairBinding::from_snapshots(pair)
+        || provenance.snapshots != preflight.snapshots
+        || provenance.daemon_sha256 != pair.daemon().source().sha256
+        || provenance.client_sha256 != pair.client().source().sha256
+        || provenance.pair_build_identity != preflight.pair_build_identity
+        || parse_build_version(&provenance.build_version)? != preflight.pair_build_version
+    {
+        return Err(PackageProvenanceError::BuildMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validated_for_test(
+    pair: &SealedExecutablePair,
+    preflight: ExecutablePairPreflight,
+) -> ValidatedPackageProvenance {
+    ValidatedPackageProvenance {
+        source_path: PathBuf::from("/test/package-provenance-v1.json"),
+        source_commit: "1234567890abcdef1234567890abcdef12345678".to_owned(),
+        kind: BuildProvenanceKind::LocalCommittedHead,
+        build_version: format!(
+            "{}.{}.{}",
+            preflight.pair_build_version.major,
+            preflight.pair_build_version.minor,
+            preflight.pair_build_version.patch
+        ),
+        pair_build_identity: preflight.pair_build_identity,
+        daemon_sha256: pair.daemon().source().sha256,
+        client_sha256: pair.client().source().sha256,
+        snapshots: preflight.snapshots,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,6 +368,7 @@ pub struct ValidatedPackageProvenance {
     pub pair_build_identity: BuildIdentity,
     pub daemon_sha256: [u8; 32],
     pub client_sha256: [u8; 32],
+    snapshots: ExecutablePairBinding,
 }
 
 #[derive(Debug, Error)]
@@ -646,9 +726,24 @@ mod tests {
             fixture.preflight(fixture.snapshots.rollback()),
         )
         .unwrap();
-        assert_eq!(validated.forward, validated.rollback);
+        assert_ne!(validated.forward, validated.rollback);
+        validated
+            .validate_against(
+                &fixture.snapshots,
+                fixture.preflight(fixture.snapshots.forward()),
+                fixture.preflight(fixture.snapshots.rollback()),
+            )
+            .unwrap();
 
         let other = Fixture::new();
+        assert!(matches!(
+            validated.validate_against(
+                &other.snapshots,
+                other.preflight(other.snapshots.forward()),
+                other.preflight(other.snapshots.rollback()),
+            ),
+            Err(PackageProvenanceError::BuildMismatch)
+        ));
         let other_record =
             PackageProvenanceRecord::load(&other.record, rustix::process::geteuid().as_raw())
                 .unwrap();
