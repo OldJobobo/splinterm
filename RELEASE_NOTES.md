@@ -46,7 +46,7 @@ divider. The active tab retains its exact theme-provided body, contrasting
 foreground, and accent underline.
 
 Older persisted unnamed Lairs may still carry historical generated identities
-such as `terminal-324324573264238-4132`. Reopening one from the Dojo picker now
+such as `terminal-1787899189-4132`. Reopening one from the Dojo picker now
 presents its initial tab as `Dojo 1`. This is a presentation-only compatibility
 rule: explicit Dojo names remain unchanged and daemon-owned topology is not
 renamed.
