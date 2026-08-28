@@ -58,15 +58,25 @@ hierarchy are recreated. Existing Beta 2 scopes retain their old explicit limits
 until then.
 
 Splinterm 0.1 does not support live daemon upgrade handoff. Upgrading Beta 2 to
-Beta 3 therefore ends active Dojos. Perform the upgrade from Foot or another
-terminal not owned by `splinterd`, then reopen Splinterm Windows after package
-replacement. Package installation does not silently restart the user service.
+Beta 3 therefore ends active Dojos. From Foot or another terminal not owned by
+`splinterd`, use this lifecycle around the package upgrade:
+
+```bash
+systemctl --user stop splinterd.service
+# upgrade the splinterm package here
+systemctl --user daemon-reload
+systemctl --user start splinterd.service
+```
+
+Then reopen Splinterm Windows. Package installation does not silently reload or
+restart the user service.
 
 ## Compatibility
 
 - Persistent topology, restore, history, remote, automation, MCP, preset, and
   terminal protocol contracts are unchanged.
 - Exact cgroup placement and workload cleanup remain mandatory in packaged mode.
-- Explicit Dojo names remain authoritative.
+- Explicit Dojo names remain authoritative; only the strict historical
+  `terminal-<timestamp>[-<pid>]` compatibility shape is presented as unnamed.
 - Beta 2 tags and packages remain immutable.
 - Beta 3 continues to target x86_64 Omarchy/Arch Linux with native Wayland.

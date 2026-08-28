@@ -164,20 +164,42 @@ fn is_legacy_generated_lair_name(value: &str) -> bool {
     };
     let process = components.next();
     components.next().is_none()
-        && !stamp.is_empty()
+        && (15..=20).contains(&stamp.len())
         && stamp.bytes().all(|byte| byte.is_ascii_digit())
         && process.is_none_or(|process| {
-            !process.is_empty() && process.bytes().all(|byte| byte.is_ascii_digit())
+            (1..=10).contains(&process.len()) && process.bytes().all(|byte| byte.is_ascii_digit())
         })
 }
 
+fn uses_legacy_generated_dojo_label(identity: &WindowDojoIdentity) -> bool {
+    identity.dojo_name == identity.lair_name && is_legacy_generated_lair_name(&identity.lair_name)
+}
+
 fn tab_dojo_label(identity: &WindowDojoIdentity) -> String {
-    if identity.dojo_name == identity.lair_name
-        && is_legacy_generated_lair_name(&identity.lair_name)
-    {
+    if uses_legacy_generated_dojo_label(identity) {
         "Dojo 1".to_owned()
     } else {
         sanitized_tab_label(&identity.dojo_name, 128, 48)
+    }
+}
+
+fn ambiguous_tab_label(
+    identity: &WindowDojoIdentity,
+    dojo_label: &str,
+    matching_ordinal: usize,
+) -> String {
+    if uses_legacy_generated_dojo_label(identity) {
+        sanitized_tab_label(
+            &format!("{dojo_label} ({})", matching_ordinal.saturating_add(1)),
+            128,
+            48,
+        )
+    } else {
+        sanitized_tab_label(
+            &format!("{} / {}", identity.lair_name, identity.dojo_name),
+            128,
+            48,
+        )
     }
 }
 
@@ -417,16 +439,21 @@ impl TabsState {
             return "Untitled Dojo".to_owned();
         };
         let dojo_label = tab_dojo_label(identity);
-        let ambiguous = self.tabs.iter().filter(|tab| {
-            self.tab_identity(tab.dojo_id)
+        let mut matching_count = 0;
+        let mut matching_ordinal = 0;
+        for tab in self.tabs.iter() {
+            if self
+                .tab_identity(tab.dojo_id)
                 .is_some_and(|candidate| tab_dojo_label(candidate) == dojo_label)
-        });
-        if ambiguous.count() > 1 {
-            sanitized_tab_label(
-                &format!("{} / {}", identity.lair_name, identity.dojo_name),
-                128,
-                48,
-            )
+            {
+                if tab.dojo_id == dojo_id {
+                    matching_ordinal = matching_count;
+                }
+                matching_count += 1;
+            }
+        }
+        if matching_count > 1 {
+            ambiguous_tab_label(identity, &dojo_label, matching_ordinal)
         } else {
             dojo_label
         }
@@ -640,8 +667,8 @@ mod tests {
 
     use super::{
         App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, WindowDojoIdentity,
-        is_legacy_generated_lair_name, opaque_rgba, tab_context_target, tab_dojo_label,
-        tab_foreground, tab_strip_hit_test, tab_strip_layout,
+        ambiguous_tab_label, is_legacy_generated_lair_name, opaque_rgba, tab_context_target,
+        tab_dojo_label, tab_foreground, tab_strip_hit_test, tab_strip_layout,
     };
 
     #[test]
@@ -794,9 +821,12 @@ mod tests {
         ));
         for explicit in [
             "terminal",
+            "terminal-123",
             "terminal-work",
             "terminal-123-work",
             "terminal-123-456-extra",
+            "terminal-12345678901234-456",
+            "terminal-123456789012345-12345678901",
         ] {
             assert!(!is_legacy_generated_lair_name(explicit));
         }
@@ -811,11 +841,16 @@ mod tests {
         };
         assert_eq!(tab_dojo_label(&identity), "Dojo 1");
 
+        assert_eq!(ambiguous_tab_label(&identity, "Dojo 1", 0), "Dojo 1 (1)");
+        assert_eq!(ambiguous_tab_label(&identity, "Dojo 1", 1), "Dojo 1 (2)");
+        assert!(!ambiguous_tab_label(&identity, "Dojo 1", 1).contains("terminal-"));
+
         let explicitly_named = WindowDojoIdentity {
-            dojo_name: "logs".to_owned(),
+            lair_name: "terminal-123".to_owned(),
+            dojo_name: "terminal-123".to_owned(),
             ..identity
         };
-        assert_eq!(tab_dojo_label(&explicitly_named), "logs");
+        assert_eq!(tab_dojo_label(&explicitly_named), "terminal-123");
     }
 
     #[test]
