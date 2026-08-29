@@ -3,6 +3,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     process::Command,
     sync::{
@@ -169,18 +170,34 @@ pub(super) struct FontFaceFingerprint {
     pub(super) source_identity: FileIdentity,
 }
 
+#[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct FontFingerprint {
+pub struct FontFingerprint {
     pub(super) pattern: String,
     pub(super) authority: FontAuthority,
     pub(super) faces: [FontFaceFingerprint; 6],
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) struct FontGeneration {
+pub struct FontGeneration {
     pub(super) id: u64,
     pub(super) fingerprint: FontFingerprint,
     pub(super) faces: [FontFace; 6],
+}
+
+impl FontGeneration {
+    /// Returns the process-local monotonic generation identity.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the stable effective source fingerprint.
+    #[must_use]
+    pub const fn fingerprint(&self) -> &FontFingerprint {
+        &self.fingerprint
+    }
 }
 
 #[derive(Debug)]
@@ -550,7 +567,12 @@ pub(super) fn cache_glyph(
     Ok(())
 }
 
-pub(super) fn snapshot_font_generation() -> Result<&'static Arc<FontGeneration>> {
+/// Returns the configured immutable startup generation.
+///
+/// # Errors
+/// Returns the retained startup staging failure.
+#[doc(hidden)]
+pub fn snapshot_font_generation() -> Result<&'static Arc<FontGeneration>> {
     SNAPSHOT_FONT_GENERATION
         .get_or_init(|| {
             let options = renderer_options();
@@ -1182,11 +1204,39 @@ pub(super) fn ceil_to_i32(value: f32) -> i32 {
     value.ceil() as i32
 }
 
-pub(super) fn resolve_face(
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedFaceSource {
+    label: &'static str,
+    family: String,
+    style: String,
+    path: PathBuf,
+    index: usize,
+    weight: i32,
+    slant: i32,
+    selected_pixel_size_26_6: isize,
+    source_identity: FileIdentity,
+}
+
+impl ResolvedFaceSource {
+    fn fingerprint(&self) -> FontFaceFingerprint {
+        FontFaceFingerprint {
+            family: self.family.clone(),
+            style: self.style.clone(),
+            path: self.path.clone(),
+            index: self.index,
+            weight: self.weight,
+            slant: self.slant,
+            selected_pixel_size_26_6: self.selected_pixel_size_26_6,
+            source_identity: self.source_identity,
+        }
+    }
+}
+
+fn resolve_face_source(
     label: &'static str,
     pattern: &str,
     expected_family_fragment: &str,
-) -> Result<FontFace> {
+) -> Result<ResolvedFaceSource> {
     let output = Command::new("fc-match")
         .args([
             "-f",
@@ -1242,11 +1292,20 @@ pub(super) fn resolve_face(
     if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
         bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
     }
-    let snapshot = ReadOnlyFileMap::immutable_snapshot(&path, MAX_STAGED_FONT_BYTES)
-        .with_context(|| format!("snapshot resolved {label} font"))?;
-    let source_identity = snapshot.source_identity;
-    let data = Arc::new(snapshot.mapping);
-    let face = FontFace {
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("inspect resolved {label} font {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() > 0,
+        "resolved font is not a non-empty regular file"
+    );
+    let source_identity = FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+    };
+    Ok(ResolvedFaceSource {
         label,
         family,
         style,
@@ -1254,20 +1313,54 @@ pub(super) fn resolve_face(
         index,
         weight,
         slant,
-        generation_id: 0,
         selected_pixel_size_26_6,
         source_identity,
+    })
+}
+
+fn stage_face(source: ResolvedFaceSource) -> Result<FontFace> {
+    let snapshot = ReadOnlyFileMap::immutable_snapshot(&source.path, MAX_STAGED_FONT_BYTES)
+        .with_context(|| format!("snapshot resolved {} font", source.label))?;
+    anyhow::ensure!(
+        snapshot.source_identity == source.source_identity,
+        "resolved font source changed before staging"
+    );
+    let data = Arc::new(snapshot.mapping);
+    let face = FontFace {
+        label: source.label,
+        family: source.family,
+        style: source.style,
+        path: source.path,
+        index: source.index,
+        weight: source.weight,
+        slant: source.slant,
+        generation_id: 0,
+        selected_pixel_size_26_6: source.selected_pixel_size_26_6,
+        source_identity: source.source_identity,
         data,
     };
-    font_ref(&face).with_context(|| format!("parse resolved {label} font"))?;
+    font_ref(&face).with_context(|| format!("parse resolved {} font", face.label))?;
     eprintln!(
-        "Resolved {label}: {} {} (face {}, {})",
+        "Resolved {}: {} {} (face {}, {})",
+        face.label,
         face.family,
         face.style,
         face.index,
         face.path.display()
     );
     Ok(face)
+}
+
+pub(super) fn resolve_face(
+    label: &'static str,
+    pattern: &str,
+    expected_family_fragment: &str,
+) -> Result<FontFace> {
+    stage_face(resolve_face_source(
+        label,
+        pattern,
+        expected_family_fragment,
+    )?)
 }
 
 #[derive(Clone, Copy)]
@@ -1325,6 +1418,56 @@ fn primary_style_pattern(family: &str, request: PrimaryStyleRequest) -> String {
         "{}:weight={weight}:slant={slant}",
         escape_fontconfig_pattern_value(family)
     )
+}
+
+fn probe_primary_style_source(
+    regular: &ResolvedFaceSource,
+    request: PrimaryStyleRequest,
+) -> ResolvedFaceSource {
+    let pattern = primary_style_pattern(&regular.family, request);
+    let candidate = resolve_face_source(request.label, &pattern, &regular.family);
+    match candidate {
+        Ok(candidate)
+            if normalize_family(&candidate.family) == normalize_family(&regular.family)
+                && candidate.path != regular.path
+                && request.bold == (candidate.weight > regular.weight)
+                && request.italic == (candidate.slant != regular.slant) =>
+        {
+            candidate
+        }
+        _ => {
+            let mut fallback = regular.clone();
+            fallback.label = request.label;
+            fallback
+        }
+    }
+}
+
+/// Probes the effective fontconfig source identities without mapping font bytes.
+///
+/// # Errors
+/// Returns an error when Fontconfig output or selected source metadata is invalid.
+#[doc(hidden)]
+pub fn probe_live_font_sources(pattern: &str, authority: FontAuthority) -> Result<FontFingerprint> {
+    let regular = resolve_face_source(
+        "primary regular",
+        pattern,
+        expected_primary_family_fragment(pattern),
+    )?;
+    let [bold_request, italic_request, bold_italic_request] = PRIMARY_STYLE_REQUESTS;
+    let sources = [
+        regular.clone(),
+        probe_primary_style_source(&regular, bold_request),
+        probe_primary_style_source(&regular, italic_request),
+        probe_primary_style_source(&regular, bold_italic_request),
+        resolve_face_source("CJK fallback", CJK_FONT, "noto sans cjk")?,
+        resolve_face_source("emoji fallback", EMOJI_FONT, "noto color emoji")?,
+    ];
+    Ok(FontFingerprint {
+        pattern: pattern.to_owned(),
+        authority,
+        faces: std::array::from_fn(|index| sources[index].fingerprint()),
+    })
 }
 
 fn face_advance(face: &FontFace, font_size: f32) -> Result<f32> {
@@ -1509,11 +1652,12 @@ fn stage_startup_font_generation(
     stage_font_generation(pattern, authority, true)
 }
 
-#[allow(
-    dead_code,
-    reason = "the next Plan 0038 milestone wires staged live generations into the watcher"
-)]
-pub(crate) fn stage_live_font_generation(
+/// Stages one stable live generation without applying the startup fallback.
+///
+/// # Errors
+/// Returns an error when resolution is unstable or any complete face set is invalid.
+#[doc(hidden)]
+pub fn stage_live_font_generation(
     pattern: &str,
     authority: FontAuthority,
 ) -> Result<FontGeneration> {
@@ -1818,6 +1962,15 @@ mod tests {
         let mut candidates = [(7_u8, "first"), (8_u8, "second")].into_iter();
         let error = stage_stable_with(|| Ok(candidates.next().unwrap())).unwrap_err();
         assert!(error.to_string().contains("changed while staging"));
+    }
+
+    #[test]
+    #[ignore = "requires host fontconfig and installed system fonts"]
+    fn live_probe_matches_the_staged_generation_on_the_supported_host() {
+        let options = renderer_options();
+        let probe = probe_live_font_sources(&options.font, options.font_authority).unwrap();
+        let staged = stage_live_font_generation(&options.font, options.font_authority).unwrap();
+        assert_eq!(probe, staged.fingerprint);
     }
 
     #[test]

@@ -1,12 +1,12 @@
 //! Graphical window lifecycle orchestration.
 
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
     PerfTraceCorrelation, WindowOptions, WindowUpdate,
     automation::{MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
-    config::AppConfig,
+    config::{AppConfig, FontAuthority},
     endpoint::{
         ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, LaunchSemantics,
     },
@@ -21,6 +21,7 @@ use splinterm_protocol::{
 use tokio::sync::{mpsc, watch};
 
 use super::{
+    font_watch::{FontUpdateSink, watch_font},
     pane_bridge::{
         ControllerOutputs, EventAction, WINDOW_COMMAND_QUEUE, WINDOW_UPDATE_QUEUE, attach,
         classify_subscription_event, layout_splint_ids, lease_snapshot_images, lease_update_images,
@@ -140,6 +141,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         padding: config.padding,
         background_alpha: theme.background_alpha,
     })?;
+    let initial_font_generation = Arc::clone(renderer::snapshot_font_generation()?);
     let mut ids = Vec::new();
     layout_splint_ids(&dojo_model.root, &mut ids);
     let image_cache =
@@ -171,6 +173,14 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         theme,
         ThemeUpdateSink::Topology(topology_update_sender.clone()),
     ));
+    let font_task = (config.font_authority == FontAuthority::NativeOmarchy).then(|| {
+        tokio::spawn(watch_font(
+            config.font.clone(),
+            config.font_authority,
+            initial_font_generation,
+            FontUpdateSink::Topology(topology_update_sender.clone()),
+        ))
+    });
     let mut panes = Vec::with_capacity(prepared.len());
     let mut tasks = HashMap::with_capacity(prepared.len());
     for pane in prepared {
@@ -226,6 +236,9 @@ pub(super) async fn run_live_multipane_window_with_app_id(
     .await
     .context("Wayland window task failed")?;
     theme_task.abort();
+    if let Some(font_task) = font_task {
+        font_task.abort();
+    }
     if let Some(smoke) = topology_smoke {
         smoke.await.context("topology smoke task failed")??;
     }
@@ -255,6 +268,7 @@ pub(super) async fn run_live_window(
         padding: config.padding,
         background_alpha: theme.background_alpha,
     })?;
+    let initial_font_generation = Arc::clone(renderer::snapshot_font_generation()?);
     let mut connection = factory.connect().await?;
     let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
@@ -309,6 +323,14 @@ pub(super) async fn run_live_window(
         theme,
         ThemeUpdateSink::Panes(vec![updates.clone()]),
     ));
+    let _font_watcher = (config.font_authority == FontAuthority::NativeOmarchy).then(|| {
+        tokio::spawn(watch_font(
+            config.font.clone(),
+            config.font_authority,
+            initial_font_generation,
+            FontUpdateSink::Panes(vec![updates.clone()]),
+        ))
+    });
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, mut resyncs) = mpsc::channel(1);
     let controller_cancellation = tokio_util::sync::CancellationToken::new();

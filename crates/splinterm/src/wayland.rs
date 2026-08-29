@@ -127,7 +127,7 @@ use crate::frontend::{
     AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
-    DojoPromptUi, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
+    DojoPromptUi, FontUpdate, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
     SessionPickerDecision, SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
     TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
     ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
@@ -836,6 +836,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             text_row,
             renderer_generation: 0,
             theme_generation: 0,
+            pending_font_update: None,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title_override: options.title,
@@ -1679,7 +1680,7 @@ impl PaneView {
             } else {
                 BackgroundUpdateImpact::NONE
             }),
-            WindowUpdate::Theme(_) => Ok(BackgroundUpdateImpact::NONE),
+            WindowUpdate::Theme(_) | WindowUpdate::Font(_) => Ok(BackgroundUpdateImpact::NONE),
             WindowUpdate::Exited { .. } | WindowUpdate::Shutdown => {
                 self.controller_active = false;
                 self.commands = None;
@@ -1813,6 +1814,7 @@ struct PresentationState {
     text_row: Option<TextRow>,
     renderer_generation: u64,
     theme_generation: u64,
+    pending_font_update: Option<FontUpdate>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -2586,6 +2588,15 @@ fn update_graphical_focus_watch(
                 true
             }
         });
+    }
+}
+
+fn retain_newest_font(slot: &mut Option<FontUpdate>, update: FontUpdate) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| current.generation.id() < update.generation.id())
+    {
+        *slot = Some(update);
     }
 }
 
@@ -7301,6 +7312,9 @@ impl App {
                         retain_newest_theme(&mut next_theme, update);
                     }
                 }
+                WindowTopologyUpdate::Font(update) => {
+                    retain_newest_font(&mut self.presentation.pending_font_update, update);
+                }
                 WindowTopologyUpdate::Closed => self
                     .scheduling
                     .request_exit(ExitClass::CleanFinalTabRemoved),
@@ -7896,6 +7910,9 @@ impl App {
                         rebuild_all_inactive |= impact.rebuild_pixels;
                         effect_desired_changed |= impact.reconcile_effect;
                     }
+                }
+                WindowUpdate::Font(update) => {
+                    retain_newest_font(&mut self.presentation.pending_font_update, update);
                 }
                 WindowUpdate::Exited { splint_id } => {
                     anyhow::ensure!(
