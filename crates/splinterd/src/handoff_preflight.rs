@@ -47,7 +47,7 @@ const CHALLENGE_BYTES: usize = 44;
 const REPORT_BYTES: usize = 98;
 const DEFAULT_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 const HANDOFF_PROTOCOL_VERSION: u16 = 1;
-const TERMINAL_CHECKPOINT_VERSION: u16 = 1;
+const TERMINAL_CHECKPOINT_VERSION: u16 = splinterm_terminal::TERMINAL_CHECKPOINT_SCHEMA_V2;
 const DESCRIPTOR_MANIFEST_VERSION: u16 = 1;
 #[cfg(test)]
 const TEST_EXEC_NAME: &str =

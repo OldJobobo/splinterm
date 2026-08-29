@@ -35,6 +35,10 @@ use tokio::{
     time::{self, Instant, MissedTickBehavior},
 };
 
+use crate::handoff_checkpoint::{
+    CheckpointBodyIdentity, CheckpointStorageError, SealedCheckpointBody,
+};
+
 static NEXT_INCARNATION: AtomicU64 = AtomicU64::new(1);
 const PARSE_BATCH: usize = 256;
 const READ_BUFFER: usize = 16 * 1024;
@@ -2469,6 +2473,10 @@ pub enum LiveError {
     Join(#[from] tokio::task::JoinError),
     #[error("live Splint I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("live Splint checkpoint capture failed: {0}")]
+    Checkpoint(#[from] CheckpointStorageError),
+    #[error("live Splint state is not representable at the handoff boundary")]
+    HandoffStateUnsupported,
 }
 
 type Reply<T> = oneshot::Sender<Result<T, LiveError>>;
@@ -2479,7 +2487,33 @@ struct PtyResume {
     acknowledged: Option<Reply<()>>,
 }
 
-/// Exclusive ownership of one quiesced actor's canonical PTY master.
+/// Actor-owned evidence captured at the sole PTY handoff linearization point.
+///
+/// Both accepted write queues are completely drained before this value is
+/// created. Later actor commands and PTY reads remain fenced while the matching
+/// [`PreparedPtyHandoff`] is held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActorHandoffEvidence {
+    pub splint_id: SplintId,
+    pub incarnation: ProcessIncarnation,
+    pub pty_identity: LinuxPtyIdentity,
+    pub size: PtySize,
+    pub foreground_process_group: u32,
+    pub terminal_revision: TerminalRevision,
+    pub history_generation: u64,
+    pub child_exit: Option<ProcessExit>,
+    pub eof_observed: bool,
+    pub user_write_bytes: usize,
+    pub user_write_offset: usize,
+    pub reply_write_bytes: usize,
+    pub reply_write_offset: usize,
+    pub synchronized_publication_active: bool,
+    pub synchronized_publication_timed_out: bool,
+    pub published_revision: TerminalRevision,
+}
+
+/// Exclusive ownership of one quiesced actor's canonical PTY master and sealed
+/// terminal checkpoint.
 ///
 /// The actor stops reading commands and PTY I/O until this lease is resumed or
 /// dropped. Dropping it returns the unchanged descriptor automatically, keeping
@@ -2488,6 +2522,8 @@ struct PtyResume {
 pub struct PreparedPtyHandoff {
     identity: LinuxPtyIdentity,
     master_raw_fd: i32,
+    evidence: ActorHandoffEvidence,
+    checkpoint: Option<SealedCheckpointBody>,
     #[cfg(test)]
     retired_reader_raw_fd: i32,
     session: Option<AdoptableLinuxPtySession>,
@@ -2503,6 +2539,28 @@ impl PreparedPtyHandoff {
     #[must_use]
     pub const fn master_raw_fd(&self) -> i32 {
         self.master_raw_fd
+    }
+
+    #[must_use]
+    pub const fn evidence(&self) -> ActorHandoffEvidence {
+        self.evidence
+    }
+
+    #[must_use]
+    pub fn checkpoint_identity(&self) -> Option<CheckpointBodyIdentity> {
+        self.checkpoint.as_ref().map(SealedCheckpointBody::identity)
+    }
+
+    #[must_use]
+    pub const fn checkpoint_body(&self) -> Option<&SealedCheckpointBody> {
+        self.checkpoint.as_ref()
+    }
+
+    /// Moves the sealed body to coordinator-owned manifest linkage while this
+    /// lease continues to fence the actor and retain PTY authority.
+    #[must_use]
+    pub fn take_checkpoint_body(&mut self) -> Option<SealedCheckpointBody> {
+        self.checkpoint.take()
     }
 
     #[cfg(test)]
@@ -3749,6 +3807,12 @@ async fn run_actor_body(
 ) -> Result<ProcessExit, LiveError> {
     let mut subscribers = Vec::<Subscriber>::new();
     let mut publication = SynchronizedPublication::new(terminal.revision());
+    let mut current_size = PtySize {
+        columns: config.columns,
+        rows: config.rows,
+        pixel_width: config.pixel_width,
+        pixel_height: config.pixel_height,
+    };
     let mut user_writes = WriteQueue::default();
     let mut reply_writes = WriteQueue::default();
     let mut interval = time::interval(config.poll_interval);
@@ -3774,6 +3838,68 @@ async fn run_actor_body(
             let reply = pending_handoff
                 .take()
                 .expect("pending PTY handoff checked as present");
+            if child_exit.is_some()
+                || eof
+                || publication.active
+                || publication.deadline.is_some()
+                || publication.published_revision != terminal.revision()
+                || user_writes.offset != 0
+                || reply_writes.offset != 0
+            {
+                let _ = reply.send(Err(LiveError::HandoffStateUnsupported));
+                continue;
+            }
+            let active_session = session
+                .as_ref()
+                .expect("active actor owns one canonical PTY session");
+            let pty_identity = active_session.identity();
+            let kernel_size = match active_session.size() {
+                Ok(size) if size == current_size => size,
+                Ok(_) => {
+                    let _ = reply.send(Err(LiveError::HandoffStateUnsupported));
+                    continue;
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error.into()));
+                    continue;
+                }
+            };
+            let foreground_process_group = match active_session.foreground_process_group() {
+                Ok(process_group) => process_group,
+                Err(error) => {
+                    let _ = reply.send(Err(error.into()));
+                    continue;
+                }
+            };
+            let checkpoint = match terminal
+                .encode_checkpoint()
+                .map_err(CheckpointStorageError::from)
+                .and_then(|bytes| SealedCheckpointBody::seal(&bytes))
+            {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    let _ = reply.send(Err(error.into()));
+                    continue;
+                }
+            };
+            let evidence = ActorHandoffEvidence {
+                splint_id,
+                incarnation,
+                pty_identity,
+                size: kernel_size,
+                foreground_process_group,
+                terminal_revision: terminal.revision(),
+                history_generation: terminal_history_generation(&terminal),
+                child_exit,
+                eof_observed: eof,
+                user_write_bytes: user_writes.bytes,
+                user_write_offset: user_writes.offset,
+                reply_write_bytes: reply_writes.bytes,
+                reply_write_offset: reply_writes.offset,
+                synchronized_publication_active: publication.active,
+                synchronized_publication_timed_out: publication.timed_out,
+                published_revision: publication.published_revision,
+            };
             #[cfg(test)]
             let retired_reader_raw_fd = io
                 .as_ref()
@@ -3806,6 +3932,8 @@ async fn run_actor_body(
             let prepared = PreparedPtyHandoff {
                 identity,
                 master_raw_fd,
+                evidence,
+                checkpoint: Some(checkpoint),
                 #[cfg(test)]
                 retired_reader_raw_fd,
                 session: Some(adoptable),
@@ -3883,6 +4011,7 @@ async fn run_actor_body(
                         &mut subscribers,
                         &mut publication,
                         &mut user_writes,
+                        &mut current_size,
                         &mut shutdown,
                         &mut shutdown_replies,
                         &config,
@@ -4065,6 +4194,7 @@ fn handle_command(
     subscribers: &mut Vec<Subscriber>,
     publication: &mut SynchronizedPublication,
     writes: &mut WriteQueue,
+    current_size: &mut PtySize,
     shutdown: &mut Option<ShutdownStage>,
     shutdown_replies: &mut Vec<oneshot::Sender<()>>,
     config: &LiveSplintConfig,
@@ -4091,6 +4221,7 @@ fn handle_command(
                 })
             };
             if result.is_ok() {
+                *current_size = size;
                 set_terminal_pixel_geometry(
                     terminal,
                     size.columns,
@@ -8617,15 +8748,68 @@ mod tests {
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
     }
 
+    fn assert_prepared_checkpoint(
+        prepared: &PreparedPtyHandoff,
+        handle: &LiveSplintHandle,
+        captured_size: PtySize,
+        terminal_config: TerminalConfig,
+    ) {
+        let evidence = prepared.evidence();
+        assert_eq!(evidence.splint_id, handle.splint_id);
+        assert_eq!(evidence.incarnation, handle.incarnation);
+        assert_eq!(evidence.pty_identity, prepared.identity());
+        assert_eq!(evidence.size, captured_size);
+        assert!(evidence.foreground_process_group > 0);
+        assert!(evidence.terminal_revision.value() > 0);
+        assert!(evidence.history_generation > 0);
+        assert_eq!(evidence.child_exit, None);
+        assert!(!evidence.eof_observed);
+        assert_eq!(evidence.user_write_bytes, 0);
+        assert_eq!(evidence.user_write_offset, 0);
+        assert_eq!(evidence.reply_write_bytes, 0);
+        assert_eq!(evidence.reply_write_offset, 0);
+        assert!(!evidence.synchronized_publication_active);
+        assert_eq!(evidence.published_revision, evidence.terminal_revision);
+        prepared.checkpoint_body().unwrap().verify().unwrap();
+        let checkpoint_identity = prepared.checkpoint_identity().unwrap();
+        let checkpoint_descriptor =
+            rustix::io::fcntl_dupfd_cloexec(prepared.checkpoint_body().unwrap().descriptor(), 3)
+                .unwrap();
+        let checkpoint = splinterm_filemap::ReadOnlyFileMap::from_sealed_fd(
+            checkpoint_descriptor,
+            usize::try_from(checkpoint_identity.size).unwrap(),
+        )
+        .unwrap();
+        let restored = Terminal::restore_checkpoint(&checkpoint, terminal_config).unwrap();
+        assert_eq!(restored.revision(), evidence.terminal_revision);
+        assert_eq!(
+            terminal_history_generation(&restored),
+            evidence.history_generation
+        );
+        assert_eq!(
+            restored
+                .snapshot(SnapshotRequest {
+                    max_scrollback_rows: 0
+                })
+                .dimensions(),
+            Dimensions {
+                columns: usize::from(captured_size.columns),
+                rows: usize::from(captured_size.rows),
+            }
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prepared_pty_handoff_fences_commands_and_resumes_one_reader() {
+        let config = fast_config();
+        let terminal_config = config.terminal.clone();
         let runtime = LiveSplintRuntime::spawn(
             SplintId::new(),
             backend(),
             shell(
                 "printf ready; read first; printf '<%s>' \"$first\"; read second; printf '<%s>' \"$second\"; sleep 0.2",
             ),
-            fast_config(),
+            config,
         )
         .await
         .unwrap();
@@ -8633,9 +8817,17 @@ mod tests {
         time::sleep(Duration::from_millis(50)).await;
         assert!(snapshot_text(&handle.snapshot().await.unwrap()).contains("ready"));
 
+        let captured_size = PtySize {
+            columns: 48,
+            rows: 10,
+            pixel_width: 480,
+            pixel_height: 200,
+        };
+        handle.resize(captured_size).await.unwrap();
         handle.input(b"before-handoff\n".to_vec()).await.unwrap();
-        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        let mut prepared = handle.prepare_pty_handoff().await.unwrap();
         assert_eq!(prepared.identity().child_pid(), handle.child_pid());
+        assert_prepared_checkpoint(&prepared, &handle, captured_size, terminal_config);
         assert!(PathBuf::from(format!("/proc/self/fd/{}", prepared.master_raw_fd())).exists());
         assert!(
             !PathBuf::from(format!(
@@ -8645,6 +8837,13 @@ mod tests {
             .exists(),
             "the actor reader must be closed before the PTY master is exposed"
         );
+
+        let linked_checkpoint = crate::handoff_checkpoint::LinkedCheckpointBody::new(
+            7,
+            prepared.take_checkpoint_body().unwrap(),
+        )
+        .unwrap();
+        linked_checkpoint.verify().unwrap();
 
         let resize_handle = handle.clone();
         let mut queued_resize =
@@ -8700,6 +8899,32 @@ mod tests {
         drop(prepared);
         drop(handle);
         drop(runtime);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsupported_synchronized_state_rejects_capture_without_retiring_the_actor() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("printf '\\033[?2026hactive'; sleep 2"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::sleep(Duration::from_millis(50)).await;
+
+        assert!(matches!(
+            handle.prepare_pty_handoff().await,
+            Err(LiveError::HandoffStateUnsupported)
+        ));
+        assert!(handle.snapshot().await.is_ok());
+
+        time::sleep(SYNCHRONIZED_UPDATE_TIMEOUT + Duration::from_millis(100)).await;
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        assert!(!prepared.evidence().synchronized_publication_active);
+        prepared.resume().await.unwrap();
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
