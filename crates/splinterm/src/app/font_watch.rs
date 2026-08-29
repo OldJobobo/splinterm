@@ -36,6 +36,10 @@ impl<F: Eq> FontReloadState<F> {
         true
     }
 
+    fn reject_observed(&mut self) {
+        self.observed = None;
+    }
+
     fn accept(&mut self, fingerprint: F) -> bool {
         if self.current == fingerprint {
             return false;
@@ -107,10 +111,15 @@ pub(in crate::app) async fn watch_font(
     }
     let mut state = FontReloadState::new(current.fingerprint().clone());
     let mut diagnostics = FontReloadDiagnostics::default();
+    let mut retry_after = None;
     let mut poll = tokio::time::interval(std::time::Duration::from_secs(1));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         poll.tick().await;
+        if retry_after.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+            continue;
+        }
+        retry_after = None;
         let fingerprint = match probe(pattern.clone(), authority).await {
             Ok(fingerprint) => fingerprint,
             Err(error) => {
@@ -136,6 +145,8 @@ pub(in crate::app) async fn watch_font(
                 }
             }
             Err(error) => {
+                state.reject_observed();
+                retry_after = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
                 if let Some(diagnostic) = diagnostics.rejected(&error) {
                     eprintln!("{diagnostic}");
                 }
@@ -159,6 +170,15 @@ mod tests {
         assert!(!state.accept(2));
         assert!(state.observe(1));
         assert!(state.accept(1));
+    }
+
+    #[test]
+    fn failed_staging_retries_the_same_observed_fingerprint() {
+        let mut state = FontReloadState::new(1_u8);
+        assert!(state.observe(2));
+        state.reject_observed();
+        assert!(state.observe(2));
+        assert!(state.accept(2));
     }
 
     #[test]
