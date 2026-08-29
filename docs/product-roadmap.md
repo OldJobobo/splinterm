@@ -97,7 +97,8 @@ work only through explicit bounded authority.
 - Make Lair and Dojo lifecycle intentional: named, pinned, disposable,
   restorable, and expired work should be recognizable and manageable.
 - Finish the fit-and-finish gaps that make the terminal feel native to Omarchy,
-  including exact theme fidelity and supported desktop integration.
+  including exact theme fidelity, live native system-font following, and
+  supported desktop integration.
 - Improve ordinary desktop workflows such as inserting local file and saved
   image paths without weakening terminal input or privacy boundaries.
 - Turn the existing CLI, SSH, and MCP capability into understandable user and

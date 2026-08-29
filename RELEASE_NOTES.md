@@ -1,3 +1,16 @@
+# Unreleased
+
+- Native Omarchy font following is now live when `main.font` is unset. Valid
+  fontconfig `monospace` family changes replace one complete immutable renderer
+  generation without restarting the Window, daemon, shell, or applications.
+- Explicit font patterns remain authoritative. Invalid live generations retain
+  the last valid family; the documented JetBrains fallback is startup-only.
+- Family changes preserve configured size/policy, padding, DPI, runtime zoom,
+  topology, focus, history, modal and IME state, and controller authority.
+  Observer panes never acquire control solely to resize after a font change.
+- Non-graphical implementation checks are recorded; packaged graphical
+  acceptance and publication remain separate unreleased gates.
+
 # Splinterm 0.1.0 Beta 1 — The Foundation Holds
 
 Splinterm has reached public beta.
