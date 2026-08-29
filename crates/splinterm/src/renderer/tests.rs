@@ -841,11 +841,50 @@ fn underline_style_color_partial_mutation_matches_clean_full_rebuild() {
 }
 
 #[test]
-fn selected_font_bytes_are_loaded_only_when_the_face_is_used() {
-    let face = resolve_face("lazy CJK test", CJK_FONT, "noto sans cjk").unwrap();
-    assert!(face.data.get().is_none());
+fn selected_font_bytes_and_opened_identity_are_staged_together() {
+    let face = resolve_face("staged CJK test", CJK_FONT, "noto sans cjk").unwrap();
+    assert!(!face.data.is_empty());
+    assert_eq!(
+        face.source_identity.length,
+        u64::try_from(face.data.len()).unwrap()
+    );
+    assert_ne!(face.source_identity, face.data.identity());
     assert_ne!(font_ref(&face).unwrap().charmap().map('界'), 0);
-    assert!(face.data.get().is_some_and(Result::is_ok));
+}
+
+#[test]
+#[ignore = "requires host fontconfig and installed system fonts"]
+fn memory_backed_freetype_keeps_the_staged_inode_after_path_replacement() {
+    let source = resolve_face("staged replacement test", CJK_FONT, "noto sans cjk").unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "splinterm-font-generation-replacement-{}",
+        std::process::id()
+    ));
+    let retired = path.with_extension("retired");
+    fs::write(&path, &**source.data).unwrap();
+    let staged = Arc::new(
+        splinterm_filemap::ReadOnlyFileMap::immutable_snapshot(
+            &path,
+            splinterm_freetype::MAX_STAGED_FONT_BYTES,
+        )
+        .unwrap()
+        .mapping,
+    );
+    fs::rename(&path, &retired).unwrap();
+    fs::write(&path, b"not a font").unwrap();
+
+    let shaped = swash::FontRef::from_index(&staged, source.index).unwrap();
+    assert_ne!(shaped.charmap().map('界'), 0);
+    let mut raster = splinterm_freetype::RasterFace::open_memory(
+        &staged,
+        u32::try_from(source.index).unwrap(),
+        22 * 64,
+    )
+    .unwrap();
+    assert!(raster.metrics().unwrap().height > 0);
+
+    fs::remove_file(path).unwrap();
+    fs::remove_file(retired).unwrap();
 }
 
 #[test]

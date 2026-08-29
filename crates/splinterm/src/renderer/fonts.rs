@@ -10,8 +10,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use splinterm_filemap::ReadOnlyFileMap;
-use splinterm_freetype::RasterFace;
+use splinterm_filemap::{FileIdentity, ReadOnlyFileMap};
+use splinterm_freetype::{MAX_STAGED_FONT_BYTES, RasterFace};
 use swash::{
     FontRef,
     scale::{Render, ScaleContext, Source, StrikeWith, image::Content},
@@ -42,7 +42,8 @@ pub(super) const SNAPSHOT_PRIMARY_BOLD_ITALIC: usize = 3;
 pub(super) const SNAPSHOT_CJK: usize = 4;
 pub(super) const SNAPSHOT_EMOJI: usize = 5;
 
-pub(super) static SNAPSHOT_FACES: OnceLock<Result<[FontFace; 6], String>> = OnceLock::new();
+pub(super) static SNAPSHOT_FONT_GENERATION: OnceLock<Result<FontGeneration, String>> =
+    OnceLock::new();
 #[derive(Default)]
 pub(super) struct PersistentGlyphCache {
     pub(super) raster_faces: HashMap<(isize, usize), RasterFace>,
@@ -152,6 +153,30 @@ pub(super) struct GlyphKey {
 
 pub(super) const BOX_DRAWING_FACE: usize = usize::MAX;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FontFaceFingerprint {
+    pub(super) family: String,
+    pub(super) style: String,
+    pub(super) path: PathBuf,
+    pub(super) index: usize,
+    pub(super) weight: i32,
+    pub(super) slant: i32,
+    pub(super) selected_pixel_size_26_6: isize,
+    pub(super) source_identity: FileIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FontFingerprint {
+    pub(super) pattern: String,
+    pub(super) authority: FontAuthority,
+    pub(super) faces: [FontFaceFingerprint; 6],
+}
+
+pub(super) struct FontGeneration {
+    pub(super) fingerprint: FontFingerprint,
+    pub(super) faces: [FontFace; 6],
+}
+
 pub(super) struct FontFace {
     pub(super) label: &'static str,
     pub(super) family: String,
@@ -161,7 +186,8 @@ pub(super) struct FontFace {
     pub(super) weight: i32,
     pub(super) slant: i32,
     pub(super) selected_pixel_size_26_6: isize,
-    pub(super) data: OnceLock<Result<ReadOnlyFileMap, String>>,
+    pub(super) source_identity: FileIdentity,
+    pub(super) data: Arc<ReadOnlyFileMap>,
 }
 
 impl FontFace {
@@ -175,12 +201,26 @@ impl FontFace {
             weight: self.weight,
             slant: self.slant,
             selected_pixel_size_26_6: self.selected_pixel_size_26_6,
-            data: OnceLock::new(),
+            source_identity: self.source_identity,
+            data: self.data.clone(),
         }
     }
 
     fn identity(&self) -> (&std::path::Path, usize) {
         (&self.path, self.index)
+    }
+
+    fn fingerprint(&self) -> FontFaceFingerprint {
+        FontFaceFingerprint {
+            family: self.family.clone(),
+            style: self.style.clone(),
+            path: self.path.clone(),
+            index: self.index,
+            weight: self.weight,
+            slant: self.slant,
+            selected_pixel_size_26_6: self.selected_pixel_size_26_6,
+            source_identity: self.source_identity,
+        }
     }
 }
 
@@ -501,26 +541,19 @@ pub(super) fn cache_glyph(
     Ok(())
 }
 
-pub(super) fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
-    SNAPSHOT_FACES
+pub(super) fn snapshot_font_generation() -> Result<&'static FontGeneration> {
+    SNAPSHOT_FONT_GENERATION
         .get_or_init(|| {
             let options = renderer_options();
-            let [regular, bold, italic, bold_italic] =
-                resolve_primary_faces(&options.font, options.font_authority)
-                    .map_err(|error| error.to_string())?;
-            Ok([
-                regular,
-                bold,
-                italic,
-                bold_italic,
-                resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")
-                    .map_err(|error| error.to_string())?,
-                resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")
-                    .map_err(|error| error.to_string())?,
-            ])
+            stage_startup_font_generation(&options.font, options.font_authority)
+                .map_err(|error| error.to_string())
         })
         .as_ref()
         .map_err(|error| anyhow::anyhow!(error.clone()))
+}
+
+pub(super) fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
+    Ok(&snapshot_font_generation()?.faces)
 }
 
 pub(super) fn snapshot_glyph(
@@ -543,14 +576,27 @@ pub(super) fn snapshot_glyph(
         cache.misses = cache.misses.saturating_add(1);
         let (glyph, color_advance) = if face_index == SNAPSHOT_EMOJI {
             let face = &faces[face_index];
-            let raster = RasterFace::rasterize_color(
-                &face.path,
-                u32::try_from(face.index).context("emoji face index fits u32")?,
-                effective_size_26_6,
-                face.selected_pixel_size_26_6,
-                u32::from(glyph_id),
-            )
-            .with_context(|| format!("rasterize color snapshot glyph {glyph_id}"))?;
+            let raster_key = (face.selected_pixel_size_26_6, face_index);
+            if !cache.raster_faces.contains_key(&raster_key) {
+                let raster_face = RasterFace::open_memory(
+                    &face.data,
+                    u32::try_from(face.index).context("emoji face index fits u32")?,
+                    face.selected_pixel_size_26_6,
+                )
+                .context("open staged emoji raster face")?;
+                cache.prepare_raster_face_insert(raster_key);
+                cache.raster_faces.insert(raster_key, raster_face);
+            }
+            let raster = cache
+                .raster_faces
+                .get_mut(&raster_key)
+                .context("inserted emoji raster face remains present")?
+                .rasterize_color_glyph(
+                    effective_size_26_6,
+                    face.selected_pixel_size_26_6,
+                    u32::from(glyph_id),
+                )
+                .with_context(|| format!("rasterize color snapshot glyph {glyph_id}"))?;
             (
                 CachedGlyph {
                     content: Content::Color,
@@ -565,8 +611,8 @@ pub(super) fn snapshot_glyph(
         } else {
             let raster_key = (effective_size_26_6, face_index);
             if !cache.raster_faces.contains_key(&raster_key) {
-                let raster_face = RasterFace::open(
-                    &faces[face_index].path,
+                let raster_face = RasterFace::open_memory(
+                    &faces[face_index].data,
                     u32::try_from(faces[face_index].index).context("face index fits u32")?,
                     pixel_size_26_6(font_size)?,
                 )
@@ -1066,8 +1112,8 @@ pub(super) struct CellMetrics {
     reason = "the protocol-bounded integer terminal advance is exactly representable in f32"
 )]
 pub(super) fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> {
-    let mut face = RasterFace::open(
-        &primary_face.path,
+    let mut face = RasterFace::open_memory(
+        &primary_face.data,
         u32::try_from(primary_face.index).context("primary face index")?,
         pixel_size_26_6(font_size)?,
     )
@@ -1173,6 +1219,10 @@ pub(super) fn resolve_face(
     if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
         bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
     }
+    let snapshot = ReadOnlyFileMap::immutable_snapshot(&path, MAX_STAGED_FONT_BYTES)
+        .with_context(|| format!("snapshot resolved {label} font"))?;
+    let source_identity = snapshot.source_identity;
+    let data = Arc::new(snapshot.mapping);
     let face = FontFace {
         label,
         family,
@@ -1182,8 +1232,10 @@ pub(super) fn resolve_face(
         weight,
         slant,
         selected_pixel_size_26_6,
-        data: OnceLock::new(),
+        source_identity,
+        data,
     };
+    font_ref(&face).with_context(|| format!("parse resolved {label} font"))?;
     eprintln!(
         "Resolved {label}: {} {} (face {}, {})",
         face.family,
@@ -1367,20 +1419,81 @@ fn resolve_primary_faces(pattern: &str, authority: FontAuthority) -> Result<[Fon
     resolve_startup_primary_with(pattern, authority, resolve_primary_faces_exact)
 }
 
-pub(super) fn font_data(face: &FontFace) -> Result<&[u8]> {
-    face.data
-        .get_or_init(|| {
-            ReadOnlyFileMap::open(&face.path)
-                .with_context(|| format!("map {}", face.path.display()))
-                .map_err(|error| error.to_string())
-        })
-        .as_ref()
-        .map(|mapping| &**mapping)
-        .map_err(|error| anyhow::anyhow!(error.clone()))
+fn resolve_font_candidate(
+    pattern: &str,
+    authority: FontAuthority,
+    startup: bool,
+) -> Result<FontGeneration> {
+    let [regular, bold, italic, bold_italic] = if startup {
+        resolve_primary_faces(pattern, authority)?
+    } else {
+        resolve_primary_faces_exact(pattern)?
+    };
+    let faces = [
+        regular,
+        bold,
+        italic,
+        bold_italic,
+        resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")?,
+        resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")?,
+    ];
+    let fingerprint = FontFingerprint {
+        pattern: pattern.to_owned(),
+        authority,
+        faces: std::array::from_fn(|index| faces[index].fingerprint()),
+    };
+    Ok(FontGeneration { fingerprint, faces })
+}
+
+fn stage_stable_with<F, T>(mut stage: impl FnMut() -> Result<(F, T)>) -> Result<T>
+where
+    F: std::fmt::Debug + Eq,
+{
+    let (first_fingerprint, first) = stage()?;
+    let (second_fingerprint, second) = stage()?;
+    anyhow::ensure!(
+        first_fingerprint == second_fingerprint,
+        "font resolution changed while staging: first={first_fingerprint:?}, second={second_fingerprint:?}"
+    );
+    drop(first);
+    Ok(second)
+}
+
+fn stage_font_generation(
+    pattern: &str,
+    authority: FontAuthority,
+    startup: bool,
+) -> Result<FontGeneration> {
+    stage_stable_with(|| {
+        let generation = resolve_font_candidate(pattern, authority, startup)?;
+        Ok((generation.fingerprint.clone(), generation))
+    })
+}
+
+fn stage_startup_font_generation(
+    pattern: &str,
+    authority: FontAuthority,
+) -> Result<FontGeneration> {
+    stage_font_generation(pattern, authority, true)
+}
+
+#[allow(
+    dead_code,
+    reason = "the next Plan 0038 milestone wires staged live generations into the watcher"
+)]
+pub(super) fn stage_live_font_generation(
+    pattern: &str,
+    authority: FontAuthority,
+) -> Result<FontGeneration> {
+    stage_font_generation(pattern, authority, false)
+}
+
+pub(super) fn font_data(face: &FontFace) -> &[u8] {
+    &face.data
 }
 
 pub(super) fn font_ref(face: &FontFace) -> Result<FontRef<'_>> {
-    FontRef::from_index(font_data(face)?, face.index).with_context(|| {
+    FontRef::from_index(font_data(face), face.index).with_context(|| {
         format!(
             "parse {} face {} with Swash",
             face.path.display(),
@@ -1487,6 +1600,16 @@ mod tests {
         weight: i32,
         slant: i32,
     ) -> FontFace {
+        static NEXT_SYNTHETIC_FACE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let mapped_path = std::env::temp_dir().join(format!(
+            "splinterm-synthetic-face-{}-{}",
+            std::process::id(),
+            NEXT_SYNTHETIC_FACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&mapped_path, b"synthetic face bytes").unwrap();
+        let data = Arc::new(ReadOnlyFileMap::open(&mapped_path).unwrap());
+        std::fs::remove_file(mapped_path).unwrap();
         FontFace {
             label,
             family: family.to_owned(),
@@ -1496,7 +1619,8 @@ mod tests {
             weight,
             slant,
             selected_pixel_size_26_6: 12 * 64,
-            data: OnceLock::new(),
+            source_identity: data.identity(),
+            data,
         }
     }
 
@@ -1647,6 +1771,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("startup fallback"));
+    }
+
+    #[test]
+    fn stable_staging_accepts_identical_fingerprints_and_returns_the_second_candidate() {
+        let mut candidates = [(7_u8, "first"), (7_u8, "second")].into_iter();
+        let staged = stage_stable_with(|| Ok(candidates.next().unwrap())).unwrap();
+        assert_eq!(staged, "second");
+    }
+
+    #[test]
+    fn stable_staging_rejects_a_mixed_resolution() {
+        let mut candidates = [(7_u8, "first"), (8_u8, "second")].into_iter();
+        let error = stage_stable_with(|| Ok(candidates.next().unwrap())).unwrap_err();
+        assert!(error.to_string().contains("changed while staging"));
     }
 
     #[test]
