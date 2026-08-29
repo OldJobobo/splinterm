@@ -200,10 +200,11 @@ use input::{
     application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
     consume_detached_enter_press, copy_mode_desktop_action, font_zoom_action,
     history_overlay_status, history_return_to_live_hit, key_input, keymap_press_for,
-    local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
-    pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
-    pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
-    shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
+    local_selection_owner, mouse_report, owned_field_clipboard_action, pane_focus_action,
+    pane_topology_action, pending_selection_drag_anchor, picker_ime_reconcile,
+    picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
+    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
+    tab_shortcut_action, take_press_owner,
 };
 use selection::{
     CellPosition, CopyModeState, CopyMotion, CopyMoveOutcome, Selection, SelectionEndpoint,
@@ -4350,6 +4351,17 @@ impl App {
         text.filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
     }
 
+    fn owned_field_consumes_repeat(&mut self, event: &KeyEvent) -> bool {
+        self.active_owned_field().is_some()
+            && (self.input.modifiers.logo
+                || owned_field_clipboard_action(
+                    &self.input.keymap,
+                    event.keysym,
+                    self.input.modifiers,
+                )
+                .is_some())
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one ordered boundary keeps field clipboard publication and bounded edits atomic"
@@ -4374,10 +4386,21 @@ impl App {
             !self.input.modifiers.logo && !self.input.modifiers.ctrl && !self.input.modifiers.alt;
         let extend = self.input.modifiers.shift;
         let clipboard_available = self.clipboard.data_device.is_some();
+        let clipboard_action =
+            owned_field_clipboard_action(&self.input.keymap, event.keysym, self.input.modifiers);
         let mut changed = false;
         let mut copied = None;
         let mut paste = false;
-        let handled = if desktop {
+        let handled = if clipboard_action == Some(ActionId::ClipboardCopy) {
+            copied = self
+                .owned_field_editor_mut(target)
+                .and_then(|editor| editor.selected_text().map(str::as_bytes))
+                .map(<[u8]>::to_vec);
+            true
+        } else if clipboard_action == Some(ActionId::ClipboardPaste) {
+            paste = true;
+            true
+        } else if desktop {
             match event.keysym {
                 Keysym::c | Keysym::C => {
                     copied = self

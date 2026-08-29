@@ -152,8 +152,9 @@ profile retains `Super+C/V` as primary. Omarchy's universal shortcuts arrive as
 that form. Without the terminal classification Omarchy may inject ordinary
 `Ctrl+C`, which remains terminal interrupt. These Super shortcuts work only when the compositor
 delivers the chord to the Splinterm Window. Splinterm-owned command-palette,
-search, and rename fields also offer
-bounded local selection, cut, paste, and undo; terminal `Super+X/Z` remain owned
+keybinding-help, search, and rename fields accept effective clipboard bindings
+such as `Ctrl+Shift+C/V` and also offer bounded local selection, cut, paste, and
+undo; terminal `Super+X/Z` remain owned
 by the running application.
 
 The same profile ships atomic `omarchy.t`, `omarchy.tdl`, `omarchy.tds`,

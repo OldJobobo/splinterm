@@ -151,8 +151,9 @@ without that classification its universal copy branch injects ordinary
 selection and exits; `Super+V/X/Z` are consumed locally without pasting or
 sending PTY input. These Super shortcuts work only when the compositor delivers
 the chord to the Splinterm Window. Splinterm-owned command palette, keybinding
-help, search, and rename fields support `Super+A` selection, `Super+C/V/X/Z`
-copy/paste/cut/undo, and Shift+Left/Right selection. Their Unicode-safe undo
+help, search, and rename fields accept effective `clipboard.copy` and
+`clipboard.paste` bindings such as `Ctrl+Shift+C/V`; they also support
+`Super+A/C/V/X/Z` selection/copy/paste/cut/undo and Shift+Left/Right selection. Their Unicode-safe undo
 history is limited to 16 states and disappears with the field. Terminal-pane
 `Super+X` and `Super+Z` are not claimed as universal cut or undo actions because
 the running application owns its input buffer.

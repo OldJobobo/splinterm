@@ -243,9 +243,10 @@ compositor-safe route, and both profiles accept Omarchy's terminal-tagged
 terminal; ordinary `Ctrl+C` remains terminal interrupt. In copy mode, `Super+C` copies the active selection and exits,
 while `Super+V/X/Z` are consumed locally. These Super shortcuts work only when
 the compositor delivers the chord to the Splinterm Window. Splinterm-owned
-command-palette, search, and rename fields also support `Super+A`,
-`Super+C/V/X/Z`, and Shift+Left/Right for bounded local
-selection, clipboard editing, and undo. Terminal panes do not claim Super+X/Z as
+command-palette, keybinding-help, search, and rename fields accept effective
+`clipboard.copy` / `clipboard.paste` bindings such as `Ctrl+Shift+C/V`; they
+also support `Super+A/C/V/X/Z` and Shift+Left/Right for bounded local selection,
+clipboard editing, and undo. Terminal panes do not claim Super+X/Z as
 universal cut/undo because the child application owns its input buffer.
 
 `remote check PROFILE` additionally starts bounded SSH/relay/daemon read-only

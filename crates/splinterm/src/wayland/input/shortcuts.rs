@@ -82,6 +82,15 @@ pub(in crate::wayland) fn shortcut_action_for(
     keymap.action(key_identity(keysym)?, active_modifiers(modifiers))
 }
 
+pub(in crate::wayland) fn owned_field_clipboard_action(
+    keymap: &ResolvedKeymap,
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> Option<ActionId> {
+    shortcut_action_for(keymap, keysym, modifiers)
+        .filter(|action| matches!(action, ActionId::ClipboardCopy | ActionId::ClipboardPaste))
+}
+
 pub(in crate::wayland) fn keymap_press_for(
     keymap: &ResolvedKeymap,
     prefix_state: &mut PrefixState,
@@ -475,6 +484,28 @@ mod tests {
                     }
                 ),
                 Some(ActionId::ClipboardPaste)
+            );
+        }
+    }
+
+    #[test]
+    fn owned_fields_accept_effective_clipboard_actions_without_other_shortcuts() {
+        for profile in [
+            crate::keymap::KeymapProfile::Splinterm,
+            crate::keymap::KeymapProfile::OmarchyTmux,
+        ] {
+            let keymap = crate::keymap::built_in_keymap(profile);
+            assert_eq!(
+                owned_field_clipboard_action(&keymap, Keysym::c, ctrl_shift()),
+                Some(ActionId::ClipboardCopy)
+            );
+            assert_eq!(
+                owned_field_clipboard_action(&keymap, Keysym::v, ctrl_shift()),
+                Some(ActionId::ClipboardPaste)
+            );
+            assert_eq!(
+                owned_field_clipboard_action(&keymap, Keysym::f, ctrl_shift()),
+                None
             );
         }
     }

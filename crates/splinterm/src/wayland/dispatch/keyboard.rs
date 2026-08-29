@@ -556,7 +556,7 @@ impl KeyboardHandler for App {
             }
             return;
         }
-        if self.input.modifiers.logo && self.active_owned_field().is_some() {
+        if self.owned_field_consumes_repeat(&event) {
             return;
         }
         if self.handle_owned_field_key(&event, queue_handle, serial) {
