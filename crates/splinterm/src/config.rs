@@ -27,11 +27,20 @@ use crate::{
 };
 
 pub const APP_ID: &str = "com.oldjobobo.splinterm";
-pub const DEFAULT_FONT: &str = "JetBrains Mono Nerd Font:style=Regular";
+pub const DEFAULT_FONT: &str = "monospace:style=Regular";
+pub const STARTUP_FONT_FALLBACK: &str = "JetBrains Mono Nerd Font:style=Regular";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FontAuthority {
+    #[default]
+    NativeOmarchy,
+    Explicit,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub font: String,
+    pub font_authority: FontAuthority,
     pub font_size: FontSize,
     pub font_sizing_policy: FontSizingPolicy,
     pub padding: TerminalPadding,
@@ -93,6 +102,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             font: DEFAULT_FONT.to_owned(),
+            font_authority: FontAuthority::NativeOmarchy,
             font_size: FontSize::Pixels(14.0),
             font_sizing_policy: FontSizingPolicy::OutputScale,
             padding: TerminalPadding::DEFAULT,
@@ -247,6 +257,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                     );
                 }
                 config.font = font;
+                config.font_authority = FontAuthority::Explicit;
                 false
             }
             "main.font-size" | "font-size" | "main.font-pixelsize" => {
@@ -1025,6 +1036,8 @@ mod tests {
     #[test]
     fn defaults_match_foot_font_and_resize_behavior() {
         let defaults = AppConfig::default();
+        assert_eq!(defaults.font, "monospace:style=Regular");
+        assert_eq!(defaults.font_authority, FontAuthority::NativeOmarchy);
         assert_eq!(defaults.font_size, FontSize::Pixels(14.0));
         assert_eq!(defaults.resize_delay_ms, 100);
         assert_eq!(defaults.keymap_profile, KeymapProfile::Splinterm);
@@ -1049,6 +1062,13 @@ mod tests {
                 .is_some_and(|catalog| catalog.contains("omarchy.tdl"))
         );
         assert!(!defaults.allow_unrestricted_commands);
+    }
+
+    #[test]
+    fn explicit_monospace_pattern_retains_explicit_authority() {
+        let loaded = parse("[main]\nfont=monospace:style=Regular\n").unwrap();
+        assert_eq!(loaded.config.font, "monospace:style=Regular");
+        assert_eq!(loaded.config.font_authority, FontAuthority::Explicit);
     }
 
     #[test]

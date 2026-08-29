@@ -133,6 +133,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,
@@ -247,6 +248,7 @@ pub(super) async fn run_live_window(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,

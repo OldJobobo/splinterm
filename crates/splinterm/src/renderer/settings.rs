@@ -5,13 +5,16 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Context, Result, bail};
 use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6};
 
-use crate::geometry::{
-    FontSize, FontSizingPolicy, OutputDpiObservation, TerminalPadding, resolve_font_size,
-    resolve_font_size_with_output,
+use crate::{
+    config::{FontAuthority, STARTUP_FONT_FALLBACK},
+    geometry::{
+        FontSize, FontSizingPolicy, OutputDpiObservation, TerminalPadding, resolve_font_size,
+        resolve_font_size_with_output,
+    },
 };
 
 pub(super) const BASE_FONT_SIZE: f32 = 22.0;
-pub(super) const PRIMARY_FONT: &str = "JetBrains Mono Nerd Font:style=Regular";
+pub(super) const PRIMARY_FONT: &str = STARTUP_FONT_FALLBACK;
 const FONT_ZOOM_STEP_POINTS: f32 = 0.5;
 
 /// Immutable process resources shared by renderer contexts.
@@ -26,6 +29,7 @@ static COMPATIBILITY_CONTEXT: OnceLock<Mutex<RenderContext>> = OnceLock::new();
 #[derive(Clone, Debug)]
 pub struct RendererOptions {
     pub font: String,
+    pub font_authority: FontAuthority,
     pub font_size: FontSize,
     pub font_sizing_policy: FontSizingPolicy,
     pub physical_dpi: f32,
@@ -37,6 +41,7 @@ impl Default for RendererOptions {
     fn default() -> Self {
         Self {
             font: PRIMARY_FONT.to_owned(),
+            font_authority: FontAuthority::Explicit,
             font_size: FontSize::Pixels(BASE_FONT_SIZE),
             font_sizing_policy: FontSizingPolicy::OutputScale,
             physical_dpi: 96.0,
@@ -159,6 +164,7 @@ pub(super) fn compatible_renderer_options(
     next: &RendererOptions,
 ) -> bool {
     current.font == next.font
+        && current.font_authority == next.font_authority
         && current.font_size == next.font_size
         && current.font_sizing_policy == next.font_sizing_policy
         && current.physical_dpi.to_bits() == next.physical_dpi.to_bits()
@@ -281,6 +287,10 @@ mod tests {
         let mut different_font = current.clone();
         different_font.font = "different font".to_owned();
         assert!(!compatible_renderer_options(&current, &different_font));
+
+        let mut different_authority = current.clone();
+        different_authority.font_authority = FontAuthority::NativeOmarchy;
+        assert!(!compatible_renderer_options(&current, &different_authority));
 
         let mut different_padding = current.clone();
         different_padding.padding.left += 1;
