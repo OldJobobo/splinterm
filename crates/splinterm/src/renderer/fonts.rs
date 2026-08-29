@@ -1971,6 +1971,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual host resource timing; requires fontconfig and installed fonts"]
+    fn repeated_live_staging_is_fd_bounded() {
+        let options = renderer_options();
+        let before = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let started = Instant::now();
+        for _ in 0..3 {
+            drop(stage_live_font_generation(&options.font, options.font_authority).unwrap());
+        }
+        let elapsed = started.elapsed();
+        let after = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        eprintln!(
+            "live-font-stage three_generations_ms={:.3} fd_before={before} fd_after={after}",
+            elapsed.as_secs_f64() * 1_000.0
+        );
+        assert!(after <= before.saturating_add(1));
+    }
+
+    #[test]
     #[ignore = "requires host fontconfig and installed system fonts"]
     fn live_probe_matches_the_staged_generation_on_the_supported_host() {
         let options = renderer_options();
