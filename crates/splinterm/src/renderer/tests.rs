@@ -779,9 +779,9 @@ fn color_fallback_cache_uses_fcft_fixed_strike_size_and_advance() {
     let font = font_ref(&faces[SNAPSHOT_EMOJI]).unwrap();
     let glyph_id = font.charmap().map('\u{1f642}');
     let small = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
-    let small_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
+    let small_advance = snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
     let larger = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
-    let larger_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
+    let larger_advance = snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
 
     assert_eq!((small.width, small.height, small_advance), (14, 14, 14));
     assert_eq!((larger.width, larger.height, larger_advance), (18, 17, 18));
@@ -1219,6 +1219,48 @@ fn empty_overlays_leave_compositor_border_area_untouched() {
 }
 
 #[test]
+fn incremental_refresh_rejects_a_different_font_generation() {
+    let snapshot = incremental_snapshot();
+    let context = compatibility_render_context().unwrap();
+    let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
+    let options = renderer_options();
+    let replacement =
+        Arc::new(stage_live_font_generation(&options.font, options.font_authority).unwrap());
+    assert_ne!(frame.font_generation.id, replacement.id);
+    frame.font_generation = replacement;
+    let error = frame
+        .refresh_rows_with_context(&snapshot, &[true, true], &context)
+        .unwrap_err();
+    assert!(error.to_string().contains("full rebuild is required"));
+}
+
+#[test]
+fn prepared_frame_retains_its_font_generation_until_drop() {
+    let snapshot = incremental_snapshot();
+    let frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+    let generation = Arc::clone(&frame.font_generation);
+    let retained = Arc::strong_count(&generation);
+    assert!(retained >= 3);
+    drop(frame);
+    assert_eq!(Arc::strong_count(&generation), retained - 1);
+}
+
+#[test]
+fn identical_glyph_ids_do_not_share_cache_entries_across_generations() {
+    reset_snapshot_cache();
+    let current = snapshot_font_generation().unwrap();
+    let face = &current.faces[SNAPSHOT_PRIMARY_REGULAR];
+    let glyph_id = font_ref(face).unwrap().charmap().map('M');
+    let current_glyph =
+        snapshot_glyph(&current.faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, 22.0).unwrap();
+    let options = renderer_options();
+    let replacement = stage_live_font_generation(&options.font, options.font_authority).unwrap();
+    let replacement_glyph =
+        snapshot_glyph(&replacement.faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, 22.0).unwrap();
+    assert!(!Arc::ptr_eq(&current_glyph, &replacement_glyph));
+}
+
+#[test]
 fn incremental_refresh_preserves_unchanged_prepared_rows() {
     let mut snapshot = incremental_snapshot();
     let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
@@ -1384,6 +1426,7 @@ fn default_alpha_tracks_color_source_and_uses_premultiplied_argb() {
 fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
     let key = GlyphKey { face: 0, glyph: 1 };
     let frame = SnapshotFrame {
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: vec![
             SnapshotGlyph {
                 key,
@@ -1476,6 +1519,7 @@ fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
 
 fn damage_test_frame() -> SnapshotFrame {
     SnapshotFrame {
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: Vec::new(),
         decorations: Vec::new(),
         cache: HashMap::new(),
@@ -2374,6 +2418,7 @@ fn scroll_copy_clips_to_undersized_framebuffers() {
 #[test]
 fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
     let frame = SnapshotFrame {
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: Vec::new(),
         decorations: Vec::new(),
         cache: HashMap::new(),

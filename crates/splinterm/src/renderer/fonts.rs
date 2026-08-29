@@ -5,7 +5,10 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     process::Command,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -42,15 +45,16 @@ pub(super) const SNAPSHOT_PRIMARY_BOLD_ITALIC: usize = 3;
 pub(super) const SNAPSHOT_CJK: usize = 4;
 pub(super) const SNAPSHOT_EMOJI: usize = 5;
 
-pub(super) static SNAPSHOT_FONT_GENERATION: OnceLock<Result<FontGeneration, String>> =
+static NEXT_FONT_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
+pub(super) static SNAPSHOT_FONT_GENERATION: OnceLock<Result<Arc<FontGeneration>, String>> =
     OnceLock::new();
 #[derive(Default)]
 pub(super) struct PersistentGlyphCache {
-    pub(super) raster_faces: HashMap<(isize, usize), RasterFace>,
-    pub(super) raster_face_order: VecDeque<(isize, usize)>,
-    pub(super) glyphs: HashMap<(isize, GlyphKey), Arc<CachedGlyph>>,
-    pub(super) advances: HashMap<(isize, GlyphKey), i32>,
-    pub(super) order: VecDeque<(isize, GlyphKey)>,
+    pub(super) raster_faces: HashMap<(u64, isize, usize), RasterFace>,
+    pub(super) raster_face_order: VecDeque<(u64, isize, usize)>,
+    pub(super) glyphs: HashMap<(u64, isize, GlyphKey), Arc<CachedGlyph>>,
+    pub(super) advances: HashMap<(u64, isize, GlyphKey), i32>,
+    pub(super) order: VecDeque<(u64, isize, GlyphKey)>,
     pub(super) glyph_bytes: usize,
     pub(super) hits: u64,
     pub(super) misses: u64,
@@ -61,7 +65,7 @@ pub(super) struct PersistentGlyphCache {
 impl PersistentGlyphCache {
     pub(super) fn insert_glyph(
         &mut self,
-        cache_key: (isize, GlyphKey),
+        cache_key: (u64, isize, GlyphKey),
         glyph: Arc<CachedGlyph>,
         color_advance: Option<i32>,
     ) {
@@ -76,7 +80,7 @@ impl PersistentGlyphCache {
 
     pub(super) fn insert_glyph_bounded(
         &mut self,
-        cache_key: (isize, GlyphKey),
+        cache_key: (u64, isize, GlyphKey),
         glyph: Arc<CachedGlyph>,
         color_advance: Option<i32>,
         entry_budget: usize,
@@ -104,7 +108,7 @@ impl PersistentGlyphCache {
         self.glyphs.insert(cache_key, glyph);
     }
 
-    pub(super) fn prepare_raster_face_insert(&mut self, raster_key: (isize, usize)) {
+    pub(super) fn prepare_raster_face_insert(&mut self, raster_key: (u64, isize, usize)) {
         while self.raster_faces.len() >= SNAPSHOT_RASTER_FACE_BUDGET {
             let Some(oldest) = self.raster_face_order.pop_front() else {
                 break;
@@ -172,11 +176,14 @@ pub(super) struct FontFingerprint {
     pub(super) faces: [FontFaceFingerprint; 6],
 }
 
-pub(super) struct FontGeneration {
+#[derive(Debug)]
+pub(crate) struct FontGeneration {
+    pub(super) id: u64,
     pub(super) fingerprint: FontFingerprint,
     pub(super) faces: [FontFace; 6],
 }
 
+#[derive(Debug)]
 pub(super) struct FontFace {
     pub(super) label: &'static str,
     pub(super) family: String,
@@ -185,6 +192,7 @@ pub(super) struct FontFace {
     pub(super) index: usize,
     pub(super) weight: i32,
     pub(super) slant: i32,
+    pub(super) generation_id: u64,
     pub(super) selected_pixel_size_26_6: isize,
     pub(super) source_identity: FileIdentity,
     pub(super) data: Arc<ReadOnlyFileMap>,
@@ -200,6 +208,7 @@ impl FontFace {
             index: self.index,
             weight: self.weight,
             slant: self.slant,
+            generation_id: self.generation_id,
             selected_pixel_size_26_6: self.selected_pixel_size_26_6,
             source_identity: self.source_identity,
             data: self.data.clone(),
@@ -541,11 +550,12 @@ pub(super) fn cache_glyph(
     Ok(())
 }
 
-pub(super) fn snapshot_font_generation() -> Result<&'static FontGeneration> {
+pub(super) fn snapshot_font_generation() -> Result<&'static Arc<FontGeneration>> {
     SNAPSHOT_FONT_GENERATION
         .get_or_init(|| {
             let options = renderer_options();
             stage_startup_font_generation(&options.font, options.font_authority)
+                .map(Arc::new)
                 .map_err(|error| error.to_string())
         })
         .as_ref()
@@ -563,20 +573,28 @@ pub(super) fn snapshot_glyph(
     font_size: f32,
 ) -> Result<Arc<CachedGlyph>> {
     let effective_size_26_6 = pixel_size_26_6(font_size)?;
+    let generation_id = faces
+        .get(face_index)
+        .context("glyph face index is in the active font generation")?
+        .generation_id;
     let key = GlyphKey {
         face: face_index,
         glyph: glyph_id,
     };
     SNAPSHOT_GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(glyph) = cache.glyphs.get(&(effective_size_26_6, key)).cloned() {
+        if let Some(glyph) = cache
+            .glyphs
+            .get(&(generation_id, effective_size_26_6, key))
+            .cloned()
+        {
             cache.hits = cache.hits.saturating_add(1);
             return Ok(glyph);
         }
         cache.misses = cache.misses.saturating_add(1);
         let (glyph, color_advance) = if face_index == SNAPSHOT_EMOJI {
             let face = &faces[face_index];
-            let raster_key = (face.selected_pixel_size_26_6, face_index);
+            let raster_key = (generation_id, face.selected_pixel_size_26_6, face_index);
             if !cache.raster_faces.contains_key(&raster_key) {
                 let raster_face = RasterFace::open_memory(
                     &face.data,
@@ -609,7 +627,7 @@ pub(super) fn snapshot_glyph(
                 Some(raster.advance_x),
             )
         } else {
-            let raster_key = (effective_size_26_6, face_index);
+            let raster_key = (generation_id, effective_size_26_6, face_index);
             if !cache.raster_faces.contains_key(&raster_key) {
                 let raster_face = RasterFace::open_memory(
                     &faces[face_index].data,
@@ -642,7 +660,7 @@ pub(super) fn snapshot_glyph(
         };
         let glyph = Arc::new(glyph);
         cache.insert_glyph(
-            (effective_size_26_6, key),
+            (generation_id, effective_size_26_6, key),
             Arc::clone(&glyph),
             color_advance,
         );
@@ -663,11 +681,16 @@ pub(super) fn pixel_size_26_6(font_size: f32) -> Result<isize> {
 }
 
 pub(super) fn snapshot_color_advance(
+    faces: &[FontFace],
     face_index: usize,
     glyph_id: u16,
     font_size: f32,
 ) -> Result<i32> {
     let cache_key = (
+        faces
+            .get(face_index)
+            .context("color face index is in the active font generation")?
+            .generation_id,
         pixel_size_26_6(font_size)?,
         GlyphKey {
             face: face_index,
@@ -971,7 +994,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         right: 0,
         bottom: 0,
     });
-    let emoji_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, font_size)?;
+    let emoji_advance = snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, font_size)?;
     records.push(serde_json::json!({
         "schema": 1,
         "label": "emoji",
@@ -1231,6 +1254,7 @@ pub(super) fn resolve_face(
         index,
         weight,
         slant,
+        generation_id: 0,
         selected_pixel_size_26_6,
         source_identity,
         data,
@@ -1429,7 +1453,8 @@ fn resolve_font_candidate(
     } else {
         resolve_primary_faces_exact(pattern)?
     };
-    let faces = [
+    let id = NEXT_FONT_GENERATION_ID.fetch_add(1, Ordering::Relaxed);
+    let mut faces = [
         regular,
         bold,
         italic,
@@ -1437,12 +1462,19 @@ fn resolve_font_candidate(
         resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")?,
         resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")?,
     ];
+    for face in &mut faces {
+        face.generation_id = id;
+    }
     let fingerprint = FontFingerprint {
         pattern: pattern.to_owned(),
         authority,
         faces: std::array::from_fn(|index| faces[index].fingerprint()),
     };
-    Ok(FontGeneration { fingerprint, faces })
+    Ok(FontGeneration {
+        id,
+        fingerprint,
+        faces,
+    })
 }
 
 fn stage_stable_with<F, T>(mut stage: impl FnMut() -> Result<(F, T)>) -> Result<T>
@@ -1481,7 +1513,7 @@ fn stage_startup_font_generation(
     dead_code,
     reason = "the next Plan 0038 milestone wires staged live generations into the watcher"
 )]
-pub(super) fn stage_live_font_generation(
+pub(crate) fn stage_live_font_generation(
     pattern: &str,
     authority: FontAuthority,
 ) -> Result<FontGeneration> {
@@ -1618,6 +1650,7 @@ mod tests {
             index: 0,
             weight,
             slant,
+            generation_id: 0,
             selected_pixel_size_26_6: 12 * 64,
             source_identity: data.identity(),
             data,
@@ -1804,6 +1837,7 @@ mod tests {
         let mut cache = PersistentGlyphCache::default();
         for glyph in 0..=SNAPSHOT_GLYPH_CACHE_BUDGET {
             let key = (
+                1,
                 768,
                 GlyphKey {
                     face: SNAPSHOT_EMOJI,
@@ -1824,6 +1858,7 @@ mod tests {
             );
         }
         let first = (
+            1,
             768,
             GlyphKey {
                 face: SNAPSHOT_EMOJI,
@@ -1840,7 +1875,7 @@ mod tests {
         let mut byte_bounded = PersistentGlyphCache::default();
         for glyph in 0..3 {
             byte_bounded.insert_glyph_bounded(
-                (768, GlyphKey { face: 0, glyph }),
+                (1, 768, GlyphKey { face: 0, glyph }),
                 Arc::new(CachedGlyph {
                     content: Content::Mask,
                     left: 0,

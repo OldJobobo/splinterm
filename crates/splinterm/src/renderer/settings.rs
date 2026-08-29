@@ -1,9 +1,11 @@
 //! Immutable renderer resources, explicit per-window state, and compatibility adapters.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6};
+
+use super::{FontGeneration, clear_snapshot_caches, snapshot_font_generation};
 
 use crate::{
     config::{FontAuthority, STARTUP_FONT_FALLBACK},
@@ -55,6 +57,7 @@ impl Default for RendererOptions {
 #[derive(Clone, Debug)]
 pub struct RenderContext {
     resources: &'static RendererResources,
+    font_generation: Result<Arc<FontGeneration>, Arc<String>>,
     output_dpi: OutputDpiObservation,
     font_zoom_steps: i16,
     background_alpha: u16,
@@ -68,13 +71,46 @@ impl RenderContext {
     #[must_use]
     pub fn new(background_alpha: u16) -> Self {
         let resources = renderer_resources();
+        let font_generation = snapshot_font_generation()
+            .map(Arc::clone)
+            .map_err(|error| Arc::new(format!("{error:#}")));
         Self {
             resources,
+            font_generation,
             output_dpi: OutputDpiObservation::provided(resources.options.physical_dpi)
                 .expect("configured physical DPI was validated"),
             font_zoom_steps: 0,
             background_alpha,
         }
+    }
+
+    pub(super) fn font_generation(&self) -> Result<&Arc<FontGeneration>> {
+        self.font_generation
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    #[must_use]
+    #[allow(dead_code, reason = "used by the next Plan 0038 delivery milestone")]
+    pub(crate) fn font_generation_id(&self) -> Option<u64> {
+        self.font_generation
+            .as_ref()
+            .ok()
+            .map(|generation| generation.id)
+    }
+
+    #[allow(dead_code, reason = "used by the next Plan 0038 delivery milestone")]
+    pub(crate) fn replace_font_generation(&mut self, next: Arc<FontGeneration>) -> bool {
+        if self
+            .font_generation
+            .as_ref()
+            .is_ok_and(|current| current.fingerprint == next.fingerprint)
+        {
+            return false;
+        }
+        self.font_generation = Ok(next);
+        clear_snapshot_caches();
+        true
     }
 
     #[must_use]

@@ -19,13 +19,13 @@ use crate::{
 };
 
 use super::{
-    BOX_DRAWING_FACE, CachedGlyph, FontFace, GlyphKey, RenderContext, SNAPSHOT_CJK, SNAPSHOT_EMOJI,
-    SNAPSHOT_PRIMARY_BOLD, SNAPSHOT_PRIMARY_BOLD_ITALIC, SNAPSHOT_PRIMARY_ITALIC,
+    BOX_DRAWING_FACE, CachedGlyph, FontFace, FontGeneration, GlyphKey, RenderContext, SNAPSHOT_CJK,
+    SNAPSHOT_EMOJI, SNAPSHOT_PRIMARY_BOLD, SNAPSHOT_PRIMARY_BOLD_ITALIC, SNAPSHOT_PRIMARY_ITALIC,
     SNAPSHOT_PRIMARY_REGULAR, cell_metrics, compatibility_render_context,
     decorations::{DecorationMetrics, DecorationSpan},
     font_ref,
     images::{SnapshotImage, prepare_snapshot_images},
-    snapshot_color_advance, snapshot_faces, snapshot_glyph, u32_to_f32,
+    snapshot_color_advance, snapshot_glyph, u32_to_f32,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,6 +42,7 @@ pub(super) struct SnapshotGlyph {
 
 /// One immutable, scale-dependent rendering of an owned daemon snapshot.
 pub(crate) struct SnapshotFrame {
+    pub(super) font_generation: Arc<FontGeneration>,
     pub(super) glyphs: Vec<SnapshotGlyph>,
     pub(super) decorations: Vec<DecorationSpan>,
     pub(super) cache: HashMap<GlyphKey, Arc<CachedGlyph>>,
@@ -335,7 +336,8 @@ impl SnapshotFrame {
         }
         let scale_120 = u16::try_from(scale_120).context("scale fits u16")?;
         let font_size = context.effective_font_size(u32::from(scale_120))?;
-        let faces = snapshot_faces()?;
+        let font_generation = Arc::clone(context.font_generation()?);
+        let faces = &font_generation.faces;
         let metrics = cell_metrics(&faces[0], font_size)?;
         let cell_width = metrics.width;
         let cell_height = metrics.height;
@@ -395,6 +397,7 @@ impl SnapshotFrame {
         let cursor = snapshot_cursor(snapshot, columns, rows);
         let images = prepare_snapshot_images(snapshot, sources)?;
         let mut frame = Self {
+            font_generation,
             glyphs,
             decorations,
             cache,
@@ -449,7 +452,12 @@ impl SnapshotFrame {
         if snapshot.palette.len() != 256 {
             bail!("snapshot palette must contain exactly 256 colors");
         }
-        let faces = snapshot_faces()?;
+        let context_generation = context.font_generation()?;
+        anyhow::ensure!(
+            self.font_generation.id == context_generation.id,
+            "incremental frame font generation changed; a full rebuild is required"
+        );
+        let faces = &self.font_generation.faces;
         let font_size = context.effective_font_size(u32::from(self.scale_120))?;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
@@ -801,8 +809,10 @@ pub(super) fn prepare_snapshot_row(
                 .or_insert(snapshot_glyph(faces, face_index, glyph_id, font_size)?);
             let cluster_advance = if face_index == SNAPSHOT_EMOJI {
                 f32::from(
-                    i16::try_from(snapshot_color_advance(face_index, glyph_id, font_size)?)
-                        .context("color glyph advance fits i16")?,
+                    i16::try_from(snapshot_color_advance(
+                        faces, face_index, glyph_id, font_size,
+                    )?)
+                    .context("color glyph advance fits i16")?,
                 )
             } else {
                 cluster_advance.trunc()
