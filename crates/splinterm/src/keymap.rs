@@ -1043,8 +1043,18 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                 |ctrl, shift, alt, key| NormalizedSequence::Direct(chord(ctrl, shift, alt, key));
             let prefixed =
                 |ctrl, shift, key| NormalizedSequence::Prefix(chord(ctrl, shift, false, key));
+            for preferred in ["Ctrl+Shift+V", "Ctrl+Shift+C"] {
+                if let Some(index) = keymap
+                    .bindings
+                    .iter()
+                    .position(|binding| binding.display() == preferred)
+                {
+                    let binding = keymap.bindings.remove(index);
+                    keymap.bindings.insert(0, binding);
+                }
+            }
             keymap.bindings.splice(
-                0..0,
+                2..2,
                 [
                     omarchy_binding(
                         prefixed(true, false, KeyIdentity::Space),
@@ -2026,8 +2036,14 @@ action = "clipboard.paste"
         );
         assert_eq!(keymap.primary_shortcut(ActionId::BindingHelp), "Prefix ?");
         assert_eq!(keymap.primary_shortcut(ActionId::CopyModeEnter), "Prefix [");
-        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardCopy), "Super+C");
-        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardPaste), "Super+V");
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ClipboardCopy),
+            "Ctrl+Shift+C"
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ClipboardPaste),
+            "Ctrl+Shift+V"
+        );
         assert_eq!(
             keymap.action(
                 KeyIdentity::Character('x'),

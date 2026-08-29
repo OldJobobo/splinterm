@@ -139,9 +139,11 @@ Up/Down or PageUp/PageDown to navigate, `Ctrl+U` to clear, and Escape once to
 clear a non-empty query or again to close. The owned query never reaches the
 terminal.
 
-Outside copy mode, both built-in profiles map `Super+C` to terminal-selection
-copy and `Super+V` to the existing safe/bracketed paste while both profiles
-retain `Ctrl+Shift+C/V` aliases. Omarchy's universal binding injects
+Outside copy mode, both built-in profiles map `Ctrl+Shift+C/V` and `Super+C/V`
+to terminal-selection copy and the existing safe/bracketed paste. The
+`omarchy-tmux` profile advertises `Ctrl+Shift+C/V` first so its generated help
+remains usable when the compositor reserves Super chords; `splinterm` keeps
+`Super+C/V` primary. Omarchy's universal binding injects
 `Ctrl+Insert`/`Shift+Insert` into windows carrying its `terminal` tag, which
 Splinterm accepts. Omarchy must classify `com.oldjobobo.splinterm` as a terminal;
 without that classification its universal copy branch injects ordinary

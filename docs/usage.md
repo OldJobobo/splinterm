@@ -109,7 +109,7 @@ The built-in application controls are:
 | Search scrollback | `Ctrl+Shift+F` |
 | Page history | `Shift+PageUp` / `Shift+PageDown` |
 | Return to live output | `Shift+End`, or plain Enter while viewing history |
-| Copy / paste | `Super+C` / `Super+V` (`Ctrl+Shift+C/V`, `Ctrl+Insert`/`Shift+Insert` aliases) |
+| Copy / paste | `Ctrl+Shift+C` / `Ctrl+Shift+V` (`Super+C/V`, `Ctrl+Insert`/`Shift+Insert` aliases) |
 | Release control | `Ctrl+Shift+L` |
 | Request control transfer | `Ctrl+Shift+T` |
 | Accept / deny transfer | `Ctrl+Shift+Y` / `Ctrl+Shift+N` |
@@ -144,8 +144,10 @@ selection, `y` or `Super+C` to publish it to the Wayland clipboard and exit, or
 Escape to cancel. Copy-mode `Super+V/X/Z` are consumed locally; copy mode never
 forwards these keys, pointer input, paste, or IME text to the terminal
 application. Outside copy mode, both built-in profiles provide terminal
-`Super+C/V` copy/paste while both profiles retain `Ctrl+Shift+C/V` aliases.
-Omarchy's universal shortcuts arrive as `Ctrl+Insert`/`Shift+Insert` when
+`Ctrl+Shift+C/V` and `Super+C/V` copy/paste. The `omarchy-tmux` profile advertises
+`Ctrl+Shift+C/V` as its primary compositor-safe shortcuts; the `splinterm`
+profile retains `Super+C/V` as primary. Omarchy's universal shortcuts arrive as
+`Ctrl+Insert`/`Shift+Insert` when
 `com.oldjobobo.splinterm` carries Omarchy's `terminal` tag; both profiles accept
 that form. Without the terminal classification Omarchy may inject ordinary
 `Ctrl+C`, which remains terminal interrupt. These Super shortcuts work only when the compositor

@@ -53,9 +53,9 @@ splinterm reopen
 | Detach active tab | Ctrl+Shift+Q |
 | Toggle tab strip | Ctrl+Shift+B |
 | Search scrollback | Ctrl+Shift+F |
-| Copy / paste | Super+C / Super+V (Ctrl+Shift+C/V and Ctrl+Insert/Shift+Insert aliases) |
+| Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V (Super+C/V and Ctrl+Insert/Shift+Insert aliases) |
 
-Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. When Omarchy classifies `com.oldjobobo.splinterm` as a terminal, it delivers universal copy/paste as `Ctrl+Insert`/`Shift+Insert`, which Splinterm accepts while preserving ordinary `Ctrl+C` terminal interrupt. While viewing historical output, plain Enter returns the focused pane to live output without submitting terminal input.
+The `omarchy-tmux` profile advertises Ctrl+Shift+C/V first because compositors may reserve Super chords. Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. When Omarchy classifies `com.oldjobobo.splinterm` as a terminal, it delivers universal copy/paste as `Ctrl+Insert`/`Shift+Insert`, which Splinterm accepts while preserving ordinary `Ctrl+C` terminal interrupt. While viewing historical output, plain Enter returns the focused pane to live output without submitting terminal input.
 
 :::note[Detach is not restore]
 Reopening attaches to processes that are still running. If a Splint has exited, starting it again from saved launch metadata is an explicit restore operation.

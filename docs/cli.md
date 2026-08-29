@@ -235,9 +235,10 @@ built from the resolved keymap. `Prefix+[` enters vi copy mode: move with
 and leave, or Escape to cancel. Selection spans visible and bounded loaded
 history without sending keys to the terminal application.
 
-Outside copy mode, both built-in profiles use `Super+C/V` to copy the terminal
-selection and perform safe/bracketed paste; both profiles retain
-`Ctrl+Shift+C/V` and accept Omarchy's terminal-tagged
+Outside copy mode, both built-in profiles use `Ctrl+Shift+C/V` and `Super+C/V`
+to copy the terminal selection and perform safe/bracketed paste. The
+`omarchy-tmux` profile advertises `Ctrl+Shift+C/V` as its primary
+compositor-safe route, and both profiles accept Omarchy's terminal-tagged
 `Ctrl+Insert`/`Shift+Insert`. Omarchy must classify `com.oldjobobo.splinterm` as
 terminal; ordinary `Ctrl+C` remains terminal interrupt. In copy mode, `Super+C` copies the active selection and exits,
 while `Super+V/X/Z` are consumed locally. These Super shortcuts work only when
