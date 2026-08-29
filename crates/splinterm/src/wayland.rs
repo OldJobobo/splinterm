@@ -197,11 +197,11 @@ use input::{
     CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, HistoryNavigation,
     ModalPointerFrame, MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile,
     PressOwner, SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
-    application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
-    consume_detached_enter_press, copy_mode_desktop_action, font_zoom_action,
-    history_overlay_status, history_return_to_live_hit, key_input, keymap_press_for,
-    local_selection_owner, mouse_report, owned_field_clipboard_action, pane_focus_action,
-    pane_topology_action, pending_selection_drag_anchor, picker_ime_reconcile,
+    application_motion, binding_help_repeat_consumed, classify_press, clipboard_read_is_current,
+    command_palette_shortcut_action, consume_detached_enter_press, copy_mode_desktop_action,
+    font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input,
+    keymap_press_for, local_selection_owner, mouse_report, owned_field_clipboard_action,
+    pane_focus_action, pane_topology_action, pending_selection_drag_anchor, picker_ime_reconcile,
     picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
     session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
     tab_shortcut_action, take_press_owner,
@@ -493,6 +493,14 @@ struct ImeState {
     sent_commit_serial: u32,
     visible_preedit: Option<String>,
     pending: ImeBatch,
+}
+
+fn ime_batch_blocked(
+    input_modal_open: bool,
+    modal_barrier: bool,
+    owned_target: Option<OwnedFieldTarget>,
+) -> bool {
+    modal_barrier || (input_modal_open && owned_target.is_none())
 }
 
 impl ImeState {
@@ -4261,6 +4269,32 @@ impl App {
         }
     }
 
+    fn ime_owned_field_target(&self) -> Option<OwnedFieldTarget> {
+        if self.modal.binding_help.is_some() {
+            return Some(OwnedFieldTarget::BindingHelp);
+        }
+        if self.modal.command_palette.is_some() {
+            return Some(OwnedFieldTarget::CommandPalette);
+        }
+        if self
+            .modal
+            .dojo_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.input().is_some())
+        {
+            return Some(OwnedFieldTarget::DojoPrompt);
+        }
+        if self.modal.input_modal_open() {
+            return None;
+        }
+        self.panes
+            .pane
+            .search
+            .input
+            .is_some()
+            .then_some(OwnedFieldTarget::Search)
+    }
+
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
         if let Some(help) = self.modal.binding_help.as_mut() {
             return Some((OwnedFieldTarget::BindingHelp, help.editor_mut()));
@@ -4837,9 +4871,12 @@ impl App {
         Ok(())
     }
 
-    fn show_binding_help(&mut self) -> Result<()> {
+    fn show_binding_help(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.show_command_palette()?;
         self.modal.binding_help = Some(BindingHelpUi::new(&self.input.keymap));
+        if self.input.ime_modal_barrier {
+            self.renew_text_input(queue_handle);
+        }
         self.surface.window.set_title("Splinterm — Key bindings");
         Ok(())
     }
@@ -4867,6 +4904,7 @@ impl App {
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
         self.modal.command_palette_text_cache.clear();
+        self.clear_ime_preedit();
         self.modal.command_palette_reconcile_pending = true;
         self.presentation.full_redraw = true;
         true
@@ -4920,7 +4958,7 @@ impl App {
             self.reconcile_command_palette_close(queue_handle);
         }
         let result = match dispatch {
-            BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(),
+            BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(queue_handle),
             BuiltInCommandDispatch::ReloadConfiguration => {
                 self.reload_keymap_configuration();
                 Ok(())
@@ -12846,6 +12884,22 @@ mod tests {
             buffer_dimensions(801, 601, 240).unwrap(),
             (1_602, 1_202, 6_408)
         );
+    }
+
+    #[test]
+    fn owned_modal_ime_batches_cross_only_the_fresh_generation_barrier() {
+        assert!(ime_batch_blocked(
+            true,
+            true,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(!ime_batch_blocked(
+            true,
+            false,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(ime_batch_blocked(true, false, None));
+        assert!(!ime_batch_blocked(false, false, None));
     }
 
     #[test]

@@ -957,11 +957,13 @@ pub(crate) fn lair_lifecycle_command(
         ActionId::SaveCurrentLair if retention == LairRetention::Disposable => {
             Some(WindowTopologyCommand::SetLairRetention {
                 lair_id,
+                expected_retention: retention,
                 retention: LairRetention::Saved,
             })
         }
         ActionId::ToggleCurrentLairPin => Some(WindowTopologyCommand::SetLairRetention {
             lair_id,
+            expected_retention: retention,
             retention: if retention == LairRetention::Pinned {
                 LairRetention::Saved
             } else {
@@ -972,12 +974,14 @@ pub(crate) fn lair_lifecycle_command(
             Some(WindowTopologyCommand::RequestLairPrompt {
                 lair_id,
                 kind: LairPromptKind::Preview,
+                expected_retention: Some(retention),
             })
         }
         ActionId::RestoreCurrentLair if retention.is_protected() => {
             Some(WindowTopologyCommand::RequestLairPrompt {
                 lair_id,
                 kind: LairPromptKind::Restore,
+                expected_retention: Some(retention),
             })
         }
         _ => None,
@@ -1720,6 +1724,7 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
                 lair_id: context.lair_id,
                 kind: LairPromptKind::Rename,
+                expected_retention: None,
             })
         }
         BuiltInCommandId::SaveCurrentLair => BuiltInCommandDispatch::Topology(
@@ -1772,6 +1777,7 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
                 lair_id: context.lair_id,
                 kind: LairPromptKind::Terminate,
+                expected_retention: None,
             })
         }
         BuiltInCommandId::SplitHorizontal => {
@@ -2529,6 +2535,7 @@ mod tests {
                 WindowTopologyCommand::RequestLairPrompt {
                     lair_id: context.lair_id,
                     kind: LairPromptKind::Rename,
+                    expected_retention: None,
                 }
             ))
         );
@@ -2547,6 +2554,7 @@ mod tests {
                 WindowTopologyCommand::RequestLairPrompt {
                     lair_id: context.lair_id,
                     kind: LairPromptKind::Terminate,
+                    expected_retention: None,
                 }
             ))
         );

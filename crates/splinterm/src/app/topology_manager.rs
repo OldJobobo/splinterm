@@ -994,10 +994,48 @@ fn saved_layout_preview(lair: &splinterm_core::Lair) -> String {
     lines.join("\n")
 }
 
+fn build_lair_prompt_target(
+    topology_revision: TopologyRevision,
+    lair: &splinterm_core::Lair,
+    kind: LairPromptKind,
+    expected_retention: Option<splinterm_core::LairRetention>,
+) -> Result<LairPromptTarget> {
+    if let Some(expected_retention) = expected_retention {
+        anyhow::ensure!(
+            lair.retention == expected_retention,
+            "captured Lair retention changed"
+        );
+    }
+    if matches!(kind, LairPromptKind::Preview | LairPromptKind::Restore) {
+        anyhow::ensure!(
+            lair.retention.is_protected(),
+            "saved Lair action targeted a disposable Lair"
+        );
+    }
+    let targets = match kind {
+        LairPromptKind::Restore => collect_lair_targets(lair, LairTargetState::Exited)?,
+        LairPromptKind::Terminate => collect_lair_targets(lair, LairTargetState::Live)?,
+        LairPromptKind::Rename | LairPromptKind::Preview => Vec::new(),
+    };
+    if kind == LairPromptKind::Restore {
+        anyhow::ensure!(!targets.is_empty(), "saved Lair has no restorable Splints");
+    }
+    Ok(LairPromptTarget {
+        topology_revision,
+        lair_id: lair.id,
+        dojo_id: None,
+        name: lair.name.clone(),
+        retention: lair.retention,
+        preview: saved_layout_preview(lair),
+        targets,
+    })
+}
+
 async fn lair_prompt_target(
     connection: &mut Connection,
     lair_id: LairId,
     kind: LairPromptKind,
+    expected_retention: Option<splinterm_core::LairRetention>,
 ) -> Result<LairPromptTarget> {
     let Response::Lairs {
         lairs,
@@ -1010,19 +1048,23 @@ async fn lair_prompt_target(
         .iter()
         .find(|lair| lair.id == lair_id)
         .context("captured Lair is absent")?;
-    Ok(LairPromptTarget {
-        topology_revision,
-        lair_id,
-        dojo_id: None,
-        name: lair.name.clone(),
-        retention: lair.retention,
-        preview: saved_layout_preview(lair),
-        targets: match kind {
-            LairPromptKind::Restore => collect_lair_targets(lair, LairTargetState::Exited)?,
-            LairPromptKind::Terminate => collect_lair_targets(lair, LairTargetState::Live)?,
-            LairPromptKind::Rename | LairPromptKind::Preview => Vec::new(),
-        },
-    })
+    build_lair_prompt_target(topology_revision, lair, kind, expected_retention)
+}
+
+fn validate_lair_retention_target(
+    lairs: &[splinterm_core::Lair],
+    lair_id: LairId,
+    expected_retention: splinterm_core::LairRetention,
+) -> Result<()> {
+    let lair = lairs
+        .iter()
+        .find(|lair| lair.id == lair_id)
+        .context("captured Lair is absent")?;
+    anyhow::ensure!(
+        lair.retention == expected_retention,
+        "captured Lair retention changed"
+    );
+    Ok(())
 }
 
 fn lair_navigation_target<T>(
@@ -1485,8 +1527,12 @@ async fn handle_session_manager_command(
                 navigate_lair(factory, connection, &state.tabs, current_lair_id, direction).await;
             finish_managed_window_open(factory, target, state, config, image_cache, updates).await
         }
-        WindowTopologyCommand::RequestLairPrompt { lair_id, kind } => {
-            match lair_prompt_target(connection, lair_id, kind).await {
+        WindowTopologyCommand::RequestLairPrompt {
+            lair_id,
+            kind,
+            expected_retention,
+        } => {
+            match lair_prompt_target(connection, lair_id, kind, expected_retention).await {
                 Ok(target) => {
                     if updates
                         .send(WindowTopologyUpdate::ShowLairPrompt { kind, target })
@@ -1640,13 +1686,24 @@ async fn handle_session_manager_command(
             }
             TopologyManagerCommandOutcome::Continue
         }
-        WindowTopologyCommand::SetLairRetention { lair_id, retention } => {
+        WindowTopologyCommand::SetLairRetention {
+            lair_id,
+            expected_retention,
+            retention,
+        } => {
             let result = async {
                 anyhow::ensure!(
                     state.tabs.iter().any(|tab| tab.lair_id == lair_id),
                     "retention change targeted a detached Lair"
                 );
-                let expected_topology_revision = connection.topology_revision().await?;
+                let Response::Lairs {
+                    lairs,
+                    topology_revision: expected_topology_revision,
+                } = connection.request(Request::ListLairs).await?
+                else {
+                    bail!("splinterd did not return its Lair catalog");
+                };
+                validate_lair_retention_target(&lairs, lair_id, expected_retention)?;
                 let response = connection
                     .request(Request::SetLairRetention {
                         expected_topology_revision,
@@ -2229,16 +2286,16 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairId, LairTargetState, LayoutNode,
-        PendingTopologyFocus, RefreshedCloseState, Response, SessionEntry, SplintId, SplintState,
-        SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
-        WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
-        close_other_tab_targets, collect_lair_targets, command_has_pending_split,
-        dojo_selector_catalog, lair_navigation_target, lair_selector_catalog,
-        materialized_dojo_targets, next_topology_manager_wake, parent_ratio,
+        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairId, LairPromptKind, LairTargetState,
+        LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response, SessionEntry, SplintId,
+        SplintState, SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision,
+        WindowTabSet, WindowTopologyCommand, build_lair_prompt_target, cancel_pane_tasks,
+        captured_dojo_kill_targets, close_action, close_other_tab_targets, collect_lair_targets,
+        command_has_pending_split, dojo_selector_catalog, lair_navigation_target,
+        lair_selector_catalog, materialized_dojo_targets, next_topology_manager_wake, parent_ratio,
         pending_focus_for_observation, refreshed_close_state, select_live_dojo_from,
         topology_command_outcome, topology_edit_target, topology_identity_diff,
-        validate_exited_close_target, window_has_tab_capacity,
+        validate_exited_close_target, validate_lair_retention_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
 
@@ -2361,6 +2418,80 @@ mod tests {
         assert_eq!(terminate_targets[0].incarnation, 8);
         assert_eq!(terminate_targets[1].splint_id, starting_id);
         assert_eq!(terminate_targets[1].incarnation, 9);
+    }
+
+    #[test]
+    fn lair_lifecycle_targets_revalidate_retention_and_restorable_leaves() {
+        use splinterm_core::LairRetention;
+
+        let mut lair = splinterm_core::Lair::new("saved", PathBuf::from("/tmp"));
+        let splint_id = lair.dojos[0].default_focus;
+        lair.retention = LairRetention::Saved;
+        lair.dojos[0].root.find_splint_mut(splint_id).unwrap().state = SplintState::Running;
+        let revision = TopologyRevision::new(7);
+
+        assert!(
+            build_lair_prompt_target(
+                revision,
+                &lair,
+                LairPromptKind::Restore,
+                Some(LairRetention::Saved),
+            )
+            .is_err()
+        );
+        assert!(
+            build_lair_prompt_target(
+                revision,
+                &lair,
+                LairPromptKind::Preview,
+                Some(LairRetention::Pinned),
+            )
+            .is_err()
+        );
+
+        let splint = lair.dojos[0].root.find_splint_mut(splint_id).unwrap();
+        splint.state = SplintState::Exited(0);
+        splint.last_incarnation = Some(4);
+        let target = build_lair_prompt_target(
+            revision,
+            &lair,
+            LairPromptKind::Restore,
+            Some(LairRetention::Saved),
+        )
+        .unwrap();
+        assert_eq!(target.targets.len(), 1);
+        assert_eq!(target.targets[0].splint_id, splint_id);
+
+        for actual in [
+            LairRetention::Disposable,
+            LairRetention::Saved,
+            LairRetention::Pinned,
+        ] {
+            lair.retention = actual;
+            for expected in [
+                LairRetention::Disposable,
+                LairRetention::Saved,
+                LairRetention::Pinned,
+            ] {
+                assert_eq!(
+                    validate_lair_retention_target(std::slice::from_ref(&lair), lair.id, expected,)
+                        .is_ok(),
+                    actual == expected,
+                    "actual={actual:?} expected={expected:?}"
+                );
+            }
+        }
+
+        lair.retention = LairRetention::Disposable;
+        assert!(
+            build_lair_prompt_target(
+                revision,
+                &lair,
+                LairPromptKind::Preview,
+                Some(LairRetention::Disposable),
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

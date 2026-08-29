@@ -82,6 +82,13 @@ pub(in crate::wayland) fn shortcut_action_for(
     keymap.action(key_identity(keysym)?, active_modifiers(modifiers))
 }
 
+pub(in crate::wayland) fn binding_help_repeat_consumed(
+    binding_help_open: bool,
+    keysym: Keysym,
+) -> bool {
+    binding_help_open && keysym == Keysym::Escape
+}
+
 pub(in crate::wayland) fn owned_field_clipboard_action(
     keymap: &ResolvedKeymap,
     keysym: Keysym,
@@ -486,6 +493,15 @@ mod tests {
                 Some(ActionId::ClipboardPaste)
             );
         }
+    }
+
+    #[test]
+    fn binding_help_consumes_escape_repeat_without_suppressing_editing_or_navigation() {
+        assert!(binding_help_repeat_consumed(true, Keysym::Escape));
+        for keysym in [Keysym::BackSpace, Keysym::Down, Keysym::a] {
+            assert!(!binding_help_repeat_consumed(true, keysym));
+        }
+        assert!(!binding_help_repeat_consumed(false, Keysym::Escape));
     }
 
     #[test]

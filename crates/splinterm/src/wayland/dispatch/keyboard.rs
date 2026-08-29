@@ -4,10 +4,11 @@ use super::super::{
     ActionId, App, CommandPaletteShortcutAction, Connection, ExitClass, KeyEvent, KeyboardHandler,
     KeymapPress, Keysym, Modifiers, PaneFocusAction, PaneTopologyAction, PasteTarget, QueueHandle,
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
-    WindowTopologyCommand, close_other_tabs_command, command_palette_shortcut_action,
-    consume_detached_enter_press, font_zoom_action, keymap_press_for, lair_lifecycle_command,
-    pane_focus_action, pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
-    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
+    WindowTopologyCommand, binding_help_repeat_consumed, close_other_tabs_command,
+    command_palette_shortcut_action, consume_detached_enter_press, font_zoom_action,
+    keymap_press_for, lair_lifecycle_command, pane_focus_action, pane_topology_action,
+    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
+    tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -350,6 +351,7 @@ impl KeyboardHandler for App {
                     WindowTopologyCommand::RequestLairPrompt {
                         lair_id: self.tab_state.active_identity.lair_id,
                         kind: super::super::LairPromptKind::Rename,
+                        expected_retention: None,
                     }
                 }
                 action @ (ActionId::SaveCurrentLair
@@ -373,6 +375,7 @@ impl KeyboardHandler for App {
                     WindowTopologyCommand::RequestLairPrompt {
                         lair_id: self.tab_state.active_identity.lair_id,
                         kind: super::super::LairPromptKind::Terminate,
+                        expected_retention: None,
                     }
                 }
                 ActionId::PreviousLair => WindowTopologyCommand::NavigateLair {
@@ -404,7 +407,7 @@ impl KeyboardHandler for App {
                 return;
             }
             Some(ActionId::BindingHelp) => {
-                if self.show_binding_help().is_err() {
+                if self.show_binding_help(queue_handle).is_err() {
                     eprintln!("splinterm key binding help unavailable");
                 } else if let Err(error) = self.schedule_draw(queue_handle) {
                     self.scheduling.fail(error);
@@ -554,6 +557,9 @@ impl KeyboardHandler for App {
             if let Err(error) = self.handle_copy_mode_key(&event, queue_handle, serial) {
                 self.scheduling.fail(error);
             }
+            return;
+        }
+        if binding_help_repeat_consumed(self.modal.binding_help.is_some(), event.keysym) {
             return;
         }
         if self.owned_field_consumes_repeat(&event) {

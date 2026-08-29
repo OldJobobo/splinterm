@@ -138,7 +138,14 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                 | zwp_text_input_v3::Event::CommitString { .. }
                 | zwp_text_input_v3::Event::Done { .. }
         );
-        if ime_batch_event && (state.modal.input_modal_open() || state.input.ime_modal_barrier) {
+        let owned_target = state.ime_owned_field_target();
+        if ime_batch_event
+            && super::super::ime_batch_blocked(
+                state.modal.input_modal_open(),
+                state.input.ime_modal_barrier,
+                owned_target,
+            )
+        {
             state.input.ime.clear_composition();
             return;
         }
@@ -146,7 +153,10 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
             zwp_text_input_v3::Event::Enter { surface } => {
                 if surface == *state.surface.window.wl_surface() {
                     state.input.ime.entered = true;
-                    if state.input.keyboard_focused && !state.modal.input_modal_open() {
+                    if state.input.keyboard_focused
+                        && (!state.modal.input_modal_open()
+                            || state.ime_owned_field_target().is_some())
+                    {
                         state.enable_text_input();
                     }
                 }
@@ -171,9 +181,20 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
             zwp_text_input_v3::Event::Done { serial } => {
                 let (_serial_matches, _, commit) = state.input.ime.finish(serial);
                 if let Some(commit) = commit {
-                    state.send_command(WindowCommand::Input(commit.into_bytes()));
+                    if let Some(target) = owned_target {
+                        if state
+                            .owned_field_editor_mut(target)
+                            .is_some_and(|editor| editor.insert(&commit))
+                        {
+                            state.refresh_owned_field(target);
+                        }
+                    } else {
+                        state.send_command(WindowCommand::Input(commit.into_bytes()));
+                    }
                 }
-                if let Err(error) = state.refresh_ime_preedit() {
+                if owned_target.is_some() {
+                    state.input.ime.clear_composition();
+                } else if let Err(error) = state.refresh_ime_preedit() {
                     state.scheduling.fail(error);
                     return;
                 }
