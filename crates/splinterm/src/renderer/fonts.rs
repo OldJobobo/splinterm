@@ -127,7 +127,7 @@ thread_local! {
         RefCell::new(PersistentGlyphCache::default());
 }
 
-pub(super) fn clear_snapshot_caches() {
+pub(crate) fn clear_snapshot_caches() {
     SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
 }
 
@@ -719,6 +719,12 @@ pub(super) fn snapshot_color_advance(
             glyph: glyph_id,
         },
     );
+    if let Some(advance) =
+        SNAPSHOT_GLYPH_CACHE.with(|cache| cache.borrow().advances.get(&cache_key).copied())
+    {
+        return Ok(advance);
+    }
+    snapshot_glyph(faces, face_index, glyph_id, font_size)?;
     SNAPSHOT_GLYPH_CACHE.with(|cache| {
         cache
             .borrow()

@@ -297,6 +297,26 @@ fn explicit_render_contexts_are_pixel_and_metric_isolated_when_interleaved() {
     assert_eq!(second_capture.pixels[3], alpha_u8(52_000));
 }
 
+#[test]
+fn font_generation_replacement_preserves_zoom_dpi_and_alpha() {
+    let mut context = RenderContext::new(12_345);
+    context.set_font_zoom_steps(2, 150).unwrap();
+    context
+        .update_output_dpi(OutputDpiObservation::provided(144.0).unwrap(), 150)
+        .unwrap();
+    let before = context.effective_font_resolution(150).unwrap();
+    let options = renderer_options();
+    let mut replacement =
+        stage_live_font_generation(&options.font, options.font_authority).unwrap();
+    replacement.fingerprint.pattern.push_str("#test-generation");
+    let replacement_id = replacement.id;
+
+    assert!(context.replace_font_generation(Arc::new(replacement)));
+    assert_eq!(context.font_generation_id(), Some(replacement_id));
+    assert_eq!(context.effective_font_resolution(150).unwrap(), before);
+    assert_eq!(context.background_alpha(), 12_345);
+}
+
 fn incremental_snapshot() -> TerminalSnapshot {
     let attributes = default_attributes();
     TerminalSnapshot {
@@ -787,6 +807,11 @@ fn color_fallback_cache_uses_fcft_fixed_strike_size_and_advance() {
     assert_eq!((larger.width, larger.height, larger_advance), (18, 17, 18));
     assert!(!Arc::ptr_eq(&small, &larger));
     assert_ne!(small.data, larger.data);
+    clear_snapshot_caches();
+    assert_eq!(
+        snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap(),
+        larger_advance
+    );
 }
 
 #[test]
