@@ -928,17 +928,24 @@ pub(crate) struct BuiltInCommandDescriptor {
 
 pub(crate) fn action_search_metadata(
     action: ActionId,
-) -> Option<(&'static str, &'static [&'static str])> {
+) -> Option<(&'static str, &'static str, &'static [&'static str])> {
     if action == ActionId::ToggleCurrentLairPin {
         return Some((
             "Toggle current Lair pin",
+            CommandCategory::Dojos.label(),
             &["pin", "unpin", "favorite", "protect", "lair", "workspace"],
         ));
     }
     BUILT_IN_COMMANDS
         .iter()
         .find(|descriptor| descriptor.shortcut_action == Some(action))
-        .map(|descriptor| (descriptor.title, descriptor.keywords))
+        .map(|descriptor| {
+            (
+                descriptor.title,
+                descriptor.category.label(),
+                descriptor.keywords,
+            )
+        })
 }
 
 pub(crate) fn lair_lifecycle_command(

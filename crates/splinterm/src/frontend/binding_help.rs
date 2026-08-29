@@ -46,8 +46,11 @@ impl BindingHelpUi {
             .map(|(id, binding)| {
                 let action = binding.action();
                 let config_name = action.config_name();
-                let (label, keywords) = action_search_metadata(action)
-                    .unwrap_or_else(|| fallback_action_metadata(action));
+                let (label, category, keywords) =
+                    action_search_metadata(action).unwrap_or_else(|| {
+                        let (label, keywords) = fallback_action_metadata(action);
+                        (label, fallback_action_category(action), keywords)
+                    });
                 let shortcut = binding.display().to_owned();
                 let source = binding.source().short_label();
                 BindingHelpRow {
@@ -56,7 +59,14 @@ impl BindingHelpUi {
                     action: config_name.to_owned(),
                     source: source.clone(),
                     compact: format!("{shortcut} — {config_name}"),
-                    search_fields: search_fields(label, config_name, &shortcut, &source, keywords),
+                    search_fields: search_fields(
+                        label,
+                        config_name,
+                        &shortcut,
+                        &source,
+                        category,
+                        keywords,
+                    ),
                 }
             })
             .collect::<Vec<_>>();
@@ -70,7 +80,14 @@ impl BindingHelpUi {
                     action: action.into(),
                     source: source.clone(),
                     compact: compact.into(),
-                    search_fields: search_fields(action, action, shortcut, &source, keywords),
+                    search_fields: search_fields(
+                        action,
+                        action,
+                        shortcut,
+                        &source,
+                        "COPY MODE",
+                        keywords,
+                    ),
                 });
             };
         push_copy_row(
@@ -234,13 +251,30 @@ fn search_fields(
     config_name: &str,
     shortcut: &str,
     source: &str,
+    category: &str,
     keywords: &[&str],
 ) -> Vec<String> {
-    [label, config_name, shortcut, source]
+    [label, config_name, shortcut, source, category]
         .into_iter()
         .chain(keywords.iter().copied())
         .map(fold_search_text)
         .collect()
+}
+
+fn fallback_action_category(action: ActionId) -> &'static str {
+    match action
+        .config_name()
+        .split_once('.')
+        .map(|(namespace, _)| namespace)
+    {
+        Some("dojo") => "TAB",
+        Some("lair" | "session") => "DOJO",
+        Some("pane") => "PANE",
+        Some("history" | "copy-mode") => "HISTORY",
+        Some("view") => "VIEW",
+        Some("control" | "access") => "CONTROL",
+        _ => "APP",
+    }
 }
 
 fn fallback_action_metadata(action: ActionId) -> (&'static str, &'static [&'static str]) {
@@ -384,10 +418,20 @@ mod tests {
         let keymap = built_in_keymap(KeymapProfile::OmarchyTmux);
         let help = BindingHelpUi::new(&keymap);
         assert_eq!(help.rows().len(), keymap.bindings().len() + 3);
-        for binding in keymap.bindings() {
-            assert!(help.rows().iter().any(|row| {
-                row.shortcut == binding.display() && row.action == binding.action().config_name()
-            }));
+        for (binding_id, binding) in keymap.bindings().iter().enumerate() {
+            let rows = help
+                .rows()
+                .iter()
+                .filter(|row| row.id == binding_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.len(),
+                1,
+                "resolved binding must appear exactly once: {}",
+                binding.display()
+            );
+            assert_eq!(rows[0].shortcut, binding.display());
+            assert_eq!(rows[0].action, binding.action().config_name());
         }
         assert!(help.rows().iter().any(|row| {
             row.action == ActionId::BindingHelp.config_name() && row.shortcut == "Prefix ?"
@@ -417,6 +461,7 @@ mod tests {
             ("show keybindings", ActionId::BindingHelp),
             ("pane.split-right", ActionId::SplitVertical),
             ("Prefix ?", ActionId::BindingHelp),
+            ("history", ActionId::SearchScrollback),
             ("maximize", ActionId::TogglePaneZoom),
             ("favorite", ActionId::ToggleCurrentLairPin),
             ("lair restore", ActionId::RestoreCurrentLair),

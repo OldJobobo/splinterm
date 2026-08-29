@@ -4327,7 +4327,19 @@ impl App {
         }
     }
 
-    fn owned_field_defers_to_modal(target: OwnedFieldTarget, keysym: Keysym) -> bool {
+    fn owned_field_defers_to_modal(
+        target: OwnedFieldTarget,
+        keysym: Keysym,
+        modifiers: Modifiers,
+    ) -> bool {
+        if target == OwnedFieldTarget::BindingHelp
+            && modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.logo
+            && matches!(keysym, Keysym::u | Keysym::U)
+        {
+            return true;
+        }
         match target {
             OwnedFieldTarget::BindingHelp | OwnedFieldTarget::CommandPalette => matches!(
                 keysym,
@@ -4375,7 +4387,7 @@ impl App {
         let Some((target, _)) = self.active_owned_field() else {
             return false;
         };
-        if Self::owned_field_defers_to_modal(target, event.keysym) {
+        if Self::owned_field_defers_to_modal(target, event.keysym, self.input.modifiers) {
             return false;
         }
         let desktop = self.input.modifiers.logo
@@ -9341,6 +9353,7 @@ mod tests {
 
     #[test]
     fn owned_fields_defer_modal_control_keys_before_text_editing() {
+        let plain = Modifiers::default();
         for target in [
             OwnedFieldTarget::BindingHelp,
             OwnedFieldTarget::CommandPalette,
@@ -9356,23 +9369,53 @@ mod tests {
                 Keysym::KP_Enter,
                 Keysym::Escape,
             ] {
-                assert!(App::owned_field_defers_to_modal(target, keysym));
+                assert!(App::owned_field_defers_to_modal(target, keysym, plain));
             }
         }
         for target in [OwnedFieldTarget::DojoPrompt, OwnedFieldTarget::Search] {
             for keysym in [Keysym::Return, Keysym::KP_Enter, Keysym::Escape] {
-                assert!(App::owned_field_defers_to_modal(target, keysym));
+                assert!(App::owned_field_defers_to_modal(target, keysym, plain));
             }
-            assert!(!App::owned_field_defers_to_modal(target, Keysym::Left));
-            assert!(!App::owned_field_defers_to_modal(target, Keysym::BackSpace));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::Left,
+                plain
+            ));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::BackSpace,
+                plain
+            ));
         }
         for target in [
             OwnedFieldTarget::BindingHelp,
             OwnedFieldTarget::CommandPalette,
         ] {
-            assert!(!App::owned_field_defers_to_modal(target, Keysym::BackSpace));
-            assert!(!App::owned_field_defers_to_modal(target, Keysym::Left));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::BackSpace,
+                plain
+            ));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::Left,
+                plain
+            ));
         }
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert!(App::owned_field_defers_to_modal(
+            OwnedFieldTarget::BindingHelp,
+            Keysym::u,
+            ctrl
+        ));
+        assert!(!App::owned_field_defers_to_modal(
+            OwnedFieldTarget::CommandPalette,
+            Keysym::u,
+            ctrl
+        ));
     }
 
     #[test]
