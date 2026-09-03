@@ -350,7 +350,7 @@ impl DojoTabView {
                     }
                     continue;
                 }
-                if matches!(update, WindowUpdate::Theme(_)) {
+                if matches!(update, WindowUpdate::Theme(_) | WindowUpdate::Font(_)) {
                     continue;
                 }
                 let splint_id = pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id);

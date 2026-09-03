@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0-beta2`
+- **Current public version tag:** `v0.1.0-beta3`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -33,37 +33,85 @@ The current product target is:
 - native Wayland under the documented Hyprland environment;
 - Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
   as the terminal-behavior oracle;
-- public Beta 2 `0.1.0beta2-1` Arch packages built from clean committed
+- public Beta 3 `0.1.0beta3-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
   exact-package acceptance for the Alpha3.1 transient-tab hotfixes; accepted
   Beta 1 graphical, package, provenance, wide-grid, sparse-publication, and
-  active-tab contrast evidence; and accepted Beta 2 terminal-lifetime,
-  font-family, workload-isolation, package, and release evidence.
+  active-tab contrast evidence; accepted Beta 2 terminal-lifetime, font-family,
+  workload-isolation, package, and release evidence; and accepted Beta 3
+  workload-policy, tab-strip, compatibility-label, package, and release evidence.
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
-## Beta 3 candidate preparation
+## Unreleased 0.1.0 stabilization
 
-The `0.1.0-beta3` maintenance candidate removes Splinterm's provisional
-512/1024/2048 task ceilings from terminal workload scopes and slices so ordinary
-Chromium, Node, editor, build, and agent workloads inherit the surrounding
-systemd user manager's `DefaultTasksMax`. The daemon retains its independent
-`TasksMax=2048` control-plane guard and the existing nested workload and
-memory-pressure boundaries remain intact.
+This source branch implements live native Omarchy system-font synchronization.
+When `main.font` is unset, a graphical client follows the effective Fontconfig
+`monospace` family, stages complete immutable face generations off dispatch
+paths, and atomically rebuilds active and hidden presentation state while
+preserving configured size and policy, padding, DPI, runtime zoom, topology,
+focus, history, modal input, and IME preedit. Explicit `main.font` disables
+native following. Invalid live candidates retain the last valid generation, and
+observer panes do not acquire control solely to resize.
 
-The candidate also places the New Dojo control immediately after the final
-visible tab, gives inactive tabs exact semantic dividers, and presents the strict
-historical initial Dojo `terminal` under Lair `terminal-<epoch-seconds>-<pid>`
-as `Dojo 1` without changing ordinary explicit names or daemon-owned topology.
-Focused implementation tests have passed; complete non-graphical release
-validation, independent review, candidate construction,
-protected publication, installation, and AUR updates remain pending. Beta 2
-remains the current public release.
+Focused and complete non-graphical validation, independent review, packaged
+graphical acceptance, and publication remain separate release boundaries.
+
+## 0.1.0 RC1 candidate preparation
+
+The `0.1.0-rc.1` maintenance candidate freezes the 0.1 feature line for
+stabilization on top of the complete public Beta 3 baseline. It refreshes the
+bounded Omarchy Gum palette environment for each newly created Splint so a
+persistent daemon does not give later PTYs stale theme colors. Existing PTYs
+remain unchanged, unrelated environment variables remain untouched, and
+missing, malformed, oversized, symlinked, or non-regular palette state preserves
+the daemon's inherited values instead of applying a partial update.
+
+Focused and complete non-graphical source validation and independent maintenance
+review are required before candidate construction. Protected publication,
+installation evidence, and the RC soak remain separate release boundaries. Beta
+3 remains the current public release until those boundaries complete.
+
+## Beta 3 release
+
+[`v0.1.0-beta3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta3)
+was published as a GitHub prerelease on 2026-08-28 and distributed through both
+AUR package bases as `0.1.0beta3-1`. Beta 3 removes provisional fixed task
+ceilings from terminal workload scopes and slices so ordinary applications
+inherit the surrounding systemd user manager's task policy while the daemon
+retains its independent `TasksMax=2048` control-plane guard. It also places the
+New Dojo control after the final visible tab, gives inactive tabs semantic
+dividers, and presents the strict historical unnamed initial Dojo form as
+`Dojo 1` without changing daemon-owned topology.
+
+- Release commit `f7e695df13e6595256ef9bfa6a702449a66bf674` passed exact-SHA CI
+  run `33150750026`. Candidate run `33151111255` built the release once, and
+  protected promotion run `33151651368` published and reverified the exact
+  five public assets; publication receipt artifact `9685613482` remains the
+  release record.
+- Source archive SHA-256:
+  `a2da767287f339919f4254a48d422c0dbe38e0bee3c9b507c55f85f3454b93a8`.
+  Main package SHA-256:
+  `690c4771125fb7ccca22a1ad5c49d73e58e8b565038da5cd6a0ef4ec2eaad26d`.
+  MCP package SHA-256:
+  `cf4518591c75c9c827abedaa15fa1f97d295b2699ab2d534c83b6f54b0653bb3`.
+- AUR source package commit: `2edc58f2335b41819e7da71cd5578ef58ca7809f`.
+  AUR prebuilt package commit: `1fb1472bf3d06764dde5bb886a79dfbe2a008848`.
+  Both visible recipes identify `0.1.0beta3-1` and pin the immutable GitHub
+  source or package assets to the release hashes above.
+- Exact-SHA CI, closed candidate construction, protected promotion, public
+  asset redownload and hash verification, and live AUR recipe verification
+  passed before this status was recorded.
+
+Upgrading Beta 2 to Beta 3 recreates the `0.1` daemon and workload hierarchy and
+therefore ends active Dojos. The [packaging guide](packaging.md) documents the
+required external-terminal upgrade and rollback workflow; package installation
+does not restart the user service automatically.
 
 ## Beta 2 release
 
@@ -273,7 +321,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta1-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |

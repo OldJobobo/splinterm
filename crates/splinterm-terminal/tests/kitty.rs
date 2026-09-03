@@ -182,14 +182,55 @@ fn recorded_spec_fixture_manifest_executes_every_case() {
 }
 
 #[test]
-fn spec_query_reply_precedes_following_da1_and_never_commits_content() {
+fn yazi_query_reply_precedes_sixel_da1_and_never_commits_content() {
     let mut terminal = terminal();
-    terminal.advance(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;/wAA\x1b\\\x1b[c");
+    terminal.advance(b"\x1b_Gi=278941603,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[0c");
     assert_eq!(
         writes(&mut terminal),
-        vec![b"\x1b_Gi=31;OK\x1b\\".to_vec(), b"\x1b[?62;22c".to_vec()]
+        vec![
+            b"\x1b_Gi=278941603;OK\x1b\\".to_vec(),
+            b"\x1b[?62;4;22c".to_vec(),
+        ]
     );
     assert_eq!(terminal.image_metrics().content_count, 0);
+    assert_eq!(terminal.image_metrics().placement_count, 0);
+}
+
+#[test]
+fn yazi_kgp_old_cell_placements_remain_bounded_when_replies_are_quiet() {
+    let limit = ImageLimits::default().placements_per_terminal;
+    let width = limit + 1;
+    let mut terminal = Terminal::new(width, 1, TerminalConfig::default());
+    terminal.set_cell_pixel_size(1, 1);
+    terminal.advance(
+        format!(
+            "\x1b_Gq=2,a=t,i=42,f=24,s={width},v=1,m=0;{}\x1b\\",
+            STANDARD.encode(vec![0x7f_u8; width * 3])
+        )
+        .as_bytes(),
+    );
+
+    for column in 0..width {
+        terminal.advance(
+            format!(
+                "\x1b[1;{}H\x1b_Gq=2,a=p,i=42,p={},x={column},y=0,w=1,h=1,c=1,r=1,z=-1,C=1\x1b\\",
+                column + 1,
+                column + 1,
+            )
+            .as_bytes(),
+        );
+    }
+
+    assert!(terminal.drain_events().next().is_none());
+    assert_eq!(terminal.image_metrics().content_count, 1);
+    assert_eq!(terminal.image_metrics().placement_count, limit);
+    assert_eq!(
+        terminal
+            .snapshot(SnapshotRequest::default())
+            .image_placements()
+            .count(),
+        limit
+    );
 }
 
 #[test]

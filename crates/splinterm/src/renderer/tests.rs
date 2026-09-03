@@ -297,6 +297,26 @@ fn explicit_render_contexts_are_pixel_and_metric_isolated_when_interleaved() {
     assert_eq!(second_capture.pixels[3], alpha_u8(52_000));
 }
 
+#[test]
+fn font_generation_replacement_preserves_zoom_dpi_and_alpha() {
+    let mut context = RenderContext::new(12_345);
+    context.set_font_zoom_steps(2, 150).unwrap();
+    context
+        .update_output_dpi(OutputDpiObservation::provided(144.0).unwrap(), 150)
+        .unwrap();
+    let before = context.effective_font_resolution(150).unwrap();
+    let options = renderer_options();
+    let mut replacement =
+        stage_live_font_generation(&options.font, options.font_authority).unwrap();
+    replacement.fingerprint.pattern.push_str("#test-generation");
+    let replacement_id = replacement.id;
+
+    assert!(context.replace_font_generation(Arc::new(replacement)));
+    assert_eq!(context.font_generation_id(), Some(replacement_id));
+    assert_eq!(context.effective_font_resolution(150).unwrap(), before);
+    assert_eq!(context.background_alpha(), 12_345);
+}
+
 fn incremental_snapshot() -> TerminalSnapshot {
     let attributes = default_attributes();
     TerminalSnapshot {
@@ -735,7 +755,10 @@ fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
 
 #[test]
 fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
-    let faces = snapshot_faces().unwrap();
+    let generation = Arc::new(
+        stage_live_font_generation(PRIMARY_FONT, crate::config::FontAuthority::Explicit).unwrap(),
+    );
+    let faces = &generation.faces;
     let attributes = CellAttributes::default();
     let face_index = select_face_for_text(faces, "⇕", &attributes).unwrap();
     assert!(
@@ -746,12 +769,17 @@ fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
         faces[face_index].data.is_none(),
         "dynamic fallbacks must use the bounded mapping cache"
     );
-    let glyph_id = with_font_ref(&faces[face_index], |font| Ok(font.charmap().map('⇕'))).unwrap();
+    let glyph_id = with_font_ref(&faces[face_index], |font, _coords| {
+        Ok(font.charmap().map('⇕'))
+    })
+    .unwrap();
     assert_ne!(glyph_id, 0);
 
     let mut snapshot = incremental_snapshot();
     snapshot.visible_rows[0].cells[0].content = "⇕".to_owned();
-    let frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+    let mut context = RenderContext::new(u16::MAX);
+    context.replace_font_generation(generation);
+    let frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
     assert!(
         frame
             .glyphs
@@ -806,14 +834,19 @@ fn color_fallback_cache_uses_fcft_fixed_strike_size_and_advance() {
     let font = font_ref(&faces[SNAPSHOT_EMOJI]).unwrap();
     let glyph_id = font.charmap().map('\u{1f642}');
     let small = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
-    let small_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
+    let small_advance = snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, 12.0).unwrap();
     let larger = snapshot_glyph(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
-    let larger_advance = snapshot_color_advance(SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
+    let larger_advance = snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap();
 
     assert_eq!((small.width, small.height, small_advance), (14, 14, 14));
     assert_eq!((larger.width, larger.height, larger_advance), (18, 17, 18));
     assert!(!Arc::ptr_eq(&small, &larger));
     assert_ne!(small.data, larger.data);
+    clear_snapshot_caches();
+    assert_eq!(
+        snapshot_color_advance(faces, SNAPSHOT_EMOJI, glyph_id, 15.0).unwrap(),
+        larger_advance
+    );
 }
 
 #[test]
@@ -868,12 +901,51 @@ fn underline_style_color_partial_mutation_matches_clean_full_rebuild() {
 }
 
 #[test]
-fn selected_font_bytes_are_loaded_only_when_the_face_is_used() {
-    let face = resolve_face("lazy CJK test", CJK_FONT, "noto sans cjk").unwrap();
-    let data = face.data.as_ref().expect("explicit face owns stable data");
-    assert!(data.get().is_none());
+fn selected_font_bytes_and_opened_identity_are_staged_together() {
+    let face = resolve_face("staged CJK test", CJK_FONT, "noto sans cjk").unwrap();
+    let data = face.data.as_ref().expect("explicit faces are staged");
+    assert!(!data.is_empty());
+    assert_eq!(
+        face.source_identity.length,
+        u64::try_from(data.len()).unwrap()
+    );
+    assert_ne!(face.source_identity, data.identity());
     assert_ne!(font_ref(&face).unwrap().charmap().map('界'), 0);
-    assert!(data.get().is_some_and(Result::is_ok));
+}
+
+#[test]
+#[ignore = "requires host fontconfig and installed system fonts"]
+fn memory_backed_freetype_keeps_the_staged_inode_after_path_replacement() {
+    let source = resolve_face("staged replacement test", CJK_FONT, "noto sans cjk").unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "splinterm-font-generation-replacement-{}",
+        std::process::id()
+    ));
+    let retired = path.with_extension("retired");
+    fs::write(
+        &path,
+        &***source.data.as_ref().expect("explicit faces are staged"),
+    )
+    .unwrap();
+    let staged = Arc::new(
+        splinterm_filemap::ReadOnlyFileMap::immutable_snapshot(
+            &path,
+            splinterm_freetype::MAX_STAGED_FONT_BYTES,
+        )
+        .unwrap()
+        .mapping,
+    );
+    fs::rename(&path, &retired).unwrap();
+    fs::write(&path, b"not a font").unwrap();
+
+    let shaped = swash::FontRef::from_index(&staged, source.index.collection_index()).unwrap();
+    assert_ne!(shaped.charmap().map('界'), 0);
+    let mut raster =
+        splinterm_freetype::RasterFace::open_memory(&staged, source.index.raw(), 22 * 64).unwrap();
+    assert!(raster.metrics().unwrap().height > 0);
+
+    fs::remove_file(path).unwrap();
+    fs::remove_file(retired).unwrap();
 }
 
 #[test]
@@ -1208,6 +1280,48 @@ fn empty_overlays_leave_compositor_border_area_untouched() {
 }
 
 #[test]
+fn incremental_refresh_rejects_a_different_font_generation() {
+    let snapshot = incremental_snapshot();
+    let context = compatibility_render_context().unwrap();
+    let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
+    let options = renderer_options();
+    let replacement =
+        Arc::new(stage_live_font_generation(&options.font, options.font_authority).unwrap());
+    assert_ne!(frame.font_generation.id, replacement.id);
+    frame.font_generation = replacement;
+    let error = frame
+        .refresh_rows_with_context(&snapshot, &[true, true], &context)
+        .unwrap_err();
+    assert!(error.to_string().contains("full rebuild is required"));
+}
+
+#[test]
+fn prepared_frame_retains_its_font_generation_until_drop() {
+    let snapshot = incremental_snapshot();
+    let frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+    let generation = Arc::clone(&frame.font_generation);
+    let retained = Arc::strong_count(&generation);
+    assert!(retained >= 3);
+    drop(frame);
+    assert_eq!(Arc::strong_count(&generation), retained - 1);
+}
+
+#[test]
+fn identical_glyph_ids_do_not_share_cache_entries_across_generations() {
+    reset_snapshot_cache();
+    let current = snapshot_font_generation().unwrap();
+    let face = &current.faces[SNAPSHOT_PRIMARY_REGULAR];
+    let glyph_id = font_ref(face).unwrap().charmap().map('M');
+    let current_glyph =
+        snapshot_glyph(&current.faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, 22.0).unwrap();
+    let options = renderer_options();
+    let replacement = stage_live_font_generation(&options.font, options.font_authority).unwrap();
+    let replacement_glyph =
+        snapshot_glyph(&replacement.faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, 22.0).unwrap();
+    assert!(!Arc::ptr_eq(&current_glyph, &replacement_glyph));
+}
+
+#[test]
 fn incremental_refresh_preserves_unchanged_prepared_rows() {
     let mut snapshot = incremental_snapshot();
     let mut frame = SnapshotFrame::load(&snapshot, 1).expect("initial frame");
@@ -1373,6 +1487,7 @@ fn default_alpha_tracks_color_source_and_uses_premultiplied_argb() {
 fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
     let key = GlyphKey { face: 0, glyph: 1 };
     let frame = SnapshotFrame {
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: vec![
             SnapshotGlyph {
                 key,
@@ -1465,6 +1580,7 @@ fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
 
 fn damage_test_frame() -> SnapshotFrame {
     SnapshotFrame {
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: Vec::new(),
         decorations: Vec::new(),
         cache: HashMap::new(),
@@ -2363,6 +2479,7 @@ fn scroll_copy_clips_to_undersized_framebuffers() {
 #[test]
 fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
     let frame = SnapshotFrame {
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: Vec::new(),
         decorations: Vec::new(),
         cache: HashMap::new(),

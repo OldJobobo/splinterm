@@ -18,7 +18,7 @@ pub(crate) use action_menu::{
 };
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
 pub use message::{
-    AuthorityStatus, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
+    AuthorityStatus, FontUpdate, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
 };
 pub use options::{TerminalGridLimits, TrustedConsentUi, WindowOptions, WindowPaneOptions};
 pub(crate) use picker::PickerHitTarget;

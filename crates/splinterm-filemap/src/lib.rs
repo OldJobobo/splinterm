@@ -5,20 +5,56 @@
 //! The unsafe operating-system mapping boundary stays in this leaf crate. Callers
 //! receive only an immutable byte slice and cannot mutate or resize the mapping.
 
-use std::{fs::File, io, ops::Deref, os::fd::OwnedFd, path::Path};
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    ops::Deref,
+    os::{fd::OwnedFd, unix::fs::MetadataExt},
+    path::Path,
+};
 
 use memmap2::{Mmap, MmapOptions};
-use rustix::fs::{SealFlags, fcntl_get_seals, fstat};
+use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, fstat, memfd_create};
 
 const REQUIRED_IMMUTABLE_SEALS: SealFlags = SealFlags::WRITE
     .union(SealFlags::GROW)
     .union(SealFlags::SHRINK)
     .union(SealFlags::SEAL);
 
+/// Identity captured from the exact opened file backing a mapping.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub length: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+        }
+    }
+}
+
+/// Immutable snapshot plus the identity of the exact source file that was copied.
+#[derive(Debug)]
+pub struct ImmutableFileSnapshot {
+    pub mapping: ReadOnlyFileMap,
+    pub source_identity: FileIdentity,
+}
+
 /// An owned, read-only mapping of one non-empty regular file.
 #[derive(Debug)]
 pub struct ReadOnlyFileMap {
     mapping: Mmap,
+    identity: FileIdentity,
 }
 
 impl ReadOnlyFileMap {
@@ -32,7 +68,10 @@ impl ReadOnlyFileMap {
     /// # Errors
     /// Returns an I/O error for missing, empty, non-regular, or unmappable files.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let file = File::open(path)?;
+        Self::map_file(&File::open(path)?)
+    }
+
+    fn map_file(file: &File) -> io::Result<Self> {
         let metadata = file.metadata()?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(io::Error::new(
@@ -40,12 +79,91 @@ impl ReadOnlyFileMap {
                 "mapped asset must be a non-empty regular file",
             ));
         }
-        // SAFETY: This leaf API is restricted to package-managed immutable assets.
-        // Splinterm opens system font files read-only; Arch package upgrades replace
-        // those paths with new inodes rather than mutating an active inode. `Mmap`
-        // owns the mapping for as long as the returned slice can be borrowed.
-        let mapping = unsafe { MmapOptions::new().map(&file)? };
-        Ok(Self { mapping })
+        let identity = FileIdentity::from_metadata(&metadata);
+        // SAFETY: Callers provide either a read-only package-managed asset or a
+        // descriptor whose immutable seals were verified before this helper. The
+        // private mapping owns the opened file's pages and exposes only immutable bytes.
+        let mapping = unsafe { MmapOptions::new().map(file)? };
+        Ok(Self { mapping, identity })
+    }
+
+    /// Returns metadata captured from the exact file descriptor that was mapped.
+    #[must_use]
+    pub const fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+
+    /// Copies one regular file into a bounded sealed anonymous snapshot.
+    ///
+    /// Source identity is checked before and after copying. The returned mapping
+    /// is backed by a sealed memfd, so later source replacement, mutation, or
+    /// truncation cannot change or fault the staged bytes.
+    ///
+    /// # Errors
+    /// Returns an I/O error for an invalid source, an exceeded bound, source
+    /// identity drift during copying, sealing failure, or mapping failure.
+    pub fn immutable_snapshot(
+        path: impl AsRef<Path>,
+        maximum_len: usize,
+    ) -> io::Result<ImmutableFileSnapshot> {
+        if maximum_len == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "immutable snapshot bound must be positive",
+            ));
+        }
+        let mut source = File::open(path)?;
+        let before = source.metadata()?;
+        if !before.is_file() || before.len() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "snapshot source must be a non-empty regular file",
+            ));
+        }
+        let maximum_len_u64 = u64::try_from(maximum_len).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "snapshot bound does not fit u64",
+            )
+        })?;
+        if before.len() > maximum_len_u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "snapshot source exceeds its byte bound",
+            ));
+        }
+        let source_identity = FileIdentity::from_metadata(&before);
+        let expected_len = usize::try_from(before.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "snapshot length does not fit usize",
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(expected_len);
+        (&mut source)
+            .take(maximum_len_u64.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        let after_identity = FileIdentity::from_metadata(&source.metadata()?);
+        if after_identity != source_identity || bytes.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "snapshot source changed while it was copied",
+            ));
+        }
+
+        let descriptor = memfd_create(
+            "splinterm-immutable-snapshot",
+            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+        )?;
+        let mut sealed_file = File::from(descriptor);
+        sealed_file.write_all(&bytes)?;
+        let descriptor: OwnedFd = sealed_file.into();
+        fcntl_add_seals(&descriptor, REQUIRED_IMMUTABLE_SEALS)?;
+        let mapping = Self::from_sealed_fd(descriptor, bytes.len())?;
+        Ok(ImmutableFileSnapshot {
+            mapping,
+            source_identity,
+        })
     }
 
     /// Verifies and maps an exactly-sized sealed descriptor read-only.
@@ -70,11 +188,7 @@ impl ReadOnlyFileMap {
             ));
         }
         let file = File::from(fd);
-        // SAFETY: All mutations and size changes are prohibited by verified
-        // kernel-enforced seals before mapping. The mapping owns its file-backed
-        // pages and exposes only immutable bytes.
-        let mapping = unsafe { MmapOptions::new().map(&file)? };
-        Ok(Self { mapping })
+        Self::map_file(&file)
     }
 }
 
@@ -108,9 +222,40 @@ mod tests {
         let path = temporary_path("bytes");
         fs::write(&path, b"mapped font bytes").unwrap();
         let mapping = ReadOnlyFileMap::open(&path).unwrap();
+        let first_identity = mapping.identity();
+        assert_eq!(&*mapping, b"mapped font bytes");
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"replacement font bytes are different").unwrap();
+        let replacement = ReadOnlyFileMap::open(&path).unwrap();
+        assert_ne!(replacement.identity(), first_identity);
         assert_eq!(&*mapping, b"mapped font bytes");
         fs::remove_file(path).unwrap();
-        assert_eq!(&*mapping, b"mapped font bytes");
+    }
+
+    #[test]
+    fn immutable_snapshot_is_bounded_and_detached_from_source_mutation() {
+        let path = temporary_path("immutable-snapshot");
+        fs::write(&path, b"original font bytes").unwrap();
+        let snapshot = ReadOnlyFileMap::immutable_snapshot(&path, 64).unwrap();
+        assert_eq!(snapshot.source_identity.length, 19);
+        assert_eq!(&*snapshot.mapping, b"original font bytes");
+
+        fs::write(&path, b"x").unwrap();
+        assert_eq!(&*snapshot.mapping, b"original font bytes");
+        assert_eq!(
+            ReadOnlyFileMap::immutable_snapshot(&path, 0)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        fs::write(&path, b"too large").unwrap();
+        assert_eq!(
+            ReadOnlyFileMap::immutable_snapshot(&path, 4)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

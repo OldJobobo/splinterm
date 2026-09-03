@@ -1,65 +1,94 @@
-# Splinterm 0.1.0 Beta 3 — Room to Work
+# Splinterm 0.1.0 RC1 — Stable Ground
 
-Beta 3 removes task ceilings that were too small for ordinary applications,
-polishes the Dojo tab strip, and gives legacy unnamed Dojos a stable readable
-label.
+This is the first release candidate for Splinterm 0.1.0. It freezes the 0.1
+feature line for stabilization and carries the complete public Beta 3 baseline
+plus bounded fixes for Omarchy environment refresh, live font following, Yazi
+image previews, and legacy Dojo restore names.
 
-## Workloads inherit the user manager's task policy
+RC1 is intended for normal daily use and soak testing on the documented target:
+x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. A code change after
+RC1 requires another release candidate before the final `v0.1.0` release.
 
-Beta 2 introduced the correct nested systemd hierarchy but shipped provisional
-fixed ceilings of 512 tasks per Splint, 1024 per Dojo, and 2048 across all
-terminal workloads. Because Linux counts both processes and threads, ordinary
-Chromium, Node, editor, build, and coding-agent workloads can reach those limits.
-Rejected task creation may then appear as an application failure even though the
-workload is not runaway.
+## Live Omarchy font following
 
-Beta 3 keeps the containment hierarchy and exact pre-exec PTY placement:
+When `main.font` is unset, a valid change to Fontconfig's effective `monospace`
+family now replaces one complete immutable renderer generation without
+restarting the Window, daemon, shell, or applications. Explicit font patterns
+remain authoritative, and an invalid live generation retains the last valid
+family.
+
+Font changes preserve configured size and sizing policy, padding, DPI, runtime
+zoom, topology, focus, history, modal and IME state, and controller authority.
+Observer panes never acquire control solely to resize after a font change, and
+deferred font-driven resizes retry after transient command-queue backpressure.
+Fontconfig named instances in variable fonts are preserved through shaping,
+metrics, and rasterization. Ambient Fontconfig checks run at a bounded ten-second
+cadence.
+
+## Yazi uses bounded Sixel previews
+
+When Sixel is enabled, Splinterm now advertises primary device attribute `4`.
+Yazi therefore selects its Sixel image path instead of the incompatible legacy
+per-cell Kitty placement path. The capability remains conditional, and the
+existing image-content and 256-placement bounds are unchanged.
+
+## Legacy Dojo names normalize on restore
+
+Loading schema-v2, schema-v3, or schema-v4 metadata now replaces only the exact
+historical generated forms `terminal`, `terminal-<timestamp>`, and
+`terminal-<timestamp>-<pid>` with collision-free `Dojo N` names. Numeric fields
+may be zero-padded, matching names emitted by older builds. Explicit names in
+current schema metadata are preserved.
+
+## New Splints follow the current Gum palette
+
+`splinterd` is persistent, so environment variables inherited when the daemon
+started can outlive an Omarchy theme change. Before RC1, a newly created shell
+could therefore receive stale Gum colors even though Splinterm's graphical
+palette already reflected the active theme.
+
+For every new Splint, the daemon now reads the active rendered palette from:
 
 ```text
-splinterd.service
-app-splinterm.slice
-└── app-splinterm-dojo<ID>.slice
-    └── splinterm-splint<ID>-<incarnation>.scope
+${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme/gum_env.lua
 ```
 
-The corrected policy is:
+It refreshes only Omarchy's bounded Gum environment namespace:
 
-- `splinterd.service` retains `TasksMax=2048` for the small control plane;
-- the aggregate workload slice does not set `TasksMax`;
-- transient Dojo slices do not set `TasksMax`; and
-- transient Splint scopes do not set `TasksMax`.
+- `GUM_*`;
+- `FOREGROUND` and `BACKGROUND`; and
+- `BORDER_FOREGROUND` and `BORDER_BACKGROUND`.
 
-Terminal workloads therefore inherit the systemd user manager's
-`DefaultTasksMax`, subject to any stricter administrator or ancestor policy.
-`EffectiveTasksMax` is the authoritative runtime value. The existing
-`MemoryHigh` pressure boundaries remain 75% aggregate, 50% per Dojo, and 25%
-per Splint; Beta 3 still sets no `MemoryMax`.
+A complete valid palette replaces current managed values and removes obsolete
+managed `GUM_*` entries. Unrelated environment variables remain untouched.
+Existing PTYs keep the environment with which they were created; only later
+Splints see a later valid theme.
 
-## Clearer Dojo tabs
+Missing, malformed, oversized, symlinked, or non-regular palette state fails
+closed. In those cases the new PTY preserves the daemon's inherited environment
+rather than receiving a partial palette.
 
-The New Dojo `+` control now sits immediately after the final visible tab instead
-of being pinned to the far-right edge of the Window. When the strip is full, the
-existing bounded active-tab visibility and hit targets remain unchanged.
+## Stabilized Beta 3 baseline
 
-Inactive tabs now use the theme's semantic pane-border color for a narrow exact
-divider. The active tab retains its exact theme-provided body, contrasting
-foreground, and accent underline.
+RC1 retains the Beta 3 workload and interface corrections:
 
-Older persisted unnamed Lairs may still carry historical generated identities
-such as `terminal-1787899189-4132`. Reopening one from the Dojo picker now
-presents its initial tab as `Dojo 1`. This is a presentation-only compatibility
-rule: explicit Dojo names remain unchanged and daemon-owned topology is not
-renamed.
+- terminal workloads inherit the systemd user manager's task policy while
+  `splinterd.service` keeps its independent `TasksMax=2048` guard;
+- the New Dojo control sits after the final visible tab;
+- inactive tabs use semantic dividers; and
+- the strict historical unnamed initial Dojo form is presented as `Dojo 1`
+  without mutating daemon-owned topology.
+
+Persistent topology, explicit restore, scrollback and search, terminal images,
+remote graphical access, JSON/NDJSON automation, MCP, configurable terminal
+lifetime, presets, and the documented native Wayland path remain part of the
+0.1 baseline.
 
 ## Upgrade boundary
 
-The corrected task policy applies when the daemon and transient workload
-hierarchy are recreated. Existing Beta 2 scopes retain their old explicit limits
-until then.
-
-Splinterm 0.1 does not support live daemon upgrade handoff. Upgrading Beta 2 to
-Beta 3 therefore ends active Dojos. From Foot or another terminal not owned by
-`splinterd`, use this lifecycle around the package upgrade:
+Splinterm 0.1 does not support live daemon upgrade handoff. Upgrading Beta 3 to
+RC1 therefore ends active Dojos. Run the upgrade from Foot or another terminal
+that is not owned by `splinterd`:
 
 ```bash
 systemctl --user stop splinterd.service
@@ -71,13 +100,16 @@ systemctl --user start splinterd.service
 Then reopen Splinterm Windows. Package installation does not silently reload or
 restart the user service.
 
-## Compatibility
+## RC1 soak focus
 
-- Persistent topology, restore, history, remote, automation, MCP, preset, and
-  terminal protocol contracts are unchanged.
-- Exact cgroup placement and workload cleanup remain mandatory in packaged mode.
-- Explicit Dojo names remain authoritative; only the strict historical pair of
-  initial Dojo `terminal` under Lair `terminal-<epoch-seconds>-<pid>` is
-  presented as unnamed.
-- Beta 2 tags and packages remain immutable.
-- Beta 3 continues to target x86_64 Omarchy/Arch Linux with native Wayland.
+During the release-candidate soak, please pay particular attention to:
+
+- repeated Omarchy theme changes followed by newly created Splints;
+- existing PTYs retaining their original environment;
+- clean installation and Beta 3 upgrade/rollback;
+- saved-Lair restore and ordinary long-running terminal workloads;
+- trusted graphical-client identity and desktop launching; and
+- optional MCP package behavior when installed.
+
+RC1 remains a prerelease. If stabilization requires any code change, the next
+public build will be RC2 rather than the final `v0.1.0` release.

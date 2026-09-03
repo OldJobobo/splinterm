@@ -13,8 +13,9 @@ use crate::{
 };
 
 const LEGACY_LAIR_SCHEMA_VERSION: u32 = 2;
-const LEGACY_TOPOLOGY_SCHEMA_VERSION: u32 = 3;
-pub const TOPOLOGY_SCHEMA_VERSION: u32 = 4;
+const LEGACY_TOPOLOGY_SCHEMA_VERSION_V3: u32 = 3;
+const LEGACY_TOPOLOGY_SCHEMA_VERSION_V4: u32 = 4;
+pub const TOPOLOGY_SCHEMA_VERSION: u32 = 5;
 pub const MAX_TOPOLOGY_DOCUMENT_BYTES: usize = 1024 * 1024;
 pub const MAX_PERSISTENT_LAIRS: usize = 64;
 const MAX_DOJOS_PER_LAIR: usize = 64;
@@ -59,23 +60,45 @@ struct LegacyLairV3 {
 }
 
 impl LegacyTopologyDocumentV3 {
-    fn migrate(self) -> TopologyDocument {
-        TopologyDocument {
+    fn migrate(self) -> Result<TopologyDocument, PersistenceError> {
+        let mut lairs = self
+            .lairs
+            .into_iter()
+            .map(|lair| Lair {
+                id: lair.id,
+                name: lair.name,
+                lifetime: lair.lifetime,
+                retention: LairRetention::Disposable,
+                provenance: None,
+                dojos: lair.dojos,
+            })
+            .collect::<Vec<_>>();
+        normalize_legacy_default_dojo_names(&mut lairs)?;
+        Ok(TopologyDocument {
             schema_version: TOPOLOGY_SCHEMA_VERSION,
             revision: self.revision,
-            lairs: self
-                .lairs
-                .into_iter()
-                .map(|lair| Lair {
-                    id: lair.id,
-                    name: lair.name,
-                    lifetime: lair.lifetime,
-                    retention: LairRetention::Disposable,
-                    provenance: None,
-                    dojos: lair.dojos,
-                })
-                .collect(),
-        }
+            lairs,
+        })
+    }
+}
+
+/// Schema-v4 could persist generated fallback names for unnamed Dojos.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyTopologyDocumentV4 {
+    schema_version: u32,
+    revision: TopologyRevision,
+    lairs: Vec<Lair>,
+}
+
+impl LegacyTopologyDocumentV4 {
+    fn migrate(mut self) -> Result<TopologyDocument, PersistenceError> {
+        normalize_legacy_default_dojo_names(&mut self.lairs)?;
+        Ok(TopologyDocument {
+            schema_version: TOPOLOGY_SCHEMA_VERSION,
+            revision: self.revision,
+            lairs: self.lairs,
+        })
     }
 }
 
@@ -106,8 +129,8 @@ struct LegacyWindowV2 {
 }
 
 impl LegacyLairDocumentV2 {
-    fn migrate(self) -> TopologyDocument {
-        let lairs = self
+    fn migrate(self) -> Result<TopologyDocument, PersistenceError> {
+        let mut lairs = self
             .dojos
             .into_iter()
             .map(|legacy_lair| Lair {
@@ -127,13 +150,48 @@ impl LegacyLairDocumentV2 {
                     })
                     .collect(),
             })
-            .collect();
-        TopologyDocument {
+            .collect::<Vec<_>>();
+        normalize_legacy_default_dojo_names(&mut lairs)?;
+        Ok(TopologyDocument {
             schema_version: TOPOLOGY_SCHEMA_VERSION,
             revision: self.revision,
             lairs,
+        })
+    }
+}
+
+fn is_decimal_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_legacy_default_dojo_name(name: &str) -> bool {
+    if name == "terminal" {
+        return true;
+    }
+    let Some(suffix) = name.strip_prefix("terminal-") else {
+        return false;
+    };
+    let mut components = suffix.split('-');
+    let Some(timestamp) = components.next() else {
+        return false;
+    };
+    let process_id = components.next();
+    components.next().is_none()
+        && is_decimal_digits(timestamp)
+        && process_id.is_none_or(is_decimal_digits)
+}
+
+fn normalize_legacy_default_dojo_names(lairs: &mut [Lair]) -> Result<(), PersistenceError> {
+    for lair in lairs {
+        for index in 0..lair.dojos.len() {
+            if is_legacy_default_dojo_name(&lair.dojos[index].name) {
+                lair.dojos[index].name = lair
+                    .next_default_dojo_name()
+                    .map_err(|_| PersistenceError::DefaultDojoNameExhausted)?;
+            }
         }
     }
+    Ok(())
 }
 
 impl TopologyDocument {
@@ -163,7 +221,7 @@ impl TopologyDocument {
         Ok(document)
     }
 
-    /// Decodes and validates a bounded schema-v3 document or migrates schema v2.
+    /// Decodes and validates current metadata or migrates supported legacy schemas.
     ///
     /// # Errors
     ///
@@ -177,13 +235,21 @@ impl TopologyDocument {
         let document = match version.schema_version {
             TOPOLOGY_SCHEMA_VERSION => serde_json::from_slice(bytes)
                 .map_err(|error| PersistenceError::Decode(error.to_string()))?,
-            LEGACY_TOPOLOGY_SCHEMA_VERSION => {
-                let legacy: LegacyTopologyDocumentV3 = serde_json::from_slice(bytes)
+            LEGACY_TOPOLOGY_SCHEMA_VERSION_V4 => {
+                let legacy: LegacyTopologyDocumentV4 = serde_json::from_slice(bytes)
                     .map_err(|error| PersistenceError::Decode(error.to_string()))?;
-                if legacy.schema_version != LEGACY_TOPOLOGY_SCHEMA_VERSION {
+                if legacy.schema_version != LEGACY_TOPOLOGY_SCHEMA_VERSION_V4 {
                     return Err(PersistenceError::UnsupportedVersion(legacy.schema_version));
                 }
-                legacy.migrate()
+                legacy.migrate()?
+            }
+            LEGACY_TOPOLOGY_SCHEMA_VERSION_V3 => {
+                let legacy: LegacyTopologyDocumentV3 = serde_json::from_slice(bytes)
+                    .map_err(|error| PersistenceError::Decode(error.to_string()))?;
+                if legacy.schema_version != LEGACY_TOPOLOGY_SCHEMA_VERSION_V3 {
+                    return Err(PersistenceError::UnsupportedVersion(legacy.schema_version));
+                }
+                legacy.migrate()?
             }
             LEGACY_LAIR_SCHEMA_VERSION => {
                 let legacy: LegacyLairDocumentV2 = serde_json::from_slice(bytes)
@@ -191,7 +257,7 @@ impl TopologyDocument {
                 if legacy.schema_version != LEGACY_LAIR_SCHEMA_VERSION {
                     return Err(PersistenceError::UnsupportedVersion(legacy.schema_version));
                 }
-                legacy.migrate()
+                legacy.migrate()?
             }
             other => return Err(PersistenceError::UnsupportedVersion(other)),
         };
@@ -199,7 +265,7 @@ impl TopologyDocument {
         Ok(document)
     }
 
-    /// Serializes validated schema-v3 metadata.
+    /// Serializes validated current-schema metadata.
     ///
     /// # Errors
     ///
@@ -380,6 +446,8 @@ pub enum PersistenceError {
     CollectionTooLarge(&'static str),
     #[error("metadata contains a duplicate {0} ID")]
     DuplicateId(&'static str),
+    #[error("metadata cannot allocate a numbered name for a legacy unnamed Dojo")]
+    DefaultDojoNameExhausted,
     #[error("metadata contains duplicate Lair names")]
     DuplicateLairName,
     #[error("metadata contains an invalid {0}")]
@@ -421,6 +489,16 @@ mod tests {
             "command": [],
             "state": {"Exited": 0}
         }})
+    }
+
+    fn dojo(name: &str) -> Value {
+        let splint_id = Uuid::new_v4();
+        json!({
+            "id": Uuid::new_v4(),
+            "name": name,
+            "default_focus": splint_id,
+            "root": leaf(&splint_id.to_string(), "/tmp")
+        })
     }
 
     fn valid_v3_document() -> Value {
@@ -588,13 +666,68 @@ mod tests {
     }
 
     #[test]
-    fn schema_v3_migration_defaults_to_disposable_without_provenance() {
+    fn schema_v3_migration_defaults_lifecycle_and_normalizes_legacy_dojo_names() {
         let mut value = valid_v3_document();
-        value["schema_version"] = json!(LEGACY_TOPOLOGY_SCHEMA_VERSION);
+        value["schema_version"] = json!(LEGACY_TOPOLOGY_SCHEMA_VERSION_V3);
         let topology = decode(&value).unwrap().into_topology().unwrap();
         let lair = topology.lairs().next().unwrap();
         assert_eq!(lair.retention, LairRetention::Disposable);
         assert_eq!(lair.provenance, None);
+        assert_eq!(lair.dojos[0].name, "Dojo 1");
+    }
+
+    #[test]
+    fn schema_v4_migration_replaces_only_numeric_generated_fallback_names() {
+        let mut value = valid_v3_document();
+        value["schema_version"] = json!(LEGACY_TOPOLOGY_SCHEMA_VERSION_V4);
+        let dojos = value["lairs"][0]["dojos"].as_array_mut().unwrap();
+        dojos.extend([
+            dojo("terminal-123"),
+            dojo("terminal-123-45"),
+            dojo("Dojo 3"),
+            dojo("terminal-012"),
+            dojo("terminal-000-007"),
+            dojo("terminal-123-worker"),
+            dojo("my-terminal-123"),
+        ]);
+
+        let topology = decode(&value).unwrap().into_topology().unwrap();
+        let names = topology
+            .lairs()
+            .next()
+            .unwrap()
+            .dojos
+            .iter()
+            .map(|dojo| dojo.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "Dojo 4",
+                "Dojo 5",
+                "Dojo 6",
+                "Dojo 3",
+                "Dojo 7",
+                "Dojo 8",
+                "terminal-123-worker",
+                "my-terminal-123",
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_generated_name_migration_rejects_number_exhaustion() {
+        let mut value = valid_v3_document();
+        value["schema_version"] = json!(LEGACY_TOPOLOGY_SCHEMA_VERSION_V4);
+        value["lairs"][0]["dojos"]
+            .as_array_mut()
+            .unwrap()
+            .push(dojo(&format!("Dojo {}", u64::MAX)));
+
+        assert_eq!(
+            decode(&value),
+            Err(PersistenceError::DefaultDojoNameExhausted)
+        );
     }
 
     #[test]
@@ -632,7 +765,7 @@ mod tests {
         assert_eq!(lair.name, "main");
         assert_eq!(lair.dojos.len(), 2);
         assert_eq!(lair.dojos[0].id.to_string(), DOJO_ID);
-        assert_eq!(lair.dojos[0].name, "terminal");
+        assert_eq!(lair.dojos[0].name, "Dojo 1");
         assert_eq!(lair.dojos[0].default_focus.to_string(), SPLINT_ID);
         assert_eq!(lair.dojos[1].id.to_string(), SECOND_DOJO_ID);
         assert_eq!(lair.dojos[1].name, "logs");
@@ -649,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_current_version_exited_metadata() {
+    fn accepts_current_version_exited_metadata_without_rewriting_explicit_names() {
         let document = decode(&valid_v3_document()).unwrap();
         let encoded = document.encode().unwrap();
         let topology = TopologyDocument::decode(&encoded)
@@ -658,6 +791,7 @@ mod tests {
             .unwrap();
         assert_eq!(topology.revision().get(), 7);
         assert_eq!(topology.lairs().count(), 1);
+        assert_eq!(topology.lairs().next().unwrap().dojos[0].name, "terminal");
     }
 
     #[test]

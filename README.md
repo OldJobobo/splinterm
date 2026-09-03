@@ -198,7 +198,7 @@ Authoritative references:
 
 Splinterm uses `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini` for its focused configuration surface. It supports fonts and sizing, shell behavior, scrollback, cursor settings, pane chrome, keymap overlays, and explicit theme overrides.
 
-On Omarchy, Splinterm can read the active theme's effective `foot.ini` and `colors.toml` directly and safely reload valid palette changes without restarting the daemon or shell.
+On Omarchy, Splinterm reads the active theme's effective `foot.ini` and `colors.toml` and safely reloads valid palette changes without restarting the daemon or shell. When `main.font` is unset, graphical clients also follow fontconfig's effective `monospace` family live; explicit font patterns remain user-owned, and invalid live generations retain the last valid font without restarting the Window or its processes.
 
 See the [configuration guide](https://splinterm.com/docs/configure/configuration/) for supported keys, keymap inspection, Omarchy integration, and Foot migration.
 

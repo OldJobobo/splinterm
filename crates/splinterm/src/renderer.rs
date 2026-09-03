@@ -69,7 +69,7 @@ use decorations::DecorationMetrics;
 #[cfg(test)]
 use decorations::DecorationSpan;
 pub use evidence::{benchmark_json, phase4_benchmark_json, write_ppm};
-pub(super) use fonts::*;
+pub use fonts::*;
 pub use fonts::{ascii_glyph_evidence, production_ascii_glyph_evidence, snapshot_cache_metrics};
 pub(crate) use frame::SnapshotFrame;
 use frame::{SnapshotGlyph, packed_rgb};

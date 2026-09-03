@@ -1,12 +1,12 @@
 //! Graphical window lifecycle orchestration.
 
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
     PerfTraceCorrelation, WindowOptions, WindowUpdate,
     automation::{Connection, MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
-    config::AppConfig,
+    config::{AppConfig, FontAuthority},
     endpoint::{
         ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, LaunchSemantics,
     },
@@ -21,6 +21,7 @@ use splinterm_protocol::{
 use tokio::sync::{mpsc, watch};
 
 use super::{
+    font_watch::{FontUpdateSink, watch_font},
     pane_bridge::{
         ControllerOutputs, EventAction, WINDOW_COMMAND_QUEUE, WINDOW_UPDATE_QUEUE, attach,
         classify_subscription_event, layout_splint_ids, lease_snapshot_images, lease_update_images,
@@ -32,6 +33,24 @@ use super::{
     theme_watch::{ThemeUpdateSink, load_startup_theme, watch_theme},
     topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
 };
+
+struct AbortOnDropTask(tokio::task::JoinHandle<()>);
+
+impl AbortOnDropTask {
+    fn new(task: tokio::task::JoinHandle<()>) -> Self {
+        Self(task)
+    }
+
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
 
 async fn run_graphical_focus_reporter(
     factory: ConnectionFactory,
@@ -171,12 +190,14 @@ async fn run_live_multipane_window_inner(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,
         padding: config.padding,
         background_alpha: theme.background_alpha,
     })?;
+    let initial_font_generation = Arc::clone(renderer::snapshot_font_generation()?);
     let mut ids = Vec::new();
     layout_splint_ids(&dojo_model.root, &mut ids);
     let image_cache =
@@ -201,13 +222,21 @@ async fn run_live_multipane_window_inner(
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let optimistic_remote_splits =
         factory.capabilities().launch_semantics == LaunchSemantics::RemoteInteractive;
-    let theme_task = tokio::spawn(watch_theme(
+    let theme_task = AbortOnDropTask::new(tokio::spawn(watch_theme(
         config.theme_source(),
         config.background_alpha,
         config.background_blur,
         theme,
         ThemeUpdateSink::Topology(topology_update_sender.clone()),
-    ));
+    )));
+    let font_task = (config.font_authority == FontAuthority::NativeOmarchy).then(|| {
+        AbortOnDropTask::new(tokio::spawn(watch_font(
+            config.font.clone(),
+            config.font_authority,
+            initial_font_generation,
+            FontUpdateSink::Topology(topology_update_sender.clone()),
+        )))
+    });
     let mut panes = Vec::with_capacity(prepared.len());
     let mut tasks = HashMap::with_capacity(prepared.len());
     for pane in prepared {
@@ -264,6 +293,9 @@ async fn run_live_multipane_window_inner(
     .await
     .context("Wayland window task failed")?;
     theme_task.abort();
+    if let Some(font_task) = font_task {
+        font_task.abort();
+    }
     if let Some(smoke) = topology_smoke {
         smoke.await.context("topology smoke task failed")??;
     }
@@ -286,12 +318,14 @@ pub(super) async fn run_live_window(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,
         padding: config.padding,
         background_alpha: theme.background_alpha,
     })?;
+    let initial_font_generation = Arc::clone(renderer::snapshot_font_generation()?);
     let mut connection = factory.connect().await?;
     let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
@@ -339,13 +373,21 @@ pub(super) async fn run_live_window(
         println!("Controller lease {controller_id} granted for live Splint");
     }
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
-    let _theme_watcher = tokio::spawn(watch_theme(
+    let _theme_watcher = AbortOnDropTask::new(tokio::spawn(watch_theme(
         config.theme_source(),
         config.background_alpha,
         config.background_blur,
         theme,
         ThemeUpdateSink::Panes(vec![updates.clone()]),
-    ));
+    )));
+    let _font_watcher = (config.font_authority == FontAuthority::NativeOmarchy).then(|| {
+        AbortOnDropTask::new(tokio::spawn(watch_font(
+            config.font.clone(),
+            config.font_authority,
+            initial_font_generation,
+            FontUpdateSink::Panes(vec![updates.clone()]),
+        )))
+    });
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, mut resyncs) = mpsc::channel(1);
     let controller_cancellation = tokio_util::sync::CancellationToken::new();
@@ -616,7 +658,7 @@ pub(super) async fn run_live_window(
 
 #[cfg(test)]
 mod tests {
-    use super::resolved_window_app_id;
+    use super::{AbortOnDropTask, resolved_window_app_id};
 
     #[test]
     fn xdg_window_identity_defaults_and_preserves_exact_override() {
@@ -625,5 +667,18 @@ mod tests {
             resolved_window_app_id(Some("org.omarchy.screensaver".to_owned())),
             "org.omarchy.screensaver"
         );
+    }
+
+    #[tokio::test]
+    async fn watcher_tasks_abort_on_scope_exit() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let watcher = AbortOnDropTask::new(tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            let _ = sender.send(());
+        }));
+
+        drop(watcher);
+
+        assert!(receiver.await.is_err());
     }
 }
