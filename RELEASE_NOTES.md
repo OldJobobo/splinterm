@@ -19,9 +19,11 @@ family.
 
 Font changes preserve configured size and sizing policy, padding, DPI, runtime
 zoom, topology, focus, history, modal and IME state, and controller authority.
-Observer panes never acquire control solely to resize after a font change.
+Observer panes never acquire control solely to resize after a font change, and
+deferred font-driven resizes retry after transient command-queue backpressure.
 Fontconfig named instances in variable fonts are preserved through shaping,
-metrics, and rasterization.
+metrics, and rasterization. Ambient Fontconfig checks run at a bounded ten-second
+cadence.
 
 ## Yazi uses bounded Sixel previews
 
