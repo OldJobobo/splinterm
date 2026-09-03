@@ -3014,6 +3014,7 @@ impl Terminal {
 
     fn device_attributes(&mut self, private: Option<u8>) {
         let reply = match private {
+            None if self.config.sixel.enabled => Some(b"\x1b[?62;4;22c".to_vec()),
             None => Some(b"\x1b[?62;22c".to_vec()),
             Some(b'>') => Some(b"\x1b[>0;1;0c".to_vec()),
             _ => None,
@@ -3699,7 +3700,7 @@ mod tests {
             vec![
                 TerminalEvent::PtyWrite(b"\x1b[0n".to_vec()),
                 TerminalEvent::PtyWrite(b"\x1b[2;3R".to_vec()),
-                TerminalEvent::PtyWrite(b"\x1b[?62;22c".to_vec()),
+                TerminalEvent::PtyWrite(b"\x1b[?62;4;22c".to_vec()),
             ]
         );
     }

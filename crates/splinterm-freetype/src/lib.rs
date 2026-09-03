@@ -11,12 +11,14 @@ use std::path::{Path, PathBuf};
 use freetype::{
     Face, Library, RenderMode, bitmap::PixelMode, face::LoadFlag, tt_os2::TrueTypeOS2Table,
 };
+use splinterm_filemap::ReadOnlyFileMap;
 use thiserror::Error;
 
 pub const MIN_PIXEL_SIZE_26_6: isize = 6 * 64;
 pub const MAX_PIXEL_SIZE_26_6: isize = 768 * 64;
 pub const MAX_GLYPH_DIMENSION: u32 = 4_096;
 pub const MAX_GLYPH_PIXELS: usize = 16 * 1024 * 1024;
+pub const MAX_STAGED_FONT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FontMetrics {
@@ -57,14 +59,17 @@ pub enum RasterError {
     InvalidPixelSize,
     #[error("font face index does not fit FreeType's signed index")]
     InvalidFaceIndex,
+    #[error("staged font exceeds the 64 MiB per-face byte bound")]
+    FontTooLarge,
     #[error("initialize FreeType: {0}")]
     Initialize(freetype::Error),
-    #[error("open font face {path} index {index}: {source}")]
-    OpenFace {
+    #[error("map font face {path}: {source}")]
+    MapFace {
         path: PathBuf,
-        index: u32,
-        source: freetype::Error,
+        source: std::io::Error,
     },
+    #[error("open owned font face index {index}: {source}")]
+    OpenMemoryFace { index: u32, source: freetype::Error },
     #[error("set FreeType character size: {0}")]
     SetSize(freetype::Error),
     #[error("load glyph {glyph_id}: {source}")]
@@ -109,13 +114,34 @@ impl RasterFace {
         if !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&pixel_size_26_6) {
             return Err(RasterError::InvalidPixelSize);
         }
+        let path = path.as_ref();
+        let data = ReadOnlyFileMap::open(path).map_err(|source| RasterError::MapFace {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::open_memory(&data, face_index, pixel_size_26_6)
+    }
+
+    /// Opens one face from immutable generation-owned bytes.
+    ///
+    /// # Errors
+    /// Returns a typed error for invalid bounds or any `FreeType` failure.
+    pub fn open_memory(
+        data: &ReadOnlyFileMap,
+        face_index: u32,
+        pixel_size_26_6: isize,
+    ) -> Result<Self, RasterError> {
+        if !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&pixel_size_26_6) {
+            return Err(RasterError::InvalidPixelSize);
+        }
+        if data.len() > MAX_STAGED_FONT_BYTES {
+            return Err(RasterError::FontTooLarge);
+        }
         let index = isize::try_from(face_index).map_err(|_| RasterError::InvalidFaceIndex)?;
         let library = Library::init().map_err(RasterError::Initialize)?;
-        let path = path.as_ref();
         let face = library
-            .new_face(path, index)
-            .map_err(|source| RasterError::OpenFace {
-                path: path.to_path_buf(),
+            .new_memory_face(data.to_vec(), index)
+            .map_err(|source| RasterError::OpenMemoryFace {
                 index: face_index,
                 source,
             })?;
@@ -144,29 +170,87 @@ impl RasterFace {
         {
             return Err(RasterError::InvalidPixelSize);
         }
+        let path = path.as_ref();
+        let data = ReadOnlyFileMap::open(path).map_err(|source| RasterError::MapFace {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::rasterize_color_memory(
+            &data,
+            face_index,
+            requested_pixel_size_26_6,
+            selected_pixel_size_26_6,
+            glyph_id,
+        )
+    }
+
+    /// Rasterizes one fixed-strike color glyph from immutable generation-owned bytes.
+    ///
+    /// # Errors
+    /// Returns a typed error for invalid bounds, `FreeType` failures, non-BGRA
+    /// output, malformed bitmap geometry, or pixman scaling failures.
+    pub fn rasterize_color_memory(
+        data: &ReadOnlyFileMap,
+        face_index: u32,
+        requested_pixel_size_26_6: isize,
+        selected_pixel_size_26_6: isize,
+        glyph_id: u32,
+    ) -> Result<RasterizedColorGlyph, RasterError> {
+        if !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&requested_pixel_size_26_6)
+            || !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&selected_pixel_size_26_6)
+        {
+            return Err(RasterError::InvalidPixelSize);
+        }
+        if data.len() > MAX_STAGED_FONT_BYTES {
+            return Err(RasterError::FontTooLarge);
+        }
         let index = isize::try_from(face_index).map_err(|_| RasterError::InvalidFaceIndex)?;
         let library = Library::init().map_err(RasterError::Initialize)?;
-        let path = path.as_ref();
         let face = library
-            .new_face(path, index)
-            .map_err(|source| RasterError::OpenFace {
-                path: path.to_path_buf(),
+            .new_memory_face(data.to_vec(), index)
+            .map_err(|source| RasterError::OpenMemoryFace {
                 index: face_index,
                 source,
             })?;
         face.set_char_size(selected_pixel_size_26_6, 0, 72, 72)
             .map_err(RasterError::SetSize)?;
-        face.load_glyph(
+        let mut raster = Self { face };
+        raster.rasterize_color_glyph(
+            requested_pixel_size_26_6,
+            selected_pixel_size_26_6,
             glyph_id,
-            LoadFlag::DEFAULT | LoadFlag::TARGET_LIGHT | LoadFlag::COLOR,
         )
-        .map_err(|source| RasterError::LoadGlyph { glyph_id, source })?;
-        if face.glyph().raw().format != freetype::ffi::FT_GLYPH_FORMAT_BITMAP {
-            face.glyph()
+    }
+
+    /// Rasterizes one color glyph through an already opened fixed-strike face.
+    ///
+    /// # Errors
+    /// Returns a typed error for invalid bounds, `FreeType` failures, non-BGRA
+    /// output, malformed bitmap geometry, or pixman scaling failures.
+    pub fn rasterize_color_glyph(
+        &mut self,
+        requested_pixel_size_26_6: isize,
+        selected_pixel_size_26_6: isize,
+        glyph_id: u32,
+    ) -> Result<RasterizedColorGlyph, RasterError> {
+        if !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&requested_pixel_size_26_6)
+            || !(MIN_PIXEL_SIZE_26_6..=MAX_PIXEL_SIZE_26_6).contains(&selected_pixel_size_26_6)
+        {
+            return Err(RasterError::InvalidPixelSize);
+        }
+        self.face
+            .load_glyph(
+                glyph_id,
+                LoadFlag::DEFAULT | LoadFlag::TARGET_LIGHT | LoadFlag::COLOR,
+            )
+            .map_err(|source| RasterError::LoadGlyph { glyph_id, source })?;
+        if self.face.glyph().raw().format != freetype::ffi::FT_GLYPH_FORMAT_BITMAP {
+            self.face
+                .glyph()
                 .render_glyph(RenderMode::Normal)
                 .map_err(|source| RasterError::RenderGlyph { glyph_id, source })?;
         }
-        let slot = face.glyph();
+        let slot = self.face.glyph();
         let bitmap = slot.bitmap();
         let mode = bitmap
             .pixel_mode()

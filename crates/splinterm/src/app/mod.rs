@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod consent;
 mod diagnostics_cli;
+mod font_watch;
 mod human_output;
 mod integrations;
 mod keymap_cli;

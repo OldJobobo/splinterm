@@ -1,6 +1,7 @@
 mod audit;
 mod cgroup;
 mod consent;
+mod omarchy_environment;
 mod persistence;
 
 use std::{
@@ -2486,6 +2487,7 @@ async fn spawn_runtime_with_size(
     .env("SPLINTERM_LAIR_ID", context.lair.to_string())
     .env("SPLINTERM_DOJO_ID", context.dojo.to_string())
     .env("SPLINTERM_SPLINT_ID", context.splint.to_string());
+    let pty_command = omarchy_environment::refresh_gum_environment(pty_command).await;
     let mut config = LiveSplintConfig::default();
     #[cfg(debug_assertions)]
     if let Some(grace) = debug_test_shutdown_grace(env::var_os("SPLINTERM_TEST_SHUTDOWN_GRACE_MS"))

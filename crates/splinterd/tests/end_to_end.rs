@@ -51,6 +51,22 @@ impl Daemon {
         policy: Option<&Path>,
         development_terminal_access: bool,
     ) -> Child {
+        Self::spawn_configured_with_environment(
+            runtime,
+            socket,
+            policy,
+            development_terminal_access,
+            &[],
+        )
+    }
+
+    fn spawn_configured_with_environment(
+        runtime: &Path,
+        socket: &Path,
+        policy: Option<&Path>,
+        development_terminal_access: bool,
+        environment: &[(&str, &str)],
+    ) -> Child {
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -76,6 +92,7 @@ impl Daemon {
             )
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
+            .envs(environment.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr);
@@ -120,6 +137,40 @@ impl Daemon {
         fs::create_dir(&runtime).unwrap();
         let socket = runtime.join("splinterd.sock");
         let child = Self::spawn_child(&runtime, &socket);
+        Self::wait_until_ready(&socket).await;
+        Self {
+            child,
+            runtime,
+            socket,
+            policy: None,
+            development_terminal_access: true,
+        }
+    }
+
+    async fn start_with_gum_environment(palette: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let runtime = std::env::temp_dir().join(format!(
+            "splinterm-gum-environment-{}-{nonce}",
+            std::process::id()
+        ));
+        let theme = runtime.join("state/omarchy/current/theme");
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(theme.join("gum_env.lua"), palette).unwrap();
+        let socket = runtime.join("splinterd.sock");
+        let child = Self::spawn_configured_with_environment(
+            &runtime,
+            &socket,
+            None,
+            true,
+            &[
+                ("BACKGROUND", "#1b1b1b"),
+                ("GUM_CHOOSE_SELECTED_BACKGROUND", "#808080"),
+                ("GUM_OLD_THEME_ONLY", "#f4f4f4"),
+            ],
+        );
         Self::wait_until_ready(&socket).await;
         Self {
             child,
@@ -2490,6 +2541,173 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
+    reason = "one lifecycle scenario compares existing and post-theme-change PTY environments"
+)]
+async fn new_splint_refreshes_the_active_omarchy_gum_environment() {
+    time::timeout(TEST_TIMEOUT, async {
+        let old_palette = r##"
+hl.env("FOREGROUND", "#f4f4f4")
+hl.env("BACKGROUND", "#1b1b1b")
+hl.env("BORDER_FOREGROUND", "#808080")
+hl.env("BORDER_BACKGROUND", "#1b1b1b")
+hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#808080")
+hl.env("GUM_OLD_THEME_ONLY", "#f4f4f4")
+"##;
+        let current_palette = r##"
+hl.env("FOREGROUND", "#afaaa2")
+hl.env("BACKGROUND", "#0c1928")
+hl.env("BORDER_FOREGROUND", "#d4bda2")
+hl.env("BORDER_BACKGROUND", "#0c1928")
+hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
+"##;
+        let daemon = Daemon::start_with_gum_environment(old_palette).await;
+        let existing_ready = daemon.runtime.join("existing-gum-ready");
+        let existing_trigger = daemon.runtime.join("existing-gum-trigger");
+        let existing_marker = daemon.runtime.join("existing-gum-environment");
+        let refreshed_marker = daemon.runtime.join("refreshed-gum-environment");
+        let malformed_marker = daemon.runtime.join("malformed-gum-environment");
+        let mut connection = daemon.connect().await;
+        let Response::LairCreated { .. } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "old-gum-environment".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "touch {}; while [ ! -e {} ]; do sleep 0.01; done; printf '%s|%s|%s' \"$BACKGROUND\" \"$GUM_CHOOSE_SELECTED_BACKGROUND\" \"${{GUM_OLD_THEME_ONLY-unset}}\" > {}",
+                            existing_ready.display(),
+                            existing_trigger.display(),
+                            existing_marker.display()
+                        ),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("existing Gum environment test Lair was not created");
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !existing_ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "existing Gum environment did not become ready"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let theme = daemon.runtime.join("state/omarchy/current/theme");
+        let replacement = theme.join("gum_env.lua.next");
+        fs::write(&replacement, current_palette).unwrap();
+        fs::rename(replacement, theme.join("gum_env.lua")).unwrap();
+        let revision = connection.topology_revision().await;
+        let Response::LairCreated { .. } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "current-gum-environment".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "printf '%s|%s|%s' \"$BACKGROUND\" \"$GUM_CHOOSE_SELECTED_BACKGROUND\" \"${{GUM_OLD_THEME_ONLY-unset}}\" > {}",
+                            refreshed_marker.display()
+                        ),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("refreshed Gum environment test Lair was not created");
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !refreshed_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "refreshed Gum environment marker timed out"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let malformed = format!(
+            "{current_palette}\nhl.env(\"GUM_FILTER_INDICATOR\", \"#ffffff\""
+        );
+        let replacement = theme.join("gum_env.lua.next");
+        fs::write(&replacement, malformed).unwrap();
+        fs::rename(replacement, theme.join("gum_env.lua")).unwrap();
+        let revision = connection.topology_revision().await;
+        let Response::LairCreated { .. } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "malformed-gum-environment".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "printf '%s|%s|%s' \"$BACKGROUND\" \"$GUM_CHOOSE_SELECTED_BACKGROUND\" \"${{GUM_OLD_THEME_ONLY-unset}}\" > {}",
+                            malformed_marker.display()
+                        ),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("malformed Gum environment test Lair was not created");
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !malformed_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "malformed Gum environment marker timed out"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+
+        fs::write(existing_trigger, b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !existing_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "existing Gum environment marker timed out"
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            fs::read_to_string(refreshed_marker).unwrap(),
+            "#0c1928|#d4bda2|unset"
+        );
+        assert_eq!(
+            fs::read_to_string(existing_marker).unwrap(),
+            "#1b1b1b|#808080|#f4f4f4"
+        );
+        assert_eq!(
+            fs::read_to_string(malformed_marker).unwrap(),
+            "#1b1b1b|#808080|#f4f4f4"
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("Gum environment integration timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
     reason = "one lifecycle scenario correlates create, restore, and new-Dojo context"
 )]
 async fn new_dojo_and_restore_inject_exact_current_context() {
@@ -3878,10 +4096,18 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             .await
             .expect("drained subscriber did not observe the overflow marker")
             .expect("drained subscriber task failed");
+        let _pre_pressure_snapshot = stable_snapshot_after_marker(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "overflow-finished",
+        )
+        .await;
 
         // The actively drained client has exited. Create a fresh unread
-        // MAX_SUBSCRIPTIONS connection so only the following unpaced pressure
-        // stream can force its resynchronization or disconnection.
+        // MAX_SUBSCRIPTIONS connection so the following unpaced pressure stream
+        // must resolve through exact coalesced delivery, resynchronization, or
+        // disconnection.
         let mut slow = daemon.connect().await;
         nix::sys::socket::setsockopt(
             &slow.stream,
@@ -3889,8 +4115,12 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             &4096,
         )
         .unwrap();
+        let mut slow_subscriptions = std::collections::BTreeMap::new();
         for _ in 0..MAX_SUBSCRIPTIONS {
-            let (_subscription_id, _) = slow.attach(splint_id, incarnation).await;
+            let (subscription_id, snapshot) = slow.attach(splint_id, incarnation).await;
+            assert!(slow_subscriptions
+                .insert(subscription_id, (snapshot, 1_u64))
+                .is_none());
         }
         producer
             .input(
@@ -3907,7 +4137,15 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             Duration::from_secs(60),
         )
         .await;
+        let final_snapshot = stable_snapshot_after_marker(
+            &mut reattached,
+            splint_id,
+            incarnation,
+            "pressure-finished",
+        )
+        .await;
 
+        let mut caught_up = false;
         let mut saw_resync = false;
         let mut disconnected = false;
         let slow_read_deadline = Instant::now() + Duration::from_secs(30);
@@ -3924,28 +4162,61 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 disconnected = true;
                 break;
             };
-            if let ServerFrame::Event {
-                event: SubscriptionEvent::ResyncRequired { .. },
-                ..
+            let ServerFrame::Event {
+                subscription_id,
+                sequence,
+                event,
             } = frame
-            {
-                saw_resync = true;
-                break;
+            else {
+                continue;
+            };
+            let (reconstructed, expected_sequence) = slow_subscriptions
+                .get_mut(&subscription_id)
+                .expect("slow connection emitted an event for an unknown subscription");
+            match event {
+                SubscriptionEvent::Update { update } => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                    apply_terminal_update(reconstructed, update);
+                    if reconstructed.revision == final_snapshot.revision
+                        && snapshot_text(reconstructed).contains("pressure-finished")
+                    {
+                        assert_eq!(&*reconstructed, &final_snapshot);
+                        caught_up = true;
+                        break;
+                    }
+                }
+                SubscriptionEvent::Snapshot { snapshot } => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                    snapshot.validate().expect("slow subscriber snapshot is valid");
+                    assert_eq!(snapshot.splint_id, splint_id);
+                    assert_eq!(snapshot.incarnation, incarnation);
+                    *reconstructed = snapshot;
+                    if reconstructed.revision == final_snapshot.revision
+                        && snapshot_text(reconstructed).contains("pressure-finished")
+                    {
+                        assert_eq!(&*reconstructed, &final_snapshot);
+                        caught_up = true;
+                        break;
+                    }
+                }
+                SubscriptionEvent::ResyncRequired { .. } => {
+                    assert!(sequence >= *expected_sequence);
+                    saw_resync = true;
+                    break;
+                }
+                _ => {
+                    assert_eq!(sequence, *expected_sequence);
+                    *expected_sequence += 1;
+                }
             }
         }
         assert!(
-            saw_resync || disconnected,
-            "slow subscriber was neither forced to resynchronize nor disconnected"
+            caught_up || saw_resync || disconnected,
+            "slow subscriber neither received final state, required resync, nor disconnected"
         );
         drop(producer);
-
-        let final_snapshot = stable_snapshot_after_marker(
-            &mut reattached,
-            splint_id,
-            incarnation,
-            "pressure-finished",
-        )
-        .await;
         assert!(final_snapshot.revision > detached.revision);
 
         let mut before_row_id = final_snapshot
