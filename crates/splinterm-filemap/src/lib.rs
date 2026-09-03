@@ -9,10 +9,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     ops::Deref,
-    os::{
-        fd::{BorrowedFd, OwnedFd},
-        unix::fs::MetadataExt,
-    },
+    os::{fd::OwnedFd, unix::fs::MetadataExt},
     path::Path,
 };
 

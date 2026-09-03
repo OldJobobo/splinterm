@@ -52,8 +52,9 @@ valid generation.
 A valid native family change preserves configured size and sizing policy,
 padding, output DPI, runtime zoom, topology, focus, history and copy-mode
 anchors, modal input, visible IME preedit, and running processes. Splinterm
-stages immutable bounded font bytes off the Wayland dispatch path, publishes all
-faces atomically, rebuilds active and hidden pane frames, and lets only an
+stages immutable bounded primary, CJK, and emoji font bytes plus ordered
+fallback metadata off the Wayland dispatch path, publishes the generation
+atomically, rebuilds active and hidden pane frames, and lets only an
 existing pane controller issue the final PTY resize. Observer panes prepare a
 future size without acquiring control. Font changes do not imply live reload of
 font size, padding, shell, scrollback, cursor, or keymap settings.

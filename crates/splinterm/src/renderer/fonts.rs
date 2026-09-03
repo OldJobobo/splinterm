@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     os::unix::fs::MetadataExt,
     path::PathBuf,
     process::Command,
@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use splinterm_filemap::{FileIdentity, ReadOnlyFileMap};
 use splinterm_freetype::{MAX_STAGED_FONT_BYTES, RasterFace};
 use swash::{
-    FontRef,
+    FontRef, NormalizedCoord,
     scale::{Render, ScaleContext, Source, StrikeWith, image::Content},
     shape::ShapeContext,
     zeno::Format,
@@ -38,6 +38,7 @@ pub(super) const EMOJI_FONT: &str = "Noto Color Emoji";
 pub(super) const SNAPSHOT_GLYPH_CACHE_BUDGET: usize = 2_048;
 pub(super) const SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 pub(super) const SNAPSHOT_RASTER_FACE_BUDGET: usize = 24;
+pub(super) const SNAPSHOT_FALLBACK_MAPPING_BUDGET: usize = 24;
 
 pub(super) const SNAPSHOT_PRIMARY_REGULAR: usize = 0;
 pub(super) const SNAPSHOT_PRIMARY_BOLD: usize = 1;
@@ -45,10 +46,40 @@ pub(super) const SNAPSHOT_PRIMARY_ITALIC: usize = 2;
 pub(super) const SNAPSHOT_PRIMARY_BOLD_ITALIC: usize = 3;
 pub(super) const SNAPSHOT_CJK: usize = 4;
 pub(super) const SNAPSHOT_EMOJI: usize = 5;
+pub(super) const SNAPSHOT_FALLBACK_START: usize = 6;
 
 static NEXT_FONT_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
 pub(super) static SNAPSHOT_FONT_GENERATION: OnceLock<Result<Arc<FontGeneration>, String>> =
     OnceLock::new();
+#[derive(Default)]
+pub(super) struct PersistentFontMappingCache {
+    pub(super) mappings: HashMap<(PathBuf, FileIdentity), Arc<ReadOnlyFileMap>>,
+    pub(super) order: VecDeque<(PathBuf, FileIdentity)>,
+    pub(super) hits: u64,
+    pub(super) misses: u64,
+    pub(super) evictions: u64,
+}
+
+impl PersistentFontMappingCache {
+    fn insert(
+        &mut self,
+        key: (PathBuf, FileIdentity),
+        mapping: Arc<ReadOnlyFileMap>,
+    ) -> Arc<ReadOnlyFileMap> {
+        while self.mappings.len() >= SNAPSHOT_FALLBACK_MAPPING_BUDGET {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if self.mappings.remove(&oldest).is_some() {
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.mappings.insert(key, Arc::clone(&mapping));
+        mapping
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PersistentGlyphCache {
     pub(super) raster_faces: HashMap<(u64, isize, usize), RasterFace>,
@@ -125,10 +156,15 @@ impl PersistentGlyphCache {
 thread_local! {
     pub(super) static SNAPSHOT_GLYPH_CACHE: RefCell<PersistentGlyphCache> =
         RefCell::new(PersistentGlyphCache::default());
+    pub(super) static SNAPSHOT_FALLBACK_MAPPING_CACHE: RefCell<PersistentFontMappingCache> =
+        RefCell::new(PersistentFontMappingCache::default());
 }
 
 pub(crate) fn clear_snapshot_caches() {
     SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+    SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|cache| {
+        *cache.borrow_mut() = PersistentFontMappingCache::default();
+    });
 }
 
 pub(super) const CORPUS: &[(CorpusKind, &str)] = &[
@@ -158,12 +194,52 @@ pub(super) struct GlyphKey {
 
 pub(super) const BOX_DRAWING_FACE: usize = usize::MAX;
 
+/// Fontconfig exposes `FC_INDEX` using `FreeType`'s packed face index: the low
+/// 16 bits select a face in a collection and bits 16-30 select a one-based
+/// named variable instance. Swash expects only the collection index.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct FontconfigFaceIndex(u32);
+
+impl FontconfigFaceIndex {
+    const COLLECTION_MASK: u32 = 0xffff;
+    const NAMED_INSTANCE_MASK: u32 = 0x7fff;
+
+    const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    fn from_fontconfig(raw: u32) -> Result<Self> {
+        anyhow::ensure!(
+            raw & 0x8000_0000 == 0,
+            "Fontconfig face index sets reserved bit 31"
+        );
+        Ok(Self::new(raw))
+    }
+
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+
+    pub(super) const fn collection_index(self) -> usize {
+        (self.0 & Self::COLLECTION_MASK) as usize
+    }
+
+    const fn named_instance_index(self) -> Option<usize> {
+        let one_based = (self.0 >> 16) & Self::NAMED_INSTANCE_MASK;
+        if one_based == 0 {
+            None
+        } else {
+            Some((one_based - 1) as usize)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct FontFaceFingerprint {
     pub(super) family: String,
     pub(super) style: String,
     pub(super) path: PathBuf,
-    pub(super) index: usize,
+    pub(super) index: u32,
     pub(super) weight: i32,
     pub(super) slant: i32,
     pub(super) selected_pixel_size_26_6: isize,
@@ -175,7 +251,7 @@ pub(super) struct FontFaceFingerprint {
 pub struct FontFingerprint {
     pub(super) pattern: String,
     pub(super) authority: FontAuthority,
-    pub(super) faces: [FontFaceFingerprint; 6],
+    pub(super) faces: Vec<FontFaceFingerprint>,
 }
 
 #[doc(hidden)]
@@ -183,7 +259,7 @@ pub struct FontFingerprint {
 pub struct FontGeneration {
     pub(super) id: u64,
     pub(super) fingerprint: FontFingerprint,
-    pub(super) faces: [FontFace; 6],
+    pub(super) faces: Vec<FontFace>,
 }
 
 impl FontGeneration {
@@ -206,13 +282,16 @@ pub(super) struct FontFace {
     pub(super) family: String,
     pub(super) style: String,
     pub(super) path: PathBuf,
-    pub(super) index: usize,
+    pub(super) index: FontconfigFaceIndex,
     pub(super) weight: i32,
     pub(super) slant: i32,
     pub(super) generation_id: u64,
     pub(super) selected_pixel_size_26_6: isize,
     pub(super) source_identity: FileIdentity,
-    pub(super) data: Arc<ReadOnlyFileMap>,
+    pub(super) outline: bool,
+    pub(super) coverage: Box<[(u32, u32)]>,
+    pub(super) data: Option<Arc<ReadOnlyFileMap>>,
+    normalized_coords: OnceLock<Result<Box<[NormalizedCoord]>, String>>,
 }
 
 impl FontFace {
@@ -228,12 +307,24 @@ impl FontFace {
             generation_id: self.generation_id,
             selected_pixel_size_26_6: self.selected_pixel_size_26_6,
             source_identity: self.source_identity,
+            outline: self.outline,
+            coverage: self.coverage.clone(),
             data: self.data.clone(),
+            normalized_coords: OnceLock::new(),
         }
     }
 
-    fn identity(&self) -> (&std::path::Path, usize) {
-        (&self.path, self.index)
+    fn identity(&self) -> (&std::path::Path, u32) {
+        (&self.path, self.index.raw())
+    }
+
+    pub(super) fn covers_text(&self, text: &str) -> bool {
+        text.chars().all(|character| {
+            let codepoint = u32::from(character);
+            self.coverage
+                .iter()
+                .any(|(start, end)| (*start..=*end).contains(&codepoint))
+        })
     }
 
     fn fingerprint(&self) -> FontFaceFingerprint {
@@ -241,7 +332,7 @@ impl FontFace {
             family: self.family.clone(),
             style: self.style.clone(),
             path: self.path.clone(),
-            index: self.index,
+            index: self.index.raw(),
             weight: self.weight,
             slant: self.slant,
             selected_pixel_size_26_6: self.selected_pixel_size_26_6,
@@ -376,9 +467,13 @@ impl TextRow {
             }
             if *kind == CorpusKind::Combining {
                 let face_index = 0;
-                let font = font_ref(&faces[face_index])?;
+                let (font, coords) = font_ref_with_coords(&faces[face_index])?;
                 let mut shaped_glyphs = Vec::new();
-                let mut shaper = shape_context.builder(font).size(font_size).build();
+                let mut shaper = shape_context
+                    .builder(font)
+                    .size(font_size)
+                    .normalized_coords(coords)
+                    .build();
                 shaper.add_str(text);
                 shaper.shape_with(|cluster| {
                     let cluster_advance = cluster.advance();
@@ -461,9 +556,9 @@ impl TextRow {
                     continue;
                 }
                 let (face_index, glyph_id) = select_glyph(&faces, *kind, character)?;
-                let font = font_ref(&faces[face_index])?;
+                let (font, coords) = font_ref_with_coords(&faces[face_index])?;
                 let advance = font
-                    .glyph_metrics(&[])
+                    .glyph_metrics(coords)
                     .scale(font_size)
                     .advance_width(glyph_id);
                 let raster_started = Instant::now();
@@ -532,8 +627,13 @@ pub(super) fn cache_glyph(
     if cache.contains_key(&key) {
         return Ok(());
     }
-    let font = font_ref(&faces[face_index])?;
-    let mut scaler = context.builder(font).size(font_size).hint(true).build();
+    let (font, coords) = font_ref_with_coords(&faces[face_index])?;
+    let mut scaler = context
+        .builder(font)
+        .size(font_size)
+        .hint(true)
+        .normalized_coords(coords)
+        .build();
     let image = Render::new(&[
         Source::ColorOutline(0),
         Source::ColorBitmap(StrikeWith::BestFit),
@@ -584,7 +684,7 @@ pub fn snapshot_font_generation() -> Result<&'static Arc<FontGeneration>> {
         .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
-pub(super) fn snapshot_faces() -> Result<&'static [FontFace; 6]> {
+pub(super) fn snapshot_faces() -> Result<&'static [FontFace]> {
     Ok(&snapshot_font_generation()?.faces)
 }
 
@@ -619,8 +719,8 @@ pub(super) fn snapshot_glyph(
             let raster_key = (generation_id, face.selected_pixel_size_26_6, face_index);
             if !cache.raster_faces.contains_key(&raster_key) {
                 let raster_face = RasterFace::open_memory(
-                    &face.data,
-                    u32::try_from(face.index).context("emoji face index fits u32")?,
+                    face.data.as_deref().context("emoji face is staged")?,
+                    face.index.raw(),
                     face.selected_pixel_size_26_6,
                 )
                 .context("open staged emoji raster face")?;
@@ -651,14 +751,17 @@ pub(super) fn snapshot_glyph(
         } else {
             let raster_key = (generation_id, effective_size_26_6, face_index);
             if !cache.raster_faces.contains_key(&raster_key) {
-                let raster_face = RasterFace::open_memory(
-                    &faces[face_index].data,
-                    u32::try_from(faces[face_index].index).context("face index fits u32")?,
-                    pixel_size_26_6(font_size)?,
-                )
-                .with_context(|| {
-                    format!("open FreeType raster face {}", faces[face_index].label)
-                })?;
+                let face = &faces[face_index];
+                let pixel_size = pixel_size_26_6(font_size)?;
+                let fallback_mapping;
+                let data = if let Some(data) = face.data.as_deref() {
+                    data
+                } else {
+                    fallback_mapping = fallback_font_mapping(face)?;
+                    &fallback_mapping
+                };
+                let raster_face = RasterFace::open_memory(data, face.index.raw(), pixel_size)
+                    .with_context(|| format!("open FreeType raster face {}", face.label))?;
                 cache.prepare_raster_face_insert(raster_key);
                 cache.raster_faces.insert(raster_key, raster_face);
             }
@@ -736,7 +839,7 @@ pub(super) fn snapshot_color_advance(
 }
 
 pub(super) fn reset_snapshot_cache() {
-    SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
+    clear_snapshot_caches();
 }
 
 pub(super) fn evict_snapshot_glyphs() -> usize {
@@ -769,20 +872,28 @@ pub(super) fn process_rss_bytes() -> Option<u64> {
 /// Returns bounded persistent snapshot-glyph-cache metrics.
 #[must_use]
 pub fn snapshot_cache_metrics() -> serde_json::Value {
-    SNAPSHOT_GLYPH_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        serde_json::json!({
-            "entries": cache.glyphs.len(),
-            "raster_faces": cache.raster_faces.len(),
-            "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
-            "glyph_budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
-            "glyph_byte_budget": SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET,
-            "raster_face_budget": SNAPSHOT_RASTER_FACE_BUDGET,
-            "hits": cache.hits,
-            "misses": cache.misses,
-            "evictions": cache.evictions,
-            "raster_face_evictions": cache.raster_face_evictions,
-            "approximate_bytes": cache.glyph_bytes,
+    SNAPSHOT_GLYPH_CACHE.with(|glyph_cache| {
+        SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|mapping_cache| {
+            let glyph_cache = glyph_cache.borrow();
+            let mapping_cache = mapping_cache.borrow();
+            serde_json::json!({
+                "entries": glyph_cache.glyphs.len(),
+                "raster_faces": glyph_cache.raster_faces.len(),
+                "fallback_mappings": mapping_cache.mappings.len(),
+                "budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+                "glyph_budget": SNAPSHOT_GLYPH_CACHE_BUDGET,
+                "glyph_byte_budget": SNAPSHOT_GLYPH_CACHE_BYTE_BUDGET,
+                "raster_face_budget": SNAPSHOT_RASTER_FACE_BUDGET,
+                "fallback_mapping_budget": SNAPSHOT_FALLBACK_MAPPING_BUDGET,
+                "hits": glyph_cache.hits,
+                "misses": glyph_cache.misses,
+                "evictions": glyph_cache.evictions,
+                "raster_face_evictions": glyph_cache.raster_face_evictions,
+                "fallback_mapping_hits": mapping_cache.hits,
+                "fallback_mapping_misses": mapping_cache.misses,
+                "fallback_mapping_evictions": mapping_cache.evictions,
+                "approximate_bytes": glyph_cache.glyph_bytes,
+            })
         })
     })
 }
@@ -798,13 +909,13 @@ pub fn snapshot_cache_metrics() -> serde_json::Value {
 pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
     let face = resolve_face("ASCII evidence", &renderer_options().font, "")?;
     let font_size = effective_font_size(120)?;
-    let font = font_ref(&face)?;
-    let metrics = font.metrics(&[]).scale(font_size);
+    let (font, coords) = font_ref_with_coords(&face)?;
+    let metrics = font.metrics(coords).scale(font_size);
     let font_ascent = ceil_to_i32(metrics.ascent);
     let font_descent = ceil_to_i32(metrics.descent);
     let resolved_metrics = cell_metrics(&face, font_size)?;
     let font_height = i32::try_from(resolved_metrics.height).context("font height fits i32")?;
-    let glyph_metrics = font.glyph_metrics(&[]).scale(font_size);
+    let glyph_metrics = font.glyph_metrics(coords).scale(font_size);
     let mut context = ScaleContext::new();
     let mut records = Vec::with_capacity(95);
 
@@ -812,7 +923,12 @@ pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
         let glyph_id = font.charmap().map(character);
         let advance = positive_round_to_u32(glyph_metrics.advance_width(glyph_id));
-        let mut scaler = context.builder(font).size(font_size).hint(true).build();
+        let mut scaler = context
+            .builder(font)
+            .size(font_size)
+            .hint(true)
+            .normalized_coords(coords)
+            .build();
         let rendered = Render::new(&[
             Source::ColorOutline(0),
             Source::ColorBitmap(StrikeWith::BestFit),
@@ -853,7 +969,7 @@ pub fn ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
             "glyph_id": glyph_id,
             "font": face.family.as_str(),
             "font_path": face.path.display().to_string(),
-            "font_index": face.index,
+            "font_index": face.index.raw(),
             "font_ascent": font_ascent,
             "font_descent": font_descent,
             "font_height": font_height,
@@ -907,9 +1023,9 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         value.parse().context("parse evidence scale")
     })?;
     let font_size = effective_font_size(scale_120)?;
-    let font = font_ref(face)?;
+    let (font, coords) = font_ref_with_coords(face)?;
     let metrics = cell_metrics(face, font_size)?;
-    let glyph_metrics = font.glyph_metrics(&[]).scale(font_size);
+    let glyph_metrics = font.glyph_metrics(coords).scale(font_size);
     let mut records = Vec::with_capacity(96);
     for codepoint in 0x20_u32..=0x7e {
         let character = char::from_u32(codepoint).context("printable ASCII is valid Unicode")?;
@@ -930,7 +1046,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
             "glyph_id": glyph_id,
             "font": face.family.as_str(),
             "font_path": face.path.display().to_string(),
-            "font_index": face.index,
+            "font_index": face.index.raw(),
             "font_ascent": metrics.ascent,
             "font_descent": metrics.descent,
             "font_height": metrics.font_height,
@@ -961,7 +1077,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
 
     let codepoint = 0x754c;
     let fallback_face = &faces[SNAPSHOT_CJK];
-    let fallback_font = font_ref(fallback_face)?;
+    let (fallback_font, fallback_coords) = font_ref_with_coords(fallback_face)?;
     let glyph_id = fallback_font
         .charmap()
         .map(char::from_u32(codepoint).context("CJK codepoint")?);
@@ -972,7 +1088,9 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         right: 0,
         bottom: 0,
     });
-    let fallback_metrics = fallback_font.glyph_metrics(&[]).scale(font_size);
+    let fallback_metrics = fallback_font
+        .glyph_metrics(fallback_coords)
+        .scale(font_size);
     records.push(serde_json::json!({
         "schema": 1,
         "label": "CJK",
@@ -981,7 +1099,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         "glyph_id": glyph_id,
         "font": fallback_face.family.as_str(),
         "font_path": fallback_face.path.display().to_string(),
-        "font_index": fallback_face.index,
+        "font_index": fallback_face.index.raw(),
         "font_ascent": metrics.ascent,
         "font_descent": metrics.descent,
         "font_height": metrics.font_height,
@@ -1031,7 +1149,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         "glyph_id": glyph_id,
         "font": emoji_face.family.as_str(),
         "font_path": emoji_face.path.display().to_string(),
-        "font_index": emoji_face.index,
+        "font_index": emoji_face.index.raw(),
         "font_ascent": metrics.ascent,
         "font_descent": metrics.descent,
         "font_height": metrics.font_height,
@@ -1059,7 +1177,11 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
 
     let mut shaped_glyphs = Vec::new();
     let mut shape_context = ShapeContext::new();
-    let mut shaper = shape_context.builder(font).size(font_size).build();
+    let mut shaper = shape_context
+        .builder(font)
+        .size(font_size)
+        .normalized_coords(coords)
+        .build();
     shaper.add_str("e\u{301}");
     shaper.shape_with(|cluster| {
         let mut pen = 0.0;
@@ -1091,7 +1213,7 @@ pub fn production_ascii_glyph_evidence() -> Result<Vec<serde_json::Value>> {
         "glyph_id": glyph_id,
         "font": face.family.as_str(),
         "font_path": face.path.display().to_string(),
-        "font_index": face.index,
+        "font_index": face.index.raw(),
         "font_ascent": metrics.ascent,
         "font_descent": metrics.descent,
         "font_height": metrics.font_height,
@@ -1164,8 +1286,11 @@ pub(super) struct CellMetrics {
 )]
 pub(super) fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<CellMetrics> {
     let mut face = RasterFace::open_memory(
-        &primary_face.data,
-        u32::try_from(primary_face.index).context("primary face index")?,
+        primary_face
+            .data
+            .as_deref()
+            .context("primary face is staged")?,
+        primary_face.index.raw(),
         pixel_size_26_6(font_size)?,
     )
     .context("open primary FreeType face for cell metrics")?;
@@ -1216,11 +1341,13 @@ pub(crate) struct ResolvedFaceSource {
     family: String,
     style: String,
     path: PathBuf,
-    index: usize,
+    index: FontconfigFaceIndex,
     weight: i32,
     slant: i32,
     selected_pixel_size_26_6: isize,
     source_identity: FileIdentity,
+    outline: bool,
+    coverage: Box<[(u32, u32)]>,
 }
 
 impl ResolvedFaceSource {
@@ -1229,7 +1356,7 @@ impl ResolvedFaceSource {
             family: self.family.clone(),
             style: self.style.clone(),
             path: self.path.clone(),
-            index: self.index,
+            index: self.index.raw(),
             weight: self.weight,
             slant: self.slant,
             selected_pixel_size_26_6: self.selected_pixel_size_26_6,
@@ -1238,17 +1365,124 @@ impl ResolvedFaceSource {
     }
 }
 
-fn resolve_face_source(
+const FONTCONFIG_FACE_FORMAT: &str = "%{file}\\n%{index}\\n%{family[0]}\\n%{style}\\n%{weight}\\n%{slant}\\n%{pixelsize}\\n%{outline}\\n%{charset}\\n--record--\\n";
+
+fn parse_fontconfig_charset(value: &str) -> Result<Box<[(u32, u32)]>> {
+    value
+        .split_whitespace()
+        .map(|range| {
+            let (start, end) = range.split_once('-').unwrap_or((range, range));
+            let start = u32::from_str_radix(start, 16)
+                .with_context(|| format!("invalid Fontconfig charset start {start:?}"))?;
+            let end = u32::from_str_radix(end, 16)
+                .with_context(|| format!("invalid Fontconfig charset end {end:?}"))?;
+            anyhow::ensure!(
+                start <= end && end <= u32::from(char::MAX),
+                "invalid Fontconfig charset range {range:?}"
+            );
+            Ok((start, end))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Vec::into_boxed_slice)
+}
+
+fn parse_fontconfig_sources(label: &'static str, stdout: &[u8]) -> Result<Vec<ResolvedFaceSource>> {
+    let stdout = std::str::from_utf8(stdout).context("fc-match output is not UTF-8")?;
+    stdout
+        .split("--record--\n")
+        .filter(|record| !record.trim().is_empty())
+        .map(|record| {
+            let mut lines = record.lines();
+            let path = PathBuf::from(
+                lines
+                    .next()
+                    .with_context(|| format!("fc-match returned no font path for {label}"))?,
+            );
+            let index = FontconfigFaceIndex::from_fontconfig(
+                lines
+                    .next()
+                    .with_context(|| format!("fc-match returned no face index for {label}"))?
+                    .parse::<u32>()
+                    .with_context(|| {
+                        format!("fc-match returned a non-numeric face index for {label}")
+                    })?,
+            )?;
+            let family = lines
+                .next()
+                .with_context(|| format!("fc-match returned no font family for {label}"))?
+                .to_owned();
+            let style = lines
+                .next()
+                .with_context(|| format!("fc-match returned no style for {label}"))?
+                .to_owned();
+            let weight = lines
+                .next()
+                .with_context(|| format!("fc-match returned no weight for {label}"))?
+                .parse::<i32>()
+                .with_context(|| format!("fc-match returned a non-numeric weight for {label}"))?;
+            let slant = lines
+                .next()
+                .with_context(|| format!("fc-match returned no slant for {label}"))?
+                .parse::<i32>()
+                .with_context(|| format!("fc-match returned a non-numeric slant for {label}"))?;
+            let selected_pixel_size = lines
+                .next()
+                .with_context(|| format!("fc-match returned no pixel size for {label}"))?
+                .parse::<f32>()
+                .with_context(|| format!("fc-match returned an invalid pixel size for {label}"))?;
+            let outline = match lines
+                .next()
+                .with_context(|| format!("fc-match returned no outline flag for {label}"))?
+            {
+                "True" => true,
+                "False" => false,
+                value => bail!("fc-match returned an invalid outline flag {value:?} for {label}"),
+            };
+            let coverage = parse_fontconfig_charset(
+                lines
+                    .next()
+                    .with_context(|| format!("fc-match returned no charset for {label}"))?,
+            )?;
+            let metadata = std::fs::metadata(&path)
+                .with_context(|| format!("inspect resolved {label} font {}", path.display()))?;
+            anyhow::ensure!(
+                metadata.is_file() && metadata.len() > 0,
+                "resolved font is not a non-empty regular file"
+            );
+            Ok(ResolvedFaceSource {
+                label,
+                family,
+                style,
+                path,
+                index,
+                weight,
+                slant,
+                selected_pixel_size_26_6: pixel_size_26_6(selected_pixel_size)?,
+                source_identity: FileIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    length: metadata.len(),
+                    modified_seconds: metadata.mtime(),
+                    modified_nanoseconds: metadata.mtime_nsec(),
+                },
+                outline,
+                coverage,
+            })
+        })
+        .collect()
+}
+
+fn run_fontconfig_sources(
     label: &'static str,
     pattern: &str,
-    expected_family_fragment: &str,
-) -> Result<ResolvedFaceSource> {
-    let output = Command::new("fc-match")
-        .args([
-            "-f",
-            "%{file}\\n%{index}\\n%{family[0]}\\n%{style}\\n%{weight}\\n%{slant}\\n%{pixelsize}\\n",
-            pattern,
-        ])
+    sorted: bool,
+) -> Result<Vec<ResolvedFaceSource>> {
+    let mut command = Command::new("fc-match");
+    if sorted {
+        command.arg("-s");
+    }
+    let output = command
+        .args(["-f", FONTCONFIG_FACE_FORMAT, pattern])
         .output()
         .with_context(|| format!("run fc-match for {label}"))?;
     if !output.status.success() {
@@ -1257,71 +1491,27 @@ fn resolve_face_source(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let stdout = String::from_utf8(output.stdout).context("fc-match output is not UTF-8")?;
-    let mut lines = stdout.lines();
-    let path = PathBuf::from(
-        lines
-            .next()
-            .with_context(|| format!("fc-match returned no font path for {label}"))?,
-    );
-    let index = lines
+    parse_fontconfig_sources(label, &output.stdout)
+}
+
+fn resolve_face_source(
+    label: &'static str,
+    pattern: &str,
+    expected_family_fragment: &str,
+) -> Result<ResolvedFaceSource> {
+    let source = run_fontconfig_sources(label, pattern, false)?
+        .into_iter()
         .next()
-        .with_context(|| format!("fc-match returned no face index for {label}"))?
-        .parse::<usize>()
-        .with_context(|| format!("fc-match returned a non-numeric face index for {label}"))?;
-    let family = lines
-        .next()
-        .with_context(|| format!("fc-match returned no font family for {label}"))?
-        .to_owned();
-    let style = lines
-        .next()
-        .with_context(|| format!("fc-match returned no style for {label}"))?
-        .to_owned();
-    let weight = lines
-        .next()
-        .with_context(|| format!("fc-match returned no weight for {label}"))?
-        .parse::<i32>()
-        .with_context(|| format!("fc-match returned a non-numeric weight for {label}"))?;
-    let slant = lines
-        .next()
-        .with_context(|| format!("fc-match returned no slant for {label}"))?
-        .parse::<i32>()
-        .with_context(|| format!("fc-match returned a non-numeric slant for {label}"))?;
-    let selected_pixel_size = lines
-        .next()
-        .with_context(|| format!("fc-match returned no pixel size for {label}"))?
-        .parse::<f32>()
-        .with_context(|| format!("fc-match returned an invalid pixel size for {label}"))?;
-    let selected_pixel_size_26_6 = pixel_size_26_6(selected_pixel_size)?;
-    let normalized_family = normalize_family(&family);
+        .with_context(|| format!("fc-match returned no face for {label}"))?;
+    let normalized_family = normalize_family(&source.family);
     let normalized_expected = normalize_family(expected_family_fragment);
     if !normalized_expected.is_empty() && !normalized_family.contains(&normalized_expected) {
-        bail!("explicit {label} pattern {pattern:?} resolved unexpectedly to {family:?}");
+        bail!(
+            "explicit {label} pattern {pattern:?} resolved unexpectedly to {:?}",
+            source.family
+        );
     }
-    let metadata = std::fs::metadata(&path)
-        .with_context(|| format!("inspect resolved {label} font {}", path.display()))?;
-    anyhow::ensure!(
-        metadata.is_file() && metadata.len() > 0,
-        "resolved font is not a non-empty regular file"
-    );
-    let source_identity = FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        length: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-    };
-    Ok(ResolvedFaceSource {
-        label,
-        family,
-        style,
-        path,
-        index,
-        weight,
-        slant,
-        selected_pixel_size_26_6,
-        source_identity,
-    })
+    Ok(source)
 }
 
 fn stage_face(source: ResolvedFaceSource) -> Result<FontFace> {
@@ -1343,7 +1533,10 @@ fn stage_face(source: ResolvedFaceSource) -> Result<FontFace> {
         generation_id: 0,
         selected_pixel_size_26_6: source.selected_pixel_size_26_6,
         source_identity: source.source_identity,
-        data,
+        outline: source.outline,
+        coverage: source.coverage,
+        data: Some(data),
+        normalized_coords: OnceLock::new(),
     };
     font_ref(&face).with_context(|| format!("parse resolved {} font", face.label))?;
     eprintln!(
@@ -1351,10 +1544,44 @@ fn stage_face(source: ResolvedFaceSource) -> Result<FontFace> {
         face.label,
         face.family,
         face.style,
-        face.index,
+        face.index.raw(),
         face.path.display()
     );
     Ok(face)
+}
+
+fn unstaged_fallback_face(source: ResolvedFaceSource) -> FontFace {
+    FontFace {
+        label: source.label,
+        family: source.family,
+        style: source.style,
+        path: source.path,
+        index: source.index,
+        weight: source.weight,
+        slant: source.slant,
+        generation_id: 0,
+        selected_pixel_size_26_6: source.selected_pixel_size_26_6,
+        source_identity: source.source_identity,
+        outline: source.outline,
+        coverage: source.coverage,
+        data: None,
+        normalized_coords: OnceLock::new(),
+    }
+}
+
+fn resolve_fallback_sources(
+    pattern: &str,
+    excluded: &HashSet<(PathBuf, FontconfigFaceIndex)>,
+) -> Result<Vec<ResolvedFaceSource>> {
+    let mut identities = excluded.clone();
+    Ok(
+        run_fontconfig_sources("fontconfig fallback", pattern, true)?
+            .into_iter()
+            .filter(|source| {
+                source.outline && identities.insert((source.path.clone(), source.index))
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn resolve_face(
@@ -1435,7 +1662,7 @@ fn probe_primary_style_source(
     match candidate {
         Ok(candidate)
             if normalize_family(&candidate.family) == normalize_family(&regular.family)
-                && candidate.path != regular.path
+                && (candidate.path != regular.path || candidate.index != regular.index)
                 && request.bold == (candidate.weight > regular.weight)
                 && request.italic == (candidate.slant != regular.slant) =>
         {
@@ -1461,25 +1688,33 @@ pub fn probe_live_font_sources(pattern: &str, authority: FontAuthority) -> Resul
         expected_primary_family_fragment(pattern),
     )?;
     let [bold_request, italic_request, bold_italic_request] = PRIMARY_STYLE_REQUESTS;
-    let sources = [
+    let mut sources = Vec::from([
         regular.clone(),
         probe_primary_style_source(&regular, bold_request),
         probe_primary_style_source(&regular, italic_request),
         probe_primary_style_source(&regular, bold_italic_request),
         resolve_face_source("CJK fallback", CJK_FONT, "noto sans cjk")?,
         resolve_face_source("emoji fallback", EMOJI_FONT, "noto color emoji")?,
-    ];
+    ]);
+    let excluded = sources
+        .iter()
+        .map(|source| (source.path.clone(), source.index))
+        .collect::<HashSet<_>>();
+    sources.extend(resolve_fallback_sources(pattern, &excluded)?);
     Ok(FontFingerprint {
         pattern: pattern.to_owned(),
         authority,
-        faces: std::array::from_fn(|index| sources[index].fingerprint()),
+        faces: sources
+            .iter()
+            .map(ResolvedFaceSource::fingerprint)
+            .collect(),
     })
 }
 
 fn face_advance(face: &FontFace, font_size: f32) -> Result<f32> {
-    let font = font_ref(face)?;
+    let (font, coords) = font_ref_with_coords(face)?;
     let advance = font
-        .glyph_metrics(&[])
+        .glyph_metrics(coords)
         .scale(font_size)
         .advance_width(font.charmap().map('M'));
     anyhow::ensure!(advance.is_finite() && advance > 0.0, "invalid M advance");
@@ -1603,21 +1838,31 @@ fn resolve_font_candidate(
         resolve_primary_faces_exact(pattern)?
     };
     let id = NEXT_FONT_GENERATION_ID.fetch_add(1, Ordering::Relaxed);
-    let mut faces = [
+    let mut faces = Vec::from([
         regular,
         bold,
         italic,
         bold_italic,
         resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")?,
         resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")?,
-    ];
+    ]);
+    let excluded = faces
+        .iter()
+        .map(|face| (face.path.clone(), face.index))
+        .collect::<HashSet<_>>();
+    let fallback_sources = resolve_fallback_sources(pattern, &excluded)?;
+    eprintln!(
+        "Resolved {} ordered Fontconfig fallback faces",
+        fallback_sources.len()
+    );
+    faces.extend(fallback_sources.into_iter().map(unstaged_fallback_face));
     for face in &mut faces {
         face.generation_id = id;
     }
     let fingerprint = FontFingerprint {
         pattern: pattern.to_owned(),
         authority,
-        faces: std::array::from_fn(|index| faces[index].fingerprint()),
+        faces: faces.iter().map(FontFace::fingerprint).collect(),
     };
     Ok(FontGeneration {
         id,
@@ -1670,18 +1915,93 @@ pub fn stage_live_font_generation(
     stage_font_generation(pattern, authority, false)
 }
 
-pub(super) fn font_data(face: &FontFace) -> &[u8] {
-    &face.data
+pub(super) fn font_data(face: &FontFace) -> Result<&[u8]> {
+    face.data
+        .as_deref()
+        .map(|mapping| &**mapping)
+        .context("fallback font data requires the bounded mapping cache")
+}
+
+fn parse_font_ref<'a>(face: &FontFace, data: &'a [u8]) -> Result<FontRef<'a>> {
+    FontRef::from_index(data, face.index.collection_index()).with_context(|| {
+        format!(
+            "parse {} Fontconfig face {} (collection face {}) with Swash",
+            face.path.display(),
+            face.index.raw(),
+            face.index.collection_index()
+        )
+    })
+}
+
+fn normalized_coords<'a>(face: &'a FontFace, font: FontRef<'_>) -> Result<&'a [NormalizedCoord]> {
+    face.normalized_coords
+        .get_or_init(|| {
+            let Some(instance_index) = face.index.named_instance_index() else {
+                return Ok(Box::new([]));
+            };
+            let Some(instance) = font.instances().nth(instance_index) else {
+                return Err(format!(
+                    "Fontconfig face {} selects missing named instance {} in {}",
+                    face.index.raw(),
+                    instance_index + 1,
+                    face.path.display()
+                ));
+            };
+            Ok(instance
+                .normalized_coords()
+                .collect::<Vec<_>>()
+                .into_boxed_slice())
+        })
+        .as_ref()
+        .map(Box::as_ref)
+        .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
 pub(super) fn font_ref(face: &FontFace) -> Result<FontRef<'_>> {
-    FontRef::from_index(font_data(face), face.index).with_context(|| {
-        format!(
-            "parse {} face {} with Swash",
-            face.path.display(),
-            face.index
-        )
+    let font = parse_font_ref(face, font_data(face)?)?;
+    normalized_coords(face, font)?;
+    Ok(font)
+}
+
+fn font_ref_with_coords(face: &FontFace) -> Result<(FontRef<'_>, &[NormalizedCoord])> {
+    let font = font_ref(face)?;
+    let coords = normalized_coords(face, font)?;
+    Ok((font, coords))
+}
+
+fn fallback_font_mapping(face: &FontFace) -> Result<Arc<ReadOnlyFileMap>> {
+    let key = (face.path.clone(), face.source_identity);
+    SNAPSHOT_FALLBACK_MAPPING_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(mapping) = cache.mappings.get(&key).cloned() {
+            cache.hits = cache.hits.saturating_add(1);
+            return Ok(mapping);
+        }
+        cache.misses = cache.misses.saturating_add(1);
+        let mapping = Arc::new(
+            ReadOnlyFileMap::open(&face.path)
+                .with_context(|| format!("map fallback {}", face.path.display()))?,
+        );
+        anyhow::ensure!(
+            mapping.identity() == face.source_identity,
+            "fallback font source changed before mapping"
+        );
+        Ok(cache.insert(key, mapping))
     })
+}
+
+pub(super) fn with_font_ref<T>(
+    face: &FontFace,
+    use_font: impl FnOnce(FontRef<'_>, &[NormalizedCoord]) -> Result<T>,
+) -> Result<T> {
+    if face.data.is_some() {
+        let (font, coords) = font_ref_with_coords(face)?;
+        return use_font(font, coords);
+    }
+    let mapping = fallback_font_mapping(face)?;
+    let font = parse_font_ref(face, &mapping)?;
+    let coords = normalized_coords(face, font)?;
+    use_font(font, coords)
 }
 
 pub(super) fn select_glyph(
@@ -1797,14 +2117,150 @@ mod tests {
             family: family.to_owned(),
             style: label.to_owned(),
             path: PathBuf::from(path),
-            index: 0,
+            index: FontconfigFaceIndex::new(0),
             weight,
             slant,
             generation_id: 0,
             selected_pixel_size_26_6: 12 * 64,
             source_identity: data.identity(),
-            data,
+            outline: true,
+            coverage: vec![(0, u32::from(char::MAX))].into_boxed_slice(),
+            data: Some(data),
+            normalized_coords: OnceLock::new(),
         }
+    }
+
+    #[test]
+    fn packed_fontconfig_face_index_separates_collection_and_named_instance() {
+        let static_face = FontconfigFaceIndex::new(7);
+        assert_eq!(static_face.raw(), 7);
+        assert_eq!(static_face.collection_index(), 7);
+        assert_eq!(static_face.named_instance_index(), None);
+
+        let victor_regular = FontconfigFaceIndex::new(0x0004_0000);
+        assert_eq!(victor_regular.raw(), 262_144);
+        assert_eq!(victor_regular.collection_index(), 0);
+        assert_eq!(victor_regular.named_instance_index(), Some(3));
+
+        let collection_instance = FontconfigFaceIndex::new(0x0003_0004);
+        assert_eq!(collection_instance.collection_index(), 4);
+        assert_eq!(collection_instance.named_instance_index(), Some(2));
+        assert!(FontconfigFaceIndex::from_fontconfig(0x8000_0000).is_err());
+    }
+
+    #[test]
+    fn fontconfig_source_parser_preserves_packed_variable_instance_index() {
+        let path = std::env::temp_dir().join(format!(
+            "splinterm-fontconfig-index-fixture-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"font fixture").unwrap();
+        let output = format!(
+            "{}\n262144\nVariable Mono\nRegular\n80\n0\n14\nTrue\n20-7e\n--record--\n",
+            path.display()
+        );
+        let sources = parse_fontconfig_sources("variable fixture", output.as_bytes()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].index.raw(), 262_144);
+        assert_eq!(sources[0].index.collection_index(), 0);
+        assert_eq!(sources[0].index.named_instance_index(), Some(3));
+    }
+
+    #[test]
+    #[ignore = "manual variable-font integration; requires SPLINTERM_VARIABLE_FONT_FIXTURE and SPLINTERM_VARIABLE_FONT_INDEX"]
+    fn variable_font_named_instance_shapes_and_rasterizes_with_freetype_identity() {
+        let path = PathBuf::from(
+            std::env::var("SPLINTERM_VARIABLE_FONT_FIXTURE")
+                .expect("SPLINTERM_VARIABLE_FONT_FIXTURE names a variable font"),
+        );
+        let raw_index = std::env::var("SPLINTERM_VARIABLE_FONT_INDEX")
+            .expect("SPLINTERM_VARIABLE_FONT_INDEX names a Fontconfig packed index")
+            .parse::<u32>()
+            .expect("packed index is numeric");
+        let snapshot = ReadOnlyFileMap::immutable_snapshot(&path, MAX_STAGED_FONT_BYTES).unwrap();
+        let mut face = synthetic_face("variable", "Variable Mono", "/fonts/variable.ttf", 80, 0);
+        face.path = path;
+        face.index = FontconfigFaceIndex::from_fontconfig(raw_index).unwrap();
+        face.source_identity = snapshot.source_identity;
+        face.data = Some(Arc::new(snapshot.mapping));
+
+        let (font, coords) = font_ref_with_coords(&face).unwrap();
+        assert!(face.index.named_instance_index().is_some());
+        assert!(!coords.is_empty());
+        let glyph_id = font.charmap().map('M');
+        assert_ne!(glyph_id, 0);
+        let swash_advance = font
+            .glyph_metrics(coords)
+            .scale(BASE_FONT_SIZE)
+            .advance_width(glyph_id);
+        assert!(swash_advance.is_finite() && swash_advance > 0.0);
+
+        let mut shape_context = ShapeContext::new();
+        let mut shaped_glyph_ids = Vec::new();
+        let mut shaper = shape_context
+            .builder(font)
+            .size(BASE_FONT_SIZE)
+            .normalized_coords(coords)
+            .build();
+        shaper.add_str("Mono");
+        shaper.shape_with(|cluster| {
+            shaped_glyph_ids.extend(cluster.glyphs.iter().map(|glyph| glyph.id));
+        });
+        assert!(!shaped_glyph_ids.is_empty());
+
+        let mut scale_context = ScaleContext::new();
+        let mut scaler = scale_context
+            .builder(font)
+            .size(BASE_FONT_SIZE)
+            .normalized_coords(coords)
+            .hint(true)
+            .build();
+        assert!(
+            Render::new(&[Source::Outline])
+                .format(Format::Alpha)
+                .render(&mut scaler, glyph_id)
+                .is_some()
+        );
+
+        let mut freetype = RasterFace::open_memory(
+            face.data.as_deref().unwrap(),
+            face.index.raw(),
+            pixel_size_26_6(BASE_FONT_SIZE).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(freetype.glyph_index('M'), u32::from(glyph_id));
+        assert!(freetype.rasterize_gray(u32::from(glyph_id)).is_ok());
+    }
+
+    #[test]
+    fn fontconfig_charset_parser_covers_singletons_ranges_and_non_bmp_codepoints() {
+        let coverage = parse_fontconfig_charset("20-7e 21d5 1f4e6-1f4e7").unwrap();
+        let mut face = synthetic_face("fallback", "Chosen Mono", "/fonts/fallback.ttf", 80, 0);
+        face.coverage = coverage;
+        assert!(face.covers_text("A⇕📦"));
+        assert!(!face.covers_text("A🦀"));
+        assert!(parse_fontconfig_charset("7e-20").is_err());
+        assert!(parse_fontconfig_charset("110000").is_err());
+    }
+
+    #[test]
+    fn fallback_font_mapping_cache_remains_bounded() {
+        let face = synthetic_face("mapping", "Chosen Mono", "/fonts/mapping.ttf", 80, 0);
+        let mapping = face.data.expect("synthetic face is mapped");
+        let identity = mapping.identity();
+        let mut cache = PersistentFontMappingCache::default();
+        for index in 0..=SNAPSHOT_FALLBACK_MAPPING_BUDGET {
+            cache.insert(
+                (
+                    PathBuf::from(format!("/fonts/fallback-{index}.ttf")),
+                    identity,
+                ),
+                Arc::clone(&mapping),
+            );
+        }
+        assert_eq!(cache.mappings.len(), SNAPSHOT_FALLBACK_MAPPING_BUDGET);
+        assert_eq!(cache.evictions, 1);
     }
 
     #[test]
@@ -1856,6 +2312,15 @@ mod tests {
             style_candidate_rejection(&regular, &compatible_oblique, request, 8.0, 8.0),
             None,
             "Fontconfig oblique faces satisfy an italic slant request"
+        );
+
+        let mut named_instance =
+            synthetic_face("bold italic", "Chosen Mono", "/fonts/regular.ttf", 200, 100);
+        named_instance.index = FontconfigFaceIndex::new(0x0007_0000);
+        assert_eq!(
+            style_candidate_rejection(&regular, &named_instance, request, 8.0, 8.0),
+            None,
+            "a distinct named instance in the same variable-font file is a distinct face"
         );
 
         let foreign = synthetic_face("bold italic", "Other Mono", "/fonts/other.ttf", 200, 100);

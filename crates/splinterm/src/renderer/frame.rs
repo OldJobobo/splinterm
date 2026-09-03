@@ -20,12 +20,11 @@ use crate::{
 
 use super::{
     BOX_DRAWING_FACE, CachedGlyph, FontFace, FontGeneration, GlyphKey, RenderContext, SNAPSHOT_CJK,
-    SNAPSHOT_EMOJI, SNAPSHOT_PRIMARY_BOLD, SNAPSHOT_PRIMARY_BOLD_ITALIC, SNAPSHOT_PRIMARY_ITALIC,
-    SNAPSHOT_PRIMARY_REGULAR, cell_metrics, compatibility_render_context,
+    SNAPSHOT_EMOJI, SNAPSHOT_FALLBACK_START, SNAPSHOT_PRIMARY_BOLD, SNAPSHOT_PRIMARY_BOLD_ITALIC,
+    SNAPSHOT_PRIMARY_ITALIC, SNAPSHOT_PRIMARY_REGULAR, cell_metrics, compatibility_render_context,
     decorations::{DecorationMetrics, DecorationSpan},
-    font_ref,
     images::{SnapshotImage, prepare_snapshot_images},
-    snapshot_color_advance, snapshot_glyph, u32_to_f32,
+    snapshot_color_advance, snapshot_glyph, u32_to_f32, with_font_ref,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -787,18 +786,24 @@ pub(super) fn prepare_snapshot_row(
                 Ok(face_index) => (face_index, cell.content.as_str()),
                 Err(_) => (primary_face_index(&cell.attributes), "\u{fffd}"),
             };
-        let font = font_ref(&faces[face_index])?;
-        let mut shaped_glyphs = Vec::new();
-        let mut shaper = shape_context.builder(font).size(font_size).build();
-        shaper.add_str(content);
-        shaper.shape_with(|cluster| {
-            let advance = cluster.advance();
-            let mut pen = 0.0;
-            for glyph in cluster.glyphs {
-                shaped_glyphs.push((glyph.id, advance, pen + glyph.x, glyph.y));
-                pen += glyph.advance;
-            }
-        });
+        let shaped_glyphs = with_font_ref(&faces[face_index], |font, coords| {
+            let mut shaped_glyphs = Vec::new();
+            let mut shaper = shape_context
+                .builder(font)
+                .size(font_size)
+                .normalized_coords(coords)
+                .build();
+            shaper.add_str(content);
+            shaper.shape_with(|cluster| {
+                let advance = cluster.advance();
+                let mut pen = 0.0;
+                for glyph in cluster.glyphs {
+                    shaped_glyphs.push((glyph.id, advance, pen + glyph.x, glyph.y));
+                    pen += glyph.advance;
+                }
+            });
+            Ok(shaped_glyphs)
+        })?;
         for (glyph_id, cluster_advance, x_offset, y_offset) in shaped_glyphs {
             let key = GlyphKey {
                 face: face_index,
@@ -861,13 +866,18 @@ pub(super) fn select_face_for_text(
     let primary = primary_face_index(attributes);
     [primary, SNAPSHOT_CJK, SNAPSHOT_EMOJI]
         .into_iter()
+        .chain(SNAPSHOT_FALLBACK_START..faces.len())
         .find(|index| {
-            font_ref(&faces[*index]).is_ok_and(|font| {
-                text.chars()
-                    .all(|character| font.charmap().map(character) != 0)
-            })
+            let face = &faces[*index];
+            face.covers_text(text)
+                && with_font_ref(face, |font, _coords| {
+                    Ok(text
+                        .chars()
+                        .all(|character| font.charmap().map(character) != 0))
+                })
+                .unwrap_or(false)
         })
-        .with_context(|| format!("no explicit font covers snapshot cell {text:?}"))
+        .with_context(|| format!("no Fontconfig face covers snapshot cell {text:?}"))
 }
 
 pub(super) fn primary_face_index(attributes: &CellAttributes) -> usize {

@@ -121,12 +121,16 @@ Renderer ownership is explicit. `RendererResources` holds immutable
 process-wide sizing, padding, and renderer options. Every graphical Window owns
 one mutable `RenderContext` containing its output DPI, font zoom, background
 alpha, and an `Arc` to one immutable `FontGeneration`. A generation owns the
-complete resolved regular/bold/italic/bold-italic and fallback set, source
-fingerprints, and bounded sealed byte snapshots used by both Swash and the safe
-FreeType wrapper. Prepared frames retain their generation and capture their
-context-dependent metrics and alpha, so composition and deterministic capture
-do not consult ambient mutable state. Glyph and raster-face cache keys include
-the generation identity; incremental refresh rejects a generation mismatch.
+complete resolved regular/bold/italic/bold-italic and ordered fallback metadata,
+source fingerprints, and bounded sealed byte snapshots for the primary, CJK,
+and emoji faces used by both Swash and the safe FreeType wrapper. Dynamic
+fallback mappings remain lazy and bounded to 24 entries; their cache identity
+includes the resolved source identity so a same-path font replacement cannot
+reuse bytes from an older generation. Prepared frames retain their generation
+and capture their context-dependent metrics and alpha, so composition and
+deterministic capture do not consult ambient mutable state. Glyph and
+raster-face cache keys include the generation identity; incremental refresh
+rejects a generation mismatch.
 Existing public configuration and capture signatures retain a separate
 compatibility context, but production Wayland rendering uses explicit context
 paths. Bounded native FreeType handles remain renderer-thread-local and are

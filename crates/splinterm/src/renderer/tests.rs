@@ -754,6 +754,42 @@ fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
 }
 
 #[test]
+fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
+    let generation = Arc::new(
+        stage_live_font_generation("monospace", crate::config::FontAuthority::NativeOmarchy)
+            .unwrap(),
+    );
+    let faces = &generation.faces;
+    let attributes = CellAttributes::default();
+    let face_index = select_face_for_text(faces, "⇕", &attributes).unwrap();
+    assert!(
+        face_index >= SNAPSHOT_FALLBACK_START,
+        "the pinned primary, CJK, and emoji faces do not cover U+21D5"
+    );
+    assert!(
+        faces[face_index].data.is_none(),
+        "dynamic fallbacks must use the bounded mapping cache"
+    );
+    let glyph_id = with_font_ref(&faces[face_index], |font, _coords| {
+        Ok(font.charmap().map('⇕'))
+    })
+    .unwrap();
+    assert_ne!(glyph_id, 0);
+
+    let mut snapshot = incremental_snapshot();
+    snapshot.visible_rows[0].cells[0].content = "⇕".to_owned();
+    let mut context = RenderContext::new(u16::MAX);
+    context.replace_font_generation(generation);
+    let frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
+    assert!(
+        frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.column == 0 && glyph.row == 0 && glyph.key.face == face_index)
+    );
+}
+
+#[test]
 fn snapshot_styles_select_distinct_primary_faces_and_cache_keys() {
     let mut snapshot = incremental_snapshot();
     snapshot.visible_rows[0].cells[0].content = "A".to_owned();
@@ -868,12 +904,13 @@ fn underline_style_color_partial_mutation_matches_clean_full_rebuild() {
 #[test]
 fn selected_font_bytes_and_opened_identity_are_staged_together() {
     let face = resolve_face("staged CJK test", CJK_FONT, "noto sans cjk").unwrap();
-    assert!(!face.data.is_empty());
+    let data = face.data.as_ref().expect("explicit faces are staged");
+    assert!(!data.is_empty());
     assert_eq!(
         face.source_identity.length,
-        u64::try_from(face.data.len()).unwrap()
+        u64::try_from(data.len()).unwrap()
     );
-    assert_ne!(face.source_identity, face.data.identity());
+    assert_ne!(face.source_identity, data.identity());
     assert_ne!(font_ref(&face).unwrap().charmap().map('界'), 0);
 }
 
@@ -886,7 +923,11 @@ fn memory_backed_freetype_keeps_the_staged_inode_after_path_replacement() {
         std::process::id()
     ));
     let retired = path.with_extension("retired");
-    fs::write(&path, &**source.data).unwrap();
+    fs::write(
+        &path,
+        &***source.data.as_ref().expect("explicit faces are staged"),
+    )
+    .unwrap();
     let staged = Arc::new(
         splinterm_filemap::ReadOnlyFileMap::immutable_snapshot(
             &path,
@@ -898,14 +939,10 @@ fn memory_backed_freetype_keeps_the_staged_inode_after_path_replacement() {
     fs::rename(&path, &retired).unwrap();
     fs::write(&path, b"not a font").unwrap();
 
-    let shaped = swash::FontRef::from_index(&staged, source.index).unwrap();
+    let shaped = swash::FontRef::from_index(&staged, source.index.collection_index()).unwrap();
     assert_ne!(shaped.charmap().map('界'), 0);
-    let mut raster = splinterm_freetype::RasterFace::open_memory(
-        &staged,
-        u32::try_from(source.index).unwrap(),
-        22 * 64,
-    )
-    .unwrap();
+    let mut raster =
+        splinterm_freetype::RasterFace::open_memory(&staged, source.index.raw(), 22 * 64).unwrap();
     assert!(raster.metrics().unwrap().height > 0);
 
     fs::remove_file(path).unwrap();
