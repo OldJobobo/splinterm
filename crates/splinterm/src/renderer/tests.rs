@@ -756,8 +756,7 @@ fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
 #[test]
 fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
     let generation = Arc::new(
-        stage_live_font_generation("monospace", crate::config::FontAuthority::NativeOmarchy)
-            .unwrap(),
+        stage_live_font_generation(PRIMARY_FONT, crate::config::FontAuthority::Explicit).unwrap(),
     );
     let faces = &generation.faces;
     let attributes = CellAttributes::default();
