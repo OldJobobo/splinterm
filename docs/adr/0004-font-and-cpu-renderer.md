@@ -138,13 +138,15 @@ cleared at successful generation publication; old bytes remain alive only while
 an old prepared frame still retains its generation.
 
 When `main.font` is unset, the client treats fontconfig `monospace` as native
-Omarchy family authority and probes complete effective source identities on a
-bounded interval. Resolution, immutable snapshotting, parsing, metric checks,
-and stable double-resolution run off Tokio and Wayland dispatch paths. A valid
-candidate is fully prepared for active, inactive, and hidden panes before one
-callback-boundary publication. Failure leaves the active generation in place.
-Explicit `main.font` disables this watcher. The startup-only documented
-JetBrains fallback is not available during live updates.
+Omarchy family authority and probes complete effective source identities every
+ten seconds after an initial ten-second delay. This bounds idle Fontconfig
+subprocess churn while retaining live following. Resolution, immutable
+snapshotting, parsing, metric checks, and stable double-resolution run off Tokio
+and Wayland dispatch paths. A valid candidate is fully prepared for active,
+inactive, and hidden panes before one callback-boundary publication. Failure
+leaves the active generation in place. Explicit `main.font` disables this
+watcher. The startup-only documented JetBrains fallback is not available during
+live updates.
 
 Release budgets are enforced by `tools/performance/phase9-thresholds.json`.
 Notable limits are 10/300 ms full-paint p95 at 80×24/240×80, 1/10 ms one-row

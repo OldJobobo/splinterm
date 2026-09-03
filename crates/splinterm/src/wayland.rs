@@ -916,6 +916,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
                 search: SearchUiState::default(),
                 authority: options.authority,
                 last_resize: None,
+                pending_resize: None,
                 prepare_dirty_rows: Vec::new(),
                 raster_dirty_rows: Vec::new(),
                 surface_dirty_rows: Vec::new(),
@@ -1004,6 +1005,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             app.apply_updates(&queue_handle)?;
             if !app.scheduling.exit {
                 app.flush_pending_terminal_input();
+                app.retry_pending_pane_resizes()?;
             }
             if app.scheduling.redraw_pending
                 && !pending_draw_waits_for_frame(
@@ -1119,6 +1121,12 @@ fn new_search_editor() -> BoundedTextEditor {
     )
 }
 
+#[derive(Debug)]
+struct PendingPaneResize {
+    size: (u16, u16, u16, u16),
+    command: WindowCommand,
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent pane rendering, history, and input flags are not one state machine"
@@ -1145,6 +1153,7 @@ struct PaneView {
     search: SearchUiState,
     authority: AuthorityStatus,
     last_resize: Option<(u16, u16, u16, u16)>,
+    pending_resize: Option<PendingPaneResize>,
     prepare_dirty_rows: Vec<bool>,
     raster_dirty_rows: Vec<bool>,
     surface_dirty_rows: Vec<bool>,
@@ -1396,6 +1405,7 @@ impl PaneView {
             search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
+            pending_resize: None,
             prepare_dirty_rows: Vec::new(),
             raster_dirty_rows: Vec::new(),
             surface_dirty_rows: Vec::new(),
@@ -2410,7 +2420,9 @@ fn event_loop_timeout(
 }
 
 fn pane_command_retry_pending(pane: &PaneView) -> bool {
-    pane.control_release_pending || pane.pending_focus_report.is_some()
+    pane.control_release_pending
+        || pane.pending_focus_report.is_some()
+        || pane.pending_resize.is_some()
 }
 
 fn command_retry_dispatch_timeout(
@@ -6958,9 +6970,12 @@ impl App {
         scale_120: u32,
         activate: bool,
     ) -> Result<()> {
-        let (Some(frame), Some(commands)) = (&pane.snapshot_frame, &pane.commands) else {
+        let Some(frame) = &pane.snapshot_frame else {
             return Ok(());
         };
+        if pane.commands.is_none() {
+            return Ok(());
+        }
         let (resize, column_capped, row_capped) = match frame.terminal_size_with_limit_status(
             logical_width,
             logical_height,
@@ -6986,6 +7001,7 @@ impl App {
             );
         }
         if !resize_changed(pane.last_resize, resize) {
+            pane.pending_resize = None;
             return Ok(());
         }
         let resize_command = if activate {
@@ -7003,13 +7019,30 @@ impl App {
                 pixel_height: resize.3,
             }
         };
-        match commands.try_send(resize_command) {
-            Ok(()) => pane.last_resize = Some(resize),
-            Err(TrySendError::Full(_)) => {
-                // Layout and scale reconciliation can briefly outpace the
-                // one-pane command worker. Keep the previous dimensions so a
-                // later update retries the newest resize instead of treating
-                // ordinary backpressure as a fatal Wayland failure.
+        pane.pending_resize = Some(PendingPaneResize {
+            size: resize,
+            command: resize_command,
+        });
+        Self::retry_pending_pane_resize(pane)
+    }
+
+    fn retry_pending_pane_resize(pane: &mut PaneView) -> Result<()> {
+        let Some(pending) = pane.pending_resize.take() else {
+            return Ok(());
+        };
+        let Some(commands) = &pane.commands else {
+            return Ok(());
+        };
+        match commands.try_send(pending.command) {
+            Ok(()) => pane.last_resize = Some(pending.size),
+            Err(TrySendError::Full(command)) => {
+                // Preserve the exact newest resize across ordinary queue
+                // backpressure. The event loop retries deferred pane commands
+                // after pending terminal input, without changing authority.
+                pane.pending_resize = Some(PendingPaneResize {
+                    size: pending.size,
+                    command,
+                });
             }
             Err(TrySendError::Closed(_)) => {
                 anyhow::bail!("Wayland command receiver disconnected");
@@ -8468,6 +8501,22 @@ impl App {
                     snapshot.input_modes,
                 )
             })
+    }
+
+    fn retry_pending_pane_resizes(&mut self) -> Result<()> {
+        for pane in
+            std::iter::once(&mut self.panes.pane).chain(self.panes.inactive_panes.iter_mut())
+        {
+            Self::retry_pending_pane_resize(pane)?;
+        }
+        for tab in self.tab_state.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
+                    Self::retry_pending_pane_resize(pane)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn has_deferred_pane_command(&self) -> bool {
@@ -11638,30 +11687,48 @@ mod tests {
             SCALE_DENOMINATOR,
         )
         .unwrap();
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Resize { .. }
+        ));
+        let previous = pane.last_resize;
         commands
             .try_send(WindowCommand::Input(vec![1]))
             .expect("fill pane command queue");
 
-        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true)
+        App::emit_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR, false)
             .expect("queue saturation defers resize");
-        assert_eq!(pane.last_resize, None);
+        assert_eq!(pane.last_resize, previous);
+        assert!(pane.pending_resize.is_some());
+        assert!(pane_command_retry_pending(&pane));
         assert_eq!(
             command_receiver.try_recv().unwrap(),
             WindowCommand::Input(vec![1])
         );
 
-        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true)
-            .expect("deferred resize retries");
+        App::retry_pending_pane_resize(&mut pane).expect("deferred resize retries");
         let retried = command_receiver.try_recv().unwrap();
-        assert!(matches!(retried, WindowCommand::Resize { .. }));
-        assert!(pane.last_resize.is_some());
+        assert!(matches!(retried, WindowCommand::PrepareResize { .. }));
+        assert_ne!(pane.last_resize, previous);
+        assert!(pane.pending_resize.is_none());
+        assert!(!pane_command_retry_pending(&pane));
 
+        commands
+            .try_send(WindowCommand::Input(vec![2]))
+            .expect("refill pane command queue");
+        App::emit_pane_resize(&mut pane, 800, 600, SCALE_DENOMINATOR, true)
+            .expect("second resize defers");
+        assert!(pane.pending_resize.is_some());
+        assert_eq!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![2])
+        );
         drop(command_receiver);
-        pane.last_resize = None;
-        let error = App::emit_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR, true)
-            .expect_err("disconnected resize receiver");
+        let error = App::retry_pending_pane_resize(&mut pane)
+            .expect_err("disconnected deferred resize receiver");
         assert!(error.to_string().contains("disconnected"));
-        assert_eq!(pane.last_resize, None);
+        assert!(pane.pending_resize.is_none());
     }
 
     #[test]

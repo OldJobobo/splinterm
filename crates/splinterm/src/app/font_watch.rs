@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use splinterm::{
     FontUpdate, WindowTopologyUpdate, WindowUpdate,
@@ -8,6 +8,8 @@ use splinterm::{
     },
 };
 use tokio::sync::mpsc;
+
+const FONT_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(in crate::app) enum FontUpdateSink {
     Panes(Vec<mpsc::Sender<WindowUpdate>>),
@@ -112,7 +114,10 @@ pub(in crate::app) async fn watch_font(
     let mut state = FontReloadState::new(current.fingerprint().clone());
     let mut diagnostics = FontReloadDiagnostics::default();
     let mut retry_after = None;
-    let mut poll = tokio::time::interval(std::time::Duration::from_secs(1));
+    // Startup already staged `current`; defer the first ambient Fontconfig
+    // resolution and keep idle subprocess churn bounded thereafter.
+    let first_probe = tokio::time::Instant::now() + FONT_PROBE_INTERVAL;
+    let mut poll = tokio::time::interval_at(first_probe, FONT_PROBE_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         poll.tick().await;
@@ -158,6 +163,11 @@ pub(in crate::app) async fn watch_font(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ambient_font_probes_keep_a_coarse_idle_cadence() {
+        assert!(FONT_PROBE_INTERVAL >= Duration::from_secs(10));
+    }
 
     #[test]
     fn reload_state_coalesces_probes_and_publishes_only_changed_candidates() {
