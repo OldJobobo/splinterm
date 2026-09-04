@@ -16,6 +16,7 @@ pub mod endpoint;
 pub mod frontend;
 pub mod geometry;
 pub mod keymap;
+pub mod navigation_projection;
 pub mod pane;
 pub mod preset;
 pub mod remote;
