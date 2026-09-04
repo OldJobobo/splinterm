@@ -17,6 +17,7 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "fixtures/terminal-images/v1/protocol-fixtures/sixel-v1.json"
 ORACLE_PATH = ROOT / "tools/foot-oracle/run-final-buffer-comparison.py"
+PROVENANCE_CHECK = ROOT / "tools/foot-oracle/check-provenance.py"
 BUILD = pathlib.Path("/tmp/splinterm-foot-oracle-build")
 
 
@@ -45,9 +46,23 @@ def file_sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def require_pinned_host() -> None:
+    result = subprocess.run(
+        [sys.executable, str(PROVENANCE_CHECK)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise RuntimeError(f"pinned Foot oracle prerequisite check failed: {detail}")
+
+
 def sixel_provenance() -> dict[str, Any]:
     """Validate output-relevant inputs for the optional Foot differential."""
 
+    require_pinned_host()
     path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(path.read_text(encoding="utf-8"))
     if provenance.get("schema") != 4:

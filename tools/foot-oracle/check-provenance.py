@@ -134,45 +134,66 @@ def font_remediation(font: dict[str, Any]) -> str:
     )
 
 
+def matrix_font_patterns(manifest: dict[str, Any], font: dict[str, Any]) -> list[str]:
+    patterns = [font["pattern"]]
+    matrix = manifest.get("oracle", {}).get("font_matrix")
+    if matrix is None:
+        return patterns
+    sizes = {
+        logical_size * scale / 120
+        for logical_size in matrix["logical_sizes_px"]
+        for scale in matrix["scales_120"]
+    }
+    base_pattern = font["pattern"]
+    if font["role"] == "cjk":
+        base_pattern = base_pattern.split(":style=", 1)[0]
+    patterns.extend(f"{base_pattern}:pixelsize={size:g}" for size in sorted(sizes))
+    return patterns
+
+
 def check_fonts(manifest: dict[str, Any]) -> None:
     for font in manifest["fonts"]:
-        output = command_output(
-            [
-                "fc-match",
-                "-f",
-                "%{file}\n%{index}\n%{hintstyle}\n%{hinting}\n%{antialias}\n%{rgba}\n%{lcdfilter}\n",
-                font["pattern"],
-            ]
-        ).splitlines()
-        if len(output) < 7:
-            raise ProvenanceError(
-                f"fontconfig did not resolve pinned {font['role']} face; "
-                f"expected {font['file']} index {font['index']}; "
-                f"{font_remediation(font)}"
-            )
-        path = pathlib.Path(output[0])
-        try:
-            index = int(output[1])
-        except ValueError as error:
-            raise ProvenanceError(f"invalid face index for {font['role']}") from error
-        if str(path) != font["file"] or index != font["index"]:
-            raise ProvenanceError(
-                f"resolved {font['role']} face drifted: expected "
-                f"{font['file']} index {font['index']}, got {path} index {index}; "
-                f"{font_remediation(font)}"
-            )
-        option_names = ("hintstyle", "hinting", "antialias", "rgba", "lcdfilter")
-        actual_raster = dict(zip(option_names, output[2:7], strict=True))
-        if actual_raster != font["fontconfig_raster"]:
-            raise ProvenanceError(
-                f"resolved {font['role']} Fontconfig raster options drifted: "
-                f"expected {font['fontconfig_raster']}, got {actual_raster}"
-            )
-        if not path.is_file() or sha256(path) != font["sha256"]:
-            raise ProvenanceError(
-                f"resolved {font['role']} font bytes drifted at {path}; "
-                f"expected SHA-256 {font['sha256']}; {font_remediation(font)}"
-            )
+        for pattern in matrix_font_patterns(manifest, font):
+            output = command_output(
+                [
+                    "fc-match",
+                    "-f",
+                    "%{file}\n%{index}\n%{hintstyle}\n%{hinting}\n%{antialias}\n%{rgba}\n%{lcdfilter}\n",
+                    pattern,
+                ]
+            ).splitlines()
+            if len(output) < 7:
+                raise ProvenanceError(
+                    f"fontconfig did not resolve pinned {font['role']} face for "
+                    f"{pattern!r}; expected {font['file']} index {font['index']}; "
+                    f"{font_remediation(font)}"
+                )
+            path = pathlib.Path(output[0])
+            try:
+                index = int(output[1])
+            except ValueError as error:
+                raise ProvenanceError(
+                    f"invalid face index for {font['role']} at {pattern!r}"
+                ) from error
+            if str(path) != font["file"] or index != font["index"]:
+                raise ProvenanceError(
+                    f"resolved {font['role']} face drifted for {pattern!r}: expected "
+                    f"{font['file']} index {font['index']}, got {path} index {index}; "
+                    f"{font_remediation(font)}"
+                )
+            option_names = ("hintstyle", "hinting", "antialias", "rgba", "lcdfilter")
+            actual_raster = dict(zip(option_names, output[2:7], strict=True))
+            if actual_raster != font["fontconfig_raster"]:
+                raise ProvenanceError(
+                    f"resolved {font['role']} Fontconfig raster options drifted for "
+                    f"{pattern!r}: expected {font['fontconfig_raster']}, got {actual_raster}"
+                )
+            if not path.is_file() or sha256(path) != font["sha256"]:
+                raise ProvenanceError(
+                    f"resolved {font['role']} font bytes drifted at {path} for "
+                    f"{pattern!r}; expected SHA-256 {font['sha256']}; "
+                    f"{font_remediation(font)}"
+                )
 
 
 def check_environment(manifest: dict[str, Any]) -> None:

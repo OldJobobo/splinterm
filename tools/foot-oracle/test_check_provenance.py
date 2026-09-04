@@ -119,6 +119,75 @@ def test_fontconfig_raster_option_drift_is_rejected(monkeypatch):
         checker.check_fonts({"fonts": [font]})
 
 
+def test_matrix_patterns_match_size_qualified_fallback_resolvers():
+    checker = load_checker()
+    manifest = {
+        "oracle": {
+            "font_matrix": {
+                "logical_sizes_px": [12],
+                "scales_120": [150],
+            }
+        }
+    }
+    assert checker.matrix_font_patterns(
+        manifest,
+        {
+            "role": "cjk",
+            "pattern": "Noto Sans CJK JP:style=Regular",
+        },
+    ) == ["Noto Sans CJK JP:style=Regular", "Noto Sans CJK JP:pixelsize=15"]
+    assert checker.matrix_font_patterns(
+        manifest,
+        {"role": "emoji", "pattern": "Noto Color Emoji"},
+    ) == ["Noto Color Emoji", "Noto Color Emoji:pixelsize=15"]
+
+
+def test_size_qualified_fontconfig_raster_drift_is_rejected(monkeypatch):
+    checker = load_checker()
+    font = checker.load_manifest()["fonts"][0]
+    seen_patterns = []
+
+    def output(arguments):
+        pattern = arguments[-1]
+        seen_patterns.append(pattern)
+        raster = dict(font["fontconfig_raster"])
+        if pattern.endswith(":pixelsize=7.5"):
+            raster["hintstyle"] = "999"
+        return "\n".join(
+            [
+                font["file"],
+                str(font["index"]),
+                raster["hintstyle"],
+                raster["hinting"],
+                raster["antialias"],
+                raster["rgba"],
+                raster["lcdfilter"],
+            ]
+        )
+
+    monkeypatch.setattr(checker, "command_output", output)
+    monkeypatch.setattr(checker, "sha256", lambda _path: font["sha256"])
+    manifest = {
+        "fonts": [font],
+        "oracle": {
+            "font_matrix": {
+                "logical_sizes_px": [6],
+                "scales_120": [120, 150],
+            }
+        },
+    }
+    with pytest.raises(
+        checker.ProvenanceError,
+        match=r"Fontconfig raster options drifted.*pixelsize=7\.5",
+    ):
+        checker.check_fonts(manifest)
+    assert seen_patterns == [
+        font["pattern"],
+        f"{font['pattern']}:pixelsize=6",
+        f"{font['pattern']}:pixelsize=7.5",
+    ]
+
+
 def test_non_reference_worker_is_an_explicit_unsupported_host(monkeypatch):
     checker = load_checker()
     manifest = checker.load_manifest()
