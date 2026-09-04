@@ -163,7 +163,7 @@ def sha256(path: Path) -> str:
 def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     provenance_path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    if provenance.get("schema") != 3:
+    if provenance.get("schema") != 4:
         raise ValueError("unsupported oracle provenance schema")
     source = Path(os.environ.get("FOOT_SOURCE", Path.home() / "Playground/foot"))
     revision = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True)
@@ -175,8 +175,6 @@ def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
         if sha256(path) != patch["sha256"]:
             raise ValueError(f"oracle patch hash drift: {patch['path']}")
     profile = provenance["default_final_buffer_profile"]
-    if sha256(ROOT / "Cargo.lock") != profile["cargo_lock_sha256"]:
-        raise ValueError("Cargo.lock drifted from final-buffer provenance")
     font_match = run(
         [
             "fc-match",

@@ -45,13 +45,22 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
             'git config --global --add safe.directory "$GITHUB_WORKSPACE"', workflow
         )
         self.assertIn("useradd --create-home validator", workflow)
-        provenance = workflow.index(
-            "runuser -u validator -- python tools/foot-oracle/check-provenance.py --portable"
-        )
         candidate_check = workflow.index("prepare-candidate.py check")
-        self.assertLess(provenance, candidate_check)
+        self.assertGreater(candidate_check, workflow.index("useradd --create-home validator"))
+        self.assertNotIn("tools/foot-oracle/check-provenance.py", workflow)
         self.assertIn("runuser -u validator -- python -m unittest", workflow)
         self.assertNotIn("safe.directory '*'", workflow)
+
+    def test_foot_jobs_are_advisory_and_source_contracts_remain_mandatory(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        mandatory = ci[ci.index("  check:") : ci.index("  foot-reference:")]
+        foot = ci[ci.index("  foot-reference:") : ci.index("  oracle:")]
+        oracle = ci[ci.index("  oracle:") :]
+        self.assertIn("generate-semantic-fixture-vectors.py --check", mandatory)
+        self.assertIn("validate-contract-fixtures.py", mandatory)
+        self.assertNotIn("check-provenance.py", mandatory)
+        self.assertIn("continue-on-error: true", foot)
+        self.assertIn("continue-on-error: true", oracle)
 
     def test_candidate_builds_once_and_retains_review_artifact(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

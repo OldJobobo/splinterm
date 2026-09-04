@@ -1,7 +1,8 @@
 # ADR 0001: Foot is Splinterm's terminal foundation
 
-- **Status:** Accepted
+- **Status:** Accepted as source foundation; external release authority superseded by [ADR 0013](0013-splinterm-owned-renderer-acceptance.md)
 - **Date:** 2026-07-17
+- **Amended:** 2026-09-04
 
 ## Context
 
@@ -25,7 +26,7 @@ That architectural change does not change the source foundation.
 Splinterm's terminal engine and graphical terminal behavior will be developed
 as a Rust port of Foot.
 
-Foot is the authoritative implementation and behavioral baseline for:
+Foot is the historical implementation and differential baseline for:
 
 - VT parsing and command handling;
 - cells, grids, scrollback, resize, and reflow;
@@ -143,8 +144,8 @@ copyright and license notices, and affected files must be recorded in
 
 ### Positive
 
-- The project has a clear behavioral authority.
-- Compatibility work is measurable against a specific implementation.
+- The project has product-owned behavioral contracts with a specific historical
+  implementation available for differential measurement.
 - Existing Foot users and Omarchy integration have a defined migration target.
 - Foundational effort is not split across competing terminal engines.
 

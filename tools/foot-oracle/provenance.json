@@ -1,5 +1,16 @@
 {
-  "schema": 3,
+  "schema": 4,
+  "policy": {
+    "release_authority": "splinterm-owned",
+    "foot_role": "optional-historical-differential",
+    "release_blocking": false,
+    "checked_host_inputs": [
+      "Foot commit and adapter patches",
+      "resolved font files, face indexes, and file hashes",
+      "Fontconfig, FreeType, fcft, and pixman versions",
+      "renderer policy and explicit environment variables"
+    ]
+  },
   "supported_host": {
     "os_release_id": "omarchy",
     "architecture": "x86_64",
@@ -41,7 +52,6 @@
     }
   },
   "environment": {
-    "fontconfig_active_config_sha256": "83c4161f1282866b60ff280c04c1a073125dab9ce2b780610059671ffc78bdf6",
     "variables": {
       "FONTCONFIG_FILE": null,
       "FONTCONFIG_PATH": null,
@@ -56,18 +66,6 @@
     {"role": "cjk", "pattern": "Noto Sans CJK JP:style=Regular", "file": "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "index": 0, "sha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a"},
     {"role": "emoji", "pattern": "Noto Color Emoji", "file": "/usr/share/fonts/noto/NotoColorEmoji.ttf", "index": 0, "sha256": "72a635cb3d2f3524c51620cdde406b217204e8a6a06c6a096ff8ed4b5fd6e27b"}
   ],
-  "rust": {
-    "rustc": "1.91.0",
-    "cargo": "1.91.0",
-    "cargo_lock_sha256": "bc500f38cb03c929cfc557521f4ea85840f0e7cff2a2590debb4b86fa120e4db",
-    "dependencies": {
-      "fontdb": "0.23.0",
-      "freetype-rs": "0.38.0",
-      "memmap2": "0.9.11",
-      "pixman-sys": "0.1.0",
-      "swash": "0.2.10"
-    }
-  },
   "oracle": {
     "semantic_runner": "tools/foot-oracle/run-fixtures.py",
     "final_buffer_runner": "tools/foot-oracle/run-final-buffer-comparison.py",
@@ -111,8 +109,7 @@
       "bottom": 12
     },
     "foreground": "ebebeb",
-    "background": "0e1216",
-    "cargo_lock_sha256": "bc500f38cb03c929cfc557521f4ea85840f0e7cff2a2590debb4b86fa120e4db"
+    "background": "0e1216"
   },
   "semantic_fixture_schema": "fixtures/terminal/v1/schema.md",
   "final_buffer_schema": "tools/foot-oracle/final-buffer-schema.md",
@@ -122,7 +119,7 @@
       "old and new structured metrics",
       "old and new mismatch heatmaps",
       "provenance diff",
-      "ADR 0004 tolerance or renderer decision when behavior changes"
+      "ADR 0004/0013 renderer-contract decision when behavior changes"
     ]
   }
 }

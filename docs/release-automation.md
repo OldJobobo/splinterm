@@ -40,13 +40,19 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
 - the requested version must exactly match Cargo and all three Arch recipes;
-- repository-owned Foot oracle metadata must match the current `Cargo.lock` before
-  candidate construction;
+- Splinterm-owned workspace, renderer, semantic-fixture, contract, package, and
+  release-automation checks determine candidate eligibility;
 - website sources and deployment automation are absent from the source archive;
 - package validation runs against extracted package contents;
 - all output is uploaded as one private, retention-bounded workflow artifact.
 
 The candidate manifest binds the repository, commit, version, tag, architecture, prior version tag, workflow run identity, and SHA-256 digest of every proposed release asset. A later publisher must consume this manifest and these exact artifacts rather than rebuilding.
+
+Foot 1.27.0 remains available as an optional historical differential. Its
+portable tooling and pinned-host jobs are advisory and do not determine the
+required `check` result or candidate eligibility. Cargo/compiler changes do not
+require Foot-provenance refreshes. See
+[ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md).
 
 ## Human approval boundary
 

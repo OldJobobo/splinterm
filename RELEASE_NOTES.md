@@ -8,6 +8,18 @@ RC2 is intended for normal daily use and soak testing on the documented target:
 x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Any later code
 change requires another release candidate before the final `v0.1.0` release.
 
+## Release validation authority
+
+Splinterm-owned semantic, renderer, contract, package, and guarded graphical
+tests are now release authority. The pinned Foot 1.27.0 harness remains an exact
+optional historical differential; its host availability or provenance drift no
+longer blocks candidate construction or promotion. Existing Foot-derived
+fixtures and zero-tolerance evidence remain unchanged.
+
+The RC2 implementation at maintenance commit `d26cee9` passed guarded packaged
+live-font replacement and invalid-candidate rollback acceptance. This policy
+change does not modify shipped Rust code.
+
 ## Live-font closure fixes
 
 - A staged generation that differs from its preceding probe now becomes the

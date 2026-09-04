@@ -55,14 +55,24 @@ jobs:
             tools/release/test_promote_release_workflow.py
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace -- --test-threads=1
+      - run: python -m pip install 'jsonschema>=4.18' pillow pytest referencing
+      - run: python tools/benchmark/generate-semantic-fixture-vectors.py --check
+      - run: python tools/foot-oracle/validate-fixtures.py
+      - run: python tools/automation/validate-contract-fixtures.py
+      - run: python -m pytest -q tools/benchmark/test_benchmark.py
+
+  foot-reference:
+    name: Optional historical Foot differential tooling
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install 'jsonschema>=4.18' pillow pytest referencing
       - run: python tools/foot-oracle/check-provenance.py --portable
       - run: python tools/foot-oracle/validate-fixtures.py
       - run: python tools/foot-oracle/validate-slice3-fixtures.py
       - run: python tools/foot-oracle/validate-slice3-fixtures.py tools/foot-oracle/slice4-final-buffer-fixtures.json
-      - run: python -m pip install 'jsonschema>=4.18' pillow pytest referencing
-      - run: python tools/automation/validate-contract-fixtures.py
       - run: python -m pytest -q tools/foot-oracle/test_*.py
-      - run: python -m pytest -q tools/benchmark/test_benchmark.py
       - name: Classify host-sensitive raster support
         run: |
           set +e
@@ -70,13 +80,15 @@ jobs:
           status=$?
           set -e
           if [ "$status" -eq 77 ]; then
-            echo '::notice title=Unsupported raster environment::Pinned Foot raster tests require the declared Omarchy reference host.'
+            echo '::notice title=Unsupported raster environment::Historical Foot differentials require the declared Omarchy reference host.'
           elif [ "$status" -ne 0 ]; then
             exit "$status"
           fi
 
   oracle:
+    name: Optional pinned-host Foot differential
     if: ${{ vars.SPLINTERM_ORACLE_RUNNER == 'enabled' }}
+    continue-on-error: true
     runs-on: [self-hosted, linux, x64, splinterm-oracle]
     permissions:
       contents: read

@@ -63,9 +63,9 @@ Terminal-centric work has several recurring failures:
 3. graphical use and automation often operate through unrelated state models;
 4. automation access is frequently either too weak to be useful or too broad to be trusted;
 5. remote access can accidentally turn a local terminal daemon into a network service; and
-6. compatibility claims can drift without a pinned behavioral authority.
+6. compatibility claims can drift without versioned, product-owned behavioral contracts.
 
-Splinterm should solve these problems with one daemon-owned topology, a native Omarchy-first interface, explicit and bounded authority, and Foot-derived terminal behavior.
+Splinterm should solve these problems with one daemon-owned topology, a native Omarchy-first interface, explicit and bounded authority, and tested terminal behavior initially informed by the pinned Foot reference.
 
 ## 4. Target users
 
@@ -117,7 +117,7 @@ They need:
 4. **Control safely:** Let multiple clients observe the same state while ensuring only one controller owns input and resize authority for a Splint at a time.
 5. **Automate explicitly:** Let authorized tools inspect and mutate terminal topology through stable machine contracts without inheriting human UI trust.
 6. **Work remotely without exposing a daemon port:** Let a human use native remote Splinterm through authenticated SSH, while separately policy-scoped automation uses the raw stdio relay.
-7. **Retain terminal compatibility:** Give me terminal behavior grounded in a pinned Foot authority rather than an undocumented approximation.
+7. **Retain terminal compatibility:** Give me terminal behavior governed by versioned Splinterm contracts and informed by a pinned Foot historical differential rather than an undocumented approximation.
 8. **Fit Omarchy naturally:** Follow the active Omarchy theme, launch through `xdg-terminal-exec`, and behave as a native Wayland application without modifying user configuration automatically.
 
 ## 6. Product principles
@@ -128,7 +128,7 @@ They need:
 4. **Disposable clients:** neither graphical nor automation clients become the source of persistent truth.
 5. **Exact targeting:** stale IDs, incarnations, revisions, or captured targets fail explicitly; operations never guess a replacement.
 6. **Terminal content is data:** output can never grant authority, approve consent, change policy, or become an automatic instruction.
-7. **Compatibility needs an oracle:** Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains the behavioral authority.
+7. **Compatibility needs owned contracts:** Splinterm-owned tests and adopted fixtures are release authority; Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical differential.
 8. **Honest maturity:** implemented, validated, supported, proposed, deferred, and publicly released have distinct meanings.
 9. **Omarchy first, portability later:** optimize and validate the primary environment before claiming broader support.
 10. **No hidden mutation:** installation and integration do not silently change the default terminal, user keybindings, SSH policy, or Omarchy-owned files.
@@ -347,7 +347,7 @@ Detailed scope and policy behavior remain authoritative in [automation.md](autom
 
 ### 12.3 Compatibility
 
-- Foot 1.27.0 at the pinned commit is the terminal behavior and differential-test authority.
+- Splinterm-owned versioned tests and fixtures are terminal behavior and release authority; Foot 1.27.0 at the pinned commit is an optional historical differential.
 - The validated primary platform is x86_64 Arch/Omarchy with native Wayland under the documented Hyprland environment.
 - Broader compositor, distribution, Nix, sandboxed-package, or hardware claims require separate implementation and evidence.
 - Public JSON/NDJSON schemas and documented operation semantics are compatibility boundaries; private daemon frames and Rust types are not.

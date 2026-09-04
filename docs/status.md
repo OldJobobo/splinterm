@@ -31,8 +31,10 @@ The current product target is:
 
 - x86_64 Omarchy/Arch Linux;
 - native Wayland under the documented Hyprland environment;
-- Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
-  as the terminal-behavior oracle;
+- Splinterm-owned semantic, renderer, contract, package, and guarded graphical
+  tests as release authority; Foot 1.27.0 commit
+  `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical
+  differential under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
 - public Beta 3 `0.1.0beta3-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
@@ -57,9 +59,12 @@ share their immutable staged mappings instead of copying an entire font file per
 raster face. Generation identity and lifetime tests use Fontconfig's generic
 monospace family rather than requiring one host-specific family.
 
-Focused and complete non-graphical validation, independent review, candidate
-construction, packaged graphical acceptance, and publication remain separate
-release boundaries.
+Focused and complete non-graphical validation and independent source review
+passed. The exact RC2 implementation package at `d26cee9` passed guarded live
+valid-font replacement and invalid-candidate rollback acceptance without
+replacing the Window, daemon, shell, or Splint incarnation. Candidate
+construction and publication remain separate release boundaries. Foot is an
+optional historical differential and does not block either boundary.
 
 ## 0.1.0 RC1 release
 

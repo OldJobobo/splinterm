@@ -2467,10 +2467,17 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
     jsonschema = pytest.importorskip("jsonschema")
     report = build_report(_successful_correctness_run)
 
-    assert report["schema"] == "splinterm.benchmark.correctness.v2"
+    assert report["schema"] == "splinterm.benchmark.correctness.v3"
     assert report["valid"] is True
-    assert report["oracle"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    assert report["historical_reference"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    assert report["historical_reference"]["role"] == "optional-differential"
     assert report["semantic_fixtures"]["fixture_count"] == 5
+    assert report["semantic_fixtures"]["status"] == "adopted-contract"
+    assert all(
+        not check["required"]
+        for check in report["checks"]
+        if check["check"].startswith("historical-foot-")
+    )
     assert "final_buffer_evidence" not in report
     assert report["fuzzing"]["status"] == "available-not-run"
     assert report["fuzzing"]["recorded_duration_seconds"] is None
