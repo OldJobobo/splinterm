@@ -4,11 +4,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::{
-    frontend::{LairExplorerRow, LairExplorerRowKind},
-    geometry::Rect,
-    navigation_projection::NavigationNodeId,
-};
+use crate::{frontend::LairExplorerRow, geometry::Rect, navigation_projection::NavigationNodeId};
 
 use super::{
     super::{ChromeTextStyle, RenderContext, fill_rect},
@@ -145,6 +141,38 @@ pub(crate) fn lair_explorer_hit_test(
             && position.1 < bottom)
             .then_some(row.id)
     })
+}
+
+#[must_use]
+pub(crate) fn lair_explorer_disclosure_hit_test(
+    layout: &LairExplorerLayout,
+    rows: &[LairExplorerRow],
+    position: (f64, f64),
+) -> Option<NavigationNodeId> {
+    layout
+        .rows
+        .iter()
+        .zip(rows.iter().skip(layout.visible_start))
+        .find_map(|(layout_row, row)| {
+            row.expanded?;
+            let bottom = f64::from(layout_row.rect.y.saturating_add(layout_row.rect.height));
+            let disclosure_width = 12_u32.saturating_mul(
+                u32::try_from(row.level)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(3),
+            );
+            let right = f64::from(
+                layout_row
+                    .rect
+                    .x
+                    .saturating_add(disclosure_width.min(layout_row.rect.width)),
+            );
+            (position.0 >= f64::from(layout_row.rect.x)
+                && position.0 < right
+                && position.1 >= f64::from(layout_row.rect.y)
+                && position.1 < bottom)
+                .then_some(row.id)
+        })
 }
 
 fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
@@ -308,13 +336,17 @@ pub(crate) fn paint_lair_explorer(
                 rgba(palette.selected_rail),
             );
         }
-        let marker = match (row.kind, row.expanded, row.current) {
-            (LairExplorerRowKind::Lair, Some(true), true) => "● ▾",
-            (LairExplorerRowKind::Lair, Some(false), true) => "● ▸",
-            (LairExplorerRowKind::Lair, Some(true), false) => "  ▾",
-            (LairExplorerRowKind::Lair, _, false) => "  ▸",
-            (LairExplorerRowKind::Dojo, _, true) => "  ●",
-            _ => "   ",
+        let marker = if row.pending {
+            "  …"
+        } else {
+            match (row.expanded, row.current) {
+                (Some(true), true) => "● ▾",
+                (Some(false), true) => "● ▸",
+                (Some(true), false) => "  ▾",
+                (Some(false), false) => "  ▸",
+                (None, true) => "  ●",
+                (None, false) => "   ",
+            }
         };
         let source = format!("{marker} {}", row.label);
         let row_inset = inset.saturating_add(
@@ -339,9 +371,15 @@ pub(crate) fn paint_lair_explorer(
             height: rect.height,
         };
         let primary = if selected == Some(row.id) {
-            palette.selected_primary
-        } else {
+            if row.enabled {
+                palette.selected_primary
+            } else {
+                palette.selected_secondary
+            }
+        } else if row.enabled {
             palette.primary
+        } else {
+            palette.secondary
         };
         let secondary = if selected == Some(row.id) {
             palette.selected_secondary
@@ -408,6 +446,7 @@ mod tests {
     use splinterm_core::LairId;
 
     use super::*;
+    use crate::frontend::LairExplorerRowKind;
 
     fn row(id: NavigationNodeId) -> LairExplorerRow {
         LairExplorerRow {
@@ -419,6 +458,7 @@ mod tests {
             expanded: Some(false),
             current: false,
             enabled: true,
+            pending: false,
         }
     }
 
@@ -457,5 +497,13 @@ mod tests {
         assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
         assert_eq!(drawer.terminal.width, 700);
         assert_eq!(lair_explorer_hit_test(&drawer, (10.0, 110.0)), Some(id));
+        assert_eq!(
+            lair_explorer_disclosure_hit_test(&drawer, &rows, (10.0, 110.0)),
+            Some(id)
+        );
+        assert_eq!(
+            lair_explorer_disclosure_hit_test(&drawer, &rows, (100.0, 110.0)),
+            None
+        );
     }
 }

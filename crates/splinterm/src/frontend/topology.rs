@@ -8,7 +8,9 @@ use splinterm_core::{
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
-use crate::navigation_projection::{NavigationAction, NavigationExplorerView};
+use crate::navigation_projection::{
+    NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
@@ -100,13 +102,18 @@ pub enum WindowTopologyCommand {
         ratio: SplitRatio,
     },
     RequestSessionPicker,
-    RequestLairExplorer,
+    RequestLairExplorer {
+        focused_splint: Option<SplintId>,
+    },
     RequestSelector {
         kind: SelectorKind,
         lair_id: LairId,
     },
     OpenDojo {
         target: SessionPickerTarget,
+    },
+    FocusSplint {
+        target: NavigationExplorerSplintTarget,
     },
     NewLair {
         cwd: PathBuf,
@@ -197,6 +204,11 @@ pub enum WindowTopologyUpdate {
     },
     ActivateTab {
         dojo_id: DojoId,
+    },
+    ActivateSplint {
+        dojo_id: DojoId,
+        splint_id: SplintId,
+        live_incarnation: Option<u64>,
     },
     RemoveTab {
         dojo_id: DojoId,

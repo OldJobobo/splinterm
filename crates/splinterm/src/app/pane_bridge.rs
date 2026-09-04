@@ -976,9 +976,25 @@ pub(in crate::app) async fn prepare_live_pane(
     image_cache: SharedImageContentCache,
     claim_control: bool,
 ) -> Result<PreparedPane> {
+    prepare_live_pane_at_incarnation(factory, config, splint_id, None, image_cache, claim_control)
+        .await
+}
+
+pub(in crate::app) async fn prepare_live_pane_at_incarnation(
+    factory: &ConnectionFactory,
+    config: &AppConfig,
+    splint_id: SplintId,
+    expected_incarnation: Option<u64>,
+    image_cache: SharedImageContentCache,
+    claim_control: bool,
+) -> Result<PreparedPane> {
     let mut connection = factory.connect().await?;
     let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
+    anyhow::ensure!(
+        expected_incarnation.is_none_or(|expected| expected == incarnation),
+        "selected Splint incarnation changed before attachment"
+    );
     let scopes = pane_access_scopes();
     if !matches!(
         connection

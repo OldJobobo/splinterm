@@ -234,6 +234,28 @@ pub struct NavigationExplorerTarget {
     pub capability: NavigationCapability,
 }
 
+/// Exact Splint authority retained by the explorer policy view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NavigationExplorerSplintTarget {
+    pub topology_revision: TopologyRevision,
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub splint_id: SplintId,
+    pub live_incarnation: Option<u64>,
+    pub last_incarnation: Option<u64>,
+    pub capability: NavigationCapability,
+}
+
+/// One Splint retained by the persistent explorer in canonical layout order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationExplorerSplint {
+    pub id: NavigationNodeId,
+    pub label: String,
+    pub lifecycle: NavigationLifecycle,
+    pub focused_here: bool,
+    pub target: NavigationExplorerSplintTarget,
+}
+
 /// One Dojo retained by the persistent explorer, including unavailable rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationExplorerDojo {
@@ -242,6 +264,7 @@ pub struct NavigationExplorerDojo {
     pub attachment: WindowAttachment,
     pub active_here: bool,
     pub target: NavigationExplorerTarget,
+    pub splints: Vec<NavigationExplorerSplint>,
 }
 
 /// One persistent Lair and its canonically ordered Dojos.
@@ -336,36 +359,7 @@ impl NavigationProjection {
                 let dojos = lair
                     .dojos
                     .iter()
-                    .map(|dojo| {
-                        if dojo.active_here {
-                            current = Some(dojo.node.id);
-                        }
-                        let action = match dojo.attachment {
-                            WindowAttachment::Here => NavigationAction::ActivateDojo,
-                            WindowAttachment::NotHere => NavigationAction::AttachDojo,
-                        };
-                        let capability = dojo
-                            .node
-                            .capabilities
-                            .iter()
-                            .copied()
-                            .find(|capability| capability.action == action)
-                            .unwrap_or_else(|| {
-                                capability(action, self.freshness, false, false, true)
-                            });
-                        NavigationExplorerDojo {
-                            id: dojo.node.id,
-                            label: dojo.node.label.clone(),
-                            attachment: dojo.attachment,
-                            active_here: dojo.active_here,
-                            target: NavigationExplorerTarget {
-                                topology_revision: self.topology_revision,
-                                lair_id: dojo.lair_id,
-                                dojo_id: dojo.dojo_id,
-                                capability,
-                            },
-                        }
-                    })
+                    .map(|dojo| self.explorer_dojo(dojo, &mut current))
                     .collect::<Vec<_>>();
                 NavigationExplorerLair {
                     id: lair.node.id,
@@ -381,6 +375,83 @@ impl NavigationProjection {
             freshness: self.freshness,
             lairs,
             current,
+        }
+    }
+
+    fn explorer_dojo(
+        &self,
+        dojo: &NavigationDojo,
+        current: &mut Option<NavigationNodeId>,
+    ) -> NavigationExplorerDojo {
+        let splints = dojo
+            .splints
+            .iter()
+            .map(|splint| {
+                if splint.focused_here {
+                    *current = Some(splint.node.id);
+                }
+                let action = match dojo.attachment {
+                    WindowAttachment::Here => NavigationAction::FocusSplint,
+                    WindowAttachment::NotHere => NavigationAction::AttachAndFocusSplint,
+                };
+                let capability = splint
+                    .node
+                    .capabilities
+                    .iter()
+                    .copied()
+                    .find(|capability| capability.action == action)
+                    .or_else(|| {
+                        splint.node.capabilities.iter().copied().find(|capability| {
+                            capability.action == NavigationAction::PreviewRestoreSplint
+                        })
+                    })
+                    .unwrap_or_else(|| capability(action, self.freshness, false, false, true));
+                NavigationExplorerSplint {
+                    id: splint.node.id,
+                    label: splint.node.label.clone(),
+                    lifecycle: splint.node.lifecycle,
+                    focused_here: splint.focused_here,
+                    target: NavigationExplorerSplintTarget {
+                        topology_revision: self.topology_revision,
+                        lair_id: dojo.lair_id,
+                        dojo_id: dojo.dojo_id,
+                        splint_id: match splint.node.id {
+                            NavigationNodeId::Splint { splint_id, .. } => splint_id,
+                            _ => unreachable!("projected Splint retained non-Splint identity"),
+                        },
+                        live_incarnation: splint.live_incarnation,
+                        last_incarnation: splint.last_incarnation,
+                        capability,
+                    },
+                }
+            })
+            .collect();
+        if dojo.active_here && current.is_none() {
+            *current = Some(dojo.node.id);
+        }
+        let action = match dojo.attachment {
+            WindowAttachment::Here => NavigationAction::ActivateDojo,
+            WindowAttachment::NotHere => NavigationAction::AttachDojo,
+        };
+        let capability = dojo
+            .node
+            .capabilities
+            .iter()
+            .copied()
+            .find(|capability| capability.action == action)
+            .unwrap_or_else(|| capability(action, self.freshness, false, false, true));
+        NavigationExplorerDojo {
+            id: dojo.node.id,
+            label: dojo.node.label.clone(),
+            attachment: dojo.attachment,
+            active_here: dojo.active_here,
+            target: NavigationExplorerTarget {
+                topology_revision: self.topology_revision,
+                lair_id: dojo.lair_id,
+                dojo_id: dojo.dojo_id,
+                capability,
+            },
+            splints,
         }
     }
 
@@ -1425,10 +1496,27 @@ mod tests {
                 capability: enabled(NavigationAction::ActivateDojo),
             }
         );
+        let attached_splint = &first.dojos[0].splints[0];
+        assert_eq!(
+            attached_splint.target,
+            NavigationExplorerSplintTarget {
+                topology_revision: captured.revision,
+                lair_id: first.dojos[0].target.lair_id,
+                dojo_id: active,
+                splint_id: attached_splint.target.splint_id,
+                live_incarnation: attached_splint.target.live_incarnation,
+                last_incarnation: attached_splint.target.last_incarnation,
+                capability: enabled(NavigationAction::FocusSplint),
+            }
+        );
         assert_eq!(second.dojos[0].target.dojo_id, detached);
         assert_eq!(
             second.dojos[0].target.capability,
             enabled(NavigationAction::AttachDojo)
+        );
+        assert_eq!(
+            second.dojos[0].splints[0].target.capability,
+            enabled(NavigationAction::AttachAndFocusSplint)
         );
     }
 
@@ -1680,6 +1768,13 @@ mod tests {
                 NavigationBlocker::TabCapacityReached,
             )]
         );
+        assert_eq!(
+            projection.lairs[0].dojos[0].splints[0].node.capabilities,
+            [disabled(
+                NavigationAction::AttachAndFocusSplint,
+                NavigationBlocker::TabCapacityReached,
+            )]
+        );
 
         let mut denied = context(&[]);
         denied.authority.attach = NavigationPermission::Denied;
@@ -1688,6 +1783,13 @@ mod tests {
             projection.lairs[0].dojos[0].node.capabilities,
             [disabled(
                 NavigationAction::AttachDojo,
+                NavigationBlocker::PermissionDenied,
+            )]
+        );
+        assert_eq!(
+            projection.lairs[0].dojos[0].splints[0].node.capabilities,
+            [disabled(
+                NavigationAction::AttachAndFocusSplint,
                 NavigationBlocker::PermissionDenied,
             )]
         );

@@ -91,8 +91,8 @@ pub(crate) use overlays::actions::{
     reason = "preserve the crate-local renderer facade for the inferred layout return type"
 )]
 pub(crate) use overlays::explorer::{
-    LairExplorerLayout, LairExplorerPresentationMode, lair_explorer_hit_test, lair_explorer_layout,
-    paint_lair_explorer,
+    LairExplorerLayout, LairExplorerPresentationMode, lair_explorer_disclosure_hit_test,
+    lair_explorer_hit_test, lair_explorer_layout, paint_lair_explorer,
 };
 pub(crate) use overlays::history::{
     HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout, paint_history_overlay,

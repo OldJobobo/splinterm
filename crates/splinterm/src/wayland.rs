@@ -155,13 +155,13 @@ use crate::renderer::{
     SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
     background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
     dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout,
-    lair_explorer_hit_test, lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt,
-    paint_history_overlay, paint_lair_explorer, paint_session_picker_overlay,
-    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
-    paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
-    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
-    session_picker_palette, snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout,
-    write_ppm,
+    lair_explorer_disclosure_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
+    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_lair_explorer,
+    paint_session_picker_overlay, paint_snapshot_overlays, paint_snapshot_presented,
+    paint_snapshot_region_presented, paint_snapshot_rows_presented, paint_tab_context_menu,
+    premultiplied_theme_rgba, scroll_snapshot_pixels, session_picker_hit_test,
+    session_picker_overlay_layout, session_picker_palette, snapshot_row_rect,
+    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -1879,7 +1879,7 @@ struct PresentationState {
     explorer_layout: Option<LairExplorerLayout>,
     explorer_text_cache: SessionPickerTextCache,
     explorer_visible_start: usize,
-    explorer_pressed: Option<NavigationNodeId>,
+    explorer_pressed: Option<(NavigationNodeId, bool)>,
     full_redraw: bool,
 }
 
@@ -3332,6 +3332,21 @@ impl App {
                 && point.1 < f64::from(bottom))
             .then_some(pane.splint_id)
         })
+    }
+
+    fn focus_splint_at_incarnation(
+        &mut self,
+        splint_id: SplintId,
+        live_incarnation: Option<u64>,
+    ) -> Option<bool> {
+        let matches = std::iter::once(&self.panes.pane)
+            .chain(&self.panes.inactive_panes)
+            .filter_map(|pane| pane.snapshot.as_ref())
+            .any(|snapshot| {
+                snapshot.splint_id == splint_id
+                    && live_incarnation.is_none_or(|expected| snapshot.incarnation == expected)
+            });
+        matches.then(|| self.focus_splint(splint_id))
     }
 
     fn focus_splint(&mut self, splint_id: SplintId) -> bool {
@@ -5043,7 +5058,29 @@ impl App {
     }
 
     fn refresh_lair_explorer(&mut self) -> Result<()> {
-        self.send_topology_command(WindowTopologyCommand::RequestLairExplorer)
+        self.explorer.begin_refresh();
+        if let Err(error) = self.send_topology_command(WindowTopologyCommand::RequestLairExplorer {
+            focused_splint: self.panes.focused_splint(),
+        }) {
+            self.explorer.mark_disconnected();
+            return Err(error);
+        }
+        self.presentation.full_redraw = true;
+        Ok(())
+    }
+
+    fn begin_lair_explorer_action(&mut self) -> bool {
+        if self.tab_state.session_switch_pending {
+            return false;
+        }
+        let Some(selected) = self.explorer.selected() else {
+            return false;
+        };
+        if !self.explorer.set_pending(selected) {
+            return false;
+        }
+        self.tab_state.session_switch_pending = true;
+        true
     }
 
     #[allow(
@@ -6524,44 +6561,64 @@ impl App {
             return owned;
         }
         let target = lair_explorer_hit_test(layout, event.position);
+        let disclosure =
+            lair_explorer_disclosure_hit_test(layout, &self.explorer.rows(), event.position);
         let mut changed = false;
         match event.kind {
             PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                 self.set_explorer_focus(true, queue_handle);
-                self.presentation.explorer_pressed = target;
+                self.presentation.explorer_pressed =
+                    target.map(|target| (target, disclosure == Some(target)));
                 if let Some(target) = target {
                     changed |= self.explorer.select(target);
                 }
             }
             PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                 let pressed = self.presentation.explorer_pressed.take();
-                if pressed.is_some()
-                    && pressed == target
+                if let Some((pressed, true)) = pressed
+                    && Some(pressed) == target
+                    && disclosure == Some(pressed)
+                {
+                    changed |= self.explorer.select(pressed);
+                    changed |= self.explorer.toggle_selected();
+                } else if pressed.is_some_and(|(pressed, _)| Some(pressed) == target)
                     && let Some(decision) = self.explorer.decision()
                 {
                     match decision {
                         LairExplorerDecision::Toggle(_) => changed = true,
-                        LairExplorerDecision::OpenDojo(target)
-                            if !self.tab_state.session_switch_pending =>
-                        {
-                            self.tab_state.session_switch_pending = true;
-                            if self
-                                .send_topology_command(WindowTopologyCommand::OpenDojo {
-                                    target: SessionPickerTarget {
-                                        topology_revision: target.topology_revision,
-                                        lair_id: target.lair_id,
-                                        dojo_id: target.dojo_id,
-                                        action: target.capability.action,
-                                    },
-                                })
-                                .is_err()
-                            {
-                                self.tab_state.session_switch_pending = false;
-                                self.explorer.mark_disconnected();
+                        LairExplorerDecision::OpenDojo(target) => {
+                            if self.begin_lair_explorer_action() {
+                                if self
+                                    .send_topology_command(WindowTopologyCommand::OpenDojo {
+                                        target: SessionPickerTarget {
+                                            topology_revision: target.topology_revision,
+                                            lair_id: target.lair_id,
+                                            dojo_id: target.dojo_id,
+                                            action: target.capability.action,
+                                        },
+                                    })
+                                    .is_err()
+                                {
+                                    self.tab_state.session_switch_pending = false;
+                                    self.explorer.mark_disconnected();
+                                }
+                                changed = true;
                             }
-                            changed = true;
                         }
-                        LairExplorerDecision::OpenDojo(_) => {}
+                        LairExplorerDecision::FocusSplint(target) => {
+                            if self.begin_lair_explorer_action() {
+                                if self
+                                    .send_topology_command(WindowTopologyCommand::FocusSplint {
+                                        target,
+                                    })
+                                    .is_err()
+                                {
+                                    self.tab_state.session_switch_pending = false;
+                                    self.explorer.mark_disconnected();
+                                }
+                                changed = true;
+                            }
+                        }
                     }
                 }
             }
@@ -7180,25 +7237,37 @@ impl App {
                     if let Some(decision) = self.explorer.decision() {
                         match decision {
                             LairExplorerDecision::Toggle(_) => changed = true,
-                            LairExplorerDecision::OpenDojo(target)
-                                if !self.tab_state.session_switch_pending =>
-                            {
-                                self.tab_state.session_switch_pending = true;
-                                let command = WindowTopologyCommand::OpenDojo {
-                                    target: SessionPickerTarget {
-                                        topology_revision: target.topology_revision,
-                                        lair_id: target.lair_id,
-                                        dojo_id: target.dojo_id,
-                                        action: target.capability.action,
-                                    },
-                                };
-                                if self.send_topology_command(command).is_err() {
-                                    self.tab_state.session_switch_pending = false;
-                                    self.explorer.mark_disconnected();
+                            LairExplorerDecision::OpenDojo(target) => {
+                                if self.begin_lair_explorer_action() {
+                                    let command = WindowTopologyCommand::OpenDojo {
+                                        target: SessionPickerTarget {
+                                            topology_revision: target.topology_revision,
+                                            lair_id: target.lair_id,
+                                            dojo_id: target.dojo_id,
+                                            action: target.capability.action,
+                                        },
+                                    };
+                                    if self.send_topology_command(command).is_err() {
+                                        self.tab_state.session_switch_pending = false;
+                                        self.explorer.mark_disconnected();
+                                    }
+                                    changed = true;
                                 }
-                                changed = true;
                             }
-                            LairExplorerDecision::OpenDojo(_) => {}
+                            LairExplorerDecision::FocusSplint(target) => {
+                                if self.begin_lair_explorer_action() {
+                                    if self
+                                        .send_topology_command(WindowTopologyCommand::FocusSplint {
+                                            target,
+                                        })
+                                        .is_err()
+                                    {
+                                        self.tab_state.session_switch_pending = false;
+                                        self.explorer.mark_disconnected();
+                                    }
+                                    changed = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -7208,7 +7277,7 @@ impl App {
                     changed = self.explorer.begin_search();
                 }
                 Keysym::r | Keysym::R if !self.explorer.search_active() => {
-                    if self.explorer.disconnected() {
+                    if self.explorer.retryable() {
                         let _ = self.refresh_lair_explorer();
                         changed = true;
                     } else {
@@ -7813,6 +7882,7 @@ impl App {
                     WindowTopologyUpdate::Apply { .. }
                         | WindowTopologyUpdate::OpenTab { .. }
                         | WindowTopologyUpdate::ActivateTab { .. }
+                        | WindowTopologyUpdate::ActivateSplint { .. }
                         | WindowTopologyUpdate::RemoveTab { .. }
                         | WindowTopologyUpdate::UpdateIdentity(_)
                 );
@@ -7838,6 +7908,7 @@ impl App {
                     WindowTopologyUpdate::Apply { .. }
                         | WindowTopologyUpdate::OpenTab { .. }
                         | WindowTopologyUpdate::ActivateTab { .. }
+                        | WindowTopologyUpdate::ActivateSplint { .. }
                         | WindowTopologyUpdate::RemoveTab { .. }
                         | WindowTopologyUpdate::UpdateIdentity(_)
                 );
@@ -7908,6 +7979,7 @@ impl App {
                         Ok(view) => view,
                         Err(error) => {
                             self.tab_state.session_switch_pending = false;
+                            self.explorer.fail_pending();
                             let message = format!("{error:#}");
                             let _ = acknowledged.send(Err(message));
                             eprintln!("splinterm Dojo tab failed to open");
@@ -7924,6 +7996,7 @@ impl App {
                         "active Dojo tab disappeared while opening another"
                     );
                     self.tab_state.session_switch_pending = false;
+                    self.explorer.clear_pending();
                     self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
                     if let Some(diagnostics) = diagnostics() {
@@ -7933,8 +8006,27 @@ impl App {
                 }
                 WindowTopologyUpdate::ActivateTab { dojo_id } => {
                     self.tab_state.session_switch_pending = false;
+                    self.explorer.clear_pending();
                     self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
+                }
+                WindowTopologyUpdate::ActivateSplint {
+                    dojo_id,
+                    splint_id,
+                    live_incarnation,
+                } => {
+                    self.tab_state.session_switch_pending = false;
+                    self.explorer.clear_pending();
+                    changed |= self.activate_tab(dojo_id)?;
+                    if let Some(focus_changed) =
+                        self.focus_splint_at_incarnation(splint_id, live_incarnation)
+                    {
+                        changed |= focus_changed;
+                    } else {
+                        self.explorer.mark_stale_target(splint_id);
+                        let _ = self.refresh_lair_explorer();
+                        changed = true;
+                    }
                 }
                 WindowTopologyUpdate::RemoveTab {
                     dojo_id,
@@ -8004,6 +8096,7 @@ impl App {
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
                     self.tab_state.session_switch_pending = false;
+                    changed |= self.explorer.fail_pending();
                     if retryable_picker {
                         let selector_kind = match self.modal.session_picker_retry_command.as_ref() {
                             Some(WindowTopologyCommand::RequestSelector { kind, .. }) => {
@@ -8057,6 +8150,8 @@ impl App {
                     }
                 }
                 WindowTopologyUpdate::ShowLairPrompt { kind, target } => {
+                    self.tab_state.session_switch_pending = false;
+                    self.explorer.clear_pending();
                     self.modal.session_picker_requested = false;
                     let prompt = match kind {
                         LairPromptKind::Rename => DojoPromptUi::rename_lair(target),
