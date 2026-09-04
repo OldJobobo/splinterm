@@ -160,6 +160,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def check_native_versions(provenance: dict[str, Any]) -> None:
+    for package, key in (
+        ("fcft", "fcft_version"),
+        ("freetype2", "freetype_version"),
+        ("fontconfig", "fontconfig_version"),
+        ("pixman-1", "pixman_version"),
+    ):
+        version = run(["pkg-config", "--modversion", package], capture_output=True)
+        if version.returncode or version.stdout.strip() != provenance["build"][key]:
+            raise ValueError(f"{package} version drifted from pinned provenance")
+
+
 def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     provenance_path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
@@ -194,14 +206,7 @@ def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
         or sha256(Path(lines[0])) != profile["font_sha256"]
     ):
         raise ValueError("resolved primary font drifted from pinned provenance")
-    for package, key in (
-        ("freetype2", "freetype_version"),
-        ("fontconfig", "fontconfig_version"),
-        ("pixman-1", "pixman_version"),
-    ):
-        version = run(["pkg-config", "--modversion", package], capture_output=True)
-        if version.returncode or version.stdout.strip() != provenance["build"][key]:
-            raise ValueError(f"{package} version drifted from pinned provenance")
+    check_native_versions(provenance)
     expected_profile = {
         "font": manifest["profile"]["font"],
         "font_size": manifest["profile"]["font_size"],
