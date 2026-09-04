@@ -68,6 +68,9 @@ def load_manifest() -> dict[str, Any]:
         raise ProvenanceError("Foot reference policy is malformed")
     if len(value["fonts"]) != 6:
         raise ProvenanceError("provenance must declare all six raster faces")
+    raster_keys = {"hintstyle", "hinting", "antialias", "rgba", "lcdfilter"}
+    if any(set(font.get("fontconfig_raster", {})) != raster_keys for font in value["fonts"]):
+        raise ProvenanceError("every raster face must pin resolved Fontconfig options")
     if value["reference_update_policy"].get("silent_regeneration") is not False:
         raise ProvenanceError("silent reference regeneration must remain disabled")
     return value
@@ -134,9 +137,14 @@ def font_remediation(font: dict[str, Any]) -> str:
 def check_fonts(manifest: dict[str, Any]) -> None:
     for font in manifest["fonts"]:
         output = command_output(
-            ["fc-match", "-f", "%{file}\n%{index}\n", font["pattern"]]
+            [
+                "fc-match",
+                "-f",
+                "%{file}\n%{index}\n%{hintstyle}\n%{hinting}\n%{antialias}\n%{rgba}\n%{lcdfilter}\n",
+                font["pattern"],
+            ]
         ).splitlines()
-        if len(output) < 2:
+        if len(output) < 7:
             raise ProvenanceError(
                 f"fontconfig did not resolve pinned {font['role']} face; "
                 f"expected {font['file']} index {font['index']}; "
@@ -152,6 +160,13 @@ def check_fonts(manifest: dict[str, Any]) -> None:
                 f"resolved {font['role']} face drifted: expected "
                 f"{font['file']} index {font['index']}, got {path} index {index}; "
                 f"{font_remediation(font)}"
+            )
+        option_names = ("hintstyle", "hinting", "antialias", "rgba", "lcdfilter")
+        actual_raster = dict(zip(option_names, output[2:7], strict=True))
+        if actual_raster != font["fontconfig_raster"]:
+            raise ProvenanceError(
+                f"resolved {font['role']} Fontconfig raster options drifted: "
+                f"expected {font['fontconfig_raster']}, got {actual_raster}"
             )
         if not path.is_file() or sha256(path) != font["sha256"]:
             raise ProvenanceError(

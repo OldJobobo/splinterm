@@ -6,6 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+PINNED_FOOT_WORKFLOW = ROOT / ".github/workflows/foot-oracle-pinned.yml"
 MANDATORY = (
     "preflight",
     "static",
@@ -20,7 +21,7 @@ MANDATORY = (
 class CiWorkflowTests(unittest.TestCase):
     def test_required_check_is_always_run_and_fail_closed(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        check = workflow[workflow.index("  check:") : workflow.index("  oracle:")]
+        check = workflow[workflow.index("  check:") :]
         self.assertIn("if: ${{ always() }}", check)
         for job in MANDATORY:
             self.assertIn(f"- {job}", check)
@@ -124,16 +125,20 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_foot_differentials_are_advisory_not_release_authority(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        check = workflow[workflow.index("  check:") : workflow.index("  oracle:")]
+        pinned = PINNED_FOOT_WORKFLOW.read_text(encoding="utf-8")
+        check = workflow[workflow.index("  check:") :]
         foot = workflow[
             workflow.index("  foot-reference:") : workflow.index("  check:")
         ]
-        oracle = workflow[workflow.index("  oracle:") :]
         self.assertNotIn("foot-reference", check)
-        self.assertNotIn("oracle", MANDATORY)
+        self.assertNotIn("self-hosted", workflow)
         self.assertIn("continue-on-error: true", foot)
-        self.assertIn("continue-on-error: true", oracle)
         self.assertIn("Splinterm-owned renderer", workflow)
+        self.assertIn("workflow_dispatch:", pinned)
+        self.assertIn("schedule:", pinned)
+        self.assertIn("runs-on: [self-hosted, linux, x64, splinterm-oracle]", pinned)
+        self.assertNotIn("\n  push:", pinned)
+        self.assertNotIn("\n  pull_request:", pinned)
 
     def test_flake_stress_is_manual_scheduled_bounded_and_stops_on_failure(self) -> None:
         workflow = (ROOT / ".github/workflows/flake-stress.yml").read_text(

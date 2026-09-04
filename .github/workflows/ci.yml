@@ -301,24 +301,3 @@ jobs:
       - name: Confirm complete CI coverage
         if: ${{ needs.preflight.result == 'success' && needs.static.result == 'success' && needs.workspace-tests.result == 'success' && needs.daemon-tests.result == 'success' && needs.mcp-tests.result == 'success' && needs.package-automation.result == 'success' && needs.renderer-contracts.result == 'success' }}
         run: echo 'Every mandatory CI boundary succeeded.'
-
-  oracle:
-    name: Optional pinned-host Foot differential
-    if: ${{ vars.SPLINTERM_ORACLE_RUNNER == 'enabled' }}
-    continue-on-error: true
-    runs-on: [self-hosted, linux, x64, splinterm-oracle]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Require exact pinned-host provenance
-        run: python tools/foot-oracle/check-provenance.py
-      - name: Run strict default raster smoke
-        run: python tools/foot-oracle/run-font-matrix.py /tmp/splinterm-oracle-ci --case regular-12px-120
-      - name: Upload reviewable failure evidence
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: splinterm-oracle-failure
-          path: /tmp/splinterm-oracle-ci
-          if-no-files-found: warn

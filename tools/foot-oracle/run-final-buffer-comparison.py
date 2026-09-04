@@ -191,7 +191,7 @@ def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
         [
             "fc-match",
             "-f",
-            "%{file}\\n%{index}\\n",
+            "%{file}\\n%{index}\\n%{hintstyle}\\n%{hinting}\\n%{antialias}\\n%{rgba}\\n%{lcdfilter}\\n",
             profile["font_pattern"],
         ],
         capture_output=True,
@@ -199,13 +199,19 @@ def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     if font_match.returncode:
         raise ValueError("fc-match failed during provenance preflight")
     lines = font_match.stdout.splitlines()
+    if len(lines) < 7:
+        raise ValueError("resolved primary font metadata is incomplete")
     if (
-        len(lines) < 2
-        or lines[0] != profile["font_file"]
+        lines[0] != profile["font_file"]
         or int(lines[1]) != profile["font_index"]
         or sha256(Path(lines[0])) != profile["font_sha256"]
     ):
         raise ValueError("resolved primary font drifted from pinned provenance")
+    option_names = ("hintstyle", "hinting", "antialias", "rgba", "lcdfilter")
+    actual_raster = dict(zip(option_names, lines[2:7], strict=True))
+    regular = next(font for font in provenance["fonts"] if font["role"] == "regular")
+    if actual_raster != regular["fontconfig_raster"]:
+        raise ValueError("resolved primary Fontconfig raster options drifted")
     check_native_versions(provenance)
     expected_profile = {
         "font": manifest["profile"]["font"],

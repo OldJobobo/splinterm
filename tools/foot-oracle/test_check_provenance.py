@@ -95,7 +95,7 @@ def test_font_drift_reports_exact_jetbrains_prerequisite(monkeypatch):
     monkeypatch.setattr(
         checker,
         "command_output",
-        lambda _arguments: "/usr/share/fonts/maple/MapleMono-Regular.ttf\n0",
+        lambda _arguments: "/usr/share/fonts/maple/MapleMono-Regular.ttf\n0\n1\nTrue\nTrue\n\n1",
     )
     with pytest.raises(checker.ProvenanceError) as failure:
         checker.check_fonts(manifest)
@@ -104,6 +104,19 @@ def test_font_drift_reports_exact_jetbrains_prerequisite(monkeypatch):
     assert "got /usr/share/fonts/maple/MapleMono-Regular.ttf index 0" in message
     assert "ttf-jetbrains-mono-nerd" in message
     assert "fc-cache --force" in message
+
+
+def test_fontconfig_raster_option_drift_is_rejected(monkeypatch):
+    checker = load_checker()
+    manifest = checker.load_manifest()
+    font = manifest["fonts"][0]
+    monkeypatch.setattr(
+        checker,
+        "command_output",
+        lambda _arguments: f"{font['file']}\n{font['index']}\n3\nTrue\nTrue\n\n1",
+    )
+    with pytest.raises(checker.ProvenanceError, match="Fontconfig raster options drifted"):
+        checker.check_fonts({"fonts": [font]})
 
 
 def test_non_reference_worker_is_an_explicit_unsupported_host(monkeypatch):

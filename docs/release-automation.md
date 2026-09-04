@@ -42,8 +42,6 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
 - the requested version must exactly match Cargo and all three Arch recipes;
-- repository-owned Foot oracle metadata must match the current `Cargo.lock` before
-  candidate construction;
 - website sources and deployment automation are absent from the source archive;
 - package validation runs against extracted package contents;
 - all output is uploaded as one private, retention-bounded workflow artifact.
@@ -88,11 +86,12 @@ context green.
 | `package-automation` | all four `packaging/PKGBUILD::check()` Python suites plus package/release workflow and helper tests |
 | `renderer-contracts` | adopted Splinterm semantic vectors, public contract fixtures, and correctness-report contracts |
 
-Two advisory jobs sit outside the aggregate release check: `foot-reference`
-validates the retained Foot fixtures and Python tooling on a portable worker,
-and `oracle` runs an exact pinned-host differential when its self-hosted runner
-is enabled. Their failure or unavailability is evidence to investigate, not an
-automatic release veto.
+The advisory `foot-reference` job sits outside the aggregate release check and
+validates retained Foot fixtures and Python tooling on a portable worker. The
+exact pinned-host differential lives in the separate manual/scheduled
+`foot-oracle-pinned.yml` workflow, so an unavailable self-hosted runner cannot
+hold the release-authority CI workflow open. Failures or unavailable evidence
+remain signals to investigate, not automatic release vetoes.
 
 Together, the split Rust commands are equivalent to
 `cargo test --frozen --workspace -- --test-threads=1`: workspace unit, binary,
@@ -110,8 +109,9 @@ contracts; API and partial-state interpretation lives in tested Python helpers
 rather than shell response matching.
 
 Failed mandatory boundaries retain focused captured output as 14-day artifacts.
-Advisory Foot jobs retain their own diagnostics without affecting the required
-`check` result. Automatic retries are not used.
+Advisory Foot validation retains its own diagnostics without affecting the
+required `check` result or completion of release-authority CI. Automatic retries
+are not used.
 `.github/workflows/flake-stress.yml` is a non-publishing weekly/manual diagnostic
 that runs 1–25 serialized daemon/MCP repetitions and stops on the first failure;
 a failure remains a failed run rather than being retried to green. Manual use is

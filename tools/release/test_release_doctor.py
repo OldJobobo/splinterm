@@ -55,6 +55,18 @@ class ReleaseDoctorTests(unittest.TestCase):
             )
             self.assertIn("not advisory", MODULE.check_workflows(root)[0])
 
+    def test_workflow_policy_rejects_self_hosted_runner_in_release_ci(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            shutil.copytree(ROOT / ".github", root / ".github")
+            ci = root / ".github/workflows/ci.yml"
+            ci.write_text(
+                ci.read_text(encoding="utf-8")
+                + "\n  oracle:\n    runs-on: [self-hosted, linux, x64, splinterm-oracle]\n",
+                encoding="utf-8",
+            )
+            self.assertIn("self-hosted runner", MODULE.check_workflows(root)[0])
+
     def test_markdown_rejects_missing_links_and_private_paths(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

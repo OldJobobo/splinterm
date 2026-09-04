@@ -77,6 +77,9 @@ def check_workflows(root: Path) -> list[str]:
         candidate = (root / ".github/workflows/release-candidate.yml").read_text(
             encoding="utf-8"
         )
+        pinned_foot = (root / ".github/workflows/foot-oracle-pinned.yml").read_text(
+            encoding="utf-8"
+        )
         promotion = (root / ".github/workflows/promote-release.yml").read_text(
             encoding="utf-8"
         )
@@ -92,6 +95,12 @@ def check_workflows(root: Path) -> list[str]:
         "CI authority branches": ('branches: [main, "maint/0.1"]', ci),
         "CI fail-closed aggregator": ("if: ${{ always() }}", ci),
         "CI explicit dependency result checks": ("needs.preflight.result == 'success'", ci),
+        "standalone pinned Foot manual trigger": ("workflow_dispatch:", pinned_foot),
+        "standalone pinned Foot schedule": ("schedule:", pinned_foot),
+        "standalone pinned Foot runner": (
+            "runs-on: [self-hosted, linux, x64, splinterm-oracle]",
+            pinned_foot,
+        ),
         "candidate authority branches": ("refs/heads/main|refs/heads/maint/0.1", candidate),
         "candidate Actions read permission": ("actions: read", candidate),
         "candidate read-only contents": ("contents: read", candidate),
@@ -113,7 +122,7 @@ def check_workflows(root: Path) -> list[str]:
         if token not in text
     ]
     try:
-        check = ci[ci.index("  check:") : ci.index("  oracle:")]
+        check = ci[ci.index("  check:") :]
         foot = ci[ci.index("  foot-reference:") : ci.index("  check:")]
     except ValueError:
         errors.append("CI advisory Foot or aggregate check boundary is malformed")
@@ -124,6 +133,10 @@ def check_workflows(root: Path) -> list[str]:
             errors.append("CI aggregate makes the historical Foot differential mandatory")
         if "continue-on-error: true" not in foot:
             errors.append("portable Foot differential is not advisory")
+    if "self-hosted" in ci:
+        errors.append("release-authority CI includes a self-hosted runner")
+    if "\n  push:" in pinned_foot or "\n  pull_request:" in pinned_foot:
+        errors.append("pinned Foot workflow runs automatically on release-authority changes")
     if "tools/foot-oracle/check-provenance.py" in candidate:
         errors.append("candidate construction depends on historical Foot provenance")
     return errors
