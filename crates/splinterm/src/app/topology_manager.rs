@@ -14,8 +14,8 @@ use splinterm::{
     endpoint::{ConnectionFactory, LaunchSemantics},
     navigation_projection::{
         EndpointFreshness, NavigationAction, NavigationAuthority, NavigationAvailability,
-        NavigationPermission, NavigationPickerKind, NavigationPickerView, NavigationProjection,
-        NavigationProjectionContext, NavigationWindowState,
+        NavigationExplorerView, NavigationPermission, NavigationPickerKind, NavigationPickerView,
+        NavigationProjection, NavigationProjectionContext, NavigationWindowState,
     },
     session_picker::{SessionEntry, collect_sessions, dojo_has_fully_running_pane_layout},
     tab::{DojoTab, OpenTabOutcome, WindowTabSet},
@@ -475,6 +475,7 @@ async fn apply_topology_command(
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
         WindowTopologyCommand::RequestSessionPicker
+        | WindowTopologyCommand::RequestLairExplorer
         | WindowTopologyCommand::RequestSelector { .. }
         | WindowTopologyCommand::OpenDojo { .. }
         | WindowTopologyCommand::NewLair { .. }
@@ -733,6 +734,19 @@ async fn recent_dojo_catalog<T>(
         &recent_dojo_ids(factory),
         &[],
     )))
+}
+
+async fn lair_explorer_view<T>(
+    factory: &ConnectionFactory,
+    connection: &mut Connection,
+    tabs: &WindowTabSet<T>,
+) -> Result<NavigationExplorerView> {
+    let Response::Topology { snapshot } = connection.request(Request::InspectTopology).await?
+    else {
+        bail!("splinterd did not return its topology");
+    };
+    let current_lair = tabs.active().map(|tab| tab.lair_id);
+    Ok(navigation_projection(factory, &snapshot, current_lair, tabs)?.explorer_view())
 }
 
 async fn selector_catalog<T>(
@@ -1460,6 +1474,21 @@ async fn handle_session_manager_command(
                         )))
                         .await;
                 }
+            }
+            TopologyManagerCommandOutcome::Continue
+        }
+        WindowTopologyCommand::RequestLairExplorer => {
+            if let Ok(view) = lair_explorer_view(factory, connection, &state.tabs).await {
+                if updates
+                    .send(WindowTopologyUpdate::ShowLairExplorer { view })
+                    .await
+                    .is_err()
+                {
+                    return TopologyManagerCommandOutcome::Stop;
+                }
+            } else {
+                eprintln!("splinterm Lair explorer refresh failed");
+                let _ = updates.send(WindowTopologyUpdate::LairExplorerFailed).await;
             }
             TopologyManagerCommandOutcome::Continue
         }

@@ -8,7 +8,7 @@ use splinterm_core::{
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
-use crate::navigation_projection::NavigationAction;
+use crate::navigation_projection::{NavigationAction, NavigationExplorerView};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
@@ -100,6 +100,7 @@ pub enum WindowTopologyCommand {
         ratio: SplitRatio,
     },
     RequestSessionPicker,
+    RequestLairExplorer,
     RequestSelector {
         kind: SelectorKind,
         lair_id: LairId,
@@ -209,6 +210,9 @@ pub enum WindowTopologyUpdate {
     ShowSessionPicker {
         catalog: SessionPickerCatalog,
     },
+    ShowLairExplorer {
+        view: NavigationExplorerView,
+    },
     ShowSelector {
         kind: SelectorKind,
         catalog: SessionPickerCatalog,
@@ -218,6 +222,7 @@ pub enum WindowTopologyUpdate {
         target: LairPromptTarget,
     },
     SessionPickerFailed(String),
+    LairExplorerFailed,
     Theme(ThemeUpdate),
     Font(FontUpdate),
     Closed,

@@ -29,6 +29,7 @@ pub(super) static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
 pub(super) enum OwnedFieldTarget {
     CommandPalette,
     DojoPrompt,
+    ExplorerSearch,
     Search,
 }
 

@@ -127,19 +127,19 @@ use crate::frontend::{
     AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
-    DojoPromptUi, FontUpdate, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
-    SessionPickerCatalog, SessionPickerCreationTarget, SessionPickerDecision, SessionPickerTarget,
-    SessionPickerUi, TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch,
-    TabMenuRightPress, TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi,
-    WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, command_dispatch,
-    tab_menu_dispatch, tab_menu_right_press,
+    DojoPromptUi, FontUpdate, LairDirection, LairExplorerDecision, LairExplorerUi, LairPromptKind,
+    PerfTraceCorrelation, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
+    SessionPickerDecision, SessionPickerTarget, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
+    TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
+    ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
+    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    close_other_tabs_command, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
     logical_extent_to_buffer,
 };
-use crate::navigation_projection::NavigationAction;
+use crate::navigation_projection::{NavigationAction, NavigationNodeId};
 #[cfg(test)]
 use crate::pane::PaneDivider;
 use crate::pane::{
@@ -150,12 +150,13 @@ use crate::pane::{
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
     ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
-    DojoPromptLayout, HistoryOverlayStatus, PickerHitTarget, RenderContext,
+    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, PickerHitTarget, RenderContext,
     SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
     SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
     background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
-    dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout, paint,
-    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_session_picker_overlay,
+    dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout,
+    lair_explorer_hit_test, lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt,
+    paint_history_overlay, paint_lair_explorer, paint_session_picker_overlay,
     paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
     paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
     scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
@@ -850,6 +851,11 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             zoomed_splint: None,
             capture: options.capture,
             capture_scale: options.capture_scale,
+            initial_columns: options.initial_columns,
+            explorer_layout: None,
+            explorer_text_cache: SessionPickerTextCache::default(),
+            explorer_visible_start: 0,
+            explorer_pressed: None,
             full_redraw: true,
         },
         input: InputState {
@@ -938,6 +944,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pending_remote_splits: HashMap::new(),
             dirty_inactive_panes: HashSet::new(),
         },
+        explorer: LairExplorerUi::default(),
         tab_state: TabsState {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
@@ -1868,6 +1875,11 @@ struct PresentationState {
     zoomed_splint: Option<SplintId>,
     capture: Option<PathBuf>,
     capture_scale: Option<u32>,
+    initial_columns: u16,
+    explorer_layout: Option<LairExplorerLayout>,
+    explorer_text_cache: SessionPickerTextCache,
+    explorer_visible_start: usize,
+    explorer_pressed: Option<NavigationNodeId>,
     full_redraw: bool,
 }
 
@@ -2037,6 +2049,7 @@ struct App {
     input: InputState,
     clipboard: ClipboardState,
     panes: PanesState,
+    explorer: LairExplorerUi,
     tab_state: TabsState,
     modal: ModalState,
     scheduling: SchedulingState,
@@ -2385,6 +2398,18 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
         }
     }
     Some(row)
+}
+
+const fn terminal_ime_allowed(
+    keyboard_focused: bool,
+    modal_open: bool,
+    explorer_focused: bool,
+) -> bool {
+    keyboard_focused && !modal_open && !explorer_focused
+}
+
+const fn ime_batch_blocked(modal_open: bool, explorer_focused: bool, barrier: bool) -> bool {
+    modal_open || explorer_focused || barrier
 }
 
 const fn presented_cursor_visible(inline_picker_open: bool, blink_phase_visible: bool) -> bool {
@@ -2892,7 +2917,7 @@ fn session_picker_new_command(
 }
 
 impl App {
-    fn content_rect(&self) -> Rect {
+    fn base_content_rect(&self) -> Rect {
         let y = tab_strip_height(
             self.tab_state.managed_tabs,
             self.tab_state.tab_strip_visible,
@@ -2904,6 +2929,36 @@ impl App {
             width: self.surface.logical_width,
             height: self.surface.logical_height.saturating_sub(y),
         }
+    }
+
+    fn current_explorer_layout(&self) -> Option<LairExplorerLayout> {
+        if !self.explorer.visible() {
+            return None;
+        }
+        let cell_width = self
+            .panes
+            .pane
+            .snapshot_frame
+            .as_ref()
+            .and_then(|frame| {
+                buffer_to_logical_ceil(frame.cell_width(), self.surface.scale_120).ok()
+            })
+            .unwrap_or(1);
+        let minimum_terminal_width =
+            cell_width.saturating_mul(u32::from(self.presentation.initial_columns));
+        let rows = self.explorer.rows();
+        lair_explorer_layout(
+            self.base_content_rect(),
+            minimum_terminal_width,
+            &rows,
+            self.explorer.selected(),
+            self.presentation.explorer_visible_start,
+        )
+    }
+
+    fn content_rect(&self) -> Rect {
+        self.current_explorer_layout()
+            .map_or_else(|| self.base_content_rect(), |layout| layout.terminal)
     }
 
     fn request_pane_control_release(pane: &mut PaneView, terminal_input_pending: bool) {
@@ -4348,6 +4403,9 @@ impl App {
     }
 
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
+        if self.explorer.focused() && self.explorer.search_active() {
+            return Some((OwnedFieldTarget::ExplorerSearch, self.explorer.editor_mut()));
+        }
         if self.modal.binding_help.is_none()
             && let Some(palette) = self.modal.command_palette.as_mut()
         {
@@ -4381,6 +4439,10 @@ impl App {
                 .dojo_prompt
                 .as_mut()
                 .and_then(DojoPromptUi::editor_mut),
+            OwnedFieldTarget::ExplorerSearch => self
+                .explorer
+                .search_active()
+                .then(|| self.explorer.editor_mut()),
             OwnedFieldTarget::Search => self.panes.pane.search.input.as_mut(),
         }
     }
@@ -4394,6 +4456,9 @@ impl App {
                 self.refresh_command_palette();
             }
             OwnedFieldTarget::DojoPrompt => self.refresh_dojo_prompt(),
+            OwnedFieldTarget::ExplorerSearch => {
+                self.presentation.full_redraw = true;
+            }
             OwnedFieldTarget::Search => {
                 self.update_window_title();
                 self.presentation.full_redraw = true;
@@ -4413,7 +4478,9 @@ impl App {
                     | Keysym::KP_Enter
                     | Keysym::Escape
             ),
-            OwnedFieldTarget::DojoPrompt | OwnedFieldTarget::Search => {
+            OwnedFieldTarget::DojoPrompt
+            | OwnedFieldTarget::ExplorerSearch
+            | OwnedFieldTarget::Search => {
                 matches!(keysym, Keysym::Return | Keysym::KP_Enter | Keysym::Escape)
             }
         }
@@ -4932,6 +4999,53 @@ impl App {
         self.reconcile_terminal_focus_report(modal_focus_changed);
     }
 
+    fn set_explorer_focus(&mut self, focused: bool, queue_handle: &QueueHandle<Self>) {
+        if focused {
+            if !self.explorer.focused() {
+                self.input.input_generation = self.input.input_generation.saturating_add(1);
+                self.input.ime_modal_barrier =
+                    self.input.ime.entered && self.input.text_input.is_some();
+                if self.input.ime_modal_barrier {
+                    if let Some(text_input) = &self.input.text_input {
+                        text_input.disable();
+                    }
+                    self.commit_text_input();
+                }
+                self.clear_ime_preedit();
+            }
+            self.explorer.focus();
+            if self.input.terminal_focus_reported {
+                self.request_active_pane_focus_report(false);
+                self.input.terminal_focus_reported = false;
+            }
+        } else {
+            self.explorer.return_to_terminal();
+            if !self.modal.input_modal_open() {
+                match picker_ime_reconcile(
+                    self.input.ime_modal_barrier,
+                    self.input.keyboard_focused,
+                    self.input.ime.entered,
+                ) {
+                    PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
+                    PickerImeReconcile::Enable => self.enable_text_input(),
+                    PickerImeReconcile::None => {}
+                }
+            }
+            if self.input.keyboard_focused
+                && self.panes.input_modes().focus_reporting
+                && !self.input.terminal_focus_reported
+            {
+                self.request_active_pane_focus_report(true);
+                self.input.terminal_focus_reported = true;
+            }
+        }
+        self.presentation.full_redraw = true;
+    }
+
+    fn refresh_lair_explorer(&mut self) -> Result<()> {
+        self.send_topology_command(WindowTopologyCommand::RequestLairExplorer)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "the closed palette catalog routes each typed application action at one modal boundary"
@@ -5072,6 +5186,34 @@ impl App {
                 }
                 Ok(())
             })(),
+            BuiltInCommandDispatch::ToggleLairExplorer => (|| -> Result<()> {
+                let was_focused = self.explorer.focused();
+                let visible = self.explorer.toggle_visibility();
+                if was_focused && !visible {
+                    self.set_explorer_focus(false, queue_handle);
+                }
+                if visible {
+                    self.refresh_lair_explorer()?;
+                }
+                self.presentation.explorer_layout = None;
+                self.presentation.full_redraw = true;
+                if self.surface.configured {
+                    self.emit_resize()?;
+                }
+                Ok(())
+            })(),
+            BuiltInCommandDispatch::FocusLairExplorer => (|| -> Result<()> {
+                let was_visible = self.explorer.visible();
+                self.set_explorer_focus(true, queue_handle);
+                if !was_visible && self.surface.configured {
+                    self.emit_resize()?;
+                }
+                self.refresh_lair_explorer()
+            })(),
+            BuiltInCommandDispatch::ReturnFocusToTerminal => {
+                self.set_explorer_focus(false, queue_handle);
+                Ok(())
+            }
             BuiltInCommandDispatch::History { target, action } => (|| -> Result<()> {
                 anyhow::ensure!(
                     self.panes.focused_splint() == Some(target),
@@ -5651,7 +5793,13 @@ impl App {
             }
             self.commit_text_input();
             self.clear_ime_preedit();
-        } else if focused && self.input.ime.entered && !self.modal.input_modal_open() {
+        } else if self.input.ime.entered
+            && terminal_ime_allowed(
+                focused,
+                self.modal.input_modal_open(),
+                self.explorer.focused(),
+            )
+        {
             self.enable_text_input();
         }
     }
@@ -5826,6 +5974,7 @@ impl App {
             self.presentation.renderer_generation.saturating_add(1);
         self.presentation.frame_titles.clear();
         self.modal.session_picker_text_cache.clear();
+        self.presentation.explorer_text_cache.clear();
         self.modal.command_palette_text_cache.clear();
         self.modal.dojo_prompt_text_cache.clear();
         self.modal.tab_context_menu_text_cache.clear();
@@ -5833,6 +5982,7 @@ impl App {
         self.tab_state.tab_close_text = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
+        self.presentation.explorer_layout = None;
         self.modal.command_palette_layout = None;
         self.modal.dojo_prompt_layout = None;
         self.modal.tab_context_menu_layout = None;
@@ -6353,6 +6503,86 @@ impl App {
             self.refresh_tab_context_menu();
         }
         changed
+    }
+
+    fn handle_lair_explorer_pointer(
+        &mut self,
+        event: &PointerEvent,
+        queue_handle: &QueueHandle<Self>,
+    ) -> bool {
+        let Some(layout) = self.presentation.explorer_layout.as_ref() else {
+            return false;
+        };
+        if !rect_contains(layout.panel, event.position) {
+            let owned = self.presentation.explorer_pressed.is_some();
+            if matches!(
+                event.kind,
+                PointerEventKind::Release { .. } | PointerEventKind::Leave { .. }
+            ) {
+                self.presentation.explorer_pressed = None;
+            }
+            return owned;
+        }
+        let target = lair_explorer_hit_test(layout, event.position);
+        let mut changed = false;
+        match event.kind {
+            PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                self.set_explorer_focus(true, queue_handle);
+                self.presentation.explorer_pressed = target;
+                if let Some(target) = target {
+                    changed |= self.explorer.select(target);
+                }
+            }
+            PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                let pressed = self.presentation.explorer_pressed.take();
+                if pressed.is_some()
+                    && pressed == target
+                    && let Some(decision) = self.explorer.decision()
+                {
+                    match decision {
+                        LairExplorerDecision::Toggle(_) => changed = true,
+                        LairExplorerDecision::OpenDojo(target)
+                            if !self.tab_state.session_switch_pending =>
+                        {
+                            self.tab_state.session_switch_pending = true;
+                            if self
+                                .send_topology_command(WindowTopologyCommand::OpenDojo {
+                                    target: SessionPickerTarget {
+                                        topology_revision: target.topology_revision,
+                                        lair_id: target.lair_id,
+                                        dojo_id: target.dojo_id,
+                                        action: target.capability.action,
+                                    },
+                                })
+                                .is_err()
+                            {
+                                self.tab_state.session_switch_pending = false;
+                                self.explorer.mark_disconnected();
+                            }
+                            changed = true;
+                        }
+                        LairExplorerDecision::OpenDojo(_) => {}
+                    }
+                }
+            }
+            PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
+                let delta =
+                    if vertical.discrete < 0 || vertical.value120 < 0 || vertical.absolute < 0.0 {
+                        -1
+                    } else {
+                        1
+                    };
+                changed |= self.explorer.move_selection(delta);
+            }
+            PointerEventKind::Leave { .. } => {
+                self.presentation.explorer_pressed = None;
+            }
+            _ => {}
+        }
+        if changed {
+            self.presentation.full_redraw = true;
+        }
+        true
     }
 
     fn handle_session_picker_pointer(&mut self, event: &PointerEvent) -> bool {
@@ -6907,6 +7137,106 @@ impl App {
                 }
                 Keysym::d | Keysym::D | Keysym::Escape => self.decide_consent(false),
                 _ => {}
+            }
+            return;
+        }
+        if self.explorer.focused() {
+            let mut changed = false;
+            match event.keysym {
+                Keysym::Up => changed = self.explorer.move_selection(-1),
+                Keysym::Down => changed = self.explorer.move_selection(1),
+                Keysym::k | Keysym::K if !self.explorer.search_active() => {
+                    changed = self.explorer.move_selection(-1);
+                }
+                Keysym::j | Keysym::J if !self.explorer.search_active() => {
+                    changed = self.explorer.move_selection(1);
+                }
+                Keysym::Page_Up => {
+                    let page = self
+                        .presentation
+                        .explorer_layout
+                        .as_ref()
+                        .map_or(1, |layout| layout.visible_capacity.max(1));
+                    changed = self
+                        .explorer
+                        .move_selection(-isize::try_from(page).unwrap_or(isize::MAX));
+                }
+                Keysym::Page_Down => {
+                    let page = self
+                        .presentation
+                        .explorer_layout
+                        .as_ref()
+                        .map_or(1, |layout| layout.visible_capacity.max(1));
+                    changed = self
+                        .explorer
+                        .move_selection(isize::try_from(page).unwrap_or(isize::MAX));
+                }
+                Keysym::Home => changed = self.explorer.select_edge(false),
+                Keysym::End => changed = self.explorer.select_edge(true),
+                Keysym::Left => changed = self.explorer.move_left(),
+                Keysym::Right => changed = self.explorer.move_right(),
+                Keysym::space => changed = self.explorer.toggle_selected(),
+                Keysym::Return | Keysym::KP_Enter => {
+                    if let Some(decision) = self.explorer.decision() {
+                        match decision {
+                            LairExplorerDecision::Toggle(_) => changed = true,
+                            LairExplorerDecision::OpenDojo(target)
+                                if !self.tab_state.session_switch_pending =>
+                            {
+                                self.tab_state.session_switch_pending = true;
+                                let command = WindowTopologyCommand::OpenDojo {
+                                    target: SessionPickerTarget {
+                                        topology_revision: target.topology_revision,
+                                        lair_id: target.lair_id,
+                                        dojo_id: target.dojo_id,
+                                        action: target.capability.action,
+                                    },
+                                };
+                                if self.send_topology_command(command).is_err() {
+                                    self.tab_state.session_switch_pending = false;
+                                    self.explorer.mark_disconnected();
+                                }
+                                changed = true;
+                            }
+                            LairExplorerDecision::OpenDojo(_) => {}
+                        }
+                    }
+                }
+                Keysym::slash | Keysym::f | Keysym::F
+                    if matches!(event.keysym, Keysym::slash) || self.input.modifiers.ctrl =>
+                {
+                    changed = self.explorer.begin_search();
+                }
+                Keysym::r | Keysym::R if !self.explorer.search_active() => {
+                    if self.explorer.disconnected() {
+                        let _ = self.refresh_lair_explorer();
+                        changed = true;
+                    } else {
+                        changed = self.explorer.reveal_current();
+                    }
+                }
+                Keysym::BackSpace => changed = self.explorer.backspace_search(),
+                Keysym::Escape if self.explorer.query().is_empty() => {
+                    self.set_explorer_focus(false, queue_handle);
+                    changed = true;
+                }
+                Keysym::Escape => changed = self.explorer.escape(),
+                _ if self.explorer.search_active()
+                    && !self.input.modifiers.ctrl
+                    && !self.input.modifiers.alt
+                    && !self.input.modifiers.logo =>
+                {
+                    if let Some(text) = Self::editable_field_text(event.utf8.as_deref()) {
+                        changed = self.explorer.append_search(text);
+                    }
+                }
+                _ => {}
+            }
+            if changed {
+                self.presentation.full_redraw = true;
+                if let Err(error) = self.schedule_draw(queue_handle) {
+                    self.scheduling.fail(error);
+                }
             }
             return;
         }
@@ -7502,6 +7832,15 @@ impl App {
                 changed = true;
                 continue;
             }
+            let refresh_explorer = self.explorer.visible()
+                && matches!(
+                    &update,
+                    WindowTopologyUpdate::Apply { .. }
+                        | WindowTopologyUpdate::OpenTab { .. }
+                        | WindowTopologyUpdate::ActivateTab { .. }
+                        | WindowTopologyUpdate::RemoveTab { .. }
+                        | WindowTopologyUpdate::UpdateIdentity(_)
+                );
             match update {
                 WindowTopologyUpdate::Apply {
                     topology_revision,
@@ -7696,6 +8035,16 @@ impl App {
                         changed = true;
                     }
                 }
+                WindowTopologyUpdate::ShowLairExplorer { view } => {
+                    self.explorer.set_view(view);
+                    self.presentation.full_redraw = true;
+                    changed = true;
+                }
+                WindowTopologyUpdate::LairExplorerFailed => {
+                    self.explorer.mark_disconnected();
+                    self.presentation.full_redraw = true;
+                    changed = true;
+                }
                 WindowTopologyUpdate::ShowSelector { kind, catalog } => {
                     if self.modal.session_picker_requested
                         && !self.tab_state.session_switch_pending
@@ -7758,6 +8107,9 @@ impl App {
                         .request_exit(ExitClass::ErrorTopologyManager);
                     anyhow::bail!("topology manager stopped");
                 }
+            }
+            if refresh_explorer {
+                let _ = self.refresh_lair_explorer();
             }
         }
         self.sync_graphical_focus();
@@ -8930,6 +9282,13 @@ impl App {
                 self.presentation.full_redraw = true;
             }
         }
+        let explorer_layout = self.current_explorer_layout();
+        if let Some(layout) = &explorer_layout {
+            self.presentation.explorer_visible_start = layout.visible_start;
+        }
+        self.presentation
+            .explorer_layout
+            .clone_from(&explorer_layout);
         let pane_layout = self.computed_pane_layout()?;
         let pane_cell_width = self
             .panes
@@ -9076,7 +9435,8 @@ impl App {
             && !inline_picker_open
             && !command_palette_open
             && !dojo_prompt_open
-            && !tab_context_menu_open;
+            && !tab_context_menu_open
+            && !self.explorer.focused();
         let backing_len = bounded_window_backing_len(width, height)?;
         let mut buffer_index = None;
         for (index, buffer) in self.surface.buffers.iter().enumerate() {
@@ -9294,7 +9654,8 @@ impl App {
                 || inline_picker_open
                 || command_palette_open
                 || dojo_prompt_open
-                || tab_context_menu_open;
+                || tab_context_menu_open
+                || explorer_layout.is_some();
             let full_backing_sync =
                 self.presentation.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.surface.buffers {
@@ -9409,6 +9770,29 @@ impl App {
                 &self.tab_state.tab_label_cache,
                 self.tab_state.tab_close_text.as_ref().map(|(_, text)| text),
                 self.tab_state.tab_new_text.as_ref().map(|(_, text)| text),
+            )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        if let Some(layout) = explorer_layout.as_ref() {
+            let rows = self.explorer.rows();
+            let breadcrumb = self.explorer.breadcrumb();
+            let status_message = self.explorer.status_message();
+            paint_lair_explorer(
+                &mut self.presentation.explorer_text_cache,
+                &self.presentation.render_context,
+                canvas,
+                width,
+                height,
+                self.surface.scale_120,
+                self.presentation.renderer_generation,
+                layout,
+                session_picker_palette(self.presentation.theme),
+                &rows,
+                self.explorer.selected(),
+                breadcrumb.as_deref(),
+                self.explorer.query(),
+                status_message,
+                self.explorer.focused(),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
@@ -9772,6 +10156,21 @@ mod tests {
     }
 
     #[test]
+    fn explorer_focus_blocks_terminal_ime_until_focus_returns() {
+        assert!(terminal_ime_allowed(true, false, false));
+        assert!(!terminal_ime_allowed(true, false, true));
+        assert!(!terminal_ime_allowed(true, true, false));
+        assert!(!terminal_ime_allowed(false, false, false));
+        assert!(ime_batch_blocked(false, true, false));
+        assert!(ime_batch_blocked(false, false, true));
+        assert!(!ime_batch_blocked(false, false, false));
+        assert_eq!(
+            picker_ime_reconcile(true, true, true),
+            PickerImeReconcile::Renew
+        );
+    }
+
+    #[test]
     fn owned_fields_defer_modal_control_keys_before_text_editing() {
         for keysym in [
             Keysym::Up,
@@ -9787,7 +10186,11 @@ mod tests {
                 keysym
             ));
         }
-        for target in [OwnedFieldTarget::DojoPrompt, OwnedFieldTarget::Search] {
+        for target in [
+            OwnedFieldTarget::DojoPrompt,
+            OwnedFieldTarget::ExplorerSearch,
+            OwnedFieldTarget::Search,
+        ] {
             for keysym in [Keysym::Return, Keysym::KP_Enter, Keysym::Escape] {
                 assert!(App::owned_field_defers_to_modal(target, keysym));
             }

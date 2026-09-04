@@ -2,6 +2,7 @@
 
 mod action_menu;
 mod binding_help;
+mod lair_explorer;
 mod message;
 mod options;
 mod picker;
@@ -17,6 +18,9 @@ pub(crate) use action_menu::{
     tab_menu_dispatch, tab_menu_right_press,
 };
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
+pub(crate) use lair_explorer::{
+    LairExplorerDecision, LairExplorerRow, LairExplorerRowKind, LairExplorerUi,
+};
 pub use message::{
     AuthorityStatus, FontUpdate, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
 };

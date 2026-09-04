@@ -225,6 +225,44 @@ pub struct NavigationPickerView {
     pub initial_row: Option<usize>,
 }
 
+/// Exact Dojo authority retained by the explorer policy view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NavigationExplorerTarget {
+    pub topology_revision: TopologyRevision,
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub capability: NavigationCapability,
+}
+
+/// One Dojo retained by the persistent explorer, including unavailable rows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationExplorerDojo {
+    pub id: NavigationNodeId,
+    pub label: String,
+    pub attachment: WindowAttachment,
+    pub active_here: bool,
+    pub target: NavigationExplorerTarget,
+}
+
+/// One persistent Lair and its canonically ordered Dojos.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationExplorerLair {
+    pub id: NavigationNodeId,
+    pub label: String,
+    pub retention: LairRetention,
+    pub current_here: bool,
+    pub dojos: Vec<NavigationExplorerDojo>,
+}
+
+/// Bounded, presentation-independent policy view for the local explorer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationExplorerView {
+    pub topology_revision: TopologyRevision,
+    pub freshness: EndpointFreshness,
+    pub lairs: Vec<NavigationExplorerLair>,
+    pub current: Option<NavigationNodeId>,
+}
+
 /// Current-Window facts which are not daemon containment relationships.
 #[derive(Clone, Copy, Debug)]
 pub struct NavigationWindowState<'a> {
@@ -287,6 +325,65 @@ impl std::fmt::Display for NavigationProjectionError {
 impl std::error::Error for NavigationProjectionError {}
 
 impl NavigationProjection {
+    /// Builds the persistent Lair → Dojo explorer policy without presentation state.
+    #[must_use]
+    pub fn explorer_view(&self) -> NavigationExplorerView {
+        let mut current = None;
+        let lairs = self
+            .lairs
+            .iter()
+            .map(|lair| {
+                let dojos = lair
+                    .dojos
+                    .iter()
+                    .map(|dojo| {
+                        if dojo.active_here {
+                            current = Some(dojo.node.id);
+                        }
+                        let action = match dojo.attachment {
+                            WindowAttachment::Here => NavigationAction::ActivateDojo,
+                            WindowAttachment::NotHere => NavigationAction::AttachDojo,
+                        };
+                        let capability = dojo
+                            .node
+                            .capabilities
+                            .iter()
+                            .copied()
+                            .find(|capability| capability.action == action)
+                            .unwrap_or_else(|| {
+                                capability(action, self.freshness, false, false, true)
+                            });
+                        NavigationExplorerDojo {
+                            id: dojo.node.id,
+                            label: dojo.node.label.clone(),
+                            attachment: dojo.attachment,
+                            active_here: dojo.active_here,
+                            target: NavigationExplorerTarget {
+                                topology_revision: self.topology_revision,
+                                lair_id: dojo.lair_id,
+                                dojo_id: dojo.dojo_id,
+                                capability,
+                            },
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                NavigationExplorerLair {
+                    id: lair.node.id,
+                    label: lair.node.label.clone(),
+                    retention: lair.retention,
+                    current_here: dojos.iter().any(|dojo| dojo.active_here),
+                    dojos,
+                }
+            })
+            .collect();
+        NavigationExplorerView {
+            topology_revision: self.topology_revision,
+            freshness: self.freshness,
+            lairs,
+            current,
+        }
+    }
+
     /// Builds one explicit quick-picker policy view.
     ///
     /// `recent_dojo_ids` is newest-first endpoint-local recency. Lair
@@ -1279,6 +1376,59 @@ mod tests {
         assert_eq!(
             dojo.node.capabilities,
             [enabled(NavigationAction::ActivateDojo)]
+        );
+    }
+
+    #[test]
+    fn explorer_view_retains_canonical_rows_and_exact_dojo_authority() {
+        let mut first = running_lair("first");
+        first.retention = LairRetention::Saved;
+        let active = first.dojos[0].id;
+        let second = running_lair("second");
+        let detached = second.dojos[0].id;
+        let captured = snapshot(vec![first, second], &[]);
+        let projection = NavigationProjection::build(&captured, context(&[active])).unwrap();
+
+        let view = projection.explorer_view();
+        assert_eq!(view.topology_revision, captured.revision);
+        assert_eq!(view.freshness, EndpointFreshness::Current);
+        assert_eq!(view.lairs.len(), 2);
+        assert_eq!(
+            view.lairs
+                .iter()
+                .map(|lair| lair.label.as_str())
+                .collect::<Vec<_>>(),
+            projection
+                .lairs
+                .iter()
+                .map(|lair| lair.node.label.as_str())
+                .collect::<Vec<_>>()
+        );
+        let first = view
+            .lairs
+            .iter()
+            .find(|lair| lair.label == "first")
+            .unwrap();
+        let second = view
+            .lairs
+            .iter()
+            .find(|lair| lair.label == "second")
+            .unwrap();
+        assert!(first.current_here);
+        assert_eq!(view.current, Some(first.dojos[0].id));
+        assert_eq!(
+            first.dojos[0].target,
+            NavigationExplorerTarget {
+                topology_revision: captured.revision,
+                lair_id: first.dojos[0].target.lair_id,
+                dojo_id: active,
+                capability: enabled(NavigationAction::ActivateDojo),
+            }
+        );
+        assert_eq!(second.dojos[0].target.dojo_id, detached);
+        assert_eq!(
+            second.dojos[0].target.capability,
+            enabled(NavigationAction::AttachDojo)
         );
     }
 

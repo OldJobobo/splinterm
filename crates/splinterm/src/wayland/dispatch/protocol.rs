@@ -3,7 +3,8 @@ use super::super::{
     Dispatch, ExtBackgroundEffectManagerV1, ExtBackgroundEffectSurfaceV1, Proxy, QueueHandle,
     WaylandSurface, WindowCommand, WpFractionalScaleManagerV1, WpFractionalScaleV1, WpViewport,
     WpViewporter, ZwpTextInputManagerV3, ZwpTextInputV3, background_effect_capability_bits,
-    ext_background_effect_surface_v1, wp_fractional_scale_v1, zwp_text_input_v3,
+    ext_background_effect_surface_v1, ime_batch_blocked, terminal_ime_allowed,
+    wp_fractional_scale_v1, zwp_text_input_v3,
 };
 
 impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
@@ -138,7 +139,13 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                 | zwp_text_input_v3::Event::CommitString { .. }
                 | zwp_text_input_v3::Event::Done { .. }
         );
-        if ime_batch_event && (state.modal.input_modal_open() || state.input.ime_modal_barrier) {
+        if ime_batch_event
+            && ime_batch_blocked(
+                state.modal.input_modal_open(),
+                state.explorer.focused(),
+                state.input.ime_modal_barrier,
+            )
+        {
             state.input.ime.clear_composition();
             return;
         }
@@ -146,7 +153,11 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
             zwp_text_input_v3::Event::Enter { surface } => {
                 if surface == *state.surface.window.wl_surface() {
                     state.input.ime.entered = true;
-                    if state.input.keyboard_focused && !state.modal.input_modal_open() {
+                    if terminal_ime_allowed(
+                        state.input.keyboard_focused,
+                        state.modal.input_modal_open(),
+                        state.explorer.focused(),
+                    ) {
                         state.enable_text_input();
                     }
                 }

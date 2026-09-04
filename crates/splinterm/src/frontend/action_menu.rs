@@ -701,6 +701,9 @@ pub(crate) enum BuiltInCommandId {
     PageDown,
     ReturnToLive,
     ToggleTabStrip,
+    ToggleLairExplorer,
+    FocusLairExplorer,
+    ReturnFocusToTerminal,
     ZoomIn,
     ZoomOut,
     ResetZoom,
@@ -756,6 +759,9 @@ impl BuiltInCommandId {
         Self::PageDown,
         Self::ReturnToLive,
         Self::ToggleTabStrip,
+        Self::ToggleLairExplorer,
+        Self::FocusLairExplorer,
+        Self::ReturnFocusToTerminal,
         Self::ZoomIn,
         Self::ZoomOut,
         Self::ResetZoom,
@@ -900,6 +906,9 @@ pub(crate) enum BuiltInCommandDispatch {
     Focus(SplintId),
     Zoom(CommandZoomAction),
     ToggleTabStrip,
+    ToggleLairExplorer,
+    FocusLairExplorer,
+    ReturnFocusToTerminal,
     History {
         target: SplintId,
         action: CommandHistoryAction,
@@ -1222,6 +1231,27 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         shortcut_action: Some(ActionId::ToggleTabStrip),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ToggleLairExplorer,
+        category: CommandCategory::View,
+        title: "Toggle Lair explorer",
+        keywords: &["toggle", "show", "hide", "lair", "explorer", "tree", "view"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::FocusLairExplorer,
+        category: CommandCategory::View,
+        title: "Focus Lair explorer",
+        keywords: &["focus", "lair", "explorer", "tree", "navigation"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ReturnFocusToTerminal,
+        category: CommandCategory::View,
+        title: "Return focus to terminal",
+        keywords: &["focus", "return", "terminal", "explorer", "navigation"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::ZoomIn,
         category: CommandCategory::View,
         title: "Zoom in",
@@ -1371,6 +1401,9 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         | BuiltInCommandId::PageUp
         | BuiltInCommandId::PageDown
         | BuiltInCommandId::ToggleTabStrip
+        | BuiltInCommandId::ToggleLairExplorer
+        | BuiltInCommandId::FocusLairExplorer
+        | BuiltInCommandId::ReturnFocusToTerminal
         | BuiltInCommandId::ZoomIn
         | BuiltInCommandId::ZoomOut
         | BuiltInCommandId::ResetZoom
@@ -1765,6 +1798,9 @@ pub(crate) fn command_dispatch(
             action: CommandHistoryAction::ReturnToLive,
         },
         BuiltInCommandId::ToggleTabStrip => BuiltInCommandDispatch::ToggleTabStrip,
+        BuiltInCommandId::ToggleLairExplorer => BuiltInCommandDispatch::ToggleLairExplorer,
+        BuiltInCommandId::FocusLairExplorer => BuiltInCommandDispatch::FocusLairExplorer,
+        BuiltInCommandId::ReturnFocusToTerminal => BuiltInCommandDispatch::ReturnFocusToTerminal,
         BuiltInCommandId::ZoomIn => BuiltInCommandDispatch::Zoom(CommandZoomAction::Increase),
         BuiltInCommandId::ZoomOut => BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease),
         BuiltInCommandId::ResetZoom => BuiltInCommandDispatch::Zoom(CommandZoomAction::Reset),
@@ -2031,6 +2067,9 @@ mod tests {
             palette.filtered,
             vec![
                 BuiltInCommandId::ToggleTabStrip,
+                BuiltInCommandId::ToggleLairExplorer,
+                BuiltInCommandId::FocusLairExplorer,
+                BuiltInCommandId::ReturnFocusToTerminal,
                 BuiltInCommandId::ZoomIn,
                 BuiltInCommandId::ZoomOut,
                 BuiltInCommandId::ResetZoom,
@@ -2460,6 +2499,26 @@ mod tests {
             command_dispatch(BuiltInCommandId::ToggleTabStrip, &context),
             Some(BuiltInCommandDispatch::ToggleTabStrip)
         );
+        for (id, dispatch) in [
+            (
+                BuiltInCommandId::ToggleLairExplorer,
+                BuiltInCommandDispatch::ToggleLairExplorer,
+            ),
+            (
+                BuiltInCommandId::FocusLairExplorer,
+                BuiltInCommandDispatch::FocusLairExplorer,
+            ),
+            (
+                BuiltInCommandId::ReturnFocusToTerminal,
+                BuiltInCommandDispatch::ReturnFocusToTerminal,
+            ),
+        ] {
+            assert_eq!(command_dispatch(id, &context), Some(dispatch));
+            assert_eq!(
+                command_descriptor(id).shortcut(&ResolvedKeymap::default()),
+                ""
+            );
+        }
         assert_eq!(
             command_dispatch(BuiltInCommandId::ZoomOut, &context),
             Some(BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease))
