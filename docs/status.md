@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0-rc.1`
+- **Current public version tag:** `v0.1.0-rc.2`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -50,9 +50,25 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
-## 0.1.0 RC2 candidate preparation
+## 0.1.0 RC3 preparation (unreleased)
 
-This source branch retains RC1 and closes two review findings in live native
+RC3 is a maintenance stabilization candidate, not a new feature release. It
+separates probed font-source identity from accepted renderer faces, rejects FIFO
+policy files without blocking, preserves fragmented requests across unrelated
+revocations, and cleans up topology subscriptions on abnormal connection exit.
+Relay cancellation interrupts blocked writes while ordered remote EOF retains
+queued response bytes for slow consumers under the logical-channel limit.
+
+RC2 remains the public release. RC3 requires exact-source validation, independent
+review, and guarded installed-package acceptance before candidate construction
+and human-approved publication. Local preparation does not publish a release or
+update installed packages. See [release automation](release-automation.md).
+
+## 0.1.0 RC2 release
+
+[`v0.1.0-rc.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.2)
+was published on 2026-09-04 from `b7f735e2257a6ae4f595e0f111f90c28279f5711`.
+It retains RC1 and closes two review findings in live native
 Omarchy font synchronization. Accepted staging now replaces a divergent probe
 fingerprint so a later generation cannot be skipped, and cached FreeType faces
 share their immutable staged mappings instead of copying an entire font file per
@@ -62,14 +78,13 @@ monospace family rather than requiring one host-specific family.
 Focused and complete non-graphical validation and independent source review
 passed. The exact RC2 implementation package at `d26cee9` passed guarded live
 valid-font replacement and invalid-candidate rollback acceptance without
-replacing the Window, daemon, shell, or Splint incarnation. Candidate
-construction and publication remain separate release boundaries. Foot is an
-optional historical differential and does not block either boundary.
+replacing the Window, daemon, shell, or Splint incarnation. Foot remains an
+optional historical differential rather than release authority.
 
 ## 0.1.0 RC1 release
 
 [`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1)
-is the current public prerelease. It freezes the 0.1 feature line on the complete
+was the first 0.1.0 release candidate. It freezes the 0.1 feature line on the complete
 Beta 3 baseline and adds live native Omarchy font following, bounded Omarchy Gum
 palette refresh for newly created Splints, Sixel capability negotiation for Yazi,
 and legacy generated-Dojo name normalization. Its release target is

@@ -1,3 +1,30 @@
+# Splinterm 0.1.0 RC3 — Stabilization (unreleased)
+
+RC3 retains the RC2 feature set and fixes bounded loading, font observation, and
+connection cleanup. It is prepared locally; RC2 remains the public release until
+RC3 passes exact-source/package acceptance and human-approved publication.
+
+## RC3 fixes
+
+- Unchanged Fontconfig sources no longer trigger repeated staging when an
+  incompatible bold or italic face falls back to the regular face. Source and
+  renderer fingerprints remain separate, preserving RC2's resolution-race fix.
+- Policy files that are FIFOs are rejected without waiting for a writer.
+- Revoking another automation connection no longer discards a partially received
+  request header or body.
+- Abnormal connection exits remove their topology subscriptions immediately,
+  without waiting for another topology mutation.
+- Relay close and session cancellation interrupt blocked writes and reclaim
+  per-channel queues. Remote EOF still delivers already-received bytes in order
+  to slow consumers; pending drains remain charged against channel admission.
+
+Upgrades retain the documented 0.1 daemon-lifetime boundary: replacing/restarting
+an incompatible daemon ends its child processes. Use the external-terminal
+upgrade and rollback workflow in [packaging](docs/packaging.md). No live-session
+handoff or new compatibility guarantee is introduced by RC3.
+
+---
+
 # Splinterm 0.1.0 RC2 — Font Reload Closure
 
 This is the second release candidate for Splinterm 0.1.0. It retains the complete
