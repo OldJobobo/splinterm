@@ -259,6 +259,7 @@ pub struct FontFingerprint {
 pub struct FontGeneration {
     pub(super) id: u64,
     pub(super) fingerprint: FontFingerprint,
+    source_fingerprint: FontFingerprint,
     pub(super) faces: Vec<FontFace>,
 }
 
@@ -269,10 +270,17 @@ impl FontGeneration {
         self.id
     }
 
-    /// Returns the stable effective source fingerprint.
+    /// Returns the stable fingerprint of the faces accepted for rendering.
     #[must_use]
     pub const fn fingerprint(&self) -> &FontFingerprint {
         &self.fingerprint
+    }
+
+    /// Returns the probed source identities used to stage this generation,
+    /// before incompatible styles were replaced by their regular face.
+    #[must_use]
+    pub const fn source_fingerprint(&self) -> &FontFingerprint {
+        &self.source_fingerprint
     }
 }
 
@@ -1680,17 +1688,8 @@ fn probe_primary_style_source(
 /// Returns an error when Fontconfig output or selected source metadata is invalid.
 #[doc(hidden)]
 pub fn probe_live_font_sources(pattern: &str, authority: FontAuthority) -> Result<FontFingerprint> {
-    let regular = resolve_face_source(
-        "primary regular",
-        pattern,
-        expected_primary_family_fragment(pattern),
-    )?;
-    let [bold_request, italic_request, bold_italic_request] = PRIMARY_STYLE_REQUESTS;
-    let mut sources = Vec::from([
-        regular.clone(),
-        probe_primary_style_source(&regular, bold_request),
-        probe_primary_style_source(&regular, italic_request),
-        probe_primary_style_source(&regular, bold_italic_request),
+    let mut sources = Vec::from(resolve_primary_sources(pattern)?);
+    sources.extend([
         resolve_face_source("CJK fallback", CJK_FONT, "noto sans cjk")?,
         resolve_face_source("emoji fallback", EMOJI_FONT, "noto color emoji")?,
     ]);
@@ -1748,9 +1747,9 @@ fn resolve_primary_style(
     regular: &FontFace,
     request: PrimaryStyleRequest,
     regular_advance: f32,
+    source: ResolvedFaceSource,
 ) -> FontFace {
-    let pattern = primary_style_pattern(&regular.family, request);
-    let resolved = resolve_face(request.label, &pattern, &regular.family).and_then(|candidate| {
+    let resolved = stage_face(source).and_then(|candidate| {
         let candidate_advance = face_advance(&candidate, BASE_FONT_SIZE)?;
         if let Some(reason) = style_candidate_rejection(
             regular,
@@ -1783,19 +1782,29 @@ fn expected_primary_family_fragment(pattern: &str) -> &'static str {
     }
 }
 
-fn resolve_primary_faces_exact(pattern: &str) -> Result<[FontFace; 4]> {
-    let regular = resolve_face(
+fn resolve_primary_sources(pattern: &str) -> Result<[ResolvedFaceSource; 4]> {
+    let regular = resolve_face_source(
         "primary regular",
         pattern,
         expected_primary_family_fragment(pattern),
     )?;
+    let [bold, italic, bold_italic] =
+        PRIMARY_STYLE_REQUESTS.map(|request| probe_primary_style_source(&regular, request));
+    Ok([regular, bold, italic, bold_italic])
+}
+
+fn resolve_primary_faces_exact(pattern: &str) -> Result<([FontFace; 4], [ResolvedFaceSource; 4])> {
+    let sources = resolve_primary_sources(pattern)?;
+    let [regular, bold, italic, bold_italic] = sources.clone();
+    let regular = stage_face(regular)?;
     let regular_advance = face_advance(&regular, BASE_FONT_SIZE)
         .context("selected primary regular face is unusable")?;
     let [bold_request, italic_request, bold_italic_request] = PRIMARY_STYLE_REQUESTS;
-    let bold = resolve_primary_style(&regular, bold_request, regular_advance);
-    let italic = resolve_primary_style(&regular, italic_request, regular_advance);
-    let bold_italic = resolve_primary_style(&regular, bold_italic_request, regular_advance);
-    Ok([regular, bold, italic, bold_italic])
+    let bold = resolve_primary_style(&regular, bold_request, regular_advance, bold);
+    let italic = resolve_primary_style(&regular, italic_request, regular_advance, italic);
+    let bold_italic =
+        resolve_primary_style(&regular, bold_italic_request, regular_advance, bold_italic);
+    Ok(([regular, bold, italic, bold_italic], sources))
 }
 
 fn resolve_startup_primary_with<T>(
@@ -1823,6 +1832,7 @@ fn resolve_startup_primary_with<T>(
 
 fn resolve_primary_faces(pattern: &str, authority: FontAuthority) -> Result<[FontFace; 4]> {
     resolve_startup_primary_with(pattern, authority, resolve_primary_faces_exact)
+        .map(|(faces, _)| faces)
 }
 
 fn resolve_font_candidate(
@@ -1830,30 +1840,53 @@ fn resolve_font_candidate(
     authority: FontAuthority,
     startup: bool,
 ) -> Result<FontGeneration> {
-    let [regular, bold, italic, bold_italic] = if startup {
-        resolve_primary_faces(pattern, authority)?
+    let (primary_faces, primary_sources) = if startup {
+        resolve_startup_primary_with(pattern, authority, resolve_primary_faces_exact)?
     } else {
         resolve_primary_faces_exact(pattern)?
     };
     let id = NEXT_FONT_GENERATION_ID.fetch_add(1, Ordering::Relaxed);
-    let mut faces = Vec::from([
-        regular,
-        bold,
-        italic,
-        bold_italic,
-        resolve_face("CJK fallback", CJK_FONT, "noto sans cjk")?,
-        resolve_face("emoji fallback", EMOJI_FONT, "noto color emoji")?,
-    ]);
+    let cjk = resolve_face_source("CJK fallback", CJK_FONT, "noto sans cjk")?;
+    let emoji = resolve_face_source("emoji fallback", EMOJI_FONT, "noto color emoji")?;
+    let mut faces = Vec::from(primary_faces);
+    faces.extend([stage_face(cjk.clone())?, stage_face(emoji.clone())?]);
+    let mut sources = Vec::from(primary_sources);
+    sources.extend([cjk, emoji]);
+    // Resolve fallback order once, then exclude the respective source/render
+    // selections. A rejected primary style can still be a fallback candidate.
+    let fallback_sources = resolve_fallback_sources(pattern, &HashSet::new())?;
+    let source_excluded = sources
+        .iter()
+        .map(|source| (source.path.clone(), source.index))
+        .collect::<HashSet<_>>();
+    sources.extend(
+        fallback_sources
+            .iter()
+            .filter(|source| !source_excluded.contains(&(source.path.clone(), source.index)))
+            .cloned(),
+    );
+    let source_fingerprint = FontFingerprint {
+        pattern: pattern.to_owned(),
+        authority,
+        faces: sources
+            .iter()
+            .map(ResolvedFaceSource::fingerprint)
+            .collect(),
+    };
     let excluded = faces
         .iter()
         .map(|face| (face.path.clone(), face.index))
         .collect::<HashSet<_>>();
-    let fallback_sources = resolve_fallback_sources(pattern, &excluded)?;
+    faces.extend(
+        fallback_sources
+            .into_iter()
+            .filter(|source| !excluded.contains(&(source.path.clone(), source.index)))
+            .map(unstaged_fallback_face),
+    );
     eprintln!(
         "Resolved {} ordered Fontconfig fallback faces",
-        fallback_sources.len()
+        faces.len() - 6
     );
-    faces.extend(fallback_sources.into_iter().map(unstaged_fallback_face));
     for face in &mut faces {
         face.generation_id = id;
     }
@@ -1865,6 +1898,7 @@ fn resolve_font_candidate(
     Ok(FontGeneration {
         id,
         fingerprint,
+        source_fingerprint,
         faces,
     })
 }
@@ -1890,7 +1924,13 @@ fn stage_font_generation(
 ) -> Result<FontGeneration> {
     stage_stable_with(|| {
         let generation = resolve_font_candidate(pattern, authority, startup)?;
-        Ok((generation.fingerprint.clone(), generation))
+        Ok((
+            (
+                generation.source_fingerprint.clone(),
+                generation.fingerprint.clone(),
+            ),
+            generation,
+        ))
     })
 }
 
@@ -2434,6 +2474,33 @@ mod tests {
     }
 
     #[test]
+    fn stable_staging_checks_sources_even_when_rendered_faces_match() {
+        let mut candidates = [((1_u8, 7_u8), "first"), ((2, 7), "second")].into_iter();
+        assert!(stage_stable_with(|| Ok(candidates.next().unwrap())).is_err());
+        let mut candidates = [((1_u8, 7_u8), "first"), ((1, 8), "second")].into_iter();
+        assert!(stage_stable_with(|| Ok(candidates.next().unwrap())).is_err());
+        let mut candidates = [((1_u8, 7_u8), "first"), ((1, 7), "second")].into_iter();
+        assert_eq!(
+            stage_stable_with(|| Ok(candidates.next().unwrap())).unwrap(),
+            "second"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires host Fontconfig, DejaVu Sans, CJK and emoji fonts"]
+    fn rejected_style_sources_match_the_probe_not_the_rendered_faces() {
+        let pattern = "DejaVu Sans";
+        let authority = FontAuthority::NativeOmarchy;
+        let probe = probe_live_font_sources(pattern, authority).unwrap();
+        let generation = stage_live_font_generation(pattern, authority).unwrap();
+        assert_eq!(&probe, generation.source_fingerprint());
+        assert_ne!(&probe, generation.fingerprint());
+        let again = stage_live_font_generation(pattern, authority).unwrap();
+        assert_eq!(generation.source_fingerprint(), again.source_fingerprint());
+        assert_eq!(generation.fingerprint(), again.fingerprint());
+    }
+
+    #[test]
     #[ignore = "manual host resource timing; requires fontconfig and installed fonts"]
     fn repeated_live_staging_is_fd_bounded() {
         let options = renderer_options();
@@ -2457,7 +2524,7 @@ mod tests {
         let options = renderer_options();
         let probe = probe_live_font_sources(&options.font, options.font_authority).unwrap();
         let staged = stage_live_font_generation(&options.font, options.font_authority).unwrap();
-        assert_eq!(probe, staged.fingerprint);
+        assert_eq!(probe, staged.source_fingerprint);
     }
 
     #[test]
