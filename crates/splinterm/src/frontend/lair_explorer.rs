@@ -251,7 +251,13 @@ impl LairExplorerUi {
         true
     }
 
-    pub(crate) fn complete_pending(&mut self, completed: LairExplorerActivationTarget) -> bool {
+    /// Retire only the acknowledged request. Return whether terminal focus may resume.
+    /// A matching local failure releases pending ownership, never keyboard ownership.
+    pub(crate) fn finish_activation(
+        &mut self,
+        completed: LairExplorerActivationTarget,
+        succeeded: bool,
+    ) -> bool {
         let matches = self
             .pending
             .is_some_and(|pending| match (pending, completed) {
@@ -271,9 +277,13 @@ impl LairExplorerUi {
                 _ => false,
             });
         if matches {
-            self.pending = None;
+            if succeeded {
+                self.pending = None;
+            } else {
+                self.fail_pending();
+            }
         }
-        matches
+        matches && succeeded
     }
 
     pub(crate) fn clear_pending(&mut self) -> bool {
@@ -959,12 +969,89 @@ mod tests {
         };
         let mut wrong = target;
         wrong.topology_revision = TopologyRevision::new(8);
-        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Splint(wrong)));
+        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Splint(wrong), true));
         wrong = target;
         wrong.live_incarnation = Some(99);
-        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Splint(wrong)));
-        assert!(explorer.complete_pending(LairExplorerActivationTarget::Splint(target)));
+        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Splint(wrong), true));
+        assert!(explorer.finish_activation(LairExplorerActivationTarget::Splint(target), true));
         assert!(explorer.decision().is_some());
+    }
+
+    #[test]
+    fn failed_activation_retires_only_exact_request_and_allows_retry_after_refresh() {
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view());
+        explorer.reveal_current();
+        explorer.focus();
+        let decision = explorer.decision().unwrap();
+        let LairExplorerDecision::FocusSplint(target) = decision else {
+            panic!("expected Splint target");
+        };
+        assert!(explorer.set_pending(decision));
+
+        let mut wrong_lair = target;
+        wrong_lair.lair_id = LairId::new();
+        let mut wrong_dojo = target;
+        wrong_dojo.dojo_id = DojoId::new();
+        let mut wrong_splint = target;
+        wrong_splint.splint_id = SplintId::new();
+        let mut wrong_revision = target;
+        wrong_revision.topology_revision = TopologyRevision::new(99);
+        let mut wrong_incarnation = target;
+        wrong_incarnation.live_incarnation = Some(99);
+        for wrong in [
+            wrong_lair,
+            wrong_dojo,
+            wrong_splint,
+            wrong_revision,
+            wrong_incarnation,
+        ] {
+            for succeeded in [false, true] {
+                assert!(
+                    !explorer
+                        .finish_activation(LairExplorerActivationTarget::Splint(wrong), succeeded,)
+                );
+                assert_eq!(explorer.pending, Some(LairExplorerPending::Splint(target)));
+                assert!(explorer.focused());
+            }
+        }
+
+        // The owner could not focus the captured incarnation. Keep keyboard
+        // ownership, but release the exact request and disable its stale row.
+        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Splint(target), false));
+        assert!(explorer.pending.is_none());
+        assert!(explorer.focused());
+        assert!(explorer.rows().iter().all(|row| !row.pending));
+        assert!(explorer.decision().is_none());
+
+        // A fresh projection retains the same stable ID under a new incarnation.
+        let mut refreshed = explorer.view.clone().unwrap();
+        let splint = &mut refreshed.lairs[0].dojos[0].splints[0];
+        assert_eq!(splint.target.splint_id, target.splint_id);
+        splint.target.live_incarnation = Some(99);
+        splint.target.last_incarnation = Some(99);
+        splint.target.capability.availability = NavigationAvailability::Enabled;
+        explorer.set_view(refreshed);
+        let retry = explorer.decision().unwrap();
+        let LairExplorerDecision::FocusSplint(retry_target) = retry else {
+            panic!("expected refreshed Splint target");
+        };
+        assert!(explorer.set_pending(retry));
+        // A delayed old acknowledgement cannot retire the new request.
+        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Splint(target), true));
+        assert_eq!(
+            explorer.pending,
+            Some(LairExplorerPending::Splint(retry_target))
+        );
+        assert!(
+            explorer.finish_activation(LairExplorerActivationTarget::Splint(retry_target), true)
+        );
+        explorer.return_to_terminal();
+        assert!(!explorer.focused());
+        assert!(explorer.pending.is_none());
+        assert!(
+            !explorer.finish_activation(LairExplorerActivationTarget::Splint(retry_target), true)
+        );
     }
 
     #[test]
@@ -1011,11 +1098,11 @@ mod tests {
         };
         let mut wrong = completed;
         wrong.lair_id = LairId::new();
-        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Dojo(wrong)));
+        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Dojo(wrong), true));
         wrong = completed;
         wrong.topology_revision = TopologyRevision::new(8);
-        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Dojo(wrong)));
-        assert!(explorer.complete_pending(LairExplorerActivationTarget::Dojo(completed)));
+        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Dojo(wrong), true));
+        assert!(explorer.finish_activation(LairExplorerActivationTarget::Dojo(completed), true));
     }
 
     #[test]

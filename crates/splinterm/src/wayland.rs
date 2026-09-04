@@ -2428,11 +2428,19 @@ fn explorer_pointer_returns_to_terminal(
         )
 }
 
-const fn explorer_activation_returns_to_terminal(
-    explorer_action_pending: bool,
-    activation_succeeded: bool,
-) -> bool {
-    explorer_action_pending && activation_succeeded
+/// Run the local focus operation only for an eligible exact target, and verify
+/// its postcondition. A no-op is successful only when the target is focused.
+fn attempt_exact_splint_focus(
+    splint_id: SplintId,
+    incarnation_matches: bool,
+    pending_remote: bool,
+    attempt: impl FnOnce() -> (bool, Option<SplintId>),
+) -> Option<bool> {
+    if !incarnation_matches || pending_remote {
+        return None;
+    }
+    let (changed, focused) = attempt();
+    (focused == Some(splint_id)).then_some(changed)
 }
 
 const fn presented_cursor_visible(inline_picker_open: bool, blink_phase_visible: bool) -> bool {
@@ -3362,6 +3370,7 @@ impl App {
         splint_id: SplintId,
         live_incarnation: Option<u64>,
     ) -> Option<bool> {
+        let pending_remote = is_pending_remote_splint(&self.panes.pending_remote_splits, splint_id);
         let matches = std::iter::once(&self.panes.pane)
             .chain(&self.panes.inactive_panes)
             .filter_map(|pane| pane.snapshot.as_ref())
@@ -3369,7 +3378,10 @@ impl App {
                 snapshot.splint_id == splint_id
                     && live_incarnation.is_none_or(|expected| snapshot.incarnation == expected)
             });
-        matches.then(|| self.focus_splint(splint_id))
+        attempt_exact_splint_focus(splint_id, matches, pending_remote, || {
+            let changed = self.focus_splint(splint_id);
+            (changed, self.panes.focused_splint())
+        })
     }
 
     fn focus_splint(&mut self, splint_id: SplintId) -> bool {
@@ -8003,9 +8015,9 @@ impl App {
                     self.tab_state.session_switch_pending = false;
                     self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
-                    let return_to_terminal = explorer_target
-                        .is_some_and(|target| self.explorer.complete_pending(target));
-                    if explorer_activation_returns_to_terminal(return_to_terminal, true) {
+                    if explorer_target
+                        .is_some_and(|target| self.explorer.finish_activation(target, true))
+                    {
                         self.set_explorer_focus(false, queue_handle);
                     }
                     if let Some(diagnostics) = diagnostics() {
@@ -8020,9 +8032,9 @@ impl App {
                     self.tab_state.session_switch_pending = false;
                     self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
-                    let return_to_terminal = explorer_target
-                        .is_some_and(|target| self.explorer.complete_pending(target));
-                    if explorer_activation_returns_to_terminal(return_to_terminal, true) {
+                    if explorer_target
+                        .is_some_and(|target| self.explorer.finish_activation(target, true))
+                    {
                         self.set_explorer_focus(false, queue_handle);
                     }
                 }
@@ -8038,12 +8050,15 @@ impl App {
                         self.focus_splint_at_incarnation(splint_id, live_incarnation)
                     {
                         changed |= focus_changed;
-                        let return_to_terminal = explorer_target
-                            .is_some_and(|target| self.explorer.complete_pending(target));
-                        if explorer_activation_returns_to_terminal(return_to_terminal, true) {
+                        if explorer_target
+                            .is_some_and(|target| self.explorer.finish_activation(target, true))
+                        {
                             self.set_explorer_focus(false, queue_handle);
                         }
                     } else {
+                        if let Some(target) = explorer_target {
+                            self.explorer.finish_activation(target, false);
+                        }
                         self.explorer.mark_stale_target(splint_id);
                         let _ = self.refresh_lair_explorer();
                         changed = true;
@@ -10287,6 +10302,41 @@ mod tests {
     }
 
     #[test]
+    fn exact_splint_activation_distinguishes_local_failure_from_already_focused() {
+        let target = SplintId::new();
+        let other = SplintId::new();
+        // A matching snapshot is not sufficient: the owner operation may fail.
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (false, Some(other))),
+            None
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (false, None)),
+            None
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (false, Some(target))),
+            Some(false)
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (true, Some(target))),
+            Some(true)
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, true, || panic!(
+                "pending remote focus attempted"
+            )),
+            None
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, false, false, || panic!(
+                "stale incarnation focus attempted"
+            )),
+            None
+        );
+    }
+
+    #[test]
     fn focused_explorer_returns_to_terminal_only_for_an_outside_primary_press() {
         let outside_press = PointerEventKind::Press {
             button: BTN_LEFT,
@@ -10313,13 +10363,6 @@ mod tests {
             false,
             &PointerEventKind::Motion { time: 12 }
         ));
-    }
-
-    #[test]
-    fn explorer_activation_returns_focus_only_after_exact_success() {
-        assert!(explorer_activation_returns_to_terminal(true, true));
-        assert!(!explorer_activation_returns_to_terminal(true, false));
-        assert!(!explorer_activation_returns_to_terminal(false, true));
     }
 
     #[test]
