@@ -32,7 +32,7 @@ jobs:
       version: ${{ steps.candidate.outputs.version }}
       tag: ${{ steps.candidate.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -154,7 +154,7 @@ jobs:
           PY
 
       - name: Transfer verified candidate to protected job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: verified-release-candidate-${{ inputs.candidate_run_id }}
           path: |
@@ -173,7 +173,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -277,7 +277,7 @@ jobs:
             --output release-receipt.json
 
       - name: Retain durable publication receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-receipt-${{ needs.verify.outputs.tag }}
           path: release-receipt.json

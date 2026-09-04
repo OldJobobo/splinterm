@@ -34,7 +34,7 @@ jobs:
       candidate_manifest_sha256: ${{ steps.identity.outputs.candidate_manifest_sha256 }}
       promotion_record_sha256: ${{ steps.identity.outputs.promotion_record_sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -114,7 +114,7 @@ jobs:
           cmp retained/promotion.json promotion-reverified.json
 
       - name: Transfer verified recovery input to protected job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: verified-recovery-input-${{ inputs.promotion_run_id }}
           path: retained
@@ -130,7 +130,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -253,7 +253,7 @@ jobs:
             --output release-receipt.json
 
       - name: Retain completed recovery receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-receipt-${{ needs.verify.outputs.tag }}
           path: release-receipt.json

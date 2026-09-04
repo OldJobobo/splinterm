@@ -75,7 +75,7 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         self.assertLess(build, create)
         self.assertIn("runuser -u builder -- python tools/release/prepare-candidate.py create", workflow)
         self.assertIn('--ci-attestation "$GITHUB_WORKSPACE/ci-attestation.json"', workflow)
-        self.assertIn("uses: actions/upload-artifact@v4", workflow)
+        self.assertIn("uses: actions/upload-artifact@v6", workflow)
         self.assertIn("include-hidden-files: true", workflow)
         self.assertIn("retention-days: 14", workflow)
         self.assertIn("fetch-depth: 0", workflow)

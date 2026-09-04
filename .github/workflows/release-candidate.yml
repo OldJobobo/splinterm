@@ -28,7 +28,7 @@ jobs:
       - name: Bootstrap Git for checkout
         run: pacman -Sy --noconfirm git
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -154,7 +154,7 @@ jobs:
           PY
 
       - name: Retain private candidate for review
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: splinterm-${{ inputs.version }}-candidate-${{ github.sha }}
           path: ${{ env.CANDIDATE_DIR }}
