@@ -40,7 +40,7 @@ jobs:
       tag: ${{ steps.candidate.outputs.tag }}
       publication_receipt_sha256: ${{ steps.candidate.outputs.publication_receipt_sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -153,7 +153,7 @@ jobs:
             --release public-release.json --ref public-ref.json --downloads public-assets
 
       - name: Transfer closed drafts and receipts to protected distribution job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: verified-aur-input-${{ inputs.candidate_run_id }}-${{ inputs.publication_run_id }}
           path: |
@@ -172,7 +172,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -310,7 +310,7 @@ jobs:
             --output aur-distribution-receipt.json
 
       - name: Retain AUR distribution receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: aur-distribution-receipt-${{ needs.verify.outputs.tag }}
           path: aur-distribution-receipt.json
