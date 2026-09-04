@@ -762,14 +762,15 @@ fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
 #[test]
 fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
     let generation = Arc::new(
-        stage_live_font_generation(PRIMARY_FONT, crate::config::FontAuthority::Explicit).unwrap(),
+        stage_renderer_test_generation(PRIMARY_FONT, crate::config::FontAuthority::Explicit)
+            .unwrap(),
     );
     let faces = &generation.faces;
     let attributes = CellAttributes::default();
     let face_index = select_face_for_text(faces, "⇕", &attributes).unwrap();
     assert!(
         face_index >= SNAPSHOT_FALLBACK_START,
-        "the pinned primary, CJK, and emoji faces do not cover U+21D5"
+        "the selected primary, CJK, and emoji faces do not cover U+21D5"
     );
     assert!(
         faces[face_index].data.is_none(),

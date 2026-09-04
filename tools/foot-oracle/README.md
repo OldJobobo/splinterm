@@ -326,8 +326,9 @@ exact bytes at 1×, 1.25×, 1.5×, and 2×.
 
 ### Slice 4 face/size/scale matrix
 
-`run-font-matrix.py` compares pinned fcft against the isolated FreeType bridge
-and production glyph cache for regular, bold, italic, and bold italic faces;
+`run-font-matrix.py` first requires the exact pinned-host provenance, then
+compares pinned fcft against the isolated FreeType bridge and production glyph
+cache for regular, bold, italic, and bold italic faces;
 logical sizes 6, 12, 22, 32, 48, and 96 px; and scales 1×, 1.25×, 1.5×, and 2×.
 Every cell records the resolved face file, index, SHA-256, logical size, scale,
 and effective fractional 26.6 size. Metrics, decorations, advances, placement,
@@ -340,7 +341,7 @@ exact metrics, placement, dimensions, ink, and mask bytes; production shaping
 compares advance strictly.
 
 ```bash
-# One portable smoke cell
+# One pinned-host smoke cell
 tools/foot-oracle/run-font-matrix.py \
   /tmp/splinterm-font-smoke --case regular-6px-120
 

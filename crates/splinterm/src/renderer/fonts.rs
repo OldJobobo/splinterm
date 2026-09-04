@@ -676,9 +676,11 @@ pub fn snapshot_font_generation() -> Result<&'static Arc<FontGeneration>> {
     SNAPSHOT_FONT_GENERATION
         .get_or_init(|| {
             let options = renderer_options();
-            stage_startup_font_generation(&options.font, options.font_authority)
-                .map(Arc::new)
-                .map_err(|error| error.to_string())
+            #[cfg(not(test))]
+            let generation = stage_startup_font_generation(&options.font, options.font_authority);
+            #[cfg(test)]
+            let generation = stage_renderer_test_generation(&options.font, options.font_authority);
+            generation.map(Arc::new).map_err(|error| error.to_string())
         })
         .as_ref()
         .map_err(|error| anyhow::anyhow!(error.clone()))
@@ -1901,6 +1903,38 @@ fn stage_startup_font_generation(
     stage_font_generation(pattern, authority, true)
 }
 
+#[cfg(test)]
+fn pinned_startup_font_is_available() -> Result<bool> {
+    let sources = run_fontconfig_sources(
+        "pinned renderer test prerequisite",
+        STARTUP_FONT_FALLBACK,
+        false,
+    )?;
+    let source = sources
+        .first()
+        .context("fc-match returned no pinned renderer test prerequisite")?;
+    Ok(normalize_family(&source.family).contains(&normalize_family("jetbrains mono")))
+}
+
+#[cfg(test)]
+fn use_host_renderer_test_font(pattern: &str, pinned_startup_font_available: bool) -> bool {
+    pattern == STARTUP_FONT_FALLBACK && !pinned_startup_font_available
+}
+
+/// Stages the pinned renderer-test generation, falling back only when Fontconfig
+/// positively reports that the pinned `JetBrains` family is absent.
+#[cfg(test)]
+pub(super) fn stage_renderer_test_generation(
+    pattern: &str,
+    authority: FontAuthority,
+) -> Result<FontGeneration> {
+    if !use_host_renderer_test_font(pattern, pinned_startup_font_is_available()?) {
+        return stage_startup_font_generation(pattern, authority);
+    }
+    stage_live_font_generation("monospace:style=Regular", FontAuthority::Explicit)
+        .context("stage the host's generic monospace renderer-test generation")
+}
+
 /// Stages one stable live generation without applying the startup fallback.
 ///
 /// # Errors
@@ -2364,6 +2398,16 @@ mod tests {
             "jetbrains mono"
         );
         assert_eq!(expected_primary_family_fragment("monospace"), "");
+    }
+
+    #[test]
+    fn host_test_font_is_used_only_when_the_pinned_default_is_absent() {
+        assert!(!use_host_renderer_test_font(STARTUP_FONT_FALLBACK, true));
+        assert!(use_host_renderer_test_font(STARTUP_FONT_FALLBACK, false));
+        assert!(!use_host_renderer_test_font(
+            "explicit configured font",
+            false
+        ));
     }
 
     #[test]
