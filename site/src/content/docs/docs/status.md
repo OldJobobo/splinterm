@@ -5,9 +5,9 @@ description: What is implemented, validated, limited, planned, and unreleased in
 
 Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1) is the current public prerelease. It adds live native Omarchy font following, current Gum palette inheritance for newly created Splints, bounded Sixel negotiation for Yazi, and legacy generated-Dojo name normalization on top of Beta 3.
+[`v0.1.0-rc.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.2) is the current public prerelease and is distributed through both AUR package bases as `0.1.0rc.2-1`. It retains RC1 while closing two live-font review findings: accepted staging remains synchronized with watcher probes, and cached FreeType faces share immutable staged mappings rather than copying complete font files.
 
-`0.1.0-rc.2` candidate preparation closes two RC1 live-font review findings: accepted staging remains synchronized with watcher probes, and cached FreeType faces share immutable staged mappings rather than copying complete font files. Complete validation, review, candidate construction, protected publication, installation, and soak evidence remain pending.
+RC2 passed complete non-graphical validation, independent source review, guarded packaged live-font replacement and invalid-candidate rollback acceptance, candidate construction, protected promotion, and exact-asset publication verification. Ongoing daily-use soak remains focused on repeated font and scale changes, theme refresh for new Splints, package upgrade and rollback, and long-running terminal workloads.
 
 ## What that means
 

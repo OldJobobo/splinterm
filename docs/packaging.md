@@ -6,7 +6,7 @@ n8n notification role are defined in [Release automation](release-automation.md)
 Splinterm's `packaging/PKGBUILD` prepares the `0.1.0rc.2` split packages for
 reviewed local and CI candidate builds. Its local source archive and `SKIP` checksum are
 valid only in that workflow. The current public versioned release is
-[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1).
+[`v0.1.0-rc.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.2).
 The closed `packaging/release-state.json` record is the machine-readable authority for that
 current public predecessor; candidate construction and promotion both reject a
 different supplied tag even when it exists. `docs/status.md` carries the same

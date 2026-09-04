@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0-rc.1`
+- **Current public version tag:** `v0.1.0-rc.2`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -35,8 +35,8 @@ The current product target is:
   tests as release authority; Foot 1.27.0 commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical
   differential under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
-- public Beta 3 `0.1.0beta3-1` Arch packages built from clean committed
-  source; and
+- public RC2 `0.1.0rc.2-1` source-built and prebuilt Arch packages from
+  clean committed source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
   exact-package acceptance for the Alpha3.1 transient-tab hotfixes; accepted
@@ -50,26 +50,41 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
-## 0.1.0 RC2 candidate preparation
+## 0.1.0 RC2 release
 
-This source branch retains RC1 and closes two review findings in live native
-Omarchy font synchronization. Accepted staging now replaces a divergent probe
-fingerprint so a later generation cannot be skipped, and cached FreeType faces
-share their immutable staged mappings instead of copying an entire font file per
-raster face. Generation identity and lifetime tests use Fontconfig's generic
-monospace family rather than requiring one host-specific family.
+[`v0.1.0-rc.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.2)
+was published as a GitHub prerelease on 2026-09-04 and distributed through both
+AUR package bases as `0.1.0rc.2-1`. It retains RC1 and closes two review findings
+in live native Omarchy font synchronization: accepted staging now replaces a
+divergent probe fingerprint so a later generation cannot be skipped, and cached
+FreeType faces share immutable staged mappings instead of copying an entire font
+file per raster face.
 
-Focused and complete non-graphical validation and independent source review
-passed. The exact RC2 implementation package at `d26cee9` passed guarded live
-valid-font replacement and invalid-candidate rollback acceptance without
-replacing the Window, daemon, shell, or Splint incarnation. Candidate
-construction and publication remain separate release boundaries. Foot is an
-optional historical differential and does not block either boundary.
+- Release commit `b7f735e2257a6ae4f595e0f111f90c28279f5711` passed exact-SHA CI
+  run `33896639651`. Candidate run `33908820911` built the release once, and
+  protected promotion run `33909587984` published and reverified the exact five
+  public assets; publication receipt artifact `9951283818` records the result.
+- Candidate manifest SHA-256:
+  `447b3355d289a4b9caaa3687ae407c4fb92b17a24bf5556c6e4852000cd8e5c3`.
+  Source archive SHA-256:
+  `468136ce05f2a8ddde70c45cc5079fb7910b322b278a0f69c4f89485a6b8cbe2`.
+  Main package SHA-256:
+  `fcf23d3fe428a59e4228a8ea62584bbc1ad0eb553f74a51f385310117a4274bf`.
+  MCP package SHA-256:
+  `e7aba1d7112c711c8acbdbf1a44b85703c288608022a62aea0bbddafea8a27e7`.
+- The source-built AUR package base was published at
+  `c0095ae523fd6f88c12c148c4e37be589dfa2c3a`, and the recommended prebuilt
+  package base at `302fe48361684c880b91e36598ac2a10968cb5cf`; fresh anonymous clones matched
+  the candidate-authored `PKGBUILD`, `.SRCINFO`, and install-script hashes.
+- The exact RC2 implementation package at `d26cee9` passed guarded live valid-font
+  replacement and invalid-candidate rollback acceptance without replacing the
+  Window, daemon, shell, or Splint incarnation. Foot remains an optional
+  historical differential and does not block release authority.
 
 ## 0.1.0 RC1 release
 
 [`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1)
-is the current public prerelease. It freezes the 0.1 feature line on the complete
+was published on 2026-09-03. It froze the 0.1 feature line on the complete
 Beta 3 baseline and adds live native Omarchy font following, bounded Omarchy Gum
 palette refresh for newly created Splints, Sixel capability negotiation for Yazi,
 and legacy generated-Dojo name normalization. Its release target is
@@ -319,7 +334,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
 | Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta3-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta3-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0rc.2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0rc.2-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
