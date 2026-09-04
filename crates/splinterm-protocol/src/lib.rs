@@ -1464,6 +1464,58 @@ pub enum AuditOperation {
     PolicyReload,
 }
 
+impl AuditOperation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::RequestAccess => "request_access",
+            Self::RequestLairAccess => "request_lair_access",
+            Self::AuthorizationStatus => "authorization_status",
+            Self::RevokeAccess => "revoke_access",
+            Self::ListLairs => "list_lairs",
+            Self::InspectTopology => "inspect_topology",
+            Self::SubscribeTopology => "subscribe_topology",
+            Self::InspectSplint => "inspect_splint",
+            Self::ReadGraphicalFocus => "read_graphical_focus",
+            Self::PublishGraphicalFocus => "publish_graphical_focus",
+            Self::CreateLair => "create_lair",
+            Self::SplitSplint => "split_splint",
+            Self::RelaunchSplint => "relaunch_splint",
+            Self::RestoreSplint => "restore_splint",
+            Self::RestoreDojo => "restore_dojo",
+            Self::RestoreLair => "restore_lair",
+            Self::SetLairRetention => "set_lair_retention",
+            Self::CloseSplint => "close_splint",
+            Self::SetSplitRatio => "set_split_ratio",
+            Self::NewDojo => "new_dojo",
+            Self::MaterializePreset => "materialize_preset",
+            Self::CloseDojo => "close_dojo",
+            Self::TerminateLair => "terminate_lair",
+            Self::RenameLair => "rename_lair",
+            Self::RenameDojo => "rename_dojo",
+            Self::SetDojoDefaultFocus => "set_dojo_default_focus",
+            Self::RenameSplint => "rename_splint",
+            Self::Attach => "attach",
+            Self::ScrollbackPage => "scrollback_page",
+            Self::SearchScrollback => "search_scrollback",
+            Self::AcquireControl => "acquire_control",
+            Self::SubscribeControl => "subscribe_control",
+            Self::RequestControlTransfer => "request_control_transfer",
+            Self::DecideControlTransfer => "decide_control_transfer",
+            Self::ForceControlTransfer => "force_control_transfer",
+            Self::ReleaseControl => "release_control",
+            Self::Input => "input",
+            Self::Resize => "resize",
+            Self::Detach => "detach",
+            Self::KillSplint => "kill_splint",
+            Self::ProcessExit => "process_exit",
+            Self::AuditInspect => "audit_inspect",
+            Self::PolicyReload => "policy_reload",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditDecision {
@@ -2930,6 +2982,61 @@ impl ServerFrameTransactionAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_operation_name_matches_its_wire_representation() {
+        for operation in [
+            AuditOperation::Ping,
+            AuditOperation::RequestAccess,
+            AuditOperation::RequestLairAccess,
+            AuditOperation::AuthorizationStatus,
+            AuditOperation::RevokeAccess,
+            AuditOperation::ListLairs,
+            AuditOperation::InspectTopology,
+            AuditOperation::SubscribeTopology,
+            AuditOperation::InspectSplint,
+            AuditOperation::ReadGraphicalFocus,
+            AuditOperation::PublishGraphicalFocus,
+            AuditOperation::CreateLair,
+            AuditOperation::SplitSplint,
+            AuditOperation::RelaunchSplint,
+            AuditOperation::RestoreSplint,
+            AuditOperation::RestoreDojo,
+            AuditOperation::RestoreLair,
+            AuditOperation::SetLairRetention,
+            AuditOperation::CloseSplint,
+            AuditOperation::SetSplitRatio,
+            AuditOperation::NewDojo,
+            AuditOperation::MaterializePreset,
+            AuditOperation::CloseDojo,
+            AuditOperation::TerminateLair,
+            AuditOperation::RenameLair,
+            AuditOperation::RenameDojo,
+            AuditOperation::SetDojoDefaultFocus,
+            AuditOperation::RenameSplint,
+            AuditOperation::Attach,
+            AuditOperation::ScrollbackPage,
+            AuditOperation::SearchScrollback,
+            AuditOperation::AcquireControl,
+            AuditOperation::SubscribeControl,
+            AuditOperation::RequestControlTransfer,
+            AuditOperation::DecideControlTransfer,
+            AuditOperation::ForceControlTransfer,
+            AuditOperation::ReleaseControl,
+            AuditOperation::Input,
+            AuditOperation::Resize,
+            AuditOperation::Detach,
+            AuditOperation::KillSplint,
+            AuditOperation::ProcessExit,
+            AuditOperation::AuditInspect,
+            AuditOperation::PolicyReload,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&operation).unwrap(),
+                format!("\"{}\"", operation.as_str())
+            );
+        }
+    }
 
     #[test]
     fn frames_are_length_prefixed_and_explicit() {
