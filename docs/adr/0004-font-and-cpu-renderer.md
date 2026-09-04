@@ -1,8 +1,8 @@
 # ADR 0004: Use narrow fontconfig discovery with Swash and CPU SHM rendering
 
-- **Status:** Accepted — Phase 8.1 renderer and oracle policy closed; live font-generation amendment accepted
+- **Status:** Accepted — renderer decisions remain current; external release authority superseded by [ADR 0013](0013-splinterm-owned-renderer-acceptance.md)
 - **Date:** 2026-07-18
-- **Amended:** 2026-08-29
+- **Amended:** 2026-09-04
 
 ## Context
 
@@ -98,16 +98,19 @@ The accepted observable tolerance is zero for every closure lane: final ARGB
 bytes, grayscale masks, cell metrics, advances, placement, four-sided ink and
 padding geometry, decoration vectors, cursor composition, renderer-path output,
 and accepted source-first scale cases. Comparators may not translate images,
-widen tolerances, or regenerate references during CI. The pinned authority is
-Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
+widen tolerances, or regenerate references during CI. The pinned historical
+reference is Foot 1.27.0 commit
+`3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
-Strict reference generation is supported only when provenance matches the
-recorded Linux x86_64 font files/indices and hashes, fontconfig/FreeType/fcft/
-pixman versions and policy, Foot patch/build options, palette, geometry,
-scales, and Rust lockfile recorded by schema-v3
-`tools/foot-oracle/provenance.json`. Portable CI validates fixtures and tools;
-a supported reference-host drift fails rather than rewriting evidence, and an
-unsupported host is reported explicitly.
+Strict Foot reference generation remains available when output-relevant
+provenance matches the recorded Linux x86_64 font files/indices and hashes,
+fontconfig/FreeType/fcft/pixman versions and policy, Foot patch/build options,
+palette, geometry, scales, and explicit environment recorded by schema-v4
+`tools/foot-oracle/provenance.json`. Cargo-lock, compiler-version, and complete
+ambient Fontconfig-inventory identity are not comparison inputs. Under
+[ADR 0013](0013-splinterm-owned-renderer-acceptance.md), Foot is an optional
+historical differential rather than release authority; drift fails that
+optional run instead of rewriting evidence or blocking a release.
 
 The production cache policy is output-independent and bounded: 2,048 persistent
 glyph entries, 64 MiB of glyph data, 24 raster faces, and a 4,096-entry active
@@ -206,6 +209,8 @@ focus-safe history, and application-keypad text input.
 
 Maintainer-private validation records cover font discovery, initial visual,
 direct fcft-mask, style, ink-bound, release timing, and strict 95-character
-grayscale-mask parity. Public unit and oracle tests enforce deterministic
-blending, clipping, shaped placement, mask/color ink bounds, Foot-derived box
-geometry, cache reuse, and capture encoding.
+grayscale-mask parity. Public Splinterm-owned unit, integration, and adopted
+fixture tests enforce deterministic blending, clipping, shaped placement,
+mask/color ink bounds, Foot-derived box geometry, cache reuse, and capture
+encoding. Retained Foot comparisons are advisory historical differentials under
+ADR 0013.

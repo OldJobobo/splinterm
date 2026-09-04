@@ -91,24 +91,20 @@ preflight before compiling Rust:
 python tools/release/release-doctor.py
 ```
 
-It checks version and generated package metadata agreement, portable pinned Foot
-provenance, release authority/workflow structure (including recovery and AUR
-authority), local Markdown links, and prohibited private coordination paths. CI
-also executes actionlint v1.7.7 from a pinned `rhysd/actionlint` image digest; local installation
-is not required. Maintainers may add `--version X.Y.Z-…`
-to validate the candidate tag, predecessor, and release-note range. When
-`Cargo.lock` changes, review every proposed duplicate provenance identity and
-then apply the same update atomically:
+It checks version and generated package metadata agreement, release
+authority/workflow structure (including recovery and AUR authority), local
+Markdown links, and prohibited private coordination paths. CI also executes
+actionlint v1.7.7 from a pinned `rhysd/actionlint` image digest; local
+installation is not required. Maintainers may add `--version X.Y.Z-…` to
+validate the candidate tag, predecessor, and release-note range.
 
-```bash
-python tools/foot-oracle/update-provenance.py
-python tools/foot-oracle/update-provenance.py --write
-python tools/foot-oracle/check-provenance.py --portable
-```
-
-The first command is always a dry run. Neither command regenerates oracle
-references or changes the pinned Foot 1.27.0 authority. Release automation
-changes should also run the focused helper and executable-workflow policy tests:
+Foot 1.27.0 is retained as an optional historical differential, not release
+authority. Its portable metadata and tooling can be checked independently with
+`python tools/foot-oracle/check-provenance.py --portable`; Cargo dependency
+changes do not require a Foot-provenance refresh. See
+[ADR 0013](docs/adr/0013-splinterm-owned-renderer-acceptance.md).
+Release automation changes should also run the focused helper and
+executable-workflow policy tests:
 
 ```bash
 python -m unittest \
@@ -178,13 +174,16 @@ install a package as an incidental test step.
 Use the exact commands named by the accepted plan that owns a changed subsystem.
 Do not broaden tolerances or regenerate accepted references silently.
 
-## Foot oracle and provenance
+## Optional Foot differential and provenance
 
 Foot 1.27.0 commit
-`3c5b584b0eafa772eb4376fb6eaf6643399e190e` is the terminal-behavior oracle.
-The canonical checkout and accepted comparison images are read-only authorities.
-Do not modify the checkout, translate comparison images, broadly widen pixel or
-semantic tolerances, or regenerate references without an explicit reviewed plan.
+`3c5b584b0eafa772eb4376fb6eaf6643399e190e` is the pinned historical
+differential. Splinterm-owned tests and adopted fixtures are release authority
+under [ADR 0013](docs/adr/0013-splinterm-owned-renderer-acceptance.md). The
+canonical checkout and accepted comparison images remain read-only. Do not
+modify the checkout, translate comparison images, broadly widen pixel or
+semantic tolerances, or regenerate references without an explicit reviewed
+plan.
 
 Oracle tooling and provenance live under [`tools/foot-oracle/`](tools/foot-oracle/).
 Start with its README and verify provenance before comparison work:

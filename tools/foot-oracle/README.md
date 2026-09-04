@@ -1,7 +1,8 @@
 # Foot semantic oracle
 
-This directory defines how Splinterm will compare its Rust terminal port against
-the pinned Foot reference implementation.
+This directory retains Splinterm's optional historical differential against the
+pinned Foot reference implementation. Splinterm-owned tests and adopted fixtures
+are release authority; see [ADR 0013](../../docs/adr/0013-splinterm-owned-renderer-acceptance.md).
 
 ## Reference
 
@@ -251,7 +252,7 @@ If the compositor contributes trailing residual pixels, the runner recaptures
 Splinterm at Foot's declared logical surface size instead of translating images
 or widening comparison tolerances.
 
-The command preflights Foot, patch, font, native-library, and Cargo.lock
+The command preflights Foot, patch, font, native-library, and explicit-environment
 provenance; builds and tests patched Foot; runs all 16 manifest cases; and writes
 an aggregate `summary.json`. The clean 2026-07-19 closure run at
 `/tmp/splinterm-final-buffer-clean-retest/` passed 16/16 with zero ARGB
@@ -270,23 +271,27 @@ uses Foot's observable order for full and dirty-row paths, with a focused
 overhang regression test. The matrix additionally resolved Foot's two-thirds
 dim intensity and opaque block/one-pixel underline cursor composition.
 
-### Provenance gates
+### Provenance checks
 
-Validate repository-owned hashes and policy on every worker:
+Validate retained repository-owned hashes and reference policy:
 
 ```bash
 python tools/foot-oracle/check-provenance.py --portable
 ```
 
 On the declared Omarchy reference host, omit `--portable` to require exact OS,
-architecture, native/Rust versions, all six resolved font files/indexes/hashes,
-active fontconfig fingerprint, environment, patches, and Cargo.lock. CI uses
-`--ci-host`: unsupported workers print `UNSUPPORTED_ORACLE_HOST` and exit 77;
-a supported worker with any drift fails normally. The optional self-hosted
-`splinterm-oracle` job runs a strict default matrix cell and uploads its failure
-directory. Reference changes require reviewed old/new metrics, heatmaps,
-provenance, and ADR 0004 updates where behavior changes; no command silently
-regenerates accepted references.
+architecture, native raster-library versions, all six resolved font
+files/indexes/hashes and raster options, explicit environment, and patches.
+Compiler version,
+Cargo.lock, and the complete ambient Fontconfig inventory are not comparison
+inputs. CI uses `--ci-host`: unsupported workers print
+`UNSUPPORTED_ORACLE_HOST` and exit 77; a supported worker with output-relevant
+drift fails that optional run normally. The portable tooling job is advisory;
+the self-hosted matrix runs in the separate manual/scheduled
+`foot-oracle-pinned.yml` workflow. Neither participates in release-authority CI.
+Reference changes require reviewed old/new metrics, heatmaps, provenance,
+and ADR updates where behavior changes; no command silently regenerates accepted
+references.
 
 ### Slice 3 decoration/cursor v2
 
@@ -366,5 +371,5 @@ box/emoji behavior. DP-2 was restored after capture.
 - Record intentional Splinterm divergences explicitly in the fixture.
 - Keep raw input byte-exact using lowercase hexadecimal.
 - Compare arbitrary input chunkings against the same final state.
-- Treat Foot as the authority until an accepted Splinterm ADR documents a
-  divergence.
+- Treat Foot as an optional historical differential; Splinterm-owned contracts
+  are release authority under ADR 0013.

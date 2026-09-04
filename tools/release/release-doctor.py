@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 from pathlib import Path
 import re
 import shutil
@@ -73,55 +71,13 @@ def check_versions(root: Path) -> list[str]:
     return errors
 
 
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def cargo_identities(value: object) -> list[str]:
-    identities: list[str] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key == "cargo_lock_sha256":
-                if isinstance(child, str):
-                    identities.append(child)
-            else:
-                identities.extend(cargo_identities(child))
-    elif isinstance(value, list):
-        for child in value:
-            identities.extend(cargo_identities(child))
-    return identities
-
-
-def check_provenance(root: Path) -> list[str]:
-    relative = Path("tools/foot-oracle/provenance.json")
-    try:
-        manifest = json.loads((root / relative).read_text(encoding="utf-8"))
-        identities = cargo_identities(manifest)
-        expected = sha256(root / "Cargo.lock")
-        if len(identities) < 2:
-            return ["Foot provenance must retain every duplicate Cargo.lock identity"]
-        if set(identities) != {expected}:
-            return [
-                "Foot Cargo.lock identities drifted; run "
-                "'python tools/foot-oracle/update-provenance.py', then rerun with --write"
-            ]
-        errors = []
-        for patch in manifest.get("oracle", {}).get("patches", []):
-            path = root / patch.get("path", "")
-            if not path.is_file() or sha256(path) != patch.get("sha256"):
-                errors.append(f"Foot oracle patch identity drifted: {patch.get('path')}")
-        reference = manifest.get("reference", {})
-        if reference.get("commit") != "3c5b584b0eafa772eb4376fb6eaf6643399e190e":
-            errors.append("Foot oracle authority commit is not the pinned Foot 1.27.0 commit")
-        return errors
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
-        return [f"invalid {relative}: {error}"]
-
-
 def check_workflows(root: Path) -> list[str]:
     try:
         ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         candidate = (root / ".github/workflows/release-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        pinned_foot = (root / ".github/workflows/foot-oracle-pinned.yml").read_text(
             encoding="utf-8"
         )
         promotion = (root / ".github/workflows/promote-release.yml").read_text(
@@ -139,6 +95,12 @@ def check_workflows(root: Path) -> list[str]:
         "CI authority branches": ('branches: [main, "maint/0.1"]', ci),
         "CI fail-closed aggregator": ("if: ${{ always() }}", ci),
         "CI explicit dependency result checks": ("needs.preflight.result == 'success'", ci),
+        "standalone pinned Foot manual trigger": ("workflow_dispatch:", pinned_foot),
+        "standalone pinned Foot schedule": ("schedule:", pinned_foot),
+        "standalone pinned Foot runner": (
+            "runs-on: [self-hosted, linux, x64, splinterm-oracle]",
+            pinned_foot,
+        ),
         "candidate authority branches": ("refs/heads/main|refs/heads/maint/0.1", candidate),
         "candidate Actions read permission": ("actions: read", candidate),
         "candidate read-only contents": ("contents: read", candidate),
@@ -154,7 +116,30 @@ def check_workflows(root: Path) -> list[str]:
         "AUR protected environment": ("environment: aur-release", aur),
         "AUR pinned SSH host identity": ("aur.archlinux.org ssh-ed25519", aur),
     }
-    return [f"release authority configuration missing {label}" for label, (token, text) in requirements.items() if token not in text]
+    errors = [
+        f"release authority configuration missing {label}"
+        for label, (token, text) in requirements.items()
+        if token not in text
+    ]
+    try:
+        check = ci[ci.index("  check:") :]
+        foot = ci[ci.index("  foot-reference:") : ci.index("  check:")]
+    except ValueError:
+        errors.append("CI advisory Foot or aggregate check boundary is malformed")
+    else:
+        if "renderer-contracts" not in check:
+            errors.append("CI aggregate omits Splinterm-owned renderer contracts")
+        if "foot-reference" in check:
+            errors.append("CI aggregate makes the historical Foot differential mandatory")
+        if "continue-on-error: true" not in foot:
+            errors.append("portable Foot differential is not advisory")
+    if "self-hosted" in ci:
+        errors.append("release-authority CI includes a self-hosted runner")
+    if "\n  push:" in pinned_foot or "\n  pull_request:" in pinned_foot:
+        errors.append("pinned Foot workflow runs automatically on release-authority changes")
+    if "tools/foot-oracle/check-provenance.py" in candidate:
+        errors.append("candidate construction depends on historical Foot provenance")
+    return errors
 
 
 def markdown_files(root: Path) -> list[Path]:
@@ -232,7 +217,6 @@ def check_candidate_range(root: Path, version: str | None) -> list[str]:
 def diagnose(root: Path, *, version: str | None = None, generated: bool = True) -> list[str]:
     checks = [
         check_versions(root),
-        check_provenance(root),
         check_workflows(root),
         check_markdown(root),
         check_candidate_range(root, version),

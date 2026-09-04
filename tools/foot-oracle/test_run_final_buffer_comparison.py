@@ -82,6 +82,48 @@ def test_manifest_rejects_duplicate_ids_and_bad_cursor(tmp_path):
         MODULE.load_manifest(write_manifest(tmp_path, value))
 
 
+def test_native_preflight_rejects_mislabeled_fcft_evidence(monkeypatch):
+    provenance = {
+        "build": {
+            "fcft_version": "3.3.3",
+            "freetype_version": "26.6.20",
+            "fontconfig_version": "2.18.2",
+            "pixman_version": "0.46.4",
+        }
+    }
+
+    def fake_run(command, **_kwargs):
+        package = command[-1]
+        actual = {
+            "fcft": "3.3.4",
+            "freetype2": "26.6.20",
+            "fontconfig": "2.18.2",
+            "pixman-1": "0.46.4",
+        }[package]
+        return subprocess.CompletedProcess(command, 0, stdout=f"{actual}\n", stderr="")
+
+    monkeypatch.setattr(MODULE, "run", fake_run)
+    with pytest.raises(ValueError, match="fcft version drifted"):
+        MODULE.check_native_versions(provenance)
+
+
+def test_direct_preflight_rejects_explicit_environment_drift(monkeypatch):
+    provenance = {
+        "environment": {
+            "variables": {
+                "FONTCONFIG_FILE": None,
+                "FONTCONFIG_PATH": None,
+                "XDG_CONFIG_HOME": "~/.config",
+            }
+        }
+    }
+    monkeypatch.setenv("FONTCONFIG_FILE", "/tmp/unpinned-fonts.conf")
+    monkeypatch.delenv("FONTCONFIG_PATH", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    with pytest.raises(ValueError, match="environment variable drifted: FONTCONFIG_FILE"):
+        MODULE.check_environment(provenance)
+
+
 def test_workspace_safety_requires_inactive_workspace_8_on_dp2(monkeypatch):
     responses = {
         "monitors all": [

@@ -215,15 +215,43 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  oracle-fixtures:
-    name: Foot oracle, contract, and benchmark fixtures
+  renderer-contracts:
+    name: Splinterm-owned renderer and contract fixtures
     needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Python fixture dependencies
         run: python -m pip install 'jsonschema>=4.18' pillow pytest referencing
-      - name: Validate portable provenance and fixture manifests
+      - name: Validate source-owned contracts and benchmark reporting
+        run: |
+          set -o pipefail
+          {
+            python tools/benchmark/generate-semantic-fixture-vectors.py --check
+            python tools/foot-oracle/validate-fixtures.py
+            python tools/automation/validate-contract-fixtures.py
+            python -m pytest -q tools/benchmark/test_benchmark.py
+            python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py
+          } 2>&1 | tee renderer-contracts.log
+      - name: Upload focused renderer-contract failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-contract-failure-${{ github.run_id }}
+          path: renderer-contracts.log
+          if-no-files-found: error
+          retention-days: 14
+
+  foot-reference:
+    name: Optional historical Foot differential tooling
+    needs: preflight
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python fixture dependencies
+        run: python -m pip install 'jsonschema>=4.18' pillow pytest referencing
+      - name: Validate retained Foot reference tooling
         run: |
           set -o pipefail
           {
@@ -231,10 +259,8 @@ jobs:
             python tools/foot-oracle/validate-fixtures.py
             python tools/foot-oracle/validate-slice3-fixtures.py
             python tools/foot-oracle/validate-slice3-fixtures.py tools/foot-oracle/slice4-final-buffer-fixtures.json
-            python tools/automation/validate-contract-fixtures.py
             python -m pytest -q tools/foot-oracle/test_*.py
-            python -m pytest -q tools/benchmark/test_benchmark.py
-          } 2>&1 | tee oracle-fixtures.log
+          } 2>&1 | tee foot-reference.log
       - name: Classify host-sensitive raster support
         run: |
           set +e
@@ -242,16 +268,16 @@ jobs:
           status=$?
           set -e
           if [ "$status" -eq 77 ]; then
-            echo '::notice title=Unsupported raster environment::Pinned Foot raster tests require the declared Omarchy reference host.'
+            echo '::notice title=Unsupported raster environment::Historical Foot differentials require the declared Omarchy reference host.'
           elif [ "$status" -ne 0 ]; then
             exit "$status"
           fi
-      - name: Upload focused oracle/fixture failure evidence
+      - name: Upload focused Foot-reference failure evidence
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: oracle-fixture-failure-${{ github.run_id }}
-          path: oracle-fixtures.log
+          name: foot-reference-failure-${{ github.run_id }}
+          path: foot-reference.log
           if-no-files-found: warn
           retention-days: 14
 
@@ -265,34 +291,14 @@ jobs:
       - daemon-tests
       - mcp-tests
       - package-automation
-      - oracle-fixtures
+      - renderer-contracts
     runs-on: ubuntu-latest
     steps:
       - name: Fail closed unless every mandatory boundary succeeded
-        if: ${{ needs.preflight.result != 'success' || needs.static.result != 'success' || needs.workspace-tests.result != 'success' || needs.daemon-tests.result != 'success' || needs.mcp-tests.result != 'success' || needs.package-automation.result != 'success' || needs.oracle-fixtures.result != 'success' }}
+        if: ${{ needs.preflight.result != 'success' || needs.static.result != 'success' || needs.workspace-tests.result != 'success' || needs.daemon-tests.result != 'success' || needs.mcp-tests.result != 'success' || needs.package-automation.result != 'success' || needs.renderer-contracts.result != 'success' }}
         run: |
           echo 'One or more mandatory CI boundaries failed, were cancelled, or were skipped.' >&2
           exit 1
       - name: Confirm complete CI coverage
-        if: ${{ needs.preflight.result == 'success' && needs.static.result == 'success' && needs.workspace-tests.result == 'success' && needs.daemon-tests.result == 'success' && needs.mcp-tests.result == 'success' && needs.package-automation.result == 'success' && needs.oracle-fixtures.result == 'success' }}
+        if: ${{ needs.preflight.result == 'success' && needs.static.result == 'success' && needs.workspace-tests.result == 'success' && needs.daemon-tests.result == 'success' && needs.mcp-tests.result == 'success' && needs.package-automation.result == 'success' && needs.renderer-contracts.result == 'success' }}
         run: echo 'Every mandatory CI boundary succeeded.'
-
-  oracle:
-    name: Pinned-host raster oracle
-    if: ${{ vars.SPLINTERM_ORACLE_RUNNER == 'enabled' }}
-    runs-on: [self-hosted, linux, x64, splinterm-oracle]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Require exact pinned-host provenance
-        run: python tools/foot-oracle/check-provenance.py
-      - name: Run strict default raster smoke
-        run: python tools/foot-oracle/run-font-matrix.py /tmp/splinterm-oracle-ci --case regular-12px-120
-      - name: Upload reviewable failure evidence
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: splinterm-oracle-failure
-          path: /tmp/splinterm-oracle-ci
-          if-no-files-found: warn
