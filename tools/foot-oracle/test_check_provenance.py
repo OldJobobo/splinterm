@@ -115,9 +115,12 @@ def test_matrix_patterns_match_size_qualified_fallback_resolvers():
     ) == ["Noto Color Emoji", "Noto Color Emoji:pixelsize=15"]
 
 
-def test_size_qualified_fontconfig_raster_drift_is_rejected(monkeypatch):
+def test_size_qualified_fontconfig_raster_drift_is_rejected(monkeypatch, tmp_path):
     checker = load_checker()
-    font = checker.load_manifest()["fonts"][0]
+    font = dict(checker.load_manifest()["fonts"][0])
+    font_path = tmp_path / "font.ttf"
+    font_path.write_bytes(b"pinned font")
+    font["file"] = str(font_path)
     seen_patterns = []
 
     def output(arguments):
