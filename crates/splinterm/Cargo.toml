@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+accesskit.workspace = true
+accesskit_unix.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 fontdb.workspace = true
