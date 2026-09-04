@@ -2467,10 +2467,17 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
     jsonschema = pytest.importorskip("jsonschema")
     report = build_report(_successful_correctness_run)
 
-    assert report["schema"] == "splinterm.benchmark.correctness.v2"
+    assert report["schema"] == "splinterm.benchmark.correctness.v3"
     assert report["valid"] is True
-    assert report["oracle"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    assert report["historical_reference"]["commit"] == "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    assert report["historical_reference"]["role"] == "optional-differential"
     assert report["semantic_fixtures"]["fixture_count"] == 5
+    assert report["semantic_fixtures"]["status"] == "adopted-contract"
+    assert all(
+        not check["required"]
+        for check in report["checks"]
+        if check["check"].startswith("historical-foot-")
+    )
     assert "final_buffer_evidence" not in report
     assert report["fuzzing"]["status"] == "available-not-run"
     assert report["fuzzing"]["recorded_duration_seconds"] is None
@@ -2489,6 +2496,27 @@ def test_correctness_report_is_evidence_bounded_and_schema_valid(
     markdown = (output / "README.md").read_text()
     assert "Correctness is reported separately from performance" in markdown
     assert "available-not-run" in markdown
+
+
+def test_correctness_report_records_informational_timeout_and_continues() -> None:
+    def timeout_run(
+        command: list[str] | tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        if list(command)[:3] == [sys.executable, "-m", "pytest"]:
+            raise subprocess.TimeoutExpired(command, 300)
+        return _successful_correctness_run(command)
+
+    report = build_report(timeout_run)
+    historical = next(
+        check
+        for check in report["checks"]
+        if check["check"] == "historical-foot-comparator-tests"
+    )
+    assert report["valid"] is True
+    assert historical["required"] is False
+    assert historical["status"] == "failed"
+    assert historical["returncode"] == 124
+    assert "timed out" in historical["output"]
 
 
 def test_correctness_report_does_not_hide_failed_checks() -> None:

@@ -138,13 +138,16 @@ install a package as an incidental test step.
 Use the exact commands named by the accepted plan that owns a changed subsystem.
 Do not broaden tolerances or regenerate accepted references silently.
 
-## Foot oracle and provenance
+## Optional Foot differential and provenance
 
 Foot 1.27.0 commit
-`3c5b584b0eafa772eb4376fb6eaf6643399e190e` is the terminal-behavior oracle.
-The canonical checkout and accepted comparison images are read-only authorities.
-Do not modify the checkout, translate comparison images, broadly widen pixel or
-semantic tolerances, or regenerate references without an explicit reviewed plan.
+`3c5b584b0eafa772eb4376fb6eaf6643399e190e` is the pinned historical
+differential. Splinterm-owned tests and adopted fixtures are release authority
+under [ADR 0013](docs/adr/0013-splinterm-owned-renderer-acceptance.md). The
+canonical checkout and accepted comparison images remain read-only. Do not
+modify the checkout, translate comparison images, broadly widen pixel or
+semantic tolerances, or regenerate references without an explicit reviewed
+plan.
 
 Oracle tooling and provenance live under [`tools/foot-oracle/`](tools/foot-oracle/).
 Start with its README and verify provenance before comparison work:

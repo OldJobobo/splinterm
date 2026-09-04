@@ -71,6 +71,6 @@ The helper intentionally labels and isolates its development authorization bypas
 - Plans and spikes record decisions and validation history; they are not user instructions.
 - Retained benchmark and graphical evidence should not enter ordinary documentation search.
 
-## Foot authority
+## Optional Foot differential
 
-Foot's pinned implementation remains the terminal behavior oracle. Do not modify the canonical Foot checkout or silently regenerate comparison references. Ported code must retain compatible licensing, exact provenance, and required notices in `THIRD_PARTY.md`.
+Splinterm-owned tests and adopted fixtures are release authority. Foot's pinned implementation remains an optional historical differential; do not modify the canonical checkout or silently regenerate comparison references. Ported code must retain compatible licensing, exact provenance, and required notices in `THIRD_PARTY.md`. See [ADR 0013](https://github.com/OldJobobo/splinterm/blob/main/docs/adr/0013-splinterm-owned-renderer-acceptance.md).

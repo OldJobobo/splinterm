@@ -160,11 +160,34 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def check_native_versions(provenance: dict[str, Any]) -> None:
+    for package, key in (
+        ("fcft", "fcft_version"),
+        ("freetype2", "freetype_version"),
+        ("fontconfig", "fontconfig_version"),
+        ("pixman-1", "pixman_version"),
+    ):
+        version = run(["pkg-config", "--modversion", package], capture_output=True)
+        if version.returncode or version.stdout.strip() != provenance["build"][key]:
+            raise ValueError(f"{package} version drifted from pinned provenance")
+
+
+def check_environment(provenance: dict[str, Any]) -> None:
+    for name, expected in provenance["environment"]["variables"].items():
+        actual = os.environ.get(name)
+        home = str(Path.home())
+        if actual is not None and actual.startswith(home):
+            actual = "~" + actual[len(home) :]
+        if actual != expected:
+            raise ValueError(f"environment variable drifted: {name}")
+
+
 def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     provenance_path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    if provenance.get("schema") != 3:
+    if provenance.get("schema") != 4:
         raise ValueError("unsupported oracle provenance schema")
+    check_environment(provenance)
     source = Path(os.environ.get("FOOT_SOURCE", Path.home() / "Playground/foot"))
     revision = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True)
     expected_revision = provenance["reference"]["commit"]
@@ -175,13 +198,11 @@ def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
         if sha256(path) != patch["sha256"]:
             raise ValueError(f"oracle patch hash drift: {patch['path']}")
     profile = provenance["default_final_buffer_profile"]
-    if sha256(ROOT / "Cargo.lock") != profile["cargo_lock_sha256"]:
-        raise ValueError("Cargo.lock drifted from final-buffer provenance")
     font_match = run(
         [
             "fc-match",
             "-f",
-            "%{file}\\n%{index}\\n",
+            "%{file}\\n%{index}\\n%{hintstyle}\\n%{hinting}\\n%{antialias}\\n%{rgba}\\n%{lcdfilter}\\n",
             profile["font_pattern"],
         ],
         capture_output=True,
@@ -189,21 +210,20 @@ def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     if font_match.returncode:
         raise ValueError("fc-match failed during provenance preflight")
     lines = font_match.stdout.splitlines()
+    if len(lines) < 7:
+        raise ValueError("resolved primary font metadata is incomplete")
     if (
-        len(lines) < 2
-        or lines[0] != profile["font_file"]
+        lines[0] != profile["font_file"]
         or int(lines[1]) != profile["font_index"]
         or sha256(Path(lines[0])) != profile["font_sha256"]
     ):
         raise ValueError("resolved primary font drifted from pinned provenance")
-    for package, key in (
-        ("freetype2", "freetype_version"),
-        ("fontconfig", "fontconfig_version"),
-        ("pixman-1", "pixman_version"),
-    ):
-        version = run(["pkg-config", "--modversion", package], capture_output=True)
-        if version.returncode or version.stdout.strip() != provenance["build"][key]:
-            raise ValueError(f"{package} version drifted from pinned provenance")
+    option_names = ("hintstyle", "hinting", "antialias", "rgba", "lcdfilter")
+    actual_raster = dict(zip(option_names, lines[2:7], strict=True))
+    regular = next(font for font in provenance["fonts"] if font["role"] == "regular")
+    if actual_raster != regular["fontconfig_raster"]:
+        raise ValueError("resolved primary Fontconfig raster options drifted")
+    check_native_versions(provenance)
     expected_profile = {
         "font": manifest["profile"]["font"],
         "font_size": manifest["profile"]["font_size"],

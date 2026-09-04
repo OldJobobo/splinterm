@@ -1,30 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://splinterm.invalid/schema/benchmark-correctness-v2.json",
-  "title": "Splinterbench correctness report v2",
+  "$id": "https://splinterm.invalid/schema/benchmark-correctness-v3.json",
+  "title": "Splinterbench correctness report v3",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "valid", "repository", "oracle", "semantic_fixtures", "checks", "feature_coverage", "fuzzing", "capability_matrix", "claim_policy"],
+  "required": ["schema", "valid", "repository", "historical_reference", "semantic_fixtures", "checks", "feature_coverage", "fuzzing", "capability_matrix", "claim_policy"],
   "properties": {
-    "schema": {"const": "splinterm.benchmark.correctness.v2"},
+    "schema": {"const": "splinterm.benchmark.correctness.v3"},
     "valid": {"type": "boolean"},
     "repository": {
       "type": "object", "additionalProperties": false, "required": ["revision", "dirty"],
       "properties": {"revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "dirty": {"type": "boolean"}}
     },
-    "oracle": {
-      "type": "object", "additionalProperties": false, "required": ["name", "version", "commit", "authority"],
+    "historical_reference": {
+      "type": "object", "additionalProperties": false, "required": ["name", "version", "commit", "role"],
       "properties": {
         "name": {"const": "foot"}, "version": {"const": "1.27.0"},
         "commit": {"const": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"},
-        "authority": {"const": "behavioral-reference"}
+        "role": {"const": "optional-differential"}
       }
     },
     "semantic_fixtures": {
       "type": "object", "additionalProperties": false,
       "required": ["status", "fixture_count", "fixtures", "rust_test", "scope"],
       "properties": {
-        "status": {"const": "covered"}, "fixture_count": {"const": 5},
+        "status": {"const": "adopted-contract"}, "fixture_count": {"const": 5},
         "fixtures": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/fileEvidence"}},
         "rust_test": {"type": "string"}, "scope": {"type": "string"}
       }

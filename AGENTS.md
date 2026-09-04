@@ -274,9 +274,11 @@ workspace 8 / DP-2 placement and no-focus isolation requirements.
 
 ## 4. Repository Safety
 
-### 4.1 Foot Oracle Authority
+### 4.1 Foot Differential Authority
 
-Preserve the pinned Foot 1.27.0 commit as the oracle authority:
+Preserve the pinned Foot 1.27.0 commit as the authority for optional Foot
+differential runs; Splinterm-owned contracts are release authority under ADR
+0013:
 
 `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
 
