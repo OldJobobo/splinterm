@@ -89,7 +89,16 @@ def run_checks(run: Run = default_run) -> list[dict[str, Any]]:
     )
     results = []
     for check, required, command in commands:
-        completed = run(command)
+        try:
+            completed = run(command)
+        except subprocess.TimeoutExpired as error:
+            completed = subprocess.CompletedProcess(
+                command, 124, stdout="", stderr=f"timed out: {error}"
+            )
+        except OSError as error:
+            completed = subprocess.CompletedProcess(
+                command, 127, stdout="", stderr=f"execution failed: {error}"
+            )
         output = "\n".join(
             line for line in (completed.stdout + completed.stderr).splitlines() if line.strip()
         )[-4000:]

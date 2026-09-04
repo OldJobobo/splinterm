@@ -79,6 +79,19 @@ def test_host_checks_ignore_rust_and_ambient_fontconfig_inventory(monkeypatch):
     assert "fontconfig_active_config_sha256" not in manifest["environment"]
 
 
+def test_fontconfig_raster_option_drift_is_rejected(monkeypatch):
+    checker = load_checker()
+    manifest = checker.load_manifest()
+    font = manifest["fonts"][0]
+    monkeypatch.setattr(
+        checker,
+        "command_output",
+        lambda _arguments: f"{font['file']}\n{font['index']}\n3\nTrue\nTrue\n\n1",
+    )
+    with pytest.raises(checker.ProvenanceError, match="Fontconfig raster options drifted"):
+        checker.check_fonts({"fonts": [font]})
+
+
 def test_non_reference_worker_is_an_explicit_unsupported_host(monkeypatch):
     checker = load_checker()
     manifest = checker.load_manifest()

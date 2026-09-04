@@ -53,14 +53,21 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
 
     def test_foot_jobs_are_advisory_and_source_contracts_remain_mandatory(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        pinned = (ROOT / ".github/workflows/foot-oracle-pinned.yml").read_text(
+            encoding="utf-8"
+        )
         mandatory = ci[ci.index("  check:") : ci.index("  foot-reference:")]
-        foot = ci[ci.index("  foot-reference:") : ci.index("  oracle:")]
-        oracle = ci[ci.index("  oracle:") :]
+        foot = ci[ci.index("  foot-reference:") :]
         self.assertIn("generate-semantic-fixture-vectors.py --check", mandatory)
         self.assertIn("validate-contract-fixtures.py", mandatory)
         self.assertNotIn("check-provenance.py", mandatory)
+        self.assertNotIn("self-hosted", ci)
         self.assertIn("continue-on-error: true", foot)
-        self.assertIn("continue-on-error: true", oracle)
+        self.assertIn("workflow_dispatch:", pinned)
+        self.assertIn("schedule:", pinned)
+        self.assertIn("runs-on: [self-hosted, linux, x64, splinterm-oracle]", pinned)
+        self.assertNotIn("\n  push:", pinned)
+        self.assertNotIn("\n  pull_request:", pinned)
 
     def test_candidate_builds_once_and_retains_review_artifact(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")

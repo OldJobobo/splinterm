@@ -36,13 +36,14 @@ Mandatory CI and candidate construction require:
 Foot remains a pinned **optional historical differential** at commit
 `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. Its fixtures, adapter patches,
 comparators, zero-tolerance policy, and accepted evidence remain intact. The
-portable tooling job and pinned-host differential may report defects, but their
+portable tooling job and standalone pinned-host workflow may report defects, but their
 failure or unavailability does not fail the aggregate release check and does not
 block candidate construction or promotion.
 
 The optional pinned-host preflight checks inputs that can directly affect the
 comparison: the Foot revision and adapter patches; resolved font paths, face
-indexes, and hashes; Fontconfig, FreeType, fcft, and pixman versions; renderer
+indexes and hashes; their resolved Fontconfig hinting, antialiasing, subpixel,
+and LCD-filter options; Fontconfig, FreeType, fcft, and pixman versions; renderer
 policy; and explicit environment variables. It does not require Cargo.lock or a
 particular Rust compiler, because the comparison judges the produced output. It
 does not hash the complete ambient Fontconfig inventory after all resolved face

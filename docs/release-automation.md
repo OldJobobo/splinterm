@@ -49,9 +49,10 @@ A failure never advances the state. Retrying candidate construction creates a ne
 The candidate manifest binds the repository, commit, version, tag, architecture, prior version tag, workflow run identity, and SHA-256 digest of every proposed release asset. A later publisher must consume this manifest and these exact artifacts rather than rebuilding.
 
 Foot 1.27.0 remains available as an optional historical differential. Its
-portable tooling and pinned-host jobs are advisory and do not determine the
-required `check` result or candidate eligibility. Cargo/compiler changes do not
-require Foot-provenance refreshes. See
+portable tooling job is advisory, while the exact pinned-host differential
+lives in the separate manual/scheduled `foot-oracle-pinned.yml` workflow so an
+offline self-hosted runner cannot delay required CI or candidate eligibility.
+Cargo/compiler changes do not require Foot-provenance refreshes. See
 [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md).
 
 ## Human approval boundary
