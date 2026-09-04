@@ -286,8 +286,8 @@ Compiler version,
 Cargo.lock, and the complete ambient Fontconfig inventory are not comparison
 inputs. CI uses `--ci-host`: unsupported workers print
 `UNSUPPORTED_ORACLE_HOST` and exit 77; a supported worker with output-relevant
-drift fails that optional run normally. The portable tooling job is advisory;
-the self-hosted matrix runs in the separate manual/scheduled
+drift fails that optional run normally. Both the portable tooling job and the
+self-hosted matrix run in the separate manual/scheduled
 `foot-oracle-pinned.yml` workflow. Neither participates in release-authority CI.
 Reference changes require reviewed old/new metrics, heatmaps, provenance,
 and ADR updates where behavior changes; no command silently regenerates accepted

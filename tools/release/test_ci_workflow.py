@@ -125,24 +125,28 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_foot_differentials_are_advisory_not_release_authority(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        pinned = PINNED_FOOT_WORKFLOW.read_text(encoding="utf-8")
-        check = workflow[workflow.index("  check:") :]
-        foot = workflow[
-            workflow.index("  foot-reference:") : workflow.index("  check:")
-        ]
-        self.assertNotIn("foot-reference", check)
+        standalone = PINNED_FOOT_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("foot-reference", workflow)
+        self.assertNotIn("tools/foot-oracle/check-provenance.py --portable", workflow)
+        self.assertNotIn("tools/foot-oracle/test_*.py", workflow)
         self.assertNotIn("self-hosted", workflow)
-        self.assertIn("continue-on-error: true", foot)
         self.assertIn("Splinterm-owned renderer", workflow)
         self.assertIn(
             "python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py",
             workflow,
         )
-        self.assertIn("workflow_dispatch:", pinned)
-        self.assertIn("schedule:", pinned)
-        self.assertIn("runs-on: [self-hosted, linux, x64, splinterm-oracle]", pinned)
-        self.assertNotIn("\n  push:", pinned)
-        self.assertNotIn("\n  pull_request:", pinned)
+        self.assertIn("workflow_dispatch:", standalone)
+        self.assertIn("schedule:", standalone)
+        self.assertIn("runs-on: ubuntu-latest", standalone)
+        self.assertIn(
+            "python tools/foot-oracle/check-provenance.py --portable", standalone
+        )
+        self.assertIn("python -m pytest -q tools/foot-oracle/test_*.py", standalone)
+        self.assertIn(
+            "runs-on: [self-hosted, linux, x64, splinterm-oracle]", standalone
+        )
+        self.assertNotIn("\n  push:", standalone)
+        self.assertNotIn("\n  pull_request:", standalone)
 
     def test_flake_stress_is_manual_scheduled_bounded_and_stops_on_failure(self) -> None:
         workflow = (ROOT / ".github/workflows/flake-stress.yml").read_text(

@@ -1,4 +1,4 @@
-name: Optional pinned-host Foot differential
+name: Optional Foot differentials
 
 on:
   workflow_dispatch:
@@ -13,6 +13,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  portable:
+    name: Portable Foot reference tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python fixture dependencies
+        run: python -m pip install 'jsonschema>=4.18' pillow pytest referencing
+      - name: Validate retained Foot reference tooling
+        run: |
+          set -o pipefail
+          {
+            python tools/foot-oracle/check-provenance.py --portable
+            python tools/foot-oracle/validate-fixtures.py
+            python tools/foot-oracle/validate-slice3-fixtures.py
+            python tools/foot-oracle/validate-slice3-fixtures.py tools/foot-oracle/slice4-final-buffer-fixtures.json
+            python -m pytest -q tools/foot-oracle/test_*.py
+          } 2>&1 | tee foot-reference.log
+      - name: Classify host-sensitive raster support
+        run: |
+          set +e
+          python tools/foot-oracle/check-provenance.py --ci-host
+          status=$?
+          set -e
+          if [ "$status" -eq 77 ]; then
+            echo '::notice title=Unsupported raster environment::Historical Foot differentials require the declared Omarchy reference host.'
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+      - name: Upload focused Foot-reference failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: foot-reference-failure-${{ github.run_id }}
+          path: foot-reference.log
+          if-no-files-found: warn
+          retention-days: 14
+
   oracle:
     name: Pinned-host Foot differential
     if: ${{ vars.SPLINTERM_ORACLE_RUNNER == 'enabled' }}
