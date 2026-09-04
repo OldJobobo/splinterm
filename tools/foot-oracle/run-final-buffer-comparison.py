@@ -172,11 +172,22 @@ def check_native_versions(provenance: dict[str, Any]) -> None:
             raise ValueError(f"{package} version drifted from pinned provenance")
 
 
+def check_environment(provenance: dict[str, Any]) -> None:
+    for name, expected in provenance["environment"]["variables"].items():
+        actual = os.environ.get(name)
+        home = str(Path.home())
+        if actual is not None and actual.startswith(home):
+            actual = "~" + actual[len(home) :]
+        if actual != expected:
+            raise ValueError(f"environment variable drifted: {name}")
+
+
 def preflight_provenance(manifest: dict[str, Any]) -> dict[str, Any]:
     provenance_path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     if provenance.get("schema") != 4:
         raise ValueError("unsupported oracle provenance schema")
+    check_environment(provenance)
     source = Path(os.environ.get("FOOT_SOURCE", Path.home() / "Playground/foot"))
     revision = run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True)
     expected_revision = provenance["reference"]["commit"]

@@ -60,6 +60,10 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         foot = ci[ci.index("  foot-reference:") :]
         self.assertIn("generate-semantic-fixture-vectors.py --check", mandatory)
         self.assertIn("validate-contract-fixtures.py", mandatory)
+        self.assertIn(
+            "python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py",
+            mandatory,
+        )
         self.assertNotIn("check-provenance.py", mandatory)
         self.assertNotIn("self-hosted", ci)
         self.assertIn("continue-on-error: true", foot)

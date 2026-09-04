@@ -60,6 +60,7 @@ jobs:
       - run: python tools/foot-oracle/validate-fixtures.py
       - run: python tools/automation/validate-contract-fixtures.py
       - run: python -m pytest -q tools/benchmark/test_benchmark.py
+      - run: python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py
 
   foot-reference:
     name: Optional historical Foot differential tooling

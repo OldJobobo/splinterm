@@ -28,7 +28,7 @@ Splinterm-owned tests and fixtures are the renderer release authority.
 Mandatory CI and candidate construction require:
 
 - workspace tests, including terminal semantics and renderer behavior;
-- adopted source fixture vectors and contract validation;
+- adopted source fixture vectors, contract validation, and graphical workspace safety guards;
 - exact Splinterm pixel, geometry, cache, generation, and fallback regressions;
 - package and release automation; and
 - guarded packaged graphical acceptance when the changed behavior requires it.
@@ -36,8 +36,8 @@ Mandatory CI and candidate construction require:
 Foot remains a pinned **optional historical differential** at commit
 `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. Its fixtures, adapter patches,
 comparators, zero-tolerance policy, and accepted evidence remain intact. The
-portable tooling job and standalone pinned-host workflow may report defects, but their
-failure or unavailability does not fail the aggregate release check and does not
+portable tooling job and standalone pinned-host workflow may report defects,
+but their failure or unavailability does not fail the aggregate release check and does not
 block candidate construction or promotion.
 
 The optional pinned-host preflight checks inputs that can directly affect the

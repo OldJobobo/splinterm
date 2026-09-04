@@ -107,6 +107,23 @@ def test_native_preflight_rejects_mislabeled_fcft_evidence(monkeypatch):
         MODULE.check_native_versions(provenance)
 
 
+def test_direct_preflight_rejects_explicit_environment_drift(monkeypatch):
+    provenance = {
+        "environment": {
+            "variables": {
+                "FONTCONFIG_FILE": None,
+                "FONTCONFIG_PATH": None,
+                "XDG_CONFIG_HOME": "~/.config",
+            }
+        }
+    }
+    monkeypatch.setenv("FONTCONFIG_FILE", "/tmp/unpinned-fonts.conf")
+    monkeypatch.delenv("FONTCONFIG_PATH", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    with pytest.raises(ValueError, match="environment variable drifted: FONTCONFIG_FILE"):
+        MODULE.check_environment(provenance)
+
+
 def test_workspace_safety_requires_inactive_workspace_8_on_dp2(monkeypatch):
     responses = {
         "monitors all": [
