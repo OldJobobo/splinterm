@@ -12,6 +12,7 @@ freetype-rs.workspace = true
 splinterm-filemap = { path = "../splinterm-filemap" }
 splinterm-pixman = { path = "../splinterm-pixman" }
 thiserror.workspace = true
+ttf-parser = "0.25.1"
 
 [lints]
 workspace = true

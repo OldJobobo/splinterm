@@ -1,13 +1,21 @@
-# Splinterm 0.1.0 RC1 — Stable Ground
+# Splinterm 0.1.0 RC2 — Font Reload Closure
 
-This is the first release candidate for Splinterm 0.1.0. It freezes the 0.1
-feature line for stabilization and carries the complete public Beta 3 baseline
-plus bounded fixes for Omarchy environment refresh, live font following, Yazi
-image previews, and legacy Dojo restore names.
+This is the second release candidate for Splinterm 0.1.0. It retains the complete
+RC1 feature line and closes two live-font correctness and resource findings found
+during RC1 review.
 
-RC1 is intended for normal daily use and soak testing on the documented target:
-x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. A code change after
-RC1 requires another release candidate before the final `v0.1.0` release.
+RC2 is intended for normal daily use and soak testing on the documented target:
+x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Any later code
+change requires another release candidate before the final `v0.1.0` release.
+
+## Live-font closure fixes
+
+- A staged generation that differs from its preceding probe now becomes the
+  watcher authority, so a later return to the probed generation is not skipped.
+- Cached FreeType faces now retain shared immutable font mappings instead of
+  copying the complete font file for every generation, face, and raster size.
+- Font-generation identity and lifetime tests resolve the host's generic
+  monospace family instead of requiring JetBrains Mono to be installed.
 
 ## Live Omarchy font following
 
@@ -86,8 +94,8 @@ lifetime, presets, and the documented native Wayland path remain part of the
 
 ## Upgrade boundary
 
-Splinterm 0.1 does not support live daemon upgrade handoff. Upgrading Beta 3 to
-RC1 therefore ends active Dojos. Run the upgrade from Foot or another terminal
+Splinterm 0.1 does not support live daemon upgrade handoff. Upgrading RC1 to
+RC2 therefore ends active Dojos. Run the upgrade from Foot or another terminal
 that is not owned by `splinterd`:
 
 ```bash
@@ -100,10 +108,12 @@ systemctl --user start splinterd.service
 Then reopen Splinterm Windows. Package installation does not silently reload or
 restart the user service.
 
-## RC1 soak focus
+## RC2 soak focus
 
 During the release-candidate soak, please pay particular attention to:
 
+- repeated valid, invalid, and rapidly superseded Omarchy font changes;
+- stable file-descriptor and memory use across repeated font and scale changes;
 - repeated Omarchy theme changes followed by newly created Splints;
 - existing PTYs retaining their original environment;
 - clean installation and Beta 3 upgrade/rollback;
@@ -111,5 +121,5 @@ During the release-candidate soak, please pay particular attention to:
 - trusted graphical-client identity and desktop launching; and
 - optional MCP package behavior when installed.
 
-RC1 remains a prerelease. If stabilization requires any code change, the next
-public build will be RC2 rather than the final `v0.1.0` release.
+RC2 remains a prerelease. If stabilization requires any code change, the next
+public build will be RC3 rather than the final `v0.1.0` release.

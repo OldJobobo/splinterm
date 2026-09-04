@@ -5,9 +5,9 @@ description: What is implemented, validated, limited, planned, and unreleased in
 
 Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
 
-[`v0.1.0-beta3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta3) is the current public prerelease. It lets terminal workloads inherit the user manager's normal task policy while retaining the daemon guard, and it polishes the Dojo tab strip and legacy unnamed-Dojo label.
+[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1) is the current public prerelease. It adds live native Omarchy font following, current Gum palette inheritance for newly created Splints, bounded Sixel negotiation for Yazi, and legacy generated-Dojo name normalization on top of Beta 3.
 
-`0.1.0-rc.1` candidate preparation is in progress as the stabilization boundary for the final `0.1.0` release. It adds current Omarchy Gum palette inheritance for newly created Splints without changing existing PTYs. Complete candidate construction, protected publication, installation, and soak evidence remain pending.
+`0.1.0-rc.2` candidate preparation closes two RC1 live-font review findings: accepted staging remains synchronized with watcher probes, and cached FreeType faces share immutable staged mappings rather than copying complete font files. Complete validation, review, candidate construction, protected publication, installation, and soak evidence remain pending.
 
 ## What that means
 
@@ -37,7 +37,7 @@ Splinterm is a **public beta**. Source, documentation, and immutable versioned G
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta3-1` |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` is also available |
 | Stable support and broader compatibility | Not released |
 | Nix and broader distributions | Planned |
 

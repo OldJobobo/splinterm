@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0-beta3`
+- **Current public version tag:** `v0.1.0-rc.1`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -48,34 +48,27 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
-## Unreleased 0.1.0 stabilization
+## 0.1.0 RC2 candidate preparation
 
-This source branch implements live native Omarchy system-font synchronization.
-When `main.font` is unset, a graphical client follows the effective Fontconfig
-`monospace` family, stages complete immutable face generations off dispatch
-paths, and atomically rebuilds active and hidden presentation state while
-preserving configured size and policy, padding, DPI, runtime zoom, topology,
-focus, history, modal input, and IME preedit. Explicit `main.font` disables
-native following. Invalid live candidates retain the last valid generation, and
-observer panes do not acquire control solely to resize.
+This source branch retains RC1 and closes two review findings in live native
+Omarchy font synchronization. Accepted staging now replaces a divergent probe
+fingerprint so a later generation cannot be skipped, and cached FreeType faces
+share their immutable staged mappings instead of copying an entire font file per
+raster face. Generation identity and lifetime tests use Fontconfig's generic
+monospace family rather than requiring one host-specific family.
 
-Focused and complete non-graphical validation, independent review, packaged
-graphical acceptance, and publication remain separate release boundaries.
+Focused and complete non-graphical validation, independent review, candidate
+construction, packaged graphical acceptance, and publication remain separate
+release boundaries.
 
-## 0.1.0 RC1 candidate preparation
+## 0.1.0 RC1 release
 
-The `0.1.0-rc.1` maintenance candidate freezes the 0.1 feature line for
-stabilization on top of the complete public Beta 3 baseline. It refreshes the
-bounded Omarchy Gum palette environment for each newly created Splint so a
-persistent daemon does not give later PTYs stale theme colors. Existing PTYs
-remain unchanged, unrelated environment variables remain untouched, and
-missing, malformed, oversized, symlinked, or non-regular palette state preserves
-the daemon's inherited values instead of applying a partial update.
-
-Focused and complete non-graphical source validation and independent maintenance
-review are required before candidate construction. Protected publication,
-installation evidence, and the RC soak remain separate release boundaries. Beta
-3 remains the current public release until those boundaries complete.
+[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1)
+is the current public prerelease. It freezes the 0.1 feature line on the complete
+Beta 3 baseline and adds live native Omarchy font following, bounded Omarchy Gum
+palette refresh for newly created Splints, Sixel capability negotiation for Yazi,
+and legacy generated-Dojo name normalization. Its release target is
+`5fe48798856effb903ac178d8414b9c39f86038b`.
 
 ## Beta 3 release
 

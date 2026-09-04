@@ -3,12 +3,11 @@
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` prepares the `0.1.0rc.1` split packages for
+Splinterm's `packaging/PKGBUILD` prepares the `0.1.0rc.2` split packages for
 reviewed local and CI candidate builds. Its local source archive and `SKIP` checksum are
 valid only in that workflow. The current public versioned release is
-[`v0.1.0-beta3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta3),
-and both AUR package bases publish `0.1.0beta3-1`. The closed
-`packaging/release-state.json` record is the machine-readable authority for that
+[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1).
+The closed `packaging/release-state.json` record is the machine-readable authority for that
 current public predecessor; candidate construction and promotion both reject a
 different supplied tag even when it exists. `docs/status.md` carries the same
 exact current-version marker, and release tooling rejects disagreement. The
@@ -106,8 +105,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0rc.1/ \
-  -o packaging/splinterm-0.1.0rc.1.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.0rc.2/ \
+  -o packaging/splinterm-0.1.0rc.2.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
@@ -126,8 +125,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0rc.1-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0rc.1-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.0rc.2-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -239,7 +238,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0rc.1-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.0rc.2-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -247,7 +246,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0rc.1-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional
