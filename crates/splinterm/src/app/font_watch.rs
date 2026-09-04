@@ -22,7 +22,7 @@ struct FontReloadState<F> {
     current: F,
 }
 
-impl<F: Eq> FontReloadState<F> {
+impl<F: Clone + Eq> FontReloadState<F> {
     fn new(current: F) -> Self {
         Self {
             observed: None,
@@ -43,6 +43,7 @@ impl<F: Eq> FontReloadState<F> {
     }
 
     fn accept(&mut self, fingerprint: F) -> bool {
+        self.observed = Some(fingerprint.clone());
         if self.current == fingerprint {
             return false;
         }
@@ -180,6 +181,15 @@ mod tests {
         assert!(!state.accept(2));
         assert!(state.observe(1));
         assert!(state.accept(1));
+    }
+
+    #[test]
+    fn accepted_staging_replaces_a_divergent_probe_fingerprint() {
+        let mut state = FontReloadState::new(1_u8);
+        assert!(state.observe(2));
+        assert!(state.accept(3));
+        assert!(state.observe(2));
+        assert!(state.accept(2));
     }
 
     #[test]

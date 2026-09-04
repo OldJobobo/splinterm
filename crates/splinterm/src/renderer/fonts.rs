@@ -719,7 +719,7 @@ pub(super) fn snapshot_glyph(
             let raster_key = (generation_id, face.selected_pixel_size_26_6, face_index);
             if !cache.raster_faces.contains_key(&raster_key) {
                 let raster_face = RasterFace::open_memory(
-                    face.data.as_deref().context("emoji face is staged")?,
+                    face.data.clone().context("emoji face is staged")?,
                     face.index.raw(),
                     face.selected_pixel_size_26_6,
                 )
@@ -753,12 +753,10 @@ pub(super) fn snapshot_glyph(
             if !cache.raster_faces.contains_key(&raster_key) {
                 let face = &faces[face_index];
                 let pixel_size = pixel_size_26_6(font_size)?;
-                let fallback_mapping;
-                let data = if let Some(data) = face.data.as_deref() {
-                    data
+                let data = if let Some(data) = &face.data {
+                    Arc::clone(data)
                 } else {
-                    fallback_mapping = fallback_font_mapping(face)?;
-                    &fallback_mapping
+                    fallback_font_mapping(face)?
                 };
                 let raster_face = RasterFace::open_memory(data, face.index.raw(), pixel_size)
                     .with_context(|| format!("open FreeType raster face {}", face.label))?;
@@ -1288,7 +1286,7 @@ pub(super) fn cell_metrics(primary_face: &FontFace, font_size: f32) -> Result<Ce
     let mut face = RasterFace::open_memory(
         primary_face
             .data
-            .as_deref()
+            .clone()
             .context("primary face is staged")?,
         primary_face.index.raw(),
         pixel_size_26_6(font_size)?,
@@ -2224,7 +2222,7 @@ mod tests {
         );
 
         let mut freetype = RasterFace::open_memory(
-            face.data.as_deref().unwrap(),
+            face.data.clone().unwrap(),
             face.index.raw(),
             pixel_size_26_6(BASE_FONT_SIZE).unwrap(),
         )

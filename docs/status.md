@@ -55,6 +55,10 @@ and hidden presentation state while preserving configured size/policy, padding,
 DPI, runtime zoom, topology, focus, history, modal input, and IME preedit.
 Explicit `main.font` disables native following. Invalid live candidates retain
 the last valid generation, and observer panes do not acquire control to resize.
+Fontconfig named instances remain selected through shaping and rasterization;
+ambient probes and deferred resize retries are bounded. Accepted staging stays
+synchronized with probe state, and cached raster faces share immutable font
+mappings across sizes instead of copying complete files.
 
 Focused renderer, watcher, cache-generation, source-replacement, geometry, and
 resize-authority tests pass. This unreleased source state does **not** yet claim

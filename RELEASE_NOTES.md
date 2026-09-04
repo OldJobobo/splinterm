@@ -7,7 +7,11 @@
   the last valid family; the documented JetBrains fallback is startup-only.
 - Family changes preserve configured size/policy, padding, DPI, runtime zoom,
   topology, focus, history, modal and IME state, and controller authority.
-  Observer panes never acquire control solely to resize after a font change.
+  Observer panes never acquire control solely to resize after a font change;
+  deferred resizes retry and ambient probes use a bounded ten-second cadence.
+- Fontconfig named variable-font instances survive shaping and rasterization.
+  Accepted staging remains synchronized with watcher probes, and cached
+  FreeType faces share immutable font mappings across raster sizes.
 - Non-graphical implementation checks are recorded; packaged graphical
   acceptance and publication remain separate unreleased gates.
 
