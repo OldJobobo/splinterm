@@ -60,7 +60,7 @@ def collect_semantic_fixtures() -> dict[str, Any]:
     if len(fixtures) != 5:
         raise ValueError(f"expected 5 v1 semantic fixtures, found {len(fixtures)}")
     return {
-        "status": "covered",
+        "status": "adopted-contract",
         "fixture_count": len(fixtures),
         "fixtures": fixtures,
         "rust_test": "crates/splinterm-terminal/tests/oracle_fixtures.rs",
@@ -83,9 +83,9 @@ def run_checks(run: Run = default_run) -> list[dict[str, Any]]:
     commands = (
         ("semantic-vector-sync", True, [sys.executable, "tools/benchmark/generate-semantic-fixture-vectors.py", "--check"]),
         ("semantic-fixture-validation", True, [sys.executable, "tools/foot-oracle/validate-fixtures.py"]),
-        ("oracle-comparator-tests", True, [sys.executable, "-m", "pytest", "-q", *foot_tests]),
+        ("historical-foot-comparator-tests", False, [sys.executable, "-m", "pytest", "-q", *foot_tests]),
         ("terminal-correctness-tests", True, ["cargo", "test", "-q", "-p", "splinterm-terminal"]),
-        ("workspace-oracle-provenance", False, [sys.executable, "tools/foot-oracle/check-provenance.py", "--portable"]),
+        ("historical-foot-provenance", False, [sys.executable, "tools/foot-oracle/check-provenance.py", "--portable"]),
     )
     results = []
     for check, required, command in commands:
@@ -147,18 +147,18 @@ def build_report(run: Run = default_run) -> dict[str, Any]:
     semantic = collect_semantic_fixtures()
     checks = run_checks(run)
     report = {
-        "schema": "splinterm.benchmark.correctness.v2",
+        "schema": "splinterm.benchmark.correctness.v3",
         "valid": all(
             check["status"] == "passed" for check in checks if check["required"]
         ),
         "repository": repository_state(run),
-        "oracle": {"name": "foot", "version": "1.27.0", "commit": PINNED_FOOT, "authority": "behavioral-reference"},
+        "historical_reference": {"name": "foot", "version": "1.27.0", "commit": PINNED_FOOT, "role": "optional-differential"},
         "semantic_fixtures": semantic,
         "checks": checks,
         "feature_coverage": feature_coverage(),
         "fuzzing": {"target": "fuzz/fuzz_targets/terminal_advance.rs", "status": "available-not-run", "recorded_duration_seconds": None},
         "capability_matrix": capability_matrix(),
-        "claim_policy": "Correctness is independent from speed. This report runs public tests and checks source-owned semantic fixtures; benchmark observations and graphical acceptance records remain maintainer-private.",
+        "claim_policy": "Splinterm-owned tests and adopted source fixtures determine correctness independently from speed. Foot is retained only as an optional historical differential; benchmark observations and graphical acceptance records remain maintainer-private.",
     }
     return report
 
@@ -170,11 +170,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         f"Overall non-graphical validation: **{'PASS' if report['valid'] else 'FAIL'}**  ",
         f"Repository revision: `{report['repository']['revision']}` ({'dirty' if report['repository']['dirty'] else 'clean'} worktree)  ",
-        f"Behavioral oracle: Foot 1.27.0 `{report['oracle']['commit']}`",
+        f"Optional historical reference: Foot 1.27.0 `{report['historical_reference']['commit']}`",
         "",
         "Correctness is reported separately from performance. Portable observations for other terminals do not expose or prove private terminal state.",
         "",
-        "## Oracle parity",
+        "## Splinterm-owned contract",
         "",
         f"- Semantic fixtures: **{semantic['fixture_count']}/{semantic['fixture_count']} covered** by the Rust fixture consumer, including chunking invariance.",
     ]

@@ -13,7 +13,7 @@ MANDATORY = (
     "daemon-tests",
     "mcp-tests",
     "package-automation",
-    "oracle-fixtures",
+    "renderer-contracts",
 )
 
 
@@ -114,10 +114,26 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_timing_sensitive_jobs_upload_logs_without_retry(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("daemon-end-to-end.log", workflow)
-        self.assertIn("mcp-protocol.log", workflow)
-        self.assertNotIn("continue-on-error", workflow)
-        self.assertNotIn("nick-fields/retry", workflow)
+        block = workflow[
+            workflow.index("  daemon-tests:") : workflow.index("  package-automation:")
+        ]
+        self.assertIn("daemon-end-to-end.log", block)
+        self.assertIn("mcp-protocol.log", block)
+        self.assertNotIn("continue-on-error", block)
+        self.assertNotIn("nick-fields/retry", block)
+
+    def test_foot_differentials_are_advisory_not_release_authority(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        check = workflow[workflow.index("  check:") : workflow.index("  oracle:")]
+        foot = workflow[
+            workflow.index("  foot-reference:") : workflow.index("  check:")
+        ]
+        oracle = workflow[workflow.index("  oracle:") :]
+        self.assertNotIn("foot-reference", check)
+        self.assertNotIn("oracle", MANDATORY)
+        self.assertIn("continue-on-error: true", foot)
+        self.assertIn("continue-on-error: true", oracle)
+        self.assertIn("Splinterm-owned renderer", workflow)
 
     def test_flake_stress_is_manual_scheduled_bounded_and_stops_on_failure(self) -> None:
         workflow = (ROOT / ".github/workflows/flake-stress.yml").read_text(

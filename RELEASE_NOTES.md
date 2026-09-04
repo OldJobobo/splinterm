@@ -1,5 +1,9 @@
 # Unreleased
 
+- Splinterm-owned semantic, renderer, contract, package, and guarded graphical
+  tests are now release authority. The pinned Foot 1.27.0 harness remains an
+  exact optional historical differential and no longer couples releases to a
+  particular compiler, Cargo lockfile, or complete ambient Fontconfig inventory.
 - Native Omarchy font following is now live when `main.font` is unset. Valid
   fontconfig `monospace` family changes replace one complete immutable renderer
   generation without restarting the Window, daemon, shell, or applications.

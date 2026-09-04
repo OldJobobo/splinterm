@@ -271,7 +271,8 @@ Across every horizon, Splinterm remains:
 - security-conscious rather than absolutely secure;
 - explicit about destructive lifecycle boundaries;
 - Omarchy-first before broadly portable;
-- grounded in Foot as the terminal-behavior oracle; and
+- grounded in Splinterm-owned contracts, with pinned Foot retained as an
+  optional historical differential; and
 - honest about implemented, validated, supported, planned, and deferred work.
 
 The product roadmap should be reconsidered if growth requires weakening those

@@ -29,8 +29,10 @@ The current product target is:
 
 - x86_64 Omarchy/Arch Linux;
 - native Wayland under the documented Hyprland environment;
-- Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`
-  as the terminal-behavior oracle;
+- Splinterm-owned semantic, renderer, contract, package, and guarded graphical
+  tests as release authority; Foot 1.27.0 commit
+  `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical
+  differential under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
 - public Beta 2 `0.1.0beta2-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
@@ -61,9 +63,10 @@ synchronized with probe state, and cached raster faces share immutable font
 mappings across sizes instead of copying complete files.
 
 Focused renderer, watcher, cache-generation, source-replacement, geometry, and
-resize-authority tests pass. This unreleased source state does **not** yet claim
-installed-package or guarded graphical acceptance; Beta 2 remains the latest
-published package authority.
+resize-authority tests pass. The exact RC2 maintenance package also passed
+guarded live valid-font replacement and invalid-candidate rollback acceptance
+without replacing the Window, daemon, shell, or Splint incarnation. Publication
+remains separate; Beta 2 remains the latest published package authority.
 
 ## Beta 2 release
 

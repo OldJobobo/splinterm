@@ -46,11 +46,11 @@ def file_sha256(path: pathlib.Path) -> str:
 
 
 def sixel_provenance() -> dict[str, Any]:
-    """Validate Foot-only authority without the unrelated Rust lockfile lane."""
+    """Validate output-relevant inputs for the optional Foot differential."""
 
     path = ROOT / "tools/foot-oracle/provenance.json"
     provenance = json.loads(path.read_text(encoding="utf-8"))
-    if provenance.get("schema") != 3:
+    if provenance.get("schema") != 4:
         raise RuntimeError("unsupported oracle provenance schema")
     source = pathlib.Path(os.environ.get("FOOT_SOURCE", pathlib.Path.home() / "Playground/foot"))
     revision = subprocess.run(

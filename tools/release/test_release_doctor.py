@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -34,26 +34,26 @@ class ReleaseDoctorTests(unittest.TestCase):
                 path.write_text(f"pkgver={version}\n", encoding="utf-8")
             self.assertTrue(any("aur-bin" in error for error in MODULE.check_versions(root)))
 
-    def test_provenance_requires_all_duplicate_lock_identities(self) -> None:
+    def test_release_doctor_has_no_external_oracle_gate(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("def check_provenance", source)
+        self.assertNotIn("check_provenance(root)", source)
+
+    def test_workflow_policy_keeps_foot_out_of_release_authority(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
-            (root / "tools/foot-oracle/patches").mkdir(parents=True)
-            lockfile = root / "Cargo.lock"
-            lockfile.write_text("lock\n", encoding="utf-8")
-            digest = MODULE.sha256(lockfile)
-            manifest = {
-                "reference": {"commit": "3c5b584b0eafa772eb4376fb6eaf6643399e190e"},
-                "rust": {"cargo_lock_sha256": digest},
-                "oracle": {"patches": []},
-            }
-            path = root / "tools/foot-oracle/provenance.json"
-            path.write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertIn("duplicate", MODULE.check_provenance(root)[0])
-            manifest["default_final_buffer_profile"] = {
-                "cargo_lock_sha256": "0" * 64
-            }
-            path.write_text(json.dumps(manifest), encoding="utf-8")
-            self.assertIn("update-provenance.py", MODULE.check_provenance(root)[0])
+            shutil.copytree(ROOT / ".github", root / ".github")
+            self.assertEqual(MODULE.check_workflows(root), [])
+
+            ci = root / ".github/workflows/ci.yml"
+            ci.write_text(
+                ci.read_text(encoding="utf-8").replace(
+                    "  foot-reference:\n    name: Optional historical Foot differential tooling\n    needs: preflight\n    continue-on-error: true",
+                    "  foot-reference:\n    name: Optional historical Foot differential tooling\n    needs: preflight",
+                ),
+                encoding="utf-8",
+            )
+            self.assertIn("not advisory", MODULE.check_workflows(root)[0])
 
     def test_markdown_rejects_missing_links_and_private_paths(self) -> None:
         with tempfile.TemporaryDirectory() as value:

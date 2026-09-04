@@ -27,7 +27,7 @@ def test_portable_provenance_accepts_repository_owned_inputs():
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "portable metadata valid" in result.stdout
+    assert "portable inputs valid" in result.stdout
 
 
 def test_manifest_declares_complete_faces_and_review_policy():
@@ -45,12 +45,38 @@ def test_manifest_declares_complete_faces_and_review_policy():
     assert len(manifest["reference_update_policy"]["required_review"]) >= 4
 
 
-def test_lock_drift_names_the_atomic_refresh_command(monkeypatch):
+def test_patch_drift_remains_rejected(monkeypatch):
     checker = load_checker()
     manifest = checker.load_manifest()
     monkeypatch.setattr(checker, "sha256", lambda _path: "0" * 64)
-    with pytest.raises(checker.ProvenanceError, match="update-provenance.py"):
+    with pytest.raises(checker.ProvenanceError, match="oracle patch drifted"):
         checker.check_repository_files(manifest)
+
+
+def test_host_checks_ignore_rust_and_ambient_fontconfig_inventory(monkeypatch):
+    checker = load_checker()
+    manifest = checker.load_manifest()
+    commands = []
+
+    def output(arguments):
+        commands.append(arguments)
+        return {
+            "fcft": manifest["build"]["fcft_version"],
+            "freetype2": manifest["build"]["freetype_version"],
+            "fontconfig": manifest["build"]["fontconfig_version"],
+            "pixman-1": manifest["build"]["pixman_version"],
+        }[arguments[-1]]
+
+    monkeypatch.setattr(checker, "command_output", output)
+    checker.check_versions(manifest)
+    assert commands == [
+        ["pkg-config", "--modversion", "fcft"],
+        ["pkg-config", "--modversion", "freetype2"],
+        ["pkg-config", "--modversion", "fontconfig"],
+        ["pkg-config", "--modversion", "pixman-1"],
+    ]
+    assert "rust" not in manifest
+    assert "fontconfig_active_config_sha256" not in manifest["environment"]
 
 
 def test_font_drift_reports_exact_jetbrains_prerequisite(monkeypatch):
