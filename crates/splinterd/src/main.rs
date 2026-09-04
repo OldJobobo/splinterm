@@ -1337,8 +1337,7 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
         tokio::select! {
             result = authenticated => result,
             exited = peer_monitor.exited() => {
-                exited?;
-                Err(anyhow::anyhow!("socket peer exited"))
+                exited.and_then(|()| Err(anyhow::anyhow!("socket peer exited")))
             }
         }
     } else {
@@ -1467,6 +1466,11 @@ async fn append_preset_leaf_audit(state: &DaemonState, splint_id: SplintId, succ
 }
 
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    state
+        .topology_hub
+        .lock()
+        .await
+        .remove_connections(&HashSet::from([connection_id]));
     retire_transient_lair_for_owner(state, connection_id).await;
     state
         .automation_connections
@@ -1730,11 +1734,17 @@ async fn serve_authenticated(
                 }
                 break;
             }
-            revoked = connection_revocations.recv(), if connection_revocation_disconnects(role) => match revoked {
-                Ok(revoked) if revoked == connection_id => break,
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
+            // Filtering inside this future keeps read_exact's partial header/body alive
+            // when a different connection is revoked.
+            () = async {
+                loop {
+                    match connection_revocations.recv().await {
+                        Ok(revoked) if revoked == connection_id => break,
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }, if connection_revocation_disconnects(role) => break,
             frame = read_optional_frame(&mut reader) => frame?,
         };
         let Some(frame) = frame else { break };
@@ -8376,6 +8386,234 @@ fn try_admit_connection(connections: &Arc<Semaphore>) -> Option<tokio::sync::Own
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    async fn exercise_fragmented_authenticated_read(split: usize, reload: bool) {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(false);
+            let peer = PeerIdentity::for_test();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            // A cloned descriptor lets the test observe consumption, not just elapsed time.
+            let observer = server.into_std().unwrap();
+            let server = UnixStream::from_std(observer.try_clone().unwrap()).unwrap();
+            let (reader, _writer) = server.into_split();
+            let (outbound, mut responses) = mpsc::channel(4);
+            let (control, mut controls) = mpsc::channel(4);
+            let (_closed, writer_closed) = watch::channel(false);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                Box::pin(serve_authenticated(
+                    reader,
+                    &task_state,
+                    &peer,
+                    41,
+                    &outbound,
+                    &control,
+                    writer_closed,
+                ))
+                .await
+            });
+            client
+                .write_all(
+                    &splinterm_protocol::encode_frame(&ClientFrame::Hello {
+                        minimum_version: PROTOCOL_VERSION,
+                        maximum_version: PROTOCOL_VERSION,
+                        role: ClientRole::Automation,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                controls.recv().await,
+                Some(ServerFrame::Hello { .. })
+            ));
+            let frame =
+                splinterm_protocol::encode_frame(&ClientFrame::Cancel { request_id: 7 }).unwrap();
+            client.write_all(&frame[..split]).await.unwrap();
+            while rustix::io::ioctl_fionread(&observer).unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+            // Ensure the unrelated broadcast was consumed while the frame is partial.
+            state.connection_revocations.send(99).unwrap();
+            while !state.connection_revocations.is_empty() {
+                tokio::task::yield_now().await;
+            }
+            client.write_all(&frame[split..]).await.unwrap();
+            assert!(matches!(
+                responses.recv().await.unwrap().frame,
+                ServerFrame::Error {
+                    request_id: Some(7),
+                    ..
+                }
+            ));
+            // Leave another body incomplete: targeted teardown must still interrupt it.
+            client.write_all(&frame[..5]).await.unwrap();
+            while rustix::io::ioctl_fionread(&observer).unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+            if reload {
+                state.policy_reloads.send(1).unwrap();
+                assert!(matches!(
+                    controls.recv().await,
+                    Some(ServerFrame::Error { .. })
+                ));
+            } else {
+                state.connection_revocations.send(41).unwrap();
+            }
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fragmented_header_survives_unrelated_revocation_and_targeted_revoke_ends_read() {
+        exercise_fragmented_authenticated_read(2, false).await;
+    }
+
+    #[tokio::test]
+    async fn fragmented_body_survives_unrelated_revocation_and_policy_reload_ends_read() {
+        exercise_fragmented_authenticated_read(6, true).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_connection_removes_only_its_topology_subscriptions() {
+        time::timeout(Duration::from_secs(1), async {
+            let state = test_state(false);
+            let mut first = state.topology_hub.lock().await.subscribe(1, 41);
+            let mut second = state.topology_hub.lock().await.subscribe(2, 41);
+            let mut sibling = state.topology_hub.lock().await.subscribe(3, 42);
+            cleanup_connection(&state, 41).await;
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 1);
+            assert!(first.changes.recv().await.is_none());
+            assert!(second.changes.recv().await.is_none());
+            assert!(matches!(
+                sibling.changes.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            cleanup_connection(&state, 41).await;
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 1);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_authenticated_future_still_allows_owner_topology_cleanup() {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(true);
+            let peer = PeerIdentity::for_test();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let (reader, _writer) = server.into_split();
+            let (outbound, mut responses) = mpsc::channel(4);
+            let (control, mut controls) = mpsc::channel(4);
+            let (_closed, writer_closed) = watch::channel(false);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                Box::pin(serve_authenticated(
+                    reader,
+                    &task_state,
+                    &peer,
+                    41,
+                    &outbound,
+                    &control,
+                    writer_closed,
+                ))
+                .await
+            });
+            for frame in [
+                ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role: ClientRole::Automation,
+                },
+                ClientFrame::Request {
+                    request_id: 1,
+                    diagnostic_correlation: None,
+                    request: Request::SubscribeTopology,
+                },
+            ] {
+                client
+                    .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                controls.recv().await,
+                Some(ServerFrame::Hello { .. })
+            ));
+            assert!(matches!(
+                responses.recv().await.unwrap().frame,
+                ServerFrame::Response {
+                    result: Response::TopologySubscribed { .. },
+                    ..
+                }
+            ));
+            let _sibling = state.topology_hub.lock().await.subscribe(u64::MAX, 42);
+            // Peer-monitor completion drops this future rather than running its epilogue.
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 2);
+            cleanup_connection(&state, 41).await;
+            let hub = state.topology_hub.lock().await;
+            assert_eq!(hub.subscribers.len(), 1);
+            assert!(hub.subscribers.contains_key(&u64::MAX));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_frame_runs_owner_topology_cleanup() {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(true);
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(serve_client(server, state.clone()));
+            for frame in [
+                ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role: ClientRole::Automation,
+                },
+                ClientFrame::Request {
+                    request_id: 1,
+                    diagnostic_correlation: None,
+                    request: Request::SubscribeTopology,
+                },
+            ] {
+                client
+                    .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+                let mut length = [0; 4];
+                client.read_exact(&mut length).await.unwrap();
+                let mut body = vec![0; u32::from_be_bytes(length) as usize];
+                client.read_exact(&mut body).await.unwrap();
+                let reply: ServerFrame = serde_json::from_slice(&body).unwrap();
+                assert!(matches!(
+                    reply,
+                    ServerFrame::Hello { .. }
+                        | ServerFrame::Response {
+                            result: Response::TopologySubscribed { .. },
+                            ..
+                        }
+                ));
+            }
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 1);
+            let _sibling = state
+                .topology_hub
+                .lock()
+                .await
+                .subscribe(u64::MAX, u64::MAX);
+            client.write_all(&[0; 4]).await.unwrap();
+            assert!(task.await.unwrap().is_err());
+            let hub = state.topology_hub.lock().await;
+            assert_eq!(hub.subscribers.len(), 1);
+            assert!(hub.subscribers.contains_key(&u64::MAX));
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn packaged_workload_cgroup_argument_is_exact() {
