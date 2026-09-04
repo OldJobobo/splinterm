@@ -593,10 +593,12 @@ fn open_without_symlinks(path: &Path) -> Result<File> {
         )
         .with_context(|| format!("cannot open policy directory component {component:?}"))?;
     }
+    // Inspect the opened descriptor before reading it. A FIFO must not block
+    // this open indefinitely before the regular-file validation can reject it.
     let descriptor = rustix::fs::openat(
         &directory,
         *file_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .context("cannot open policy file")?;
@@ -774,6 +776,52 @@ mod tests {
         assert_eq!(document.rules.len(), 1);
         assert_eq!(document.rules[0].id, "reader");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn fifo_policy_is_rejected_without_waiting_for_a_writer() {
+        const CHILD_PATH: &str = "SPLINTERM_POLICY_FIFO_TEST_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let error = inspect_file(Path::new(&path)).unwrap_err();
+            assert!(error.to_string().contains("regular file"));
+            return;
+        }
+
+        let path = test_path("fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::FileType::Fifo,
+            Mode::RUSR | Mode::WUSR,
+            0,
+        )
+        .unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "policy::tests::fifo_policy_is_rejected_without_waiting_for_a_writer",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        fs::remove_file(path).unwrap();
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "policy loader blocked or failed"
+        );
     }
 
     #[test]
