@@ -8,7 +8,6 @@
 
 use std::{
     borrow::Borrow,
-    ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -104,7 +103,7 @@ struct SharedFontData(Arc<ReadOnlyFileMap>);
 
 impl Borrow<[u8]> for SharedFontData {
     fn borrow(&self) -> &[u8] {
-        self.0.as_ref().deref()
+        self.0.as_ref()
     }
 }
 
