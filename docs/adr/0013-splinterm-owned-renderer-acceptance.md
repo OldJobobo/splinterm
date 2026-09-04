@@ -36,9 +36,9 @@ Mandatory CI and candidate construction require:
 Foot remains a pinned **optional historical differential** at commit
 `3c5b584b0eafa772eb4376fb6eaf6643399e190e`. Its fixtures, adapter patches,
 comparators, zero-tolerance policy, and accepted evidence remain intact. The
-portable tooling job and standalone pinned-host workflow may report defects,
-but their failure or unavailability does not fail the aggregate release check and does not
-block candidate construction or promotion.
+standalone portable-tooling and pinned-host jobs may report defects, but their
+failure or unavailability does not fail or hold open the aggregate release check
+and does not block candidate construction or promotion.
 
 The optional pinned-host preflight checks inputs that can directly affect the
 comparison: the Foot revision and adapter patches; resolved font paths, face

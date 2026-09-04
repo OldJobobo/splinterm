@@ -86,12 +86,12 @@ context green.
 | `package-automation` | all four `packaging/PKGBUILD::check()` Python suites plus package/release workflow and helper tests |
 | `renderer-contracts` | adopted Splinterm semantic vectors, public contract fixtures, and correctness-report contracts |
 
-The advisory `foot-reference` job sits outside the aggregate release check and
-validates retained Foot fixtures and Python tooling on a portable worker. The
-exact pinned-host differential lives in the separate manual/scheduled
-`foot-oracle-pinned.yml` workflow, so an unavailable self-hosted runner cannot
-hold the release-authority CI workflow open. Failures or unavailable evidence
-remain signals to investigate, not automatic release vetoes.
+Portable Foot fixture/tooling validation and the exact pinned-host differential
+both live in the separate manual/scheduled `foot-oracle-pinned.yml` workflow.
+No historical Foot job runs inside release-authority CI, so a queued worker or
+hung advisory command cannot hold candidate construction open. Failures or
+unavailable evidence remain signals to investigate, not automatic release
+vetoes.
 
 Together, the split Rust commands are equivalent to
 `cargo test --frozen --workspace -- --test-threads=1`: workspace unit, binary,

@@ -95,8 +95,13 @@ def check_workflows(root: Path) -> list[str]:
         "CI authority branches": ('branches: [main, "maint/0.1"]', ci),
         "CI fail-closed aggregator": ("if: ${{ always() }}", ci),
         "CI explicit dependency result checks": ("needs.preflight.result == 'success'", ci),
-        "standalone pinned Foot manual trigger": ("workflow_dispatch:", pinned_foot),
-        "standalone pinned Foot schedule": ("schedule:", pinned_foot),
+        "standalone Foot manual trigger": ("workflow_dispatch:", pinned_foot),
+        "standalone Foot schedule": ("schedule:", pinned_foot),
+        "standalone portable Foot runner": ("runs-on: ubuntu-latest", pinned_foot),
+        "standalone portable Foot validation": (
+            "python tools/foot-oracle/check-provenance.py --portable",
+            pinned_foot,
+        ),
         "standalone pinned Foot runner": (
             "runs-on: [self-hosted, linux, x64, splinterm-oracle]",
             pinned_foot,
@@ -123,16 +128,17 @@ def check_workflows(root: Path) -> list[str]:
     ]
     try:
         check = ci[ci.index("  check:") :]
-        foot = ci[ci.index("  foot-reference:") : ci.index("  check:")]
     except ValueError:
-        errors.append("CI advisory Foot or aggregate check boundary is malformed")
+        errors.append("CI aggregate check boundary is malformed")
     else:
         if "renderer-contracts" not in check:
             errors.append("CI aggregate omits Splinterm-owned renderer contracts")
-        if "foot-reference" in check:
-            errors.append("CI aggregate makes the historical Foot differential mandatory")
-        if "continue-on-error: true" not in foot:
-            errors.append("portable Foot differential is not advisory")
+    if (
+        "foot-reference" in ci
+        or "tools/foot-oracle/check-provenance.py --portable" in ci
+        or "tools/foot-oracle/test_*.py" in ci
+    ):
+        errors.append("release-authority CI includes historical Foot advisory tooling")
     if "self-hosted" in ci:
         errors.append("release-authority CI includes a self-hosted runner")
     if "\n  push:" in pinned_foot or "\n  pull_request:" in pinned_foot:

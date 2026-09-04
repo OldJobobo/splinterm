@@ -47,13 +47,19 @@ class ReleaseDoctorTests(unittest.TestCase):
 
             ci = root / ".github/workflows/ci.yml"
             ci.write_text(
-                ci.read_text(encoding="utf-8").replace(
-                    "  foot-reference:\n    name: Optional historical Foot differential tooling\n    needs: preflight\n    continue-on-error: true",
-                    "  foot-reference:\n    name: Optional historical Foot differential tooling\n    needs: preflight",
-                ),
+                ci.read_text(encoding="utf-8")
+                + "\n  foot-reference:\n"
+                + "    runs-on: ubuntu-latest\n"
+                + "    steps:\n"
+                + "      - run: python tools/foot-oracle/check-provenance.py --portable\n",
                 encoding="utf-8",
             )
-            self.assertIn("not advisory", MODULE.check_workflows(root)[0])
+            self.assertTrue(
+                any(
+                    "historical Foot advisory tooling" in error
+                    for error in MODULE.check_workflows(root)
+                )
+            )
 
     def test_workflow_policy_rejects_self_hosted_runner_in_release_ci(self) -> None:
         with tempfile.TemporaryDirectory() as value:
