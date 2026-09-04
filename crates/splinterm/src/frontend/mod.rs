@@ -25,6 +25,7 @@ pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
 pub(crate) use text_edit::BoundedTextEditor;
 pub use topology::{
-    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, WindowDojoIdentity,
-    WindowTopologyCommand, WindowTopologyUpdate,
+    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, SessionPickerCatalog,
+    SessionPickerCreationTarget, SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand,
+    WindowTopologyUpdate,
 };

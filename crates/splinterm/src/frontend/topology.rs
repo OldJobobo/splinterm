@@ -8,6 +8,7 @@ use splinterm_core::{
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
+use crate::navigation_projection::NavigationAction;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
@@ -23,6 +24,30 @@ pub struct WindowDojoIdentity {
 pub enum SelectorKind {
     Dojo,
     Lair,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionPickerCreationTarget {
+    pub topology_revision: TopologyRevision,
+    pub action: NavigationAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionPickerTarget {
+    pub topology_revision: TopologyRevision,
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub action: NavigationAction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPickerCatalog {
+    pub items: Vec<SessionPickerItem>,
+    pub targets: Vec<SessionPickerTarget>,
+    pub creation_enabled: bool,
+    pub creation_blocker: Option<&'static str>,
+    pub creation_target: Option<SessionPickerCreationTarget>,
+    pub initial_row: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,13 +105,21 @@ pub enum WindowTopologyCommand {
         lair_id: LairId,
     },
     OpenDojo {
-        lair_id: LairId,
-        dojo_id: DojoId,
+        target: SessionPickerTarget,
     },
     NewLair {
         cwd: PathBuf,
     },
+    PickerNewLair {
+        topology_revision: TopologyRevision,
+        cwd: PathBuf,
+    },
     NewDojo {
+        lair_id: LairId,
+        cwd: PathBuf,
+    },
+    PickerNewDojo {
+        topology_revision: TopologyRevision,
         lair_id: LairId,
         cwd: PathBuf,
     },
@@ -174,13 +207,11 @@ pub enum WindowTopologyUpdate {
         message: String,
     },
     ShowSessionPicker {
-        items: Vec<SessionPickerItem>,
-        targets: Vec<(LairId, DojoId)>,
+        catalog: SessionPickerCatalog,
     },
     ShowSelector {
         kind: SelectorKind,
-        items: Vec<SessionPickerItem>,
-        targets: Vec<(LairId, DojoId)>,
+        catalog: SessionPickerCatalog,
     },
     ShowLairPrompt {
         kind: LairPromptKind,

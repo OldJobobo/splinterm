@@ -30,7 +30,8 @@ pub mod wayland;
 
 pub use frontend::{
     AuthorityStatus, FontUpdate, LairDirection, LairPromptKind, LairPromptTarget,
-    PerfTraceCorrelation, SelectorKind, SessionPickerDecision, SessionPickerItem, SessionPickerUi,
+    PerfTraceCorrelation, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
+    SessionPickerDecision, SessionPickerItem, SessionPickerTarget, SessionPickerUi,
     TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
     WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };

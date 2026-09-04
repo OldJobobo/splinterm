@@ -187,6 +187,44 @@ pub struct NavigationProjection {
     pub lairs: Vec<NavigationLair>,
 }
 
+/// Projection-owned picker policy whose rows have distinct eligibility rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NavigationPickerKind {
+    RecentDojos,
+    ChooseDojo { lair_id: LairId },
+    ChooseLair,
+}
+
+/// Revision-bound authority captured by an eligible picker row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NavigationPickerTarget {
+    pub topology_revision: TopologyRevision,
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub action: NavigationAction,
+}
+
+/// Bounded display projection for one eligible picker row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationPickerRow {
+    pub target: NavigationPickerTarget,
+    pub display_title: String,
+    pub breadcrumb: String,
+    pub working_directory: String,
+    pub pane_count: usize,
+    pub running_pane_count: usize,
+}
+
+/// Complete policy view for one picker opening.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationPickerView {
+    pub topology_revision: TopologyRevision,
+    pub kind: NavigationPickerKind,
+    pub rows: Vec<NavigationPickerRow>,
+    pub creation: Option<NavigationCapability>,
+    pub initial_row: Option<usize>,
+}
+
 /// Current-Window facts which are not daemon containment relationships.
 #[derive(Clone, Copy, Debug)]
 pub struct NavigationWindowState<'a> {
@@ -249,6 +287,142 @@ impl std::fmt::Display for NavigationProjectionError {
 impl std::error::Error for NavigationProjectionError {}
 
 impl NavigationProjection {
+    /// Builds one explicit quick-picker policy view.
+    ///
+    /// `recent_dojo_ids` is newest-first endpoint-local recency. Lair
+    /// representatives are current-Window Dojos ordered from most to least
+    /// recently active. Neither list is action authority.
+    #[must_use]
+    pub fn picker_view(
+        &self,
+        kind: NavigationPickerKind,
+        recent_dojo_ids: &[DojoId],
+        lair_representatives: &[DojoId],
+    ) -> NavigationPickerView {
+        let creation = match kind {
+            NavigationPickerKind::RecentDojos | NavigationPickerKind::ChooseLair => {
+                Some(self.creation.new_lair)
+            }
+            NavigationPickerKind::ChooseDojo { lair_id } => self
+                .creation
+                .new_dojo
+                .filter(|creation| creation.lair_id == lair_id)
+                .map(|creation| creation.capability),
+        };
+        let mut rows = match kind {
+            NavigationPickerKind::RecentDojos => self.recent_picker_rows(recent_dojo_ids),
+            NavigationPickerKind::ChooseDojo { lair_id } => self
+                .lairs
+                .iter()
+                .find(|lair| lair.lair_id == lair_id)
+                .map_or_else(Vec::new, |lair| {
+                    lair.dojos
+                        .iter()
+                        .filter_map(|dojo| self.dojo_picker_row(lair, dojo, false))
+                        .collect()
+                }),
+            NavigationPickerKind::ChooseLair => self
+                .lairs
+                .iter()
+                .filter_map(|lair| {
+                    let representative = lair_representatives
+                        .iter()
+                        .find_map(|dojo_id| {
+                            lair.dojos
+                                .iter()
+                                .find(|dojo| dojo.dojo_id == *dojo_id)
+                                .filter(|dojo| enabled_picker_action(dojo).is_some())
+                        })
+                        .or_else(|| {
+                            lair.dojos.iter().find(|dojo| {
+                                dojo.attachment == WindowAttachment::NotHere
+                                    && dojo.node.lifecycle == NavigationLifecycle::Running
+                                    && enabled_picker_action(dojo).is_some()
+                            })
+                        });
+                    representative.and_then(|dojo| self.dojo_picker_row(lair, dojo, true))
+                })
+                .collect(),
+        };
+        let initial_row = match kind {
+            NavigationPickerKind::RecentDojos => (!rows.is_empty()).then_some(0),
+            NavigationPickerKind::ChooseDojo { .. } | NavigationPickerKind::ChooseLair => rows
+                .iter()
+                .position(|row| {
+                    self.lairs
+                        .iter()
+                        .flat_map(|lair| &lair.dojos)
+                        .any(|dojo| dojo.dojo_id == row.target.dojo_id && dojo.active_here)
+                })
+                .or_else(|| (!rows.is_empty()).then_some(0)),
+        };
+        if matches!(kind, NavigationPickerKind::RecentDojos) {
+            rows.sort_by_key(|row| {
+                recent_dojo_ids
+                    .iter()
+                    .position(|dojo_id| *dojo_id == row.target.dojo_id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        NavigationPickerView {
+            topology_revision: self.topology_revision,
+            kind,
+            rows,
+            creation,
+            initial_row,
+        }
+    }
+
+    fn recent_picker_rows(&self, recent_dojo_ids: &[DojoId]) -> Vec<NavigationPickerRow> {
+        self.lairs
+            .iter()
+            .flat_map(|lair| {
+                lair.dojos
+                    .iter()
+                    .filter(|dojo| recent_dojo_ids.contains(&dojo.dojo_id))
+                    .filter(|dojo| dojo.node.lifecycle == NavigationLifecycle::Running)
+                    .filter_map(|dojo| self.dojo_picker_row(lair, dojo, false))
+            })
+            .collect()
+    }
+
+    fn dojo_picker_row(
+        &self,
+        lair: &NavigationLair,
+        dojo: &NavigationDojo,
+        lair_row: bool,
+    ) -> Option<NavigationPickerRow> {
+        let action = enabled_picker_action(dojo)?;
+        let (display_title, breadcrumb) = if lair_row {
+            (
+                lair.node.label.clone(),
+                bounded_label(&format!("Opens {}", dojo.node.label)),
+            )
+        } else {
+            (
+                dojo.node.label.clone(),
+                bounded_label(&format!("{} / {}", lair.node.label, dojo.node.label)),
+            )
+        };
+        Some(NavigationPickerRow {
+            target: NavigationPickerTarget {
+                topology_revision: self.topology_revision,
+                lair_id: lair.lair_id,
+                dojo_id: dojo.dojo_id,
+                action,
+            },
+            display_title,
+            breadcrumb,
+            working_directory: dojo.working_directory.clone(),
+            pane_count: dojo.splints.len(),
+            running_pane_count: dojo
+                .splints
+                .iter()
+                .filter(|splint| splint.node.lifecycle == NavigationLifecycle::Running)
+                .count(),
+        })
+    }
+
     /// Builds a projection from one validated topology/runtime snapshot.
     ///
     /// Transient Lairs are intentionally absent. Unknown Window-local identities
@@ -321,6 +495,17 @@ impl NavigationProjection {
             lairs,
         })
     }
+}
+
+fn enabled_picker_action(dojo: &NavigationDojo) -> Option<NavigationAction> {
+    dojo.node.capabilities.iter().find_map(|capability| {
+        (capability.is_enabled()
+            && matches!(
+                capability.action,
+                NavigationAction::ActivateDojo | NavigationAction::AttachDojo
+            ))
+        .then_some(capability.action)
+    })
 }
 
 fn project_creation(
@@ -923,6 +1108,121 @@ mod tests {
                 second: Box::new(running_layout_with_leaves(count - first_count)),
             }
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn picker_policies_keep_levels_order_and_eligibility_distinct() {
+        let mut first_lair = running_lair("first");
+        first_lair.dojos[0].name = "active".to_owned();
+        let active_dojo = first_lair.dojos[0].id;
+        let second_in_first = running_dojo("second");
+        let second_in_first_id = second_in_first.id;
+        first_lair.dojos.push(second_in_first);
+        let unrecorded_dojo = running_dojo("unrecorded");
+        let unrecorded_dojo_id = unrecorded_dojo.id;
+        first_lair.dojos.push(unrecorded_dojo);
+        let first_lair_id = first_lair.id;
+
+        let mut second_lair = running_lair("second");
+        second_lair.dojos[0].name = "remote".to_owned();
+        let remote_dojo = second_lair.dojos[0].id;
+        let second_lair_id = second_lair.id;
+        let mut exited = Dojo::with_shell("exited", PathBuf::from("/exited"));
+        exited
+            .root
+            .find_splint_mut(exited.default_focus)
+            .unwrap()
+            .state = SplintState::Exited(0);
+        let exited_dojo = exited.id;
+        second_lair.dojos.push(exited);
+
+        let captured = snapshot(vec![first_lair, second_lair], &[]);
+        let attached = [active_dojo];
+        let mut window = context(&attached);
+        window.window.current_lair = Some(first_lair_id);
+        let projection = NavigationProjection::build(&captured, window).unwrap();
+
+        let recent = projection.picker_view(
+            NavigationPickerKind::RecentDojos,
+            &[remote_dojo, second_in_first_id, active_dojo, exited_dojo],
+            &[],
+        );
+        assert_eq!(
+            recent
+                .rows
+                .iter()
+                .map(|row| row.target.dojo_id)
+                .collect::<Vec<_>>(),
+            vec![remote_dojo, second_in_first_id, active_dojo]
+        );
+        assert_eq!(recent.initial_row, Some(0));
+        assert!(
+            !recent
+                .rows
+                .iter()
+                .any(|row| row.target.dojo_id == unrecorded_dojo_id)
+        );
+        assert_eq!(
+            recent.creation.unwrap().action,
+            NavigationAction::CreateLair
+        );
+
+        let dojos = projection.picker_view(
+            NavigationPickerKind::ChooseDojo {
+                lair_id: first_lair_id,
+            },
+            &[],
+            &[],
+        );
+        assert_eq!(
+            dojos
+                .rows
+                .iter()
+                .map(|row| row.target.dojo_id)
+                .collect::<Vec<_>>(),
+            vec![active_dojo, second_in_first_id, unrecorded_dojo_id]
+        );
+        assert_eq!(dojos.initial_row, Some(0));
+        assert_eq!(dojos.creation.unwrap().action, NavigationAction::CreateDojo);
+
+        let canonical_lairs = projection
+            .lairs
+            .iter()
+            .map(|lair| lair.lair_id)
+            .collect::<Vec<_>>();
+        let lairs = projection.picker_view(
+            NavigationPickerKind::ChooseLair,
+            &[],
+            &[remote_dojo, active_dojo],
+        );
+        assert_eq!(
+            lairs
+                .rows
+                .iter()
+                .map(|row| row.target.lair_id)
+                .collect::<Vec<_>>(),
+            canonical_lairs
+        );
+        let first = lairs
+            .rows
+            .iter()
+            .find(|row| row.target.lair_id == first_lair_id)
+            .unwrap();
+        assert_eq!(first.display_title, "first");
+        assert_eq!(first.breadcrumb, "Opens active");
+        let second = lairs
+            .rows
+            .iter()
+            .find(|row| row.target.lair_id == second_lair_id)
+            .unwrap();
+        assert_eq!(second.breadcrumb, "Opens remote");
+        assert!(
+            lairs
+                .rows
+                .iter()
+                .all(|row| row.target.dojo_id != exited_dojo)
+        );
     }
 
     #[test]
