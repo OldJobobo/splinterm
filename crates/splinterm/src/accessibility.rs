@@ -9,10 +9,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use accesskit::{
-    Action, ActionData, ActionHandler, ActionRequest, ActivationHandler, AriaCurrent,
-    DeactivationHandler, Live, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate,
-};
+use accesskit::{Action, AriaCurrent, Live, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+
+use crate::native_atspi::NativeAtspiPublisher;
 
 pub const MAX_ACCESSIBILITY_ITEMS: usize = 4096;
 pub const MAX_ACCESSIBLE_NAME_CHARS: usize = 256;
@@ -271,7 +270,7 @@ impl SemanticNavigationSnapshot {
         {
             return Err(SemanticTreeError::TooManyItems);
         }
-        valid_text(&self.query, MAX_ACCESSIBLE_QUERY_CHARS)?;
+        valid_query_text(&self.query)?;
         if let Some(status) = &self.status {
             valid_text(status, MAX_ACCESSIBLE_NAME_CHARS)?;
         }
@@ -321,6 +320,10 @@ impl SemanticNavigationSnapshot {
         }
         Ok(())
     }
+}
+
+pub(crate) fn valid_query_text(text: &str) -> Result<(), SemanticTreeError> {
+    valid_text(text, MAX_ACCESSIBLE_QUERY_CHARS)
 }
 
 fn valid_text(text: &str, maximum: usize) -> Result<(), SemanticTreeError> {
@@ -431,15 +434,16 @@ impl SemanticUpdateCoalescer {
         self.pending = Some(snapshot);
     }
 
-    /// Return one update for the newest staged state, suppressing equivalents.
+    /// Return the newest staged state, suppressing equivalents and validating
+    /// the platform-neutral AccessKit tree before native publication.
     ///
     /// # Errors
     ///
     /// Returns an error when the pending semantic snapshot is invalid.
-    pub fn take_update(
+    pub fn take_snapshot(
         &mut self,
         owner_turn: SemanticOwnerTurn,
-    ) -> Result<Option<TreeUpdate>, SemanticTreeError> {
+    ) -> Result<Option<SemanticNavigationSnapshot>, SemanticTreeError> {
         if self.published_turn == Some(owner_turn) {
             return Ok(None);
         }
@@ -449,71 +453,17 @@ impl SemanticUpdateCoalescer {
         if self.published.as_ref() == Some(&snapshot) {
             return Ok(None);
         }
-        let update = snapshot.tree_update()?;
-        self.published = Some(snapshot);
+        snapshot.tree_update()?;
+        self.published = Some(snapshot.clone());
         self.published_turn = Some(owner_turn);
-        Ok(Some(update))
+        Ok(Some(snapshot))
     }
 }
 
-struct InitialTreeHandler(Arc<Mutex<TreeUpdate>>);
-
-impl ActivationHandler for InitialTreeHandler {
-    fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
-        Some(
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-        )
-    }
-}
-
-struct NoopDeactivationHandler;
-
-impl DeactivationHandler for NoopDeactivationHandler {
-    fn deactivate_accessibility(&mut self) {}
-}
-
-struct SemanticActionHandler(SemanticActionQueue);
-
-impl ActionHandler for SemanticActionHandler {
-    fn do_action(&mut self, request: ActionRequest) {
-        if request.target_tree != TreeId::ROOT {
-            return;
-        }
-        let node = SemanticNodeId(request.target_node.0);
-        let is_item = node.0 >= FIRST_ITEM_NODE_ID;
-        let is_focusable =
-            is_item || matches!(node, TERMINAL_NODE_ID | SEARCH_NODE_ID | TREE_NODE_ID);
-        let action = match (request.action, request.data) {
-            (Action::Focus, None) if is_focusable => Some(SemanticAction::Focus(node)),
-            (Action::Click, None) if is_item => Some(SemanticAction::Activate(node)),
-            (Action::Expand, None) if is_item => Some(SemanticAction::SetExpanded {
-                node,
-                expanded: true,
-            }),
-            (Action::Collapse, None) if is_item => Some(SemanticAction::SetExpanded {
-                node,
-                expanded: false,
-            }),
-            (Action::SetValue, Some(ActionData::Value(value))) if node == SEARCH_NODE_ID => {
-                let value = value.chars().take(MAX_ACCESSIBLE_QUERY_CHARS).collect();
-                Some(SemanticAction::SetSearch(value))
-            }
-            _ => None,
-        };
-        if let Some(action) = action {
-            let _ = self.0.push(action);
-        }
-    }
-}
-
-/// AccessKit's AT-SPI adapter. Construct and update this only on the calloop
-/// owner thread. The callback handlers communicate solely through `actions`.
+/// Native AT-SPI adapter. Construct and update this only on the calloop owner
+/// thread. D-Bus callbacks communicate solely through the bounded action queue.
 pub struct UnixAccessibilityAdapter {
-    adapter: accesskit_unix::Adapter,
-    current_tree: Arc<Mutex<TreeUpdate>>,
+    publisher: NativeAtspiPublisher,
     updates: SemanticUpdateCoalescer,
 }
 
@@ -527,22 +477,13 @@ impl UnixAccessibilityAdapter {
         initial: SemanticNavigationSnapshot,
         actions: SemanticActionQueue,
     ) -> Result<Self, SemanticTreeError> {
-        let initial_tree = initial.tree_update()?;
-        let current_tree = Arc::new(Mutex::new(initial_tree));
-        let adapter = accesskit_unix::Adapter::new(
-            InitialTreeHandler(Arc::clone(&current_tree)),
-            SemanticActionHandler(actions),
-            NoopDeactivationHandler,
-        );
+        initial.tree_update()?;
+        let publisher = NativeAtspiPublisher::new(initial.clone(), actions);
         let updates = SemanticUpdateCoalescer {
             published: Some(initial),
             ..SemanticUpdateCoalescer::default()
         };
-        Ok(Self {
-            adapter,
-            current_tree,
-            updates,
-        })
+        Ok(Self { publisher, updates })
     }
 
     pub fn stage(&mut self, snapshot: SemanticNavigationSnapshot) {
@@ -558,19 +499,20 @@ impl UnixAccessibilityAdapter {
         &mut self,
         owner_turn: SemanticOwnerTurn,
     ) -> Result<bool, SemanticTreeError> {
-        let Some(update) = self.updates.take_update(owner_turn)? else {
+        let Some(snapshot) = self.updates.take_snapshot(owner_turn)? else {
             return Ok(false);
         };
-        *self
-            .current_tree
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = update.clone();
-        self.adapter.update_if_active(|| update);
+        self.publisher.publish(&snapshot);
         Ok(true)
     }
 
+    #[must_use]
+    pub fn transport_error(&self) -> Option<&str> {
+        self.publisher.transport_error()
+    }
+
     pub fn update_window_focus_state(&mut self, focused: bool) {
-        self.adapter.update_window_focus_state(focused);
+        self.publisher.update_window_focus_state(focused);
     }
 }
 
@@ -682,14 +624,14 @@ mod tests {
         coalescer.stage(first.clone());
         assert!(
             coalescer
-                .take_update(SemanticOwnerTurn(1))
+                .take_snapshot(SemanticOwnerTurn(1))
                 .unwrap()
                 .is_some()
         );
         coalescer.stage(first.clone());
         assert!(
             coalescer
-                .take_update(SemanticOwnerTurn(2))
+                .take_snapshot(SemanticOwnerTurn(2))
                 .unwrap()
                 .is_none()
         );
@@ -699,7 +641,7 @@ mod tests {
         coalescer.stage(intermediate);
         assert!(
             coalescer
-                .take_update(SemanticOwnerTurn(3))
+                .take_snapshot(SemanticOwnerTurn(3))
                 .unwrap()
                 .is_some()
         );
@@ -708,46 +650,15 @@ mod tests {
         coalescer.stage(final_snapshot);
         assert!(
             coalescer
-                .take_update(SemanticOwnerTurn(3))
+                .take_snapshot(SemanticOwnerTurn(3))
                 .unwrap()
                 .is_none()
         );
-        let update = coalescer
-            .take_update(SemanticOwnerTurn(4))
+        let snapshot = coalescer
+            .take_snapshot(SemanticOwnerTurn(4))
             .unwrap()
             .unwrap();
-        assert_eq!(node(&update, STATUS_NODE_ID).label(), Some("Disconnected"));
-    }
-
-    #[test]
-    fn accesskit_actions_cross_only_the_bounded_typed_queue() {
-        let queue = SemanticActionQueue::new(|| {});
-        let mut handler = SemanticActionHandler(queue.clone());
-        handler.do_action(ActionRequest {
-            action: Action::Focus,
-            target_tree: TreeId::ROOT,
-            target_node: NodeId(17),
-            data: None,
-        });
-        handler.do_action(ActionRequest {
-            action: Action::SetValue,
-            target_tree: TreeId::ROOT,
-            target_node: SEARCH_NODE_ID.into(),
-            data: Some(ActionData::Value("query".into())),
-        });
-        handler.do_action(ActionRequest {
-            action: Action::Click,
-            target_tree: TreeId(accesskit::Uuid::from_u128(1)),
-            target_node: NodeId(18),
-            data: None,
-        });
-        assert_eq!(
-            queue.drain(),
-            vec![
-                SemanticAction::Focus(SemanticNodeId(17)),
-                SemanticAction::SetSearch("query".to_owned())
-            ]
-        );
+        assert_eq!(snapshot.status.as_deref(), Some("Disconnected"));
     }
 
     #[test]

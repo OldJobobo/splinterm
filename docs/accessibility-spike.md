@@ -1,8 +1,10 @@
 # Semantic accessibility spike
 
 Splinterm's custom renderer has no native widget tree. The accessibility seam is
-therefore an independent AccessKit tree published on Linux through AT-SPI over
-D-Bus by `accesskit_unix`.
+therefore an independent AccessKit tree whose bounded navigation projection is
+published on Linux through AT-SPI over D-Bus by Splinterm's native adapter.
+AccessKit Unix is not used because its AT-SPI translation does not preserve the
+expanded/current states or distinct navigation actions required by this contract.
 
 This spike establishes the contract needed by the optional navigation explorer;
 it does not enable or render the explorer.
@@ -31,19 +33,19 @@ projection and reject stale or removed targets.
 
 ## Thread and event-loop boundary
 
-AccessKit Unix handlers run on another thread. They may only enqueue a bounded
-`SemanticAction` and invoke the supplied wake callback. They must never mutate
-Wayland objects, renderer state, or application focus directly.
+zbus invokes native AT-SPI handlers away from the calloop owner. They may only
+enqueue a bounded `SemanticAction` and invoke the supplied wake callback. They
+must never mutate Wayland objects, renderer state, or application focus directly.
 
 The intended runtime flow is:
 
 ```text
 AT-SPI action
-  -> AccessKit worker callback
+  -> native zbus callback
   -> SemanticActionQueue + calloop Ping
   -> calloop-owned App drains typed actions
   -> current projection revalidation and state reduction
-  -> one coalesced TreeUpdate
+  -> one coalesced semantic publication
 ```
 
 Focus and search requests replace older requests of the same class. Duplicate
@@ -52,17 +54,17 @@ non-coalescible actions. Semantic snapshots are staged by state changes rather
 than raster damage; equivalent snapshots and intermediate states superseded in
 the same loop turn do not publish updates. Every flush carries an explicit
 `SemanticOwnerTurn`; a second flush with the same token remains pending until a
-later turn. A dedicated polite, atomic Status
-node carries result, empty, error, stale, and disconnected announcements without
-churning item names.
+later turn. A dedicated Status node and one polite AT-SPI announcement carry
+result, empty, error, stale, and disconnected changes without churning item
+names.
 
 ## Wayland limitation
 
 Wayland does not reveal a top-level Window's compositor-relative position.
-Accordingly Splinterm must not call `Adapter::set_root_window_bounds` or claim
-accurate global screen coordinates on Wayland. Local node geometry may be added
-when explorer layout exists, but this limitation does not prevent AT-SPI role,
-hierarchy, state, focus, or action exposure.
+Accordingly Splinterm does not expose the AT-SPI Component interface or claim
+accurate global screen coordinates. Local node geometry and Component support
+may be added when explorer layout exists, but this limitation does not prevent
+AT-SPI role, hierarchy, state, focus, or action exposure.
 
 ## Manual AT-SPI inspection
 
@@ -76,12 +78,13 @@ With the desktop accessibility bus enabled, inspect the process using an AT-SPI
 inspector or screen reader. The bounded gate checks are:
 
 1. Window, SearchInput, Tree, Status, and three TreeItem levels are discoverable.
-2. `editor` is independently selected, current, and focused.
+2. `editor` is independently selected, current, focused, and collapsed;
+   `shell` is busy and disabled; `offline` is disabled without being busy.
 3. expand/collapse, focus, activation, and search-value actions arrive as typed
-   queue events.
+   queue events with their exact semantic node IDs.
 4. changing the status once produces one polite announcement; an equivalent
    update produces none.
-5. no global bounds are claimed.
+5. no Component interface or global bounds are exposed.
 
 This manual inspection is graphical-environment validation and is not implied by
 normal non-graphical test execution.

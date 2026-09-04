@@ -9,8 +9,8 @@ repository.workspace = true
 
 [dependencies]
 accesskit.workspace = true
-accesskit_unix.workspace = true
 anyhow.workspace = true
+atspi.workspace = true
 clap.workspace = true
 fontdb.workspace = true
 libc.workspace = true
@@ -33,6 +33,7 @@ unicode-width.workspace = true
 uuid.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true
