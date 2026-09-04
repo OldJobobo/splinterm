@@ -131,6 +131,7 @@ pub(in crate::app) async fn select_dojo(
 fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result<()> {
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
         physical_dpi: 96.0,

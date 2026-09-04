@@ -53,6 +53,33 @@ def test_lock_drift_names_the_atomic_refresh_command(monkeypatch):
         checker.check_repository_files(manifest)
 
 
+def test_font_drift_reports_exact_jetbrains_prerequisite(monkeypatch):
+    checker = load_checker()
+    manifest = {
+        "fonts": [
+            {
+                "role": "regular",
+                "pattern": "JetBrains Mono Nerd Font:style=Regular",
+                "file": "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+                "index": 0,
+                "sha256": "0" * 64,
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        checker,
+        "command_output",
+        lambda _arguments: "/usr/share/fonts/maple/MapleMono-Regular.ttf\n0",
+    )
+    with pytest.raises(checker.ProvenanceError) as failure:
+        checker.check_fonts(manifest)
+    message = str(failure.value)
+    assert "expected /usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf index 0" in message
+    assert "got /usr/share/fonts/maple/MapleMono-Regular.ttf index 0" in message
+    assert "ttf-jetbrains-mono-nerd" in message
+    assert "fc-cache --force" in message
+
+
 def test_non_reference_worker_is_an_explicit_unsupported_host(monkeypatch):
     checker = load_checker()
     manifest = checker.load_manifest()

@@ -127,7 +127,7 @@ use crate::frontend::{
     AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
-    DojoPromptUi, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
+    DojoPromptUi, FontUpdate, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
     SessionPickerDecision, SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
     TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
     ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
@@ -151,9 +151,9 @@ use crate::renderer::{
     DojoPromptLayout, HistoryOverlayStatus, PickerHitTarget, RenderContext,
     SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
     SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
-    background_bgra, command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test,
-    dojo_prompt_layout, fill_rect, history_overlay_layout, paint, paint_command_palette,
-    paint_dojo_prompt, paint_history_overlay, paint_session_picker_overlay,
+    background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
+    dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout, paint,
+    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_session_picker_overlay,
     paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
     paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
     scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
@@ -836,6 +836,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             text_row,
             renderer_generation: 0,
             theme_generation: 0,
+            pending_font_update: None,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title_override: options.title,
@@ -915,6 +916,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
                 search: SearchUiState::default(),
                 authority: options.authority,
                 last_resize: None,
+                pending_resize: None,
                 prepare_dirty_rows: Vec::new(),
                 raster_dirty_rows: Vec::new(),
                 surface_dirty_rows: Vec::new(),
@@ -1003,6 +1005,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             app.apply_updates(&queue_handle)?;
             if !app.scheduling.exit {
                 app.flush_pending_terminal_input();
+                app.retry_pending_pane_resizes()?;
             }
             if app.scheduling.redraw_pending
                 && !pending_draw_waits_for_frame(
@@ -1118,6 +1121,12 @@ fn new_search_editor() -> BoundedTextEditor {
     )
 }
 
+#[derive(Debug)]
+struct PendingPaneResize {
+    size: (u16, u16, u16, u16),
+    command: WindowCommand,
+}
+
 #[allow(
     clippy::struct_excessive_bools,
     reason = "independent pane rendering, history, and input flags are not one state machine"
@@ -1144,6 +1153,7 @@ struct PaneView {
     search: SearchUiState,
     authority: AuthorityStatus,
     last_resize: Option<(u16, u16, u16, u16)>,
+    pending_resize: Option<PendingPaneResize>,
     prepare_dirty_rows: Vec<bool>,
     raster_dirty_rows: Vec<bool>,
     surface_dirty_rows: Vec<bool>,
@@ -1188,6 +1198,29 @@ fn rebuild_pane_scaled_frame(pane: &mut PaneView, scale_120: u32) -> Result<bool
     )?);
     finish_rebuilt_pane_frame(pane);
     Ok(true)
+}
+
+fn prepare_pane_scaled_frame_with_context(
+    pane: &PaneView,
+    scale_120: u32,
+    context: &RenderContext,
+) -> Result<Option<SnapshotFrame>> {
+    let Some(display) = pane.display_snapshot() else {
+        return Ok(None);
+    };
+    Ok(Some(SnapshotFrame::load_scaled_with_sources_and_context(
+        &display,
+        scale_120,
+        Some(&pane.image_sources),
+        context,
+    )?))
+}
+
+fn install_prepared_pane_frame(pane: &mut PaneView, frame: Option<SnapshotFrame>) {
+    if let Some(frame) = frame {
+        pane.snapshot_frame = Some(frame);
+        finish_rebuilt_pane_frame(pane);
+    }
 }
 
 fn rebuild_pane_scaled_frame_with_context(
@@ -1372,6 +1405,7 @@ impl PaneView {
             search: SearchUiState::default(),
             authority: options.authority,
             last_resize: None,
+            pending_resize: None,
             prepare_dirty_rows: Vec::new(),
             raster_dirty_rows: Vec::new(),
             surface_dirty_rows: Vec::new(),
@@ -1679,7 +1713,7 @@ impl PaneView {
             } else {
                 BackgroundUpdateImpact::NONE
             }),
-            WindowUpdate::Theme(_) => Ok(BackgroundUpdateImpact::NONE),
+            WindowUpdate::Theme(_) | WindowUpdate::Font(_) => Ok(BackgroundUpdateImpact::NONE),
             WindowUpdate::Exited { .. } | WindowUpdate::Shutdown => {
                 self.controller_active = false;
                 self.commands = None;
@@ -1753,6 +1787,11 @@ fn rebuild_inactive_frames_with_context(
     Ok(rebuilt)
 }
 
+struct PreparedTabFontFrames {
+    focused: Option<SnapshotFrame>,
+    inactive: Vec<Option<SnapshotFrame>>,
+}
+
 struct CachedFrameTitle {
     source: String,
     maximum_cells: u32,
@@ -1813,6 +1852,7 @@ struct PresentationState {
     text_row: Option<TextRow>,
     renderer_generation: u64,
     theme_generation: u64,
+    pending_font_update: Option<FontUpdate>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -2380,7 +2420,9 @@ fn event_loop_timeout(
 }
 
 fn pane_command_retry_pending(pane: &PaneView) -> bool {
-    pane.control_release_pending || pane.pending_focus_report.is_some()
+    pane.control_release_pending
+        || pane.pending_focus_report.is_some()
+        || pane.pending_resize.is_some()
 }
 
 fn command_retry_dispatch_timeout(
@@ -2586,6 +2628,15 @@ fn update_graphical_focus_watch(
                 true
             }
         });
+    }
+}
+
+fn retain_newest_font(slot: &mut Option<FontUpdate>, update: FontUpdate) {
+    if slot
+        .as_ref()
+        .is_none_or(|current| current.generation.id() < update.generation.id())
+    {
+        *slot = Some(update);
     }
 }
 
@@ -5621,6 +5672,106 @@ impl App {
         Ok(rebuilt)
     }
 
+    fn reconcile_font_generation(&mut self, update: FontUpdate) -> Result<bool> {
+        let mut candidate_context = self.presentation.render_context.clone();
+        if !candidate_context.replace_font_generation(update.generation) {
+            return Ok(false);
+        }
+
+        let focused = if let Some(mut display) = self.panes.display_snapshot() {
+            apply_ime_preedit(&mut display, self.input.ime.visible_preedit.as_deref());
+            Some(SnapshotFrame::load_scaled_with_sources_and_context(
+                &display,
+                self.surface.scale_120,
+                Some(&self.panes.pane.image_sources),
+                &candidate_context,
+            )?)
+        } else {
+            None
+        };
+        let inactive = self
+            .panes
+            .inactive_panes
+            .iter()
+            .map(|pane| {
+                prepare_pane_scaled_frame_with_context(
+                    pane,
+                    self.surface.scale_120,
+                    &candidate_context,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let hidden = self
+            .tab_state
+            .tabs
+            .iter()
+            .map(|tab| {
+                let Some(view) = tab.value.as_ref() else {
+                    return Ok(None);
+                };
+                let focused = prepare_pane_scaled_frame_with_context(
+                    &view.pane,
+                    self.surface.scale_120,
+                    &candidate_context,
+                )?;
+                let inactive = view
+                    .inactive_panes
+                    .iter()
+                    .map(|pane| {
+                        prepare_pane_scaled_frame_with_context(
+                            pane,
+                            self.surface.scale_120,
+                            &candidate_context,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Some(PreparedTabFontFrames { focused, inactive }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.presentation.render_context = candidate_context;
+        install_prepared_pane_frame(&mut self.panes.pane, focused);
+        for (pane, frame) in self.panes.inactive_panes.iter_mut().zip(inactive) {
+            install_prepared_pane_frame(pane, frame);
+        }
+        for (tab, prepared) in self.tab_state.tabs.iter_mut().zip(hidden) {
+            let (Some(view), Some(prepared)) = (tab.value.as_mut(), prepared) else {
+                continue;
+            };
+            install_prepared_pane_frame(&mut view.pane, prepared.focused);
+            for (pane, frame) in view.inactive_panes.iter_mut().zip(prepared.inactive) {
+                install_prepared_pane_frame(pane, frame);
+            }
+            view.frame_titles.clear();
+            view.dirty_inactive_panes.clear();
+        }
+        clear_snapshot_caches();
+        self.presentation.renderer_generation =
+            self.presentation.renderer_generation.saturating_add(1);
+        self.presentation.frame_titles.clear();
+        self.modal.session_picker_text_cache.clear();
+        self.modal.command_palette_text_cache.clear();
+        self.modal.dojo_prompt_text_cache.clear();
+        self.modal.tab_context_menu_text_cache.clear();
+        self.tab_state.tab_label_cache.clear();
+        self.tab_state.tab_close_text = None;
+        self.tab_state.tab_new_text = None;
+        self.modal.session_picker_layout = None;
+        self.modal.command_palette_layout = None;
+        self.modal.dojo_prompt_layout = None;
+        self.modal.tab_context_menu_layout = None;
+        self.surface.buffers.clear();
+        self.surface.backing.clear();
+        self.presentation.full_redraw = true;
+        self.input.cursor_blink_visible = true;
+        self.input.last_cursor_blink = Instant::now();
+        self.update_ime_cursor_rectangle();
+        if self.surface.configured {
+            self.emit_font_resize()?;
+        }
+        Ok(true)
+    }
+
     fn toggle_tab_strip(&mut self) -> Result<bool> {
         if !self.tab_state.managed_tabs {
             return Ok(false);
@@ -6754,6 +6905,44 @@ impl App {
         Ok(())
     }
 
+    fn emit_font_resize(&mut self) -> Result<()> {
+        let layout = self.computed_pane_layout()?;
+        let active_rect = self
+            .panes
+            .focused_splint()
+            .and_then(|splint_id| layout.as_ref().and_then(|layout| layout.rect(splint_id)));
+        let content = self.content_rect();
+        let (active_width, active_height) = active_rect
+            .map_or((content.width, content.height), |rect| {
+                (rect.width, rect.height)
+            });
+        let active = self.panes.pane.controller_active;
+        Self::emit_pane_resize(
+            &mut self.panes.pane,
+            active_width,
+            active_height,
+            self.surface.scale_120,
+            active,
+        )?;
+        for pane in &mut self.panes.inactive_panes {
+            let Some(splint_id) = pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id) else {
+                continue;
+            };
+            let Some(rect) = layout.as_ref().and_then(|layout| layout.rect(splint_id)) else {
+                continue;
+            };
+            let active = pane.controller_active;
+            Self::emit_pane_resize(
+                pane,
+                rect.width,
+                rect.height,
+                self.surface.scale_120,
+                active,
+            )?;
+        }
+        Ok(())
+    }
+
     fn emit_active_pane_resize(
         pane: &mut PaneView,
         logical_width: u32,
@@ -6781,9 +6970,12 @@ impl App {
         scale_120: u32,
         activate: bool,
     ) -> Result<()> {
-        let (Some(frame), Some(commands)) = (&pane.snapshot_frame, &pane.commands) else {
+        let Some(frame) = &pane.snapshot_frame else {
             return Ok(());
         };
+        if pane.commands.is_none() {
+            return Ok(());
+        }
         let (resize, column_capped, row_capped) = match frame.terminal_size_with_limit_status(
             logical_width,
             logical_height,
@@ -6809,6 +7001,7 @@ impl App {
             );
         }
         if !resize_changed(pane.last_resize, resize) {
+            pane.pending_resize = None;
             return Ok(());
         }
         let resize_command = if activate {
@@ -6826,13 +7019,30 @@ impl App {
                 pixel_height: resize.3,
             }
         };
-        match commands.try_send(resize_command) {
-            Ok(()) => pane.last_resize = Some(resize),
-            Err(TrySendError::Full(_)) => {
-                // Layout and scale reconciliation can briefly outpace the
-                // one-pane command worker. Keep the previous dimensions so a
-                // later update retries the newest resize instead of treating
-                // ordinary backpressure as a fatal Wayland failure.
+        pane.pending_resize = Some(PendingPaneResize {
+            size: resize,
+            command: resize_command,
+        });
+        Self::retry_pending_pane_resize(pane)
+    }
+
+    fn retry_pending_pane_resize(pane: &mut PaneView) -> Result<()> {
+        let Some(pending) = pane.pending_resize.take() else {
+            return Ok(());
+        };
+        let Some(commands) = &pane.commands else {
+            return Ok(());
+        };
+        match commands.try_send(pending.command) {
+            Ok(()) => pane.last_resize = Some(pending.size),
+            Err(TrySendError::Full(command)) => {
+                // Preserve the exact newest resize across ordinary queue
+                // backpressure. The event loop retries deferred pane commands
+                // after pending terminal input, without changing authority.
+                pane.pending_resize = Some(PendingPaneResize {
+                    size: pending.size,
+                    command,
+                });
             }
             Err(TrySendError::Closed(_)) => {
                 anyhow::bail!("Wayland command receiver disconnected");
@@ -7301,6 +7511,9 @@ impl App {
                         retain_newest_theme(&mut next_theme, update);
                     }
                 }
+                WindowTopologyUpdate::Font(update) => {
+                    retain_newest_font(&mut self.presentation.pending_font_update, update);
+                }
                 WindowTopologyUpdate::Closed => self
                     .scheduling
                     .request_exit(ExitClass::CleanFinalTabRemoved),
@@ -7518,6 +7731,7 @@ impl App {
         let mut full_frame_reload = false;
         let mut rebuild_all_inactive = false;
         let mut effect_desired_changed = false;
+        let mut font_reconciled = false;
         if let Some(update) = next_theme {
             if inline_picker_open {
                 retain_newest_theme(&mut self.modal.deferred_picker_theme, update);
@@ -7897,6 +8111,9 @@ impl App {
                         effect_desired_changed |= impact.reconcile_effect;
                     }
                 }
+                WindowUpdate::Font(update) => {
+                    retain_newest_font(&mut self.presentation.pending_font_update, update);
+                }
                 WindowUpdate::Exited { splint_id } => {
                     anyhow::ensure!(
                         self.panes.focused_splint() == Some(splint_id),
@@ -7930,6 +8147,22 @@ impl App {
                         self.scheduling.request_exit(ExitClass::ErrorPaneStream);
                         return Ok(());
                     }
+                }
+            }
+        }
+        if let Some(update) = self.presentation.pending_font_update.take() {
+            match self.reconcile_font_generation(update) {
+                Ok(true) => {
+                    font_reconciled = true;
+                    visual_changed = true;
+                    focused_visual_changed = true;
+                    self.presentation.full_redraw = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "splinterm live font update rejected during frame reconciliation: {error:#}"
+                    );
                 }
             }
         }
@@ -8094,7 +8327,8 @@ impl App {
             }
             self.refresh_ime_preedit()?;
             self.update_ime_cursor_rectangle();
-            if !self.modal.inline_picker_open()
+            if !font_reconciled
+                && !self.modal.inline_picker_open()
                 && !self.modal.session_picker_reconcile_pending
                 && terminal_resize_allowed(
                     TerminalResizeCause::SnapshotAvailable,
@@ -8267,6 +8501,22 @@ impl App {
                     snapshot.input_modes,
                 )
             })
+    }
+
+    fn retry_pending_pane_resizes(&mut self) -> Result<()> {
+        for pane in
+            std::iter::once(&mut self.panes.pane).chain(self.panes.inactive_panes.iter_mut())
+        {
+            Self::retry_pending_pane_resize(pane)?;
+        }
+        for tab in self.tab_state.tabs.iter_mut() {
+            if let Some(view) = tab.value.as_mut() {
+                for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
+                    Self::retry_pending_pane_resize(pane)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn has_deferred_pane_command(&self) -> bool {
@@ -11324,6 +11574,33 @@ mod tests {
     }
 
     #[test]
+    fn observer_font_resize_prepares_without_claiming_control() {
+        let splint_id = SplintId::new();
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(2);
+        let mut pane = PaneView::from_options(
+            WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: false,
+                image_sources: ImageContentLeaseSet::default(),
+            },
+            SCALE_DENOMINATOR,
+        )
+        .unwrap();
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, false).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::PrepareResize { .. }
+        ));
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, false).unwrap();
+        assert!(command_receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn pane_resize_respects_same_version_endpoint_grid_limits() {
         let splint_id = SplintId::new();
         let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
@@ -11410,30 +11687,48 @@ mod tests {
             SCALE_DENOMINATOR,
         )
         .unwrap();
+        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true).unwrap();
+        assert!(matches!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Resize { .. }
+        ));
+        let previous = pane.last_resize;
         commands
             .try_send(WindowCommand::Input(vec![1]))
             .expect("fill pane command queue");
 
-        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true)
+        App::emit_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR, false)
             .expect("queue saturation defers resize");
-        assert_eq!(pane.last_resize, None);
+        assert_eq!(pane.last_resize, previous);
+        assert!(pane.pending_resize.is_some());
+        assert!(pane_command_retry_pending(&pane));
         assert_eq!(
             command_receiver.try_recv().unwrap(),
             WindowCommand::Input(vec![1])
         );
 
-        App::emit_pane_resize(&mut pane, 320, 240, SCALE_DENOMINATOR, true)
-            .expect("deferred resize retries");
+        App::retry_pending_pane_resize(&mut pane).expect("deferred resize retries");
         let retried = command_receiver.try_recv().unwrap();
-        assert!(matches!(retried, WindowCommand::Resize { .. }));
-        assert!(pane.last_resize.is_some());
+        assert!(matches!(retried, WindowCommand::PrepareResize { .. }));
+        assert_ne!(pane.last_resize, previous);
+        assert!(pane.pending_resize.is_none());
+        assert!(!pane_command_retry_pending(&pane));
 
+        commands
+            .try_send(WindowCommand::Input(vec![2]))
+            .expect("refill pane command queue");
+        App::emit_pane_resize(&mut pane, 800, 600, SCALE_DENOMINATOR, true)
+            .expect("second resize defers");
+        assert!(pane.pending_resize.is_some());
+        assert_eq!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::Input(vec![2])
+        );
         drop(command_receiver);
-        pane.last_resize = None;
-        let error = App::emit_pane_resize(&mut pane, 640, 480, SCALE_DENOMINATOR, true)
-            .expect_err("disconnected resize receiver");
+        let error = App::retry_pending_pane_resize(&mut pane)
+            .expect_err("disconnected deferred resize receiver");
         assert!(error.to_string().contains("disconnected"));
-        assert_eq!(pane.last_resize, None);
+        assert!(pane.pending_resize.is_none());
     }
 
     #[test]

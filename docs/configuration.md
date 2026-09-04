@@ -9,7 +9,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 
 | Section/key | Meaning | Range/default |
 | --- | --- | --- |
-| `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
+| `main.font` | explicit fontconfig pattern; when unset, follow Omarchy's effective `monospace` family | unset |
 | `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
@@ -39,7 +39,27 @@ outside terminal hit-testing, and emits one bounded `grid_capped` diagnostic for
 the pane instead of silently treating the residual as terminal cells.
 
 Malformed supported values fail startup. Unknown sections and keys print
-line-numbered diagnostics. By default, palette roles come directly from the
+line-numbered diagnostics. When `main.font` is unset, each graphical client
+follows fontconfig's effective `monospace` family and watches that complete
+regular/bold/italic/bold-italic plus CJK/emoji generation for live changes. An
+explicit `main.font` remains authoritative and disables native live family
+following, including when its literal value is `monospace`. Native startup tries
+the documented JetBrains Mono Nerd Font pattern only if initial `monospace`
+resolution fails, then fails startup if that fallback is also unavailable; a
+live-update failure never switches to the fallback and retains the complete last
+valid generation.
+
+A valid native family change preserves configured size and sizing policy,
+padding, output DPI, runtime zoom, topology, focus, history and copy-mode
+anchors, modal input, visible IME preedit, and running processes. Splinterm
+stages immutable bounded primary, CJK, and emoji font bytes plus ordered
+fallback metadata off the Wayland dispatch path, publishes the generation
+atomically, rebuilds active and hidden pane frames, and lets only an
+existing pane controller issue the final PTY resize. Observer panes prepare a
+future size without acquiring control. Font changes do not imply live reload of
+font size, padding, shell, scrollback, cursor, or keymap settings.
+
+By default, palette roles come directly from the
 active Omarchy theme's `colors.toml` and effective `foot.ini`; `[colors] alpha`
 and `[colors] blur` are explicit user overrides. Whichever alpha source wins follows Foot's default
 alpha mode: only cells whose background source is default are translucent;

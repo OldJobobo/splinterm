@@ -45,6 +45,26 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
+## Unreleased main
+
+Current `main` contains the non-graphical implementation for live native
+Omarchy system-font synchronization. When `main.font` is unset, a graphical
+client follows the effective fontconfig `monospace` family, stages complete
+immutable face generations off dispatch paths, and atomically rebuilds active
+and hidden presentation state while preserving configured size/policy, padding,
+DPI, runtime zoom, topology, focus, history, modal input, and IME preedit.
+Explicit `main.font` disables native following. Invalid live candidates retain
+the last valid generation, and observer panes do not acquire control to resize.
+Fontconfig named instances remain selected through shaping and rasterization;
+ambient probes and deferred resize retries are bounded. Accepted staging stays
+synchronized with probe state, and cached raster faces share immutable font
+mappings across sizes instead of copying complete files.
+
+Focused renderer, watcher, cache-generation, source-replacement, geometry, and
+resize-authority tests pass. This unreleased source state does **not** yet claim
+installed-package or guarded graphical acceptance; Beta 2 remains the latest
+published package authority.
+
 ## Beta 2 release
 
 [`v0.1.0-beta2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta2)

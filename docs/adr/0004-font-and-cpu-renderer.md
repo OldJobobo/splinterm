@@ -1,7 +1,8 @@
 # ADR 0004: Use narrow fontconfig discovery with Swash and CPU SHM rendering
 
-- **Status:** Accepted — Phase 8.1 renderer and oracle policy closed
+- **Status:** Accepted — Phase 8.1 renderer and oracle policy closed; live font-generation amendment accepted
 - **Date:** 2026-07-18
+- **Amended:** 2026-08-29
 
 ## Context
 
@@ -117,15 +118,35 @@ cache keys or invalidation; cold/warm and full/damage/scroll-copy paths must
 produce identical pixels.
 
 Renderer ownership is explicit. `RendererResources` holds immutable
-process-wide renderer options and font configuration. Every graphical Window
-owns one mutable `RenderContext` containing its output DPI, font zoom, and
-background alpha. Prepared frames capture their context-dependent metrics and
-alpha, so composition and deterministic capture do not consult ambient mutable
-state. Existing public configuration and capture signatures retain a separate
+process-wide sizing, padding, and renderer options. Every graphical Window owns
+one mutable `RenderContext` containing its output DPI, font zoom, background
+alpha, and an `Arc` to one immutable `FontGeneration`. A generation owns the
+complete resolved regular/bold/italic/bold-italic and ordered fallback metadata,
+source fingerprints, and bounded sealed byte snapshots for the primary, CJK,
+and emoji faces used by both Swash and the safe FreeType wrapper. Dynamic
+fallback mappings remain lazy and bounded to 24 entries; their cache identity
+includes the resolved source identity so a same-path font replacement cannot
+reuse bytes from an older generation. Prepared frames retain their generation
+and capture their context-dependent metrics and alpha, so composition and
+deterministic capture do not consult ambient mutable state. Glyph and
+raster-face cache keys include the generation identity; incremental refresh
+rejects a generation mismatch.
+Existing public configuration and capture signatures retain a separate
 compatibility context, but production Wayland rendering uses explicit context
-paths. Immutable resolved font faces remain process-wide; bounded glyph and
-raster-face caches remain renderer-thread-local so native FreeType handles are
-not made `Send` or `Sync`.
+paths. Bounded native FreeType handles remain renderer-thread-local and are
+cleared at successful generation publication; old bytes remain alive only while
+an old prepared frame still retains its generation.
+
+When `main.font` is unset, the client treats fontconfig `monospace` as native
+Omarchy family authority and probes complete effective source identities every
+ten seconds after an initial ten-second delay. This bounds idle Fontconfig
+subprocess churn while retaining live following. Resolution, immutable
+snapshotting, parsing, metric checks, and stable double-resolution run off Tokio
+and Wayland dispatch paths. A valid candidate is fully prepared for active,
+inactive, and hidden panes before one callback-boundary publication. Failure
+leaves the active generation in place. Explicit `main.font` disables this
+watcher. The startup-only documented JetBrains fallback is not available during
+live updates.
 
 Release budgets are enforced by `tools/performance/phase9-thresholds.json`.
 Notable limits are 10/300 ms full-paint p95 at 80×24/240×80, 1/10 ms one-row
@@ -168,7 +189,11 @@ focus-safe history, and application-keypad text input.
 - CPU SHM rendering remains the baseline; a future GPU renderer must preserve
   the same cell, fallback, shaping, and damage semantics.
 - Glyph caches are invalidated and rerasterized when physical scale or font
-  identity changes.
+  identity changes; generation-keyed entries cannot cross a live family swap.
+- A live family swap preserves Window size, configured font size and policy,
+  padding, output DPI, runtime zoom, modal and IME state, topology, focus, and
+  history. Existing controller authority may emit one final changed PTY size;
+  observers do not acquire control for font reconciliation.
 - Full-window blend is fast for the current evidence row, but terminal rendering
   must consume semantic damage rather than repaint large windows continuously.
 - Fontconfig process startup is acceptable for the first client slice but may be

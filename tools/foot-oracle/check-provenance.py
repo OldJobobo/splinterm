@@ -139,22 +139,45 @@ def check_versions(manifest: dict[str, Any]) -> None:
         raise ProvenanceError("cargo version drifted")
 
 
+def font_remediation(font: dict[str, Any]) -> str:
+    package = (
+        "ttf-jetbrains-mono-nerd"
+        if "JetBrainsMonoNerdFont" in font["file"]
+        else "the package containing the pinned font"
+    )
+    return (
+        f"provision the exact pinned file (Omarchy/Arch: install {package}), "
+        "then run 'fc-cache --force'"
+    )
+
+
 def check_fonts(manifest: dict[str, Any]) -> None:
     for font in manifest["fonts"]:
         output = command_output(
             ["fc-match", "-f", "%{file}\n%{index}\n", font["pattern"]]
         ).splitlines()
         if len(output) < 2:
-            raise ProvenanceError(f"fontconfig did not resolve {font['role']}")
+            raise ProvenanceError(
+                f"fontconfig did not resolve pinned {font['role']} face; "
+                f"expected {font['file']} index {font['index']}; "
+                f"{font_remediation(font)}"
+            )
         path = pathlib.Path(output[0])
         try:
             index = int(output[1])
         except ValueError as error:
             raise ProvenanceError(f"invalid face index for {font['role']}") from error
         if str(path) != font["file"] or index != font["index"]:
-            raise ProvenanceError(f"resolved {font['role']} face drifted")
+            raise ProvenanceError(
+                f"resolved {font['role']} face drifted: expected "
+                f"{font['file']} index {font['index']}, got {path} index {index}; "
+                f"{font_remediation(font)}"
+            )
         if not path.is_file() or sha256(path) != font["sha256"]:
-            raise ProvenanceError(f"resolved {font['role']} font bytes drifted")
+            raise ProvenanceError(
+                f"resolved {font['role']} font bytes drifted at {path}; "
+                f"expected SHA-256 {font['sha256']}; {font_remediation(font)}"
+            )
 
 
 def check_environment(manifest: dict[str, Any]) -> None:
