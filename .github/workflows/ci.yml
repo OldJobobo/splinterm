@@ -231,6 +231,7 @@ jobs:
             python tools/foot-oracle/validate-fixtures.py
             python tools/automation/validate-contract-fixtures.py
             python -m pytest -q tools/benchmark/test_benchmark.py
+            python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py
           } 2>&1 | tee renderer-contracts.log
       - name: Upload focused renderer-contract failure evidence
         if: ${{ failure() }}

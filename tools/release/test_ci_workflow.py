@@ -134,6 +134,10 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertNotIn("self-hosted", workflow)
         self.assertIn("continue-on-error: true", foot)
         self.assertIn("Splinterm-owned renderer", workflow)
+        self.assertIn(
+            "python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py",
+            workflow,
+        )
         self.assertIn("workflow_dispatch:", pinned)
         self.assertIn("schedule:", pinned)
         self.assertIn("runs-on: [self-hosted, linux, x64, splinterm-oracle]", pinned)
