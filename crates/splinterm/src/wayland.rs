@@ -2412,6 +2412,29 @@ const fn ime_batch_blocked(modal_open: bool, explorer_focused: bool, barrier: bo
     modal_open || explorer_focused || barrier
 }
 
+fn explorer_pointer_returns_to_terminal(
+    explorer_focused: bool,
+    inside_panel: bool,
+    event: &PointerEventKind,
+) -> bool {
+    explorer_focused
+        && !inside_panel
+        && matches!(
+            event,
+            &PointerEventKind::Press {
+                button: BTN_LEFT,
+                ..
+            }
+        )
+}
+
+const fn explorer_activation_returns_to_terminal(
+    explorer_action_pending: bool,
+    activation_succeeded: bool,
+) -> bool {
+    explorer_action_pending && activation_succeeded
+}
+
 const fn presented_cursor_visible(inline_picker_open: bool, blink_phase_visible: bool) -> bool {
     inline_picker_open || blink_phase_visible
 }
@@ -5069,17 +5092,43 @@ impl App {
         Ok(())
     }
 
-    fn begin_lair_explorer_action(&mut self) -> bool {
-        if self.tab_state.session_switch_pending {
-            return false;
-        }
-        let Some(selected) = self.explorer.selected() else {
-            return false;
-        };
-        if !self.explorer.set_pending(selected) {
+    fn begin_lair_explorer_action(&mut self, decision: LairExplorerDecision) -> bool {
+        if self.tab_state.session_switch_pending || !self.explorer.set_pending(decision) {
             return false;
         }
         self.tab_state.session_switch_pending = true;
+        true
+    }
+
+    fn execute_lair_explorer_decision(&mut self, decision: LairExplorerDecision) -> bool {
+        let returns_focus = decision.returns_focus_to_terminal();
+        let command = match decision {
+            LairExplorerDecision::Toggle(_) => return true,
+            LairExplorerDecision::OpenDojo(target) => {
+                let target = SessionPickerTarget {
+                    topology_revision: target.topology_revision,
+                    lair_id: target.lair_id,
+                    dojo_id: target.dojo_id,
+                    action: target.capability.action,
+                };
+                WindowTopologyCommand::OpenDojo {
+                    target,
+                    explorer_target: Some(crate::frontend::LairExplorerActivationTarget::Dojo(
+                        target,
+                    )),
+                }
+            }
+            LairExplorerDecision::FocusSplint(target) => {
+                WindowTopologyCommand::FocusSplint { target }
+            }
+        };
+        if !returns_focus || !self.begin_lair_explorer_action(decision) {
+            return false;
+        }
+        if self.send_topology_command(command).is_err() {
+            self.tab_state.session_switch_pending = false;
+            self.explorer.mark_disconnected();
+        }
         true
     }
 
@@ -6547,10 +6596,24 @@ impl App {
         event: &PointerEvent,
         queue_handle: &QueueHandle<Self>,
     ) -> bool {
-        let Some(layout) = self.presentation.explorer_layout.as_ref() else {
+        let Some(inside_panel) = self
+            .presentation
+            .explorer_layout
+            .as_ref()
+            .map(|layout| rect_contains(layout.panel, event.position))
+        else {
             return false;
         };
-        if !rect_contains(layout.panel, event.position) {
+        if explorer_pointer_returns_to_terminal(self.explorer.focused(), inside_panel, &event.kind)
+        {
+            self.set_explorer_focus(false, queue_handle);
+            if self.surface.configured
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+        }
+        if !inside_panel {
             let owned = self.presentation.explorer_pressed.is_some();
             if matches!(
                 event.kind,
@@ -6560,6 +6623,9 @@ impl App {
             }
             return owned;
         }
+        let Some(layout) = self.presentation.explorer_layout.as_ref() else {
+            return false;
+        };
         let target = lair_explorer_hit_test(layout, event.position);
         let disclosure =
             lair_explorer_disclosure_hit_test(layout, &self.explorer.rows(), event.position);
@@ -6584,42 +6650,7 @@ impl App {
                 } else if pressed.is_some_and(|(pressed, _)| Some(pressed) == target)
                     && let Some(decision) = self.explorer.decision()
                 {
-                    match decision {
-                        LairExplorerDecision::Toggle(_) => changed = true,
-                        LairExplorerDecision::OpenDojo(target) => {
-                            if self.begin_lair_explorer_action() {
-                                if self
-                                    .send_topology_command(WindowTopologyCommand::OpenDojo {
-                                        target: SessionPickerTarget {
-                                            topology_revision: target.topology_revision,
-                                            lair_id: target.lair_id,
-                                            dojo_id: target.dojo_id,
-                                            action: target.capability.action,
-                                        },
-                                    })
-                                    .is_err()
-                                {
-                                    self.tab_state.session_switch_pending = false;
-                                    self.explorer.mark_disconnected();
-                                }
-                                changed = true;
-                            }
-                        }
-                        LairExplorerDecision::FocusSplint(target) => {
-                            if self.begin_lair_explorer_action() {
-                                if self
-                                    .send_topology_command(WindowTopologyCommand::FocusSplint {
-                                        target,
-                                    })
-                                    .is_err()
-                                {
-                                    self.tab_state.session_switch_pending = false;
-                                    self.explorer.mark_disconnected();
-                                }
-                                changed = true;
-                            }
-                        }
-                    }
+                    changed |= self.execute_lair_explorer_decision(decision);
                 }
             }
             PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
@@ -6766,7 +6797,10 @@ impl App {
                             .fail(anyhow::anyhow!("Dojo picker selected an invalid target"));
                         return;
                     };
-                    WindowTopologyCommand::OpenDojo { target }
+                    WindowTopologyCommand::OpenDojo {
+                        target,
+                        explorer_target: None,
+                    }
                 }
             };
             self.modal.session_picker_retry_command = Some(match selector_kind {
@@ -7235,40 +7269,7 @@ impl App {
                 Keysym::space => changed = self.explorer.toggle_selected(),
                 Keysym::Return | Keysym::KP_Enter => {
                     if let Some(decision) = self.explorer.decision() {
-                        match decision {
-                            LairExplorerDecision::Toggle(_) => changed = true,
-                            LairExplorerDecision::OpenDojo(target) => {
-                                if self.begin_lair_explorer_action() {
-                                    let command = WindowTopologyCommand::OpenDojo {
-                                        target: SessionPickerTarget {
-                                            topology_revision: target.topology_revision,
-                                            lair_id: target.lair_id,
-                                            dojo_id: target.dojo_id,
-                                            action: target.capability.action,
-                                        },
-                                    };
-                                    if self.send_topology_command(command).is_err() {
-                                        self.tab_state.session_switch_pending = false;
-                                        self.explorer.mark_disconnected();
-                                    }
-                                    changed = true;
-                                }
-                            }
-                            LairExplorerDecision::FocusSplint(target) => {
-                                if self.begin_lair_explorer_action() {
-                                    if self
-                                        .send_topology_command(WindowTopologyCommand::FocusSplint {
-                                            target,
-                                        })
-                                        .is_err()
-                                    {
-                                        self.tab_state.session_switch_pending = false;
-                                        self.explorer.mark_disconnected();
-                                    }
-                                    changed = true;
-                                }
-                            }
-                        }
+                        changed |= self.execute_lair_explorer_decision(decision);
                     }
                 }
                 Keysym::slash | Keysym::f | Keysym::F
@@ -7856,7 +7857,10 @@ impl App {
         clippy::too_many_lines,
         reason = "bounded topology draining, tab reconciliation, and deferred picker updates remain one transaction"
     )]
-    fn apply_topology_updates(&mut self) -> Result<(bool, Option<ThemeUpdate>)> {
+    fn apply_topology_updates(
+        &mut self,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<(bool, Option<ThemeUpdate>)> {
         let mut pending = VecDeque::new();
         if let Some(updates) = &mut self.tab_state.topology_updates {
             let drained = drain_receiver(updates, &self.platform.update_waker);
@@ -7963,6 +7967,7 @@ impl App {
                     panes,
                     focused,
                     acknowledged,
+                    explorer_target,
                 } => {
                     let topology_revision = identity.topology_revision;
                     let dojo_id = identity.dojo_id;
@@ -7996,32 +8001,48 @@ impl App {
                         "active Dojo tab disappeared while opening another"
                     );
                     self.tab_state.session_switch_pending = false;
-                    self.explorer.clear_pending();
                     self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
+                    let return_to_terminal = explorer_target
+                        .is_some_and(|target| self.explorer.complete_pending(target));
+                    if explorer_activation_returns_to_terminal(return_to_terminal, true) {
+                        self.set_explorer_focus(false, queue_handle);
+                    }
                     if let Some(diagnostics) = diagnostics() {
                         diagnostics.update_topology(topology_revision, self.tab_state.tabs.len());
                     }
                     let _ = acknowledged.send(Ok(()));
                 }
-                WindowTopologyUpdate::ActivateTab { dojo_id } => {
+                WindowTopologyUpdate::ActivateTab {
+                    dojo_id,
+                    explorer_target,
+                } => {
                     self.tab_state.session_switch_pending = false;
-                    self.explorer.clear_pending();
                     self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
+                    let return_to_terminal = explorer_target
+                        .is_some_and(|target| self.explorer.complete_pending(target));
+                    if explorer_activation_returns_to_terminal(return_to_terminal, true) {
+                        self.set_explorer_focus(false, queue_handle);
+                    }
                 }
                 WindowTopologyUpdate::ActivateSplint {
                     dojo_id,
                     splint_id,
                     live_incarnation,
+                    explorer_target,
                 } => {
                     self.tab_state.session_switch_pending = false;
-                    self.explorer.clear_pending();
                     changed |= self.activate_tab(dojo_id)?;
                     if let Some(focus_changed) =
                         self.focus_splint_at_incarnation(splint_id, live_incarnation)
                     {
                         changed |= focus_changed;
+                        let return_to_terminal = explorer_target
+                            .is_some_and(|target| self.explorer.complete_pending(target));
+                        if explorer_activation_returns_to_terminal(return_to_terminal, true) {
+                            self.set_explorer_focus(false, queue_handle);
+                        }
                     } else {
                         self.explorer.mark_stale_target(splint_id);
                         let _ = self.refresh_lair_explorer();
@@ -8319,7 +8340,7 @@ impl App {
         reason = "bounded update draining and semantic damage coalescing stay adjacent"
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        let (topology_changed, topology_theme) = self.apply_topology_updates()?;
+        let (topology_changed, topology_theme) = self.apply_topology_updates(queue_handle)?;
         if topology_changed {
             self.cancel_copy_mode_for_topology();
         }
@@ -10263,6 +10284,42 @@ mod tests {
             picker_ime_reconcile(true, true, true),
             PickerImeReconcile::Renew
         );
+    }
+
+    #[test]
+    fn focused_explorer_returns_to_terminal_only_for_an_outside_primary_press() {
+        let outside_press = PointerEventKind::Press {
+            button: BTN_LEFT,
+            serial: 7,
+            time: 11,
+        };
+        assert!(explorer_pointer_returns_to_terminal(
+            true,
+            false,
+            &outside_press
+        ));
+        assert!(!explorer_pointer_returns_to_terminal(
+            false,
+            false,
+            &outside_press
+        ));
+        assert!(!explorer_pointer_returns_to_terminal(
+            true,
+            true,
+            &outside_press
+        ));
+        assert!(!explorer_pointer_returns_to_terminal(
+            true,
+            false,
+            &PointerEventKind::Motion { time: 12 }
+        ));
+    }
+
+    #[test]
+    fn explorer_activation_returns_focus_only_after_exact_success() {
+        assert!(explorer_activation_returns_to_terminal(true, true));
+        assert!(!explorer_activation_returns_to_terminal(true, false));
+        assert!(!explorer_activation_returns_to_terminal(false, true));
     }
 
     #[test]

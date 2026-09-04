@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use splinterm_core::{LairRetention, SplintId};
 
-use super::text_edit::BoundedTextEditor;
+use super::{text_edit::BoundedTextEditor, topology::LairExplorerActivationTarget};
 use crate::navigation_projection::{
     EndpointFreshness, NavigationAvailability, NavigationExplorerDojo,
     NavigationExplorerSplintTarget, NavigationExplorerTarget, NavigationExplorerView,
@@ -38,6 +38,42 @@ pub(crate) enum LairExplorerDecision {
     FocusSplint(NavigationExplorerSplintTarget),
 }
 
+impl LairExplorerDecision {
+    pub(crate) const fn returns_focus_to_terminal(self) -> bool {
+        matches!(self, Self::OpenDojo(_) | Self::FocusSplint(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LairExplorerPending {
+    Dojo(NavigationExplorerTarget),
+    Splint(NavigationExplorerSplintTarget),
+}
+
+impl LairExplorerPending {
+    const fn from_decision(decision: LairExplorerDecision) -> Option<Self> {
+        match decision {
+            LairExplorerDecision::Toggle(_) => None,
+            LairExplorerDecision::OpenDojo(target) => Some(Self::Dojo(target)),
+            LairExplorerDecision::FocusSplint(target) => Some(Self::Splint(target)),
+        }
+    }
+
+    const fn id(self) -> NavigationNodeId {
+        match self {
+            Self::Dojo(target) => NavigationNodeId::Dojo {
+                lair_id: target.lair_id,
+                dojo_id: target.dojo_id,
+            },
+            Self::Splint(target) => NavigationNodeId::Splint {
+                lair_id: target.lair_id,
+                dojo_id: target.dojo_id,
+                splint_id: target.splint_id,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExplorerLoadState {
     Waiting,
@@ -55,7 +91,7 @@ pub(crate) struct LairExplorerUi {
     query: BoundedTextEditor,
     expanded: HashSet<NavigationNodeId>,
     selected: Option<NavigationNodeId>,
-    pending: Option<NavigationNodeId>,
+    pending: Option<LairExplorerPending>,
     view: Option<NavigationExplorerView>,
     load_state: ExplorerLoadState,
 }
@@ -132,6 +168,7 @@ impl LairExplorerUi {
                 .and_then(|previous| nearest_surviving_parent(previous, &view, selected))
         });
         if self.pending.is_some_and(|pending| {
+            let pending = pending.id();
             !view.lairs.iter().any(|lair| {
                 lair.id == pending
                     || lair.dojos.iter().any(|dojo| {
@@ -202,12 +239,41 @@ impl LairExplorerUi {
         }
     }
 
-    pub(crate) fn set_pending(&mut self, id: NavigationNodeId) -> bool {
+    pub(crate) fn set_pending(&mut self, decision: LairExplorerDecision) -> bool {
+        let Some(pending) = LairExplorerPending::from_decision(decision) else {
+            return false;
+        };
+        let id = pending.id();
         if self.pending.is_some() || !self.rows().iter().any(|row| row.id == id && row.enabled) {
             return false;
         }
-        self.pending = Some(id);
+        self.pending = Some(pending);
         true
+    }
+
+    pub(crate) fn complete_pending(&mut self, completed: LairExplorerActivationTarget) -> bool {
+        let matches = self
+            .pending
+            .is_some_and(|pending| match (pending, completed) {
+                (
+                    LairExplorerPending::Dojo(pending),
+                    LairExplorerActivationTarget::Dojo(completed),
+                ) => {
+                    pending.topology_revision == completed.topology_revision
+                        && pending.lair_id == completed.lair_id
+                        && pending.dojo_id == completed.dojo_id
+                        && pending.capability.action == completed.action
+                }
+                (
+                    LairExplorerPending::Splint(pending),
+                    LairExplorerActivationTarget::Splint(completed),
+                ) => pending == completed,
+                _ => false,
+            });
+        if matches {
+            self.pending = None;
+        }
+        matches
     }
 
     pub(crate) fn clear_pending(&mut self) -> bool {
@@ -218,7 +284,7 @@ impl LairExplorerUi {
         let Some(pending) = self.pending.take() else {
             return false;
         };
-        if let NavigationNodeId::Splint { splint_id, .. } = pending {
+        if let NavigationNodeId::Splint { splint_id, .. } = pending.id() {
             self.mark_stale_target(splint_id);
         }
         true
@@ -378,7 +444,7 @@ impl LairExplorerUi {
             WindowAttachment::NotHere => "Not here",
         };
         let dojo_expanded = self.expanded.contains(&dojo.id);
-        let pending = self.pending == Some(dojo.id);
+        let pending = self.pending.is_some_and(|pending| pending.id() == dojo.id);
         rows.push(LairExplorerRow {
             id: dojo.id,
             kind: LairExplorerRowKind::Dojo,
@@ -399,7 +465,9 @@ impl LairExplorerUi {
             }
             let (enabled, blocker) = availability(splint.target.capability.availability);
             let lifecycle = lifecycle_label(splint.lifecycle);
-            let pending = self.pending == Some(splint.id);
+            let pending = self
+                .pending
+                .is_some_and(|pending| pending.id() == splint.id);
             rows.push(LairExplorerRow {
                 id: splint.id,
                 kind: LairExplorerRowKind::Splint,
@@ -535,7 +603,7 @@ impl LairExplorerUi {
 
     pub(crate) fn decision(&mut self) -> Option<LairExplorerDecision> {
         let selected = self.selected?;
-        if self.pending == Some(selected) {
+        if self.pending.is_some_and(|pending| pending.id() == selected) {
             return None;
         }
         if matches!(selected, NavigationNodeId::Lair(_)) {
@@ -681,6 +749,7 @@ mod tests {
     use splinterm_core::{DojoId, LairId, SplintId, TopologyRevision};
 
     use super::*;
+    use crate::frontend::topology::SessionPickerTarget;
     use crate::navigation_projection::{
         NavigationAction, NavigationAvailability, NavigationCapability, NavigationExplorerDojo,
         NavigationExplorerLair, NavigationExplorerSplint, NavigationExplorerSplintTarget,
@@ -792,6 +861,30 @@ mod tests {
     }
 
     #[test]
+    fn terminal_targets_return_focus_while_disclosures_keep_it() {
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view());
+        assert!(explorer.reveal_current());
+        assert!(
+            explorer
+                .decision()
+                .is_some_and(LairExplorerDecision::returns_focus_to_terminal)
+        );
+        assert!(explorer.move_left());
+        assert!(
+            explorer
+                .decision()
+                .is_some_and(LairExplorerDecision::returns_focus_to_terminal)
+        );
+        assert!(explorer.move_left());
+        assert!(
+            explorer
+                .decision()
+                .is_some_and(|decision| !decision.returns_focus_to_terminal())
+        );
+    }
+
+    #[test]
     fn reveal_and_navigation_preserve_stable_hierarchy() {
         let mut explorer = LairExplorerUi::default();
         let view = view();
@@ -851,8 +944,9 @@ mod tests {
         let selected = view.current.unwrap();
         explorer.set_view(view);
         explorer.reveal_current();
-        assert!(explorer.set_pending(selected));
-        assert!(!explorer.set_pending(selected));
+        let decision = explorer.decision().unwrap();
+        assert!(explorer.set_pending(decision));
+        assert!(!explorer.set_pending(decision));
         let rows = explorer.rows();
         let pending = rows.iter().find(|row| row.id == selected).unwrap();
         assert!(pending.pending);
@@ -860,7 +954,16 @@ mod tests {
         assert_eq!(pending.status, "Pending · Running");
         assert_eq!(rows.iter().filter(|row| row.pending).count(), 1);
         assert_eq!(explorer.decision(), None);
-        assert!(explorer.clear_pending());
+        let LairExplorerDecision::FocusSplint(target) = decision else {
+            panic!("expected exact Splint decision");
+        };
+        let mut wrong = target;
+        wrong.topology_revision = TopologyRevision::new(8);
+        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Splint(wrong)));
+        wrong = target;
+        wrong.live_incarnation = Some(99);
+        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Splint(wrong)));
+        assert!(explorer.complete_pending(LairExplorerActivationTarget::Splint(target)));
         assert!(explorer.decision().is_some());
     }
 
@@ -897,10 +1000,22 @@ mod tests {
         explorer.set_view(view);
         explorer.reveal_current();
         explorer.move_left();
-        assert_eq!(
-            explorer.decision(),
-            Some(LairExplorerDecision::OpenDojo(target))
-        );
+        let decision = LairExplorerDecision::OpenDojo(target);
+        assert_eq!(explorer.decision(), Some(decision));
+        assert!(explorer.set_pending(decision));
+        let completed = SessionPickerTarget {
+            topology_revision: target.topology_revision,
+            lair_id: target.lair_id,
+            dojo_id: target.dojo_id,
+            action: target.capability.action,
+        };
+        let mut wrong = completed;
+        wrong.lair_id = LairId::new();
+        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Dojo(wrong)));
+        wrong = completed;
+        wrong.topology_revision = TopologyRevision::new(8);
+        assert!(!explorer.complete_pending(LairExplorerActivationTarget::Dojo(wrong)));
+        assert!(explorer.complete_pending(LairExplorerActivationTarget::Dojo(completed)));
     }
 
     #[test]
@@ -941,7 +1056,8 @@ mod tests {
         view.lairs[0].dojos[0].splints.swap(0, 1);
         explorer.set_view(view.clone());
         assert_eq!(explorer.selected(), Some(selected));
-        assert!(explorer.set_pending(selected));
+        let decision = explorer.decision().unwrap();
+        assert!(explorer.set_pending(decision));
 
         view.lairs[0].dojos[0]
             .splints

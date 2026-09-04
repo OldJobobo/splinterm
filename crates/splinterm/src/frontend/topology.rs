@@ -42,6 +42,12 @@ pub struct SessionPickerTarget {
     pub action: NavigationAction,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LairExplorerActivationTarget {
+    Dojo(SessionPickerTarget),
+    Splint(NavigationExplorerSplintTarget),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionPickerCatalog {
     pub items: Vec<SessionPickerItem>,
@@ -111,6 +117,7 @@ pub enum WindowTopologyCommand {
     },
     OpenDojo {
         target: SessionPickerTarget,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     FocusSplint {
         target: NavigationExplorerSplintTarget,
@@ -201,14 +208,17 @@ pub enum WindowTopologyUpdate {
         panes: Vec<WindowPaneOptions>,
         focused: SplintId,
         acknowledged: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ActivateTab {
         dojo_id: DojoId,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ActivateSplint {
         dojo_id: DojoId,
         splint_id: SplintId,
         live_incarnation: Option<u64>,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     RemoveTab {
         dojo_id: DojoId,

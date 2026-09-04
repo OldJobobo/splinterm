@@ -29,10 +29,11 @@ pub mod viewport;
 pub mod wayland;
 
 pub use frontend::{
-    AuthorityStatus, FontUpdate, LairDirection, LairPromptKind, LairPromptTarget,
-    PerfTraceCorrelation, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
-    SessionPickerDecision, SessionPickerItem, SessionPickerTarget, SessionPickerUi,
-    TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
-    WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, FontUpdate, LairDirection, LairExplorerActivationTarget, LairPromptKind,
+    LairPromptTarget, PerfTraceCorrelation, SelectorKind, SessionPickerCatalog,
+    SessionPickerCreationTarget, SessionPickerDecision, SessionPickerItem, SessionPickerTarget,
+    SessionPickerUi, TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand,
+    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate,
 };
 pub use wayland::run as run_window;

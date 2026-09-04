@@ -18,6 +18,22 @@ const HEADER_HEIGHT: u32 = 76;
 const FOOTER_HEIGHT: u32 = 30;
 const ROW_HEIGHT: u32 = 34;
 
+const fn explorer_header_text(focused: bool) -> &'static str {
+    if focused {
+        "LAIRS · KEYBOARD FOCUS"
+    } else {
+        "LAIRS"
+    }
+}
+
+const fn explorer_footer_text(focused: bool) -> &'static str {
+    if focused {
+        "↑↓ move  ←→ open  Esc terminal"
+    } else {
+        "Click rows · terminal input active"
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LairExplorerPresentationMode {
     Docked,
@@ -274,7 +290,7 @@ pub(crate) fn paint_lair_explorer(
         canvas,
         canvas_width,
         canvas_height,
-        "LAIRS",
+        explorer_header_text(focused),
         ChromeTextStyle::Bold,
         scale_120,
         renderer_generation,
@@ -425,7 +441,7 @@ pub(crate) fn paint_lair_explorer(
         canvas,
         canvas_width,
         canvas_height,
-        "↑↓ move  ←→ open  R reveal  / search  Esc terminal",
+        explorer_footer_text(focused),
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -460,6 +476,17 @@ mod tests {
             enabled: true,
             pending: false,
         }
+    }
+
+    #[test]
+    fn focus_copy_makes_input_ownership_explicit() {
+        assert_eq!(explorer_header_text(false), "LAIRS");
+        assert_eq!(
+            explorer_footer_text(false),
+            "Click rows · terminal input active"
+        );
+        assert_eq!(explorer_header_text(true), "LAIRS · KEYBOARD FOCUS");
+        assert_eq!(explorer_footer_text(true), "↑↓ move  ←→ open  Esc terminal");
     }
 
     #[test]

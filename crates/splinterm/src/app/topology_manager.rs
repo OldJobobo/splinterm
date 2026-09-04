@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, SessionPickerCatalog,
-    SessionPickerCreationTarget, SessionPickerItem, SessionPickerTarget, WindowDojoIdentity,
-    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
+    LairDirection, LairExplorerActivationTarget, LairPromptKind, LairPromptTarget, SelectorKind,
+    SessionPickerCatalog, SessionPickerCreationTarget, SessionPickerItem, SessionPickerTarget,
+    WindowDojoIdentity, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate,
     automation::{Connection, SharedImageContentCache, protocol_error},
     config::AppConfig,
     endpoint::{ConnectionFactory, LaunchSemantics},
@@ -1422,6 +1422,7 @@ async fn finish_managed_window_open(
     config: &AppConfig,
     image_cache: &SharedImageContentCache,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
+    explorer_target: Option<LairExplorerActivationTarget>,
 ) -> TopologyManagerCommandOutcome {
     let target_id = target.as_ref().ok().map(|target| target.dojo.id);
     let result = async {
@@ -1438,7 +1439,8 @@ async fn finish_managed_window_open(
                 "new transient Lair collided with an existing Window tab"
             );
             remember_dojo(factory, dojo.id);
-            send_existing_tab_activation(updates, dojo.id, requested_focus).await?;
+            send_existing_tab_activation(updates, dojo.id, requested_focus, explorer_target)
+                .await?;
             return Ok(OpenTabOutcome::ActivatedExisting);
         }
         anyhow::ensure!(
@@ -1466,6 +1468,7 @@ async fn finish_managed_window_open(
                 focused: requested_focus
                     .map_or(prepared.dojo.default_focus, |(splint_id, _)| splint_id),
                 acknowledged,
+                explorer_target,
             })
             .await
             .is_err()
@@ -1524,13 +1527,18 @@ async fn send_existing_tab_activation(
     updates: &mpsc::Sender<WindowTopologyUpdate>,
     dojo_id: DojoId,
     requested_focus: Option<(SplintId, Option<u64>)>,
+    explorer_target: Option<LairExplorerActivationTarget>,
 ) -> Result<()> {
     let update = requested_focus.map_or(
-        WindowTopologyUpdate::ActivateTab { dojo_id },
+        WindowTopologyUpdate::ActivateTab {
+            dojo_id,
+            explorer_target,
+        },
         |(splint_id, live_incarnation)| WindowTopologyUpdate::ActivateSplint {
             dojo_id,
             splint_id,
             live_incarnation,
+            explorer_target,
         },
     );
     updates
@@ -1703,7 +1711,10 @@ async fn handle_session_manager_command(
             }
             TopologyManagerCommandOutcome::Continue
         }
-        WindowTopologyCommand::OpenDojo { target } => match target.action {
+        WindowTopologyCommand::OpenDojo {
+            target,
+            explorer_target,
+        } => match target.action {
             NavigationAction::ActivateDojo => {
                 let current = revision_bound_picker_dojo(connection, target, false).await;
                 let valid = current.is_ok()
@@ -1716,6 +1727,7 @@ async fn handle_session_manager_command(
                     if updates
                         .send(WindowTopologyUpdate::ActivateTab {
                             dojo_id: target.dojo_id,
+                            explorer_target,
                         })
                         .await
                         .is_err()
@@ -1737,9 +1749,17 @@ async fn handle_session_manager_command(
             }
             NavigationAction::AttachDojo => {
                 let selected = revision_bound_picker_dojo(connection, target, true).await;
-                let target = persistent_window_open(selected);
-                finish_managed_window_open(factory, target, state, config, image_cache, updates)
-                    .await
+                let target_open = persistent_window_open(selected);
+                finish_managed_window_open(
+                    factory,
+                    target_open,
+                    state,
+                    config,
+                    image_cache,
+                    updates,
+                    explorer_target,
+                )
+                .await
             }
             _ => {
                 let _ = updates
@@ -1766,6 +1786,7 @@ async fn handle_session_manager_command(
                             dojo_id: target.dojo_id,
                             splint_id: target.splint_id,
                             live_incarnation: target.live_incarnation,
+                            explorer_target: Some(LairExplorerActivationTarget::Splint(target)),
                         })
                         .await
                         .is_err()
@@ -1798,6 +1819,7 @@ async fn handle_session_manager_command(
                     config,
                     image_cache,
                     updates,
+                    Some(LairExplorerActivationTarget::Splint(target)),
                 )
                 .await
             }
@@ -1869,7 +1891,8 @@ async fn handle_session_manager_command(
             }
             let target =
                 create_daily_dojo(factory, connection, config, cwd, captured_revision).await;
-            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
+            finish_managed_window_open(factory, target, state, config, image_cache, updates, None)
+                .await
         }
         WindowTopologyCommand::MaterializePreset { target, dojos } => {
             if !factory.is_local() {
@@ -1954,6 +1977,7 @@ async fn handle_session_manager_command(
                         config,
                         image_cache,
                         updates,
+                        None,
                     )
                     .await,
                     TopologyManagerCommandOutcome::Stop
@@ -2026,7 +2050,8 @@ async fn handle_session_manager_command(
                     requested_focus: None,
                 }
             });
-            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
+            finish_managed_window_open(factory, target, state, config, image_cache, updates, None)
+                .await
         }
         WindowTopologyCommand::NavigateLair {
             current_lair_id,
@@ -2035,7 +2060,8 @@ async fn handle_session_manager_command(
             let target = persistent_window_open(
                 navigate_lair(factory, connection, &state.tabs, current_lair_id, direction).await,
             );
-            finish_managed_window_open(factory, target, state, config, image_cache, updates).await
+            finish_managed_window_open(factory, target, state, config, image_cache, updates, None)
+                .await
         }
         WindowTopologyCommand::RequestLairPrompt { lair_id, kind } => {
             match lair_prompt_target(connection, lair_id, kind).await {
@@ -2325,7 +2351,10 @@ async fn handle_session_manager_command(
         WindowTopologyCommand::ActivateTab { dojo_id } => {
             if state.tabs.activate(dojo_id)
                 && updates
-                    .send(WindowTopologyUpdate::ActivateTab { dojo_id })
+                    .send(WindowTopologyUpdate::ActivateTab {
+                        dojo_id,
+                        explorer_target: None,
+                    })
                     .await
                     .is_err()
             {
@@ -2763,16 +2792,17 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairId, LairTargetState, LayoutNode,
-        PendingTopologyFocus, RefreshedCloseState, Response, SessionEntry, SplintId, SplintState,
-        SplitRatio, TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
-        WindowTopologyCommand, cancel_pane_tasks, captured_dojo_kill_targets, close_action,
-        close_other_tab_targets, collect_lair_targets, command_has_pending_split,
+        Axis, CloseAction, DojoId, DojoTab, LairDirection, LairExplorerActivationTarget, LairId,
+        LairTargetState, LayoutNode, PendingTopologyFocus, RefreshedCloseState, Response,
+        SessionEntry, SessionPickerTarget, SplintId, SplintState, SplitRatio,
+        TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
+        WindowTopologyCommand, WindowTopologyUpdate, cancel_pane_tasks, captured_dojo_kill_targets,
+        close_action, close_other_tab_targets, collect_lair_targets, command_has_pending_split,
         explorer_splint_from_snapshot, lair_navigation_target, materialized_dojo_targets,
         next_topology_manager_wake, parent_ratio, pending_focus_for_observation, picker_catalog,
-        refreshed_close_state, select_live_dojo_from, tab_organization_promotes,
-        topology_command_outcome, topology_edit_target, topology_identity_diff,
-        validate_exited_close_target, window_has_tab_capacity,
+        refreshed_close_state, select_live_dojo_from, send_existing_tab_activation,
+        tab_organization_promotes, topology_command_outcome, topology_edit_target,
+        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
     };
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
     use splinterm::navigation_projection::{
@@ -2782,6 +2812,76 @@ mod tests {
     };
     use splinterm_core::{Lair, Topology};
     use splinterm_protocol::{SplintLifecycle, SplintRuntimeSummary, TopologySnapshot};
+
+    #[tokio::test]
+    async fn existing_activation_updates_preserve_exact_explorer_correlation() {
+        let lair_id = LairId::new();
+        let dojo_id = DojoId::new();
+        let splint_id = SplintId::new();
+        let dojo_target = SessionPickerTarget {
+            topology_revision: TopologyRevision::new(7),
+            lair_id,
+            dojo_id,
+            action: NavigationAction::ActivateDojo,
+        };
+        let (updates, mut receiver) = mpsc::channel(1);
+        send_existing_tab_activation(
+            &updates,
+            dojo_id,
+            None,
+            Some(LairExplorerActivationTarget::Dojo(dojo_target)),
+        )
+        .await
+        .unwrap();
+        let WindowTopologyUpdate::ActivateTab {
+            dojo_id: updated_dojo,
+            explorer_target,
+        } = receiver.recv().await.unwrap()
+        else {
+            panic!("expected Dojo activation");
+        };
+        assert_eq!(updated_dojo, dojo_id);
+        assert_eq!(
+            explorer_target,
+            Some(LairExplorerActivationTarget::Dojo(dojo_target))
+        );
+
+        let splint_target = NavigationExplorerSplintTarget {
+            topology_revision: TopologyRevision::new(8),
+            lair_id,
+            dojo_id,
+            splint_id,
+            live_incarnation: Some(4),
+            last_incarnation: Some(4),
+            capability: NavigationCapability {
+                action: NavigationAction::FocusSplint,
+                availability: NavigationAvailability::Enabled,
+            },
+        };
+        send_existing_tab_activation(
+            &updates,
+            dojo_id,
+            Some((splint_id, Some(4))),
+            Some(LairExplorerActivationTarget::Splint(splint_target)),
+        )
+        .await
+        .unwrap();
+        let WindowTopologyUpdate::ActivateSplint {
+            dojo_id: updated_dojo,
+            splint_id: updated_splint,
+            live_incarnation,
+            explorer_target,
+        } = receiver.recv().await.unwrap()
+        else {
+            panic!("expected Splint activation");
+        };
+        assert_eq!((updated_dojo, updated_splint), (dojo_id, splint_id));
+        assert_eq!(live_incarnation, Some(4));
+        assert_eq!(
+            explorer_target,
+            Some(LairExplorerActivationTarget::Splint(splint_target))
+        );
+    }
 
     #[test]
     fn explorer_splint_target_rejects_stale_revision_parent_and_incarnation() {

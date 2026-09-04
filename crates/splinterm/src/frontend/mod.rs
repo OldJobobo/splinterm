@@ -29,7 +29,7 @@ pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
 pub(crate) use text_edit::BoundedTextEditor;
 pub use topology::{
-    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, SessionPickerCatalog,
-    SessionPickerCreationTarget, SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand,
-    WindowTopologyUpdate,
+    LairDirection, LairExplorerActivationTarget, LairPromptKind, LairPromptTarget, SelectorKind,
+    SessionPickerCatalog, SessionPickerCreationTarget, SessionPickerTarget, WindowDojoIdentity,
+    WindowTopologyCommand, WindowTopologyUpdate,
 };
