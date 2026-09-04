@@ -27,7 +27,7 @@ def test_portable_provenance_accepts_repository_owned_inputs():
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "portable metadata valid" in result.stdout
+    assert "portable inputs valid" in result.stdout
 
 
 def test_manifest_declares_complete_faces_and_review_policy():
@@ -45,12 +45,150 @@ def test_manifest_declares_complete_faces_and_review_policy():
     assert len(manifest["reference_update_policy"]["required_review"]) >= 4
 
 
-def test_lock_drift_names_the_atomic_refresh_command(monkeypatch):
+def test_patch_drift_remains_rejected(monkeypatch):
     checker = load_checker()
     manifest = checker.load_manifest()
     monkeypatch.setattr(checker, "sha256", lambda _path: "0" * 64)
-    with pytest.raises(checker.ProvenanceError, match="update-provenance.py"):
+    with pytest.raises(checker.ProvenanceError, match="oracle patch drifted"):
         checker.check_repository_files(manifest)
+
+
+def test_host_checks_ignore_rust_and_ambient_fontconfig_inventory(monkeypatch):
+    checker = load_checker()
+    manifest = checker.load_manifest()
+    commands = []
+
+    def output(arguments):
+        commands.append(arguments)
+        return {
+            "fcft": manifest["build"]["fcft_version"],
+            "freetype2": manifest["build"]["freetype_version"],
+            "fontconfig": manifest["build"]["fontconfig_version"],
+            "pixman-1": manifest["build"]["pixman_version"],
+        }[arguments[-1]]
+
+    monkeypatch.setattr(checker, "command_output", output)
+    checker.check_versions(manifest)
+    assert commands == [
+        ["pkg-config", "--modversion", "fcft"],
+        ["pkg-config", "--modversion", "freetype2"],
+        ["pkg-config", "--modversion", "fontconfig"],
+        ["pkg-config", "--modversion", "pixman-1"],
+    ]
+    assert "rust" not in manifest
+    assert "fontconfig_active_config_sha256" not in manifest["environment"]
+
+
+def test_font_drift_reports_exact_jetbrains_prerequisite(monkeypatch):
+    checker = load_checker()
+    manifest = {
+        "fonts": [
+            {
+                "role": "regular",
+                "pattern": "JetBrains Mono Nerd Font:style=Regular",
+                "file": "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+                "index": 0,
+                "sha256": "0" * 64,
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        checker,
+        "command_output",
+        lambda _arguments: "/usr/share/fonts/maple/MapleMono-Regular.ttf\n0\n1\nTrue\nTrue\n\n1",
+    )
+    with pytest.raises(checker.ProvenanceError) as failure:
+        checker.check_fonts(manifest)
+    message = str(failure.value)
+    assert "expected /usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf index 0" in message
+    assert "got /usr/share/fonts/maple/MapleMono-Regular.ttf index 0" in message
+    assert "ttf-jetbrains-mono-nerd" in message
+    assert "fc-cache --force" in message
+
+
+def test_fontconfig_raster_option_drift_is_rejected(monkeypatch):
+    checker = load_checker()
+    manifest = checker.load_manifest()
+    font = manifest["fonts"][0]
+    monkeypatch.setattr(
+        checker,
+        "command_output",
+        lambda _arguments: f"{font['file']}\n{font['index']}\n3\nTrue\nTrue\n\n1",
+    )
+    with pytest.raises(checker.ProvenanceError, match="Fontconfig raster options drifted"):
+        checker.check_fonts({"fonts": [font]})
+
+
+def test_matrix_patterns_match_size_qualified_fallback_resolvers():
+    checker = load_checker()
+    manifest = {
+        "oracle": {
+            "font_matrix": {
+                "logical_sizes_px": [12],
+                "scales_120": [150],
+            }
+        }
+    }
+    assert checker.matrix_font_patterns(
+        manifest,
+        {
+            "role": "cjk",
+            "pattern": "Noto Sans CJK JP:style=Regular",
+        },
+    ) == ["Noto Sans CJK JP:style=Regular", "Noto Sans CJK JP:pixelsize=15"]
+    assert checker.matrix_font_patterns(
+        manifest,
+        {"role": "emoji", "pattern": "Noto Color Emoji"},
+    ) == ["Noto Color Emoji", "Noto Color Emoji:pixelsize=15"]
+
+
+def test_size_qualified_fontconfig_raster_drift_is_rejected(monkeypatch, tmp_path):
+    checker = load_checker()
+    font = dict(checker.load_manifest()["fonts"][0])
+    font_path = tmp_path / "font.ttf"
+    font_path.write_bytes(b"pinned font")
+    font["file"] = str(font_path)
+    seen_patterns = []
+
+    def output(arguments):
+        pattern = arguments[-1]
+        seen_patterns.append(pattern)
+        raster = dict(font["fontconfig_raster"])
+        if pattern.endswith(":pixelsize=7.5"):
+            raster["hintstyle"] = "999"
+        return "\n".join(
+            [
+                font["file"],
+                str(font["index"]),
+                raster["hintstyle"],
+                raster["hinting"],
+                raster["antialias"],
+                raster["rgba"],
+                raster["lcdfilter"],
+            ]
+        )
+
+    monkeypatch.setattr(checker, "command_output", output)
+    monkeypatch.setattr(checker, "sha256", lambda _path: font["sha256"])
+    manifest = {
+        "fonts": [font],
+        "oracle": {
+            "font_matrix": {
+                "logical_sizes_px": [6],
+                "scales_120": [120, 150],
+            }
+        },
+    }
+    with pytest.raises(
+        checker.ProvenanceError,
+        match=r"Fontconfig raster options drifted.*pixelsize=7\.5",
+    ):
+        checker.check_fonts(manifest)
+    assert seen_patterns == [
+        font["pattern"],
+        f"{font['pattern']}:pixelsize=6",
+        f"{font['pattern']}:pixelsize=7.5",
+    ]
 
 
 def test_non_reference_worker_is_an_explicit_unsupported_host(monkeypatch):

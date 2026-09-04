@@ -7,7 +7,7 @@ use splinterm_core::{
 };
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
-use super::{SessionPickerItem, ThemeUpdate, WindowPaneOptions};
+use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
@@ -190,6 +190,7 @@ pub enum WindowTopologyUpdate {
     },
     SessionPickerFailed(String),
     Theme(ThemeUpdate),
+    Font(FontUpdate),
     Closed,
     Shutdown(String),
 }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +32,40 @@ def test_effective_sizes_preserve_fractional_scale_boundaries() -> None:
     assert cases["regular-6px-150"].effective_size == 7.5
     assert cases["italic-22px-180"].effective_size == 33.0
     assert cases["bold-italic-96px-240"].effective_size == 192.0
+
+
+def test_pinned_host_preflight_invokes_strict_provenance(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(MATRIX, "run", fake_run)
+    MATRIX.require_pinned_host()
+    assert calls == [[sys.executable, MATRIX.TOOLS / "check-provenance.py"]]
+
+
+def test_failed_preflight_stops_before_creating_output(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    output = tmp_path / "matrix"
+
+    def failed_run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "provenance error: resolved regular face drifted; install fixture",
+        )
+
+    monkeypatch.setattr(MATRIX, "run", failed_run)
+    monkeypatch.setattr(sys, "argv", [str(MODULE_PATH), str(output)])
+    assert MATRIX.main() == 1
+    assert not output.exists()
+    captured = capsys.readouterr()
+    assert "font matrix prerequisites unavailable" in captured.err
+    assert "resolved regular face drifted" in captured.err
 
 
 def test_progress_summary_is_truthful(tmp_path: Path) -> None:

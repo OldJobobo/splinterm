@@ -14,11 +14,11 @@ use splinterm_automation_client::{
 };
 use splinterm_core::{Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    AccessGrant, AccessGrantSource, AccessScope, AuditDecision, AuditOperation, AuditOutcome,
-    AutomationLaunch, ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES,
-    MAX_SEARCH_RESULTS, MutationPreflight, MutationPreparation, Request, Response,
-    RestoreLeafResult, ScrollbackPage, SearchPage, SplintLifecycle, SplintRuntimeSummary,
-    TerminalProvenance, TerminalSnapshot, TopologySnapshot,
+    AccessGrant, AccessGrantSource, AccessScope, AuditDecision, AuditOutcome, AutomationLaunch,
+    ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    MutationPreflight, MutationPreparation, Request, Response, RestoreLeafResult, ScrollbackPage,
+    SearchPage, SplintLifecycle, SplintRuntimeSummary, TerminalProvenance, TerminalSnapshot,
+    TopologySnapshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1879,55 +1879,6 @@ fn decode_audit_cursor(value: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
-fn audit_operation_name(operation: AuditOperation) -> &'static str {
-    match operation {
-        AuditOperation::Ping => "ping",
-        AuditOperation::RequestAccess => "request_access",
-        AuditOperation::RequestLairAccess => "request_lair_access",
-        AuditOperation::AuthorizationStatus => "authorization_status",
-        AuditOperation::RevokeAccess => "revoke_access",
-        AuditOperation::ListLairs => "list_lairs",
-        AuditOperation::InspectTopology => "inspect_topology",
-        AuditOperation::SubscribeTopology => "subscribe_topology",
-        AuditOperation::InspectSplint => "inspect_splint",
-        AuditOperation::ReadGraphicalFocus => "read_graphical_focus",
-        AuditOperation::PublishGraphicalFocus => "publish_graphical_focus",
-        AuditOperation::CreateLair => "create_lair",
-        AuditOperation::SplitSplint => "split_splint",
-        AuditOperation::RelaunchSplint => "relaunch_splint",
-        AuditOperation::RestoreSplint => "restore_splint",
-        AuditOperation::RestoreDojo => "restore_dojo",
-        AuditOperation::RestoreLair => "restore_lair",
-        AuditOperation::SetLairRetention => "set_lair_retention",
-        AuditOperation::CloseSplint => "close_splint",
-        AuditOperation::SetSplitRatio => "set_split_ratio",
-        AuditOperation::NewDojo => "new_dojo",
-        AuditOperation::MaterializePreset => "materialize_preset",
-        AuditOperation::CloseDojo => "close_dojo",
-        AuditOperation::TerminateLair => "terminate_lair",
-        AuditOperation::RenameLair => "rename_lair",
-        AuditOperation::RenameDojo => "rename_dojo",
-        AuditOperation::SetDojoDefaultFocus => "set_dojo_default_focus",
-        AuditOperation::RenameSplint => "rename_splint",
-        AuditOperation::Attach => "attach",
-        AuditOperation::ScrollbackPage => "scrollback_page",
-        AuditOperation::SearchScrollback => "search_scrollback",
-        AuditOperation::AcquireControl => "acquire_control",
-        AuditOperation::SubscribeControl => "subscribe_control",
-        AuditOperation::RequestControlTransfer => "request_control_transfer",
-        AuditOperation::DecideControlTransfer => "decide_control_transfer",
-        AuditOperation::ForceControlTransfer => "force_control_transfer",
-        AuditOperation::ReleaseControl => "release_control",
-        AuditOperation::Input => "input",
-        AuditOperation::Resize => "resize",
-        AuditOperation::Detach => "detach",
-        AuditOperation::KillSplint => "kill_splint",
-        AuditOperation::ProcessExit => "process_exit",
-        AuditOperation::AuditInspect => "audit_inspect",
-        AuditOperation::PolicyReload => "policy_reload",
-    }
-}
-
 fn audit_outcome(decision: AuditDecision, outcome: Option<AuditOutcome>) -> &'static str {
     match (decision, outcome) {
         (AuditDecision::Denied | AuditDecision::Rejected | AuditDecision::Expired, _) => "denied",
@@ -2297,7 +2248,7 @@ pub(crate) async fn dispatch(
                         .map(|record| {
                             json!({
                                 "audit_id": record.audit_id,
-                                "operation": audit_operation_name(record.operation),
+                                "operation": record.operation.as_str(),
                                 "outcome": audit_outcome(record.decision, record.outcome),
                             })
                         })

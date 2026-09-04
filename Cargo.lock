@@ -1506,8 +1506,10 @@ name = "splinterm-freetype"
 version = "0.1.0-beta1"
 dependencies = [
  "freetype-rs",
+ "splinterm-filemap",
  "splinterm-pixman",
  "thiserror",
+ "ttf-parser",
 ]
 
 [[package]]

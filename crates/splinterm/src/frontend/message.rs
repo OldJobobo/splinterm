@@ -1,12 +1,14 @@
 //! Bounded messages exchanged by the application owner and graphical adapter.
 
+use std::sync::Arc;
+
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::SplintId;
 use splinterm_protocol::{
     ControlTransferDecision, ControlTransferOutcome, SearchPage, TerminalSnapshot, TerminalUpdate,
 };
 
-use crate::config::ResolvedTheme;
+use crate::{config::ResolvedTheme, renderer::FontGeneration};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthorityStatus {
@@ -49,6 +51,7 @@ pub enum WindowUpdate {
     SearchResults(SearchPage),
     SearchResyncRequired,
     Theme(ThemeUpdate),
+    Font(FontUpdate),
     Exited {
         splint_id: SplintId,
     },
@@ -59,6 +62,11 @@ pub enum WindowUpdate {
 pub struct ThemeUpdate {
     pub generation: u64,
     pub theme: ResolvedTheme,
+}
+
+#[derive(Clone, Debug)]
+pub struct FontUpdate {
+    pub generation: Arc<FontGeneration>,
 }
 
 /// Bounded Wayland-to-protocol commands for the first interactive slice.

@@ -80,6 +80,11 @@ def require_success(result: subprocess.CompletedProcess[str], label: str) -> Non
         raise RuntimeError(f"{label} failed: {detail}")
 
 
+def require_pinned_host() -> None:
+    result = run([sys.executable, TOOLS / "check-provenance.py"])
+    require_success(result, "pinned Foot oracle prerequisite check")
+
+
 def records_by_label(path: Path) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -298,8 +303,13 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("--case", choices=[case.identifier for case in matrix_cases()])
     args = parser.parse_args()
-    args.output.mkdir(parents=True, exist_ok=False)
+    try:
+        require_pinned_host()
+    except (OSError, RuntimeError) as error:
+        print(f"font matrix prerequisites unavailable: {error}", file=sys.stderr)
+        return 1
 
+    args.output.mkdir(parents=True, exist_ok=False)
     selected = [case for case in matrix_cases() if args.case in (None, case.identifier)]
     build = run(
         [

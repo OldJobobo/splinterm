@@ -42,15 +42,13 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
 - the requested version must exactly match Cargo and all three Arch recipes;
-- repository-owned Foot oracle metadata must match the current `Cargo.lock` before
-  candidate construction;
 - website sources and deployment automation are absent from the source archive;
 - package validation runs against extracted package contents;
 - all output is uploaded as one private, retention-bounded workflow artifact.
 
 The candidate manifest binds the repository, commit, version, tag, architecture, prior version tag, candidate workflow identity, exact CI run ID/URL/branch/SHA/event and successful `check` job, and SHA-256 digest of every proposed release asset. A later publisher validates and preserves this CI provenance and must consume this manifest and these exact artifacts rather than rebuilding. Package construction may use `--no-check` only after the exact CI attestation succeeds.
 
-## Deterministic preflight and provenance refresh
+## Deterministic release preflight
 
 Run the same cheap release checks locally and in CI before Rust compilation:
 
@@ -64,18 +62,12 @@ validates the predecessor/release-note commit range. On an Arch host with
 `makepkg`, the doctor also compares each checked-in AUR `.SRCINFO` with
 `makepkg --printsrcinfo` output.
 
-A `Cargo.lock` change does not authorize reference regeneration. Refresh only
-the repository-owned lock identities with an inspect-then-write sequence:
-
-```bash
-python tools/foot-oracle/update-provenance.py
-python tools/foot-oracle/update-provenance.py --write
-python tools/foot-oracle/check-provenance.py --portable
-```
-
-The default update command does not write. `--write` replaces the provenance
-manifest atomically and updates every duplicate lock identity while preserving
-the pinned Foot commit and reference policy.
+Release preflight has no external-terminal provenance dependency. A
+`Cargo.lock` or compiler change therefore does not require a Foot metadata
+refresh. The retained Foot 1.27.0 differential can be validated independently
+with `python tools/foot-oracle/check-provenance.py --portable`, but it is not a
+candidate or promotion prerequisite. See
+[ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md).
 
 ## CI boundaries and package-check equivalence
 
@@ -92,7 +84,14 @@ context green.
 | `daemon-tests` | `splinterd` `end_to_end`, serialized, no retry-to-green |
 | `mcp-tests` | `schema_inventory` and `stdio_protocol`, serialized, no retry-to-green |
 | `package-automation` | all four `packaging/PKGBUILD::check()` Python suites plus package/release workflow and helper tests |
-| `oracle-fixtures` | portable Foot provenance, fixture schemas, public contract fixtures, Foot Python tests, and benchmark contracts |
+| `renderer-contracts` | adopted Splinterm semantic vectors, public contract fixtures, and correctness-report contracts |
+
+Portable Foot fixture/tooling validation and the exact pinned-host differential
+both live in the separate manual/scheduled `foot-oracle-pinned.yml` workflow.
+No historical Foot job runs inside release-authority CI, so a queued worker or
+hung advisory command cannot hold candidate construction open. Failures or
+unavailable evidence remain signals to investigate, not automatic release
+vetoes.
 
 Together, the split Rust commands are equivalent to
 `cargo test --frozen --workspace -- --test-threads=1`: workspace unit, binary,
@@ -109,8 +108,10 @@ place for repository-specific authority, immutability, artifact, and credential
 contracts; API and partial-state interpretation lives in tested Python helpers
 rather than shell response matching.
 
-Failed workspace, daemon, MCP, package/release, and oracle boundaries retain the
-focused captured output as 14-day artifacts. Automatic retries are not used.
+Failed mandatory boundaries retain focused captured output as 14-day artifacts.
+Advisory Foot validation retains its own diagnostics without affecting the
+required `check` result or completion of release-authority CI. Automatic retries
+are not used.
 `.github/workflows/flake-stress.yml` is a non-publishing weekly/manual diagnostic
 that runs 1–25 serialized daemon/MCP repetitions and stops on the first failure;
 a failure remains a failed run rather than being retried to green. Manual use is

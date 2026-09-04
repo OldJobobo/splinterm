@@ -6,6 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+PINNED_FOOT_WORKFLOW = ROOT / ".github/workflows/foot-oracle-pinned.yml"
 MANDATORY = (
     "preflight",
     "static",
@@ -13,14 +14,14 @@ MANDATORY = (
     "daemon-tests",
     "mcp-tests",
     "package-automation",
-    "oracle-fixtures",
+    "renderer-contracts",
 )
 
 
 class CiWorkflowTests(unittest.TestCase):
     def test_required_check_is_always_run_and_fail_closed(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        check = workflow[workflow.index("  check:") : workflow.index("  oracle:")]
+        check = workflow[workflow.index("  check:") :]
         self.assertIn("if: ${{ always() }}", check)
         for job in MANDATORY:
             self.assertIn(f"- {job}", check)
@@ -114,10 +115,38 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_timing_sensitive_jobs_upload_logs_without_retry(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("daemon-end-to-end.log", workflow)
-        self.assertIn("mcp-protocol.log", workflow)
-        self.assertNotIn("continue-on-error", workflow)
-        self.assertNotIn("nick-fields/retry", workflow)
+        block = workflow[
+            workflow.index("  daemon-tests:") : workflow.index("  package-automation:")
+        ]
+        self.assertIn("daemon-end-to-end.log", block)
+        self.assertIn("mcp-protocol.log", block)
+        self.assertNotIn("continue-on-error", block)
+        self.assertNotIn("nick-fields/retry", block)
+
+    def test_foot_differentials_are_advisory_not_release_authority(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        standalone = PINNED_FOOT_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("foot-reference", workflow)
+        self.assertNotIn("tools/foot-oracle/check-provenance.py --portable", workflow)
+        self.assertNotIn("tools/foot-oracle/test_*.py", workflow)
+        self.assertNotIn("self-hosted", workflow)
+        self.assertIn("Splinterm-owned renderer", workflow)
+        self.assertIn(
+            "python -m pytest -q tools/foot-oracle/test_run_final_buffer_comparison.py",
+            workflow,
+        )
+        self.assertIn("workflow_dispatch:", standalone)
+        self.assertIn("schedule:", standalone)
+        self.assertIn("runs-on: ubuntu-latest", standalone)
+        self.assertIn(
+            "python tools/foot-oracle/check-provenance.py --portable", standalone
+        )
+        self.assertIn("python -m pytest -q tools/foot-oracle/test_*.py", standalone)
+        self.assertIn(
+            "runs-on: [self-hosted, linux, x64, splinterm-oracle]", standalone
+        )
+        self.assertNotIn("\n  push:", standalone)
+        self.assertNotIn("\n  pull_request:", standalone)
 
     def test_flake_stress_is_manual_scheduled_bounded_and_stops_on_failure(self) -> None:
         workflow = (ROOT / ".github/workflows/flake-stress.yml").read_text(

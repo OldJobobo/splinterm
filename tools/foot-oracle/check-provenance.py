@@ -36,43 +36,47 @@ def sha256(path: pathlib.Path) -> str:
 
 def load_manifest() -> dict[str, Any]:
     value = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    if value.get("schema") != 3:
+    if value.get("schema") != 4:
         raise ProvenanceError("unsupported provenance schema")
     for key in (
         "supported_host",
+        "policy",
         "reference",
         "build",
         "environment",
         "fonts",
-        "rust",
         "oracle",
         "default_final_buffer_profile",
         "reference_update_policy",
     ):
         if key not in value:
             raise ProvenanceError(f"provenance is missing {key}")
+    reference = value["reference"]
+    if (
+        reference.get("name") != "foot"
+        or reference.get("version") != "1.27.0"
+        or reference.get("commit")
+        != "3c5b584b0eafa772eb4376fb6eaf6643399e190e"
+    ):
+        raise ProvenanceError("historical Foot reference identity drifted")
+    policy = value["policy"]
+    if (
+        policy.get("release_authority") != "splinterm-owned"
+        or policy.get("foot_role") != "optional-historical-differential"
+        or policy.get("release_blocking") is not False
+    ):
+        raise ProvenanceError("Foot reference policy is malformed")
     if len(value["fonts"]) != 6:
         raise ProvenanceError("provenance must declare all six raster faces")
+    raster_keys = {"hintstyle", "hinting", "antialias", "rgba", "lcdfilter"}
+    if any(set(font.get("fontconfig_raster", {})) != raster_keys for font in value["fonts"]):
+        raise ProvenanceError("every raster face must pin resolved Fontconfig options")
     if value["reference_update_policy"].get("silent_regeneration") is not False:
         raise ProvenanceError("silent reference regeneration must remain disabled")
     return value
 
 
 def check_repository_files(manifest: dict[str, Any]) -> None:
-    expected_lock = manifest["rust"]["cargo_lock_sha256"]
-    remediation = (
-        "run 'python tools/foot-oracle/update-provenance.py' to review the change, "
-        "then rerun with --write"
-    )
-    if sha256(ROOT / "Cargo.lock") != expected_lock:
-        raise ProvenanceError(
-            f"Cargo.lock drifted from pinned provenance; {remediation}"
-        )
-    profile_lock = manifest["default_final_buffer_profile"]["cargo_lock_sha256"]
-    if profile_lock != expected_lock:
-        raise ProvenanceError(
-            f"profile and Rust Cargo.lock identities disagree; {remediation}"
-        )
     for patch in manifest["oracle"]["patches"]:
         path = ROOT / patch["path"]
         if not path.is_file() or sha256(path) != patch["sha256"]:
@@ -106,61 +110,94 @@ def command_output(arguments: list[str]) -> str:
     return result.stdout.strip()
 
 
-def active_fontconfig_fingerprint() -> str:
-    home = str(pathlib.Path.home())
-    entries = []
-    for line in command_output(["fc-conflist"]).splitlines():
-        if not line.startswith("+ "):
-            continue
-        path = pathlib.Path(line[2:].split(":", 1)[0])
-        if not path.is_file():
-            raise ProvenanceError(f"active fontconfig file is missing: {path}")
-        name = str(path)
-        if name.startswith(home):
-            name = "~" + name[len(home) :]
-        entries.append({"path": name, "sha256": sha256(path)})
-    payload = json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
 def check_versions(manifest: dict[str, Any]) -> None:
     expected = manifest["build"]
     for package, key in (
+        ("fcft", "fcft_version"),
         ("freetype2", "freetype_version"),
         ("fontconfig", "fontconfig_version"),
         ("pixman-1", "pixman_version"),
     ):
         if command_output(["pkg-config", "--modversion", package]) != expected[key]:
             raise ProvenanceError(f"{package} version drifted")
-    rust = manifest["rust"]
-    if command_output(["rustc", "--version"]).split()[1] != rust["rustc"]:
-        raise ProvenanceError("rustc version drifted")
-    if command_output(["cargo", "--version"]).split()[1] != rust["cargo"]:
-        raise ProvenanceError("cargo version drifted")
+
+
+def font_remediation(font: dict[str, Any]) -> str:
+    package = (
+        "ttf-jetbrains-mono-nerd"
+        if "JetBrainsMonoNerdFont" in font["file"]
+        else "the package containing the pinned font"
+    )
+    return (
+        f"provision the exact pinned file (Omarchy/Arch: install {package}), "
+        "then run 'fc-cache --force'"
+    )
+
+
+def matrix_font_patterns(manifest: dict[str, Any], font: dict[str, Any]) -> list[str]:
+    patterns = [font["pattern"]]
+    matrix = manifest.get("oracle", {}).get("font_matrix")
+    if matrix is None:
+        return patterns
+    sizes = {
+        logical_size * scale / 120
+        for logical_size in matrix["logical_sizes_px"]
+        for scale in matrix["scales_120"]
+    }
+    base_pattern = font["pattern"]
+    if font["role"] == "cjk":
+        base_pattern = base_pattern.split(":style=", 1)[0]
+    patterns.extend(f"{base_pattern}:pixelsize={size:g}" for size in sorted(sizes))
+    return patterns
 
 
 def check_fonts(manifest: dict[str, Any]) -> None:
     for font in manifest["fonts"]:
-        output = command_output(
-            ["fc-match", "-f", "%{file}\n%{index}\n", font["pattern"]]
-        ).splitlines()
-        if len(output) < 2:
-            raise ProvenanceError(f"fontconfig did not resolve {font['role']}")
-        path = pathlib.Path(output[0])
-        try:
-            index = int(output[1])
-        except ValueError as error:
-            raise ProvenanceError(f"invalid face index for {font['role']}") from error
-        if str(path) != font["file"] or index != font["index"]:
-            raise ProvenanceError(f"resolved {font['role']} face drifted")
-        if not path.is_file() or sha256(path) != font["sha256"]:
-            raise ProvenanceError(f"resolved {font['role']} font bytes drifted")
+        for pattern in matrix_font_patterns(manifest, font):
+            output = command_output(
+                [
+                    "fc-match",
+                    "-f",
+                    "%{file}\n%{index}\n%{hintstyle}\n%{hinting}\n%{antialias}\n%{rgba}\n%{lcdfilter}\n",
+                    pattern,
+                ]
+            ).splitlines()
+            if len(output) < 7:
+                raise ProvenanceError(
+                    f"fontconfig did not resolve pinned {font['role']} face for "
+                    f"{pattern!r}; expected {font['file']} index {font['index']}; "
+                    f"{font_remediation(font)}"
+                )
+            path = pathlib.Path(output[0])
+            try:
+                index = int(output[1])
+            except ValueError as error:
+                raise ProvenanceError(
+                    f"invalid face index for {font['role']} at {pattern!r}"
+                ) from error
+            if str(path) != font["file"] or index != font["index"]:
+                raise ProvenanceError(
+                    f"resolved {font['role']} face drifted for {pattern!r}: expected "
+                    f"{font['file']} index {font['index']}, got {path} index {index}; "
+                    f"{font_remediation(font)}"
+                )
+            option_names = ("hintstyle", "hinting", "antialias", "rgba", "lcdfilter")
+            actual_raster = dict(zip(option_names, output[2:7], strict=True))
+            if actual_raster != font["fontconfig_raster"]:
+                raise ProvenanceError(
+                    f"resolved {font['role']} Fontconfig raster options drifted for "
+                    f"{pattern!r}: expected {font['fontconfig_raster']}, got {actual_raster}"
+                )
+            if not path.is_file() or sha256(path) != font["sha256"]:
+                raise ProvenanceError(
+                    f"resolved {font['role']} font bytes drifted at {path} for "
+                    f"{pattern!r}; expected SHA-256 {font['sha256']}; "
+                    f"{font_remediation(font)}"
+                )
 
 
 def check_environment(manifest: dict[str, Any]) -> None:
     expected = manifest["environment"]
-    if active_fontconfig_fingerprint() != expected["fontconfig_active_config_sha256"]:
-        raise ProvenanceError("active fontconfig configuration drifted")
     for name, value in expected["variables"].items():
         actual = os.environ.get(name)
         if actual is not None and actual.startswith(str(pathlib.Path.home())):
@@ -191,7 +228,11 @@ def main() -> int:
     except (OSError, ValueError, KeyError, ProvenanceError) as error:
         print(f"provenance error: {error}", file=sys.stderr)
         return 1
-    print("Foot oracle provenance: portable metadata valid" if args.portable else "Foot oracle provenance: pinned host exact")
+    print(
+        "Historical Foot reference metadata: portable inputs valid"
+        if args.portable
+        else "Historical Foot differential: output-relevant host inputs valid"
+    )
     return 0
 
 

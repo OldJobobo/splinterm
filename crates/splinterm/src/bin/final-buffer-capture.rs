@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::Deserialize;
 use splinterm::{
-    config::CursorStyle,
+    config::{CursorStyle, FontAuthority},
     geometry::{FontSize, FontSizingPolicy, TerminalPadding, resolve_font_size},
     renderer::{
         CursorPresentation, RendererOptions, UnfocusedCursorStyle, capture_final_buffer,
@@ -328,6 +328,7 @@ fn main() -> Result<()> {
     )?;
     configure(RendererOptions {
         font: arguments.font.clone(),
+        font_authority: FontAuthority::Explicit,
         font_size,
         font_sizing_policy,
         physical_dpi: arguments.physical_dpi,

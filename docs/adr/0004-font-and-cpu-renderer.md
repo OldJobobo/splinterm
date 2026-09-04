@@ -1,7 +1,8 @@
 # ADR 0004: Use narrow fontconfig discovery with Swash and CPU SHM rendering
 
-- **Status:** Accepted — Phase 8.1 renderer and oracle policy closed
+- **Status:** Accepted — renderer decisions remain current; external release authority superseded by [ADR 0013](0013-splinterm-owned-renderer-acceptance.md)
 - **Date:** 2026-07-18
+- **Amended:** 2026-09-04
 
 ## Context
 
@@ -97,16 +98,19 @@ The accepted observable tolerance is zero for every closure lane: final ARGB
 bytes, grayscale masks, cell metrics, advances, placement, four-sided ink and
 padding geometry, decoration vectors, cursor composition, renderer-path output,
 and accepted source-first scale cases. Comparators may not translate images,
-widen tolerances, or regenerate references during CI. The pinned authority is
-Foot 1.27.0 commit `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
+widen tolerances, or regenerate references during CI. The pinned historical
+reference is Foot 1.27.0 commit
+`3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
-Strict reference generation is supported only when provenance matches the
-recorded Linux x86_64 font files/indices and hashes, fontconfig/FreeType/fcft/
-pixman versions and policy, Foot patch/build options, palette, geometry,
-scales, and Rust lockfile recorded by schema-v3
-`tools/foot-oracle/provenance.json`. Portable CI validates fixtures and tools;
-a supported reference-host drift fails rather than rewriting evidence, and an
-unsupported host is reported explicitly.
+Strict Foot reference generation remains available when output-relevant
+provenance matches the recorded Linux x86_64 font files/indices and hashes,
+fontconfig/FreeType/fcft/pixman versions and policy, Foot patch/build options,
+palette, geometry, scales, and explicit environment recorded by schema-v4
+`tools/foot-oracle/provenance.json`. Cargo-lock, compiler-version, and complete
+ambient Fontconfig-inventory identity are not comparison inputs. Under
+[ADR 0013](0013-splinterm-owned-renderer-acceptance.md), Foot is an optional
+historical differential rather than release authority; drift fails that
+optional run instead of rewriting evidence or blocking a release.
 
 The production cache policy is output-independent and bounded: 2,048 persistent
 glyph entries, 64 MiB of glyph data, 24 raster faces, and a 4,096-entry active
@@ -117,15 +121,35 @@ cache keys or invalidation; cold/warm and full/damage/scroll-copy paths must
 produce identical pixels.
 
 Renderer ownership is explicit. `RendererResources` holds immutable
-process-wide renderer options and font configuration. Every graphical Window
-owns one mutable `RenderContext` containing its output DPI, font zoom, and
-background alpha. Prepared frames capture their context-dependent metrics and
-alpha, so composition and deterministic capture do not consult ambient mutable
-state. Existing public configuration and capture signatures retain a separate
+process-wide sizing, padding, and renderer options. Every graphical Window owns
+one mutable `RenderContext` containing its output DPI, font zoom, background
+alpha, and an `Arc` to one immutable `FontGeneration`. A generation owns the
+complete resolved regular/bold/italic/bold-italic and ordered fallback metadata,
+source fingerprints, and bounded sealed byte snapshots for the primary, CJK,
+and emoji faces used by both Swash and the safe FreeType wrapper. Dynamic
+fallback mappings remain lazy and bounded to 24 entries; their cache identity
+includes the resolved source identity so a same-path font replacement cannot
+reuse bytes from an older generation. Prepared frames retain their generation
+and capture their context-dependent metrics and alpha, so composition and
+deterministic capture do not consult ambient mutable state. Glyph and
+raster-face cache keys include the generation identity; incremental refresh
+rejects a generation mismatch.
+Existing public configuration and capture signatures retain a separate
 compatibility context, but production Wayland rendering uses explicit context
-paths. Immutable resolved font faces remain process-wide; bounded glyph and
-raster-face caches remain renderer-thread-local so native FreeType handles are
-not made `Send` or `Sync`.
+paths. Bounded native FreeType handles remain renderer-thread-local and are
+cleared at successful generation publication; old bytes remain alive only while
+an old prepared frame still retains its generation.
+
+When `main.font` is unset, the client treats fontconfig `monospace` as native
+Omarchy family authority and probes complete effective source identities every
+ten seconds after an initial ten-second delay. This bounds idle Fontconfig
+subprocess churn while retaining live following. Resolution, immutable
+snapshotting, parsing, metric checks, and stable double-resolution run off Tokio
+and Wayland dispatch paths. A valid candidate is fully prepared for active,
+inactive, and hidden panes before one callback-boundary publication. Failure
+leaves the active generation in place. Explicit `main.font` disables this
+watcher. The startup-only documented JetBrains fallback is not available during
+live updates.
 
 Release budgets are enforced by `tools/performance/phase9-thresholds.json`.
 Notable limits are 10/300 ms full-paint p95 at 80×24/240×80, 1/10 ms one-row
@@ -168,7 +192,11 @@ focus-safe history, and application-keypad text input.
 - CPU SHM rendering remains the baseline; a future GPU renderer must preserve
   the same cell, fallback, shaping, and damage semantics.
 - Glyph caches are invalidated and rerasterized when physical scale or font
-  identity changes.
+  identity changes; generation-keyed entries cannot cross a live family swap.
+- A live family swap preserves Window size, configured font size and policy,
+  padding, output DPI, runtime zoom, modal and IME state, topology, focus, and
+  history. Existing controller authority may emit one final changed PTY size;
+  observers do not acquire control for font reconciliation.
 - Full-window blend is fast for the current evidence row, but terminal rendering
   must consume semantic damage rather than repaint large windows continuously.
 - Fontconfig process startup is acceptable for the first client slice but may be
@@ -181,6 +209,8 @@ focus-safe history, and application-keypad text input.
 
 Maintainer-private validation records cover font discovery, initial visual,
 direct fcft-mask, style, ink-bound, release timing, and strict 95-character
-grayscale-mask parity. Public unit and oracle tests enforce deterministic
-blending, clipping, shaped placement, mask/color ink bounds, Foot-derived box
-geometry, cache reuse, and capture encoding.
+grayscale-mask parity. Public Splinterm-owned unit, integration, and adopted
+fixture tests enforce deterministic blending, clipping, shaped placement,
+mask/color ink bounds, Foot-derived box geometry, cache reuse, and capture
+encoding. Retained Foot comparisons are advisory historical differentials under
+ADR 0013.
