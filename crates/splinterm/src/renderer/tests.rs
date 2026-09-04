@@ -1,5 +1,13 @@
 use super::{frame::select_face_for_text, *};
 
+fn stage_test_font_generation() -> FontGeneration {
+    stage_live_font_generation(
+        "monospace:style=Regular",
+        crate::config::FontAuthority::NativeOmarchy,
+    )
+    .expect("stage the host's generic monospace family")
+}
+
 fn synthetic_row() -> TextRow {
     let key = GlyphKey { face: 0, glyph: 1 };
     TextRow {
@@ -305,9 +313,7 @@ fn font_generation_replacement_preserves_zoom_dpi_and_alpha() {
         .update_output_dpi(OutputDpiObservation::provided(144.0).unwrap(), 150)
         .unwrap();
     let before = context.effective_font_resolution(150).unwrap();
-    let options = renderer_options();
-    let mut replacement =
-        stage_live_font_generation(&options.font, options.font_authority).unwrap();
+    let mut replacement = stage_test_font_generation();
     replacement.fingerprint.pattern.push_str("#test-generation");
     let replacement_id = replacement.id;
 
@@ -940,12 +946,39 @@ fn memory_backed_freetype_keeps_the_staged_inode_after_path_replacement() {
 
     let shaped = swash::FontRef::from_index(&staged, source.index.collection_index()).unwrap();
     assert_ne!(shaped.charmap().map('界'), 0);
-    let mut raster =
-        splinterm_freetype::RasterFace::open_memory(&staged, source.index.raw(), 22 * 64).unwrap();
+    let retained_before = Arc::strong_count(&staged);
+    let mut raster = splinterm_freetype::RasterFace::open_memory(
+        Arc::clone(&staged),
+        source.index.raw(),
+        22 * 64,
+    )
+    .unwrap();
+    assert!(Arc::strong_count(&staged) > retained_before);
     assert!(raster.metrics().unwrap().height > 0);
+    drop(raster);
+    assert_eq!(Arc::strong_count(&staged), retained_before);
 
     fs::remove_file(path).unwrap();
     fs::remove_file(retired).unwrap();
+}
+
+#[test]
+fn raster_faces_share_one_generation_mapping_across_sizes() {
+    let generation = stage_test_font_generation();
+    let face = &generation.faces[SNAPSHOT_PRIMARY_REGULAR];
+    let data = face.data.clone().expect("primary face is staged");
+    let retained_before = Arc::strong_count(&data);
+
+    let first =
+        splinterm_freetype::RasterFace::open_memory(Arc::clone(&data), face.index.raw(), 16 * 64)
+            .unwrap();
+    let second =
+        splinterm_freetype::RasterFace::open_memory(Arc::clone(&data), face.index.raw(), 32 * 64)
+            .unwrap();
+    assert!(Arc::strong_count(&data) > retained_before);
+
+    drop((first, second));
+    assert_eq!(Arc::strong_count(&data), retained_before);
 }
 
 #[test]
@@ -1203,8 +1236,11 @@ fn forward_and_reverse_viewport_scroll_copy_match_clean_full_repaint() {
 fn persistent_raster_face_cache_is_bounded_across_scale_churn() {
     SNAPSHOT_GLYPH_CACHE.with(|cache| *cache.borrow_mut() = PersistentGlyphCache::default());
     let snapshot = incremental_snapshot();
+    let mut context = RenderContext::new(u16::MAX);
+    assert!(context.replace_font_generation(Arc::new(stage_test_font_generation())));
     for scale_120 in 120..=u32::try_from(120 + SNAPSHOT_RASTER_FACE_BUDGET).unwrap() {
-        SnapshotFrame::load_scaled(&snapshot, scale_120).expect("scaled frame");
+        SnapshotFrame::load_scaled_with_context(&snapshot, scale_120, &context)
+            .expect("scaled frame");
     }
     let metrics = snapshot_cache_metrics();
     assert_eq!(
@@ -1282,11 +1318,10 @@ fn empty_overlays_leave_compositor_border_area_untouched() {
 #[test]
 fn incremental_refresh_rejects_a_different_font_generation() {
     let snapshot = incremental_snapshot();
-    let context = compatibility_render_context().unwrap();
+    let mut context = compatibility_render_context().unwrap();
+    assert!(context.replace_font_generation(Arc::new(stage_test_font_generation())));
     let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
-    let options = renderer_options();
-    let replacement =
-        Arc::new(stage_live_font_generation(&options.font, options.font_authority).unwrap());
+    let replacement = Arc::new(stage_test_font_generation());
     assert_ne!(frame.font_generation.id, replacement.id);
     frame.font_generation = replacement;
     let error = frame
@@ -1298,7 +1333,9 @@ fn incremental_refresh_rejects_a_different_font_generation() {
 #[test]
 fn prepared_frame_retains_its_font_generation_until_drop() {
     let snapshot = incremental_snapshot();
-    let frame = SnapshotFrame::load_scaled(&snapshot, 120).unwrap();
+    let mut context = compatibility_render_context().unwrap();
+    assert!(context.replace_font_generation(Arc::new(stage_test_font_generation())));
+    let frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
     let generation = Arc::clone(&frame.font_generation);
     let retained = Arc::strong_count(&generation);
     assert!(retained >= 3);
@@ -1309,13 +1346,12 @@ fn prepared_frame_retains_its_font_generation_until_drop() {
 #[test]
 fn identical_glyph_ids_do_not_share_cache_entries_across_generations() {
     reset_snapshot_cache();
-    let current = snapshot_font_generation().unwrap();
+    let current = stage_test_font_generation();
     let face = &current.faces[SNAPSHOT_PRIMARY_REGULAR];
     let glyph_id = font_ref(face).unwrap().charmap().map('M');
     let current_glyph =
         snapshot_glyph(&current.faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, 22.0).unwrap();
-    let options = renderer_options();
-    let replacement = stage_live_font_generation(&options.font, options.font_authority).unwrap();
+    let replacement = stage_test_font_generation();
     let replacement_glyph =
         snapshot_glyph(&replacement.faces, SNAPSHOT_PRIMARY_REGULAR, glyph_id, 22.0).unwrap();
     assert!(!Arc::ptr_eq(&current_glyph, &replacement_glyph));

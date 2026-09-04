@@ -6,11 +6,14 @@
 //! file/index and receive owned, tightly packed alpha bytes; no `FreeType` pointer
 //! or borrowed bitmap escapes the API.
 
-use std::path::{Path, PathBuf};
-
-use freetype::{
-    Face, Library, RenderMode, bitmap::PixelMode, face::LoadFlag, tt_os2::TrueTypeOS2Table,
+use std::{
+    borrow::Borrow,
+    ops::Deref,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
+
+use freetype::{Face, Library, RenderMode, bitmap::PixelMode, face::LoadFlag};
 use splinterm_filemap::ReadOnlyFileMap;
 use thiserror::Error;
 
@@ -96,8 +99,19 @@ pub enum RasterError {
     ScaleColor(#[from] splinterm_pixman::ScaleError),
 }
 
+#[derive(Clone, Debug)]
+struct SharedFontData(Arc<ReadOnlyFileMap>);
+
+impl Borrow<[u8]> for SharedFontData {
+    fn borrow(&self) -> &[u8] {
+        self.0.as_ref().deref()
+    }
+}
+
 pub struct RasterFace {
-    face: Face,
+    face: Face<SharedFontData>,
+    data: SharedFontData,
+    collection_index: u32,
 }
 
 impl RasterFace {
@@ -115,11 +129,14 @@ impl RasterFace {
             return Err(RasterError::InvalidPixelSize);
         }
         let path = path.as_ref();
-        let data = ReadOnlyFileMap::open(path).map_err(|source| RasterError::MapFace {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::open_memory(&data, face_index, pixel_size_26_6)
+        let data =
+            Arc::new(
+                ReadOnlyFileMap::open(path).map_err(|source| RasterError::MapFace {
+                    path: path.to_path_buf(),
+                    source,
+                })?,
+            );
+        Self::open_memory(data, face_index, pixel_size_26_6)
     }
 
     /// Opens one face from immutable generation-owned bytes.
@@ -127,7 +144,7 @@ impl RasterFace {
     /// # Errors
     /// Returns a typed error for invalid bounds or any `FreeType` failure.
     pub fn open_memory(
-        data: &ReadOnlyFileMap,
+        data: Arc<ReadOnlyFileMap>,
         face_index: u32,
         pixel_size_26_6: isize,
     ) -> Result<Self, RasterError> {
@@ -139,15 +156,20 @@ impl RasterFace {
         }
         let index = isize::try_from(face_index).map_err(|_| RasterError::InvalidFaceIndex)?;
         let library = Library::init().map_err(RasterError::Initialize)?;
+        let data = SharedFontData(data);
         let face = library
-            .new_memory_face(data.to_vec(), index)
+            .new_memory_face2(data.clone(), index)
             .map_err(|source| RasterError::OpenMemoryFace {
                 index: face_index,
                 source,
             })?;
         face.set_char_size(pixel_size_26_6, 0, 72, 72)
             .map_err(RasterError::SetSize)?;
-        Ok(Self { face })
+        Ok(Self {
+            face,
+            data,
+            collection_index: face_index & 0xffff,
+        })
     }
 
     /// Rasterize one fixed-strike color glyph using pinned fcft's pixel fixup.
@@ -171,12 +193,15 @@ impl RasterFace {
             return Err(RasterError::InvalidPixelSize);
         }
         let path = path.as_ref();
-        let data = ReadOnlyFileMap::open(path).map_err(|source| RasterError::MapFace {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let data =
+            Arc::new(
+                ReadOnlyFileMap::open(path).map_err(|source| RasterError::MapFace {
+                    path: path.to_path_buf(),
+                    source,
+                })?,
+            );
         Self::rasterize_color_memory(
-            &data,
+            data,
             face_index,
             requested_pixel_size_26_6,
             selected_pixel_size_26_6,
@@ -190,7 +215,7 @@ impl RasterFace {
     /// Returns a typed error for invalid bounds, `FreeType` failures, non-BGRA
     /// output, malformed bitmap geometry, or pixman scaling failures.
     pub fn rasterize_color_memory(
-        data: &ReadOnlyFileMap,
+        data: Arc<ReadOnlyFileMap>,
         face_index: u32,
         requested_pixel_size_26_6: isize,
         selected_pixel_size_26_6: isize,
@@ -206,15 +231,20 @@ impl RasterFace {
         }
         let index = isize::try_from(face_index).map_err(|_| RasterError::InvalidFaceIndex)?;
         let library = Library::init().map_err(RasterError::Initialize)?;
+        let data = SharedFontData(data);
         let face = library
-            .new_memory_face(data.to_vec(), index)
+            .new_memory_face2(data.clone(), index)
             .map_err(|source| RasterError::OpenMemoryFace {
                 index: face_index,
                 source,
             })?;
         face.set_char_size(selected_pixel_size_26_6, 0, 72, 72)
             .map_err(RasterError::SetSize)?;
-        let mut raster = Self { face };
+        let mut raster = Self {
+            face,
+            data,
+            collection_index: face_index & 0xffff,
+        };
         raster.rasterize_color_glyph(
             requested_pixel_size_26_6,
             selected_pixel_size_26_6,
@@ -357,12 +387,15 @@ impl RasterFace {
         let underline_top = (underline_position + underline_thickness / 2.0).trunc();
         let underline_width = underline_thickness.max(1.0).round();
         let (mut strike_position, mut strike_thickness) =
-            TrueTypeOS2Table::from_face(&mut self.face).map_or((0.0, 0.0), |os2| {
-                (
-                    f64::from(os2.y_strikeout_position()) * y_scale / 64.0,
-                    f64::from(os2.y_strikeout_size()) * y_scale / 64.0,
-                )
-            });
+            ttf_parser::Face::parse(self.data.borrow(), self.collection_index)
+                .ok()
+                .and_then(|face| face.strikeout_metrics())
+                .map_or((0.0, 0.0), |metrics| {
+                    (
+                        f64::from(metrics.position) * y_scale / 64.0,
+                        f64::from(metrics.thickness) * y_scale / 64.0,
+                    )
+                });
         if strike_position == 0.0 {
             strike_thickness = underline_thickness;
             strike_position = 3.0 * ascent / 8.0 - strike_thickness / 2.0;
