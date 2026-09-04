@@ -82,6 +82,22 @@ pub(in crate::wayland) fn shortcut_action_for(
     keymap.action(key_identity(keysym)?, active_modifiers(modifiers))
 }
 
+pub(in crate::wayland) fn binding_help_repeat_consumed(
+    binding_help_open: bool,
+    keysym: Keysym,
+) -> bool {
+    binding_help_open && keysym == Keysym::Escape
+}
+
+pub(in crate::wayland) fn owned_field_clipboard_action(
+    keymap: &ResolvedKeymap,
+    keysym: Keysym,
+    modifiers: Modifiers,
+) -> Option<ActionId> {
+    shortcut_action_for(keymap, keysym, modifiers)
+        .filter(|action| matches!(action, ActionId::ClipboardCopy | ActionId::ClipboardPaste))
+}
+
 pub(in crate::wayland) fn keymap_press_for(
     keymap: &ResolvedKeymap,
     prefix_state: &mut PrefixState,
@@ -480,6 +496,37 @@ mod tests {
     }
 
     #[test]
+    fn binding_help_consumes_escape_repeat_without_suppressing_editing_or_navigation() {
+        assert!(binding_help_repeat_consumed(true, Keysym::Escape));
+        for keysym in [Keysym::BackSpace, Keysym::Down, Keysym::a] {
+            assert!(!binding_help_repeat_consumed(true, keysym));
+        }
+        assert!(!binding_help_repeat_consumed(false, Keysym::Escape));
+    }
+
+    #[test]
+    fn owned_fields_accept_effective_clipboard_actions_without_other_shortcuts() {
+        for profile in [
+            crate::keymap::KeymapProfile::Splinterm,
+            crate::keymap::KeymapProfile::OmarchyTmux,
+        ] {
+            let keymap = crate::keymap::built_in_keymap(profile);
+            assert_eq!(
+                owned_field_clipboard_action(&keymap, Keysym::c, ctrl_shift()),
+                Some(ActionId::ClipboardCopy)
+            );
+            assert_eq!(
+                owned_field_clipboard_action(&keymap, Keysym::v, ctrl_shift()),
+                Some(ActionId::ClipboardPaste)
+            );
+            assert_eq!(
+                owned_field_clipboard_action(&keymap, Keysym::f, ctrl_shift()),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn command_palette_shortcut_is_exact_managed_and_blocked_safely() {
         let action = shortcut_action(Keysym::p, ctrl_shift());
         assert_eq!(
@@ -617,6 +664,10 @@ mod tests {
                 ActionId::RecentSessions => "Dojo picker boundary",
                 ActionId::NewSession
                 | ActionId::RenameCurrentLair
+                | ActionId::SaveCurrentLair
+                | ActionId::ToggleCurrentLairPin
+                | ActionId::PreviewCurrentLair
+                | ActionId::RestoreCurrentLair
                 | ActionId::TerminateCurrentLair
                 | ActionId::PreviousLair
                 | ActionId::NextLair

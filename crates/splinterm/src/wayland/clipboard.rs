@@ -28,6 +28,7 @@ pub(super) static ACTIVE_CLIPBOARD_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnedFieldTarget {
+    BindingHelp,
     CommandPalette,
     DojoPrompt,
     Search,

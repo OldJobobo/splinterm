@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     frontend::{
@@ -48,6 +49,122 @@ const MAX_PREVIEW_LINE_SCALARS: usize = 120;
 const PROMPT_INPUT_HEIGHT: u32 = 38;
 const PROMPT_BUTTON_HEIGHT: u32 = 34;
 const PROMPT_GAP: u32 = 12;
+
+fn preview_text_width(text: &str) -> usize {
+    text.chars()
+        .map(|character| character.width().unwrap_or(0).min(2))
+        .sum()
+}
+
+fn ellipsize_preview_line(line: &mut String, maximum_cells: usize) {
+    if maximum_cells == 0 {
+        line.clear();
+        return;
+    }
+    while preview_text_width(line) >= maximum_cells {
+        line.pop();
+    }
+    line.push('…');
+}
+
+fn bounded_preview_indentation(source: &str, maximum_cells: usize) -> (String, usize) {
+    let mut indentation = String::new();
+    let mut cells = 0_usize;
+    for character in source
+        .chars()
+        .take_while(|character| character.is_whitespace())
+    {
+        let width = character.width().unwrap_or(0).min(2);
+        if cells.saturating_add(width) > maximum_cells {
+            break;
+        }
+        indentation.push(character);
+        cells = cells.saturating_add(width);
+    }
+    (indentation, cells)
+}
+
+fn preview_line_rect(body: Rect, index: usize, line_height: u32) -> Option<Rect> {
+    let y = body.y.saturating_add(
+        u32::try_from(index)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(line_height),
+    );
+    let bottom = body.y.saturating_add(body.height);
+    if y >= bottom {
+        return None;
+    }
+    Some(Rect {
+        y,
+        height: line_height.min(bottom.saturating_sub(y)),
+        ..body
+    })
+}
+
+fn wrap_preview_body(body: &str, maximum_cells: usize) -> Vec<String> {
+    let maximum_cells = maximum_cells.max(1);
+    let mut wrapped = Vec::with_capacity(MAX_PREVIEW_LINES);
+    let mut overflowed = false;
+
+    'source_lines: for source in body.lines() {
+        if wrapped.len() == MAX_PREVIEW_LINES {
+            overflowed = true;
+            break;
+        }
+        if source.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+
+        let (indentation, indentation_cells) =
+            bounded_preview_indentation(source, maximum_cells / 2);
+        let mut remaining = source.trim_start();
+
+        while !remaining.is_empty() {
+            if wrapped.len() == MAX_PREVIEW_LINES {
+                overflowed = true;
+                break 'source_lines;
+            }
+            let available = maximum_cells.saturating_sub(indentation_cells).max(1);
+            let mut used = 0_usize;
+            let mut boundary = 0_usize;
+            let mut whitespace = None;
+            for (offset, character) in remaining.char_indices() {
+                let width = character.width().unwrap_or(0).min(2);
+                if used.saturating_add(width) > available {
+                    break;
+                }
+                used = used.saturating_add(width);
+                boundary = offset.saturating_add(character.len_utf8());
+                if character.is_whitespace() {
+                    whitespace = Some(offset);
+                }
+            }
+            if boundary == remaining.len() {
+                wrapped.push(format!("{indentation}{remaining}"));
+                break;
+            }
+            if boundary == 0 {
+                let consumed = remaining
+                    .chars()
+                    .next()
+                    .map_or(remaining.len(), char::len_utf8);
+                wrapped.push(format!("{indentation}…"));
+                remaining = remaining[consumed..].trim_start();
+                continue;
+            }
+            let split = whitespace.filter(|offset| *offset > 0).unwrap_or(boundary);
+            let chunk = remaining[..split].trim_end();
+            wrapped.push(format!("{indentation}{chunk}"));
+            remaining = remaining[split..].trim_start();
+        }
+    }
+
+    if overflowed && let Some(last) = wrapped.last_mut() {
+        ellipsize_preview_line(last, maximum_cells);
+    }
+    wrapped
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommandPaletteRowLayout {
@@ -291,6 +408,11 @@ impl CommandPaletteTextCache {
     fn len(&self) -> usize {
         self.entries.len()
     }
+
+    #[cfg(test)]
+    fn contains_source(&self, source: &str) -> bool {
+        self.entries.keys().any(|(text, _)| text == source)
+    }
 }
 
 fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
@@ -476,13 +598,19 @@ pub(crate) fn paint_command_palette(
         palette.primary,
         false,
     )?;
-    let query = if binding_help.is_some() {
-        format!("{} profile · generated bindings", keymap.profile().name())
+    let query = if let Some(help) = binding_help {
+        if help.query().is_empty() {
+            "> Search keybindings".to_owned()
+        } else {
+            format!("> {}_", help.query())
+        }
     } else if state.query().is_empty() {
         "> Type a command".to_owned()
     } else {
         format!("> {}_", state.query())
     };
+    let query_is_placeholder =
+        binding_help.map_or_else(|| state.query().is_empty(), |help| help.query().is_empty());
     paint_text(
         cache,
         context,
@@ -502,7 +630,7 @@ pub(crate) fn paint_command_palette(
                 .saturating_sub(title_width),
             height: header.height,
         },
-        if binding_help.is_some() || state.query().is_empty() {
+        if query_is_placeholder {
             palette.secondary
         } else {
             palette.primary
@@ -510,7 +638,14 @@ pub(crate) fn paint_command_palette(
         false,
     )?;
 
-    if state.filtered().is_empty() {
+    let empty_label = if binding_help.is_some_and(|help| help.rows().is_empty()) {
+        Some("No matching keybindings")
+    } else if binding_help.is_none() && state.filtered().is_empty() {
+        Some("No matching commands")
+    } else {
+        None
+    };
+    if let Some(empty_label) = empty_label {
         let empty = buffer_rect(layout.list, scale_120);
         paint_text(
             cache,
@@ -518,7 +653,7 @@ pub(crate) fn paint_command_palette(
             canvas,
             width,
             height,
-            "No matching commands",
+            empty_label,
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
@@ -779,7 +914,7 @@ pub(crate) fn paint_command_palette(
         width,
         height,
         if binding_help.is_some() {
-            "↑↓/Pg navigate · Prefix+[ copy · v/y · Super+C/V · fields X/Z · Esc"
+            "Type to search · ↑↓/Pg navigate · Ctrl+U clear · Esc clear/close"
         } else {
             "↑↓ navigate   Enter run   Esc close"
         },
@@ -1303,33 +1438,30 @@ pub(crate) fn paint_dojo_prompt(
     if state.uses_layout_summary() {
         let body_rect = buffer_rect(layout.body, scale_120);
         let line_height = PREVIEW_LINE_HEIGHT.saturating_mul(scale_120).div_ceil(120);
-        for (index, source) in body.lines().take(MAX_PREVIEW_LINES).enumerate() {
-            let mut line = source
-                .chars()
-                .take(MAX_PREVIEW_LINE_SCALARS)
-                .collect::<String>();
-            if source.chars().count() > MAX_PREVIEW_LINE_SCALARS {
-                line.push('…');
-            }
+        let metrics = ChromeText::load_styled_with_context(
+            "M",
+            scale_120,
+            ChromeTextStyle::Regular,
+            context,
+        )?;
+        let maximum_cells = usize::try_from(body_rect.width / metrics.frame.cell_width.max(1))
+            .unwrap_or(MAX_PREVIEW_LINE_SCALARS)
+            .min(MAX_PREVIEW_LINE_SCALARS);
+        for (index, line) in wrap_preview_body(&body, maximum_cells).iter().enumerate() {
+            let Some(line_rect) = preview_line_rect(body_rect, index, line_height) else {
+                break;
+            };
             paint_text(
                 cache,
                 context,
                 canvas,
                 width,
                 height,
-                &line,
+                line,
                 ChromeTextStyle::Regular,
                 scale_120,
                 renderer_generation,
-                Rect {
-                    y: body_rect.y.saturating_add(
-                        u32::try_from(index)
-                            .unwrap_or(u32::MAX)
-                            .saturating_mul(line_height),
-                    ),
-                    height: line_height,
-                    ..body_rect
-                },
+                line_rect,
                 palette.secondary,
                 false,
             )?;
@@ -1469,6 +1601,46 @@ mod tests {
         renderer::session_picker_palette,
     };
     use splinterm_core::{DojoId, LairId, SplintId};
+
+    #[test]
+    fn preview_body_wraps_to_available_cells_and_marks_bounded_overflow() {
+        let body = "Not restored: terminal/scrollback bodies, process memory, shell state, environment, clipboard, images";
+        let wrapped = wrap_preview_body(body, 48);
+        assert!(wrapped.len() > 1);
+        assert!(wrapped.iter().all(|line| preview_text_width(line) <= 48));
+        assert_eq!(wrapped.concat().replace(' ', ""), body.replace(' ', ""));
+
+        let overflow = wrap_preview_body(&format!("{body}\n").repeat(8), 24);
+        assert_eq!(overflow.len(), MAX_PREVIEW_LINES);
+        assert!(overflow.last().is_some_and(|line| line.ends_with('…')));
+        assert!(overflow.iter().all(|line| preview_text_width(line) <= 24));
+
+        let wide_indentation = wrap_preview_body("\u{3000}\u{3000}wide words here", 8);
+        assert!(
+            wide_indentation
+                .iter()
+                .all(|line| preview_text_width(line) <= 8)
+        );
+    }
+
+    #[test]
+    fn fractional_preview_line_rects_remain_inside_the_buffer_body() {
+        let body = buffer_rect(
+            Rect {
+                x: 24,
+                y: 36,
+                width: 472,
+                height: PREVIEW_BODY_HEIGHT,
+            },
+            121,
+        );
+        let line_height = PREVIEW_LINE_HEIGHT.saturating_mul(121).div_ceil(120);
+        for index in 0..MAX_PREVIEW_LINES {
+            let line = preview_line_rect(body, index, line_height).unwrap();
+            assert!(line.y >= body.y);
+            assert!(line.y.saturating_add(line.height) <= body.y.saturating_add(body.height));
+        }
+    }
 
     #[test]
     fn layout_is_bounded_selected_visible_and_hit_targets_are_half_open() {
@@ -1909,7 +2081,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cache.len(), shaped);
-        let help = BindingHelpUi::new(&keymap);
+        let mut help = BindingHelpUi::new(&keymap);
         paint_command_palette(
             &mut cache,
             &RenderContext::new(u16::MAX),
@@ -1929,5 +2101,29 @@ mod tests {
         )
         .unwrap();
         assert!(cache.len() > shaped);
+        assert!(cache.contains_source("> Search keybindings"));
+
+        assert!(help.append_text("definitely absent xyz"));
+        let empty_layout = command_palette_layout(content, &[], 0, 0).unwrap();
+        paint_command_palette(
+            &mut cache,
+            &RenderContext::new(u16::MAX),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &empty_layout,
+            session_picker_palette(theme),
+            &state,
+            &keymap,
+            None,
+            true,
+            Some(&help),
+        )
+        .unwrap();
+        assert!(cache.contains_source("> definitely absent xyz_"));
+        assert!(cache.contains_source("No matching keybindings"));
     }
 }

@@ -926,6 +926,68 @@ pub(crate) struct BuiltInCommandDescriptor {
     shortcut_action: Option<ActionId>,
 }
 
+pub(crate) fn action_search_metadata(
+    action: ActionId,
+) -> Option<(&'static str, &'static str, &'static [&'static str])> {
+    if action == ActionId::ToggleCurrentLairPin {
+        return Some((
+            "Toggle current Lair pin",
+            CommandCategory::Dojos.label(),
+            &["pin", "unpin", "favorite", "protect", "lair", "workspace"],
+        ));
+    }
+    BUILT_IN_COMMANDS
+        .iter()
+        .find(|descriptor| descriptor.shortcut_action == Some(action))
+        .map(|descriptor| {
+            (
+                descriptor.title,
+                descriptor.category.label(),
+                descriptor.keywords,
+            )
+        })
+}
+
+pub(crate) fn lair_lifecycle_command(
+    action: ActionId,
+    lair_id: LairId,
+    retention: LairRetention,
+) -> Option<WindowTopologyCommand> {
+    match action {
+        ActionId::SaveCurrentLair if retention == LairRetention::Disposable => {
+            Some(WindowTopologyCommand::SetLairRetention {
+                lair_id,
+                expected_retention: retention,
+                retention: LairRetention::Saved,
+            })
+        }
+        ActionId::ToggleCurrentLairPin => Some(WindowTopologyCommand::SetLairRetention {
+            lair_id,
+            expected_retention: retention,
+            retention: if retention == LairRetention::Pinned {
+                LairRetention::Saved
+            } else {
+                LairRetention::Pinned
+            },
+        }),
+        ActionId::PreviewCurrentLair if retention.is_protected() => {
+            Some(WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Preview,
+                expected_retention: Some(retention),
+            })
+        }
+        ActionId::RestoreCurrentLair if retention.is_protected() => {
+            Some(WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Restore,
+                expected_retention: Some(retention),
+            })
+        }
+        _ => None,
+    }
+}
+
 impl BuiltInCommandDescriptor {
     pub(crate) fn shortcut(self, keymap: &ResolvedKeymap) -> &str {
         self.shortcut_action
@@ -1058,35 +1120,35 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         category: CommandCategory::Dojos,
         title: "Save current Lair layout",
         keywords: &["save", "retain", "lair", "layout", "workspace"],
-        shortcut_action: None,
+        shortcut_action: Some(ActionId::SaveCurrentLair),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::PinCurrentLair,
         category: CommandCategory::Dojos,
         title: "Pin current Lair",
         keywords: &["pin", "protect", "lair", "workspace"],
-        shortcut_action: None,
+        shortcut_action: Some(ActionId::ToggleCurrentLairPin),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::UnpinCurrentLair,
         category: CommandCategory::Dojos,
         title: "Unpin current Lair",
         keywords: &["unpin", "saved", "lair", "workspace"],
-        shortcut_action: None,
+        shortcut_action: Some(ActionId::ToggleCurrentLairPin),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::PreviewCurrentLair,
         category: CommandCategory::Dojos,
         title: "Preview saved Lair layout",
         keywords: &["preview", "saved", "lair", "layout", "recipe"],
-        shortcut_action: None,
+        shortcut_action: Some(ActionId::PreviewCurrentLair),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RestoreCurrentLair,
         category: CommandCategory::Dojos,
         title: "Restore saved Lair…",
         keywords: &["restore", "launch", "saved", "lair", "layout"],
-        shortcut_action: None,
+        shortcut_action: Some(ActionId::RestoreCurrentLair),
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::PreviousLair,
@@ -1662,32 +1724,43 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
                 lair_id: context.lair_id,
                 kind: LairPromptKind::Rename,
+                expected_retention: None,
             })
         }
-        BuiltInCommandId::SaveCurrentLair | BuiltInCommandId::UnpinCurrentLair => {
-            BuiltInCommandDispatch::Topology(WindowTopologyCommand::SetLairRetention {
-                lair_id: context.lair_id,
-                retention: LairRetention::Saved,
-            })
+        BuiltInCommandId::SaveCurrentLair => BuiltInCommandDispatch::Topology(
+            lair_lifecycle_command(
+                ActionId::SaveCurrentLair,
+                context.lair_id,
+                context.lair_retention,
+            )
+            .expect("enabled save action has one lifecycle command"),
+        ),
+        BuiltInCommandId::PinCurrentLair | BuiltInCommandId::UnpinCurrentLair => {
+            BuiltInCommandDispatch::Topology(
+                lair_lifecycle_command(
+                    ActionId::ToggleCurrentLairPin,
+                    context.lair_id,
+                    context.lair_retention,
+                )
+                .expect("enabled pin-toggle action has one lifecycle command"),
+            )
         }
-        BuiltInCommandId::PinCurrentLair => {
-            BuiltInCommandDispatch::Topology(WindowTopologyCommand::SetLairRetention {
-                lair_id: context.lair_id,
-                retention: LairRetention::Pinned,
-            })
-        }
-        BuiltInCommandId::PreviewCurrentLair => {
-            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
-                lair_id: context.lair_id,
-                kind: LairPromptKind::Preview,
-            })
-        }
-        BuiltInCommandId::RestoreCurrentLair => {
-            BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
-                lair_id: context.lair_id,
-                kind: LairPromptKind::Restore,
-            })
-        }
+        BuiltInCommandId::PreviewCurrentLair => BuiltInCommandDispatch::Topology(
+            lair_lifecycle_command(
+                ActionId::PreviewCurrentLair,
+                context.lair_id,
+                context.lair_retention,
+            )
+            .expect("enabled preview action has one lifecycle command"),
+        ),
+        BuiltInCommandId::RestoreCurrentLair => BuiltInCommandDispatch::Topology(
+            lair_lifecycle_command(
+                ActionId::RestoreCurrentLair,
+                context.lair_id,
+                context.lair_retention,
+            )
+            .expect("enabled restore action has one lifecycle command"),
+        ),
         BuiltInCommandId::PreviousLair => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NavigateLair {
                 current_lair_id: context.lair_id,
@@ -1704,6 +1777,7 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestLairPrompt {
                 lair_id: context.lair_id,
                 kind: LairPromptKind::Terminate,
+                expected_retention: None,
             })
         }
         BuiltInCommandId::SplitHorizontal => {
@@ -2126,6 +2200,69 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_keyboard_and_palette_paths_share_exact_commands() {
+        let disposable = palette().context();
+        let saved = CommandPaletteContext {
+            lair_retention: LairRetention::Saved,
+            ..disposable.clone()
+        };
+        let pinned = CommandPaletteContext {
+            lair_retention: LairRetention::Pinned,
+            ..disposable.clone()
+        };
+        for (command, action, context) in [
+            (
+                BuiltInCommandId::SaveCurrentLair,
+                ActionId::SaveCurrentLair,
+                &disposable,
+            ),
+            (
+                BuiltInCommandId::PinCurrentLair,
+                ActionId::ToggleCurrentLairPin,
+                &saved,
+            ),
+            (
+                BuiltInCommandId::UnpinCurrentLair,
+                ActionId::ToggleCurrentLairPin,
+                &pinned,
+            ),
+            (
+                BuiltInCommandId::PreviewCurrentLair,
+                ActionId::PreviewCurrentLair,
+                &saved,
+            ),
+            (
+                BuiltInCommandId::RestoreCurrentLair,
+                ActionId::RestoreCurrentLair,
+                &pinned,
+            ),
+        ] {
+            let expected = lair_lifecycle_command(action, context.lair_id, context.lair_retention)
+                .expect("applicable lifecycle action has one command");
+            assert_eq!(
+                command_dispatch(command, context),
+                Some(BuiltInCommandDispatch::Topology(expected))
+            );
+        }
+        assert!(
+            lair_lifecycle_command(
+                ActionId::SaveCurrentLair,
+                saved.lair_id,
+                saved.lair_retention
+            )
+            .is_none()
+        );
+        assert!(
+            lair_lifecycle_command(
+                ActionId::PreviewCurrentLair,
+                disposable.lair_id,
+                disposable.lair_retention
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn selection_wraps_skips_disabled_and_preserves_enabled_command() {
         let mut palette = palette();
         assert!(palette.move_selection(-1));
@@ -2232,6 +2369,16 @@ mod tests {
             command_descriptor(BuiltInCommandId::NewSession).shortcut(&keymap),
             ""
         );
+        let omarchy = crate::keymap::built_in_keymap(crate::keymap::KeymapProfile::OmarchyTmux);
+        for (command, shortcut) in [
+            (BuiltInCommandId::SaveCurrentLair, "Prefix Shift+S"),
+            (BuiltInCommandId::PinCurrentLair, "Prefix Shift+F"),
+            (BuiltInCommandId::UnpinCurrentLair, "Prefix Shift+F"),
+            (BuiltInCommandId::PreviewCurrentLair, "Prefix Shift+V"),
+            (BuiltInCommandId::RestoreCurrentLair, "Prefix Shift+O"),
+        ] {
+            assert_eq!(command_descriptor(command).shortcut(&omarchy), shortcut);
+        }
         let custom = crate::keymap::resolve_keymap_text(
             crate::keymap::KeymapProfile::Splinterm,
             "version = 1\n[[unbind]]\nsequence = [\"Ctrl+Shift+S\"]\n[[binding]]\nsequence = [\"Ctrl+Alt+S\"]\naction = \"session.recent\"",
@@ -2388,6 +2535,7 @@ mod tests {
                 WindowTopologyCommand::RequestLairPrompt {
                     lair_id: context.lair_id,
                     kind: LairPromptKind::Rename,
+                    expected_retention: None,
                 }
             ))
         );
@@ -2406,6 +2554,7 @@ mod tests {
                 WindowTopologyCommand::RequestLairPrompt {
                     lair_id: context.lair_id,
                     kind: LairPromptKind::Terminate,
+                    expected_retention: None,
                 }
             ))
         );

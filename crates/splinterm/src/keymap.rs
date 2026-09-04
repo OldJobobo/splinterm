@@ -39,6 +39,10 @@ pub enum ActionId {
     MoveDojoLeft,
     MoveDojoRight,
     RenameCurrentLair,
+    SaveCurrentLair,
+    ToggleCurrentLairPin,
+    PreviewCurrentLair,
+    RestoreCurrentLair,
     TerminateCurrentLair,
     PreviousLair,
     NextLair,
@@ -105,6 +109,10 @@ impl ActionId {
         Self::MoveDojoRight,
         Self::NewSession,
         Self::RenameCurrentLair,
+        Self::SaveCurrentLair,
+        Self::ToggleCurrentLairPin,
+        Self::PreviewCurrentLair,
+        Self::RestoreCurrentLair,
         Self::TerminateCurrentLair,
         Self::PreviousLair,
         Self::NextLair,
@@ -172,6 +180,10 @@ impl ActionId {
             Self::MoveDojoLeft => "dojo.move-left",
             Self::MoveDojoRight => "dojo.move-right",
             Self::RenameCurrentLair => "lair.rename",
+            Self::SaveCurrentLair => "lair.save",
+            Self::ToggleCurrentLairPin => "lair.pin-toggle",
+            Self::PreviewCurrentLair => "lair.preview",
+            Self::RestoreCurrentLair => "lair.restore",
             Self::TerminateCurrentLair => "lair.terminate-confirmed",
             Self::PreviousLair => "lair.previous",
             Self::NextLair => "lair.next",
@@ -1031,8 +1043,18 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                 |ctrl, shift, alt, key| NormalizedSequence::Direct(chord(ctrl, shift, alt, key));
             let prefixed =
                 |ctrl, shift, key| NormalizedSequence::Prefix(chord(ctrl, shift, false, key));
+            for preferred in ["Ctrl+Shift+V", "Ctrl+Shift+C"] {
+                if let Some(index) = keymap
+                    .bindings
+                    .iter()
+                    .position(|binding| binding.display() == preferred)
+                {
+                    let binding = keymap.bindings.remove(index);
+                    keymap.bindings.insert(0, binding);
+                }
+            }
             keymap.bindings.splice(
-                0..0,
+                2..2,
                 [
                     omarchy_binding(
                         prefixed(true, false, KeyIdentity::Space),
@@ -1173,6 +1195,26 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                         prefixed(false, true, KeyIdentity::Character('r')),
                         ActionId::RenameCurrentLair,
                         "Prefix Shift+R",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('s')),
+                        ActionId::SaveCurrentLair,
+                        "Prefix Shift+S",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('f')),
+                        ActionId::ToggleCurrentLairPin,
+                        "Prefix Shift+F",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('v')),
+                        ActionId::PreviewCurrentLair,
+                        "Prefix Shift+V",
+                    ),
+                    omarchy_binding(
+                        prefixed(false, true, KeyIdentity::Character('o')),
+                        ActionId::RestoreCurrentLair,
+                        "Prefix Shift+O",
                     ),
                     omarchy_binding(
                         prefixed(false, true, KeyIdentity::Character('p')),
@@ -1994,8 +2036,14 @@ action = "clipboard.paste"
         );
         assert_eq!(keymap.primary_shortcut(ActionId::BindingHelp), "Prefix ?");
         assert_eq!(keymap.primary_shortcut(ActionId::CopyModeEnter), "Prefix [");
-        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardCopy), "Super+C");
-        assert_eq!(keymap.primary_shortcut(ActionId::ClipboardPaste), "Super+V");
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ClipboardCopy),
+            "Ctrl+Shift+C"
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ClipboardPaste),
+            "Ctrl+Shift+V"
+        );
         assert_eq!(
             keymap.action(
                 KeyIdentity::Character('x'),
@@ -2017,6 +2065,22 @@ action = "clipboard.paste"
             "Prefix Shift+K"
         );
         assert_eq!(keymap.primary_shortcut(ActionId::LairChooser), "Prefix S");
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::SaveCurrentLair),
+            "Prefix Shift+S"
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::ToggleCurrentLairPin),
+            "Prefix Shift+F"
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::PreviewCurrentLair),
+            "Prefix Shift+V"
+        );
+        assert_eq!(
+            keymap.primary_shortcut(ActionId::RestoreCurrentLair),
+            "Prefix Shift+O"
+        );
         assert_eq!(keymap.primary_shortcut(ActionId::DetachWindow), "Prefix D");
     }
 
@@ -2102,6 +2166,36 @@ action = "clipboard.paste"
             ),
             KeymapPress::Consumed(None)
         );
+    }
+
+    #[test]
+    fn strict_overlay_can_bind_every_lair_lifecycle_action() {
+        let path = Path::new("keybindings.toml");
+        let text = r#"
+version = 1
+inherits = "splinterm"
+[[binding]]
+sequence = ["Ctrl+Alt+S"]
+action = "lair.save"
+[[binding]]
+sequence = ["Ctrl+Alt+F"]
+action = "lair.pin-toggle"
+[[binding]]
+sequence = ["Ctrl+Alt+V"]
+action = "lair.preview"
+[[binding]]
+sequence = ["Ctrl+Alt+O"]
+action = "lair.restore"
+"#;
+        let resolved = resolve_keymap_text(KeymapProfile::Splinterm, text, path).unwrap();
+        for (action, shortcut) in [
+            (ActionId::SaveCurrentLair, "Ctrl+Alt+S"),
+            (ActionId::ToggleCurrentLairPin, "Ctrl+Alt+F"),
+            (ActionId::PreviewCurrentLair, "Ctrl+Alt+V"),
+            (ActionId::RestoreCurrentLair, "Ctrl+Alt+O"),
+        ] {
+            assert_eq!(resolved.keymap.primary_shortcut(action), shortcut);
+        }
     }
 
     #[test]

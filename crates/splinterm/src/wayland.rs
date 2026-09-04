@@ -132,7 +132,8 @@ use crate::frontend::{
     TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
     ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
     WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
-    close_other_tabs_command, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
+    close_other_tabs_command, command_dispatch, lair_lifecycle_command, tab_menu_dispatch,
+    tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -196,13 +197,14 @@ use input::{
     CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, HistoryNavigation,
     ModalPointerFrame, MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile,
     PressOwner, SessionPickerShortcutAction, TabShortcutAction, WheelAccumulator, WheelOutcome,
-    application_motion, classify_press, clipboard_read_is_current, command_palette_shortcut_action,
-    consume_detached_enter_press, copy_mode_desktop_action, font_zoom_action,
-    history_overlay_status, history_return_to_live_hit, key_input, keymap_press_for,
-    local_selection_owner, mouse_report, pane_focus_action, pane_topology_action,
-    pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
-    pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
-    shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
+    application_motion, binding_help_repeat_consumed, classify_press, clipboard_read_is_current,
+    command_palette_shortcut_action, consume_detached_enter_press, copy_mode_desktop_action,
+    font_zoom_action, history_overlay_status, history_return_to_live_hit, key_input,
+    keymap_press_for, local_selection_owner, mouse_report, owned_field_clipboard_action,
+    pane_focus_action, pane_topology_action, pending_selection_drag_anchor, picker_ime_reconcile,
+    picker_release_activation, pointer_axis_focus_target, reconciled_focus_report,
+    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
+    tab_shortcut_action, take_press_owner,
 };
 use selection::{
     CellPosition, CopyModeState, CopyMotion, CopyMoveOutcome, Selection, SelectionEndpoint,
@@ -491,6 +493,14 @@ struct ImeState {
     sent_commit_serial: u32,
     visible_preedit: Option<String>,
     pending: ImeBatch,
+}
+
+fn ime_batch_blocked(
+    input_modal_open: bool,
+    modal_barrier: bool,
+    owned_target: Option<OwnedFieldTarget>,
+) -> bool {
+    modal_barrier || (input_modal_open && owned_target.is_none())
 }
 
 impl ImeState {
@@ -4310,10 +4320,37 @@ impl App {
         }
     }
 
-    fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
-        if self.modal.binding_help.is_none()
-            && let Some(palette) = self.modal.command_palette.as_mut()
+    fn ime_owned_field_target(&self) -> Option<OwnedFieldTarget> {
+        if self.modal.binding_help.is_some() {
+            return Some(OwnedFieldTarget::BindingHelp);
+        }
+        if self.modal.command_palette.is_some() {
+            return Some(OwnedFieldTarget::CommandPalette);
+        }
+        if self
+            .modal
+            .dojo_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.input().is_some())
         {
+            return Some(OwnedFieldTarget::DojoPrompt);
+        }
+        if self.modal.input_modal_open() {
+            return None;
+        }
+        self.panes
+            .pane
+            .search
+            .input
+            .is_some()
+            .then_some(OwnedFieldTarget::Search)
+    }
+
+    fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
+        if let Some(help) = self.modal.binding_help.as_mut() {
+            return Some((OwnedFieldTarget::BindingHelp, help.editor_mut()));
+        }
+        if let Some(palette) = self.modal.command_palette.as_mut() {
             return Some((OwnedFieldTarget::CommandPalette, palette.editor_mut()));
         }
         if let Some(prompt) = self.modal.dojo_prompt.as_mut()
@@ -4334,6 +4371,11 @@ impl App {
         target: OwnedFieldTarget,
     ) -> Option<&mut BoundedTextEditor> {
         match target {
+            OwnedFieldTarget::BindingHelp => self
+                .modal
+                .binding_help
+                .as_mut()
+                .map(BindingHelpUi::editor_mut),
             OwnedFieldTarget::CommandPalette => self
                 .modal
                 .command_palette
@@ -4350,6 +4392,12 @@ impl App {
 
     fn refresh_owned_field(&mut self, target: OwnedFieldTarget) {
         match target {
+            OwnedFieldTarget::BindingHelp => {
+                if let Some(help) = self.modal.binding_help.as_mut() {
+                    help.editor_changed();
+                }
+                self.refresh_command_palette();
+            }
             OwnedFieldTarget::CommandPalette => {
                 if let Some(palette) = self.modal.command_palette.as_mut() {
                     palette.editor_changed();
@@ -4364,14 +4412,28 @@ impl App {
         }
     }
 
-    fn owned_field_defers_to_modal(target: OwnedFieldTarget, keysym: Keysym) -> bool {
+    fn owned_field_defers_to_modal(
+        target: OwnedFieldTarget,
+        keysym: Keysym,
+        modifiers: Modifiers,
+    ) -> bool {
+        if target == OwnedFieldTarget::BindingHelp
+            && modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.logo
+            && matches!(keysym, Keysym::u | Keysym::U)
+        {
+            return true;
+        }
         match target {
-            OwnedFieldTarget::CommandPalette => matches!(
+            OwnedFieldTarget::BindingHelp | OwnedFieldTarget::CommandPalette => matches!(
                 keysym,
                 Keysym::Up
                     | Keysym::Down
                     | Keysym::Home
                     | Keysym::End
+                    | Keysym::Page_Up
+                    | Keysym::Page_Down
                     | Keysym::Return
                     | Keysym::KP_Enter
                     | Keysym::Escape
@@ -4384,6 +4446,17 @@ impl App {
 
     fn editable_field_text(text: Option<&str>) -> Option<&str> {
         text.filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+    }
+
+    fn owned_field_consumes_repeat(&mut self, event: &KeyEvent) -> bool {
+        self.active_owned_field().is_some()
+            && (self.input.modifiers.logo
+                || owned_field_clipboard_action(
+                    &self.input.keymap,
+                    event.keysym,
+                    self.input.modifiers,
+                )
+                .is_some())
     }
 
     #[allow(
@@ -4399,7 +4472,7 @@ impl App {
         let Some((target, _)) = self.active_owned_field() else {
             return false;
         };
-        if Self::owned_field_defers_to_modal(target, event.keysym) {
+        if Self::owned_field_defers_to_modal(target, event.keysym, self.input.modifiers) {
             return false;
         }
         let desktop = self.input.modifiers.logo
@@ -4410,10 +4483,21 @@ impl App {
             !self.input.modifiers.logo && !self.input.modifiers.ctrl && !self.input.modifiers.alt;
         let extend = self.input.modifiers.shift;
         let clipboard_available = self.clipboard.data_device.is_some();
+        let clipboard_action =
+            owned_field_clipboard_action(&self.input.keymap, event.keysym, self.input.modifiers);
         let mut changed = false;
         let mut copied = None;
         let mut paste = false;
-        let handled = if desktop {
+        let handled = if clipboard_action == Some(ActionId::ClipboardCopy) {
+            copied = self
+                .owned_field_editor_mut(target)
+                .and_then(|editor| editor.selected_text().map(str::as_bytes))
+                .map(<[u8]>::to_vec);
+            true
+        } else if clipboard_action == Some(ActionId::ClipboardPaste) {
+            paste = true;
+            true
+        } else if desktop {
             match event.keysym {
                 Keysym::c | Keysym::C => {
                     copied = self
@@ -4838,9 +4922,12 @@ impl App {
         Ok(())
     }
 
-    fn show_binding_help(&mut self) -> Result<()> {
+    fn show_binding_help(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
         self.show_command_palette()?;
         self.modal.binding_help = Some(BindingHelpUi::new(&self.input.keymap));
+        if self.input.ime_modal_barrier {
+            self.renew_text_input(queue_handle);
+        }
         self.surface.window.set_title("Splinterm — Key bindings");
         Ok(())
     }
@@ -4868,6 +4955,7 @@ impl App {
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
         self.modal.command_palette_text_cache.clear();
+        self.clear_ime_preedit();
         self.modal.command_palette_reconcile_pending = true;
         self.presentation.full_redraw = true;
         true
@@ -4921,7 +5009,7 @@ impl App {
             self.reconcile_command_palette_close(queue_handle);
         }
         let result = match dispatch {
-            BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(),
+            BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(queue_handle),
             BuiltInCommandDispatch::ReloadConfiguration => {
                 self.reload_keymap_configuration();
                 Ok(())
@@ -6611,7 +6699,20 @@ impl App {
                             isize::try_from(BINDING_HELP_PAGE_ITEMS).unwrap_or(isize::MAX),
                         );
                     }
-                    Keysym::Escape => close = true,
+                    Keysym::u | Keysym::U
+                        if self.input.modifiers.ctrl
+                            && !self.input.modifiers.alt
+                            && !self.input.modifiers.logo =>
+                    {
+                        changed = help.clear_query();
+                    }
+                    Keysym::Escape => {
+                        if help.query().is_empty() {
+                            close = true;
+                        } else {
+                            changed = help.clear_query();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -9540,30 +9641,68 @@ mod tests {
 
     #[test]
     fn owned_fields_defer_modal_control_keys_before_text_editing() {
-        for keysym in [
-            Keysym::Up,
-            Keysym::Down,
-            Keysym::Home,
-            Keysym::End,
-            Keysym::Return,
-            Keysym::KP_Enter,
-            Keysym::Escape,
+        let plain = Modifiers::default();
+        for target in [
+            OwnedFieldTarget::BindingHelp,
+            OwnedFieldTarget::CommandPalette,
         ] {
-            assert!(App::owned_field_defers_to_modal(
-                OwnedFieldTarget::CommandPalette,
-                keysym
-            ));
+            for keysym in [
+                Keysym::Up,
+                Keysym::Down,
+                Keysym::Home,
+                Keysym::End,
+                Keysym::Page_Up,
+                Keysym::Page_Down,
+                Keysym::Return,
+                Keysym::KP_Enter,
+                Keysym::Escape,
+            ] {
+                assert!(App::owned_field_defers_to_modal(target, keysym, plain));
+            }
         }
         for target in [OwnedFieldTarget::DojoPrompt, OwnedFieldTarget::Search] {
             for keysym in [Keysym::Return, Keysym::KP_Enter, Keysym::Escape] {
-                assert!(App::owned_field_defers_to_modal(target, keysym));
+                assert!(App::owned_field_defers_to_modal(target, keysym, plain));
             }
-            assert!(!App::owned_field_defers_to_modal(target, Keysym::Left));
-            assert!(!App::owned_field_defers_to_modal(target, Keysym::BackSpace));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::Left,
+                plain
+            ));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::BackSpace,
+                plain
+            ));
         }
+        for target in [
+            OwnedFieldTarget::BindingHelp,
+            OwnedFieldTarget::CommandPalette,
+        ] {
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::BackSpace,
+                plain
+            ));
+            assert!(!App::owned_field_defers_to_modal(
+                target,
+                Keysym::Left,
+                plain
+            ));
+        }
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert!(App::owned_field_defers_to_modal(
+            OwnedFieldTarget::BindingHelp,
+            Keysym::u,
+            ctrl
+        ));
         assert!(!App::owned_field_defers_to_modal(
             OwnedFieldTarget::CommandPalette,
-            Keysym::BackSpace
+            Keysym::u,
+            ctrl
         ));
     }
 
@@ -13040,6 +13179,22 @@ mod tests {
             buffer_dimensions(801, 601, 240).unwrap(),
             (1_602, 1_202, 6_408)
         );
+    }
+
+    #[test]
+    fn owned_modal_ime_batches_cross_only_the_fresh_generation_barrier() {
+        assert!(ime_batch_blocked(
+            true,
+            true,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(!ime_batch_blocked(
+            true,
+            false,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(ime_batch_blocked(true, false, None));
+        assert!(!ime_batch_blocked(false, false, None));
     }
 
     #[test]

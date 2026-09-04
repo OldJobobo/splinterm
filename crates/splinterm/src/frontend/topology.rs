@@ -101,6 +101,7 @@ pub enum WindowTopologyCommand {
     RequestLairPrompt {
         lair_id: LairId,
         kind: LairPromptKind,
+        expected_retention: Option<LairRetention>,
     },
     RequestDojoRestorePrompt {
         dojo_id: DojoId,
@@ -115,6 +116,7 @@ pub enum WindowTopologyCommand {
     },
     SetLairRetention {
         lair_id: LairId,
+        expected_retention: LairRetention,
         retention: LairRetention,
     },
     RestoreLair {
