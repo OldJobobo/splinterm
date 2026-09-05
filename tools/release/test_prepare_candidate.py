@@ -193,7 +193,7 @@ class PrepareCandidateTests(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
                 MODULE.run(["git", "show", f"{commit}:RELEASE_NOTES.md"]) + "\n",
             )
-            self.assertIn("Font Reload Closure", output.read_text(encoding="utf-8"))
+            self.assertTrue(output.read_text(encoding="utf-8").startswith("# Splinterm "))
 
     def test_manifest_example_is_json_serializable(self) -> None:
         manifest = {

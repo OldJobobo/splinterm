@@ -61,6 +61,12 @@ def current_public_release_tag() -> str:
     return tag
 
 
+def is_prerelease(version: str) -> bool:
+    if not isinstance(version, str) or SEMVER.fullmatch(version) is None:
+        raise ValueError("release version is malformed")
+    return "-" in version
+
+
 def safe_relative(value: Any) -> str:
     if not isinstance(value, str):
         raise ValueError("asset path must be a string")
@@ -245,6 +251,7 @@ def verify_candidate(
         "candidate_manifest_sha256": manifest_sha256,
         "commit": commit,
         "version": version,
+        "prerelease": is_prerelease(version),
         "tag": manifest["tag"],
         "release_notes": "RELEASE-NOTES.md",
         "public_assets": public_assets,
@@ -260,8 +267,11 @@ def create_receipt(
 ) -> dict[str, Any]:
     if release.get("tagName") != promotion["tag"] or release.get("isDraft") is not False:
         raise ValueError("published release identity or state does not match")
-    if release.get("isPrerelease") is not True:
-        raise ValueError("alpha release must remain marked prerelease")
+    expected_prerelease = is_prerelease(promotion["version"])
+    if promotion.get("prerelease") is not expected_prerelease:
+        raise ValueError("promotion prerelease state does not match its version")
+    if release.get("isPrerelease") is not expected_prerelease:
+        raise ValueError("published prerelease state does not match the approved version")
     ref_object = ref.get("object")
     if not isinstance(ref_object, dict) or ref_object.get("sha") != promotion["commit"]:
         raise ValueError("published tag does not resolve to the candidate commit")
@@ -300,6 +310,7 @@ def create_receipt(
         "candidate_manifest_sha256": promotion["candidate_manifest_sha256"],
         "commit": promotion["commit"],
         "version": promotion["version"],
+        "prerelease": expected_prerelease,
         "tag": promotion["tag"],
         "release_url": release.get("url"),
         "workflow_run": workflow_run,

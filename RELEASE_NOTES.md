@@ -1,164 +1,67 @@
-# Splinterm 0.1.0 RC3 — Stabilization
+# Splinterm 0.1.0
 
-RC3 retains the RC2 feature set and fixes bounded loading, font observation, and
-connection cleanup. This is a prerelease for continued testing before 0.1.0
-stable.
+Splinterm's first stable release is for x86_64 Omarchy/Arch Linux with native
+Wayland under Hyprland. It carries the RC3 terminal and daemon implementation
+forward unchanged; this release updates version metadata, documentation, and
+publication tooling rather than adding product features.
 
-## RC3 fixes
+## What ships
+
+- Daemon-owned terminal sessions that survive closing a graphical Window,
+  multiplexed Splints and Dojos, saved Lairs, and explicit restore.
+- Scrollback and search, terminal images, native Wayland input, and configurable
+  terminal lifetime and presets.
+- Live Omarchy theme and default-font following. Invalid font generations retain
+  the last valid renderer, while explicit font choices remain authoritative.
+- Bounded JSON/NDJSON automation, remote graphical access, and an optional
+  policy-scoped MCP adapter. Terminal output never grants automation authority.
+- Source-built and prebuilt Arch packages, desktop integration, and a systemd
+  user service.
+
+## Stabilization included from RC3
 
 - Unchanged Fontconfig sources no longer trigger repeated staging when an
-  incompatible bold or italic face falls back to the regular face. Source and
-  renderer fingerprints remain separate, preserving RC2's resolution-race fix.
-- Policy files that are FIFOs are rejected without waiting for a writer.
-- Revoking another automation connection no longer discards a partially received
-  request header or body.
-- Abnormal connection exits remove their topology subscriptions immediately,
-  without waiting for another topology mutation.
-- Relay close and session cancellation interrupt blocked writes and reclaim
-  per-channel queues. Remote EOF still delivers already-received bytes in order
-  to slow consumers; pending drains remain charged against channel admission.
+  incompatible bold or italic face falls back to the regular face.
+- FIFO policy files are rejected without waiting for a writer.
+- Revoking another automation connection preserves partially received requests.
+- Abnormal connection exits immediately remove their topology subscriptions.
+- Relay cancellation interrupts blocked writes and reclaims queues. Remote EOF
+  still delivers buffered bytes in order to slow consumers, within channel bounds.
 
-Upgrades retain the documented 0.1 daemon-lifetime boundary: replacing/restarting
-an incompatible daemon ends its child processes. Use the external-terminal
-upgrade and rollback workflow in [packaging](docs/packaging.md). No live-session
-handoff or new compatibility guarantee is introduced by RC3.
+The release also retains the RC1/RC2 font-lifetime fixes, current Gum colors for
+new Splints, bounded Sixel previews for Yazi, and legacy generated-Dojo name
+normalization.
 
----
+## Install
 
-# Splinterm 0.1.0 RC2 — Font Reload Closure
-
-This is the second release candidate for Splinterm 0.1.0. It retains the complete
-RC1 feature line and closes two live-font correctness and resource findings found
-during RC1 review.
-
-RC2 is intended for normal daily use and soak testing on the documented target:
-x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Any later code
-change requires another release candidate before the final `v0.1.0` release.
-
-## Release validation authority
-
-Splinterm-owned semantic, renderer, contract, package, and guarded graphical
-tests are now release authority. The pinned Foot 1.27.0 harness remains an exact
-optional historical differential; its host availability or provenance drift no
-longer blocks candidate construction or promotion. Existing Foot-derived
-fixtures and zero-tolerance evidence remain unchanged.
-
-The RC2 implementation at maintenance commit `d26cee9` passed guarded packaged
-live-font replacement and invalid-candidate rollback acceptance. This policy
-change does not modify shipped Rust code.
-
-## Live-font closure fixes
-
-- A staged generation that differs from its preceding probe now becomes the
-  watcher authority, so a later return to the probed generation is not skipped.
-- Cached FreeType faces now retain shared immutable font mappings instead of
-  copying the complete font file for every generation, face, and raster size.
-- Font-generation identity and lifetime tests resolve the host's generic
-  monospace family instead of requiring JetBrains Mono to be installed.
-
-## Live Omarchy font following
-
-When `main.font` is unset, a valid change to Fontconfig's effective `monospace`
-family now replaces one complete immutable renderer generation without
-restarting the Window, daemon, shell, or applications. Explicit font patterns
-remain authoritative, and an invalid live generation retains the last valid
-family.
-
-Font changes preserve configured size and sizing policy, padding, DPI, runtime
-zoom, topology, focus, history, modal and IME state, and controller authority.
-Observer panes never acquire control solely to resize after a font change, and
-deferred font-driven resizes retry after transient command-queue backpressure.
-Fontconfig named instances in variable fonts are preserved through shaping,
-metrics, and rasterization. Ambient Fontconfig checks run at a bounded ten-second
-cadence.
-
-## Yazi uses bounded Sixel previews
-
-When Sixel is enabled, Splinterm now advertises primary device attribute `4`.
-Yazi therefore selects its Sixel image path instead of the incompatible legacy
-per-cell Kitty placement path. The capability remains conditional, and the
-existing image-content and 256-placement bounds are unchanged.
-
-## Legacy Dojo names normalize on restore
-
-Loading schema-v2, schema-v3, or schema-v4 metadata now replaces only the exact
-historical generated forms `terminal`, `terminal-<timestamp>`, and
-`terminal-<timestamp>-<pid>` with collision-free `Dojo N` names. Numeric fields
-may be zero-padded, matching names emitted by older builds. Explicit names in
-current schema metadata are preserved.
-
-## New Splints follow the current Gum palette
-
-`splinterd` is persistent, so environment variables inherited when the daemon
-started can outlive an Omarchy theme change. Before RC1, a newly created shell
-could therefore receive stale Gum colors even though Splinterm's graphical
-palette already reflected the active theme.
-
-For every new Splint, the daemon now reads the active rendered palette from:
-
-```text
-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme/gum_env.lua
-```
-
-It refreshes only Omarchy's bounded Gum environment namespace:
-
-- `GUM_*`;
-- `FOREGROUND` and `BACKGROUND`; and
-- `BORDER_FOREGROUND` and `BORDER_BACKGROUND`.
-
-A complete valid palette replaces current managed values and removes obsolete
-managed `GUM_*` entries. Unrelated environment variables remain untouched.
-Existing PTYs keep the environment with which they were created; only later
-Splints see a later valid theme.
-
-Missing, malformed, oversized, symlinked, or non-regular palette state fails
-closed. In those cases the new PTY preserves the daemon's inherited environment
-rather than receiving a partial palette.
-
-## Stabilized Beta 3 baseline
-
-RC1 retains the Beta 3 workload and interface corrections:
-
-- terminal workloads inherit the systemd user manager's task policy while
-  `splinterd.service` keeps its independent `TasksMax=2048` guard;
-- the New Dojo control sits after the final visible tab;
-- inactive tabs use semantic dividers; and
-- the strict historical unnamed initial Dojo form is presented as `Dojo 1`
-  without mutating daemon-owned topology.
-
-Persistent topology, explicit restore, scrollback and search, terminal images,
-remote graphical access, JSON/NDJSON automation, MCP, configurable terminal
-lifetime, presets, and the documented native Wayland path remain part of the
-0.1 baseline.
+Use `yay -S splinterm-bin` for the prebuilt package or `yay -S splinterm` to build
+from source. The optional MCP packages are `splinterm-mcp-bin` and `splinterm-mcp`.
+AUR distribution follows verification of the GitHub release assets. Packages and
+source are also available on this release page.
 
 ## Upgrade boundary
 
-Splinterm 0.1 does not support live daemon upgrade handoff. Upgrading RC1 to
-RC2 therefore ends active Dojos. Run the upgrade from Foot or another terminal
-that is not owned by `splinterd`:
+**Splinterm 0.1 does not support live daemon upgrade handoff.** Stopping or
+replacing the running daemon ends its child processes; saved topology is not a
+checkpoint of running applications. Save your work and upgrade from Foot or
+another terminal that is not owned by `splinterd`:
 
 ```bash
 systemctl --user stop splinterd.service
-# upgrade the splinterm package here
+# Upgrade the splinterm package here.
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
 
-Then reopen Splinterm Windows. Package installation does not silently reload or
-restart the user service.
+Then reopen Splinterm Windows. Package installation does not silently restart
+the user service. See the [upgrade and rollback documentation](https://splinterm.com/docs/packaging/).
 
-## RC2 soak focus
+## Scope and limitations
 
-During the release-candidate soak, please pay particular attention to:
+Stable 0.1.0 does not add support for other distributions, compositors,
+architectures, or package formats, and does not promise live daemon replacement
+or a support lifetime. Splinterm is security-conscious, not absolutely secure;
+automation remains subject to explicit policy, consent, revocation, and resource
+bounds. Future 0.x releases may change interfaces with documented migration.
 
-- repeated valid, invalid, and rapidly superseded Omarchy font changes;
-- stable file-descriptor and memory use across repeated font and scale changes;
-- repeated Omarchy theme changes followed by newly created Splints;
-- existing PTYs retaining their original environment;
-- clean installation and Beta 3 upgrade/rollback;
-- saved-Lair restore and ordinary long-running terminal workloads;
-- trusted graphical-client identity and desktop launching; and
-- optional MCP package behavior when installed.
-
-RC2 remains a prerelease. If stabilization requires any code change, the next
-public build will be RC3 rather than the final `v0.1.0` release.
+[Documentation](https://splinterm.com/docs/) · [Source and issues](https://github.com/OldJobobo/splinterm)
