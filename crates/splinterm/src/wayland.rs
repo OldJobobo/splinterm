@@ -3403,13 +3403,17 @@ impl App {
             self.panes.restored_frontend_needs_resize = true;
         }
         std::mem::swap(&mut self.panes.pane, &mut self.panes.inactive_panes[index]);
+        self.focused_pane_changed();
+        true
+    }
+
+    fn focused_pane_changed(&mut self) {
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.clipboard.drag_target = None;
         self.panes.pane.pointer_cell = None;
         self.panes.pane.hovered_url = None;
         self.presentation.full_redraw = true;
         self.sync_graphical_focus();
-        true
     }
 
     fn directional_splint(&self, direction: FocusDirection) -> Option<SplintId> {
@@ -7804,7 +7808,7 @@ impl App {
             .or_else(|| {
                 self.panes
                     .focused_splint()
-                    .filter(|splint_id| !removed.contains(splint_id))
+                    .filter(|splint_id| identities.contains(splint_id))
             })
             .unwrap_or_else(|| layout.first_splint_id());
         anyhow::ensure!(
@@ -7815,8 +7819,18 @@ impl App {
         self.panes
             .pending_exited_splints
             .retain(|splint_id| !removed.contains(splint_id));
+        let active_replaced = tabs::replace_retired_panes(
+            &mut self.panes.pane,
+            &mut self.panes.inactive_panes,
+            &mut prepared,
+            &removed,
+            |pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+        );
         self.panes.inactive_panes.extend(prepared);
-        let _ = self.focus_splint(next_focus);
+        let focus_changed = self.focus_splint(next_focus);
+        if active_replaced && !focus_changed {
+            self.focused_pane_changed();
+        }
         anyhow::ensure!(
             self.panes.focused_splint() == Some(next_focus),
             "topology update focus could not be applied"
@@ -7824,7 +7838,7 @@ impl App {
         self.panes.inactive_panes.retain(|pane| {
             pane.snapshot
                 .as_ref()
-                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+                .is_none_or(|snapshot| layout.find_splint(snapshot.splint_id).is_some())
         });
         self.panes
             .pending_remote_splits

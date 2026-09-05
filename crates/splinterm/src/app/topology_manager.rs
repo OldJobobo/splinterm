@@ -31,9 +31,7 @@ use splinterm_protocol::{
 use tokio::sync::mpsc;
 
 use super::{
-    pane_bridge::{
-        PaneTask, layout_splint_ids, prepare_live_pane, prepare_live_pane_at_incarnation,
-    },
+    pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane_at_incarnation},
     session_catalog::{
         GraphicalLairLifetime, automation_launch, graphical_create_request, launch_parameters,
         new_dojo_request_for, recent_dojo_ids, remember_dojo, select_dojo_from,
@@ -537,15 +535,38 @@ fn topology_identity_diff(
     let mut current_ids = Vec::new();
     layout_splint_ids(previous, &mut previous_ids);
     layout_splint_ids(current, &mut current_ids);
-    let previous = previous_ids
+    let previous_ids = previous_ids
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
-    let current = current_ids
+    let current_ids = current_ids
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
+    // Restoration keeps the durable ID but replaces the process and its streams.
+    // Never try to attach an already-exited incarnation.
+    let replacements = current_ids
+        .intersection(&previous_ids)
+        .copied()
+        .filter(|id| {
+            let old = previous
+                .find_splint(*id)
+                .expect("collected previous Splint");
+            let next = current.find_splint(*id).expect("collected current Splint");
+            next.last_incarnation.is_some()
+                && next.last_incarnation != old.last_incarnation
+                && !matches!(next.state, SplintState::Exited(_))
+        })
+        .collect::<Vec<_>>();
     (
-        current.difference(&previous).copied().collect(),
-        previous.difference(&current).copied().collect(),
+        current_ids
+            .difference(&previous_ids)
+            .copied()
+            .chain(replacements.iter().copied())
+            .collect(),
+        previous_ids
+            .difference(&current_ids)
+            .copied()
+            .chain(replacements)
+            .collect(),
     )
 }
 
@@ -608,7 +629,19 @@ async fn reconcile_window_topology(
     }
     let mut prepared = Vec::new();
     for splint_id in added_ids {
-        match prepare_live_pane(factory, config, splint_id, image_cache.clone(), false).await {
+        let expected_incarnation = next
+            .find_splint(splint_id)
+            .and_then(|splint| splint.last_incarnation);
+        match prepare_live_pane_at_incarnation(
+            factory,
+            config,
+            splint_id,
+            expected_incarnation,
+            image_cache.clone(),
+            false,
+        )
+        .await
+        {
             Ok(pane) => prepared.push((splint_id, pane)),
             Err(error) => {
                 let tasks = prepared
@@ -3373,6 +3406,48 @@ mod tests {
         assert_eq!(
             catalog.creation_blocker,
             Some("Window tab capacity reached")
+        );
+    }
+
+    #[test]
+    fn topology_diff_replaces_restored_incarnation_not_metadata_or_exit() {
+        let mut old = splinterm_core::Splint::shell(PathBuf::from("/tmp"));
+        old.state = SplintState::Exited(0);
+        old.last_incarnation = Some(7);
+        let id = old.id;
+        let previous = LayoutNode::Leaf(old.clone());
+        for state in [SplintState::Starting, SplintState::Running] {
+            let mut restored = old.clone();
+            restored.state = state;
+            restored.last_incarnation = Some(8);
+            let next = LayoutNode::Leaf(restored);
+            assert_eq!(
+                topology_identity_diff(&previous, &next),
+                (vec![id], vec![id])
+            );
+            assert_eq!(topology_identity_diff(&next, &next), (vec![], vec![]));
+        }
+        for state in [SplintState::Exited(1), SplintState::Running] {
+            let mut metadata = old.clone();
+            metadata.state = state;
+            metadata.title = "renamed".into();
+            assert_eq!(
+                topology_identity_diff(&previous, &LayoutNode::Leaf(metadata)),
+                (vec![], vec![])
+            );
+        }
+        let mut already_exited = old.clone();
+        already_exited.last_incarnation = Some(8);
+        assert_eq!(
+            topology_identity_diff(&previous, &LayoutNode::Leaf(already_exited)),
+            (vec![], vec![])
+        );
+        let mut first_live = old.clone();
+        first_live.state = SplintState::Running;
+        old.last_incarnation = None;
+        assert_eq!(
+            topology_identity_diff(&LayoutNode::Leaf(old), &LayoutNode::Leaf(first_live)),
+            (vec![id], vec![id])
         );
     }
 

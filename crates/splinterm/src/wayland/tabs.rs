@@ -7,6 +7,32 @@ use super::{
     rect_contains, sanitized_tab_label,
 };
 
+/// Install new streams for durable IDs that were retired and added in one update.
+/// Shared by visible and hidden tabs; preserve pane positions and logical focus.
+/// Remaining prepared panes are genuinely new layout members.
+pub(super) fn replace_retired_panes<T>(
+    active: &mut T,
+    inactive: &mut [T],
+    prepared: &mut Vec<T>,
+    removed: &HashSet<SplintId>,
+    identity: impl Fn(&T) -> Option<SplintId>,
+) -> bool {
+    let mut active_replaced = false;
+    for (position, old) in std::iter::once(active)
+        .chain(inactive.iter_mut())
+        .enumerate()
+    {
+        let Some(id) = identity(old).filter(|id| removed.contains(id)) else {
+            continue;
+        };
+        if let Some(index) = prepared.iter().position(|pane| identity(pane) == Some(id)) {
+            *old = prepared.swap_remove(index);
+            active_replaced |= position == 0;
+        }
+    }
+    active_replaced
+}
+
 pub(super) const TAB_STRIP_LOGICAL_HEIGHT: u32 = 34;
 const TAB_PREFERRED_LOGICAL_WIDTH: u32 = 180;
 const TAB_MIN_LOGICAL_WIDTH: u32 = 96;
@@ -296,7 +322,7 @@ impl DojoTabView {
         );
         let next_focus = focused.or_else(|| {
             self.focused_splint()
-                .filter(|splint_id| !removed.contains(splint_id))
+                .filter(|splint_id| identities.contains(splint_id))
         });
         let next_focus = next_focus.unwrap_or_else(|| layout.first_splint_id());
         anyhow::ensure!(
@@ -308,13 +334,20 @@ impl DojoTabView {
             .retain(|splint_id| !removed.contains(splint_id));
         self.pending_remote_splits
             .retain(|_, pending| layout.find_splint(*pending).is_some());
+        replace_retired_panes(
+            &mut self.pane,
+            &mut self.inactive_panes,
+            &mut prepared,
+            &removed,
+            |pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+        );
         self.inactive_panes.extend(prepared);
         let focused = self.focus_splint(next_focus);
         debug_assert!(focused);
         self.inactive_panes.retain(|pane| {
             pane.snapshot
                 .as_ref()
-                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+                .is_none_or(|snapshot| layout.find_splint(snapshot.splint_id).is_some())
         });
         self.layout = Some(layout);
         Ok(())
@@ -662,6 +695,62 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_streams_replace_active_and_hidden_panes_without_duplicate_ids() {
+        let active_id = super::SplintId::new();
+        let hidden_id = super::SplintId::new();
+        let added_id = super::SplintId::new();
+        let unchanged_id = super::SplintId::new();
+        let mut active = (active_id, 7);
+        let mut inactive = vec![(hidden_id, 3), (unchanged_id, 1)];
+        let mut prepared = vec![(hidden_id, 4), (added_id, 1), (active_id, 8)];
+        let removed = super::HashSet::from([active_id, hidden_id]);
+        assert!(super::replace_retired_panes(
+            &mut active,
+            &mut inactive,
+            &mut prepared,
+            &removed,
+            |pane| Some(pane.0)
+        ));
+        assert_eq!(active, (active_id, 8));
+        assert_eq!(inactive, vec![(hidden_id, 4), (unchanged_id, 1)]);
+        assert_eq!(prepared, vec![(added_id, 1)]);
+        inactive.extend(prepared);
+        assert_eq!(
+            inactive.iter().filter(|pane| pane.0 == hidden_id).count(),
+            1
+        );
+        assert!(!inactive.iter().any(|pane| pane.0 == active_id));
+    }
+
+    #[test]
+    fn restoring_hidden_stream_does_not_change_active_pane() {
+        let active_id = super::SplintId::new();
+        let hidden_id = super::SplintId::new();
+        let mut active = (active_id, 7);
+        let mut inactive = vec![(hidden_id, 3)];
+        let mut prepared = vec![(hidden_id, 4)];
+        assert!(!super::replace_retired_panes(
+            &mut active,
+            &mut inactive,
+            &mut prepared,
+            &super::HashSet::from([hidden_id]),
+            |pane| Some(pane.0)
+        ));
+        assert_eq!(active, (active_id, 7));
+        assert_eq!(inactive, vec![(hidden_id, 4)]);
+        assert!(prepared.is_empty());
+        // Ordinary removal leaves the old pane for the caller's focus-and-prune step.
+        assert!(!super::replace_retired_panes(
+            &mut active,
+            &mut inactive,
+            &mut prepared,
+            &super::HashSet::from([active_id]),
+            |pane| Some(pane.0)
+        ));
+        assert_eq!(active, (active_id, 7));
+    }
+
     use std::collections::HashMap;
 
     use splinterm_core::{LairId, TopologyRevision};
