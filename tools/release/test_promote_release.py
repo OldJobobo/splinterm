@@ -22,7 +22,7 @@ RUN_ID = 12345
 
 class CandidateFixture:
     def __init__(
-        self, root: Path, previous_version_tag: str = "v0.1.0-rc.2"
+        self, root: Path, previous_version_tag: str = "v0.1.0-rc.3"
     ) -> None:
         self.root = root
         self.assets = MODULE.expected_assets(COMMIT, VERSION)
