@@ -1149,7 +1149,7 @@ fn equivalent_semantic_state_survives_cursor_cache_scale_and_theme_paths() {
     let mut moved = semantic_state.clone();
     moved.cursor_column = 1;
     let mut moved_frame = frame;
-    moved_frame.refresh_cursor(&moved);
+    moved_frame.refresh_cursor(&moved).unwrap();
     paint_snapshot_rows_presented(
         &mut pixels,
         width,
@@ -1418,7 +1418,7 @@ fn cursor_and_title_changes_do_not_reshape_rows() {
     snapshot.cursor_column = 1;
     snapshot.cursor_row = 1;
     snapshot.title = "new title".into();
-    frame.refresh_cursor(&snapshot);
+    frame.refresh_cursor(&snapshot).unwrap();
 
     assert_eq!(frame.cursor, Some((1, 1)));
     assert_eq!(frame.glyphs, glyphs);
@@ -1523,6 +1523,9 @@ fn default_alpha_tracks_color_source_and_uses_premultiplied_argb() {
 fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
     let key = GlyphKey { face: 0, glyph: 1 };
     let frame = SnapshotFrame {
+        font_ligatures: crate::font_shaping::FontLigatures::Off,
+        font_features: crate::font_shaping::FeatureSettings::default(),
+        font_size: BASE_FONT_SIZE,
         font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: vec![
             SnapshotGlyph {
@@ -1616,6 +1619,9 @@ fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
 
 fn damage_test_frame() -> SnapshotFrame {
     SnapshotFrame {
+        font_ligatures: crate::font_shaping::FontLigatures::Off,
+        font_features: crate::font_shaping::FeatureSettings::default(),
+        font_size: BASE_FONT_SIZE,
         font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: Vec::new(),
         decorations: Vec::new(),
@@ -2515,6 +2521,9 @@ fn scroll_copy_clips_to_undersized_framebuffers() {
 #[test]
 fn terminal_size_calculation_clamps_minimum_and_protocol_limits() {
     let frame = SnapshotFrame {
+        font_ligatures: crate::font_shaping::FontLigatures::Off,
+        font_features: crate::font_shaping::FeatureSettings::default(),
+        font_size: BASE_FONT_SIZE,
         font_generation: Arc::clone(snapshot_font_generation().unwrap()),
         glyphs: Vec::new(),
         decorations: Vec::new(),
@@ -2636,4 +2645,507 @@ fn ppm_capture_is_lossless_rgb_and_checks_dimensions() {
             .kind(),
         io::ErrorKind::InvalidInput
     );
+}
+
+fn shaping_context(mode: crate::font_shaping::FontLigatures, features: &str) -> RenderContext {
+    compatibility_render_context().unwrap().with_test_shaping(
+        mode,
+        crate::font_shaping::FeatureSettings::parse(features).unwrap(),
+    )
+}
+
+fn shaping_snapshot(lines: &[&str]) -> TerminalSnapshot {
+    let mut snapshot = incremental_snapshot();
+    snapshot.columns = lines[0].chars().count();
+    snapshot.rows = lines.len();
+    snapshot.visible_rows = lines
+        .iter()
+        .enumerate()
+        .map(|(row, text)| TerminalRow {
+            row_id: Some(u64::try_from(row + 1).unwrap()),
+            linebreak: false,
+            cells: text
+                .chars()
+                .map(|character| TerminalCell {
+                    content: character.to_string(),
+                    spacer_remaining: None,
+                    attributes: default_attributes(),
+                })
+                .collect(),
+        })
+        .collect();
+    snapshot.input_modes.cursor_visible = false;
+    snapshot
+}
+
+#[test]
+fn live_shaping_joins_ascii_with_spaces_and_keeps_grid_source_spans() {
+    use crate::font_shaping::FontLigatures::{Off, On};
+    let snapshot = shaping_snapshot(&[" != === -> "]);
+    let on =
+        SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(On, "calt=1"))
+            .unwrap();
+    let off =
+        SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(Off, "calt=1"))
+            .unwrap();
+    assert_ne!(
+        on.glyphs.iter().map(|glyph| glyph.key).collect::<Vec<_>>(),
+        off.glyphs.iter().map(|glyph| glyph.key).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        on.glyphs.len(),
+        3,
+        "spaces and empty contextual masks provide context without empty placements"
+    );
+    assert_eq!(on.cell_spans, off.cell_spans);
+    assert_eq!(on.foregrounds, off.foregrounds);
+    assert_eq!(on.backgrounds, off.backgrounds);
+    assert_eq!(on.cell_width, off.cell_width);
+    assert!(on.glyphs.iter().all(|glyph| glyph.cells == 1
+        && snapshot.visible_rows[0].cells[glyph.column as usize].content != " "));
+    assert!(
+        on.glyphs
+            .iter()
+            .all(|glyph| glyph.x_offset.to_bits() == 0.0_f32.to_bits())
+    );
+    let no_calt =
+        SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(On, "calt=0"))
+            .unwrap();
+    assert_eq!(
+        no_calt
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.key)
+            .collect::<Vec<_>>(),
+        off.glyphs.iter().map(|glyph| glyph.key).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn live_shaping_features_apply_with_ligatures_off_and_on() {
+    use crate::font_shaping::FontLigatures::{Off, On};
+    for mode in [Off, On] {
+        // A combining mark forces the second cell through per-cell fallback.
+        let mut snapshot = shaping_snapshot(&["00"]);
+        snapshot.visible_rows[0].cells[1].content = "0\u{301}".into();
+        let plain = SnapshotFrame::load_scaled_with_context(
+            &snapshot,
+            120,
+            &shaping_context(mode, "zero=0"),
+        )
+        .unwrap();
+        let slashed = SnapshotFrame::load_scaled_with_context(
+            &snapshot,
+            120,
+            &shaping_context(mode, "zero=1"),
+        )
+        .unwrap();
+        for column in 0..2 {
+            let ids = |frame: &SnapshotFrame| {
+                frame
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| glyph.column == column)
+                    .map(|glyph| glyph.key)
+                    .collect::<Vec<_>>()
+            };
+            assert_ne!(ids(&plain), ids(&slashed));
+        }
+        assert_eq!(plain.cell_spans, slashed.cell_spans);
+    }
+}
+
+#[test]
+fn live_shaping_attribute_and_fallback_boundaries_preserve_per_cell_rendering() {
+    use crate::font_shaping::FontLigatures::{Off, On};
+    for boundary in 0..13 {
+        let mut snapshot = shaping_snapshot(&["!="]);
+        let cell = &mut snapshot.visible_rows[0].cells[1];
+        match boundary {
+            0 => cell.attributes.bold = true,
+            1 => cell.attributes.italic = true,
+            2 => {
+                cell.attributes.foreground_source = ColorSource::Rgb;
+                cell.attributes.foreground = 0x0011_2233;
+            }
+            3 => {
+                cell.attributes.background_source = ColorSource::Rgb;
+                cell.attributes.background = 0x0011_2233;
+            }
+            4 => cell.attributes.underline = UnderlineStyle::Single,
+            5 => cell.attributes.strikethrough = true,
+            6 => cell.attributes.conceal = true,
+            7 => cell.attributes.reverse = true,
+            8 => cell.attributes.dim = true,
+            9 => cell.content.clear(),
+            10 => cell.content = "界".into(),
+            11 => cell.content = "─".into(),
+            12 => cell.content = "=\u{301}".into(),
+            _ => unreachable!(),
+        }
+        let on =
+            SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(On, "calt=1"))
+                .unwrap();
+        let off = SnapshotFrame::load_scaled_with_context(
+            &snapshot,
+            120,
+            &shaping_context(Off, "calt=1"),
+        )
+        .unwrap();
+        assert_eq!(
+            on.glyphs
+                .iter()
+                .map(|glyph| (glyph.column, glyph.key))
+                .collect::<Vec<_>>(),
+            off.glyphs
+                .iter()
+                .map(|glyph| (glyph.column, glyph.key))
+                .collect::<Vec<_>>(),
+            "boundary {boundary}"
+        );
+        assert_eq!(on.decorations, off.decorations);
+        assert_eq!(on.cell_spans, off.cell_spans);
+    }
+    let mut snapshot = shaping_snapshot(&["!= ", "!= "]);
+    snapshot.visible_rows[0].cells[2].content.clear();
+    snapshot.visible_rows[0].cells[2].spacer_remaining = Some(1);
+    snapshot.visible_rows[1].cells.truncate(1);
+    let on =
+        SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(On, "calt=1"))
+            .unwrap();
+    let off =
+        SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(Off, "calt=1"))
+            .unwrap();
+    assert_eq!(
+        on.glyphs.iter().map(|glyph| glyph.key).collect::<Vec<_>>(),
+        off.glyphs.iter().map(|glyph| glyph.key).collect::<Vec<_>>()
+    );
+    assert_eq!(on.cell_spans, off.cell_spans);
+}
+
+fn assert_shaping_frame_matches_full(
+    frame: &SnapshotFrame,
+    snapshot: &TerminalSnapshot,
+    context: &RenderContext,
+) {
+    let full = SnapshotFrame::load_scaled_with_context(snapshot, 120, context).unwrap();
+    assert_eq!(frame.glyphs, full.glyphs);
+    assert_eq!(frame.decorations, full.decorations);
+    assert_eq!(frame.cell_spans, full.cell_spans);
+    assert_eq!(frame.cursor, full.cursor);
+    let geometry = frame.tight_geometry().unwrap();
+    let width = geometry.buffer_width();
+    let height = geometry.buffer_height();
+    let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
+    let mut expected = actual.clone();
+    for style in [
+        CursorStyle::Block,
+        CursorStyle::Beam,
+        CursorStyle::Underline,
+    ] {
+        paint_snapshot(&mut actual, width, height, frame, &geometry, true, style);
+        paint_snapshot(&mut expected, width, height, &full, &geometry, true, style);
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn live_shaping_cursor_dirty_rows_and_incremental_frames_match_full() {
+    use crate::font_shaping::FontLigatures::{Cursor, On};
+    let context = shaping_context(Cursor, "calt=1");
+    let mut snapshot = shaping_snapshot(&["!= === ->", "!= === ->", "!= === ->"]);
+    let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
+    let joined = frame.glyphs.clone();
+    let geometry = frame.tight_geometry().unwrap();
+    let width = geometry.buffer_width();
+    let height = geometry.buffer_height();
+    let mut incremental = vec![0; usize::try_from(width * height * 4).unwrap()];
+    paint_snapshot(
+        &mut incremental,
+        width,
+        height,
+        &frame,
+        &geometry,
+        true,
+        CursorStyle::Block,
+    );
+    for (column, row, visible, expected_dirty) in [
+        (0, 0, true, [true, false, false]),
+        (1, 0, true, [true, false, false]),
+        (4, 2, true, [true, false, true]),
+        (4, 2, false, [false, false, true]),
+    ] {
+        snapshot.cursor_column = column;
+        snapshot.cursor_row = row;
+        snapshot.input_modes.cursor_visible = visible;
+        let mut dirty = [false; 3];
+        frame.mark_cursor_dirty_rows(&snapshot, &mut dirty);
+        assert_eq!(dirty, expected_dirty);
+        let untouched = frame
+            .glyphs
+            .iter()
+            .filter(|glyph| glyph.row == 1)
+            .copied()
+            .collect::<Vec<_>>();
+        frame
+            .refresh_rows_with_context(&snapshot, &[], &context)
+            .unwrap();
+        assert_eq!(
+            untouched,
+            frame
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.row == 1)
+                .copied()
+                .collect::<Vec<_>>()
+        );
+        paint_snapshot_rows(
+            &mut incremental,
+            width,
+            height,
+            &frame,
+            &geometry,
+            &dirty,
+            true,
+            CursorStyle::Block,
+        );
+        let full = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
+        let mut expected = vec![0; incremental.len()];
+        paint_snapshot(
+            &mut expected,
+            width,
+            height,
+            &full,
+            &geometry,
+            true,
+            CursorStyle::Block,
+        );
+        assert_eq!(
+            incremental, expected,
+            "cursor dirty raster rows match full composition"
+        );
+        assert_shaping_frame_matches_full(&frame, &snapshot, &context);
+    }
+    assert_eq!(frame.glyphs, joined, "hiding cursor restores context");
+    snapshot.input_modes.cursor_blink = true;
+    let mut dirty = [false; 3];
+    frame.mark_cursor_dirty_rows(&snapshot, &mut dirty);
+    assert_eq!(dirty, [false; 3]);
+    frame.refresh_cursor(&snapshot).unwrap();
+    assert_eq!(frame.glyphs, joined);
+    snapshot.visible_rows[1].cells[0].content = "-".into();
+    snapshot.visible_rows[1].cells[1].content = ">".into();
+    frame
+        .refresh_rows_with_context(&snapshot, &[false, true, false], &context)
+        .unwrap();
+    assert_shaping_frame_matches_full(&frame, &snapshot, &context);
+    assert!(
+        frame
+            .refresh_rows_with_context(&snapshot, &[true; 3], &shaping_context(On, "calt=1"))
+            .is_err()
+    );
+    assert!(
+        frame
+            .refresh_rows_with_context(&snapshot, &[true; 3], &shaping_context(Cursor, "calt=0"))
+            .is_err()
+    );
+}
+
+#[test]
+fn live_shaping_cursor_splits_only_at_reported_cell_and_history_reuse_is_guarded() {
+    use crate::font_shaping::FontLigatures::{Cursor, Off};
+    let context = shaping_context(Cursor, "calt=1");
+    let mut snapshot = shaping_snapshot(&["!= === ->", "!= === ->", "!= === ->"]);
+    snapshot.input_modes.cursor_visible = true;
+    snapshot.cursor_column = 0;
+    let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, 120, &context).unwrap();
+    let off =
+        SnapshotFrame::load_scaled_with_context(&snapshot, 120, &shaping_context(Off, "calt=1"))
+            .unwrap();
+    assert_eq!(
+        frame.glyphs[..2]
+            .iter()
+            .map(|glyph| glyph.key)
+            .collect::<Vec<_>>(),
+        off.glyphs[..2]
+            .iter()
+            .map(|glyph| glyph.key)
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        frame.glyphs[2].key, off.glyphs[2].key,
+        "other runs retain joining"
+    );
+    assert!(
+        frame
+            .scroll_viewport_rows_with_context(&snapshot, 1, &context)
+            .unwrap()
+            .is_none()
+    );
+    snapshot.input_modes.cursor_visible = false;
+    assert!(
+        frame
+            .scroll_viewport_rows_with_context(&snapshot, 1, &context)
+            .unwrap()
+            .is_none()
+    );
+    frame.refresh_cursor(&snapshot).unwrap();
+    // Distinct reused rows and newly exposed content exercise both copy directions.
+    snapshot.visible_rows[1].cells[0].content = "-".into();
+    snapshot.visible_rows[1].cells[1].content = ">".into();
+    frame
+        .refresh_rows_with_context(&snapshot, &[false, true, false], &context)
+        .unwrap();
+    for delta in [1, -1] {
+        let geometry = frame.tight_geometry().unwrap();
+        let width = geometry.buffer_width();
+        let height = geometry.buffer_height();
+        let mut actual = vec![0; usize::try_from(width * height * 4).unwrap()];
+        paint_snapshot(
+            &mut actual,
+            width,
+            height,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        let mut shifted = snapshot.clone();
+        let dirty = if delta > 0 {
+            shifted.visible_rows.rotate_right(1);
+            shifted.visible_rows[0].cells[0].content = "x".into();
+            [true, false, false]
+        } else {
+            shifted.visible_rows.rotate_left(1);
+            shifted.visible_rows[2].cells[0].content = "y".into();
+            [false, false, true]
+        };
+        let scroll = frame
+            .scroll_viewport_rows_with_context(&shifted, delta, &context)
+            .unwrap()
+            .unwrap();
+        scroll_snapshot_pixels(&mut actual, width, &frame, &geometry, scroll);
+        paint_snapshot_rows(
+            &mut actual,
+            width,
+            height,
+            &frame,
+            &geometry,
+            &dirty,
+            false,
+            CursorStyle::Block,
+        );
+        assert_shaping_frame_matches_full(&frame, &shifted, &context);
+        let full = SnapshotFrame::load_scaled_with_context(&shifted, 120, &context).unwrap();
+        let mut expected = vec![0; actual.len()];
+        paint_snapshot(
+            &mut expected,
+            width,
+            height,
+            &full,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        assert_eq!(
+            actual, expected,
+            "history scroll pixels match full composition"
+        );
+        snapshot = shifted;
+    }
+}
+
+#[test]
+fn live_shaping_overhanging_and_merged_glyph_ink_is_clipped_by_selection_and_cursor() {
+    use crate::font_shaping::FontLigatures::On;
+    for (column, cells, left) in [(0, 1, 0), (0, 3, 0), (2, 1, -4)] {
+        let mut frame = damage_test_frame();
+        frame.font_ligatures = On;
+        frame.columns = 3;
+        frame.rows = 1;
+        let key = GlyphKey { face: 0, glyph: 1 };
+        frame.cache.insert(
+            key,
+            Arc::new(CachedGlyph {
+                content: Content::Mask,
+                left,
+                top: 1,
+                width: 6,
+                height: 1,
+                data: vec![255; 6],
+            }),
+        );
+        frame.glyphs.push(SnapshotGlyph {
+            key,
+            column,
+            row: 0,
+            cells,
+            cluster_advance: 6.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            foreground: [200, 100, 50],
+        });
+        let geometry = frame.tight_geometry().unwrap();
+        let mut base = vec![0; 6 * 2 * 4];
+        paint_snapshot(
+            &mut base,
+            6,
+            2,
+            &frame,
+            &geometry,
+            false,
+            CursorStyle::Block,
+        );
+        for cursor in 0..3 {
+            frame.cursor = Some((cursor, 0));
+            let mut actual = vec![0; base.len()];
+            paint_snapshot(
+                &mut actual,
+                6,
+                2,
+                &frame,
+                &geometry,
+                true,
+                CursorStyle::Block,
+            );
+            for x in 0..6 {
+                let pixel = &actual[x * 4..x * 4 + 4];
+                if x / 2 == cursor as usize {
+                    assert_eq!(pixel, [255; 4]);
+                } else {
+                    assert_eq!(
+                        pixel,
+                        &base[x * 4..x * 4 + 4],
+                        "outside cursor ink must survive"
+                    );
+                }
+            }
+        }
+        let mut selected = base.clone();
+        paint_snapshot_overlays(
+            &mut selected,
+            6,
+            2,
+            &frame,
+            &geometry,
+            SnapshotOverlays {
+                selection: Some(((0, 1), (0, 1))),
+                hovered_url: None,
+                dirty_rows: None,
+                focused: true,
+                selection_color: 0,
+                selection_foreground: 0x0011_2233,
+                url_color: 0,
+                accent_color: 0,
+            },
+        );
+        for x in 0..6 {
+            let pixel = &selected[x * 4..x * 4 + 4];
+            if x / 2 == 1 {
+                assert_eq!(pixel, [0x33, 0x22, 0x11, 255]);
+            } else {
+                assert_eq!(pixel, &base[x * 4..x * 4 + 4]);
+            }
+        }
+    }
 }

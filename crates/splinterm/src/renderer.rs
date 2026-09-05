@@ -43,7 +43,6 @@ mod images;
 mod overlays;
 mod raster;
 mod settings;
-#[cfg(test)]
 mod shaping;
 mod text;
 

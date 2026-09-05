@@ -21,6 +21,7 @@ use serde::Deserialize;
 use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS};
 
 use crate::{
+    font_shaping::{FeatureSettings, FontLigatures},
     geometry::{FontSize, FontSizingPolicy, TerminalPadding},
     keymap::{KeymapProfile, ResolvedKeymap, resolve_keymap},
     preset::PresetCatalog,
@@ -40,6 +41,8 @@ pub enum FontAuthority {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub font: String,
+    pub font_ligatures: FontLigatures,
+    pub font_features: FeatureSettings,
     pub font_authority: FontAuthority,
     pub font_size: FontSize,
     pub font_sizing_policy: FontSizingPolicy,
@@ -120,6 +123,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             font: DEFAULT_FONT.to_owned(),
+            font_ligatures: FontLigatures::Off,
+            font_features: FeatureSettings::default(),
             font_authority: FontAuthority::NativeOmarchy,
             font_size: FontSize::Pixels(14.0),
             font_sizing_policy: FontSizingPolicy::OutputScale,
@@ -277,6 +282,23 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 }
                 config.font = font;
                 config.font_authority = FontAuthority::Explicit;
+                false
+            }
+            "main.font-ligatures" => {
+                config.font_ligatures = match value {
+                    "off" => FontLigatures::Off,
+                    "on" => FontLigatures::On,
+                    "cursor" => FontLigatures::Cursor,
+                    _ => bail!(
+                        "line {}: font-ligatures must be off, on or cursor",
+                        index + 1
+                    ),
+                };
+                false
+            }
+            "main.font-features" => {
+                config.font_features = FeatureSettings::parse(value)
+                    .with_context(|| format!("line {}: invalid font-features", index + 1))?;
                 false
             }
             "main.font-size" | "font-size" | "main.font-pixelsize" => {
@@ -1058,6 +1080,69 @@ mod tests {
         format!(
             "[colors-dark]\nforeground={foreground}\nbackground={background}\nselection-background={selection_background}\nselection-foreground={selection_foreground}\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n"
         )
+    }
+
+    #[test]
+    fn font_shaping_startup_settings_are_explicit_bounded_and_line_numbered() {
+        let defaults = parse("").unwrap().config;
+        assert_eq!(defaults.font_ligatures, FontLigatures::Off);
+        assert_eq!(defaults.font_features, FeatureSettings::default());
+        for (text, mode) in [
+            ("off", FontLigatures::Off),
+            ("on", FontLigatures::On),
+            ("cursor", FontLigatures::Cursor),
+        ] {
+            let loaded = parse(&format!(
+                "[main]\nfont-ligatures={text}\nfont-features=calt=1,zero=1,ss01=2\n"
+            ))
+            .unwrap();
+            assert!(loaded.diagnostics.is_empty());
+            assert_eq!(loaded.config.font_ligatures, mode);
+            assert_eq!(
+                loaded.config.font_features,
+                FeatureSettings::new(&[("ss01", 2), ("zero", 1), ("calt", 1)]).unwrap()
+            );
+        }
+        assert_eq!(
+            parse("main.font-features=").unwrap().config.font_features,
+            FeatureSettings::default()
+        );
+        for value in [
+            "calt",
+            "cal=1",
+            "caltt=1",
+            "cált=1",
+            "calt=-1",
+            "calt=65536",
+            "calt=+1",
+            "calt=1,calt=0",
+            "calt=1,",
+            "calt=true",
+            "calt=",
+            "calt=1.0",
+        ] {
+            let error = parse(&format!("[main]\nfont-features={value}")).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("line 2"),
+                "{value}: {error:#}"
+            );
+        }
+        let too_many = (0..65)
+            .map(|i| format!("f{i:03}=1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            format!(
+                "{:#}",
+                parse(&format!("main.font-features={too_many}")).unwrap_err()
+            )
+            .contains("too many")
+        );
+        assert!(parse("main.font-features=ss01=65535").is_ok());
+        assert!(parse("main.font-features=calt=1,CALT=0").is_ok());
+        assert!(
+            format!("{:#}", parse("[main]\nfont-ligatures=yes").unwrap_err()).contains("line 2")
+        );
     }
 
     #[test]

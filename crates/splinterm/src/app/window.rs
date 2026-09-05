@@ -191,6 +191,8 @@ async fn run_live_multipane_window_inner(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_ligatures: config.font_ligatures,
+        font_features: config.font_features.clone(),
         font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
@@ -320,6 +322,8 @@ pub(super) async fn run_live_window(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_ligatures: config.font_ligatures,
+        font_features: config.font_features.clone(),
         font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,

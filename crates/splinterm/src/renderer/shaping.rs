@@ -1,20 +1,18 @@
-//! Experimental, test-only shaping of one compatible single-font Latin/LTR run.
+//! Bounded shaping of one compatible single-font Latin/LTR run.
 //!
 //! Callers supply adjacent logical leaders (not wide-cell spacers) and authoritative
 //! terminal widths. Byte ranges always refer to the concatenated original text;
 //! glyph count and advances never redefine terminal columns or source semantics.
-//! Run itemization, other scripts/directions, style/fallback boundaries, cursor
-//! policy, variation overrides, and integration with painting/cache invalidation
-//! are deliberately outside this prototype. Source spans are not ink bounds or
-//! contextual dependency spans: calt may retain separate one-cell clusters while
-//! drawing across columns. No live renderer path uses this prototype.
+//! Live itemization admits only adjacent single-width printable ASCII cells.
+//! Source spans are not ink bounds or contextual dependency spans: calt may
+//! retain separate one-cell clusters while drawing across columns.
 
 use std::ops::Range;
 
 use anyhow::{Result, ensure};
 use splinterm_protocol::MAX_COLUMNS;
 use swash::{
-    FontRef, Setting,
+    FontRef,
     shape::{
         Direction, ShapeContext,
         cluster::{Glyph, GlyphCluster},
@@ -22,45 +20,17 @@ use swash::{
     text::Script,
 };
 
-// Experimental resource ceilings, not new user configuration or protocol limits.
+use crate::font_shaping::FeatureSettings;
+
+// Resource ceilings, not new user configuration or protocol limits.
 const MAX_RUN_BYTES: usize = 64 * 1024;
-const MAX_FEATURES: usize = 64;
 const MAX_OUTPUT_GLYPHS: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug)]
-struct LogicalCell<'a> {
-    text: &'a str,
-    column: usize,
-    width: usize,
-}
-
-/// Exact four-byte printable ASCII tags, case preserved, sorted with no duplicates.
-/// Values are unsigned OpenType feature selectors, not just boolean switches.
-#[derive(Debug)]
-struct FeatureSettings(Vec<Setting<u16>>);
-
-impl FeatureSettings {
-    fn new(settings: &[(&str, i64)]) -> Result<Self> {
-        ensure!(settings.len() <= MAX_FEATURES, "too many feature settings");
-        let mut normalized = Vec::with_capacity(settings.len());
-        for &(tag, value) in settings {
-            ensure!(
-                tag.len() == 4 && tag.bytes().all(|byte| (0x20..=0x7e).contains(&byte)),
-                "feature tag must be exactly four printable ASCII bytes"
-            );
-            let value = u16::try_from(value)?;
-            normalized.push(Setting {
-                tag: u32::from_be_bytes(tag.as_bytes().try_into()?),
-                value,
-            });
-        }
-        normalized.sort_unstable_by_key(|setting| setting.tag);
-        ensure!(
-            normalized.windows(2).all(|pair| pair[0].tag != pair[1].tag),
-            "duplicate feature tag"
-        );
-        Ok(Self(normalized))
-    }
+pub(super) struct LogicalCell<'a> {
+    pub(super) text: &'a str,
+    pub(super) column: usize,
+    pub(super) width: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,11 +40,11 @@ struct CellSource {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct SourceSpan {
-    bytes: Range<usize>,
+pub(super) struct SourceSpan {
+    pub(super) bytes: Range<usize>,
     /// Indices into the original logical leader sequence, not glyph indices.
-    cells: Range<usize>,
-    columns: Range<usize>,
+    pub(super) cells: Range<usize>,
+    pub(super) columns: Range<usize>,
 }
 
 #[derive(Debug)]
@@ -151,11 +121,12 @@ impl RunSource {
 }
 
 #[derive(Debug)]
-struct ShapedCluster {
-    source: SourceSpan,
+pub(super) struct ShapedCluster {
+    pub(super) source: SourceSpan,
+    #[cfg_attr(not(test), allow(dead_code))]
     components: Vec<SourceSpan>,
     /// Retain every glyph's ID, advance, offsets and flags, including zero advances.
-    glyphs: Vec<Glyph>,
+    pub(super) glyphs: Vec<Glyph>,
 }
 
 impl ShapedCluster {
@@ -178,14 +149,20 @@ impl ShapedCluster {
 }
 
 #[derive(Debug)]
-struct ShapedRun {
+pub(super) struct ShapedRun {
+    #[cfg_attr(not(test), allow(dead_code))]
     source: RunSource,
-    clusters: Vec<ShapedCluster>,
+    pub(super) clusters: Vec<ShapedCluster>,
 }
 
-fn shape_run(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bounded run inputs include named-instance coordinates"
+)]
+pub(super) fn shape_run(
     context: &mut ShapeContext,
     font: FontRef<'_>,
+    coords: &[i16],
     cells: &[LogicalCell<'_>],
     row_columns: usize,
     size: f32,
@@ -201,7 +178,8 @@ fn shape_run(
         .script(Script::Latin)
         .direction(Direction::LeftToRight)
         .size(size)
-        .features(features.0.iter().copied())
+        .normalized_coords(coords)
+        .features(features.iter())
         .build();
     // One add_str call is important: Swash's byte offsets restart with each call.
     shaper.add_str(&source.text);
@@ -239,6 +217,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::*;
+    use swash::Setting;
 
     fn pinned_font() -> FontRef<'static> {
         static DATA: OnceLock<Vec<u8>> = OnceLock::new();
@@ -276,6 +255,7 @@ mod tests {
         shape_run(
             &mut ShapeContext::new(),
             pinned_font(),
+            &[],
             cells,
             usize::from(MAX_COLUMNS),
             20.0,
@@ -531,7 +511,7 @@ mod tests {
     fn shaping_feature_settings_are_validated_and_normalized() {
         let features = FeatureSettings::new(&[("ss01", 65535), ("calt", 0), ("liga", 1)]).unwrap();
         assert_eq!(
-            features.0,
+            features.iter().collect::<Vec<_>>(),
             vec![
                 Setting::from(("calt", 0)),
                 Setting::from(("liga", 1)),
@@ -545,10 +525,15 @@ mod tests {
             assert!(FeatureSettings::new(&[("calt", value)]).is_err());
         }
         assert!(FeatureSettings::new(&[("calt", 0), ("calt", 1)]).is_err());
-        assert!(FeatureSettings::new(&vec![("calt", 1); MAX_FEATURES + 1]).is_err());
-        assert!(FeatureSettings::new(&[]).unwrap().0.is_empty());
+        assert!(FeatureSettings::new(&vec![("calt", 1); 65]).is_err());
+        assert!(FeatureSettings::new(&[]).unwrap().iter().next().is_none());
         assert_eq!(
-            FeatureSettings::new(&[("CALt", 1)]).unwrap().0[0].tag,
+            FeatureSettings::new(&[("CALt", 1)])
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()
+                .tag,
             u32::from_be_bytes(*b"CALt")
         );
     }
@@ -600,6 +585,7 @@ mod tests {
                 shape_run(
                     &mut ShapeContext::new(),
                     pinned_font(),
+                    &[],
                     &valid,
                     1,
                     size,

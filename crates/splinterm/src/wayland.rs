@@ -1639,10 +1639,18 @@ impl PaneView {
                 let trace_revision = update.revision;
                 let trace_rows = update.rows.len();
                 let content_changed = terminal_update_changes_visible_content(&update);
-                let frame_dirty = content_changed
+                let mut frame_dirty = content_changed
                     || update.cursor.is_some()
                     || update.input_modes.is_some()
                     || image_sources.is_some();
+                let cursor_only = !content_changed
+                    && image_sources.is_none()
+                    && !self.viewport_dirty
+                    && self
+                        .snapshot_frame
+                        .as_ref()
+                        .zip(self.snapshot.as_ref())
+                        .is_some_and(|(frame, snapshot)| frame.can_refresh_cursor_rows(snapshot));
                 let previous_generation = self
                     .snapshot
                     .as_ref()
@@ -1665,6 +1673,13 @@ impl PaneView {
                 }
                 if let Some(image_sources) = image_sources {
                     self.image_sources = image_sources;
+                }
+                if cursor_only && let Some(display) = self.display_snapshot() {
+                    self.snapshot_frame
+                        .as_mut()
+                        .expect("cursor-only frame exists")
+                        .refresh_cursor(&display)?;
+                    frame_dirty = false;
                 }
                 let trace_pane_role = self.trace_pane_role(pane_role);
                 if frame_dirty {
@@ -8495,6 +8510,7 @@ impl App {
         let mut focused_visual_changed = topology_changed;
         let mut title_changed = false;
         let mut full_frame_reload = false;
+        let mut history_content_changed = false;
         let mut rebuild_all_inactive = false;
         let mut effect_desired_changed = false;
         let mut font_reconciled = false;
@@ -8582,6 +8598,7 @@ impl App {
                     let full_frame_reasons = terminal_update_full_frame_reasons(&update, current);
                     let mut full = full_frame_reasons != 0;
                     let content_changed = terminal_update_changes_visible_content(&update);
+                    history_content_changed |= content_changed || image_sources.is_some();
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
                     if content_changed {
@@ -8750,6 +8767,7 @@ impl App {
                     }
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
+                    history_content_changed = true;
                     self.panes.pane.history_page_pending = false;
                     let pinned_selection_rows = self
                         .panes
@@ -8991,13 +9009,6 @@ impl App {
             &mut self.input.last_cursor_blink,
         ) {
             let prepare_started = perf_trace_enabled().then(Instant::now);
-            let trace_dirty_rows = self
-                .panes
-                .pane
-                .prepare_dirty_rows
-                .iter()
-                .filter(|dirty| **dirty)
-                .count();
             let live_viewport = self.panes.pane.scrollback_viewport.is_live();
             let display_owned = if live_viewport {
                 None
@@ -9012,7 +9023,46 @@ impl App {
                 .as_ref()
                 .or(self.panes.pane.snapshot.as_ref())
                 .context("updated snapshot exists")?;
-            if full_frame_reload || self.panes.pane.snapshot_frame.is_none() || !live_viewport {
+            let cursor_only_history = !live_viewport
+                && !history_content_changed
+                && !self.panes.pane.viewport_dirty
+                && self
+                    .panes
+                    .pane
+                    .snapshot_frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.can_refresh_cursor_rows(display));
+            if cursor_only_history {
+                self.panes.pane.prepare_dirty_rows.fill(false);
+            }
+            if let Some(frame) = &self.panes.pane.snapshot_frame {
+                self.panes
+                    .pane
+                    .prepare_dirty_rows
+                    .resize(display.rows, false);
+                self.panes
+                    .pane
+                    .raster_dirty_rows
+                    .resize(display.rows, false);
+                self.panes
+                    .pane
+                    .surface_dirty_rows
+                    .resize(display.rows, false);
+                frame.mark_cursor_dirty_rows(display, &mut self.panes.pane.prepare_dirty_rows);
+                frame.mark_cursor_dirty_rows(display, &mut self.panes.pane.raster_dirty_rows);
+                frame.mark_cursor_dirty_rows(display, &mut self.panes.pane.surface_dirty_rows);
+            }
+            let trace_dirty_rows = self
+                .panes
+                .pane
+                .prepare_dirty_rows
+                .iter()
+                .filter(|dirty| **dirty)
+                .count();
+            if full_frame_reload
+                || self.panes.pane.snapshot_frame.is_none()
+                || (!live_viewport && !cursor_only_history)
+            {
                 self.panes.pane.snapshot_frame =
                     Some(SnapshotFrame::load_scaled_with_sources_and_context(
                         display,
@@ -9027,7 +9077,6 @@ impl App {
                     &self.presentation.render_context,
                 )?;
                 frame.refresh_images(display, &self.panes.pane.image_sources)?;
-                frame.refresh_cursor(display);
             }
             self.panes.pane.rendered_viewport_offset =
                 self.panes.pane.scrollback_viewport.offset_from_bottom();
@@ -9415,13 +9464,11 @@ impl App {
             self.panes.pane.pending_scrolls.clear();
             let incremental = if display.images.is_none() {
                 if let (Some(frame), Some(delta)) = (&mut self.panes.pane.snapshot_frame, delta) {
-                    let scroll = frame.scroll_viewport_rows_with_context(
+                    frame.scroll_viewport_rows_with_context(
                         &display,
                         delta,
                         &self.presentation.render_context,
-                    )?;
-                    frame.refresh_cursor(&display);
-                    scroll
+                    )?
                 } else {
                     None
                 }
@@ -12083,6 +12130,100 @@ mod tests {
         ));
         fs::write(&temporary, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         fs::rename(temporary, path).unwrap();
+    }
+
+    #[test]
+    fn live_shaping_cached_pane_cursor_updates_match_full_without_frame_rebuild() {
+        use crate::font_shaping::{FeatureSettings, FontLigatures};
+        let context = RenderContext::new(u16::MAX).with_test_shaping(
+            FontLigatures::Cursor,
+            FeatureSettings::parse("calt=1").unwrap(),
+        );
+        let theme = ResolvedTheme::default();
+        for role in ["visible-inactive", "hidden"] {
+            for history in [false, true] {
+                let mut options = pane_options(SplintId::new());
+                options.snapshot.columns = 2;
+                options.snapshot.rows = 2;
+                let rows: Vec<_> = (1..=3)
+                    .map(|id| {
+                        let mut row = blank_row(2);
+                        row.row_id = Some(id);
+                        row.cells[0].content = "!".into();
+                        row.cells[1].content = "=".into();
+                        row
+                    })
+                    .collect();
+                options.snapshot.visible_rows = rows[1..].to_vec();
+                options.snapshot.scrollback_rows = rows[..1].to_vec();
+                options.snapshot.available_scrollback_rows = 1;
+                options.snapshot.oldest_available_scrollback_row_id = Some(1);
+                options.snapshot.newest_available_scrollback_row_id = Some(1);
+                apply_theme(&mut options.snapshot, theme);
+                let mut pane = PaneView::from_options_with_context(options, 120, &context).unwrap();
+                if history {
+                    pane.scrollback_viewport
+                        .scroll_up(1, pane.snapshot.as_ref().unwrap());
+                    rebuild_pane_scaled_frame_with_context(&mut pane, 120, &context).unwrap();
+                }
+                for (column, row, visible) in [(1, 0, true), (0, 1, true), (0, 1, false)] {
+                    let snapshot = pane.snapshot.as_ref().unwrap();
+                    let mut update = empty_update();
+                    update.base_revision = snapshot.revision;
+                    update.revision = snapshot.revision + 1;
+                    update.cursor = Some(splinterm_protocol::TerminalCursor {
+                        column,
+                        row,
+                        deferred_wrap: false,
+                    });
+                    let mut modes = snapshot.input_modes;
+                    modes.cursor_visible = visible;
+                    update.input_modes = Some(modes);
+                    let impact = pane
+                        .apply_background_update(
+                            WindowUpdate::Update {
+                                update,
+                                image_sources: None,
+                                trace: None,
+                            },
+                            theme,
+                            role,
+                        )
+                        .unwrap();
+                    assert!(impact.visual_changed);
+                    assert!(
+                        !impact.frame_dirty,
+                        "cursor-only {role} update must not request a whole frame rebuild"
+                    );
+                    let display = pane.display_snapshot().unwrap();
+                    let frame = pane.snapshot_frame.as_ref().unwrap();
+                    let full =
+                        SnapshotFrame::load_scaled_with_context(&display, 120, &context).unwrap();
+                    let geometry = frame.window_geometry(160, 100, 120).unwrap();
+                    let mut actual = vec![0; 160 * 100 * 4];
+                    let mut expected = actual.clone();
+                    crate::renderer::paint_snapshot(
+                        &mut actual,
+                        160,
+                        100,
+                        frame,
+                        &geometry,
+                        true,
+                        crate::config::CursorStyle::Block,
+                    );
+                    crate::renderer::paint_snapshot(
+                        &mut expected,
+                        160,
+                        100,
+                        &full,
+                        &geometry,
+                        true,
+                        crate::config::CursorStyle::Block,
+                    );
+                    assert_eq!(actual, expected, "cached {role}, history={history}");
+                }
+            }
+        }
     }
 
     #[test]

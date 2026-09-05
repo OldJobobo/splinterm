@@ -14,6 +14,7 @@ mod box_drawing;
 pub mod config;
 pub mod diagnostics;
 pub mod endpoint;
+pub mod font_shaping;
 pub mod frontend;
 pub mod geometry;
 pub mod keymap;

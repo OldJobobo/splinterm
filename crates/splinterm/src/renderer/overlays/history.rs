@@ -310,13 +310,16 @@ pub(crate) fn paint_snapshot_overlays(
                 let [_, red, green, blue] = selection_foreground.to_be_bytes();
                 [red, green, blue]
             };
+            // Contextual ink may originate outside the selected source span.
+            // Opted-in rows use bounded row candidates and the pixel clip below.
             for glyph in frame
                 .glyphs
                 .iter()
                 .filter(|glyph| {
                     glyph.row == row
-                        && glyph.column < last.saturating_add(1)
-                        && glyph.column.saturating_add(glyph.cells.max(1)) > first
+                        && (frame.font_ligatures != crate::font_shaping::FontLigatures::Off
+                            || (glyph.column < last.saturating_add(1)
+                                && glyph.column.saturating_add(glyph.cells.max(1)) > first))
                 })
                 .rev()
             {

@@ -10,6 +10,8 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | Section/key | Meaning | Range/default |
 | --- | --- | --- |
 | `main.font` | explicit fontconfig pattern; when unset, follow Omarchy's effective `monospace` family | unset |
+| `main.font-ligatures` | startup-only cross-cell shaping: `off`, `on`, or `cursor` | off |
+| `main.font-features` | startup-only comma-separated OpenType `tag=value` settings | empty; at most 64 unique tags |
 | `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
@@ -67,6 +69,50 @@ atomically, rebuilds active and hidden pane frames, and lets only an
 existing pane controller issue the final PTY resize. Observer panes prepare a
 future size without acquiring control. Font changes do not imply live reload of
 font size, padding, shell, scrollback, cursor, or keymap settings.
+
+### Opt-in terminal font shaping
+
+```ini
+[main]
+font-ligatures=cursor
+font-features=calt=1,zero=1,ss01=2
+```
+
+`off` (the default) retains per-cell rendering: no joining across terminal
+cells. Features still apply within each cell, including combining/emoji
+clusters; `off` does not disable required intra-cell shaping. `on` shapes
+compatible runs regardless of the cursor. `cursor` breaks runs immediately
+before and after the reported visible cursor cell, restoring neighboring
+context when it moves away. Blink and focus presentation do not reshape text.
+The cursor's logical span is never enlarged to the ligature's ink or source span.
+
+This first live slice joins **only adjacent single-width printable ASCII cells**,
+including spaces, with identical attributes and selected face. Style, colors,
+decorations, conceal, generated box drawing, non-ASCII/wide/grapheme cells,
+missing cells, and row ends are hard boundaries. Other text retains existing
+per-cell fallback, with the configured features. Run shaping failure falls back
+to that same per-cell path. Terminal widths, original text, selection/copy, and
+daemon/protocol semantics are unchanged. Selection colors clip glyph ink to
+selected cells, even where contextual glyphs originate in neighboring cells.
+
+Feature tags are case-sensitive, exactly four printable ASCII bytes; settings
+are comma-separated, with explicit unsigned decimal values from 0 to 65535.
+Whitespace around comma-separated entries is ignored. No bare tags, duplicate
+tags, signed/boolean values, or more than 64 settings are accepted; invalid
+values fail startup with a line-numbered diagnostic. Empty `font-features=`
+uses font/engine defaults. Tags and selectors unsupported by the selected font
+have no effect; numeric selectors do not imply that a font provides that variant.
+For example, `font-ligatures=off` with `font-features=zero=1` requests a slashed
+zero without enabling cross-cell joining.
+
+Both settings require a new client process; configuration reload and the native
+font-family watcher do not change them. They remain attached to immutable
+renderer resources through font-family changes. Named font instances retain
+their existing normalized coordinates. Per-face settings, arbitrary variation
+axes, general script/bidi run shaping, and Kitty/Ghostty parity are not provided.
+History scroll-copy is retained for cursor-free rows; transitions involving a
+visible cursor in `cursor` mode use the existing full-frame rebuild fallback to
+avoid copying stale context breaks.
 
 By default, palette roles come directly from the
 active Omarchy theme's `colors.toml` and effective `foot.ini`; `[colors] alpha`
