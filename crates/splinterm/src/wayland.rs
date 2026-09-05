@@ -1110,6 +1110,24 @@ fn buffer_dimensions(
     SurfaceGeometry::new(logical_width, logical_height, scale_120)?.buffer_layout()
 }
 
+fn window_buffer_dimensions(
+    has_pane_layout: bool,
+    managed_tabs: bool,
+    remote: bool,
+    logical_size: (u32, u32),
+    scale_120: u32,
+    geometry: Option<WindowGeometry>,
+) -> Result<(u32, u32, i32)> {
+    // Remote observers also translate content below chrome. Translation moves
+    // the grid, not its source surface extent, so allocate the whole Window.
+    if !has_pane_layout && !managed_tabs && !remote {
+        if let Some(geometry) = geometry {
+            return geometry.buffer_layout();
+        }
+    }
+    buffer_dimensions(logical_size.0.max(1), logical_size.1.max(1), scale_120)
+}
+
 fn note_output_enter<T: Clone + Eq>(entered: &mut Vec<T>, output: &T) {
     entered.retain(|candidate| candidate != output);
     entered.push(output.clone());
@@ -9503,21 +9521,14 @@ impl App {
                 Err(error)
             }
         })?;
-        let (width, height, stride) = if pane_layout.is_some() || self.tab_state.managed_tabs {
-            buffer_dimensions(
-                self.surface.logical_width.max(1),
-                self.surface.logical_height.max(1),
-                self.surface.scale_120,
-            )?
-        } else if let Some(geometry) = window_geometry {
-            geometry.buffer_layout()?
-        } else {
-            buffer_dimensions(
-                self.surface.logical_width.max(1),
-                self.surface.logical_height.max(1),
-                self.surface.scale_120,
-            )?
-        };
+        let (width, height, stride) = window_buffer_dimensions(
+            pane_layout.is_some(),
+            self.tab_state.managed_tabs,
+            self.tab_state.remote_display_identity.is_some(),
+            (self.surface.logical_width, self.surface.logical_height),
+            self.surface.scale_120,
+            window_geometry,
+        )?;
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
         let resolved_selection = self.panes.pane.selection.and_then(|selection| {
@@ -13994,6 +14005,69 @@ mod tests {
         assert!(note_output_leave(&mut entered, &1));
         assert!(entered.is_empty());
         // App deliberately leaves renderer's last DPI observation unchanged here.
+    }
+
+    #[test]
+    fn remote_observer_buffer_contains_header_and_translated_terminal_at_all_scales() {
+        use crate::geometry::{CellGeometry, TerminalPadding};
+        for scale in [120, 150, 180, 240] {
+            let logical_size = (801, 601);
+            let header = tab_strip_height(false, false, true, logical_size.1);
+            let geometry = WindowGeometry::fit_window(
+                logical_size.0,
+                logical_size.1 - header,
+                CellGeometry::new(8, 16).unwrap(),
+                TerminalPadding::uniform(0),
+                scale,
+                2,
+                65535,
+                2,
+                65535,
+            )
+            .unwrap()
+            .translated(0, logical_extent_to_buffer(header, scale).unwrap())
+            .unwrap();
+            let content_only = geometry.buffer_layout().unwrap();
+            let full = buffer_dimensions(logical_size.0, logical_size.1, scale).unwrap();
+            assert!(content_only.1 < full.1);
+            assert_eq!(
+                window_buffer_dimensions(false, false, true, logical_size, scale, Some(geometry))
+                    .unwrap(),
+                full,
+                "remote observer must allocate the full surface at scale {scale}"
+            );
+            let grid = geometry.visible_grid_rect;
+            assert_eq!(grid.y, logical_extent_to_buffer(header, scale).unwrap());
+            assert!(grid.x + grid.width <= full.0);
+            assert!(grid.y + grid.height <= full.1);
+            assert!(
+                grid.y + grid.height > content_only.1,
+                "old buffer clips bottom rows"
+            );
+            // Retain the existing local geometry path and full-surface pane/tab paths.
+            for (panes, tabs, expected) in [
+                (false, false, content_only),
+                (true, false, full),
+                (false, true, full),
+            ] {
+                assert_eq!(
+                    window_buffer_dimensions(
+                        panes,
+                        tabs,
+                        false,
+                        logical_size,
+                        scale,
+                        Some(geometry)
+                    )
+                    .unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                window_buffer_dimensions(false, false, false, logical_size, scale, None).unwrap(),
+                full
+            );
+        }
     }
 
     #[test]
