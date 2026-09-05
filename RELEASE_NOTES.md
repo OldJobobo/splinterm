@@ -1,8 +1,8 @@
-# Splinterm 0.1.0 RC3 — Stabilization (unreleased)
+# Splinterm 0.1.0 RC3 — Stabilization
 
 RC3 retains the RC2 feature set and fixes bounded loading, font observation, and
-connection cleanup. It is prepared locally; RC2 remains the public release until
-RC3 passes exact-source/package acceptance and human-approved publication.
+connection cleanup. This is a prerelease for continued testing before 0.1.0
+stable.
 
 ## RC3 fixes
 
