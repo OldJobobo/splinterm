@@ -1778,11 +1778,33 @@ impl PaneView {
     }
 }
 
+#[derive(Default)]
 struct InactiveUpdateDrain {
     changed: bool,
     theme: Option<ThemeUpdate>,
     dirty_frames: HashSet<SplintId>,
+    repaint_panes: HashSet<SplintId>,
     exited: Vec<SplintId>,
+}
+
+impl InactiveUpdateDrain {
+    fn record(&mut self, splint_id: Option<SplintId>, impact: BackgroundUpdateImpact) {
+        self.changed |= impact.visual_changed;
+        if let Some(splint_id) = splint_id {
+            if impact.frame_dirty {
+                self.dirty_frames.insert(splint_id);
+            }
+            if impact.visual_changed {
+                self.repaint_panes.insert(splint_id);
+            }
+        }
+    }
+
+    fn panes_to_repaint(&self) -> &HashSet<SplintId> {
+        // Cursor-only updates refresh prepared rows in place. They still need
+        // pixels when a peer rebuild selects incremental inactive composition.
+        &self.repaint_panes
+    }
 }
 
 fn apply_inactive_update_batch(
@@ -8362,10 +8384,7 @@ impl App {
     }
 
     fn apply_inactive_updates(&mut self) -> Result<InactiveUpdateDrain> {
-        let mut changed = false;
-        let mut next_theme = None;
-        let mut dirty_frames = HashSet::new();
-        let mut exited = Vec::new();
+        let mut drain = InactiveUpdateDrain::default();
         for pane in &mut self.panes.inactive_panes {
             let mut pending = Vec::new();
             let mut disconnected = false;
@@ -8378,13 +8397,13 @@ impl App {
                 pane.controller_active = false;
                 pane.commands = None;
                 pane.updates = None;
-                changed = true;
+                drain.changed = true;
             }
             let mut terminal_updates = Vec::with_capacity(pending.len());
             for update in pending {
                 match update {
                     WindowUpdate::Theme(update) => {
-                        retain_newest_theme(&mut next_theme, update);
+                        retain_newest_theme(&mut drain.theme, update);
                     }
                     WindowUpdate::Exited { splint_id } => {
                         anyhow::ensure!(
@@ -8396,27 +8415,20 @@ impl App {
                         pane.controller_active = false;
                         pane.commands = None;
                         pane.updates = None;
-                        exited.push(splint_id);
-                        changed = true;
+                        drain.exited.push(splint_id);
+                        drain.changed = true;
                     }
                     update => terminal_updates.push(update),
                 }
             }
             let impact =
                 apply_inactive_update_batch(pane, terminal_updates, self.presentation.theme)?;
-            changed |= impact.visual_changed;
-            if impact.frame_dirty
-                && let Some(snapshot) = pane.snapshot.as_ref()
-            {
-                dirty_frames.insert(snapshot.splint_id);
-            }
+            drain.record(
+                pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+                impact,
+            );
         }
-        Ok(InactiveUpdateDrain {
-            changed,
-            theme: next_theme,
-            dirty_frames,
-            exited,
-        })
+        Ok(drain)
     }
 
     #[allow(
@@ -8502,7 +8514,9 @@ impl App {
         }
         let receiver_batch_size = pending.len();
         let inactive = self.apply_inactive_updates()?;
-        self.panes.pending_exited_splints.extend(inactive.exited);
+        self.panes
+            .pending_exited_splints
+            .extend(inactive.exited.iter().copied());
         if let Some(update) = inactive.theme {
             retain_newest_theme(&mut next_theme, update);
         }
@@ -8978,7 +8992,7 @@ impl App {
         if rebuilt_inactive > 0 {
             self.panes
                 .dirty_inactive_panes
-                .extend(inactive.dirty_frames.iter().copied());
+                .extend(inactive.panes_to_repaint().iter().copied());
         }
         if rebuild_all_inactive {
             self.presentation.full_redraw = true;
@@ -12223,6 +12237,130 @@ mod tests {
                     assert_eq!(actual, expected, "cached {role}, history={history}");
                 }
             }
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "mixed inactive damage keeps the real reducer, rebuild selection, and pixel checks together"
+    )]
+    fn live_shaping_mixed_inactive_updates_repaint_both_changed_panes() {
+        use crate::font_shaping::{FeatureSettings, FontLigatures};
+        let context = RenderContext::new(u16::MAX).with_test_shaping(
+            FontLigatures::Cursor,
+            FeatureSettings::parse("calt=1").unwrap(),
+        );
+        let theme = ResolvedTheme::default();
+        let render = |frame: &SnapshotFrame| {
+            let geometry = frame.window_geometry(160, 100, 120).unwrap();
+            let mut pixels = vec![0; 160 * 100 * 4];
+            crate::renderer::paint_snapshot(
+                &mut pixels,
+                160,
+                100,
+                frame,
+                &geometry,
+                false,
+                crate::config::CursorStyle::Block,
+            );
+            pixels
+        };
+        for order in [[0, 1], [1, 0]] {
+            let ids = [SplintId::new(), SplintId::new(), SplintId::new()];
+            let mut panes: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let mut options = pane_options(*id);
+                    options.snapshot.columns = 2;
+                    options.snapshot.rows = 1;
+                    options.snapshot.input_modes.cursor_visible = false;
+                    let mut row = blank_row(2);
+                    row.row_id = options.snapshot.visible_rows[0].row_id;
+                    row.cells[0].content = "!".into();
+                    row.cells[1].content = "=".into();
+                    options.snapshot.visible_rows = vec![row];
+                    apply_theme(&mut options.snapshot, theme);
+                    PaneView::from_options_with_context(options, 120, &context).unwrap()
+                })
+                .collect();
+            let mut pixels: Vec<_> = panes
+                .iter()
+                .map(|pane| render(pane.snapshot_frame.as_ref().unwrap()))
+                .collect();
+            let before = pixels.clone();
+            let mut drain = InactiveUpdateDrain::default();
+            for index in order {
+                let pane = &mut panes[index];
+                let snapshot = pane.snapshot.as_ref().unwrap();
+                let mut update = empty_update();
+                update.base_revision = snapshot.revision;
+                update.revision = snapshot.revision + 1;
+                if index == 0 {
+                    update.cursor = Some(splinterm_protocol::TerminalCursor {
+                        column: 1,
+                        row: 0,
+                        deferred_wrap: false,
+                    });
+                    let mut modes = snapshot.input_modes;
+                    modes.cursor_visible = true;
+                    update.input_modes = Some(modes);
+                } else {
+                    let mut row = snapshot.visible_rows[0].clone();
+                    row.cells[0].content = "a".into();
+                    row.cells[1].content = "b".into();
+                    update
+                        .rows
+                        .push(splinterm_protocol::TerminalRowPatch { index: 0, row });
+                }
+                let impact = apply_inactive_update_batch(
+                    pane,
+                    [WindowUpdate::Update {
+                        update,
+                        image_sources: None,
+                        trace: None,
+                    }],
+                    theme,
+                )
+                .unwrap();
+                assert!(impact.visual_changed);
+                assert_eq!(impact.frame_dirty, index == 1);
+                drain.record(Some(ids[index]), impact);
+            }
+            assert!(drain.changed);
+            assert_eq!(drain.dirty_frames, HashSet::from([ids[1]]));
+            assert_eq!(
+                rebuild_inactive_frames_with_context(
+                    &mut panes,
+                    &drain.dirty_frames,
+                    false,
+                    120,
+                    &context,
+                )
+                .unwrap(),
+                1,
+                "only the content pane needs a frame rebuild"
+            );
+            assert_eq!(drain.panes_to_repaint(), &HashSet::from([ids[0], ids[1]]));
+            for (index, pane) in panes.iter().enumerate() {
+                if drain.panes_to_repaint().contains(&ids[index]) {
+                    pixels[index] = render(pane.snapshot_frame.as_ref().unwrap());
+                }
+                let display = pane.display_snapshot().unwrap();
+                let full =
+                    SnapshotFrame::load_scaled_with_context(&display, 120, &context).unwrap();
+                assert_eq!(
+                    pixels[index],
+                    render(&full),
+                    "pane {index}, order {order:?}"
+                );
+            }
+            assert_ne!(
+                pixels[0], before[0],
+                "cursor break changes inactive ligature ink"
+            );
+            assert_ne!(pixels[1], before[1], "content update changes peer ink");
+            assert_eq!(pixels[2], before[2], "untouched pane stays unchanged");
         }
     }
 
