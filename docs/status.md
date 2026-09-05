@@ -50,6 +50,14 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
+## 0.1.0 stable preparation
+
+The maintenance branch prepares `0.1.0` with RC3's terminal and daemon source
+unchanged. Only release metadata, notes, and publication tooling change. The
+public release remains RC3 until the exact stable candidate passes validation,
+independent review, and protected publication. No wider platform support or live
+daemon-upgrade guarantee is introduced.
+
 ## 0.1.0 RC3 release
 
 RC3 is a maintenance stabilization candidate, not a new feature release. It

@@ -5,7 +5,7 @@
 
 **A persistent, security-conscious terminal substrate for humans and bounded automation.**
 
-[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [Beta 2 release notes draft](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
+[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [0.1.0 release notes](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
 
 </div>
 
@@ -14,7 +14,7 @@ Splinterm combines a native Wayland terminal with a headless daemon that keeps s
 Humans use that persistent topology through native windows, tabs, and panes. Authorized tools can reach the same sessions through bounded JSON/NDJSON, SSH relay, and MCP interfaces. Splinterm is built in Rust from [Foot](https://codeberg.org/dnkl/foot)'s terminal behavior and designed first for Omarchy and Arch Linux.
 
 > [!IMPORTANT]
-> **Status: public beta.** Source, immutable versioned GitHub and AUR packages, and documentation are public. Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated for the current x86_64 Omarchy/Arch Linux target. The beta may make breaking changes; broader compatibility guarantees and stable support have not been released.
+> **Splinterm 0.1 targets x86_64 Omarchy/Arch Linux.** Core terminal emulation, persistent sessions, multiplexing, native Wayland presentation, Arch packaging, and bounded automation workflows are implemented and validated on that target. Broader platform support, live daemon upgrade handoff, and a support-duration guarantee are not included. Future 0.x releases may change interfaces with documented migration.
 >
 > See the repository-authoritative [current status](docs/status.md) for the exact capability and availability boundaries.
 
@@ -53,8 +53,8 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Sixel, practical Kitty static images, and inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`, both `0.1.0beta1-1` |
-| Stable support and broader compatibility | Not released |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`; see [current release status](docs/status.md) |
+| Support lifetime and broader compatibility | No additional guarantee |
 | Nix and broader distributions | Planned |
 
 For limitations and release gates, read [Current status](docs/status.md). Exact image support is documented in [`docs/images.md`](docs/images.md).
@@ -69,7 +69,7 @@ yay -S splinterm-bin
 yay -S splinterm-mcp-bin
 ```
 
-The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. All packages remain beta software with no stable compatibility or support-duration guarantee.
+The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. Version 0.1 does not support live daemon upgrades; save your work and upgrade from an external terminal. No support-duration or broader-platform guarantee is implied.
 
 For the newest published versioned release package, use Foot or another terminal
 not owned by `splinterd`, then clone the public repository and run:

@@ -22,10 +22,11 @@ RUN_ID = 12345
 
 class CandidateFixture:
     def __init__(
-        self, root: Path, previous_version_tag: str = "v0.1.0-rc.3"
+        self, root: Path, previous_version_tag: str = "v0.1.0-rc.3",
+        version: str = VERSION,
     ) -> None:
         self.root = root
-        self.assets = MODULE.expected_assets(COMMIT, VERSION)
+        self.assets = MODULE.expected_assets(COMMIT, version)
         records = []
         for relative, kind in self.assets.items():
             path = root / relative
@@ -41,9 +42,9 @@ class CandidateFixture:
             "publishable": False,
             "repository": REPOSITORY,
             "commit": COMMIT,
-            "version": VERSION,
-            "package_version": VERSION.replace("-", ""),
-            "tag": f"v{VERSION}",
+            "version": version,
+            "package_version": version.replace("-", ""),
+            "tag": f"v{version}",
             "architecture": "x86_64",
             "previous_version_tag": previous_version_tag,
             "workflow_run": f"https://github.com/{REPOSITORY}/actions/runs/{RUN_ID}",
@@ -124,6 +125,43 @@ class PromoteReleaseTests(unittest.TestCase):
             self.assertIn("candidate-manifest.json", promotion["public_assets"])
             self.assertIn("SHA256SUMS", promotion["public_assets"])
             self.assertNotIn("aur-source/PKGBUILD", promotion["public_assets"])
+
+    def test_release_classification_rejects_malformed_versions(self) -> None:
+        for version in (None, "", "v0.1.0", "0.1", "0.1.0\n"):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "malformed"):
+                MODULE.is_prerelease(version)
+
+    def test_stable_and_prerelease_candidates_bind_publication_state(self) -> None:
+        for version in ("0.1.0", "0.1.0-alpha1", "0.1.0-beta3", "0.1.0-rc.3"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as value:
+                fixture = CandidateFixture(Path(value), version=version)
+                promotion = MODULE.verify_candidate(
+                    fixture.root, REPOSITORY, RUN_ID, COMMIT, fixture.manifest_sha256
+                )
+                expected = "-" in version
+                self.assertIs(promotion["prerelease"], expected)
+                release = {
+                    "tagName": f"v{version}", "isDraft": False,
+                    "isPrerelease": expected,
+                    "assets": [{"name": name} for name in promotion["public_assets"]],
+                }
+                ref = {"object": {"sha": COMMIT}}
+                receipt = MODULE.create_receipt(
+                    promotion, release, ref, fixture.root, "https://example.invalid/run/1"
+                )
+                self.assertIs(receipt["prerelease"], expected)
+                for wrong in (not expected, None, str(expected).lower(), int(expected)):
+                    release["isPrerelease"] = wrong
+                    with self.assertRaisesRegex(ValueError, "published prerelease state"):
+                        MODULE.create_receipt(
+                            promotion, release, ref, fixture.root, "https://example.invalid/run/1"
+                        )
+                release["isPrerelease"] = expected
+                promotion["prerelease"] = not expected
+                with self.assertRaisesRegex(ValueError, "promotion prerelease state"):
+                    MODULE.create_receipt(
+                        promotion, release, ref, fixture.root, "https://example.invalid/run/1"
+                    )
 
     def test_candidate_rejects_a_stale_predecessor_even_when_well_formed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:

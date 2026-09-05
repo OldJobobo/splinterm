@@ -23,7 +23,7 @@ n8n is not trusted with release authority. Its unavailability may delay a notifi
 1. **Source** — an exact reviewed commit on `main` or `maint/0.1` contains a consistent workspace version, package recipes, documentation, and tests.
 2. **Candidate** — a manually dispatched, read-only workflow builds that commit once and emits a closed manifest, source archive, packages, checksums, release-notes draft, and AUR recipe drafts. Candidate artifacts are private GitHub workflow artifacts and are explicitly marked non-published.
 3. **Approved** — a maintainer starts `.github/workflows/promote-release.yml` with the exact candidate workflow run ID and manifest SHA-256, reviews the verified summary, and approves the protected GitHub `release` environment. Creating or selecting a candidate never implies approval.
-4. **Published** — the protected job creates the versioned tag and GitHub prerelease from the approved candidate artifacts without rebuilding them, downloads every published asset, verifies the tag target and exact asset set, and retains a publication receipt.
+4. **Published** — the protected job creates the versioned tag and GitHub release from the approved candidate artifacts without rebuilding them, downloads every published asset, verifies the tag target and exact asset set, and retains a publication receipt.
 5. **Distributed** — separately gated automation updates AUR recipes to the exact published assets and verifies their visible state.
 6. **Recorded** — release URLs, hashes, workflow run, AUR versions, and resulting status-document changes are retained as release evidence.
 
@@ -67,6 +67,12 @@ read/write permission. The read-only verifier cannot access it. The protected
 publisher needs Workflows permission because the versioned tag may point to a
 candidate that changes files under `.github/workflows/`; GitHub rejects that
 ref creation when only the job's ordinary `GITHUB_TOKEN` is used.
+
+The verified candidate version determines the GitHub prerelease flag: versions
+with a prerelease suffix remain prereleases, while a plain `X.Y.Z` version is a
+stable release. This flag is derived before approval, shown in the approval
+summary, reverified afterward, and checked against the public release before a
+receipt is retained. It is not a dispatch-time override.
 
 The publisher uploads only the source archive, main/MCP packages, candidate
 manifest, and checksums. AUR drafts remain private inputs for the separately

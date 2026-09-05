@@ -59,7 +59,7 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         environment = workflow.index("name: Require configured protected release environment")
         existing = workflow.index("name: Refuse existing tag or release and fail closed on API errors")
-        create = workflow.index("name: Create versioned tag and prerelease")
+        create = workflow.index("name: Create versioned tag and release")
         self.assertLess(environment, existing)
         self.assertLess(existing, create)
         self.assertIn('rule.get("type") == "required_reviewers"', workflow[environment:existing])
@@ -78,7 +78,7 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
 
     def test_published_assets_are_downloaded_and_receipted(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        create = workflow.index("name: Create versioned tag and prerelease")
+        create = workflow.index("name: Create versioned tag and release")
         upload = workflow.index("name: Upload exact approved assets without replacement")
         verify = workflow.index("name: Download and verify published release")
         receipt = workflow.index("name: Retain durable publication receipt")
@@ -88,6 +88,17 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("gh release download", workflow[verify:receipt])
         self.assertIn("promote-release.py receipt", workflow[verify:receipt])
         self.assertIn("retention-days: 90", workflow[receipt:])
+
+    def test_release_state_comes_from_verified_candidate_not_dispatch_input(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("prerelease: ${{ steps.candidate.outputs.prerelease }}", workflow)
+        self.assertIn("str(promotion['prerelease']).lower()", workflow)
+        self.assertIn("RELEASE_PRERELEASE: ${{ needs.verify.outputs.prerelease }}", workflow)
+        self.assertIn('case "$RELEASE_PRERELEASE" in', workflow)
+        self.assertIn("true|false)", workflow)
+        self.assertIn('--prerelease="$RELEASE_PRERELEASE"', workflow)
+        self.assertNotIn("inputs.prerelease", workflow)
+        self.assertNotIn("--prerelease \\", workflow)
 
     def test_promotion_tests_are_part_of_ci(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
