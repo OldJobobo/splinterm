@@ -397,19 +397,6 @@ async fn monitor_daemon_peer(
     }
 }
 
-async fn finish_channel(
-    channel_id: u32,
-    control_outbound: &mpsc::Sender<GraphicalFrame>,
-    events: &mpsc::Sender<GraphicalEvent>,
-) {
-    let _ = control_outbound
-        .send(GraphicalFrame::CloseChannel { channel_id })
-        .await;
-    let _ = events
-        .send(GraphicalEvent::ChannelFinished(channel_id))
-        .await;
-}
-
 async fn apply_channel_command(
     command: Option<ChannelCommand>,
     upstream_open: &mut bool,
@@ -452,57 +439,63 @@ async fn run_graphical_channel(
     output: ChannelOutput,
     cancellation: CancellationToken,
 ) {
-    let mut daemon_reader = daemon_reader;
-    let mut daemon_writer = daemon_writer;
-    let mut read_buffer = vec![0_u8; MAX_DATA_BYTES];
-    let mut upstream_open = true;
-    'channel: loop {
-        let permit = tokio::select! {
-            () = cancellation.cancelled() => break,
-            command = commands.recv() => {
+    // Both pumps are scoped here: either direction ending drops the other future,
+    // including a blocked write, before any potentially blocked output drain.
+    {
+        let events = &output.events;
+        let upstream = async move {
+            let mut daemon_writer = daemon_writer;
+            let mut upstream_open = true;
+            loop {
                 if !apply_channel_command(
-                    command,
+                    commands.recv().await,
                     &mut upstream_open,
                     &mut daemon_writer,
-                    &output.events,
-                ).await {
+                    events,
+                )
+                .await
+                {
                     break;
                 }
-                continue 'channel;
             }
-            permit = output.data.reserve() => match permit {
-                Ok(permit) => permit,
-                Err(_) => break,
-            },
         };
-        let read = tokio::select! {
-            () = cancellation.cancelled() => break,
-            command = commands.recv() => {
-                drop(permit);
-                if !apply_channel_command(
-                    command,
-                    &mut upstream_open,
-                    &mut daemon_writer,
-                    &output.events,
-                ).await {
+        let downstream = async {
+            let mut daemon_reader = daemon_reader;
+            let mut read_buffer = vec![0_u8; MAX_DATA_BYTES];
+            loop {
+                let Ok(permit) = output.data.reserve().await else {
                     break;
+                };
+                match daemon_reader.read(&mut read_buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        if permit.send(read_buffer[..count].to_vec()).is_err() {
+                            break;
+                        }
+                    }
                 }
-                continue 'channel;
             }
-            read = daemon_reader.read(&mut read_buffer) => read,
         };
-        match read {
-            Ok(0) | Err(_) => break,
-            Ok(count) => {
-                if permit.send(read_buffer[..count].to_vec()).is_err() {
-                    break;
-                }
-            }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {}
+            () = upstream => {}
+            () = downstream => {}
         }
     }
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => { output.data.discard(); }
+        () = async {
+            let _ = output.data.drain().await;
+            let _ = output.control.send(GraphicalFrame::CloseChannel { channel_id }).await;
+        } => {}
+    }
     cancellation.cancel();
-    let _ = output.data.drain().await;
-    finish_channel(channel_id, &output.control, &output.events).await;
+    let _ = output
+        .events
+        .send(GraphicalEvent::ChannelFinished(channel_id))
+        .await;
 }
 
 async fn run_graphical_input_reader<R>(
@@ -646,12 +639,14 @@ where
                             break;
                         }
                         last_channel_id = channel_id;
+                        // Never block this coordinator on physical-output backpressure;
+                        // it must remain able to process close and session-failure events.
                         if channels.len() >= MAX_LOGICAL_CHANNELS {
-                            if control_tx.send(GraphicalFrame::ChannelRejected {
+                            if control_tx.try_send(GraphicalFrame::ChannelRejected {
                                 channel_id,
                                 reason: "graphical relay logical channel limit reached".to_owned(),
-                            }).await.is_err() {
-                                terminal_error = Some("graphical relay output closed".to_owned());
+                            }).is_err() {
+                                terminal_error = Some("graphical relay output queue closed or full".to_owned());
                                 break;
                             }
                             continue;
@@ -669,11 +664,10 @@ where
                                 // Queue the admission acknowledgement before either channel task
                                 // can emit data or a daemon-lifetime failure.
                                 if control_tx
-                                    .send(GraphicalFrame::ChannelOpened { channel_id })
-                                    .await
+                                    .try_send(GraphicalFrame::ChannelOpened { channel_id })
                                     .is_err()
                                 {
-                                    terminal_error = Some("graphical relay output closed".to_owned());
+                                    terminal_error = Some("graphical relay output queue closed or full".to_owned());
                                     break;
                                 }
                                 tokio::spawn(monitor_daemon_peer(
@@ -695,11 +689,11 @@ where
                                 ));
                             }
                             Err(error) => {
-                                if control_tx.send(GraphicalFrame::ChannelRejected {
+                                if control_tx.try_send(GraphicalFrame::ChannelRejected {
                                     channel_id,
                                     reason: bounded_reason(&error),
-                                }).await.is_err() {
-                                    terminal_error = Some("graphical relay output closed".to_owned());
+                                }).is_err() {
+                                    terminal_error = Some("graphical relay output queue closed or full".to_owned());
                                     break;
                                 }
                             }
@@ -731,7 +725,8 @@ where
                         }
                     }
                     GraphicalFrame::CloseChannel { channel_id } => {
-                        if let Some(channel) = channels.remove(&channel_id) {
+                        if let Some(channel) = channels.get(&channel_id) {
+                            // Keep admission charged until the pumps release their socket.
                             let _ = channel.commands.try_send(ChannelCommand::Close);
                             channel.cancellation.cancel();
                         } else if channel_id > last_channel_id {
@@ -812,6 +807,210 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn graphical_channel_half_close_preserves_order_and_drains_daemon_reply() {
+        time::timeout(Duration::from_secs(2), async {
+            let (stream, mut daemon) = UnixStream::pair().unwrap();
+            let (reader, writer) = stream.into_split();
+            let (commands, command_rx) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
+            commands
+                .send(ChannelCommand::Data(b"first".to_vec()))
+                .await
+                .unwrap();
+            commands
+                .send(ChannelCommand::Data(b"second".to_vec()))
+                .await
+                .unwrap();
+            commands.send(ChannelCommand::HalfClose).await.unwrap();
+            let (control, mut control_rx) = mpsc::channel(1);
+            let (events, mut event_rx) = mpsc::channel(1);
+            let (data, mut data_rx) = fair_data_queue();
+            let task = tokio::spawn(run_graphical_channel(
+                1,
+                reader,
+                writer,
+                command_rx,
+                ChannelOutput {
+                    control,
+                    data: data.channel(1),
+                    events,
+                },
+                CancellationToken::new(),
+            ));
+            let mut request = Vec::new();
+            daemon.read_to_end(&mut request).await.unwrap();
+            assert_eq!(request, b"firstsecond");
+            daemon.write_all(b"reply").await.unwrap();
+            daemon.shutdown().await.unwrap();
+            let reply = data_rx.recv().await.unwrap();
+            assert_eq!(reply.bytes(), b"reply");
+            assert!(matches!(
+                control_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            drop(reply);
+            assert_eq!(
+                control_rx.recv().await,
+                Some(GraphicalFrame::CloseChannel { channel_id: 1 })
+            );
+            task.await.unwrap();
+            assert!(matches!(
+                event_rx.recv().await,
+                Some(GraphicalEvent::ChannelFinished(1))
+            ));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn graphical_channel_close_interrupts_full_control_queue() {
+        time::timeout(Duration::from_secs(2), async {
+            let (stream, mut daemon) = UnixStream::pair().unwrap();
+            let (reader, writer) = stream.into_split();
+            let (_commands, command_rx) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
+            let (control, _control_rx) = mpsc::channel(1);
+            control.send(GraphicalFrame::HelloAck).await.unwrap();
+            let (events, mut event_rx) = mpsc::channel(1);
+            let (data, _data_rx) = fair_data_queue();
+            let cancellation = CancellationToken::new();
+            let task = tokio::spawn(run_graphical_channel(
+                1,
+                reader,
+                writer,
+                command_rx,
+                ChannelOutput {
+                    control,
+                    data: data.channel(1),
+                    events,
+                },
+                cancellation.clone(),
+            ));
+            daemon.shutdown().await.unwrap();
+            assert_eq!(daemon.read(&mut [0; 1]).await.unwrap(), 0);
+            cancellation.cancel();
+            task.await.unwrap();
+            assert!(matches!(
+                event_rx.recv().await,
+                Some(GraphicalEvent::ChannelFinished(1))
+            ));
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn saturated_graphical_writer_teardown(cancel: bool) {
+        time::timeout(Duration::from_secs(2), async {
+            let (stream, mut daemon) = UnixStream::pair().unwrap();
+            // Saturate the kernel send buffer before starting the pump.
+            stream.writable().await.unwrap();
+            let mut buffered = 0;
+            loop {
+                match stream.try_write(&[0x55; MAX_DATA_BYTES]) {
+                    Ok(count) => buffered += count,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            assert!(buffered > 0);
+            let (reader, writer) = stream.into_split();
+            let (commands, command_rx) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
+            commands
+                .send(ChannelCommand::Data(vec![0xaa; MAX_DATA_BYTES]))
+                .await
+                .unwrap();
+            let (control, mut control_rx) = mpsc::channel(4);
+            let (events, mut event_rx) = mpsc::channel(4);
+            let (data, _data_rx) = fair_data_queue();
+            let cancellation = CancellationToken::new();
+            let task = tokio::spawn(run_graphical_channel(
+                1,
+                reader,
+                writer,
+                command_rx,
+                ChannelOutput {
+                    control,
+                    data: data.channel(1),
+                    events,
+                },
+                cancellation.clone(),
+            ));
+            while commands.capacity() != CHANNEL_QUEUE_FRAMES {
+                tokio::task::yield_now().await;
+            }
+            if cancel {
+                cancellation.cancel();
+            } else {
+                daemon.shutdown().await.unwrap();
+            }
+            task.await.unwrap();
+            assert!(matches!(
+                event_rx.recv().await,
+                Some(GraphicalEvent::ChannelFinished(1))
+            ));
+            if !cancel {
+                assert_eq!(
+                    control_rx.recv().await,
+                    Some(GraphicalFrame::CloseChannel { channel_id: 1 })
+                );
+            }
+            let mut received = Vec::new();
+            daemon.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received.len(), buffered);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn graphical_channel_cancels_saturated_daemon_writer() {
+        saturated_graphical_writer_teardown(true).await;
+    }
+
+    #[tokio::test]
+    async fn graphical_channel_daemon_eof_ends_saturated_writer() {
+        saturated_graphical_writer_teardown(false).await;
+    }
+
+    #[tokio::test]
+    async fn graphical_channel_close_interrupts_blocked_output_drain() {
+        time::timeout(Duration::from_secs(2), async {
+            let (stream, mut daemon) = UnixStream::pair().unwrap();
+            let (reader, writer) = stream.into_split();
+            let (_commands, command_rx) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
+            let (control, _control_rx) = mpsc::channel(1);
+            let (events, mut event_rx) = mpsc::channel(1);
+            let (data, mut data_rx) = fair_data_queue();
+            let cancellation = CancellationToken::new();
+            let task = tokio::spawn(run_graphical_channel(
+                1,
+                reader,
+                writer,
+                command_rx,
+                ChannelOutput {
+                    control,
+                    data: data.channel(1),
+                    events,
+                },
+                cancellation.clone(),
+            ));
+            daemon.write_all(b"pending output").await.unwrap();
+            let in_flight = data_rx.recv().await.unwrap();
+            daemon.shutdown().await.unwrap();
+            // Socket lifetime must not depend on the physical output writer draining.
+            assert_eq!(daemon.read(&mut [0; 1]).await.unwrap(), 0);
+            cancellation.cancel();
+            task.await.unwrap();
+            assert!(matches!(
+                event_rx.recv().await,
+                Some(GraphicalEvent::ChannelFinished(1))
+            ));
+            drop(in_flight);
+        })
+        .await
+        .unwrap();
+    }
 
     fn validated_pair() -> (ValidatedConnection, UnixStream) {
         let (stream, peer) = UnixStream::pair().unwrap();

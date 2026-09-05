@@ -49,6 +49,7 @@ jobs:
             tools/automation/test_dojo_picker.py \
             tools/package/test_release_manifest.py \
             tools/package/test_installer_safety.py \
+            tools/package/test_validate_mcp_package.py \
             tools/release/test_prepare_candidate.py \
             tools/release/test_promote_release.py \
             tools/release/test_release_candidate_workflow.py \

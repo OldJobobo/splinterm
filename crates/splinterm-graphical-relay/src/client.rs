@@ -32,7 +32,6 @@ struct IncomingData {
 enum IncomingCommand {
     Data(IncomingData),
     HalfClose,
-    Close,
 }
 
 #[derive(Debug)]
@@ -40,6 +39,18 @@ struct Route {
     opened: Option<oneshot::Sender<Result<(), String>>>,
     incoming: mpsc::Sender<IncomingCommand>,
     incoming_bytes: Arc<Semaphore>,
+    outgoing_cancellation: CancellationToken,
+    incoming_cancellation: CancellationToken,
+    data_outbound: FairDataChannel,
+}
+
+impl Drop for Route {
+    fn drop(&mut self) {
+        // Removing a remote route is ordered incoming EOF, not cancellation:
+        // dropping its sender drains queued bytes under the retained channel slot.
+        self.outgoing_cancellation.cancel();
+        self.data_outbound.discard();
+    }
 }
 
 #[derive(Debug)]
@@ -47,6 +58,7 @@ struct ClientState {
     control_outbound: mpsc::Sender<Frame>,
     data_outbound: FairDataSender,
     incoming_session_bytes: Arc<Semaphore>,
+    channel_slots: Arc<Semaphore>,
     routes: Mutex<HashMap<u32, Route>>,
     allocator: Mutex<ChannelIdAllocator>,
     failure: Mutex<Option<String>>,
@@ -69,13 +81,13 @@ impl ClientState {
         }
         *failure = Some(reason.clone());
         self.cancellation.cancel();
+        self.channel_slots.close();
         drop(failure);
         if let Ok(mut routes) = self.routes.lock() {
             for (_, mut route) in routes.drain() {
                 if let Some(opened) = route.opened.take() {
                     let _ = opened.send(Err(reason.clone()));
                 }
-                let _ = route.incoming.try_send(IncomingCommand::Close);
             }
         }
     }
@@ -84,12 +96,12 @@ impl ClientState {
         if let Ok(mut routes) = self.routes.lock()
             && let Some(mut route) = routes.remove(&channel_id)
         {
+            route.incoming_cancellation.cancel();
             if let Some(opened) = route.opened.take() {
                 let _ = opened.send(Err(
                     "graphical relay channel closed while opening".to_owned()
                 ));
             }
-            let _ = route.incoming.try_send(IncomingCommand::Close);
         }
     }
 }
@@ -162,6 +174,7 @@ impl ClientMultiplexer {
             control_outbound,
             data_outbound,
             incoming_session_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_BYTES)),
+            channel_slots: Arc::new(Semaphore::new(MAX_LOGICAL_CHANNELS)),
             routes: Mutex::new(HashMap::new()),
             allocator: Mutex::new(ChannelIdAllocator::default()),
             failure: Mutex::new(None),
@@ -170,30 +183,31 @@ impl ClientMultiplexer {
 
         let writer_state = state.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    () = writer_state.cancellation.cancelled() => {
-                        let _ = writer.shutdown().await;
-                        return;
-                    },
-                    frame = control_rx.recv() => if let Some(frame) = frame
-                        && let Err(error) = write_frame(&mut writer, &frame).await
-                    {
-                        writer_state.fail(format!("graphical relay write failed: {error}"));
-                        return;
-                    },
-                    data = data_rx.recv() => if let Some(data) = data
-                        && let Err(error) = write_data_frame(
-                            &mut writer,
-                            data.channel_id(),
-                            data.bytes(),
-                        ).await
-                    {
-                        writer_state.fail(format!("graphical relay write failed: {error}"));
-                        return;
-                    },
-                }
+            // Cancellation covers physical writes too, not only queue selection.
+            tokio::select! {
+                biased;
+                () = writer_state.cancellation.cancelled() => {}
+                () = async {
+                    loop {
+                        let result = tokio::select! {
+                            biased;
+                            frame = control_rx.recv() => match frame {
+                                Some(frame) => write_frame(&mut writer, &frame).await,
+                                None => return,
+                            },
+                            data = data_rx.recv() => match data {
+                                Some(data) => write_data_frame(
+                                    &mut writer, data.channel_id(), data.bytes(),
+                                ).await,
+                                None => return,
+                            },
+                        };
+                        if let Err(error) = result {
+                            writer_state.fail(format!("graphical relay write failed: {error}"));
+                            return;
+                        }
+                    }
+                } => {}
             }
         });
 
@@ -232,12 +246,22 @@ impl ClientMultiplexer {
     /// # Errors
     ///
     /// Returns an error when the session has failed, the identity space is
-    /// exhausted, or the remote relay rejects the channel.
+    /// exhausted, the local channel limit is reached (including pending incoming
+    /// drains), or the remote relay rejects the channel.
     pub async fn open_channel(&self) -> Result<LogicalChannel> {
         let state = &self.handle.state;
         if let Some(reason) = state.failure() {
             bail!(reason);
         }
+        // Remote EOF may leave ordered incoming data waiting on a slow consumer.
+        // Admission remains charged until both that pump and the application end.
+        let channel_slot = Arc::new(
+            state
+                .channel_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| anyhow::anyhow!("graphical relay logical channel limit reached"))?,
+        );
         let channel_id = state
             .allocator
             .lock()
@@ -247,6 +271,9 @@ impl ClientMultiplexer {
         let (bridge_reader, bridge_writer) = tokio::io::split(bridge);
         let (incoming, incoming_rx) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
         let (opened_tx, opened_rx) = oneshot::channel();
+        let outgoing_cancellation = state.cancellation.child_token();
+        let incoming_cancellation = state.cancellation.child_token();
+        let data_outbound = state.data_outbound.channel(channel_id);
         state
             .routes
             .lock()
@@ -257,6 +284,9 @@ impl ClientMultiplexer {
                     opened: Some(opened_tx),
                     incoming,
                     incoming_bytes: Arc::new(Semaphore::new(MAX_INCOMING_CHANNEL_QUEUED_BYTES)),
+                    outgoing_cancellation: outgoing_cancellation.clone(),
+                    incoming_cancellation: incoming_cancellation.clone(),
+                    data_outbound: data_outbound.clone(),
                 },
             );
         let mut opening = OpeningGuard {
@@ -269,18 +299,24 @@ impl ClientMultiplexer {
             bridge_writer,
             incoming_rx,
             state.clone(),
+            incoming_cancellation.clone(),
+            channel_slot.clone(),
         ));
-        if state
-            .control_outbound
-            .send(Frame::OpenChannel { channel_id })
-            .await
-            .is_err()
-        {
-            state.close_channel(channel_id);
-            opening.disarm();
-            bail!("graphical relay writer is unavailable");
-        }
-        let admission = opened_rx.await;
+        let admission = tokio::select! {
+            biased;
+            // Honor an acknowledgement already delivered before transport EOF.
+            admission = async {
+                if state.control_outbound.send(Frame::OpenChannel { channel_id }).await.is_err() {
+                    state.close_channel(channel_id);
+                }
+                opened_rx.await
+            } => admission,
+            () = state.cancellation.cancelled() => {
+                state.close_channel(channel_id);
+                opening.disarm();
+                bail!(state.failure().unwrap_or_else(|| "graphical relay session cancelled".to_owned()));
+            }
+        };
         opening.disarm();
         match admission {
             Ok(Ok(())) => {}
@@ -292,21 +328,22 @@ impl ClientMultiplexer {
                     .unwrap_or_else(|| "graphical relay channel admission was cancelled".to_owned())
             ),
         }
-        let data_outbound = state.data_outbound.channel(channel_id);
-        let outgoing_data = data_outbound.clone();
-        let outgoing_state = state.clone();
-        let (outgoing_finished, outgoing_completion) = oneshot::channel();
-        tokio::spawn(async move {
-            run_outgoing_channel(channel_id, bridge_reader, outgoing_data, outgoing_state).await;
-            let _ = outgoing_finished.send(());
-        });
+        tokio::spawn(run_outgoing_channel(
+            channel_id,
+            bridge_reader,
+            data_outbound.clone(),
+            state.clone(),
+            outgoing_cancellation,
+            channel_slot.clone(),
+        ));
         Ok(LogicalChannel {
             stream: application,
             guard: Arc::new(ChannelGuard {
                 channel_id,
                 handle: self.handle.clone(),
                 data_outbound,
-                outgoing_completion: Some(outgoing_completion),
+                incoming_cancellation,
+                _channel_slot: channel_slot,
             }),
         })
     }
@@ -348,7 +385,6 @@ fn dispatch_frame(state: &Arc<ClientState>, frame: Frame) -> std::result::Result
             let _ = opened.send(Err(format!(
                 "remote graphical relay rejected channel: {reason}"
             )));
-            let _ = route.incoming.try_send(IncomingCommand::Close);
         }
         Frame::Data { channel_id, bytes } => {
             send_incoming_data(state, channel_id, bytes)?;
@@ -462,7 +498,6 @@ fn close_remote_channel(state: &ClientState, channel_id: u32) -> std::result::Re
             "graphical relay channel closed while opening".to_owned()
         ));
     }
-    let _ = route.incoming.try_send(IncomingCommand::Close);
     Ok(())
 }
 
@@ -471,37 +506,45 @@ async fn run_incoming_channel(
     mut writer: tokio::io::WriteHalf<DuplexStream>,
     mut incoming: mpsc::Receiver<IncomingCommand>,
     state: Arc<ClientState>,
+    cancellation: CancellationToken,
+    _channel_slot: Arc<OwnedSemaphorePermit>,
 ) {
-    let mut half_closed = false;
-    loop {
-        let command = tokio::select! {
-            () = state.cancellation.cancelled() => break,
-            command = incoming.recv() => command,
-        };
-        match command {
-            Some(IncomingCommand::Data(data)) if !half_closed => {
-                if writer.write_all(&data.bytes).await.is_err() {
-                    let _ = state
-                        .control_outbound
-                        .try_send(Frame::CloseChannel { channel_id });
-                    state.close_channel(channel_id);
+    let pump = async {
+        let mut half_closed = false;
+        loop {
+            match incoming.recv().await {
+                Some(IncomingCommand::Data(data)) if !half_closed => {
+                    if writer.write_all(&data.bytes).await.is_err() {
+                        let _ = state
+                            .control_outbound
+                            .try_send(Frame::CloseChannel { channel_id });
+                        state.close_channel(channel_id);
+                        break;
+                    }
+                }
+                Some(IncomingCommand::HalfClose) if !half_closed => {
+                    half_closed = true;
+                    let _ = writer.shutdown().await;
+                }
+                None => {
+                    let _ = writer.shutdown().await;
+                    break;
+                }
+                Some(IncomingCommand::Data(_) | IncomingCommand::HalfClose) => {
+                    state.fail("remote graphical relay sent data after channel half-close");
                     break;
                 }
             }
-            Some(IncomingCommand::HalfClose) if !half_closed => {
-                half_closed = true;
-                let _ = writer.shutdown().await;
-            }
-            Some(IncomingCommand::Close) | None => {
-                let _ = writer.shutdown().await;
-                break;
-            }
-            Some(IncomingCommand::Data(_) | IncomingCommand::HalfClose) => {
-                state.fail("remote graphical relay sent data after channel half-close");
-                break;
-            }
         }
+    };
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {}
+        () = pump => {}
     }
+    // The outgoing read half can still own the duplex stream. Explicit shutdown
+    // exposes EOF to the application without waiting for that half to disappear.
+    let _ = writer.shutdown().await;
 }
 
 async fn run_outgoing_channel(
@@ -509,47 +552,54 @@ async fn run_outgoing_channel(
     mut reader: tokio::io::ReadHalf<DuplexStream>,
     data_outbound: FairDataChannel,
     state: Arc<ClientState>,
+    cancellation: CancellationToken,
+    _channel_slot: Arc<OwnedSemaphorePermit>,
 ) {
-    let mut buffer = vec![0_u8; MAX_DATA_BYTES];
-    loop {
-        let permit = tokio::select! {
-            () = state.cancellation.cancelled() => return,
-            permit = data_outbound.reserve() => match permit {
+    let pump = async {
+        let mut buffer = vec![0_u8; MAX_DATA_BYTES];
+        loop {
+            let permit = match data_outbound.reserve().await {
                 Ok(permit) => permit,
                 Err(error) => {
-                    state.fail(format!("graphical relay byte reservation failed: {error}"));
+                    if !cancellation.is_cancelled() {
+                        state.fail(format!("graphical relay byte reservation failed: {error}"));
+                    }
                     return;
                 }
-            },
-        };
-        let read = tokio::select! {
-            () = state.cancellation.cancelled() => return,
-            read = reader.read(&mut buffer) => read,
-        };
-        match read {
-            Ok(0) => {
-                drop(permit);
-                let _ = data_outbound.drain().await;
-                let _ = state
-                    .control_outbound
-                    .send(Frame::HalfClose { channel_id })
-                    .await;
-                return;
-            }
-            Ok(count) => {
-                if let Err(error) = permit.send(buffer[..count].to_vec()) {
-                    state.fail(format!("graphical relay data queue failed: {error}"));
+            };
+            let read = reader.read(&mut buffer).await;
+            match read {
+                Ok(0) => {
+                    drop(permit);
+                    let _ = data_outbound.drain().await;
+                    let _ = state
+                        .control_outbound
+                        .send(Frame::HalfClose { channel_id })
+                        .await;
                     return;
                 }
-            }
-            Err(error) => {
-                drop(permit);
-                state.fail(format!(
-                    "logical graphical relay channel read failed: {error}"
-                ));
-                return;
+                Ok(count) => {
+                    if let Err(error) = permit.send(buffer[..count].to_vec()) {
+                        if !cancellation.is_cancelled() {
+                            state.fail(format!("graphical relay data queue failed: {error}"));
+                        }
+                        return;
+                    }
+                }
+                Err(error) => {
+                    drop(permit);
+                    state.fail(format!(
+                        "logical graphical relay channel read failed: {error}"
+                    ));
+                    return;
+                }
             }
         }
+    };
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {}
+        () = pump => {}
     }
 }
 
@@ -558,42 +608,33 @@ struct ChannelGuard {
     channel_id: u32,
     handle: Arc<ClientHandle>,
     data_outbound: FairDataChannel,
-    outgoing_completion: Option<oneshot::Receiver<()>>,
+    incoming_cancellation: CancellationToken,
+    _channel_slot: Arc<OwnedSemaphorePermit>,
 }
 
 impl Drop for ChannelGuard {
     fn drop(&mut self) {
         let state = &self.handle.state;
         state.close_channel(self.channel_id);
-        let channel_id = self.channel_id;
-        let handle = self.handle.clone();
-        let data_outbound = self.data_outbound.clone();
-        let outgoing_completion = self.outgoing_completion.take();
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            state.fail("graphical relay channel closed outside an async runtime");
-            return;
-        };
-        runtime.spawn(async move {
-            if let Some(completion) = outgoing_completion {
-                let _ = completion.await;
-            }
-            let _ = data_outbound.drain().await;
-            if handle
-                .state
-                .control_outbound
-                .send(Frame::CloseChannel { channel_id })
-                .await
-                .is_err()
-            {
-                handle
-                    .state
-                    .fail("graphical relay control output queue closed");
-            }
-        });
+        self.incoming_cancellation.cancel();
+        self.data_outbound.discard();
+        if state
+            .control_outbound
+            .try_send(Frame::CloseChannel {
+                channel_id: self.channel_id,
+            })
+            .is_err()
+        {
+            state.fail("graphical relay control output queue closed or full");
+        }
     }
 }
 
 /// One logical full-duplex byte channel over a graphical relay session.
+///
+/// Dropping the channel performs a full close and can discard buffered writes.
+/// Shut down its write side and drain its response first when ordered completion
+/// is required.
 #[derive(Debug)]
 pub struct LogicalChannel {
     stream: DuplexStream,
@@ -650,6 +691,299 @@ mod tests {
     use tokio::{io::AsyncReadExt as _, time};
 
     use super::*;
+
+    async fn test_client(capacity: usize) -> (ClientMultiplexer, DuplexStream) {
+        let (transport, mut server) = tokio::io::duplex(capacity);
+        let (reader, writer) = tokio::io::split(transport);
+        let negotiation = tokio::spawn(ClientMultiplexer::negotiate(reader, writer));
+        assert_eq!(read_frame(&mut server).await.unwrap(), Some(Frame::Hello));
+        write_frame(&mut server, &Frame::HelloAck).await.unwrap();
+        (negotiation.await.unwrap().unwrap(), server)
+    }
+
+    async fn test_open(client: &ClientMultiplexer, server: &mut DuplexStream) -> LogicalChannel {
+        let opening_client = client.clone();
+        let opening = tokio::spawn(async move { opening_client.open_channel().await.unwrap() });
+        let channel_id = loop {
+            match read_frame(server).await.unwrap() {
+                Some(Frame::OpenChannel { channel_id }) => break channel_id,
+                Some(Frame::CloseChannel { .. } | Frame::HalfClose { .. }) => {}
+                other => panic!("unexpected admission frame: {other:?}"),
+            }
+        };
+        write_frame(server, &Frame::ChannelOpened { channel_id })
+            .await
+            .unwrap();
+        opening.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn outgoing_half_close_follows_all_data_and_keeps_incoming_reply_open() {
+        time::timeout(Duration::from_secs(2), async {
+            let (client, mut server) = test_client(4 * MAX_DATA_BYTES).await;
+            let mut channel = test_open(&client, &mut server).await;
+            let expected = vec![0xaa; 2 * MAX_DATA_BYTES + 7];
+            channel.write_all(&expected).await.unwrap();
+            channel.shutdown().await.unwrap();
+            let channel_id = channel.channel_id();
+            let mut received = Vec::new();
+            loop {
+                match read_frame(&mut server).await.unwrap() {
+                    Some(Frame::Data {
+                        channel_id: id,
+                        bytes,
+                    }) => {
+                        assert_eq!(id, channel_id);
+                        received.extend(bytes);
+                    }
+                    Some(Frame::HalfClose { channel_id: id }) => {
+                        assert_eq!(id, channel_id);
+                        break;
+                    }
+                    other => panic!("unexpected half-close frame: {other:?}"),
+                }
+            }
+            assert_eq!(received, expected);
+            write_frame(
+                &mut server,
+                &Frame::Data {
+                    channel_id,
+                    bytes: b"reply".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+            write_frame(&mut server, &Frame::CloseChannel { channel_id })
+                .await
+                .unwrap();
+            let mut reply = Vec::new();
+            channel.read_to_end(&mut reply).await.unwrap();
+            assert_eq!(reply, b"reply");
+            assert_eq!(client.terminal_failure(), None);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_close_preserves_tail_for_consumer_delayed_beyond_teardown_grace() {
+        time::timeout(Duration::from_secs(2), async {
+            let (client, mut server) = test_client(4 * MAX_DATA_BYTES).await;
+            let mut channel = test_open(&client, &mut server).await;
+            let channel_id = channel.channel_id();
+            for byte in [0xaa, 0xbb] {
+                write_frame(
+                    &mut server,
+                    &Frame::Data {
+                        channel_id,
+                        bytes: vec![byte; MAX_DATA_BYTES],
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            write_frame(&mut server, &Frame::CloseChannel { channel_id })
+                .await
+                .unwrap();
+            while client
+                .handle
+                .state
+                .routes
+                .lock()
+                .unwrap()
+                .contains_key(&channel_id)
+            {
+                tokio::task::yield_now().await;
+            }
+            time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                client.handle.state.channel_slots.available_permits(),
+                MAX_LOGICAL_CHANNELS - 1
+            );
+            let mut received = Vec::new();
+            channel.read_to_end(&mut received).await.unwrap();
+            assert_eq!(
+                received,
+                [vec![0xaa; MAX_DATA_BYTES], vec![0xbb; MAX_DATA_BYTES]].concat()
+            );
+            assert_eq!(client.terminal_failure(), None);
+            drop(channel);
+            assert_eq!(
+                client.handle.state.channel_slots.available_permits(),
+                MAX_LOGICAL_CHANNELS
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_remote_closed_drains_hold_local_admission_until_local_drop() {
+        time::timeout(Duration::from_secs(10), async {
+            let (client, mut server) = test_client(64 * 1024).await;
+            let state = &client.handle.state;
+            let mut channels = Vec::new();
+            for _ in 0..MAX_LOGICAL_CHANNELS {
+                let channel = test_open(&client, &mut server).await;
+                let channel_id = channel.channel_id();
+                send_incoming_data(state, channel_id, vec![0xaa; MAX_DATA_BYTES]).unwrap();
+                send_incoming_data(state, channel_id, vec![0xbb]).unwrap();
+                close_remote_channel(state, channel_id).unwrap();
+                channels.push(channel);
+            }
+            assert!(state.routes.lock().unwrap().is_empty());
+            assert_eq!(state.channel_slots.available_permits(), 0);
+            assert!(
+                client
+                    .open_channel()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("channel limit")
+            );
+            drop(channels.pop());
+            while state.channel_slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+            let reopened = test_open(&client, &mut server).await;
+            assert_eq!(state.channel_slots.available_permits(), 0);
+            drop(reopened);
+            drop(channels);
+            while state.channel_slots.available_permits() != MAX_LOGICAL_CHANNELS {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                state.incoming_session_bytes.available_permits(),
+                MAX_SESSION_QUEUED_BYTES
+            );
+            assert_eq!(client.terminal_failure(), None);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cancel_interrupts_physical_writer_and_outgoing_drain() {
+        time::timeout(Duration::from_secs(2), async {
+            let (client, mut server) = test_client(64).await;
+            let mut channel = test_open(&client, &mut server).await;
+            channel
+                .write_all(&vec![0xaa; MAX_DATA_BYTES])
+                .await
+                .unwrap();
+            channel.shutdown().await.unwrap();
+            // Consuming one header byte proves the physical frame write has begun.
+            assert_eq!(server.read(&mut [0; 1]).await.unwrap(), 1);
+            let state = client.handle.state.clone();
+            let weak = Arc::downgrade(&state);
+            state.fail("test cancellation");
+            drop(channel);
+            drop(client);
+            drop(state);
+            while weak.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+            let mut pending = Vec::new();
+            server.read_to_end(&mut pending).await.unwrap();
+            assert!(pending.len() < MAX_DATA_BYTES);
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn blocked_incoming_teardown(session: bool) {
+        time::timeout(Duration::from_secs(2), async {
+            let (control_outbound, _control_rx) = mpsc::channel(4);
+            let (data_outbound, _data_rx) = fair_data_queue();
+            let state = Arc::new(ClientState {
+                control_outbound,
+                data_outbound,
+                incoming_session_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_BYTES)),
+                channel_slots: Arc::new(Semaphore::new(MAX_LOGICAL_CHANNELS)),
+                routes: Mutex::new(HashMap::new()),
+                allocator: Mutex::new(ChannelIdAllocator::default()),
+                failure: Mutex::new(None),
+                cancellation: CancellationToken::new(),
+            });
+            let (mut application, bridge) = tokio::io::duplex(1);
+            // Retain the other half: dropping the incoming half alone does not signal EOF.
+            let (_bridge_reader, bridge_writer) = tokio::io::split(bridge);
+            let (incoming, incoming_rx) = mpsc::channel(CHANNEL_QUEUE_FRAMES);
+            let incoming_bytes = Arc::new(Semaphore::new(MAX_INCOMING_CHANNEL_QUEUED_BYTES));
+            let cancellation = state.cancellation.child_token();
+            state.routes.lock().unwrap().insert(
+                1,
+                Route {
+                    opened: None,
+                    incoming: incoming.clone(),
+                    incoming_bytes: incoming_bytes.clone(),
+                    outgoing_cancellation: state.cancellation.child_token(),
+                    incoming_cancellation: cancellation.clone(),
+                    data_outbound: state.data_outbound.channel(1),
+                },
+            );
+            let (sibling, _sibling_rx) = mpsc::channel(1);
+            state.routes.lock().unwrap().insert(
+                2,
+                Route {
+                    opened: None,
+                    incoming: sibling,
+                    outgoing_cancellation: state.cancellation.child_token(),
+                    incoming_cancellation: state.cancellation.child_token(),
+                    data_outbound: state.data_outbound.channel(2),
+                    incoming_bytes: Arc::new(Semaphore::new(MAX_INCOMING_CHANNEL_QUEUED_BYTES)),
+                },
+            );
+            send_incoming_data(&state, 1, vec![0xaa; MAX_DATA_BYTES]).unwrap();
+            let task = tokio::spawn(run_incoming_channel(
+                1,
+                bridge_writer,
+                incoming_rx,
+                state.clone(),
+                cancellation.clone(),
+                Arc::new(state.channel_slots.clone().try_acquire_owned().unwrap()),
+            ));
+            while incoming.capacity() != CHANNEL_QUEUE_FRAMES {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                incoming_bytes.available_permits(),
+                MAX_INCOMING_CHANNEL_QUEUED_BYTES - MAX_DATA_BYTES
+            );
+            if session {
+                state.fail("test cancellation");
+            } else {
+                close_remote_channel(&state, 1).unwrap();
+                // Ordered remote EOF retains a bounded drain; local close interrupts it.
+                assert!(!task.is_finished());
+                cancellation.cancel();
+            }
+            task.await.unwrap();
+            assert_eq!(
+                incoming_bytes.available_permits(),
+                MAX_INCOMING_CHANNEL_QUEUED_BYTES
+            );
+            let mut received = Vec::new();
+            application.read_to_end(&mut received).await.unwrap();
+            assert_eq!(received, vec![0xaa]);
+            if !session {
+                assert!(state.routes.lock().unwrap().contains_key(&2));
+                assert!(!state.cancellation.is_cancelled());
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn incoming_channel_local_close_interrupts_remote_closed_blocked_consumer() {
+        blocked_incoming_teardown(false).await;
+    }
+
+    #[tokio::test]
+    async fn incoming_channel_session_cancel_interrupts_blocked_consumer() {
+        blocked_incoming_teardown(true).await;
+    }
 
     #[tokio::test]
     async fn one_negotiation_routes_multiple_independent_channels() {
