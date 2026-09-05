@@ -28,7 +28,7 @@ source=(
   "https://github.com/OldJobobo/splinterm/releases/download/v$_upstream_ver/$pkgbase-$_upstream_ver.tar.gz"
 )
 sha256sums=(
-  'd59bf82a5e2218112613d4a69adb20ce2b6cd8c133cc9b14da8fbfa1de4d0644'
+  'c0ccb3e29d4e47a2e905a03767b4b480e24a62ad67d1a74efa12cae4c1597767'
 )
 
 prepare() {

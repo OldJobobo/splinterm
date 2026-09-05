@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0-rc.2`
+- **Current public version tag:** `v0.1.0-rc.3`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -50,7 +50,7 @@ not current compatibility promises. Headless `splinterd` does not require a
 graphical environment, but its packaged and remote workflows remain beta
 interfaces on the documented platform.
 
-## 0.1.0 RC3 preparation (unreleased)
+## 0.1.0 RC3 release
 
 RC3 is a maintenance stabilization candidate, not a new feature release. It
 separates probed font-source identity from accepted renderer faces, rejects FIFO
@@ -59,10 +59,17 @@ revocations, and cleans up topology subscriptions on abnormal connection exit.
 Relay cancellation interrupts blocked writes while ordered remote EOF retains
 queued response bytes for slow consumers under the logical-channel limit.
 
-RC2 remains the public release. RC3 requires exact-source validation, independent
-review, and guarded installed-package acceptance before candidate construction
-and human-approved publication. Local preparation does not publish a release or
-update installed packages. See [release automation](release-automation.md).
+[`v0.1.0-rc.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.3)
+was published from `2855721bf467f0d6fac0205d072d019012946158` after required CI,
+independent review, guarded installed-package VM acceptance, and protected
+human-approved promotion. The five public assets were downloaded and verified
+against the candidate manifest. Both AUR package bases,
+[`splinterm`](https://aur.archlinux.org/packages/splinterm) and
+[`splinterm-bin`](https://aur.archlinux.org/packages/splinterm-bin), publish
+`0.1.0rc.3-1` with the matching source and binary hashes. Their optional MCP
+subpackages retain the same version. See [release automation](release-automation.md).
+
+RC3 remains a prerelease for continued testing before 0.1.0 stable.
 
 ## 0.1.0 RC2 release
 
