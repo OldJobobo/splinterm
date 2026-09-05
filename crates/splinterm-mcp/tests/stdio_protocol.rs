@@ -271,6 +271,7 @@ fn accept_automation(listener: &UnixListener) -> UnixStream {
             version: splinterm_protocol::PROTOCOL_VERSION,
             limits: ServerLimits::default(),
             development_terminal_access: false,
+            daemon_hostname: None,
         },
     );
     stream
@@ -625,6 +626,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     version: splinterm_protocol::PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 },
             );
             let ClientFrame::Request {
@@ -984,6 +986,7 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         let ClientFrame::Request {
@@ -1082,6 +1085,7 @@ fn terminal_tools_use_exact_scoped_requests_cursors_and_cleanup() {
                     version: splinterm_protocol::PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 },
             );
             let ClientFrame::Request {
@@ -1842,6 +1846,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         let ClientFrame::Request {
@@ -1920,6 +1925,7 @@ fn daemon_deadline_returns_stable_timeout_and_disposes_connection() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         assert!(matches!(

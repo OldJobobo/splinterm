@@ -149,6 +149,30 @@ pub enum ClientFrame {
     },
 }
 
+/// Maximum UTF-8 byte length of informational daemon hostname metadata.
+pub const MAX_DAEMON_HOSTNAME_BYTES: usize = 255;
+
+/// Accept only bounded hostname-like text. Reject controls, whitespace, formatting
+/// and bidi characters rather than attempting to repair an untrusted identity.
+#[must_use]
+pub fn usable_daemon_hostname(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= MAX_DAEMON_HOSTNAME_BYTES
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_')))
+    .then_some(value)
+}
+
+fn deserialize_daemon_hostname<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Frame decoding is transport-bounded; retain only usable, bounded metadata.
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|hostname| usable_daemon_hostname(hostname).is_some()))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
@@ -156,6 +180,13 @@ pub enum ServerFrame {
         version: u16,
         limits: ServerLimits,
         development_terminal_access: bool,
+        /// Informational OS hostname at connection time, never authentication authority.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_daemon_hostname"
+        )]
+        daemon_hostname: Option<String>,
     },
     Response {
         request_id: u64,
@@ -2930,6 +2961,80 @@ impl ServerFrameTransactionAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_hostname_is_additive_and_old_clients_ignore_it() {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldServerFrame {
+            Hello {
+                version: u16,
+                limits: ServerLimits,
+                development_terminal_access: bool,
+            },
+        }
+        let old = ServerFrame::Hello {
+            version: PROTOCOL_VERSION,
+            limits: ServerLimits::default(),
+            development_terminal_access: false,
+            daemon_hostname: None,
+        };
+        let old_json = serde_json::to_value(&old).unwrap();
+        assert!(old_json.get("daemon_hostname").is_none());
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(old_json.clone()).unwrap(),
+            old
+        );
+        let mut new_json = old_json;
+        new_json["daemon_hostname"] = serde_json::json!("daemon-actual.example");
+        let decoded: ServerFrame = serde_json::from_value(new_json.clone()).unwrap();
+        assert!(
+            matches!(decoded, ServerFrame::Hello { daemon_hostname: Some(ref host), .. } if host == "daemon-actual.example")
+        );
+        let OldServerFrame::Hello {
+            version,
+            limits,
+            development_terminal_access,
+        } = serde_json::from_value(new_json).unwrap();
+        assert_eq!(version, PROTOCOL_VERSION);
+        assert_eq!(limits, ServerLimits::default());
+        assert!(!development_terminal_access);
+    }
+
+    #[test]
+    fn hello_hostname_rejects_unusable_metadata_without_losing_the_handshake() {
+        for hostname in [
+            String::new(),
+            "a".repeat(MAX_DAEMON_HOSTNAME_BYTES + 1),
+            "bad\nname".to_owned(),
+            "bad\0name".to_owned(),
+            "bad\u{202e}name".to_owned(),
+            "bad\u{2066}name".to_owned(),
+            "bad\u{200b}name".to_owned(),
+            "white space".to_owned(),
+        ] {
+            let frame = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: Some(hostname),
+            };
+            let decoded: ServerFrame =
+                serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+            assert!(matches!(
+                decoded,
+                ServerFrame::Hello {
+                    daemon_hostname: None,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            usable_daemon_hostname("node-界.example"),
+            Some("node-界.example")
+        );
+        assert!(usable_daemon_hostname(&"a".repeat(MAX_DAEMON_HOSTNAME_BYTES)).is_some());
+    }
 
     #[test]
     fn frames_are_length_prefixed_and_explicit() {

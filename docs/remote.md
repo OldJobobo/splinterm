@@ -274,3 +274,27 @@ SSH/relay/channel loss shuts down the affected local views and drops their
 connections, releasing subscriptions and controller leases. It sends no kill,
 close, restore, or other process-lifecycle request, so daemon-owned remote
 Splints continue running.
+
+## Remote window hostname tag (unreleased 0.1.1)
+
+Remote graphical windows show a compact `Remote: hostname` tag in the upper-right
+application header. The hostname is the connected daemon's kernel OS nodename,
+not the SSH profile/alias, terminal title, OSC data, or working directory. Local
+windows have no tag and retain their existing geometry. Hiding remote Dojo tabs
+keeps a minimal header for the tag; the tag is noninteractive and does not cover
+terminal cells or tab actions. Narrow windows truncate the label by display cells,
+retaining the `Remote` prefix when it fits.
+
+This is informational connection-time metadata, **not a trusted security or
+connection-health indicator**. Each new Window takes the hostname from its initial
+connection to its fixed endpoint; tab selection does not change it. Renaming the
+host does not update an existing Window. Transport failure continues to use the
+existing shutdown/error lifecycle, not a new reconnection mechanism.
+
+Older daemons that omit the optional handshake field show `Remote`. Empty,
+non-UTF-8 OS names, names over 255 UTF-8 bytes, and metadata containing anything
+other than letters/numbers, dots, hyphens, or underscores also fall back to
+`Remote` (including control, whitespace, and bidi-formatting characters). The
+additive private-protocol field does not change protocol negotiation or public
+CLI schemas; older clients ignore it. No hostname command, shell lookup, or
+`HOSTNAME` environment value is used.

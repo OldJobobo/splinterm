@@ -792,6 +792,12 @@ struct DaemonState {
     development_terminal_access: bool,
 }
 
+/// Read the kernel nodename once for this handshake, without environment or subprocesses.
+fn daemon_hostname() -> Option<String> {
+    let name = rustix::system::uname();
+    splinterm_protocol::usable_daemon_hostname(name.nodename().to_str().ok()?).map(str::to_owned)
+}
+
 async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> time::Instant {
     let mut transfers = state.image_transfers.lock().await;
     if expire {
@@ -1709,6 +1715,7 @@ async fn serve_authenticated(
             version: PROTOCOL_VERSION,
             limits: ServerLimits::default(),
             development_terminal_access: state.development_terminal_access,
+            daemon_hostname: daemon_hostname(),
         },
     )
     .await?;
@@ -8464,6 +8471,22 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn advertised_daemon_hostname_comes_from_the_kernel_and_is_bounded() {
+        let uname = rustix::system::uname();
+        let expected = uname
+            .nodename()
+            .to_str()
+            .ok()
+            .and_then(splinterm_protocol::usable_daemon_hostname);
+        assert_eq!(super::daemon_hostname().as_deref(), expected);
+        assert!(
+            super::daemon_hostname()
+                .is_none_or(|host| host.len() <= splinterm_protocol::MAX_DAEMON_HOSTNAME_BYTES)
+        );
+        assert!(c"invalid\xff".to_str().is_err());
     }
 
     #[tokio::test]

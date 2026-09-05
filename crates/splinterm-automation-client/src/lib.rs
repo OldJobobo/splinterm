@@ -3026,6 +3026,7 @@ pub struct Connection {
     queued_events: VecDeque<(ServerFrame, usize)>,
     queued_event_bytes: usize,
     limits: ServerLimits,
+    daemon_hostname: Option<String>,
     socket_path: Option<PathBuf>,
     trusted_ui: bool,
     unusable: bool,
@@ -3169,9 +3170,12 @@ impl Connection {
             },
         )
         .await?;
-        let limits = match read_frame(reader.as_mut()).await? {
+        let (limits, daemon_hostname) = match read_frame(reader.as_mut()).await? {
             ServerFrame::Hello {
-                version, limits, ..
+                version,
+                limits,
+                daemon_hostname,
+                ..
             } if version == PROTOCOL_VERSION => {
                 if let Err(error) = limits.validate_terminal_transport() {
                     bail!(
@@ -3179,7 +3183,7 @@ impl Connection {
                         error.message
                     );
                 }
-                limits
+                (limits, daemon_hostname)
             }
             ServerFrame::Error { error, .. } => {
                 return Err(anyhow::Error::new(DaemonProtocolFailure(error)));
@@ -3198,10 +3202,17 @@ impl Connection {
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits,
+            daemon_hostname,
             socket_path,
             trusted_ui: role == ClientRole::TrustedUi,
             unusable: false,
         })
+    }
+
+    /// Informational hostname advertised by the daemon at handshake time.
+    #[must_use]
+    pub fn daemon_hostname(&self) -> Option<&str> {
+        self.daemon_hostname.as_deref()
     }
 
     /// Returns the bounds negotiated during the daemon handshake.
@@ -4097,6 +4108,7 @@ mod tests {
             queued_events: VecDeque::new(),
             queued_event_bytes: 0,
             limits: ServerLimits::default(),
+            daemon_hostname: None,
             socket_path: None,
             trusted_ui: false,
             unusable: false,
@@ -4923,6 +4935,7 @@ mod tests {
                         version: PROTOCOL_VERSION,
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
+                        daemon_hostname: None,
                     })
                     .unwrap(),
                 )
@@ -4986,6 +4999,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negotiation_exposes_only_bounded_usable_daemon_hostname() {
+        for advertised in [
+            None,
+            Some("actual-daemon"),
+            Some("bad\nname"),
+            Some("\u{2067}host"),
+            Some(&"x".repeat(256)),
+        ] {
+            let expected = advertised.and_then(splinterm_protocol::usable_daemon_hostname);
+            let frame = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: advertised.map(str::to_owned),
+            };
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let server_task = tokio::spawn(async move {
+                let _ = read_client_frame(&mut server).await;
+                server
+                    .write_all(&encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            });
+            let connection = Connection::connect_stream(client, ClientRole::RemoteInteractive)
+                .await
+                .unwrap();
+            assert_eq!(connection.daemon_hostname(), expected);
+            server_task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn negotiation_stores_limits_and_rejects_error() {
         let (client, mut server) = UnixStream::pair().unwrap();
         let expected_limits = ServerLimits {
@@ -5003,6 +5048,7 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 limits: expected_limits,
                 development_terminal_access: false,
+                daemon_hostname: None,
             };
             server
                 .write_all(&encode_frame(&frame).unwrap())
@@ -5043,6 +5089,7 @@ mod tests {
                 version: PROTOCOL_VERSION - 1,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             };
             server
                 .write_all(&encode_frame(&frame).unwrap())
@@ -5083,6 +5130,7 @@ mod tests {
                     version: PROTOCOL_VERSION,
                     limits,
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 };
                 server
                     .write_all(&encode_frame(&frame).unwrap())
@@ -5120,6 +5168,7 @@ mod tests {
                         version: PROTOCOL_VERSION,
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
+                        daemon_hostname: None,
                     })
                     .unwrap(),
                 )
@@ -5152,6 +5201,7 @@ mod tests {
                         version: PROTOCOL_VERSION,
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
+                        daemon_hostname: None,
                     })
                     .unwrap(),
                 )
@@ -5543,6 +5593,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             limits: ServerLimits::default(),
             development_terminal_access: true,
+            daemon_hostname: None,
         };
         let second = ServerFrame::Response {
             request_id: 7,
@@ -5606,6 +5657,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             limits: ServerLimits::default(),
             development_terminal_access: true,
+            daemon_hostname: None,
         };
         let encoded = encode_frame(&expected).unwrap();
         let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();

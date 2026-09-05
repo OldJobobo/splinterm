@@ -113,6 +113,8 @@ pub struct WindowOptions {
     pub initial_dojo: Option<WindowDojoIdentity>,
     /// Initial tab-strip policy for managed Dojo windows.
     pub initial_tab_strip_visible: bool,
+    /// Remote daemon identity from this Window's initial connection; never terminal content.
+    pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
 }
 
 impl Default for WindowOptions {
@@ -151,6 +153,7 @@ impl Default for WindowOptions {
             optimistic_remote_splits: false,
             initial_dojo: None,
             initial_tab_strip_visible: true,
+            remote_display_identity: None,
         }
     }
 }

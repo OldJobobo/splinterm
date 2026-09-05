@@ -670,7 +670,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .map_or(Ok((INITIAL_WIDTH, INITIAL_HEIGHT)), |frame| {
             frame.initial_logical_size(options.initial_columns, options.initial_rows, 120)
         })?;
-    if managed_tabs && options.initial_tab_strip_visible {
+    if (managed_tabs && options.initial_tab_strip_visible)
+        || options.remote_display_identity.is_some()
+    {
         initial_height = initial_height
             .checked_add(TAB_STRIP_LOGICAL_HEIGHT)
             .context("initial tab strip height overflow")?;
@@ -953,6 +955,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             active_identity: initial_identity,
             managed_tabs,
             tab_strip_visible: options.initial_tab_strip_visible,
+            remote_display_identity: options.remote_display_identity,
+            remote_host_text: None,
+            remote_host_clipped: None,
             tab_strip_layout: None,
             tab_strip_pressed: None,
             tab_label_cache: HashMap::new(),
@@ -2885,8 +2890,8 @@ fn pending_remote_snapshot(splint_id: SplintId, columns: usize, rows: usize) -> 
     }
 }
 
-fn tab_strip_height(managed_tabs: bool, visible: bool, surface_height: u32) -> u32 {
-    if managed_tabs && visible {
+fn tab_strip_height(managed_tabs: bool, visible: bool, remote: bool, surface_height: u32) -> u32 {
+    if (managed_tabs && visible) || remote {
         TAB_STRIP_LOGICAL_HEIGHT.min(surface_height)
     } else {
         0
@@ -2957,6 +2962,7 @@ impl App {
         let y = tab_strip_height(
             self.tab_state.managed_tabs,
             self.tab_state.tab_strip_visible,
+            self.tab_state.remote_display_identity.is_some(),
             self.surface.logical_height,
         );
         Rect {
@@ -6087,6 +6093,8 @@ impl App {
         self.modal.tab_context_menu_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         self.presentation.explorer_layout = None;
@@ -6152,6 +6160,8 @@ impl App {
         self.modal.session_picker_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         if !raster_changed {
@@ -9144,6 +9154,8 @@ impl App {
         self.modal.session_picker_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         if !raster_changed {
@@ -9207,6 +9219,8 @@ impl App {
         self.modal.session_picker_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         if self.modal.inline_picker_open() {
@@ -9574,6 +9588,7 @@ impl App {
                 self.modal.tab_context_menu_anchor,
             )
         });
+        self.prepare_remote_host_text()?;
         let tab_layout = self.current_tab_strip_layout();
         let content_rect = self.content_rect();
         let content_buffer_rect = Self::buffer_rect(content_rect, self.surface.scale_120)?;
@@ -9925,6 +9940,10 @@ impl App {
                 &self.tab_state.tab_label_cache,
                 self.tab_state.tab_close_text.as_ref().map(|(_, text)| text),
                 self.tab_state.tab_new_text.as_ref().map(|(_, text)| text),
+                self.tab_state
+                    .remote_host_clipped
+                    .as_ref()
+                    .map(|cached| &cached.text),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
@@ -10435,15 +10454,25 @@ mod tests {
     #[test]
     fn hidden_tab_strip_reclaims_managed_window_height() {
         assert_eq!(
-            tab_strip_height(true, true, TAB_STRIP_LOGICAL_HEIGHT + 20),
+            tab_strip_height(true, true, false, TAB_STRIP_LOGICAL_HEIGHT + 20),
             TAB_STRIP_LOGICAL_HEIGHT
         );
         assert_eq!(
-            tab_strip_height(true, true, TAB_STRIP_LOGICAL_HEIGHT - 1),
+            tab_strip_height(true, true, false, TAB_STRIP_LOGICAL_HEIGHT - 1),
             TAB_STRIP_LOGICAL_HEIGHT - 1
         );
-        assert_eq!(tab_strip_height(true, false, 200), 0);
-        assert_eq!(tab_strip_height(false, true, 200), 0);
+        for managed in [false, true] {
+            for visible in [false, true] {
+                assert_eq!(
+                    tab_strip_height(managed, visible, true, 200),
+                    TAB_STRIP_LOGICAL_HEIGHT
+                );
+                assert_eq!(tab_strip_height(managed, visible, true, 10), 10);
+                assert_eq!(tab_strip_height(managed, visible, true, 0), 0);
+            }
+        }
+        assert_eq!(tab_strip_height(true, false, false, 200), 0);
+        assert_eq!(tab_strip_height(false, true, false, 200), 0);
     }
 
     #[test]

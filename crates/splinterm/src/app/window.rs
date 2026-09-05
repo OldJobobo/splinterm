@@ -186,7 +186,8 @@ async fn run_live_multipane_window_inner(
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
     }
-    let initial_identity = initial_window_dojo_identity(&factory, dojo_model.id).await?;
+    let (initial_identity, remote_display_identity) =
+        initial_window_dojo_identity(&factory, dojo_model.id).await?;
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
@@ -273,6 +274,7 @@ async fn run_live_multipane_window_inner(
             topology_commands: Some(topology_commands),
             graphical_focus,
             forced_control_transfer,
+            remote_display_identity,
             optimistic_remote_splits,
             initial_dojo: Some(initial_identity),
             initial_tab_strip_visible,
@@ -327,6 +329,7 @@ pub(super) async fn run_live_window(
     })?;
     let initial_font_generation = Arc::clone(renderer::snapshot_font_generation()?);
     let mut connection = factory.connect().await?;
+    let remote_display_identity = factory.remote_display_identity(&connection);
     let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
     let requested_scopes = pane_access_scopes();
@@ -421,6 +424,7 @@ pub(super) async fn run_live_window(
             controlled: controller_id.is_some(),
             graphical_focus,
             forced_control_transfer,
+            remote_display_identity,
             terminal_grid_limits,
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,

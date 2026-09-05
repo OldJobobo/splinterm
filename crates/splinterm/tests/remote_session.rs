@@ -37,6 +37,99 @@ fn fake_ssh(directory: &Path, mode: &str) -> PathBuf {
 }
 
 #[tokio::test]
+async fn remote_window_identity_is_refreshed_per_connection_without_retargeting_the_factory() {
+    use splinterm::endpoint::ConnectionFactory;
+    let directory = test_directory("hostname-connection-time");
+    let ssh = fake_ssh(&directory, "read-only");
+    let source = fs::read_to_string(&ssh).unwrap().replace(
+        "'development_terminal_access': False",
+        "'development_terminal_access': False, 'daemon_hostname': 'daemon-' + str(channel)",
+    );
+    fs::write(&ssh, source).unwrap();
+    let catalog = RemoteCatalog::parse(
+        "version = 1\n[remotes.test]\nhost = \"ssh-alias.invalid\"\n",
+        None,
+    )
+    .unwrap();
+    let session =
+        RemoteSession::connect_with_program(catalog.get("test").unwrap(), ssh.as_os_str())
+            .await
+            .unwrap();
+    let factory = ConnectionFactory::from_remote_session("test", session);
+    let first = factory.connect().await.unwrap();
+    let initial = factory.remote_display_identity(&first).unwrap();
+    let cloned_factory = factory.clone();
+    let second = cloned_factory.connect().await.unwrap();
+    let next = cloned_factory.remote_display_identity(&second).unwrap();
+    assert_ne!(initial, next);
+    assert_eq!(
+        initial.label(),
+        format!("Remote: {}", first.daemon_hostname().unwrap())
+    );
+    assert_eq!(
+        next.label(),
+        format!("Remote: {}", second.daemon_hostname().unwrap())
+    );
+    assert_eq!(factory.remote_display_identity(&first), Some(initial));
+    drop(first);
+    drop(second);
+    drop(cloned_factory);
+    drop(factory);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn remote_window_identity_uses_current_daemon_hello_not_ssh_alias() {
+    use splinterm::endpoint::ConnectionFactory;
+    let directory = test_directory("hostname");
+    for advertised in [None, Some("actual-daemon"), Some("bad\u{202e}name")] {
+        let ssh = fake_ssh(&directory, "read-only");
+        let mut source = fs::read_to_string(&ssh).unwrap();
+        if let Some(host) = advertised {
+            source = source.replace(
+                "'development_terminal_access': False",
+                &format!(
+                    "'development_terminal_access': False, 'daemon_hostname': {}",
+                    serde_json::to_string(host).unwrap()
+                ),
+            );
+            fs::write(&ssh, source).unwrap();
+        }
+        let catalog = RemoteCatalog::parse(
+            "version = 1\n[remotes.test]\nhost = \"ssh-alias.invalid\"\n",
+            None,
+        )
+        .unwrap();
+        let session =
+            RemoteSession::connect_with_program(catalog.get("test").unwrap(), ssh.as_os_str())
+                .await
+                .unwrap();
+        let factory = ConnectionFactory::from_remote_session("test", session);
+        let connection = factory.connect().await.unwrap();
+        let identity = factory.remote_display_identity(&connection).unwrap();
+        let expected = if advertised == Some("actual-daemon") {
+            "Remote: actual-daemon"
+        } else {
+            "Remote"
+        };
+        assert_eq!(identity.label(), expected);
+        assert!(
+            ConnectionFactory::local()
+                .remote_display_identity(&connection)
+                .is_none()
+        );
+        // A Window retains its connection-time identity independently of tab/OSC state.
+        let retained = identity.clone();
+        drop(connection);
+        drop(factory);
+        assert_eq!(retained.label(), expected);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn one_fake_ssh_process_serves_multiple_interactive_connections() {
     let directory = test_directory("multiplex");
     let ssh = fake_ssh(&directory, "read-only");
