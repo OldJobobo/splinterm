@@ -20,7 +20,7 @@ pkgbase = splinterm
 	makedepends = wayland
 	makedepends = xdg-terminal-exec
 	source = https://github.com/OldJobobo/splinterm/releases/download/v0.1.0/splinterm-0.1.0.tar.gz
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = bac906ff649c4700366dca05ae4593b2b757aab4d54fbd6202a7ff5481926112
 
 pkgname = splinterm
 	pkgdesc = Persistent Wayland terminal for humans and bounded automation
