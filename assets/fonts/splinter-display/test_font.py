@@ -42,6 +42,11 @@ class FontTests(unittest.TestCase):
         for pair in zip("splinterm", "plinterm"):
             self.assertEqual(KERN[pair], TITLE_KERN[pair])
 
+    def test_original_capital_d_is_preserved(self):
+        # The original D was explicitly retained during the capital refinement.
+        digest = hashlib.sha256(json.dumps(self.glyphs["uni0044"], sort_keys=True).encode()).hexdigest()
+        self.assertEqual(digest, "303ac5f50aae525cc7b4756a6366eadb956919870c58c6700676a191ca0b36ff")
+
     def test_source_coverage_is_unique_and_complete(self):
         self.assertEqual(set(self.cmap), EXPECTED)
         self.assertEqual(len(self.glyphs), len(EXPECTED) + 1)

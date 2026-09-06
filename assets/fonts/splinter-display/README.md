@@ -4,11 +4,11 @@ An original heavy display typeface built around the approved Splinterm lettering
 rounded mass, tight spacing, and angular cuts in the `p` descender and `i` dot.
 The founding nine glyphs and the title's kerning remain unchanged.
 
-**Font asset v0.1:** a usable English display alphabet, not a terminal/coding font.
+**Font asset v0.2:** a usable English display alphabet, not a terminal/coding font.
 Use it for titles, branding, posters, and short labels rather than small body text.
 
 This version belongs to the font, not the Splinterm application. OpenType metadata
-spells it `0.100` (numerically 0.1); filenames remain stable for consumers. See
+spells it `0.200` (numerically 0.2); filenames remain stable for consumers. See
 [CHANGELOG.md](CHANGELOG.md) for the asset release history.
 
 ## Try it
@@ -69,7 +69,8 @@ For web use, without the old title's additional negative letter spacing:
 }
 ```
 
-This branch does not change the Splinterm website or install any font.
+The website's main wordmark consumes this WOFF2 directly. The font build and
+viewer do not install any font.
 
 ## Editable source
 

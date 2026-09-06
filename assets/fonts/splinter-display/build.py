@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent
 EPOCH = 3860000000  # Fixed OpenType timestamp; never depend on build time.
 FAMILY = "Splinter Display"
 STEM = "SplinterDisplay-Heavy"
-RELEASE = "0.1"
-VERSION = "0.100"  # OpenType's three-decimal spelling of the v0.1 asset release.
+RELEASE = "0.2"
+VERSION = "0.200"  # OpenType's three-decimal spelling of the v0.2 asset release.
 
 
 def load_glyphs():
