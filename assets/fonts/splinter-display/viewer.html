@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Splinter Display — type specimen</title>
+  <style>
+    @font-face {
+      font-family: "Splinter Display";
+      src: url("dist/SplinterDisplay-Heavy.woff2") format("woff2");
+      font-weight: 900;
+      font-style: normal;
+      font-display: swap;
+    }
+    :root {
+      color-scheme: dark;
+      --ground: #201e1f;
+      --ink: #f2e6d8;
+      --muted: #b2a697;
+      --signal: #f3a536;
+      --line: #665b5f;
+      --sample-size: 128px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--ground); color: var(--ink); font: 16px/1.6 system-ui, sans-serif; }
+    main { max-width: 1440px; padding: 32px clamp(20px, 5vw, 72px) 64px; margin: auto; }
+    header { display: flex; flex-wrap: wrap; gap: 12px 40px; align-items: baseline; justify-content: space-between; }
+    h1 { margin: 0; font: 500 16px/1.5 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .09em; }
+    .muted, #font-status { color: var(--muted); }
+    a { color: var(--signal); text-underline-offset: .2em; }
+    a:hover { color: var(--ink); }
+    a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--signal); outline-offset: 5px;
+    }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 28px; margin: 32px 0 12px; }
+    .controls label { display: flex; align-items: center; gap: 12px; }
+    input[type="range"] { accent-color: var(--signal); width: min(200px, 40vw); }
+    output { min-width: 4em; font-variant-numeric: tabular-nums; }
+    button { color: var(--ink); border: 1px solid var(--line); background: transparent; padding: 8px 16px; font: inherit; cursor: pointer; }
+    button:hover { border-color: var(--signal); }
+    .display { font-family: "Splinter Display", sans-serif; font-weight: 900; font-synthesis: none; font-kerning: normal; }
+    textarea {
+      display: block; width: 100%; min-height: 310px; margin: 0; padding: 22px 0;
+      resize: vertical; border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+      background: transparent; color: var(--ink); font-size: var(--sample-size); line-height: 1.12;
+      letter-spacing: 0;
+    }
+    #coverage { min-height: 1.6em; color: var(--muted); overflow-wrap: anywhere; }
+    #coverage.warning { color: var(--signal); }
+    section { margin-top: 44px; }
+    h2 { font-size: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+    .alphabet { font-size: clamp(32px, 4.5vw, 64px); line-height: 1.2; overflow-wrap: anywhere; margin: 12px 0; }
+    .samples { font-size: clamp(28px, 4vw, 55px); line-height: 1.35; overflow-wrap: anywhere; }
+    footer { margin-top: 48px; border-top: 1px solid var(--line); padding-top: 20px; }
+    footer nav { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+    footer p { max-width: 75ch; }
+    @media (max-width: 600px) {
+      :root { --sample-size: 64px; }
+      textarea { min-height: 220px; }
+    }
+    @media print {
+      .controls, footer nav { display: none; }
+      main { padding: 24px; }
+      textarea { resize: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Splinter Display / Heavy</h1>
+      <span class="muted">Original typeface · v0.1</span>
+    </header>
+    <p id="font-status" role="status">Loading the local WOFF2 font…</p>
+    <noscript><p>Enable JavaScript for the size control and coverage warnings. The font and text field still work without it.</p></noscript>
+    <div class="controls">
+      <label for="size">Size <input id="size" type="range" min="32" max="200" value="128"><output id="size-value" for="size">128 px</output></label>
+      <button id="reset" type="button">Reset text</button>
+      <a href="dist/specimen.png">Full proof sheet</a>
+    </div>
+    <label for="sample" class="muted">Type your own text</label>
+    <textarea id="sample" class="display" rows="2" spellcheck="false" autocapitalize="off" aria-describedby="coverage">splinterm</textarea>
+    <p id="coverage" role="status">104 characters: English letters, numbers, and punctuation.</p>
+    <section aria-labelledby="alphabet-heading">
+      <h2 id="alphabet-heading">The alphabet</h2>
+      <p class="display alphabet">ABCDEFGHIJKLMNOPQRSTUVWXYZ</p>
+      <p class="display alphabet">abcdefghijklmnopqrstuvwxyz</p>
+      <p class="display alphabet">0123456789</p>
+      <p class="display alphabet">!&quot;#$%&amp;'()*+,-./:;&lt;=&gt;?@[\]^_`{|}~</p>
+      <p class="display alphabet">‘Quotes’ “Type” – — … •</p>
+    </section>
+    <section aria-labelledby="spacing-heading">
+      <h2 id="spacing-heading">Spacing and kerning</h2>
+      <div class="display samples">
+        <p>Build boldly. Split freely.</p>
+        <p>AVATAR / WAYFINDER / 09:41</p>
+        <p>The quick brown fox jumps over the lazy dog.</p>
+      </div>
+    </section>
+    <footer>
+      <nav aria-label="Font files">
+        <a href="dist/SplinterDisplay-Heavy.ttf" download>Download TTF</a>
+        <a href="dist/SplinterDisplay-Heavy.otf" download>Download OTF</a>
+        <a href="dist/SplinterDisplay-Heavy.woff2" download>Download WOFF2</a>
+        <a href="README.md">Build notes</a>
+      </nav>
+      <p class="muted">Install either TTF or OTF, not both. This is a proportional display face, not a coding font. One weight, no hinting, no accented-language coverage. Nothing is installed by this viewer.</p>
+    </footer>
+  </main>
+  <script>
+    const sample = document.getElementById('sample');
+    const size = document.getElementById('size');
+    const output = document.getElementById('size-value');
+    const coverage = document.getElementById('coverage');
+    const status = document.getElementById('font-status');
+    const extras = new Set([0xa0, 0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026]);
+    function updateSize() {
+      document.documentElement.style.setProperty('--sample-size', `${size.value}px`);
+      output.value = `${size.value} px`;
+    }
+    function updateCoverage() {
+      const missing = [...new Set([...sample.value].filter(char => {
+        const cp = char.codePointAt(0);
+        return !(cp >= 32 && cp <= 126) && !extras.has(cp) && !'\n\r\t'.includes(char);
+      }))];
+      coverage.classList.toggle('warning', missing.length > 0);
+      coverage.textContent = missing.length
+        ? `Not in this font: ${missing.join(' ')}. These characters use your browser’s fallback font.`
+        : 'All sample characters are covered. Kerning is on; no extra letter spacing.';
+    }
+    size.value = window.matchMedia('(max-width: 600px)').matches ? '64' : '128';
+    size.addEventListener('input', updateSize);
+    sample.addEventListener('input', updateCoverage);
+    document.getElementById('reset').addEventListener('click', () => {
+      sample.value = 'splinterm';
+      updateCoverage();
+      sample.focus();
+    });
+    updateSize();
+    updateCoverage();
+    document.fonts.load('900 64px "Splinter Display"', 'splinterm').then(fonts => {
+      status.textContent = fonts.length ? 'Local WOFF2 loaded — you are viewing the actual font.' : 'Font did not load. The text below is fallback, not Splinter Display.';
+    }).catch(() => {
+      status.textContent = 'Font did not load. Open this folder through a local web server if your browser blocks local fonts.';
+    });
+  </script>
+</body>
+</html>
