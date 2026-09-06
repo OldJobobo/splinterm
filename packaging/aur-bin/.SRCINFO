@@ -8,10 +8,10 @@ pkgbase = splinterm-bin
 	noextract = splinterm-mcp-0.1.0-x86_64.pkg.tar.zst
 	options = !strip
 	options = !debug
-	source = splinterm-0.1.0-x86_64.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0/splinterm-0000000000000000000000000000000000000000-x86_64.pkg.tar.zst
-	source = splinterm-mcp-0.1.0-x86_64.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0/splinterm-mcp-0000000000000000000000000000000000000000-x86_64.pkg.tar.zst
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	source = splinterm-0.1.0-x86_64.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0/splinterm-7bba5a91fd4624f2f2699dd95af01d97d6200bc2-x86_64.pkg.tar.zst
+	source = splinterm-mcp-0.1.0-x86_64.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.0/splinterm-mcp-7bba5a91fd4624f2f2699dd95af01d97d6200bc2-x86_64.pkg.tar.zst
+	sha256sums = 0057bdf34f924fd6bb3153e618dce7df5dd3ba1a170fe2904c4ec319a014f89b
+	sha256sums = a279a5afcd9771a3265cbaf08cf4cee91901be4471149f89562356a27e02f869
 
 pkgname = splinterm-bin
 	pkgdesc = Persistent Wayland terminal for humans and bounded automation (prebuilt binary)
