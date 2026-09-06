@@ -4092,10 +4092,13 @@ impl App {
             Keysym::l | Keysym::L | Keysym::Right if plain => Some(CopyMotion::Right),
             Keysym::k | Keysym::K | Keysym::Up if plain => Some(CopyMotion::Up(1)),
             Keysym::j | Keysym::J | Keysym::Down if plain => Some(CopyMotion::Down(1)),
+            Keysym::w | Keysym::W if plain => Some(CopyMotion::WordForward),
+            Keysym::b | Keysym::B if plain => Some(CopyMotion::WordBackward),
+            Keysym::e | Keysym::E if plain => Some(CopyMotion::WordEnd),
             Keysym::Page_Up => Some(CopyMotion::Up(page)),
             Keysym::Page_Down => Some(CopyMotion::Down(page)),
-            Keysym::Home => Some(CopyMotion::LineStart),
-            Keysym::End => Some(CopyMotion::LineEnd),
+            Keysym::_0 | Keysym::Home if plain => Some(CopyMotion::LineStart),
+            Keysym::dollar | Keysym::End if plain => Some(CopyMotion::LineEnd),
             _ => None,
         };
         let Some(motion) = motion else {
@@ -10603,6 +10606,33 @@ mod tests {
         assert_eq!(state.overlay_selection().anchor.row_id, 4);
         snapshot.history_generation += 1;
         assert!(!copy_mode_is_valid(&snapshot, state));
+    }
+
+    #[test]
+    fn copy_mode_vim_word_motions_cross_whitespace_and_punctuation() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 1);
+        snapshot.columns = 17;
+        snapshot.rows = 1;
+        let mut row = blank_row(snapshot.columns);
+        row.row_id = Some(1);
+        for (column, content) in "alpha beta, gamma".chars().enumerate() {
+            row.cells[column].content = content.to_string();
+        }
+        snapshot.visible_rows = vec![row];
+
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordEnd).moved);
+        assert_eq!(state.cursor.column, 4);
+
+        state.cursor.column = 0;
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordForward).moved);
+        assert_eq!(state.cursor.column, 6);
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordBackward).moved);
+        assert_eq!(state.cursor.column, 0);
+
+        state.cursor.column = 10;
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordEnd).moved);
+        assert_eq!(state.cursor.column, 16);
     }
 
     fn pane_options(splint_id: SplintId) -> WindowPaneOptions {

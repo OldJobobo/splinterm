@@ -139,8 +139,9 @@ With the `omarchy-tmux` profile, `Prefix+B` toggles the Dojo tab strip,
 labels, configuration names, shortcuts, sources, and closed keywords; use
 Up/Down or PageUp/PageDown to navigate, `Ctrl+U` to clear, and Escape once to
 clear a query or again to close.
-Move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown; press `v` to begin a
-selection, `y` or `Super+C` to publish it to the Wayland clipboard and exit, or
+Move with `h/j/k/l`, arrows, `w`/`b`/`e` word motions, `0`/`$` (or Home/End),
+or PageUp/PageDown; press `v` to begin a selection, `y` or `Super+C` to publish
+it to the Wayland clipboard and exit, or
 Escape to cancel. Copy-mode `Super+V/X/Z` are consumed locally; copy mode never
 forwards these keys, pointer input, paste, or IME text to the terminal
 application. Outside copy mode, both built-in profiles provide terminal
