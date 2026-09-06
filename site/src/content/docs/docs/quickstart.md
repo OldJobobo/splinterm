@@ -3,9 +3,13 @@ title: Quickstart
 description: Open a new Splinterm terminal, detach from work, and return to the running session.
 ---
 
-This first workflow demonstrates Splinterm's central behavior: the graphical window can close while the daemon-owned terminal session continues running.
+Open a terminal, split it into panes, close its Window, and return to the same running work. This workflow uses the default **persistent** lifetime.
 
-## 1. Install the public beta
+:::caution[Check the lifetime before closing]
+If you set `multiplexer.persistent-by-default=no`, an ordinary unnamed Lair belongs to its Window and closing that Window ends its processes unless the Lair has been promoted. Command-bearing XDG launches start client-bound and end with their command or owning Window unless promoted. See [Terminal lifetime](/docs/configure/configuration/#terminal-lifetime).
+:::
+
+## 1. Install Splinterm
 
 Follow [Installation](/docs/install/) from an x86_64 Omarchy/Arch system.
 
@@ -17,13 +21,17 @@ Use the installed desktop entry or run:
 splinterm-xdg-terminal-exec
 ```
 
-A commandless launch creates a fresh persistent **Lair**, one **Dojo**, and one **Splint**. A working directory is preserved exactly. If another application supplies a command through the XDG terminal contract, Splinterm preserves its structured argv without rebuilding shell text and creates a transient client-bound Lair instead. That Lair and all its processes disappear when the command exits or the owning Window disconnects. Native `splinterm launch -- COMMAND...` remains persistent.
+A commandless launch creates a **Lair** (your workspace), one **Dojo** (its terminal layout), and one **Splint** (a terminal pane). The Lair is persistent by default. Native `splinterm launch -- COMMAND...` is also persistent; an application-supplied XDG command instead starts in a client-bound Lair. While unpromoted, that Lair ends when its initial command exits or its owning Window disconnects.
 
-## 3. Leave the work running
+## 3. Split the Dojo
 
-Start a recognizable process in the terminal, then close the graphical window. Closing the final tab detaches the client; it does not terminate the daemon-owned Dojo or its running Splints.
+With the default `splinterm` keymap, press **Ctrl+Shift+Enter** for a horizontal split or **Ctrl+Shift+\\** for a vertical split. Each pane is a Splint. Use **Ctrl+Shift+Arrow** to move between them; **Ctrl+Shift+D** creates another Dojo, shown as a tab.
 
-## 4. Return through Recent Dojos
+## 4. Leave persistent work running
+
+Start a recognizable process in a Splint, then close the graphical Window. With the default persistent lifetime, this detaches the view without terminating its Dojos or Splints. The daemon must remain running: restarting it or rebooting ends processes.
+
+## 5. Return through Recent Dojos
 
 Open the native Dojo picker:
 
@@ -55,12 +63,12 @@ splinterm reopen
 | Search scrollback | Ctrl+Shift+F |
 | Copy / paste | Ctrl+Shift+C / Ctrl+Shift+V (Super+C/V and Ctrl+Insert/Shift+Insert aliases) |
 
-The `omarchy-tmux` profile advertises Ctrl+Shift+C/V first because compositors may reserve Super chords. Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. When Omarchy classifies `com.oldjobobo.splinterm` as a terminal, it delivers universal copy/paste as `Ctrl+Insert`/`Shift+Insert`, which Splinterm accepts while preserving ordinary `Ctrl+C` terminal interrupt. While viewing historical output, plain Enter returns the focused pane to live output without submitting terminal input.
+Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. When Omarchy classifies `com.oldjobobo.splinterm` as a terminal, it delivers universal copy/paste as `Ctrl+Insert`/`Shift+Insert`, which Splinterm accepts while preserving ordinary `Ctrl+C` terminal interrupt. While viewing historical output, plain Enter returns the focused pane to live output without submitting terminal input.
 
 :::note[Detach is not restore]
 Reopening attaches to processes that are still running. If a Splint has exited, starting it again from saved launch metadata is an explicit restore operation.
 :::
 
-The optional `omarchy-tmux` profile adds `Ctrl+Space` / `Ctrl+B` prefixes, trusted searchable `Prefix+?` key help, `Prefix+[` vi copy mode, and `Prefix Shift+S/F/V/O` for Save, pin toggle, Preview, and Restore of the current Lair. See [Configuration and keymaps](/docs/configure/configuration/).
+The optional `omarchy-tmux` profile adds `Ctrl+Space` / `Ctrl+B` prefixes, trusted `Prefix+?` key help, and `Prefix+[` vi copy mode. See [Configuration and keymaps](/docs/configure/configuration/).
 
 Next, learn the [core concepts](/docs/concepts/), read about [sessions and persistence](/docs/sessions/), or create complete layouts with [Dojo presets](/docs/presets/).

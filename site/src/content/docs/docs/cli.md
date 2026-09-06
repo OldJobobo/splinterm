@@ -10,11 +10,11 @@ The `splinterm` CLI serves both people and structured clients. Human output is t
 ```bash
 splinterm dojos                    # open Recent Dojos
 splinterm reopen                   # reopen the last still-running Dojo
-splinterm launch                   # create a fresh persistent graphical Lair
+splinterm launch                   # create a fresh graphical Lair; persistent by default
 splinterm window --lair-id L --dojo-id D
 ```
 
-`splinterm sessions` remains a compatibility alias for `dojos`. A Window is a disposable view and can hold several Dojos as local tabs.
+`splinterm sessions` remains a compatibility alias for `dojos`. A Window can hold several Dojos as local tabs. Bare `launch` follows `persistent-by-default`; closing a Window that owns an unpromoted transient Lair ends its processes. Explicitly named and native command-bearing launches remain persistent. See [Terminal lifetime](/docs/configure/configuration/#terminal-lifetime).
 
 ## Inspect topology
 
@@ -96,4 +96,4 @@ splinterm --output ndjson --schema-major 2 --timeout-ms 300000 \
 
 Machine mode never prompts. It uses stable schema-major-2 envelopes, explicit timeouts, structured exit categories, resource policy, incarnation checks, and resynchronization rules. Human-readable output and private daemon frames are not compatibility contracts.
 
-For every flag and operation, the current executable's `--help` and repository [`docs/cli.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/cli.md) remain authoritative.
+For every flag and operation, the current executable's `--help` and repository [`docs/cli.md`](https://github.com/OldJobobo/splinterm/blob/v0.1.0/docs/cli.md) remain authoritative.

@@ -1,23 +1,25 @@
 ---
 title: Why native Wayland?
-description: What Splinterm gains from speaking Wayland directly, how persistence changes the model, and where the current limits are.
+description: How Splinterm works with your Wayland desktop, from display scaling to input and drawing.
 ---
 
-Splinterm is a native Wayland client. It speaks directly to the compositor instead of presenting an X11 window through the XWayland compatibility layer.
+Splinterm works directly with your Wayland desktop for display scaling, keyboard input, and the clipboard. It does not need XWayland to display its windows.
 
-That choice improves how the terminal participates in a modern Wayland desktop. It is not, by itself, what makes Splinterm unique. The larger difference is that the native window is only a disposable view into terminal state owned by the headless `splinterd` daemon.
+The window and the running work are separate: `splinterd`, the background service, runs your shells. With the default persistent settings, those shells keep running after you close the window.
 
 ```text
 Hyprland / Wayland compositor
              ↓
-  disposable splinterm window
+      splinterm window
              ↓
-   persistent splinterd topology
+   splinterd background service
              ↓
      shells · layouts · scrollback
 ```
 
-## What users gain
+<span id="what-users-gain"></span>
+
+## What this means in use
 
 ### Compositor-aware scaling
 
@@ -47,7 +49,7 @@ Wayland does not give ordinary clients the broad global window inspection and in
 
 Many current terminal emulators can use a native Wayland backend. Native Wayland support alone therefore is not the main product distinction.
 
-In Splinterm, `splinterd` owns shell processes, terminal state, scrollback, layouts, and persistent session metadata. A `splinterm` Wayland window displays that state but does not own its lifetime. Closing the window detaches the view; it does not end the work beneath it.
+In Splinterm, `splinterd` runs the shell processes and holds terminal state, scrollback, layouts, and saved session details. Closing a window leaves persistent work running while that service stays alive. Window-owned work is different: unless promoted to persistent, it ends with its owning window. See [Sessions and persistence](/docs/sessions/) before changing the defaults.
 
 The daemon itself requires neither Wayland nor X11. It can continue serving persistent sessions while no graphical client is connected.
 

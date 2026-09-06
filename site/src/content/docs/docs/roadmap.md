@@ -1,72 +1,91 @@
 ---
 title: Roadmap
-description: Product direction from the current public beta toward a supported persistent workspace.
+description: What we’re working on, what comes next, and what is still an idea.
 ---
 
-Splinterm's roadmap uses **Now / Next / Later / Explore** horizons instead of release dates. These horizons describe intended product outcomes. They are not delivery dates, implementation order, compatibility guarantees, or promises that every listed idea will ship.
+We group plans into **Now / Next / Later / Explore** rather than assigning release dates. Plans can change, and an item here does not mean it is available in the current package.
 
-[Current status](/docs/status/) remains the authority for what works today. The repository [product roadmap](https://github.com/OldJobobo/splinterm/blob/main/docs/product-roadmap.md) contains the full strategic rationale. Maintainer dependency order, implementation plans, and delivery gates are tracked separately from the public product repository; accepted decisions needed to understand shipped behavior are promoted into public ADRs and documentation.
+See [Current status](/docs/status/) for what you can use today, or the [visual roadmap](/roadmap/) for a shorter overview.
 
-## Now: make the public beta a confident daily driver
+<span id="shipped-foundations"></span>
 
-The current priority is to make persistence understandable, desktop behavior coherent, and installation trustworthy on the validated x86_64 Omarchy/Arch environment.
+## Already available
 
-Planned outcomes include:
+The first stable release includes persistent Lairs, saved layouts, explicit restore, optional work that ends with its window, Omarchy theme and font-family following, local-file drop support, SSH access, and automation with permissions.
 
-- recognizable named, pinned, disposable, restorable, and expired Lair states;
-- clear save, restore, pin, delete, and bounded-retention controls without persisting terminal contents or secrets;
-- exact theme fidelity and supported Omarchy desktop integration;
-- bounded local-file drop path insertion in Alpha3, with clipboard-image saving retained as later work;
-- stronger installation, upgrade, recovery, diagnostics, and automation-consent journeys; and
-- a passing beta performance and memory gate, or an explicit product disposition.
+There are important limits: restarting the background service ends running commands and loses terminal history. Version 0.1 cannot keep those commands alive through an upgrade or reboot. Read [Upgrade and rollback](/docs/packaging/) and [Sessions and persistence](/docs/sessions/) before relying on saved work.
 
-This horizon succeeds when a new user can install Splinterm, organize work, close its Window, return safely, and predict destructive actions without maintainer assistance.
+<span id="now-make-daily-work-easier"></span>
 
-## Next: define a supported 1.0 contract
+## Now: make the everyday easier
 
-A supported release requires more than implemented features. It requires an explicit and testable relationship with users.
+Focus on everyday use on x86_64 Omarchy/Arch:
 
-Before a 1.0 claim, the project intends to:
+- a short path from installation to opening, splitting, and returning to a Dojo;
+- names you can recognize in tabs and pickers, with clear warnings before ending work;
+- easy-to-find shortcuts, including familiar tmux-style controls;
+- clearer upgrade instructions, error messages, and permission prompts;
+- better feedback and recovery when SSH connections fail; and
+- repeatable checks for everyday use and performance, tied to the builds tested.
 
-- declare supported platforms, compatibility windows, release channels, and breaking-change policy;
-- publish tested upgrade, rollback, reset, and recovery procedures;
-- stabilize human workflows, configuration, machine schemas, and package contracts;
-- establish issue reporting, security reporting, and realistic support expectations; and
-- make resource limits, diagnostics, and failure behavior ordinary product knowledge.
+The aim is simple: you can organize work, return to it, and know what will end a running command without asking the maintainer.
 
-Version 1.0 is a support contract, not a reward for accumulating features.
+Keeping commands alive through compatible background-service upgrades is future work. Saving clipboard images is also a future idea, not part of the current local-file drop feature.
 
-## Later: connect the persistent workspace
+<span id="next-define-a-supported-10-contract"></span>
 
-After the primary product is dependable, local, remote, headless, and authorized tool access should become intentional ways into the same work rather than separate terminal worlds.
+## Next: prepare for 1.0 support
 
-Candidate outcomes include:
+Stable 0.1 supports the documented setup; it is not a long-term-support promise. Before 1.0, we want users to know what will keep working between versions and how long it will be supported.
 
-- productized native remote profiles, connection diagnostics, and SSH recovery;
-- stable integration kits and reference journeys for tools and MCP hosts;
-- visibly distinct human and automated activity inside shared topology; and
-- portable workspace definitions that do not execute untrusted shell source.
+That means:
 
-This horizon does not imply a public daemon listener, cloud account, hosted control plane, synchronized secrets, or collaborative simultaneous typing.
+- clear supported platforms, support periods, release channels, and rules for breaking changes;
+- tested upgrades, downgrades, resets, and recovery steps;
+- reliable settings, commands, tool interfaces, and packages;
+- straightforward bug and security reporting; and
+- documented resource limits and what happens when something fails.
 
-## Explore: broader Linux support
+More features alone will not make Splinterm ready for 1.0.
 
-The following are research directions rather than commitments:
+<span id="later-connect-the-persistent-workspace"></span>
 
-- reproducible Nix and Home Manager workflows;
-- additional Wayland compositors backed by compatibility matrices;
-- additional distribution artifacts with coherent service and upgrade behavior;
-- a carefully bounded extension model; and
-- selective compatibility work driven by real applications.
+## Later: make remote work feel familiar
 
-An expansion should proceed only when it serves a real blocked user, can be continuously validated, has an honest support boundary, and justifies the primary-product work it delays.
+Working on this machine, over SSH, without a graphical desktop, or through an authorized tool should feel more consistent.
 
-## Deliberate boundaries
+Ideas include:
 
-Splinterm does not currently promise reboot-transparent process survival, arbitrary `foot.ini` compatibility, unrestricted automation, collaborative typing, a hosted control plane, or broad Linux support without continuous validation.
+- familiar controls across local and remote work;
+- better examples and support for tool and MCP integrations;
+- a clear difference between your actions and a tool’s actions; and
+- shareable workspace descriptions that are data, not executable scripts.
 
-The primary human workflow remains the product anchor. Automation expands Splinterm; it does not redefine it as an "AI terminal."
+This does not mean cloud accounts, syncing secrets, a public daemon port, or several people typing into the same pane at once.
 
-## Evidence and feedback
+<span id="explore-broader-linux-support"></span>
 
-Roadmap decisions use release validation, issue patterns, documentation feedback, explicit user research, and privacy-preserving aggregate website analytics. The terminal application itself does not embed product telemetry, and website analytics cannot prove that a terminal workflow succeeded.
+## Explore: more Linux setups
+
+We are considering Nix and Home Manager, other Wayland desktops, packages for additional distributions, extensions with clear limits, and compatibility fixes for applications people use.
+
+Before promising support, there needs to be a real need, a way to test the setup regularly, and time to maintain it. These remain ideas, not commitments.
+
+<span id="deliberate-boundaries"></span>
+
+## What we are not promising
+
+- Keeping commands running through a reboot.
+- Support for every `foot.ini` setting.
+- Tools acting without permission.
+- Several people typing into one pane at once.
+- A cloud service for managing your terminals.
+- Support for Linux setups we cannot regularly test.
+
+Splinterm is a terminal for people first. Automation is optional help, not its whole identity.
+
+<span id="evidence-and-feedback"></span>
+
+## What guides the work
+
+We use release tests, bug reports, documentation feedback, user research, and privacy-preserving aggregate website analytics. The terminal application does not collect product telemetry, and website visits cannot tell us whether a terminal workflow succeeded.

@@ -1,50 +1,49 @@
 ---
 title: Current status
-description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
+description: The shipped Splinterm release, validated target, capabilities, and limits.
 ---
 
-Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
+**Splinterm 0.1.0 is the first stable release for the documented target.**
 
-[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1) is the current public prerelease. It adds wide-grid support through `480×128`, bounded sparse terminal publication frames, and active-tab contrast that remains independent from terminal selection colors, while retaining the accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
+[`v0.1.0`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0) was published on September 5, 2026. The prebuilt `splinterm-bin` and optional `splinterm-mcp-bin` AUR packages, and their source-built alternatives, are **`0.1.0-1`**.
 
-## What that means
+These guides describe that shipped release. Development on `main` may contain features that are not yet available in packages.
 
-- The product runs and has a normal graphical daily-use path.
-- Core terminal, persistence, multiplexing, packaging, and automation milestones have recorded validation.
-- The current target is narrow: x86_64 Omarchy/Arch Linux with native Wayland.
-- Installation uses the versioned AUR package, the matching GitHub release, or a committed source checkout.
-- Broader distribution and long-term compatibility promises have not been released.
+## Supported target, not a universal promise
 
-## Capability summary
+- x86_64 Omarchy/Arch Linux, running native Wayland under the documented Hyprland environment.
+- Headless `splinterd` does not require a graphical environment; its packaged and remote workflows retain the documented 0.1 limitations.
+- Stable 0.1.0 is not an LTS promise or a 1.0 compatibility contract. Future 0.x releases may change interfaces with documented migration.
+- Other distributions, compositors, architectures, and package formats are not current compatibility promises.
 
-| Area | Current state |
+## What you can use today
+
+| Area | Shipped behavior |
 | --- | --- |
-| Native Wayland presentation | Keyboard, pointer, clipboard, IME, scaling, and damage-driven rendering validated on the documented Hyprland target |
-| Persistent sessions and explicit restore | Implemented and validated |
-| XDG command lifecycle | Commandless launches remain persistent; command-bearing launches use trusted client-bound transient Lairs |
-| Pane layouts and multiple Dojos | Implemented and validated |
-| Window-local Dojo tabs, tab strip, and context menus | Implemented and validated |
-| Configurable keymaps, searchable help, and current-Lair controls | Implemented and non-graphically validated; packaged graphical acceptance pending |
-| Atomic Dojo presets and optional Bash helpers | Implemented and validated |
-| Vi copy mode and trusted local field editing | Implemented and validated |
-| Multi-client controller transfer | Implemented and validated |
-| JSON/NDJSON automation | Implemented and validated |
-| SSH stdio relay | Implemented and validated |
-| [Native remote graphical client](/docs/remote/) | Implemented and validated with profile-bound OpenSSH transport; remote image transfer is excluded |
-| [MCP adapter](/docs/mcp/) | Implemented and validated as an optional, separately policy-identified package |
-| Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
-| Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
-| Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta1-1` |
-| Stable support and broader compatibility | Not released |
-| Nix and broader distributions | Planned |
+| Native Wayland terminal | Keyboard, pointer, clipboard, IME, scaling, and damage-driven rendering on the documented target |
+| Lairs, Dojos, and Splints | Persistent workspaces, pane layouts, and Window-local Dojo tabs |
+| Terminal lifetime | Persistent by default; optional Window-owned Lairs; command-bearing XDG launches start client-bound, with owning-client tab-organization promotion when enabled |
+| Returning to work | Recent Dojos and reopen for running work; explicit restore for exited processes |
+| Keymaps and local controls | Built-in `splinterm` and `omarchy-tmux` profiles, binding help, command palette, and vi copy mode |
+| Dojo presets | Atomic layouts and optional collision-safe Bash helpers |
+| Omarchy integration | Native theme following, live system-monospace family following when `main.font` is unset, and opt-in desktop integration |
+| Remote access | Native graphical clients over profile-bound SSH; remote image transfer excluded |
+| Automation | Policy-scoped JSON/NDJSON, SSH stdio relay, and an optional separately identified MCP adapter |
+| Images | Documented Sixel, practical Kitty static-image, and inline iTerm2 PNG subsets |
+| Installation | Versioned GitHub releases and AUR packages |
 
 ## Important boundaries
 
+Closing a Window leaves **persistent** work running while `splinterd` and its processes remain alive. A Window-owned, unpromoted Lair ends with its owning Window. A daemon restart or reboot does not preserve running processes or terminal history. See [Sessions and persistence](/docs/sessions/).
+
+**0.1 has no live daemon-upgrade handoff.** Save application work before upgrading and follow [Upgrade and rollback](/docs/packaging/).
+
 Splinterm is **security-conscious**, not absolutely secure. [Automation](/docs/automation/) is constrained by executable identity, explicit scopes, resource limits, controller ownership, revocation, and bounded audit metadata. Terminal output is always untrusted data and cannot grant authority.
 
-Persistent topology is also separate from graphical presentation. Creating or mutating a Dojo does not map, focus, move, or resize a native Wayland window. Read [Why native Wayland?](/docs/wayland/) for the direct-compositor benefits, comparison model, and explicit non-claims.
+Creating or mutating a Dojo does not map, focus, move, or resize a native Wayland Window. Read [Why native Wayland?](/docs/wayland/) for the direct-compositor benefits and explicit non-claims.
 
-## Before depending on it
+## Release evidence and direction
 
-Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public beta availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+The [published release](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0) and [publication record](https://github.com/OldJobobo/splinterm/blob/258b05180dffadd01def52f0ef18f8c2ee220b8b/docs/status.md) record the stable release boundary. [Source at the release tag](https://github.com/OldJobobo/splinterm/tree/v0.1.0) identifies shipped behavior; older maturity text in individual tagged documents is historical, not a newer release claim.
+
+The [public roadmap](/docs/roadmap/) describes intended improvements, not additional shipped capabilities.

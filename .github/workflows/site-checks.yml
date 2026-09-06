@@ -1,0 +1,38 @@
+name: Site checks
+
+on:
+  pull_request:
+    paths:
+      - site/**
+      - .github/workflows/site-checks.yml
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - .github/workflows/site-checks.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    env:
+      ASTRO_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - run: npm run validate

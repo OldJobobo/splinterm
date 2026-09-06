@@ -1,13 +1,21 @@
 ---
 title: Sessions and persistence
-description: Work with Lairs, Dojos, Splints, windows, detach, reopen, restore, and reset.
+description: Learn what closes, what keeps running, and how to return to your work.
 ---
 
-`splinterd` owns terminal processes and persistent topology. Graphical Splinterm processes can disconnect and be replaced without ending those sessions.
+By default, closing a window leaves your work running in `splinterd`, the background service. Open the Dojo again to return to those running processes. You can also choose work that ends with its window.
+
+This page explains those choices, plus what happens when a process exits or the background service restarts.
 
 ## New work and existing work
 
-A commandless desktop/XDG launch creates a fresh persistent Lair with one Dojo and Splint. An XDG launch carrying a command creates a transient client-bound Lair instead; it is removed when its initial command exits or its owning Window disconnects. Transient Lairs are never saved, restored, listed in Recent Dojos, or selected by `reopen`. Native `splinterm launch -- COMMAND...` remains persistent. Reopening is intentionally separate:
+Commandless desktop launches, bare `splinterm launch`, picker **New**, and in-Window **New Terminal** use `multiplexer.persistent-by-default` (`yes` by default). With `no`, the Window owns the fresh unnamed Lair; closing it terminates and removes the complete Lair. Explicit names, native command-bearing launches, presets, restore/relaunch, remote creation, automation, and MCP remain persistent.
+
+Creating another Dojo or explicitly naming/renaming a Dojo promotes the complete Window-owned Lair when `multiplexer.persist-on-tab-organization=yes` (the default). Promotion is permanent. Set it to `no` to retain Window ownership even for organized or multi-tab Lairs. Generated names do not promote a Lair.
+
+An XDG launch carrying a command starts client-bound regardless of `persistent-by-default`. While unpromoted, its Lair is removed when the initial command exits or the owning Window disconnects. The owning client's tab-organization promotion also applies to these Lairs when enabled; set `persist-on-tab-organization=no` to retain their client-bound lifetime. Unpromoted transient Lairs are never saved, restored, listed in Recent Dojos, or selected by `reopen`.
+
+Reopening is intentionally separate:
 
 ```bash
 splinterm dojos   # choose New Terminal or a recent running Dojo
@@ -25,8 +33,9 @@ These actions have deliberately different effects:
 | Action | Result |
 | --- | --- |
 | Close a persistent window | Detaches its local tabs and views |
+| Close a Window owning an unpromoted transient Lair | Terminates its processes and removes the Lair |
 | Close a transient XDG command window | Terminates every process and removes its complete Lair |
-| Close a tab | Detaches that Dojo from this window |
+| Close a tab | Detaches that Dojo; the final tab also closes the Window and applies its lifetime rules |
 | Close Other Tabs | Detaches every other local tab without ending their Dojos |
 | Terminate Dojo from a tab menu | Confirms, then ends the Dojo's pane processes |
 | Terminate a live Splint | Ends its process after explicit confirmation |
@@ -38,9 +47,9 @@ These actions have deliberately different effects:
 
 Metadata is stored under `$XDG_STATE_HOME/splinterm/`, falling back to `$HOME/.local/state/splinterm/`. Writes use an owner-only atomic primary and a previous-generation backup.
 
-Splinterm persists identities, names, layout, focus hints, lifecycle state, and reviewed launch metadata for persistent Lairs. Transient XDG command Lairs are filtered from every durable projection. Splinterm does **not** persist terminal and scrollback bodies, clipboard data, PTY handles, grants, controller tokens, or transient owner leases.
+Splinterm persists identities, names, layout, focus hints, lifecycle state, and reviewed launch metadata for persistent Lairs. Unpromoted transient Lairs, including XDG command Lairs, are filtered from every durable projection. Splinterm does **not** persist terminal and scrollback bodies, clipboard data, PTY handles, grants, controller tokens, or transient owner leases.
 
-Startup quarantines malformed metadata and never executes a saved command automatically.
+Startup quarantines malformed metadata and never executes a saved command automatically. Daemon restarts and reboots end running processes; explicit restore starts new processes from metadata, not from an application checkpoint. See [Upgrade and rollback](/docs/packaging/) before replacing packages.
 
 ## Reset all sessions
 
@@ -56,8 +65,6 @@ Reset moves the complete session database to a timestamped backup, restarts the 
 ## Tab controls
 
 The visible tab strip supports activation, detach-only close, and a `+` action for Recent Dojos. Right-click a tab to Rename Tab, Activate Tab, create a New Dojo in its Lair, Close Tab, Close Other Tabs, or open confirmed Terminate Dojo. Opening the menu does not activate the target tab first.
-
-The command palette separates the hierarchy: **Choose Lair** lists Lairs and switches through the selected Lair's most recently used Dojo, while **Choose Dojo** lists only Dojos in the active Lair. **Recent Dojos** remains a global cross-Lair list.
 
 These are trusted application controls. Terminal content cannot paint, rename, or activate them.
 

@@ -1,14 +1,14 @@
 ---
 title: Remote access
-description: Open native remote Splinterm windows or relay bounded automation through authenticated SSH.
+description: Open your remote work over SSH or connect an automation tool with its own permissions.
 ---
 
-Splinterm supports two distinct SSH workflows without exposing a daemon network listener:
+You can use Splinterm on another machine over SSH in two ways:
 
-- a **native graphical client** for a person using a remote account; and
-- a **policy-scoped stdio relay** for machine automation.
+- **Open a remote Dojo** in a native window on your desktop.
+- **Connect an automation tool** through an SSH relay, with its own permissions.
 
-Transport is not interchangeable authority. OpenSSH authenticates the human graphical workflow. Machine operations remain governed by exact executable policy.
+Neither requires opening a network port on `splinterd`. SSH authenticates your login for graphical use, but it does not grant tool permissions. Automation still needs a policy for the exact program making the requests.
 
 ## Configure a remote profile
 
@@ -77,4 +77,4 @@ It copies bounded private-protocol bytes over stdio. The remote daemon authorize
 
 Use a dedicated account or restricted key when relay callers must not inherit the account's other SSH capabilities. Relay stdout is protocol data only; diagnostics stay on stderr.
 
-For the complete relay identity, profile schema, authentication, reconnect, and policy contract, read repository [`docs/remote.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/remote.md).
+For the complete relay identity, profile schema, authentication, reconnect, and policy contract, read repository [`docs/remote.md`](https://github.com/OldJobobo/splinterm/blob/v0.1.0/docs/remote.md).

@@ -7,7 +7,14 @@
   --sl-color-white: #f2e6d8;
   --sl-color-gray-1: #ded1c3;
   --sl-color-gray-2: #b2a697;
-  --sl-color-gray-3: #807669;
+  --sl-color-gray-3: #b2a697;
+  --sl-text-2xs: 1rem;
+  --sl-text-xs: 1rem;
+  --sl-text-sm: 1rem;
+  --sl-text-body: 1.25rem;
+  --sl-text-body-sm: 1rem;
+  --sl-text-code: 1.125rem;
+  --sl-text-code-sm: 1rem;
   --sl-color-gray-4: #665b5f;
   --sl-color-gray-5: #403a3c;
   --sl-color-gray-6: #2d292b;
@@ -21,7 +28,7 @@
   --sl-color-white: #201e1f;
   --sl-color-gray-1: #342f31;
   --sl-color-gray-2: #51494d;
-  --sl-color-gray-3: #71676a;
+  --sl-color-gray-3: #61575a;
   --sl-color-gray-4: #aaa09a;
   --sl-color-gray-5: #d9cec3;
   --sl-color-gray-6: #eee6dc;
@@ -117,7 +124,7 @@ header.header {
   max-width: 42rem;
   margin-top: 2rem;
   color: var(--sl-color-gray-2);
-  font-size: clamp(1rem, 1.8vw, 1.25rem);
+  font-size: clamp(1.125rem, 1.8vw, 1.25rem);
   line-height: 1.65;
 }
 
@@ -133,22 +140,23 @@ header.header {
 .sl-link-button {
   border-radius: 2px;
   font-family: var(--sl-font-mono);
-  font-size: .76rem;
+  font-size: 1rem;
   letter-spacing: .015em;
 }
 
 .docs-home-intro {
   display: grid;
-  grid-template-columns: minmax(9rem, .35fr) minmax(18rem, .72fr) minmax(18rem, .93fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: clamp(1.5rem, 4vw, 5rem);
   align-items: start;
   padding: clamp(4.5rem, 9vw, 8rem) 0 clamp(3rem, 6vw, 5rem);
 }
 
 .docs-home-kicker {
+  grid-column: 1 / -1;
   margin: .35rem 0 0;
   color: var(--sl-color-accent);
-  font: 500 .67rem/1.5 var(--sl-font-mono);
+  font: 500 1rem/1.5 var(--sl-font-mono);
   letter-spacing: .13em;
   text-transform: uppercase;
 }
@@ -165,7 +173,7 @@ header.header {
   max-width: 38rem;
   margin: .25rem 0 0;
   color: var(--sl-color-gray-2);
-  font-size: 1rem;
+  font-size: 1.125rem;
   line-height: 1.8;
 }
 
@@ -176,7 +184,7 @@ header.header {
 
 .docs-route-list a {
   display: grid;
-  grid-template-columns: 3rem minmax(16rem, 1fr) minmax(7rem, .28fr) 1.5rem;
+  grid-template-columns: 2rem minmax(0, 1fr) minmax(7rem, .28fr) 1.5rem;
   gap: clamp(1rem, 3vw, 3rem);
   align-items: center;
   min-height: 8.5rem;
@@ -197,15 +205,15 @@ header.header {
 .route-index,
 .route-meta {
   color: var(--sl-color-gray-3);
-  font: 500 .63rem/1.5 var(--sl-font-mono);
+  font: 500 1rem/1.5 var(--sl-font-mono);
   letter-spacing: .08em;
   text-transform: uppercase;
 }
 
 .route-copy {
   display: grid;
-  grid-template-columns: minmax(10rem, .6fr) minmax(16rem, 1fr);
-  gap: clamp(1rem, 4vw, 4rem);
+  grid-template-columns: minmax(0, 1fr);
+  gap: .5rem;
   align-items: baseline;
 }
 
@@ -218,7 +226,7 @@ header.header {
 .route-copy small {
   max-width: 34rem;
   color: var(--sl-color-gray-2);
-  font-size: .88rem;
+  font-size: 1.125rem;
   line-height: 1.65;
 }
 
@@ -232,7 +240,7 @@ header.header {
 
 .docs-home-footer {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 3rem;
   align-items: start;
   margin-top: clamp(4rem, 8vw, 7rem);
@@ -244,12 +252,12 @@ header.header {
   max-width: 38rem;
   margin: 0;
   color: var(--sl-color-gray-3);
-  font: 400 .68rem/1.7 var(--sl-font-mono);
+  font: 400 1.125rem/1.7 var(--sl-font);
 }
 
 .docs-home-footer p span {
   margin-right: .8rem;
-  color: #da9336;
+  color: var(--sl-color-accent-high);
   text-transform: uppercase;
   letter-spacing: .08em;
 }
@@ -257,21 +265,23 @@ header.header {
 .docs-home-footer > div {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: .7rem 1.5rem;
 }
 
 .docs-home-footer a {
   color: var(--sl-color-gray-2);
-  font: 500 .67rem/1.5 var(--sl-font-mono);
+  font: 500 1rem/1.5 var(--sl-font-mono);
   text-decoration: none;
 }
 
 .docs-home-footer a:hover { color: var(--sl-color-accent); }
 
-@media (max-width: 800px) {
+.docs-route-list a > *, .docs-home-intro > * { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 1000px) {
   .hero { min-height: auto; }
-  .hero h1 { font-size: clamp(3.5rem, 16vw, 6rem); }
+  .hero h1 { font-size: clamp(2rem, 8vw, 3.5rem); line-height: 1.05; }
   .docs-home-intro { grid-template-columns: 1fr; gap: 1.2rem; }
   .docs-home-lede { margin-top: .6rem; }
   .docs-route-list a { grid-template-columns: 2rem 1fr 1.2rem; min-height: 9rem; gap: 1rem; }

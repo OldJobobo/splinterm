@@ -1,14 +1,16 @@
 ---
 title: Core concepts
-description: Understand Splinterm's persistent topology and its disposable graphical views.
+description: Meet Lairs, Dojos, and Splints, and learn what happens when you close a window.
 ---
 
-Splinterm separates terminal process lifetime from graphical client lifetime. Its vocabulary makes that ownership explicit.
+A **Lair** holds your workspace. A **Dojo** arranges its terminal panes. Each pane is a **Splint**.
 
-## Persistent topology
+For example, you might keep your editor and tests in one Dojo, with your services in another:
+
+## Your workspace
 
 ```text
-Topology
+Your work
 └── Lair: project atlas
     ├── Dojo: editor
     │   ├── Splint: shell
@@ -17,38 +19,60 @@ Topology
         └── Splint: server
 ```
 
-### Topology
-
-The complete daemon-owned catalog of Lairs, Dojos, Splints, layout trees, names, stable IDs, focus hints, and lifecycle metadata.
-
 ### Lair
 
-A named persistent session or project. One Lair contains zero or more Dojos.
+A workspace for a project or session, containing zero or more Dojos. By default, its work keeps running when you close the window. You can also configure ordinary unnamed Lairs to end with their window.
 
 ### Dojo
 
-One persistent terminal layout within a Lair. A Dojo owns a binary pane-layout tree whose leaves are Splints.
+A layout of Splints inside a Lair, shown through a tab. Put an editor beside your tests, or keep a few service logs together.
+
+A Dojo is not the tab itself. A persistent Dojo still exists after you close its tab, so you can open that layout again later.
 
 ### Splint
 
-An individual terminal pane. It has a stable ID, terminal state, launch metadata, and a process lifecycle.
+One terminal pane and its process. It has a stable ID and remembers how its process was launched. A process can exit while the Splint remains available for an explicit restore.
 
-## Disposable presentation
+<span id="disposable-presentation"></span>
+
+## Windows and tabs
 
 ### Window
 
-A native Wayland toplevel managed by the compositor. It receives compositor scaling, input, clipboard, IME, and frame lifecycle events directly. A window displays one or more Dojos but does not own their process lifetime. See [Why native Wayland?](/docs/wayland/) for the practical benefits and current limits.
+The part of Splinterm you see on your Wayland desktop. A window displays one or more Dojos and handles your keyboard, mouse, clipboard, and display scale.
+
+The background service, `splinterd`, runs the shells. Closing a window leaves persistent Lairs running. If a Lair still belongs to that window instead, closing it ends the Lair’s processes.
 
 ### Tab
 
-A window-local reference to one daemon-owned Dojo. Tabs and their order disappear with the window. Closing a tab detaches the view; it does not close the Dojo.
+A view of one Dojo inside a window. Each window has its own tabs and tab order. Closing a tab removes that view; closing the final tab also closes the window, so its lifetime rules apply.
 
-## Lifecycle words
+## Persistent or Window-owned?
 
-- **Attach:** observe an existing running Dojo or Splint through a client.
-- **Detach:** remove a graphical view without terminating the underlying process.
-- **Incarnation:** one process lifetime inside a stable Splint identity.
-- **Restore:** explicitly start an exited Splint using saved launch metadata.
+**Persistent** means work can keep running after its window closes. **Window-owned** means work ends when its owning window closes, unless you make it persistent first.
+
+The default is `persistent-by-default=yes`. Set it to `no` to make ordinary unnamed graphical Lairs Window-owned. By default, creating another Dojo or explicitly naming/renaming a Dojo makes the whole Lair persistent. The docs call that change **promotion**.
+
+An XDG launch with a command starts client-bound regardless of the default lifetime. That means it ends when its initial command exits or its owning window disconnects, unless promoted. The same tab-organization promotion applies when enabled.
+
+Learn the exact [lifetime settings](/docs/configure/configuration/#terminal-lifetime) and [closing, reopening, and restore behavior](/docs/sessions/).
+
+:::caution
+Persistence does not keep commands running through a background-service restart or reboot. Saved layouts and launch details are not saved application state or terminal history.
+:::
+
+<span id="lifecycle-words"></span>
+
+## Words you’ll see in the reference docs
+
+- **Attach:** open a view of an existing running Dojo or Splint.
+- **Detach:** remove a view without ending its processes.
+- **Restore:** explicitly start an exited Splint again using its saved launch details. This starts a new process, not a continuation of the old one.
+- **Incarnation:** one run of a process inside a Splint. Restoring it starts a new incarnation with the same Splint ID.
 - **Controller:** the one client currently allowed to send input or resize a Splint.
 
-The distinction between persistent topology and disposable presentation is important for both people and automation. Structured clients can mutate topology, but those operations do not imply compositor-native window control.
+### Topology
+
+The background service’s complete record of Lairs, Dojos, Splints, names, IDs, layouts, focus hints, and lifecycle state. Internally, each Dojo’s layout is a tree of splits with a Splint at each leaf.
+
+A tool’s permission to change that record does not automatically let it open, focus, move, or resize a desktop window.

@@ -1,11 +1,13 @@
 ---
-title: Bounded automation
-description: How structured clients inspect, operate, and observe Splinterm without inheriting human graphical authority.
+title: Automation and permissions
+description: Give tools access to your workspace, choose what they can do, and revoke access.
 ---
 
-Splinterm exposes the same persistent topology to people and authorized tools. Automation can inspect Lairs, Dojos, and Splints; read bounded terminal state; mutate layouts and lifecycle; send input; resize; and subscribe to change streams.
+Tools can help with the same Lairs, Dojos, and Splints you use yourself. With permission, they can read output, create panes, run commands, change layouts, and follow updates.
 
-It does not receive authority merely because it can reach the daemon. Policy-controlled operations require matching identity, scope, resource, and limit checks; input and resize additionally require exclusive controller ownership. The narrow authenticated-local `focus` projection is the documented exception: it exposes only nullable active Splint ID and working directory, never topology or terminal content.
+Connecting a tool does not give it permission to act. An owner-controlled policy specifies the program, its allowed actions, which resources it can access, and its limits. Sending input or resizing a Splint also requires control of that Splint; only one client can hold that control at a time.
+
+There is one narrow exception: the authenticated-local `focus` query can return the active Splint ID and working directory, or no active Splint. It does not expose the workspace layout or terminal content.
 
 ```text
 JSON/NDJSON client · MCP host · SSH stdio relay
@@ -19,7 +21,9 @@ JSON/NDJSON client · MCP host · SSH stdio relay
            topology · terminal · control
 ```
 
-## Three ways to use the machine surface
+<span id="three-ways-to-use-the-machine-surface"></span>
+
+## Read, change, and follow your workspace
 
 ### Inspect
 

@@ -1,246 +1,157 @@
 ---
 import SiteLayout from '../layouts/SiteLayout.astro';
 import TopologyScene from '../components/TopologyScene.astro';
+import release from '../data/release.json';
 
 const capabilities = [
-  ['Native Wayland terminal', 'Implemented'],
-  ['Persistent sessions', 'Validated'],
-  ['Panes, tabs, and restore', 'Validated'],
-  ['Bounded automation', 'Validated'],
-  ['Versioned public builds', 'Available'],
-  ['AUR beta package', 'Available'],
+  ['Native Wayland terminal', 'Included'],
+  ['Persistent sessions', 'Included'],
+  ['Panes, tabs, and restore', 'Included'],
+  ['Automation with permissions', 'Optional'],
+  ['Versioned releases', 'Available'],
+  ['AUR package', release.packageVersion],
 ];
 ---
 
 <SiteLayout
-  title="Splinterm — persistent terminal sessions, bounded automation"
-  description="Splinterm is a persistent, security-conscious terminal substrate for humans and bounded automation."
+  title="Splinterm — a terminal you can come back to"
+  description="A terminal for Omarchy with panes, tabs, and work you can come back to. By default, shells keep running when you close the window."
 >
   <section class="intro-hero" aria-labelledby="intro-title">
     <img class="intro-mark" src="/logo-transparent.png" alt="" width="768" height="768" />
     <h1 id="intro-title" class="intro-wordmark">splinterm</h1>
-    <p class="intro-status">Public beta · Arch / Omarchy · x86_64</p>
-    <p class="intro-thesis">A native Wayland terminal where the window can close and the work keeps running.</p>
+    <p class="intro-status">Splinterm {release.version} · Arch / Omarchy · x86_64</p>
+    <p class="intro-thesis">A terminal for Omarchy with work you can come back to.</p>
     <div class="intro-actions" aria-label="Get started with Splinterm">
-      <a class="button primary intro-primary" href="/docs/install/">Install the beta <span aria-hidden="true">↗</span></a>
-      <a class="button secondary" href="#workflow">See the workflow <span aria-hidden="true">↓</span></a>
+      <a class="button primary intro-primary" href="/docs/install/">Install Splinterm <span aria-hidden="true">↗</span></a>
+      <a class="button secondary" href="#workflow">See how it works <span aria-hidden="true">↓</span></a>
     </div>
     <div class="intro-install" aria-label="Recommended installation command">
       <span>Recommended</span>
       <code><i aria-hidden="true">$</i> yay -S splinterm-bin</code>
-      <a href="/docs/status/">Read beta limits</a>
+      <a href="/docs/status/">Release and limits</a>
     </div>
   </section>
 
   <section id="product" class="hero shell-section" aria-labelledby="product-title">
     <div class="hero-copy">
-      <p class="eyebrow"><span>Public beta</span> · Enter the Lair</p>
+      <p class="eyebrow"><span>{release.channel} {release.version}</span> · Enter the Lair</p>
       <h2 id="product-title">Your shell should outlive its <em>window.</em></h2>
       <p class="hero-lede">
-        Splinterm keeps your work below the surface: Lairs hold projects, Dojos hold working
-        sessions, and Splints keep their shells alive when graphical clients disappear.
+        By default, your shells keep running when you close the window. Open your Dojo again
+        and pick up where you left off, with your panes and running commands still there.
       </p>
       <div class="hero-actions">
-        <a class="button primary" href="/docs/install/">Install the beta <span aria-hidden="true">↗</span></a>
-        <a class="button secondary" href="#workflow">See the three-step workflow</a>
+        <a class="button primary" href="/docs/install/">Install Splinterm <span aria-hidden="true">↗</span></a>
+        <a class="button secondary" href="#workflow">Try it for yourself</a>
       </div>
-      <p class="hero-note">Built in Rust from Foot’s terminal behavior. Quietly disciplined for Omarchy.</p>
+      <p class="hero-note">The background service must stay running. You can also choose work that ends when its window closes. <a href="/docs/sessions/">See what stays running.</a></p>
     </div>
     <TopologyScene />
   </section>
 
   <section class="manifesto shell-section" aria-labelledby="persistence-title">
-    <div class="section-index" aria-hidden="true">01 / Below the surface</div>
+    <div class="section-index" aria-hidden="true">01 / Your workspace</div>
     <div class="manifesto-copy">
-      <h2 id="persistence-title">The work lives in the Lair.<br />Windows only visit.</h2>
+      <h2 id="persistence-title">Make room<br />for your work.</h2>
       <p>
-        <code>splinterd</code> keeps the topology underground. A Lair gathers the work, each Dojo
-        holds a focused session, and every Splint carries a running shell. Windows are temporary views in.
+        A <strong>Lair</strong> holds your workspace. A <strong>Dojo</strong> is a layout shown in a tab.
+        Each terminal pane is a <strong>Splint</strong>. Keep an editor beside your tests, or give your
+        services their own Dojo.
       </p>
+      <p><a href="/docs/presets/">Start with a ready-made layout</a> or arrange your own.</p>
     </div>
     <ol class="sequence" aria-label="Persistent session workflow">
-      <li><span>01</span><strong>Enter</strong><small>Open a Lair and gather the work.</small></li>
-      <li><span>02</span><strong>Train</strong><small>Shape a Dojo from tabs, panes, and Splints.</small></li>
-      <li><span>03</span><strong>Return</strong><small>Leave the window; find the same Dojo later.</small></li>
+      <li><span>01</span><strong>Open</strong><small>Start a terminal from the desktop launcher.</small></li>
+      <li><span>02</span><strong>Split</strong><small>Add panes for the things you’re working on.</small></li>
+      <li><span>03</span><strong>Close</strong><small>Leave persistent work running in the background.</small></li>
+      <li><span>04</span><strong>Return</strong><small>Choose your layout from Recent Dojos.</small></li>
     </ol>
   </section>
 
-  <section class="wayland-section shell-section" aria-labelledby="wayland-title">
-    <div class="section-index" aria-hidden="true">02 / Native presentation</div>
-    <div class="wayland-heading">
-      <p class="eyebrow">No XWayland in the middle</p>
-      <h2 id="wayland-title">Native where you look.<br />Persistent where you work.</h2>
-      <p>
-        Splinterm speaks directly to the Wayland compositor for input, scaling, clipboard,
-        IME, and frame timing. The window stays lightweight and disposable; the work remains
-        with <code>splinterd</code> below it.
-      </p>
-      <a class="text-link" href="/docs/wayland/">Why native Wayland matters <span aria-hidden="true">→</span></a>
+  <section id="workflow" class="first-workflow shell-section" aria-labelledby="workflow-title">
+    <div>
+      <p class="eyebrow">Try it</p>
+      <h2 id="workflow-title">Leave the window.<br />Return to the Dojo.</h2>
+      <p>Open a terminal and press Ctrl+Shift+Enter to add a pane. With the default settings, you can close the window and use Recent Dojos to return to the same running work.</p>
+      <div class="hero-actions">
+        <a class="button primary" href="/docs/quickstart/">Follow the quickstart <span aria-hidden="true">→</span></a>
+        <a class="button workflow-secondary" href="/docs/configure/configuration/#keymaps-and-the-command-palette">Coming from tmux?</a>
+      </div>
+      <p>Changed the lifetime settings? <a href="/docs/sessions/">Check what closing a window does</a> before trying this.</p>
     </div>
-
-    <div class="wayland-path" aria-label="Splinterm presentation and persistence architecture">
-      <div><span>01</span><small>Compositor</small><strong>Hyprland / Wayland</strong></div>
-      <i aria-hidden="true">↓</i>
-      <div><span>02</span><small>Disposable view</small><strong>splinterm window</strong></div>
-      <i aria-hidden="true">↓</i>
-      <div><span>03</span><small>Persistent owner</small><strong>splinterd topology</strong></div>
-      <i aria-hidden="true">↓</i>
-      <div><span>04</span><small>Living work</small><strong>shells · layouts · scrollback</strong></div>
+    <div class="command-stack" aria-label="Example Splinterm commands">
+      <div><span>$</span><code>yay -S splinterm-bin</code><small>install</small></div>
+      <div><span>$</span><code>splinterm-xdg-terminal-exec</code><small>open a terminal</small></div>
+      <div><span>$</span><code>splinterm dojos</code><small>choose running work</small></div>
+      <div><span>$</span><code>splinterm reopen</code><small>return to the last Dojo</small></div>
     </div>
-
-    <div class="wayland-benefits">
-      <article><span>Scale</span><h3>Follow the output</h3><p>Compositor-aware geometry and fractional scaling across Wayland outputs.</p></article>
-      <article><span>Input</span><h3>Meet text where it enters</h3><p>Native keyboard, pointer, clipboard, compose, and IME/preedit handling.</p></article>
-      <article><span>Frames</span><h3>Draw only what changed</h3><p>Damage-driven rendering and compositor frame scheduling avoid blind full-window redraws.</p></article>
-      <article><span>Lifecycle</span><h3>Close the glass, not the work</h3><p>The Wayland client can disappear while daemon-owned sessions continue below it.</p></article>
-    </div>
-
-    <p class="wayland-boundary">
-      Native does not mean GPU-rendered or universally compatible. Splinterm currently uses
-      CPU/Wayland-SHM composition and is validated for the documented Omarchy/Arch and Hyprland target.
-    </p>
   </section>
 
-  <section class="control-section shell-section" aria-labelledby="control-title">
-    <div class="section-index" aria-hidden="true">03 / Shared substrate</div>
-    <div class="control-heading">
-      <h2 id="control-title">One Lair.<br />Two deliberate ways in.</h2>
-      <p>Human hands and bounded automation can enter the same topology without inheriting the same authority.</p>
+  <section class="wayland-section shell-section" aria-labelledby="wayland-title">
+    <div class="section-index" aria-hidden="true">02 / On your desktop</div>
+    <div class="wayland-heading">
+      <p class="eyebrow">Native Wayland</p>
+      <h2 id="wayland-title">Built for Omarchy.</h2>
+      <p>Splinterm works directly with Wayland for keyboard input, display scaling, and the clipboard—without XWayland in between.</p>
+      <a class="text-link" href="/docs/wayland/">How Wayland support works <span aria-hidden="true">→</span></a>
+    </div>
+    <div class="wayland-benefits">
+      <article><span>Displays</span><h3>Use your display scale</h3><p>Follows the scale set for each output, including fractional scaling.</p></article>
+      <article><span>Input</span><h3>Type your way</h3><p>Keyboard, mouse, copy and paste, compose keys, and input methods.</p></article>
+      <article><span>Drawing</span><h3>Redraw what changed</h3><p>Updates changed areas rather than redrawing the whole window every time.</p></article>
+      <article><span>Appearance</span><h3>Match your theme</h3><p>Follows Omarchy’s colors and, unless you set a font override, its monospace font family.</p></article>
+    </div>
+    <p class="wayland-boundary">Tested on x86_64 Omarchy/Arch with Hyprland. Other Linux desktops are not yet supported. Rendering uses the CPU, not the GPU.</p>
+  </section>
+
+  <section id="automation" class="control-section shell-section" aria-labelledby="control-title">
+    <div class="section-index" aria-hidden="true">03 / Optional automation</div>
+    <div id="automation-title" class="control-heading">
+      <h2 id="control-title">A little help.<br />On your terms.</h2>
+      <p>Connect scripts or an MCP tool to your workspace. They need permission before they can read output, type commands, or change your layout.</p>
     </div>
     <div class="control-grid">
       <article class="control-card human-card">
-        <div class="card-label"><span>Human</span><i>native client</i></div>
-        <h3>Hands on the Dojo</h3>
-        <p>Local or SSH-backed Wayland windows, tabs, panes, presets, vi copy mode, and explicit control transfer.</p>
+        <div class="card-label"><span>Tools</span><i>with permission</i></div>
+        <h3>Help with the routine</h3>
+        <p>Give a tool access to the work it needs, locally or over SSH.</p>
         <ul>
-          <li>Typed keymaps and trusted chrome</li>
-          <li>Native Recent Dojos picker</li>
-          <li>Visible authority state</li>
+          <li>Read output and search scrollback</li>
+          <li>Create panes and run commands</li>
+          <li>Follow changes as they happen</li>
         </ul>
       </article>
       <article class="control-card automation-card">
-        <div class="card-label"><span>Automation</span><i>bounded client</i></div>
-        <h3>Allowed in, never unleashed</h3>
-        <p>JSON/NDJSON, an SSH stdio relay, and MCP—always subject to explicit policy.</p>
+        <div class="card-label"><span>Permissions</span><i>set by you</i></div>
+        <h3>Choose what it can do</h3>
+        <p>Permissions apply to a specific program, not every tool on your machine.</p>
         <ul>
-          <li>Exact executable identity</li>
-          <li>Resource and scope limits</li>
-          <li>Revocable controller leases</li>
+          <li>Limit which sessions it can access</li>
+          <li>Choose which actions it can take</li>
+          <li>Set time and output limits</li>
+          <li>Revoke access when you’re done</li>
         </ul>
       </article>
     </div>
-    <p class="boundary-note"><span aria-hidden="true">◆</span> Discipline is structural: terminal output remains data, never authority or automatic instruction.</p>
-  </section>
-
-  <section class="automation-section shell-section" aria-labelledby="automation-title">
-    <div class="section-index" aria-hidden="true">04 / Bounded automation</div>
-    <div class="automation-heading">
-      <p class="eyebrow">One topology, closed authority</p>
-      <h2 id="automation-title">Useful enough to act.<br />Narrow enough to revoke.</h2>
-      <p>
-        Tools can inspect and operate the same Lairs, Dojos, and Splints visible to people—without
-        inheriting human graphical trust. Policy-controlled machine operations meet explicit identity,
-        scope, resource, and limit checks at the daemon.
-      </p>
-      <div class="automation-actions">
-        <a class="button primary" href="/docs/automation/">Understand bounded automation</a>
-        <a class="text-link" href="/docs/mcp/">Configure MCP <span aria-hidden="true">→</span></a>
+    <div class="boundary-note">
+      <p><span aria-hidden="true">◆</span> Text printed in a terminal does not grant a tool permission to act.</p>
+      <div class="hero-actions">
+        <a class="button primary" href="/docs/automation/">Learn about tool permissions</a>
+        <a class="text-link" href="/docs/mcp/">Set up MCP <span aria-hidden="true">→</span></a>
       </div>
-    </div>
-
-    <div class="automation-stack" aria-label="Automation authority flow">
-      <div class="automation-entry">
-        <span>Client</span>
-        <strong>MCP host · JSON/NDJSON · SSH relay</strong>
-      </div>
-      <i aria-hidden="true">↓</i>
-      <div class="automation-entry accent-entry">
-        <span>Policy identity</span>
-        <strong>exact executable path + digest where required</strong>
-      </div>
-      <i aria-hidden="true">↓</i>
-      <div class="automation-gate">
-        <span>Policy-controlled operations</span>
-        <ul>
-          <li>exact path + SHA-256</li>
-          <li>closed operation scopes</li>
-          <li>explicit resources</li>
-          <li>deadlines + result limits</li>
-        </ul>
-      </div>
-      <i aria-hidden="true">↓</i>
-      <div class="automation-entry">
-        <span>Authorized surface</span>
-        <strong>topology · terminal · control</strong>
-      </div>
-    </div>
-
-    <div class="automation-capabilities" aria-label="Automation capabilities">
-      <article><span>Inspect</span><strong>Read bounded state</strong><p>Discover topology, snapshots, scrollback, search results, authorization, and body-free audit metadata.</p></article>
-      <article><span>Operate</span><strong>Mutate explicitly</strong><p>Create, split, launch, input, resize, restore, rename, or close only when the exact operation is authorized.</p></article>
-      <article><span>Observe</span><strong>Subscribe and reconcile</strong><p>Follow topology, terminal, and control streams; stop and fetch fresh state when a resync is required.</p></article>
-    </div>
-
-    <div class="automation-facts" aria-label="MCP and automation boundaries">
-      <div><strong>33</strong><span>fixed MCP tools</span></div>
-      <div><strong>18</strong><span>closed policy scopes</span></div>
-      <div><strong>0</strong><span>daemon network listeners by default</span></div>
-      <p>Terminal output is untrusted data. It cannot grant authority, approve consent, alter policy, or become an instruction to call another tool.</p>
-    </div>
-  </section>
-
-  <section class="performance-section shell-section" aria-labelledby="performance-title">
-    <div class="section-index" aria-hidden="true">05 / Measured footprint</div>
-    <div class="performance-heading">
-      <p class="eyebrow">Measured, not mythologized</p>
-      <h2 id="performance-title">Foot-class light.<br />Built to multiply.</h2>
-      <p>
-        Splinterm keeps panes inside one native topology instead of stacking a separate
-        multiplexer onto every terminal window. The payoff shows up most clearly as the
-        workspace grows.
-      </p>
-    </div>
-
-    <div class="performance-feature" aria-label="Splinterm idle memory benchmark">
-      <span>Idle footprint</span>
-      <strong>52.9 <small>MiB</small></strong>
-      <p>Comparable to Foot at 50.9 MiB—and 76–85% below the tested Alacritty, Ghostty, and Kitty builds.</p>
-    </div>
-
-    <div class="benchmark-grid">
-      <article>
-        <span class="benchmark-label">Shell ready</span>
-        <strong>76.7 <small>ms</small></strong>
-        <p>Comparable to Foot, and faster than the tested Alacritty, Kitty, and Ghostty launches.</p>
-      </article>
-      <article>
-        <span class="benchmark-label">Native four-pane grid</span>
-        <strong>111 <small>MiB</small></strong>
-        <p>Less memory than Foot + tmux at 122 MiB, four Foot windows at 197 MiB, or Foot + Zellij at 204 MiB.</p>
-      </article>
-    </div>
-
-    <div class="benchmark-note">
-      <span aria-hidden="true">◆</span>
-      <p>
-        Medians from randomized, checksum-verified runs on one Linux/Wayland host. Splinterm
-        used its prestarted daemon; peer terminals used standalone launches. These are measured
-        results for the recorded hardware and builds—not a universal ranking.
-      </p>
     </div>
   </section>
 
   <section class="status-section shell-section" aria-labelledby="status-title">
-    <div class="section-index" aria-hidden="true">06 / Current state</div>
+    <div class="section-index" aria-hidden="true">04 / Available now</div>
     <div class="status-intro">
-      <h2 id="status-title">The doors are open.<br />The edges stay marked.</h2>
-      <p>
-        Splinterm is a public beta. Source, documentation, and immutable versioned GitHub and AUR
-        packages are open; the validated target remains narrow and stable compatibility guarantees do not exist yet.
-      </p>
+      <h2 id="status-title">Available<br />for Omarchy.</h2>
+      <p>Splinterm {release.version} is the first stable release for x86_64 Omarchy/Arch with Hyprland. It is not a long-term-support release or a 1.0 compatibility promise; future 0.x releases may need migration steps.</p>
+      <p>Save your work before upgrading. Version 0.1 cannot keep commands running through a restart of its background service.</p>
       <div class="status-actions">
-        <a class="text-link" href="/docs/status/">Read the complete status and limits <span aria-hidden="true">→</span></a>
-        <a class="text-link" href="/roadmap/">Follow the product roadmap <span aria-hidden="true">→</span></a>
+        <a class="text-link" href="/docs/status/">What’s supported <span aria-hidden="true">→</span></a>
+        <a class="text-link" href="/docs/packaging/">Upgrade safely <span aria-hidden="true">→</span></a>
       </div>
     </div>
     <div class="capability-list">
@@ -248,45 +159,28 @@ const capabilities = [
         <div class="capability-row">
           <span>{String(index + 1).padStart(2, '0')}</span>
           <strong>{name}</strong>
-          <i class:list={{ pending: status === 'Preparing' }}>{status}</i>
+          <i>{status}</i>
         </div>
       ))}
     </div>
   </section>
 
-  <section id="workflow" class="first-workflow shell-section" aria-labelledby="workflow-title">
-    <div>
-      <p class="eyebrow">The ordinary path into the Lair</p>
-      <h2 id="workflow-title">Leave the window.<br />Return to the Dojo.</h2>
-      <p>Install the current public beta from the AUR, open a Splint, then use the Dojo picker whenever you want the running work back.</p>
-      <div class="hero-actions">
-        <a class="button primary" href="/docs/install/">Install the beta</a>
-        <a class="button workflow-secondary" href="/docs/quickstart/">Follow the full quickstart <span aria-hidden="true">→</span></a>
-      </div>
-    </div>
-    <div class="command-stack" aria-label="Example Splinterm commands">
-      <div><span>$</span><code>yay -S splinterm-bin</code></div>
-      <div><span>$</span><code>splinterm dojos</code><small>choose a running Dojo</small></div>
-      <div><span>$</span><code>splinterm reopen</code><small>return to the last one</small></div>
-    </div>
-  </section>
-
   <section class="docs-gateway shell-section" aria-labelledby="docs-title">
     <div>
-      <p class="eyebrow">Know the passages</p>
-      <h2 id="docs-title">Go as deep as the work requires.</h2>
+      <p class="eyebrow">Need a hand?</p>
+      <h2 id="docs-title">Find what you need.</h2>
     </div>
     <div class="gateway-links">
-      <a href="/docs/quickstart/"><span>Start using Splinterm</span><small>Install, launch, detach, and return.</small><i>↗</i></a>
-      <a href="/docs/configure/configuration/"><span>Configure the terminal</span><small>Fonts, themes, typed keymaps, vi copy mode, and migration.</small><i>↗</i></a>
-      <a href="/docs/presets/"><span>Build a Dojo from a preset</span><small>Atomic Omarchy layouts, strict catalogs, and collision-safe shell helpers.</small><i>↗</i></a>
-      <a href="/docs/sessions/"><span>Understand persistence</span><small>Lairs, Dojos, Splints, windows, and lifecycle.</small><i>↗</i></a>
-      <a href="/docs/remote/"><span>Enter a remote Lair</span><small>Native SSH-backed windows and separately bounded machine relay.</small><i>↗</i></a>
-      <a href="/docs/wayland/"><span>Why native Wayland</span><small>Direct compositor integration, practical benefits, and honest limits.</small><i>↗</i></a>
-      <a href="/docs/automation/"><span>Automate safely</span><small>Machine contracts, policy gates, controller ownership, and untrusted output.</small><i>↗</i></a>
-      <a href="/docs/mcp/"><span>Connect an MCP host</span><small>Install the adapter, authorize only what it needs, validate, and revoke.</small><i>↗</i></a>
-      <a href="/roadmap/"><span>Follow the product roadmap</span><small>Daily-driver confidence, supported 1.0, connected workspaces, and gated expansion.</small><i>↗</i></a>
-      <a href="/docs/development/"><span>Develop and contribute</span><small>Workspace structure, checks, and architecture.</small><i>↗</i></a>
+      <a href="/docs/quickstart/"><span>Get started</span><small>Install, open, split, and return.</small><i>↗</i></a>
+      <a href="/docs/configure/configuration/"><span>Make it yours</span><small>Fonts, colors, keyboard shortcuts, and tmux-style controls.</small><i>↗</i></a>
+      <a href="/docs/presets/"><span>Try a Dojo preset</span><small>Set up a complete layout in one go.</small><i>↗</i></a>
+      <a href="/docs/sessions/"><span>Keep work running</span><small>What closes, what stays, and how to return.</small><i>↗</i></a>
+      <a href="/docs/remote/"><span>Work over SSH</span><small>Open a Dojo on another machine.</small><i>↗</i></a>
+      <a href="/docs/wayland/"><span>Understand Wayland support</span><small>How Splinterm works with your desktop.</small><i>↗</i></a>
+      <a href="/docs/automation/"><span>Connect a tool</span><small>Choose its permissions and limits.</small><i>↗</i></a>
+      <a href="/docs/mcp/"><span>Set up MCP</span><small>Install, connect, and authorize the adapter.</small><i>↗</i></a>
+      <a href="/roadmap/"><span>See what’s next</span><small>What we’re working on and what’s still an idea.</small><i>↗</i></a>
+      <a href="/docs/development/"><span>Help build Splinterm</span><small>Source code, tests, and contributor guidance.</small><i>↗</i></a>
     </div>
   </section>
 </SiteLayout>

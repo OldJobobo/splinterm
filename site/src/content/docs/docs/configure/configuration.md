@@ -15,7 +15,8 @@ Start from the repository example at `config/splinterm/config.ini`. Set `SPLINTE
 
 ```ini
 [main]
-font=JetBrains Mono Nerd Font:style=Regular
+# Leave font unset to follow the system monospace family live.
+# font=JetBrains Mono Nerd Font:style=Regular
 font-pixelsize=14
 font-sizing-policy=output-scale
 padding-left=12
@@ -30,6 +31,8 @@ login-shell=yes
 lines=1000
 
 [multiplexer]
+persistent-by-default=yes
+persist-on-tab-organization=yes
 divider-style=line
 frame-title=splint
 
@@ -53,16 +56,18 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 
 | Key | Meaning | Default or range |
 | --- | --- | --- |
-| `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
+| `main.font` | explicit fontconfig pattern; unset follows the system monospace family live | unset |
 | `main.font-pixelsize` | pixel font size | 6–96; 14 |
 | `main.font-point-size` | alternative point size | 6–96; unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` | `output-scale` |
 | `main.padding-*` | four independent logical edges | 0–10000; 12 |
-| `main.initial-columns` | initial grid columns | 2–240; 80 |
-| `main.initial-rows` | initial grid rows | 2–80; 24 |
+| `main.initial-columns` | initial grid columns | 2–480; 80 |
+| `main.initial-rows` | initial grid rows | 2–128; 24 |
 | `main.shell` | executable for an empty launch | account login shell |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | `block` |
+| `multiplexer.persistent-by-default` | ordinary unnamed graphical Lairs are persistent (`yes`) or Window-owned (`no`) | `yes` |
+| `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned Lair | `yes` |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
 | `key-bindings.profile` | `splinterm` or `omarchy-tmux` | `splinterm` |
@@ -70,6 +75,22 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `key-bindings.prefix-timeout-ms` | prefix timeout in milliseconds | 250–5000; 1000 |
 | `presets.file` | optional strict preset catalog | unset |
 | `presets.allow-unrestricted-commands` | enable packaged `c`, `cx`, `cy` aliases | `no` |
+
+## Terminal lifetime
+
+`persistent-by-default=no` applies to commandless desktop launches, bare `splinterm launch`, picker **New**, and in-Window **New Terminal**. Closing the owning Window terminates and removes its unpromoted transient Lair. Explicit names, native command-bearing launches, presets, restore/relaunch, remote creation, automation, and MCP remain persistent.
+
+With `persist-on-tab-organization=yes`, creating another Dojo or explicitly naming/renaming a Dojo atomically promotes the complete Window-owned Lair. Promotion is permanent; a later Window close detaches its persistent work normally. Set it to `no` to keep organized, multi-tab Lairs Window-owned. Generated Lair and `Dojo 1` names do not promote a Lair.
+
+**Command-bearing XDG launches start client-bound** regardless of `persistent-by-default`. The same owning-client tab-organization promotion applies when enabled; while unpromoted, the Lair ends when its initial command exits or its owning Window disconnects. Use `persist-on-tab-organization=no` if organizing tabs must not make that work persistent. Unpromoted transient Lairs never enter saved or Recent Dojos flows. See [Sessions and persistence](/docs/sessions/) before changing lifetime defaults.
+
+## Live font family following
+
+Leave `main.font` **unset** to follow Fontconfig's effective system `monospace` family, including live Omarchy font-family changes. An explicit pattern disables that live following—even `font=monospace` is an explicit override.
+
+A valid live family change preserves configured size, sizing policy, runtime zoom, topology, and running processes. A failed live update retains the last valid font generation. This does not imply live reload of font size, padding, shell, scrollback, cursor, or keymap settings.
+
+The [release configuration reference](https://github.com/OldJobobo/splinterm/blob/v0.1.0/docs/configuration.md) records fallback and styled-face behavior.
 
 ## Font sizing and Wayland scale
 
@@ -106,13 +127,11 @@ splinterm keymap show omarchy-tmux
 splinterm keymap conflicts
 ```
 
-The default `splinterm` profile provides the controls in the [quickstart](/docs/quickstart/). The `omarchy-tmux` profile adds familiar `Ctrl+Space` and `Ctrl+B` prefixes, pane and tab workflows, local pane zoom, stable-ID choosers, `Prefix+B` tab-strip toggling, trusted searchable `Prefix+?` key help, transactional configuration reload, `Prefix+[` vi copy mode, and `Prefix Shift+S/F/V/O` for Save, pin toggle, Preview, and Restore of the current Lair. The closed `lair.save`, `lair.pin-toggle`, `lair.preview`, and `lair.restore` actions remain available to strict overlays when another chord layout is preferred. `dojo.close-other-tabs` is likewise available even though neither profile claims a default chord.
-
-Inside keybinding help, type to search the effective action labels, configuration names, shortcuts, sources, and closed keywords. Use Up/Down or PageUp/PageDown to navigate, `Ctrl+U` to clear, and Escape once to clear a non-empty query or again to close. Query input and paste remain client-owned and never reach the terminal.
+The default `splinterm` profile provides the controls in the [quickstart](/docs/quickstart/). The `omarchy-tmux` profile adds familiar `Ctrl+Space` and `Ctrl+B` prefixes, pane and tab workflows, local pane zoom, stable-ID choosers, `Prefix+B` tab-strip toggling, trusted `Prefix+?` key help, transactional configuration reload, and `Prefix+[` vi copy mode. `dojo.close-other-tabs` is available to strict overlays even though neither profile claims a default chord.
 
 The command palette is a curated trusted subset of this closed registry. It projects shortcut labels from the effective resolved keymap and exposes binding help, reload, copy mode, pane zoom, Dojo/Lair workflows, and Window detach without allowing configuration, plugins, or terminal output to register commands.
 
-Both profiles provide terminal `Ctrl+Shift+C/V` and `Super+C/V`, and accept Omarchy's terminal-tagged `Ctrl+Insert`/`Shift+Insert`. The `omarchy-tmux` profile advertises `Ctrl+Shift+C/V` first so generated help remains usable when the compositor reserves Super chords; `splinterm` keeps `Super+C/V` primary. Omarchy must classify `com.oldjobobo.splinterm` as a terminal; without that classification its universal copy branch may inject ordinary `Ctrl+C`, which remains terminal interrupt. Splinterm-owned command-palette, keybinding-help, search, and rename fields accept effective `clipboard.copy` / `clipboard.paste` bindings such as `Ctrl+Shift+C/V` and retain local `Super+C/V/X/Z`; terminal-pane `Super+X/Z` remain application-owned. These Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. In copy mode, move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown. Press `v` to begin selecting, `y` or `Super+C` to publish to the Wayland clipboard and exit, or Escape to cancel. `Super+V/X/Z`, pointer input, paste, and IME text are consumed locally and never forwarded to the terminal application.
+Both profiles provide terminal `Ctrl+Shift+C/V` and `Super+C/V`, and accept Omarchy's terminal-tagged `Ctrl+Insert`/`Shift+Insert`. Omarchy must classify `com.oldjobobo.splinterm` as a terminal; without that classification its universal copy branch may inject ordinary `Ctrl+C`, which remains terminal interrupt. Splinterm-owned fields use local `Super+C/V/X/Z`; terminal-pane `Super+X/Z` remain application-owned. These Super shortcuts work only when the compositor delivers the chord to the Splinterm Window. In copy mode, move with `h/j/k/l`, arrows, Home/End, or PageUp/PageDown. Press `v` to begin selecting, `y` or `Super+C` to publish to the Wayland clipboard and exit, or Escape to cancel. `Super+V/X/Z`, pointer input, paste, and IME text are consumed locally and never forwarded to the terminal application.
 
 While a focused pane is viewing historical output, plain Enter or keypad Enter returns it to live output without sending terminal input. A later Enter pressed while already live submits normally.
 
