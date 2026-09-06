@@ -23,6 +23,7 @@
   --blood: #6b2c2e;
   --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
   --display: 'Splinter Display', var(--sans);
+  --wordmark-yellow: var(--signal);
   --mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
 }
 
@@ -102,6 +103,17 @@ a:focus-visible { outline: 2px solid var(--signal); outline-offset: 4px; }
   line-height: .82;
   letter-spacing: 0;
   animation: intro-arrive .8s .08s cubic-bezier(.2, .75, .2, 1) both;
+}
+.intro-wordmark .wordmark-m { color: var(--wordmark-yellow); }
+.intro-wordmark .wordmark-i {
+  /* Font ascent is .82em; the .26em stop falls in the dot/stem gap. */
+  background: linear-gradient(to bottom, var(--wordmark-yellow) .26em, var(--ink) .26em);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@media (forced-colors: active) {
+  .intro-wordmark .wordmark-i { background: none; color: CanvasText; }
 }
 .intro-status {
   margin: clamp(1.5rem, 3vh, 2.5rem) 0 0;

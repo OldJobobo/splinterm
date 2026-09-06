@@ -46,7 +46,9 @@ export function checkFont({
   assert.match(wordmark, /font-synthesis:\s*none/);
   assert.match(wordmark, /font-kerning:\s*normal/);
   assert.match(wordmark, /letter-spacing:\s*0(?:;|$)/);
-  assert.match(html, /<h1\b[^>]*\bid="intro-title"[^>]*>splinterm<\/h1>/);
+  const heading = html.match(/<h1\b[^>]*\bid="intro-title"[^>]*>([\s\S]*?)<\/h1>/)?.[1];
+  assert.ok(heading, 'Wordmark heading is missing');
+  assert.equal(heading.replace(/<[^>]*>/g, ''), 'splinterm');
 
   for (const page of ['roadmap/index.html', 'docs/index.html']) {
     const pageHtml = readFileSync(resolve(root, page), 'utf8');
