@@ -1654,7 +1654,7 @@ pub(crate) fn command_dispatch(
         }
         BuiltInCommandId::ChooseLair => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::RequestSelector {
-                kind: SelectorKind::LairDojo,
+                kind: SelectorKind::Lair,
                 lair_id: context.lair_id,
             })
         }
@@ -2377,7 +2377,7 @@ mod tests {
             command_dispatch(BuiltInCommandId::ChooseLair, &context),
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::RequestSelector {
-                    kind: SelectorKind::LairDojo,
+                    kind: SelectorKind::Lair,
                     lair_id: context.lair_id,
                 }
             ))

@@ -232,6 +232,7 @@ pub(in crate::app) fn remember_dojo(factory: &ConnectionFactory, dojo_id: DojoId
 pub(in crate::app) fn session_picker_item(entry: &SessionEntry) -> SessionPickerItem {
     SessionPickerItem {
         display_title: entry.display_title(),
+        breadcrumb: entry.display_title(),
         working_directory: entry.working_directory(),
         pane_count: entry.pane_count,
         running_pane_count: entry.running_panes,

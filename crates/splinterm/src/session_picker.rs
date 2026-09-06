@@ -97,6 +97,24 @@ impl SessionEntry {
     }
 
     #[must_use]
+    pub fn lair_display_title(&self) -> String {
+        picker_label(
+            &self.lair_name,
+            MAX_PICKER_TITLE_SCALARS,
+            MAX_PICKER_TITLE_CELLS,
+        )
+    }
+
+    #[must_use]
+    pub fn dojo_display_title(&self) -> String {
+        picker_label(
+            &self.dojo_name,
+            MAX_PICKER_TITLE_SCALARS,
+            MAX_PICKER_TITLE_CELLS,
+        )
+    }
+
+    #[must_use]
     pub fn working_directory(&self) -> String {
         picker_label(
             &self.cwd.to_string_lossy(),
@@ -456,9 +474,14 @@ mod tests {
         );
         entry.cwd = PathBuf::from(format!("/tmp/{}\u{200f}", "界".repeat(300)));
         let title = entry.display_title();
+        let lair_title = entry.lair_display_title();
+        let dojo_title = entry.dojo_display_title();
         let cwd = entry.working_directory();
-        assert!(!title.chars().any(char::is_control));
-        assert!(!title.chars().any(is_bidi_formatting));
+        for label in [&title, &lair_title, &dojo_title] {
+            assert!(!label.chars().any(char::is_control));
+            assert!(!label.chars().any(is_bidi_formatting));
+            assert!(label.chars().count() <= MAX_PICKER_TITLE_SCALARS);
+        }
         assert!(!cwd.chars().any(is_bidi_formatting));
         assert!(title.chars().count() <= MAX_PICKER_TITLE_SCALARS);
         assert!(cwd.chars().count() <= MAX_PICKER_CWD_SCALARS);
@@ -476,7 +499,9 @@ mod tests {
                 <= MAX_PICKER_CWD_CELLS
         );
         assert!(title.ends_with('…'));
+        assert!(dojo_title.ends_with('…'));
         assert!(cwd.ends_with('…'));
+        assert_eq!(lair_title, "work spoof");
         assert!(entry.display_title().contains("work spoof"));
     }
 

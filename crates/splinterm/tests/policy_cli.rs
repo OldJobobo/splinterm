@@ -165,7 +165,8 @@ fn reset_requires_confirmation_and_rejects_machine_mode_before_service_access() 
 
 #[test]
 fn reset_backup_failure_restarts_service_and_preserves_state() {
-    let directory = test_directory("reset-backup-failure");
+    // Leave room for runtime/splinterm/splinterd.sock under a private TMPDIR.
+    let directory = test_directory("rbf");
     let state_home = directory.join("state");
     let state = state_home.join("splinterm");
     let runtime = directory.join("runtime");
@@ -201,11 +202,8 @@ fi
     );
     assert!(!reset.status.success());
     assert!(reset.stdout.is_empty());
-    assert!(
-        String::from_utf8(reset.stderr)
-            .unwrap()
-            .contains("restarted unchanged")
-    );
+    let stderr = String::from_utf8(reset.stderr).unwrap();
+    assert!(stderr.contains("restarted unchanged"), "{stderr}");
     assert_eq!(fs::read(&state).unwrap(), b"not-a-directory");
     assert_eq!(
         fs::read_to_string(&record).unwrap(),

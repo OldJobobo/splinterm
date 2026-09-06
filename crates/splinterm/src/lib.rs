@@ -16,6 +16,7 @@ pub mod endpoint;
 pub mod frontend;
 pub mod geometry;
 pub mod keymap;
+pub mod navigation_projection;
 pub mod pane;
 pub mod preset;
 pub mod remote;
@@ -29,7 +30,8 @@ pub mod wayland;
 
 pub use frontend::{
     AuthorityStatus, FontUpdate, LairDirection, LairPromptKind, LairPromptTarget,
-    PerfTraceCorrelation, SelectorKind, SessionPickerDecision, SessionPickerItem, SessionPickerUi,
+    PerfTraceCorrelation, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
+    SessionPickerDecision, SessionPickerItem, SessionPickerTarget, SessionPickerUi,
     TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
     WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };
