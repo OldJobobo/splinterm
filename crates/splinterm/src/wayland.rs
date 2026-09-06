@@ -2832,6 +2832,14 @@ fn tab_strip_height(managed_tabs: bool, visible: bool, surface_height: u32) -> u
     }
 }
 
+fn session_picker_retry_request(command: &WindowTopologyCommand) -> Option<WindowTopologyCommand> {
+    match command {
+        WindowTopologyCommand::RequestSessionPicker
+        | WindowTopologyCommand::RequestSelector { .. } => Some(command.clone()),
+        _ => None,
+    }
+}
+
 const fn session_picker_purpose(selector_kind: Option<SelectorKind>) -> SessionPickerPurpose {
     match selector_kind {
         Some(SelectorKind::Dojo) => SessionPickerPurpose::Dojos,
@@ -5513,6 +5521,11 @@ impl App {
     }
 
     fn send_topology_command(&mut self, command: WindowTopologyCommand) -> Result<()> {
+        // Capture all entry points, including keyboard shortcuts, before dispatch so
+        // a failed load can retry the exact picker kind and original Lair scope.
+        if let Some(request) = session_picker_retry_request(&command) {
+            self.modal.session_picker_retry_command = Some(request);
+        }
         let commands = self.tab_state.topology_commands.clone();
         try_topology_command_with_rollback(commands.as_ref(), command, |target, pending| {
             self.rollback_pending_remote_split(target, pending)
@@ -6406,11 +6419,12 @@ impl App {
                 }
             }
         }
-        if let Some(target) = activate {
-            let decision = match target {
-                PickerHitTarget::New => SessionPickerDecision::New,
-                PickerHitTarget::Open(index) => SessionPickerDecision::Open(index),
-            };
+        if let Some(decision) = activate.and_then(|target| {
+            self.modal
+                .session_picker
+                .as_ref()
+                .and_then(|picker| picker.decision_for_target(target))
+        }) {
             self.decide_session_picker(decision);
             changed = true;
         }
@@ -9808,6 +9822,29 @@ mod tests {
         );
         assert_eq!(tab_strip_height(true, false, 200), 0);
         assert_eq!(tab_strip_height(false, true, 200), 0);
+    }
+
+    #[test]
+    fn picker_retry_requests_preserve_kind_and_original_lair_scope() {
+        assert!(matches!(
+            session_picker_retry_request(&WindowTopologyCommand::RequestSessionPicker),
+            Some(WindowTopologyCommand::RequestSessionPicker)
+        ));
+        for kind in [SelectorKind::Dojo, SelectorKind::Lair] {
+            let lair_id = LairId::new();
+            let request = WindowTopologyCommand::RequestSelector { kind, lair_id };
+            assert!(matches!(
+                session_picker_retry_request(&request),
+                Some(WindowTopologyCommand::RequestSelector {
+                    kind: retry_kind,
+                    lair_id: retry_lair,
+                }) if retry_kind == kind && retry_lair == lair_id
+            ));
+        }
+        assert!(
+            session_picker_retry_request(&WindowTopologyCommand::NewLair { cwd: "/tmp".into() })
+                .is_none()
+        );
     }
 
     #[test]

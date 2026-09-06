@@ -238,13 +238,20 @@ impl SessionPickerUi {
     }
 
     pub(crate) fn selected_decision(&self) -> Option<SessionPickerDecision> {
-        if self.selected == 0 {
-            self.new_enabled.then_some(SessionPickerDecision::New)
-        } else {
-            self.filtered_indices
-                .get(self.selected - 1)
+        self.decision_for_target(self.selected_target())
+    }
+
+    pub(crate) fn decision_for_target(
+        &self,
+        target: PickerHitTarget,
+    ) -> Option<SessionPickerDecision> {
+        match target {
+            PickerHitTarget::New => self.new_enabled.then_some(SessionPickerDecision::New),
+            PickerHitTarget::Open(index) => self
+                .filtered_indices
+                .get(index)
                 .copied()
-                .map(SessionPickerDecision::Open)
+                .map(SessionPickerDecision::Open),
         }
     }
 
@@ -576,6 +583,38 @@ mod tests {
         assert!(picker.clear_search());
         assert!(picker.append_search(&"x".repeat(100)));
         assert_eq!(picker.query().chars().count(), 64);
+    }
+
+    #[test]
+    fn filtered_pointer_targets_resolve_original_catalog_indices() {
+        let items = (0..10)
+            .map(|index| SessionPickerItem {
+                display_title: format!("session {index}"),
+                breadcrumb: "work".to_owned(),
+                working_directory: String::new(),
+                pane_count: 1,
+                running_pane_count: 1,
+            })
+            .collect();
+        let mut picker = SessionPickerUi::inline(items, false, Some("Unavailable"), Some(0));
+        picker.append_search("session 9");
+        assert_eq!(
+            picker.decision_for_target(PickerHitTarget::Open(0)),
+            Some(SessionPickerDecision::Open(9))
+        );
+        assert_eq!(
+            picker.decision_for_target(picker.selected_target()),
+            picker.selected_decision()
+        );
+        assert_eq!(picker.decision_for_target(PickerHitTarget::Open(1)), None);
+        assert_eq!(picker.decision_for_target(PickerHitTarget::New), None);
+        picker.append_search(" missing");
+        assert_eq!(picker.decision_for_target(PickerHitTarget::Open(0)), None);
+        picker.clear_search();
+        assert_eq!(
+            picker.decision_for_target(PickerHitTarget::Open(9)),
+            Some(SessionPickerDecision::Open(9))
+        );
     }
 
     #[test]
