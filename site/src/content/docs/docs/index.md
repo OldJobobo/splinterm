@@ -84,9 +84,10 @@ hero:
 </nav>
 
 <div class="docs-home-footer">
-  <p><span>Public beta</span> The source is open; the validated environment and compatibility promise remain intentionally narrow.</p>
+  <p><span>Shipped release</span> These guides cover the release listed in Current status—not unreleased development features. Platform and compatibility claims remain intentionally narrow.</p>
   <div>
     <a href="/docs/status/">Read current status</a>
+    <a href="/docs/packaging/">Upgrade and rollback</a>
     <a href="/docs/roadmap/">Product roadmap</a>
     <a href="/docs/troubleshooting/">Troubleshooting</a>
     <a href="/docs/sessions/">Sessions and persistence</a>

@@ -3,7 +3,7 @@ title: Troubleshooting
 description: Diagnose common local Splinterm installation, daemon, session, and configuration problems.
 ---
 
-This page covers the first local checks. Splinterm is a public beta with a narrow validated Omarchy/Arch environment, so failures outside that target may not have a supported resolution.
+This page covers the first local checks for the shipped release on the documented Omarchy/Arch target. See [Current status](/docs/status/) for the support boundary and [Upgrade and rollback](/docs/packaging/) for package replacement.
 
 ## Check the installed command
 
@@ -40,7 +40,7 @@ systemctl --user show splinterd.service \
 journalctl --user-unit splinterd.service -n 50 --no-pager
 ```
 
-The packaged task ceiling protects the daemon from unbounded process creation, while `MemoryHigh` causes reclaim and throttling rather than imposing a hard memory ceiling. Terminal workloads run in a separate aggregate slice with nested per-Dojo and per-Splint boundaries, so they do not share the daemon's task or memory-pressure budget. `MemoryCurrent` includes charged page cache, some of which may be reclaimable under pressure.
+The packaged task ceiling protects the daemon control plane from unbounded process creation, while `MemoryHigh` causes reclaim and throttling rather than imposing a hard memory ceiling. Terminal workloads run in a separate aggregate slice with nested per-Dojo and per-Splint boundaries. Workload units do not set `TasksMax`; Splint scopes receive the systemd user manager's normal `DefaultTasksMax`, subject to stricter administrator or ancestor policy. `EffectiveTasksMax` is the authoritative runtime value. `MemoryCurrent` includes charged page cache, some of which may be reclaimable under pressure.
 
 After a daemon restart, inspect exited topology with `splinterm list --all`. Restoration is explicit because Splinterm never reruns saved commands automatically.
 
@@ -50,7 +50,10 @@ The packaged daemon fails closed when it cannot place a terminal helper in its e
 
 ```bash
 journalctl --user-unit splinterd.service -n 40 --no-pager
+systemctl --user show -p DefaultTasksMax
 systemctl --user status app-splinterm.slice
+# Replace SPLINT_SCOPE with the actual scope name from the hierarchy.
+systemctl --user show SPLINT_SCOPE -p TasksCurrent -p TasksMax -p EffectiveTasksMax
 systemd-cgls --user-unit app-splinterm.slice
 ```
 
@@ -72,14 +75,14 @@ Do not install a development client to an earlier user-local `PATH` entry and tr
 Run with the intended file and read the line-numbered diagnostic:
 
 ```bash
-SPLINTERM_CONFIG=/path/to/config.ini splinterm launch
+SPLINTERM_CONFIG=/path/to/config.ini splinterm config check
 ```
 
-Unknown keys and malformed values fail rather than being guessed. Compare the file with the [supported configuration](/docs/configure/configuration/).
+Malformed supported values fail validation. Unknown sections and keys produce line-numbered diagnostics rather than being guessed. Compare the file with the [supported configuration](/docs/configure/configuration/).
 
 ## A Dojo is missing from Recent Dojos
 
-The native picker opens only Dojos whose complete pane layout is still running. Exited Splints remain in persistent metadata, but starting them again requires explicit restore.
+The native picker opens only Dojos whose complete pane layout is still running. Exited Splints remain in persistent metadata, but starting them again requires explicit restore. Unpromoted Window-owned and XDG command Lairs are excluded from Recent Dojos and saved state; see [Terminal lifetime](/docs/configure/configuration/#terminal-lifetime).
 
 Inspect active and exited topology through the human CLI:
 

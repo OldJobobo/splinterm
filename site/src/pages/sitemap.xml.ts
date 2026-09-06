@@ -22,6 +22,7 @@ export const GET: APIRoute = async ({ site }) => {
   const docs = await getCollection('docs');
   const urls = [
     new URL('/', site),
+    new URL('/roadmap/', site),
     ...docs.map((entry) => new URL(`/${entry.id.replace(/\/index$/, '')}/`, site)),
   ];
 

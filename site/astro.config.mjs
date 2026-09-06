@@ -1,5 +1,6 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import release from './src/data/release.json' with { type: 'json' };
 
 export default defineConfig({
   site: 'https://splinterm.com',
@@ -15,6 +16,7 @@ export default defineConfig({
       },
       customCss: ['./src/styles/starlight.css'],
       lastUpdated: false,
+      head: [{ tag: 'meta', attrs: { name: 'splinterm-release', content: release.version } }],
       sidebar: [
         {
           label: 'Start here',
@@ -23,6 +25,7 @@ export default defineConfig({
             { label: 'Current status', slug: 'docs/status' },
             { label: 'Roadmap', slug: 'docs/roadmap' },
             { label: 'Installation', slug: 'docs/install' },
+            { label: 'Upgrade and rollback', slug: 'docs/packaging' },
             { label: 'Quickstart', slug: 'docs/quickstart' },
             { label: 'CLI reference', slug: 'docs/cli' },
             { label: 'Core concepts', slug: 'docs/concepts' },

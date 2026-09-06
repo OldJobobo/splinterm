@@ -1,9 +1,11 @@
 ---
 title: Installation
-description: Install or update the current Splinterm public beta on Arch Linux and Omarchy.
+description: Install the shipped Splinterm release on Arch Linux and Omarchy.
 ---
 
-The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public beta, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
+The validated installation target is an **x86_64 Omarchy system based on Arch Linux, using native Wayland under Hyprland**. See [Current status](/docs/status/) for the shipped version and support boundary.
+
+Already installed? Read [Upgrade and rollback](/docs/packaging/) before replacing packages. Upgrades can end daemon-owned shells; stable 0.1 does not provide live daemon handoff.
 
 ## Install the prebuilt AUR package
 
@@ -19,11 +21,13 @@ The optional policy-scoped MCP adapter is a separate exact-version prebuilt pack
 yay -S splinterm-mcp-bin
 ```
 
-Source-built `splinterm` and `splinterm-mcp` packages remain available. Migrating from them prompts once to approve replacement by the conflicting `-bin` packages. `paru` may be used instead of `yay`. AUR availability does not expand the supported target or create stable compatibility and support-duration guarantees.
+Source-built `splinterm` and `splinterm-mcp` packages remain available. Migrating from them prompts once to approve replacement by the conflicting `-bin` packages. `paru` may be used instead of `yay`. AUR availability does not expand the supported target or create a long-term-support or 1.0 compatibility promise.
 
 ## Install the current versioned release directly
 
-For the newest published versioned package, clone the public repository and run the release installer:
+Run the installer from **another terminal, such as Foot**, not a shell inside Splinterm. It refuses a Splinterm-owned shell because stopping the daemon would terminate the installer itself.
+
+For the newest published versioned package, clone the public repository and run:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git
@@ -41,7 +45,7 @@ The default installer downloads only a published versioned release; it never sel
 
 ## Build from committed source
 
-To compile and package the current committed checkout locally:
+Source mode packages the clean committed checkout, which may differ from the shipped release. Select and review the intended commit first, then run from an external terminal:
 
 ```bash
 ./install.sh --source
@@ -61,5 +65,11 @@ The installer does not:
 - edit Omarchy or Hyprland configuration;
 - enable persistent systemd user lingering; or
 - opt a fresh installation into the optional MCP package.
+
+To opt into the reversible Omarchy default-terminal, terminal-tag, and screensaver integration explicitly:
+
+```bash
+splinterm integration omarchy enable
+```
 
 Continue to the [quickstart](/docs/quickstart/) after installation. If an MCP host needs bounded access, follow the separate [MCP adapter setup](/docs/mcp/); installing the adapter alone grants no authority.

@@ -1,19 +1,21 @@
 ---
 import SiteLayout from '../layouts/SiteLayout.astro';
+import release from '../data/release.json';
 
 const horizons = [
   {
     number: '01',
     label: 'Now',
-    stage: 'Public beta',
+    stage: 'Daily-driver improvements',
     title: 'Earn daily-driver confidence.',
-    summary: 'Make persistence understandable, desktop behavior coherent, and installation trustworthy on the environment Splinterm can validate today.',
+    summary: 'Build on the shipped terminal, lifetime controls, theme integration, and versioned packages. Make ordinary work easier to learn and safer to return to.',
     outcomes: [
-      'Intentional Lair states and lifecycle controls',
-      'Exact theme fidelity and Omarchy integration',
-      'Bounded local-file drop path insertion',
-      'Trustworthy install, recovery, and diagnostics',
-      'A resolved beta performance and memory gate',
+      'A clear first five minutes: open, split, and resume',
+      'Recognizable work and predictable lifecycle actions',
+      'Discoverable controls with familiar tmux paths',
+      'Safer upgrades and actionable recovery diagnostics',
+      'Clearer connection feedback and recovery for existing SSH profiles',
+      'Repeatable daily-driver and performance checks',
     ],
     signal: 'A new user can leave a Window, return to the same work, and predict every destructive action without maintainer help.',
   },
@@ -39,7 +41,7 @@ const horizons = [
     title: 'Keep one workspace across entry points.',
     summary: 'Make local, remote, headless, and authorized tool access feel like ways into the same work instead of separate terminal worlds.',
     outcomes: [
-      'Productized remote profiles and recovery',
+      'A cohesive journey across local, remote, and headless entry points',
       'Stable integration kits and reference journeys',
       'Distinct human and automation activity',
       'Portable, non-executable workspace definitions',
@@ -73,8 +75,9 @@ const horizons = [
       <p class="eyebrow"><span>Direction, not a deadline</span> · Product roadmap</p>
       <h1 id="roadmap-title">The work persists.<br /><em>The promise grows carefully.</em></h1>
       <p>
-        Splinterm is moving from a capable public beta toward a supported persistent workspace.
-        The horizons below describe outcomes—not dates, feature quotas, or compatibility guarantees.
+        Splinterm {release.version} is stable for its documented target. The next work improves
+        daily use without broadening that promise by implication. These horizons describe intended
+        outcomes—not dates, feature quotas, or features already available in packages.
       </p>
       <div class="hero-actions">
         <a class="button primary" href="#horizons">Follow the horizons <span aria-hidden="true">↓</span></a>
@@ -83,7 +86,7 @@ const horizons = [
     </div>
     <div class="roadmap-compass" aria-label="Current roadmap position">
       <span>Current position</span>
-      <strong>Public beta</strong>
+      <strong>{release.version} · {release.channel}</strong>
       <div class="compass-line" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
       <ol>
         <li class="active">Confidence</li>
@@ -96,11 +99,13 @@ const horizons = [
   </section>
 
   <section class="roadmap-north shell-section" aria-labelledby="north-star-title">
-    <div class="section-index" aria-hidden="true">North star / Persistent work</div>
+    <div class="section-index" aria-hidden="true">Baseline / Shipped, not planned</div>
     <blockquote id="north-star-title">Splinterm should become the place terminal work lives while windows, machines, and tools come and go.</blockquote>
     <p>
-      The primary human workflow remains the anchor. Automation expands the product; it does not
-      redefine Splinterm as an “AI terminal.” Every support claim stays narrower than the evidence.
+      Persistent Lairs, explicit restore, optional Window-owned lifetimes, Omarchy theme and font
+      following, bounded file-drop insertion, native SSH clients, and policy-scoped automation already
+      ship. <a href="/docs/status/">Current status</a> records their limits. Running-process survival
+      across daemon upgrades is future work—not a capability of 0.1.
     </p>
   </section>
 
@@ -151,7 +156,7 @@ const horizons = [
       <p>This page communicates the product path. Public documentation records strategy, current status, accepted architecture, and supported boundaries; maintainer delivery sequencing is tracked separately.</p>
       <div class="hero-actions">
         <a class="button primary" href="/docs/roadmap/">Roadmap documentation</a>
-        <a class="text-link" href="https://github.com/OldJobobo/splinterm/blob/main/docs/product-roadmap.md">Product roadmap <span aria-hidden="true">↗</span></a>
+        <a class="text-link" href={release.releaseUrl}>Shipped release <span aria-hidden="true">↗</span></a>
       </div>
     </div>
   </section>

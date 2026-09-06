@@ -77,4 +77,4 @@ It copies bounded private-protocol bytes over stdio. The remote daemon authorize
 
 Use a dedicated account or restricted key when relay callers must not inherit the account's other SSH capabilities. Relay stdout is protocol data only; diagnostics stay on stderr.
 
-For the complete relay identity, profile schema, authentication, reconnect, and policy contract, read repository [`docs/remote.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/remote.md).
+For the complete relay identity, profile schema, authentication, reconnect, and policy contract, read repository [`docs/remote.md`](https://github.com/OldJobobo/splinterm/blob/v0.1.0/docs/remote.md).

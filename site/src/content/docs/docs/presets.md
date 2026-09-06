@@ -111,4 +111,4 @@ title = "shell"
 
 `{cwd}` and `{cwd.basename}` are the only placeholders. Pane commands are direct argv, or values parsed by Splinterm's closed compatibility lexer; they are never passed to `sh -c`.
 
-Non-dry runs are trusted-local human operations. Remote, automation, and MCP clients cannot invoke private preset materialization. For the complete schema and failure semantics, read repository [`docs/presets.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/presets.md).
+Non-dry runs are trusted-local human operations. Remote, automation, and MCP clients cannot invoke private preset materialization. For the complete schema and failure semantics, read repository [`docs/presets.md`](https://github.com/OldJobobo/splinterm/blob/v0.1.0/docs/presets.md).

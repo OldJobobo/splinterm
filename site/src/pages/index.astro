@@ -1,6 +1,7 @@
 ---
 import SiteLayout from '../layouts/SiteLayout.astro';
 import TopologyScene from '../components/TopologyScene.astro';
+import release from '../data/release.json';
 
 const capabilities = [
   ['Native Wayland terminal', 'Implemented'],
@@ -8,43 +9,43 @@ const capabilities = [
   ['Panes, tabs, and restore', 'Validated'],
   ['Bounded automation', 'Validated'],
   ['Versioned public builds', 'Available'],
-  ['AUR beta package', 'Available'],
+  ['AUR package', release.packageVersion],
 ];
 ---
 
 <SiteLayout
   title="Splinterm — persistent terminal sessions, bounded automation"
-  description="Splinterm is a persistent, security-conscious terminal substrate for humans and bounded automation."
+  description="A native Wayland terminal for persistent work. Open a Lair, arrange Splints in a Dojo, and return to running sessions."
 >
   <section class="intro-hero" aria-labelledby="intro-title">
     <img class="intro-mark" src="/logo-transparent.png" alt="" width="768" height="768" />
     <h1 id="intro-title" class="intro-wordmark">splinterm</h1>
-    <p class="intro-status">Public beta · Arch / Omarchy · x86_64</p>
-    <p class="intro-thesis">A native Wayland terminal where the window can close and the work keeps running.</p>
+    <p class="intro-status">Splinterm {release.version} · Arch / Omarchy · x86_64</p>
+    <p class="intro-thesis">A native Wayland terminal. Persistent work by default. Ninja names included.</p>
     <div class="intro-actions" aria-label="Get started with Splinterm">
-      <a class="button primary intro-primary" href="/docs/install/">Install the beta <span aria-hidden="true">↗</span></a>
+      <a class="button primary intro-primary" href="/docs/install/">Install Splinterm <span aria-hidden="true">↗</span></a>
       <a class="button secondary" href="#workflow">See the workflow <span aria-hidden="true">↓</span></a>
     </div>
     <div class="intro-install" aria-label="Recommended installation command">
       <span>Recommended</span>
       <code><i aria-hidden="true">$</i> yay -S splinterm-bin</code>
-      <a href="/docs/status/">Read beta limits</a>
+      <a href="/docs/status/">Release and limits</a>
     </div>
   </section>
 
   <section id="product" class="hero shell-section" aria-labelledby="product-title">
     <div class="hero-copy">
-      <p class="eyebrow"><span>Public beta</span> · Enter the Lair</p>
+      <p class="eyebrow"><span>{release.channel} {release.version}</span> · Enter the Lair</p>
       <h2 id="product-title">Your shell should outlive its <em>window.</em></h2>
       <p class="hero-lede">
-        Splinterm keeps your work below the surface: Lairs hold projects, Dojos hold working
-        sessions, and Splints keep their shells alive when graphical clients disappear.
+        A Lair is your workspace. A Dojo arranges its Splints—terminal panes—for the work at hand.
+        Persistent by default, your shells can keep running after you close the Window.
       </p>
       <div class="hero-actions">
-        <a class="button primary" href="/docs/install/">Install the beta <span aria-hidden="true">↗</span></a>
-        <a class="button secondary" href="#workflow">See the three-step workflow</a>
+        <a class="button primary" href="/docs/install/">Install Splinterm <span aria-hidden="true">↗</span></a>
+        <a class="button secondary" href="#workflow">Open, split, and return</a>
       </div>
-      <p class="hero-note">Built in Rust from Foot’s terminal behavior. Quietly disciplined for Omarchy.</p>
+      <p class="hero-note">Built in Rust for Omarchy. Window-owned lifetimes are optional; daemon restarts end processes. <a href="/docs/sessions/">Know what persists.</a></p>
     </div>
     <TopologyScene />
   </section>
@@ -54,15 +55,35 @@ const capabilities = [
     <div class="manifesto-copy">
       <h2 id="persistence-title">The work lives in the Lair.<br />Windows only visit.</h2>
       <p>
-        <code>splinterd</code> keeps the topology underground. A Lair gathers the work, each Dojo
-        holds a focused session, and every Splint carries a running shell. Windows are temporary views in.
+        <code>splinterd</code> keeps persistent work running below the surface. A Lair gathers your
+        Dojos; each Dojo arranges Splints into a layout. Tabs show those layouts without becoming their owners.
       </p>
     </div>
     <ol class="sequence" aria-label="Persistent session workflow">
-      <li><span>01</span><strong>Enter</strong><small>Open a Lair and gather the work.</small></li>
-      <li><span>02</span><strong>Train</strong><small>Shape a Dojo from tabs, panes, and Splints.</small></li>
-      <li><span>03</span><strong>Return</strong><small>Leave the window; find the same Dojo later.</small></li>
+      <li><span>01</span><strong>Open</strong><small>Enter a fresh Lair through the desktop launcher.</small></li>
+      <li><span>02</span><strong>Split</strong><small>Arrange Splints inside your Dojo.</small></li>
+      <li><span>03</span><strong>Close</strong><small>Leave persistent work running in the daemon.</small></li>
+      <li><span>04</span><strong>Resume</strong><small>Return through Recent Dojos or reopen.</small></li>
     </ol>
+  </section>
+
+  <section id="workflow" class="first-workflow shell-section" aria-labelledby="workflow-title">
+    <div>
+      <p class="eyebrow">The ordinary path into the Lair</p>
+      <h2 id="workflow-title">Leave the Window.<br />Return to the Dojo.</h2>
+      <p>Install Splinterm, open a terminal, and split your Dojo with Ctrl+Shift+Enter. With the default persistent lifetime, you can close the Window and return to that running layout later.</p>
+      <div class="hero-actions">
+        <a class="button primary" href="/docs/install/">Install Splinterm</a>
+        <a class="button workflow-secondary" href="/docs/quickstart/">Follow the full quickstart <span aria-hidden="true">→</span></a>
+      </div>
+      <p>Changed lifetime settings or upgrading? Read <a href="/docs/sessions/">what persists</a> and <a href="/docs/packaging/">how to upgrade safely</a> first.</p>
+    </div>
+    <div class="command-stack" aria-label="Example Splinterm commands">
+      <div><span>$</span><code>yay -S splinterm-bin</code><small>install</small></div>
+      <div><span>$</span><code>splinterm-xdg-terminal-exec</code><small>open a fresh Lair</small></div>
+      <div><span>$</span><code>splinterm dojos</code><small>choose running work</small></div>
+      <div><span>$</span><code>splinterm reopen</code><small>return to the last Dojo</small></div>
+    </div>
   </section>
 
   <section class="wayland-section shell-section" aria-labelledby="wayland-title">
@@ -92,7 +113,7 @@ const capabilities = [
       <article><span>Scale</span><h3>Follow the output</h3><p>Compositor-aware geometry and fractional scaling across Wayland outputs.</p></article>
       <article><span>Input</span><h3>Meet text where it enters</h3><p>Native keyboard, pointer, clipboard, compose, and IME/preedit handling.</p></article>
       <article><span>Frames</span><h3>Draw only what changed</h3><p>Damage-driven rendering and compositor frame scheduling avoid blind full-window redraws.</p></article>
-      <article><span>Lifecycle</span><h3>Close the glass, not the work</h3><p>The Wayland client can disappear while daemon-owned sessions continue below it.</p></article>
+      <article><span>Lifecycle</span><h3>Close the glass, not the work</h3><p>The Wayland client can disappear while persistent sessions continue in the running daemon.</p></article>
     </div>
 
     <p class="wayland-boundary">
@@ -189,54 +210,14 @@ const capabilities = [
     </div>
   </section>
 
-  <section class="performance-section shell-section" aria-labelledby="performance-title">
-    <div class="section-index" aria-hidden="true">05 / Measured footprint</div>
-    <div class="performance-heading">
-      <p class="eyebrow">Measured, not mythologized</p>
-      <h2 id="performance-title">Foot-class light.<br />Built to multiply.</h2>
-      <p>
-        Splinterm keeps panes inside one native topology instead of stacking a separate
-        multiplexer onto every terminal window. The payoff shows up most clearly as the
-        workspace grows.
-      </p>
-    </div>
-
-    <div class="performance-feature" aria-label="Splinterm idle memory benchmark">
-      <span>Idle footprint</span>
-      <strong>52.9 <small>MiB</small></strong>
-      <p>Comparable to Foot at 50.9 MiB—and 76–85% below the tested Alacritty, Ghostty, and Kitty builds.</p>
-    </div>
-
-    <div class="benchmark-grid">
-      <article>
-        <span class="benchmark-label">Shell ready</span>
-        <strong>76.7 <small>ms</small></strong>
-        <p>Comparable to Foot, and faster than the tested Alacritty, Kitty, and Ghostty launches.</p>
-      </article>
-      <article>
-        <span class="benchmark-label">Native four-pane grid</span>
-        <strong>111 <small>MiB</small></strong>
-        <p>Less memory than Foot + tmux at 122 MiB, four Foot windows at 197 MiB, or Foot + Zellij at 204 MiB.</p>
-      </article>
-    </div>
-
-    <div class="benchmark-note">
-      <span aria-hidden="true">◆</span>
-      <p>
-        Medians from randomized, checksum-verified runs on one Linux/Wayland host. Splinterm
-        used its prestarted daemon; peer terminals used standalone launches. These are measured
-        results for the recorded hardware and builds—not a universal ranking.
-      </p>
-    </div>
-  </section>
-
   <section class="status-section shell-section" aria-labelledby="status-title">
-    <div class="section-index" aria-hidden="true">06 / Current state</div>
+    <div class="section-index" aria-hidden="true">05 / Current state</div>
     <div class="status-intro">
       <h2 id="status-title">The doors are open.<br />The edges stay marked.</h2>
       <p>
-        Splinterm is a public beta. Source, documentation, and immutable versioned GitHub and AUR
-        packages are open; the validated target remains narrow and stable compatibility guarantees do not exist yet.
+        Splinterm {release.version} is the first stable release for the documented x86_64 Omarchy/Arch
+        and Hyprland target. It is not an LTS promise or a 1.0 compatibility contract.
+        Future 0.x releases may require documented migration; 0.1 has no live daemon-upgrade handoff.
       </p>
       <div class="status-actions">
         <a class="text-link" href="/docs/status/">Read the complete status and limits <span aria-hidden="true">→</span></a>
@@ -251,23 +232,6 @@ const capabilities = [
           <i class:list={{ pending: status === 'Preparing' }}>{status}</i>
         </div>
       ))}
-    </div>
-  </section>
-
-  <section id="workflow" class="first-workflow shell-section" aria-labelledby="workflow-title">
-    <div>
-      <p class="eyebrow">The ordinary path into the Lair</p>
-      <h2 id="workflow-title">Leave the window.<br />Return to the Dojo.</h2>
-      <p>Install the current public beta from the AUR, open a Splint, then use the Dojo picker whenever you want the running work back.</p>
-      <div class="hero-actions">
-        <a class="button primary" href="/docs/install/">Install the beta</a>
-        <a class="button workflow-secondary" href="/docs/quickstart/">Follow the full quickstart <span aria-hidden="true">→</span></a>
-      </div>
-    </div>
-    <div class="command-stack" aria-label="Example Splinterm commands">
-      <div><span>$</span><code>yay -S splinterm-bin</code></div>
-      <div><span>$</span><code>splinterm dojos</code><small>choose a running Dojo</small></div>
-      <div><span>$</span><code>splinterm reopen</code><small>return to the last one</small></div>
     </div>
   </section>
 

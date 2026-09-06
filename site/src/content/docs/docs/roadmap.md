@@ -1,30 +1,38 @@
 ---
 title: Roadmap
-description: Product direction from the current public beta toward a supported persistent workspace.
+description: Shipped foundations and intended improvements for Splinterm's persistent workspace.
 ---
 
 Splinterm's roadmap uses **Now / Next / Later / Explore** horizons instead of release dates. These horizons describe intended product outcomes. They are not delivery dates, implementation order, compatibility guarantees, or promises that every listed idea will ship.
 
-[Current status](/docs/status/) remains the authority for what works today. The repository [product roadmap](https://github.com/OldJobobo/splinterm/blob/main/docs/product-roadmap.md) contains the full strategic rationale. Maintainer dependency order, implementation plans, and delivery gates are tracked separately from the public product repository; accepted decisions needed to understand shipped behavior are promoted into public ADRs and documentation.
+[Current status](/docs/status/) identifies the shipped release and its support boundary. The [visual roadmap](/roadmap/) summarizes the same horizons. Development-branch plans are not evidence that a feature is available in current packages. Maintainer dependency order, implementation plans, and delivery gates are tracked separately from the public product repository; accepted decisions needed to understand shipped behavior are promoted into public ADRs and documentation.
 
-## Now: make the public beta a confident daily driver
+## Shipped foundations
 
-The current priority is to make persistence understandable, desktop behavior coherent, and installation trustworthy on the validated x86_64 Omarchy/Arch environment.
+The first stable release already includes persistent Lairs and explicit restore; saved-Lair controls; optional Window-owned lifetimes and tab-organization promotion; native Omarchy theme and font-family following; bounded local-file drop path insertion; native SSH profiles; versioned packages; and policy-scoped automation.
 
-Planned outcomes include:
+These capabilities retain their documented limits. In particular, 0.1 has no live daemon-upgrade handoff, terminal-history persistence across daemon restarts, or reboot-transparent process survival. See [Upgrade and rollback](/docs/packaging/) and [Sessions and persistence](/docs/sessions/).
 
-- recognizable named, pinned, disposable, restorable, and expired Lair states;
-- clear save, restore, pin, delete, and bounded-retention controls without persisting terminal contents or secrets;
-- exact theme fidelity and supported Omarchy desktop integration;
-- bounded local-file drop path insertion in Alpha3, with clipboard-image saving retained as later work;
-- stronger installation, upgrade, recovery, diagnostics, and automation-consent journeys; and
-- a passing beta performance and memory gate, or an explicit product disposition.
+## Now: make daily work easier
+
+Improve the human journey on the validated x86_64 Omarchy/Arch environment without renaming Lairs, Dojos, or Splints.
+
+Intended improvements include:
+
+- a clear first five minutes: open a terminal, split a Dojo, leave, and resume;
+- recognizable work in tabs and pickers, with lifecycle consequences visible before destructive actions;
+- easier discovery of controls and familiar tmux workflows;
+- safer upgrades, clearer recovery diagnostics, and less confusing consent;
+- better connection feedback and recovery for people using existing SSH profiles; and
+- repeatable daily-driver checks and performance evidence tied to exact builds.
+
+Compatible live upgrade handoff is future work, not a reason to skip saving work before a 0.1 upgrade. Clipboard-image saving also remains a future direction rather than part of the shipped local-file drop feature.
 
 This horizon succeeds when a new user can install Splinterm, organize work, close its Window, return safely, and predict destructive actions without maintainer assistance.
 
 ## Next: define a supported 1.0 contract
 
-A supported release requires more than implemented features. It requires an explicit and testable relationship with users.
+Stable 0.1 is scoped to the documented target. A future 1.0 contract would need wider and longer-lived commitments, not simply more features.
 
 Before a 1.0 claim, the project intends to:
 
@@ -42,7 +50,7 @@ After the primary product is dependable, local, remote, headless, and authorized
 
 Candidate outcomes include:
 
-- productized native remote profiles, connection diagnostics, and SSH recovery;
+- a more cohesive experience across existing local, remote, and headless entry points;
 - stable integration kits and reference journeys for tools and MCP hosts;
 - visibly distinct human and automated activity inside shared topology; and
 - portable workspace definitions that do not execute untrusted shell source.
