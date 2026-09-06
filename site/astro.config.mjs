@@ -45,7 +45,7 @@ export default defineConfig({
         {
           label: 'Automation and integrations',
           items: [
-            { label: 'Bounded automation', slug: 'docs/automation' },
+            { label: 'Automation and permissions', slug: 'docs/automation' },
             { label: 'MCP adapter', slug: 'docs/mcp' },
           ],
         },

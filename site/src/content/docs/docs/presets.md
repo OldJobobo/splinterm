@@ -1,9 +1,11 @@
 ---
 title: Dojo presets
-description: Inspect, customize, and run complete Dojo layouts without shell injection or partial topology changes.
+description: Set up a complete Dojo from a preset, preview it, or customize your own layout.
 ---
 
-Dojo presets turn a named layout into one atomic Splinterm topology transaction. The client validates and compiles the complete pane tree before the daemon persists it or launches a process. Presets use direct argument vectors; they are not shell scripts.
+A preset sets up a complete Dojo in one go: panes, commands, and working directories. Start with a bundled layout or make your own, and preview it before running anything.
+
+Splinterm checks the whole layout before saving it or starting processes, then creates it as one atomic operation. Commands are passed as argument lists, not interpreted as shell scripts.
 
 ## Bundled Omarchy workflows
 

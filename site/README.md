@@ -32,6 +32,18 @@ npm run preview
 
 The generated `dist/` directory is local build output and is not committed.
 
+## Voice and copy
+
+Playful names, straightforward explanations. Keep Lair, Dojo, and Splint; let the name and artwork carry the personality without announcing the joke.
+
+- Lead with what a person can do: open, split, return, configure, connect.
+- Explain a term when it first becomes useful. A Lair is a workspace, a Dojo is a layout, and a Splint is a terminal pane.
+- Prefer concrete examples to phrases such as “shared substrate” or “closed authority.” Keep precise protocol terms in the reference docs where they help.
+- Say important limits plainly. “Restarting the background service ends running commands” is more useful than “no live daemon-upgrade handoff.” Keep the exact technical meaning behind the shorter wording.
+- Do not trade accuracy for friendliness: qualify default persistence, explain permission requirements, and separate planned work from shipped features.
+- Remove repeated explanations before adding another section. A heading should help readers find something, not make them solve a metaphor.
+- Keep reading text at 18–20px and supporting labels at least 16px at the default root size, expressed in `rem`. Use normal weights, readable contrast, and reflow narrow layouts rather than shrinking text. The typography tests guard key source declarations and solid-surface contrast; also check computed styles, overflow, and clipping in the local preview at mobile and desktop widths.
+
 ## Release content ownership
 
 The site describes the **shipped release**, not everything implemented on `main`. For 0.1 releases, compare the published GitHub release, AUR package versions, exact release-tag source, and the post-publication record on `maint/0.1` before editing. Do not merge an entire maintenance branch merely to synchronize documentation.

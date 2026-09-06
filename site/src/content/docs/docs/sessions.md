@@ -1,9 +1,11 @@
 ---
 title: Sessions and persistence
-description: Work with Lairs, Dojos, Splints, windows, detach, reopen, restore, and reset.
+description: Learn what closes, what keeps running, and how to return to your work.
 ---
 
-`splinterd` owns terminal processes and persistent topology. Graphical Splinterm processes can disconnect and be replaced without ending persistent sessions, while the daemon and its processes remain alive. Window-owned lifetimes have different rules.
+By default, closing a window leaves your work running in `splinterd`, the background service. Open the Dojo again to return to those running processes. You can also choose work that ends with its window.
+
+This page explains those choices, plus what happens when a process exits or the background service restarts.
 
 ## New work and existing work
 
