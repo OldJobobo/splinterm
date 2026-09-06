@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - site/**
+      - assets/fonts/splinter-display/dist/*.woff2
       - .github/workflows/site-checks.yml
   push:
     branches: [main]
     paths:
       - site/**
+      - assets/fonts/splinter-display/dist/*.woff2
       - .github/workflows/site-checks.yml
   workflow_dispatch:
 

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - site/**
+      - assets/fonts/splinter-display/dist/*.woff2
       - .github/workflows/site.yml
   workflow_dispatch:
 

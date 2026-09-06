@@ -28,9 +28,29 @@ npm run validate
 npm run preview
 ```
 
-`npm run validate` runs the release-check regression tests, type-checks the Astro project, builds every static route and search index, verifies generated local page and asset links stay inside `dist/`, and checks current-release copy and critical routes. `npm test` runs the in-memory regression suite independently. The build also emits `sitemap.xml`, `robots.txt`, the SVG favicon, and a `/favicon.ico` compatibility redirect.
+`npm run validate` runs the release, typography, and font-integration regression tests, type-checks the Astro project, builds every static route and search index, verifies generated local page and asset links stay inside `dist/`, and checks current-release copy, critical routes, and the bundled wordmark font. `npm test` runs the in-memory regression suite independently. The build also emits `sitemap.xml`, `robots.txt`, the SVG favicon, and a `/favicon.ico` compatibility redirect.
 
 The generated `dist/` directory is local build output and is not committed.
+
+## Wordmark typography
+
+The homepage's main “splinterm” title uses **Splinter Display Heavy v0.2**, the
+original font in [`../assets/fonts/splinter-display/`](../assets/fonts/splinter-display/).
+CSS and the homepage-only preload import its canonical WOFF2 directly; Vite emits
+one content-hashed asset in `dist/_astro/`. There is no manually synchronized copy
+in `public/`, no external font service, and no font-build dependency in the site
+build. Build from the repository checkout, not a standalone copy of `site/`.
+
+Only `.intro-wordmark` uses the display font. Body text, navigation, code, roadmap
+headings, and documentation typography are unchanged. Weight 900 and zero extra
+letter spacing preserve the font's intended spacing and kerning; `font-display: swap`
+keeps the title visible while loading.
+
+`npm run check:font` checks the built font against the canonical bytes, confirms
+that CSS and the CORS-enabled preload use the same URL, and guards title styling
+and homepage-only preloading. `npm run test:font` exercises failure cases without
+building the site; these tests also run under `npm test`. Both site workflows watch
+canonical WOFF2 changes.
 
 ## Voice and copy
 

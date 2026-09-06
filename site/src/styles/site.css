@@ -1,3 +1,11 @@
+@font-face {
+  font-family: 'Splinter Display';
+  src: url('../../../assets/fonts/splinter-display/dist/SplinterDisplay-Heavy.woff2?no-inline') format('woff2');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --ink: #f2e6d8;
   --muted: #b2a697;
@@ -14,6 +22,7 @@
   --ember: #da9336;
   --blood: #6b2c2e;
   --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --display: 'Splinter Display', var(--sans);
   --mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
 }
 
@@ -85,10 +94,13 @@ a:focus-visible { outline: 2px solid var(--signal); outline-offset: 4px; }
 }
 .intro-wordmark {
   margin: clamp(.7rem, 1.8vh, 1.4rem) 0 0;
+  font-family: var(--display);
   font-size: clamp(4rem, 10vw, 8.5rem);
-  font-weight: 650;
+  font-weight: 900;
+  font-synthesis: none;
+  font-kerning: normal;
   line-height: .82;
-  letter-spacing: -.08em;
+  letter-spacing: 0;
   animation: intro-arrive .8s .08s cubic-bezier(.2, .75, .2, 1) both;
 }
 .intro-status {

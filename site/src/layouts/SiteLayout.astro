@@ -1,13 +1,15 @@
 ---
 import '../styles/site.css';
+import displayFontUrl from '../../../assets/fonts/splinter-display/dist/SplinterDisplay-Heavy.woff2?url&no-inline';
 import release from '../data/release.json';
 
 interface Props {
   title: string;
   description: string;
+  preloadDisplayFont?: boolean;
 }
 
-const { title, description } = Astro.props;
+const { title, description, preloadDisplayFont = false } = Astro.props;
 const path = Astro.url.pathname;
 ---
 
@@ -20,6 +22,9 @@ const path = Astro.url.pathname;
     <meta name="splinterm-release" content={release.version} />
     <meta name="theme-color" content="#0e1216" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    {preloadDisplayFont && (
+      <link rel="preload" href={displayFontUrl} as="font" type="font/woff2" crossorigin="anonymous" />
+    )}
     <title>{title}</title>
   </head>
   <body>
