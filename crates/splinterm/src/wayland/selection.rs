@@ -39,6 +39,9 @@ pub(super) enum CopyMotion {
     Down(usize),
     LineStart,
     LineEnd,
+    WordForward,
+    WordBackward,
+    WordEnd,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -133,6 +136,18 @@ pub(super) fn move_copy_cursor(
         ),
         CopyMotion::LineStart => (row, 0, false),
         CopyMotion::LineEnd => (row, snapshot.columns - 1, false),
+        CopyMotion::WordForward => {
+            let (row, column) = word_forward(snapshot, (row, state.cursor.column));
+            (row, column, false)
+        }
+        CopyMotion::WordBackward => {
+            let (row, column) = word_backward(snapshot, (row, state.cursor.column));
+            (row, column, false)
+        }
+        CopyMotion::WordEnd => {
+            let (row, column) = word_end(snapshot, (row, state.cursor.column));
+            (row, column, false)
+        }
     };
     let row_id = snapshot
         .scrollback_rows
@@ -157,6 +172,162 @@ pub(super) fn move_copy_cursor(
         moved,
         request_older,
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WordClass {
+    Whitespace,
+    Keyword,
+    Punctuation,
+}
+
+fn word_class(snapshot: &TerminalSnapshot, (row, column): (usize, usize)) -> WordClass {
+    let cell = snapshot
+        .scrollback_rows
+        .iter()
+        .chain(&snapshot.visible_rows)
+        .nth(row)
+        .and_then(|row| row.cells.get(column));
+    let Some(cell) = cell else {
+        return WordClass::Whitespace;
+    };
+    if cell.spacer_remaining.is_some()
+        || cell.content.is_empty()
+        || cell.content.chars().all(char::is_whitespace)
+    {
+        return WordClass::Whitespace;
+    }
+    if cell
+        .content
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        WordClass::Keyword
+    } else {
+        WordClass::Punctuation
+    }
+}
+
+fn is_spacer(snapshot: &TerminalSnapshot, (row, column): (usize, usize)) -> bool {
+    snapshot
+        .scrollback_rows
+        .iter()
+        .chain(&snapshot.visible_rows)
+        .nth(row)
+        .and_then(|row| row.cells.get(column))
+        .is_some_and(|cell| cell.spacer_remaining.is_some())
+}
+
+fn next_cell(snapshot: &TerminalSnapshot, mut position: (usize, usize)) -> Option<(usize, usize)> {
+    let row_count = snapshot.scrollback_rows.len() + snapshot.visible_rows.len();
+    loop {
+        let (row, column) = position;
+        position = if column + 1 < snapshot.columns {
+            (row, column + 1)
+        } else if row + 1 < row_count {
+            (row + 1, 0)
+        } else {
+            return None;
+        };
+        if !is_spacer(snapshot, position) {
+            return Some(position);
+        }
+    }
+}
+
+fn previous_cell(
+    snapshot: &TerminalSnapshot,
+    mut position: (usize, usize),
+) -> Option<(usize, usize)> {
+    loop {
+        let (row, column) = position;
+        position = if let Some(column) = column.checked_sub(1) {
+            (row, column)
+        } else {
+            (row.checked_sub(1)?, snapshot.columns - 1)
+        };
+        if !is_spacer(snapshot, position) {
+            return Some(position);
+        }
+    }
+}
+
+fn word_forward(snapshot: &TerminalSnapshot, position: (usize, usize)) -> (usize, usize) {
+    let mut cursor = position;
+    let class = word_class(snapshot, cursor);
+    if class != WordClass::Whitespace {
+        loop {
+            let Some(next) = next_cell(snapshot, cursor) else {
+                return cursor;
+            };
+            if next.0 != cursor.0 || word_class(snapshot, next) != class {
+                cursor = next;
+                break;
+            }
+            cursor = next;
+        }
+    }
+    while word_class(snapshot, cursor) == WordClass::Whitespace {
+        let Some(next) = next_cell(snapshot, cursor) else {
+            return cursor;
+        };
+        cursor = next;
+    }
+    cursor
+}
+
+fn word_backward(snapshot: &TerminalSnapshot, position: (usize, usize)) -> (usize, usize) {
+    let mut cursor = position;
+    loop {
+        let Some(previous) = previous_cell(snapshot, cursor) else {
+            return cursor;
+        };
+        cursor = previous;
+        if word_class(snapshot, cursor) != WordClass::Whitespace {
+            break;
+        }
+    }
+    let class = word_class(snapshot, cursor);
+    while let Some(previous) = previous_cell(snapshot, cursor) {
+        if previous.0 != cursor.0 || word_class(snapshot, previous) != class {
+            break;
+        }
+        cursor = previous;
+    }
+    cursor
+}
+
+fn word_end(snapshot: &TerminalSnapshot, position: (usize, usize)) -> (usize, usize) {
+    let mut cursor = position;
+    let class = word_class(snapshot, cursor);
+    if class != WordClass::Whitespace {
+        while let Some(next) = next_cell(snapshot, cursor) {
+            if next.0 != cursor.0 || word_class(snapshot, next) != class {
+                break;
+            }
+            cursor = next;
+        }
+        if cursor != position {
+            return cursor;
+        }
+    }
+    loop {
+        let Some(next) = next_cell(snapshot, cursor) else {
+            return cursor;
+        };
+        cursor = next;
+        if word_class(snapshot, cursor) != WordClass::Whitespace {
+            break;
+        }
+    }
+    let class = word_class(snapshot, cursor);
+    while let Some(next) = next_cell(snapshot, cursor) {
+        if next.0 != cursor.0 || word_class(snapshot, next) != class {
+            break;
+        }
+        cursor = next;
+    }
+    cursor
 }
 
 pub(super) fn selection_endpoint(

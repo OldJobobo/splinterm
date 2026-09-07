@@ -91,9 +91,9 @@ impl BindingHelpUi {
                 });
             };
         push_copy_row(
-            "copy: h/j/k/l · arrows · Home/End · PgUp/PgDn",
+            "copy: h/j/k/l · arrows · w/b/e · 0/$ · Home/End · PgUp/PgDn",
             "move copy cursor",
-            "copy: h/j/k/l · arrows · Home/End · PgUp/PgDn — move",
+            "copy: h/j/k/l · arrows · w/b/e · 0/$ · Home/End · PgUp/PgDn — move",
             &["copy", "cursor", "move", "navigate", "history"],
         );
         push_copy_row(
@@ -440,6 +440,15 @@ mod tests {
             row.action == ActionId::CopyModeEnter.config_name() && row.shortcut == "Prefix ["
         }));
         assert!(help.rows().iter().any(|row| row.shortcut == "copy: v"));
+        let movement = help
+            .rows()
+            .iter()
+            .find(|row| row.action == "move copy cursor")
+            .unwrap();
+        for alias in ["w/b/e", "0/$"] {
+            assert!(movement.shortcut.contains(alias));
+            assert!(movement.compact.contains(alias));
+        }
     }
 
     #[test]
