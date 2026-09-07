@@ -10635,6 +10635,75 @@ mod tests {
         assert_eq!(state.cursor.column, 16);
     }
 
+    #[test]
+    fn copy_mode_words_respect_row_boundaries_and_loaded_history() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 1);
+        snapshot.columns = 3;
+        snapshot.rows = 1;
+        let mut rows = Vec::new();
+        for (index, text) in ["foo", "bar", "   ", "baz"].into_iter().enumerate() {
+            let mut row = blank_row(3);
+            row.row_id = Some(index as u64 + 1);
+            for (column, character) in text.chars().enumerate() {
+                row.cells[column].content = character.to_string();
+            }
+            rows.push(row);
+        }
+        snapshot.visible_rows = rows.split_off(3);
+        snapshot.scrollback_rows = rows;
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        for (motion, start, expected) in [
+            (CopyMotion::WordEnd, (1, 0), (1, 2)),
+            (CopyMotion::WordForward, (1, 0), (2, 0)),
+            (CopyMotion::WordBackward, (2, 2), (2, 0)),
+            (CopyMotion::WordBackward, (2, 0), (1, 0)),
+            (CopyMotion::WordEnd, (1, 2), (2, 2)),
+            (CopyMotion::WordForward, (2, 0), (4, 0)),
+            (CopyMotion::WordBackward, (4, 0), (2, 0)),
+            (CopyMotion::WordEnd, (2, 2), (4, 2)),
+            (CopyMotion::WordEnd, (4, 2), (4, 2)),
+            (CopyMotion::WordBackward, (1, 0), (1, 0)),
+        ] {
+            state.cursor.row_id = start.0;
+            state.cursor.column = start.1;
+            move_copy_cursor(&snapshot, &mut state, motion);
+            assert_eq!(
+                (state.cursor.row_id, state.cursor.column),
+                expected,
+                "{motion:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_mode_word_motions_skip_wide_character_spacers() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 1);
+        snapshot.columns = 8;
+        snapshot.rows = 1;
+        let mut row = blank_row(8);
+        row.row_id = Some(1);
+        for (column, content) in [(0, "中"), (2, "文"), (4, " "), (5, "f"), (6, "o"), (7, "o")] {
+            row.cells[column].content = content.into();
+        }
+        for column in [1, 3] {
+            row.cells[column].content.clear();
+            row.cells[column].spacer_remaining = Some(1);
+        }
+        snapshot.visible_rows = vec![row];
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        for (motion, start, expected) in [
+            (CopyMotion::WordEnd, 0, 2),
+            (CopyMotion::WordEnd, 2, 7),
+            (CopyMotion::WordForward, 0, 5),
+            (CopyMotion::WordBackward, 5, 0),
+            (CopyMotion::WordBackward, 2, 0),
+        ] {
+            state.cursor.column = start;
+            move_copy_cursor(&snapshot, &mut state, motion);
+            assert_eq!(state.cursor.column, expected, "{motion:?}");
+        }
+    }
+
     fn pane_options(splint_id: SplintId) -> WindowPaneOptions {
         let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
         let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
