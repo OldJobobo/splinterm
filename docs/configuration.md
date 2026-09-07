@@ -145,8 +145,9 @@ profile defines no actions on those four shifted prefix keys. New Dojos and
 Lairs inherit the focused Splint cwd.
 
 `Prefix+[` enters copy mode at the live cursor or current history viewport.
-`h/j/k/l` and arrows move over visible and loaded historical rows; Home/End move
-to line edges and PageUp/PageDown page within bounded loaded history while
+`h/j/k/l` and arrows move over visible and loaded historical rows; `w`, `b`, and
+`e` move by Vim-style words; `0`/`$` (or Home/End) move to line edges; and
+PageUp/PageDown page within bounded loaded history while
 requesting older bounded pages when needed. `v` anchors a selection, `y` copies
 it to the Wayland clipboard with the triggering keyboard serial and exits, and
 Escape cancels. Copy mode isolates terminal input, paste, pointer actions, IME,

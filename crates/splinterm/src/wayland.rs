@@ -4092,10 +4092,13 @@ impl App {
             Keysym::l | Keysym::L | Keysym::Right if plain => Some(CopyMotion::Right),
             Keysym::k | Keysym::K | Keysym::Up if plain => Some(CopyMotion::Up(1)),
             Keysym::j | Keysym::J | Keysym::Down if plain => Some(CopyMotion::Down(1)),
+            Keysym::w | Keysym::W if plain => Some(CopyMotion::WordForward),
+            Keysym::b | Keysym::B if plain => Some(CopyMotion::WordBackward),
+            Keysym::e | Keysym::E if plain => Some(CopyMotion::WordEnd),
             Keysym::Page_Up => Some(CopyMotion::Up(page)),
             Keysym::Page_Down => Some(CopyMotion::Down(page)),
-            Keysym::Home => Some(CopyMotion::LineStart),
-            Keysym::End => Some(CopyMotion::LineEnd),
+            Keysym::_0 | Keysym::Home if plain => Some(CopyMotion::LineStart),
+            Keysym::dollar | Keysym::End if plain => Some(CopyMotion::LineEnd),
             _ => None,
         };
         let Some(motion) = motion else {
@@ -10603,6 +10606,102 @@ mod tests {
         assert_eq!(state.overlay_selection().anchor.row_id, 4);
         snapshot.history_generation += 1;
         assert!(!copy_mode_is_valid(&snapshot, state));
+    }
+
+    #[test]
+    fn copy_mode_vim_word_motions_cross_whitespace_and_punctuation() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 1);
+        snapshot.columns = 17;
+        snapshot.rows = 1;
+        let mut row = blank_row(snapshot.columns);
+        row.row_id = Some(1);
+        for (column, content) in "alpha beta, gamma".chars().enumerate() {
+            row.cells[column].content = content.to_string();
+        }
+        snapshot.visible_rows = vec![row];
+
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordEnd).moved);
+        assert_eq!(state.cursor.column, 4);
+
+        state.cursor.column = 0;
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordForward).moved);
+        assert_eq!(state.cursor.column, 6);
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordBackward).moved);
+        assert_eq!(state.cursor.column, 0);
+
+        state.cursor.column = 10;
+        assert!(move_copy_cursor(&snapshot, &mut state, CopyMotion::WordEnd).moved);
+        assert_eq!(state.cursor.column, 16);
+    }
+
+    #[test]
+    fn copy_mode_words_respect_row_boundaries_and_loaded_history() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 1);
+        snapshot.columns = 3;
+        snapshot.rows = 1;
+        let mut rows = Vec::new();
+        for (index, text) in ["foo", "bar", "   ", "baz"].into_iter().enumerate() {
+            let mut row = blank_row(3);
+            row.row_id = Some(index as u64 + 1);
+            for (column, character) in text.chars().enumerate() {
+                row.cells[column].content = character.to_string();
+            }
+            rows.push(row);
+        }
+        snapshot.visible_rows = rows.split_off(3);
+        snapshot.scrollback_rows = rows;
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        for (motion, start, expected) in [
+            (CopyMotion::WordEnd, (1, 0), (1, 2)),
+            (CopyMotion::WordForward, (1, 0), (2, 0)),
+            (CopyMotion::WordBackward, (2, 2), (2, 0)),
+            (CopyMotion::WordBackward, (2, 0), (1, 0)),
+            (CopyMotion::WordEnd, (1, 2), (2, 2)),
+            (CopyMotion::WordForward, (2, 0), (4, 0)),
+            (CopyMotion::WordBackward, (4, 0), (2, 0)),
+            (CopyMotion::WordEnd, (2, 2), (4, 2)),
+            (CopyMotion::WordEnd, (4, 2), (4, 2)),
+            (CopyMotion::WordBackward, (1, 0), (1, 0)),
+        ] {
+            state.cursor.row_id = start.0;
+            state.cursor.column = start.1;
+            move_copy_cursor(&snapshot, &mut state, motion);
+            assert_eq!(
+                (state.cursor.row_id, state.cursor.column),
+                expected,
+                "{motion:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_mode_word_motions_skip_wide_character_spacers() {
+        let mut snapshot = snapshot(SplintId::new(), 1, 1);
+        snapshot.columns = 8;
+        snapshot.rows = 1;
+        let mut row = blank_row(8);
+        row.row_id = Some(1);
+        for (column, content) in [(0, "中"), (2, "文"), (4, " "), (5, "f"), (6, "o"), (7, "o")] {
+            row.cells[column].content = content.into();
+        }
+        for column in [1, 3] {
+            row.cells[column].content.clear();
+            row.cells[column].spacer_remaining = Some(1);
+        }
+        snapshot.visible_rows = vec![row];
+        let mut state = copy_mode_enter(&snapshot, &snapshot).unwrap();
+        for (motion, start, expected) in [
+            (CopyMotion::WordEnd, 0, 2),
+            (CopyMotion::WordEnd, 2, 7),
+            (CopyMotion::WordForward, 0, 5),
+            (CopyMotion::WordBackward, 5, 0),
+            (CopyMotion::WordBackward, 2, 0),
+        ] {
+            state.cursor.column = start;
+            move_copy_cursor(&snapshot, &mut state, motion);
+            assert_eq!(state.cursor.column, expected, "{motion:?}");
+        }
     }
 
     fn pane_options(splint_id: SplintId) -> WindowPaneOptions {
