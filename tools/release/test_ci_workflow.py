@@ -148,6 +148,24 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertNotIn("\n  push:", standalone)
         self.assertNotIn("\n  pull_request:", standalone)
 
+    def test_flake_stress_bootstraps_before_frozen_repetitions(self) -> None:
+        workflow = (ROOT / ".github/workflows/flake-stress.yml").read_text(
+            encoding="utf-8"
+        )
+        fetch = "run: cargo fetch --locked"
+        helper = "run: cargo build --frozen -p splinterm-pty --bin splinterm-pty-child"
+        self.assertEqual(workflow.count(fetch), 1)
+        self.assertEqual(workflow.count(helper), 1)
+        self.assertLess(workflow.index(fetch), workflow.index("--frozen"))
+        loop = workflow.index("for ((iteration = 1;")
+        self.assertLess(workflow.index(helper), loop)
+        for target in (
+            "cargo test --frozen -p splinterd --test end_to_end -- --test-threads=1",
+            "cargo test --frozen -p splinterm-mcp --test stdio_protocol -- --test-threads=1",
+        ):
+            self.assertEqual(workflow.count(target), 1)
+            self.assertGreater(workflow.index(target), loop)
+
     def test_flake_stress_is_manual_scheduled_bounded_and_stops_on_failure(self) -> None:
         workflow = (ROOT / ".github/workflows/flake-stress.yml").read_text(
             encoding="utf-8"
