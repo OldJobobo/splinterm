@@ -24,6 +24,12 @@
           default = package;
           splinterm = package;
           splinterm-with-mcp = package.override { withMcp = true; };
+          # Graphical acceptance is opt-in, never part of ordinary flake check.
+          desktop-test = import ./nix/desktop-test.nix { inherit self pkgs; };
+          desktop-smoke = import ./nix/desktop-test.nix {
+            inherit self pkgs;
+            smokeOnly = true;
+          };
         }
       );
 

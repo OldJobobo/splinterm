@@ -209,3 +209,49 @@ store-path/inode and NixOS activation behavior, **not** cross-version protocol
 migration or live process preservation. The test driver bounds execution to
 15 minutes and tears down its private VMs. A failing build retains its Nix log;
 use `nix log` on the failed derivation to inspect the exact failing subtest.
+
+### Opt-in disposable Wayland desktop acceptance
+
+Graphical acceptance requires approval for the complete bounded guest sequence.
+These test packages are deliberately **not** part of ordinary `nix flake check`:
+
+```sh
+nix build .#desktop-smoke --no-link --print-build-logs
+nix build .#desktop-test --no-link --print-build-logs --json
+```
+
+Run the smoke first. The full test also repeats that smoke before continuing.
+Both use one disposable NixOS VM with Sway, a guest-only virtual GPU, software
+rendering, 2 GiB RAM, two vCPUs, and a 15-minute execution limit. There is no host
+viewer, workstation input, SSH connection to a real host, or host installation.
+
+The smoke launches the installed desktop entry through GIO with `splinterd`
+stopped, verifies matching client/daemon executable paths, enters a shell marker
+through the guest virtual keyboard, and verifies visible text with OCR.
+The full matrix additionally checks:
+
+- installed New, Dojos, and Reopen desktop actions;
+- tab creation/cycling and a split, with shell PID/count assertions;
+- resizing with changed PTY geometry and rendering at 1× and 1.5× scale;
+- ASCII, Chinese, Japanese, Korean, and color emoji specimens;
+- clipboard paste into a shell and copying a pointer-selected text fixture; and
+- Ctrl-click URL dispatch to a guest-local recording handler, with no browser
+  or external network request.
+
+Reopen must return to the same live shell after the disposable window is closed.
+Each case records window ID/PID, focus, workspace, geometry, output scale and
+transform, seat state, and test-controlled cursor position. Every input batch
+checks the sole owned guest window; unexpected windows or focus/workspace drift
+abort the test. Pointer fixtures use OCR bounds from unmodified guest captures.
+Cases close only their test windows, stop the private user daemon, check socket
+and helper cleanup, and restore an empty workspace 8, scale 1, and cursor origin.
+The NixOS driver tears down its private VM on success or failure.
+
+A successful test output contains `acceptance/` with PNG captures, state records,
+shell markers, and launcher logs. Inspect the captures as well as the assertions:
+OCR proves selected ASCII fixtures are visible, not comprehensive glyph quality.
+Font specimens are reprinted after scale changes; this is not a test of a fixed
+viewport across terminal reflow. This software-rendered Sway fixture does not
+replace acceptance on another compositor, physical GPU, browser, or real host.
+Desktop actions exercise their installed `Exec` entries, not a desktop-menu
+widget's navigation.
