@@ -55,11 +55,16 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Public source and versioned builds | Available |
 | AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`; see [current release status](docs/status.md) |
 | Support lifetime and broader compatibility | No additional guarantee |
-| Nix and broader distributions | Planned |
+| NixOS | Source flake and desktop/headless module; deployment acceptance remains separate |
 
 For limitations and release gates, read [Current status](docs/status.md). Exact image support is documented in [`docs/images.md`](docs/images.md).
 
 ## Install
+
+**NixOS:** the repository includes a source-built flake with the full Wayland GUI,
+desktop launcher, headless daemon, and optional MCP variant. See
+[the NixOS installation guide](docs/nixos.md) for declarative desktop and server
+setup. This does not extend the Arch graphical validation claim to NixOS.
 
 The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The recommended AUR packages download verified prebuilt binaries and do not compile locally:
 

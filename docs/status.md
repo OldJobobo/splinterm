@@ -379,7 +379,7 @@ post-alpha3, pre-1.0 roadmap milestone.
 | AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub releases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Long-term or broader support | Not promised | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
-| Nix and broader distribution | Planned | Not current product behavior or support. |
+| NixOS packaging | Source flake and module | Full Wayland GUI and headless service packaging; live NixOS/graphical acceptance remains separate. See `docs/nixos.md`. |
 
 **Classification meanings:** implemented means present in current code; validated
 means required recorded evidence exists for the named scope; supported means a

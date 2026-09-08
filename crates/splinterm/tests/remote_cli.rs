@@ -83,12 +83,12 @@ known_hosts_file = "~/.ssh/known_hosts"
 }
 
 #[test]
-fn remote_check_uses_one_fixed_fake_ssh_and_only_read_only_probes() {
+fn remote_check_uses_configured_nixos_executable_and_only_read_only_probes() {
     let home = test_directory("check");
     let profiles = home.join("remotes.toml");
     fs::write(
         &profiles,
-        "version = 1\n[remotes.test]\nhost = \"example.invalid\"\n",
+        "version = 1\n[remotes.test]\nhost = \"example.invalid\"\nexecutable = \"/run/current-system/sw/bin/splinterm\"\n",
     )
     .unwrap();
     install_fake_ssh(&home);
@@ -110,7 +110,7 @@ fn remote_check_uses_one_fixed_fake_ssh_and_only_read_only_probes() {
         serde_json::from_slice(&fs::read(home.join("argv.json")).unwrap()).unwrap();
     assert_eq!(
         arguments.last().unwrap(),
-        "/usr/bin/splinterm relay --graphical-stdio"
+        "/run/current-system/sw/bin/splinterm relay --graphical-stdio"
     );
     fs::remove_dir_all(home).unwrap();
 }
