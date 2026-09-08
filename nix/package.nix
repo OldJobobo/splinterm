@@ -39,7 +39,8 @@ rustPlatform.buildRustPackage {
         "fixtures"
         "tests"
         "tools"
-        "nix"
+        # Only this script is a package input; VM harness edits must not rebuild Rust.
+        "nix/package-smoke.py"
         "README.md"
         "LICENSE"
         "THIRD_PARTY.md"

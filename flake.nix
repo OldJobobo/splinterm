@@ -37,6 +37,7 @@
         in
         {
           package = self.packages.${system}.default;
+          headless = import ./nix/headless-test.nix { inherit self pkgs; };
           module = import ./nix/module-check.nix {
             inherit
               self

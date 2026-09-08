@@ -170,7 +170,42 @@ Checks cover remote-profile validation, installed desktop-file validity,
 unwrapped sibling layout, a private non-graphical daemon with trusted human CLI
 access, PTY helper execution and clean shutdown, and desktop/headless/disabled
 NixOS module evaluation.
-The private daemon test does not require a live user manager and does not test
-workload cgroups. The broader upstream Rust suite remains a separate boundary.
-Live NixOS user-service/cgroup/SSH testing and approved Wayland graphical
-acceptance are additional deployment checks, not implied by a successful build.
+The package's private-daemon smoke does not require a live user manager. The
+separate headless VM check below tests the actual module/service integration.
+The broader upstream Rust suite remains a separate boundary. Acceptance on real
+hosts and approved Wayland graphical testing are additional deployment checks,
+not implied by a successful build.
+
+### Headless NixOS integration test
+
+```sh
+nix build .#checks.x86_64-linux.headless --print-build-logs
+```
+
+This check is also included in `nix flake check`. It boots two disposable,
+non-graphical NixOS VMs (1.5 GiB RAM and two vCPUs each) on an isolated test
+network. The Nix builder needs working KVM access and the `kvm`/`nixos-test`
+system features. First use downloads the pinned NixOS VM/test-driver closure.
+It does not activate a workstation service or contact production hosts.
+
+The check covers:
+
+- disabled-by-default service and lingering, and explicit manual startup;
+- automatic startup under an explicitly lingering test account, without display
+  variables or a desktop session;
+- owner environment-file loading, configured shell, UID, home, CWD, and PTY;
+- strict workload cgroup placement, per-Splint/Dojo/aggregate task and memory
+  boundaries, and scope/slice cleanup after exit or daemon shutdown;
+- denied machine-mode access without policy, removal of the development bypass,
+  and rejected local clients from a different package derivation;
+- real SSH login/logout, native remote checks and reconnection, with strict host
+  keys, disposable test credentials and the NixOS remote executable path;
+- controlled switching between the standard and MCP-enabled package generations
+  and back, retaining matching executable/service identities; and
+- reboot startup with persisted topology but no automatic workload execution.
+
+Generation switching uses two variants of the same source revision. It tests
+store-path/inode and NixOS activation behavior, **not** cross-version protocol
+migration or live process preservation. The test driver bounds execution to
+15 minutes and tears down its private VMs. A failing build retains its Nix log;
+use `nix log` on the failed derivation to inspect the exact failing subtest.
