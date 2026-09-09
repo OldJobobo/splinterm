@@ -54,6 +54,64 @@ class McpHostTests(unittest.TestCase):
         finally:
             host.close()
 
+    def test_resource_update_survives_both_response_orders(self) -> None:
+        update = (
+            b'{"jsonrpc":"2.0","method":"notifications/resources/updated",'
+            b'"params":{"uri":"splinterm://topology"}}\n'
+        )
+        response = b'{"jsonrpc":"2.0","id":1,"result":{}}\n'
+        for payload in (update + response, response + update):
+            with self.subTest(payload=payload):
+                host = validate_mcp_package.McpHost(
+                    self.fake_server(payload), os.environ.copy()
+                )
+                try:
+                    host.request("tools/call", {})
+                    self.assertEqual(
+                        host.wait_for_resource_update("splinterm://topology", 1)["params"],
+                        {"uri": "splinterm://topology"},
+                    )
+                    self.assertEqual(host.notifications, [])
+                finally:
+                    host.close()
+
+    def test_queued_matching_update_does_not_read_and_preserves_other_notifications(self) -> None:
+        host = validate_mcp_package.McpHost(self.fake_server(b""), os.environ.copy())
+        unrelated = {"method": "notifications/resources/updated", "params": {"uri": "other"}}
+        matching = {"method": "notifications/resources/updated", "params": {"uri": "wanted"}}
+        malformed = {"method": "notifications/resources/updated", "params": None}
+        host.notifications = [unrelated, matching, malformed]
+        try:
+            with mock.patch.object(host, "receive", side_effect=AssertionError("unexpected read")):
+                self.assertIs(host.wait_for_resource_update("wanted"), matching)
+                self.assertEqual(host.notifications, [unrelated, malformed])
+        finally:
+            host.close()
+
+    def test_unrelated_updates_do_not_extend_deadline(self) -> None:
+        host = validate_mcp_package.McpHost(self.fake_server(b""), os.environ.copy())
+        unrelated = {"method": "notifications/resources/updated", "params": {"uri": "other"}}
+        try:
+            with (
+                mock.patch.object(validate_mcp_package.time, "monotonic", side_effect=[0, 1, 2, 3]),
+                mock.patch.object(host, "receive", return_value=unrelated) as receive,
+            ):
+                with self.assertRaisesRegex(AssertionError, "missing MCP resource update"):
+                    host.wait_for_resource_update("wanted", 3)
+                self.assertEqual(receive.call_args_list, [mock.call(2), mock.call(1)])
+                self.assertEqual(host.notifications, [unrelated, unrelated])
+        finally:
+            host.close()
+
+    def test_missing_update_still_fails(self) -> None:
+        host = validate_mcp_package.McpHost(self.fake_server(b""), os.environ.copy())
+        try:
+            with mock.patch.object(host, "receive", side_effect=AssertionError("timed out")):
+                with self.assertRaisesRegex(AssertionError, "timed out"):
+                    host.wait_for_resource_update("wanted", 1)
+        finally:
+            host.close()
+
     def test_receive_rejects_an_oversized_buffered_line(self) -> None:
         host = validate_mcp_package.McpHost(self.fake_server(b""), os.environ.copy())
         try:
