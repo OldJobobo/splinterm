@@ -20,8 +20,9 @@ Add Splinterm to your configuration flake and commit the resulting `flake.lock`:
 inputs.splinterm.url = "github:OldJobobo/splinterm/<reviewed-revision>";
 ```
 
-Replace `<reviewed-revision>` with the commit containing Nix support. Until that
-branch is merged/published, use a local checkout containing the implementation.
+Replace `<reviewed-revision>` with a reviewed 0.1 maintenance commit containing
+Nix support. The original `v0.1.0` tag predates this integration. Until the
+packaging branch is merged/published, use a local checkout containing it.
 The public release installer and Arch packages are **not** NixOS installers.
 The package's own pinned nixpkgs supplies its Rust/native toolchain; following a
 host's older nixpkgs input may not provide a sufficiently recent Rust compiler.
@@ -182,7 +183,12 @@ not implied by a successful build.
 nix build .#checks.x86_64-linux.headless --print-build-logs
 ```
 
-This check is also included in `nix flake check`. It boots two disposable,
+This check is also included in `nix flake check`. CI runs it together with the
+package and module checks; the required `check` job depends on the Nix job, so a
+Nix failure cannot produce a successful release-authority CI result. Graphical
+tests remain opt-in and are not launched by CI.
+
+It boots two disposable,
 non-graphical NixOS VMs (1.5 GiB RAM and two vCPUs each) on an isolated test
 network. The Nix builder needs working KVM access and the `kvm`/`nixos-test`
 system features. First use downloads the pinned NixOS VM/test-driver closure.
@@ -194,7 +200,7 @@ The check covers:
 - automatic startup under an explicitly lingering test account, without display
   variables or a desktop session;
 - owner environment-file loading, configured shell, UID, home, CWD, and PTY;
-- strict workload cgroup placement, per-Splint/Dojo/aggregate task and memory
+- strict workload cgroup placement, inherited aggregate task and nested memory
   boundaries, and scope/slice cleanup after exit or daemon shutdown;
 - denied machine-mode access without policy, removal of the development bypass,
   and rejected local clients from a different package derivation;
