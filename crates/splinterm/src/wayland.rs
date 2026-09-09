@@ -2487,10 +2487,10 @@ fn window_title(
     control_transfer_pending: bool,
     search: Option<&SearchUiState>,
 ) -> String {
-    let base = snapshot_title
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Splinterm");
+    let base = match snapshot_title.map(str::trim) {
+        None | Some("" | "Splinterm") => "Splinterm".to_owned(),
+        Some(title) => format!("Splinterm — {title}"),
+    };
     let controller = controller_active.then_some("local controller");
     let authority_label = if authority.development_bypass {
         Some("DEVELOPMENT BYPASS")
@@ -2503,7 +2503,7 @@ fn window_title(
         (Some(controller), Some(authority)) => format!("{base} — {controller} — {authority}"),
         (Some(controller), None) => format!("{base} — {controller}"),
         (None, Some(authority)) => format!("{base} — {authority}"),
-        (None, None) => base.to_owned(),
+        (None, None) => base,
     };
     let title = if control_transfer_pending {
         format!("{title} — CONTROL REQUEST: Ctrl+Shift+Y accept / Ctrl+Shift+N deny")
@@ -12451,6 +12451,69 @@ mod tests {
     }
 
     #[test]
+    fn window_title_preserves_app_identity_and_shell_title() {
+        let authority = AuthorityStatus::default();
+        for title in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("Splinterm"),
+            Some(" Splinterm "),
+        ] {
+            assert_eq!(
+                window_title(title, false, &authority, false, None),
+                "Splinterm"
+            );
+        }
+        for (title, expected) in [
+            (
+                "tester@nixos-plasma: ~",
+                "Splinterm — tester@nixos-plasma: ~",
+            ),
+            ("  project — editor  ", "Splinterm — project — editor"),
+            ("作業", "Splinterm — 作業"),
+        ] {
+            assert_eq!(
+                window_title(Some(title), false, &authority, false, None),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn window_title_preserves_app_identity_with_authority_status() {
+        for (authority, label) in [
+            (AuthorityStatus::default(), ""),
+            (
+                AuthorityStatus {
+                    grants: vec![(1, "agent".into())],
+                    development_bypass: false,
+                },
+                " — EXTERNAL ACCESS ACTIVE",
+            ),
+            (
+                AuthorityStatus {
+                    grants: vec![(1, "agent".into())],
+                    development_bypass: true,
+                },
+                " — DEVELOPMENT BYPASS",
+            ),
+        ] {
+            for controller_active in [false, true] {
+                let controller = if controller_active {
+                    " — local controller"
+                } else {
+                    ""
+                };
+                assert_eq!(
+                    window_title(Some("shell"), controller_active, &authority, false, None),
+                    format!("Splinterm — shell{controller}{label}")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn trusted_title_surfaces_control_decision_and_bounded_search_state() {
         let authority = AuthorityStatus::default();
         let mut search = SearchUiState {
@@ -12469,7 +12532,7 @@ mod tests {
             preview: "needle".into(),
         });
         let title = window_title(Some("shell"), true, &authority, true, Some(&search));
-        assert!(title.contains("local controller"));
+        assert!(title.starts_with("Splinterm — shell — local controller"));
         assert!(title.contains("CONTROL REQUEST"));
         assert!(title.contains("SEARCH: needlespoof [1 match(es)"));
         assert!(!title.contains('\n'));
