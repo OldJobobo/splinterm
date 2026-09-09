@@ -1,4 +1,8 @@
 target/
+/result
+/result-*
+/.nix-store/
+/.validation/
 /.idea/
 /.vscode/
 *.swp

@@ -202,15 +202,20 @@ port = 22                            # optional
 identity_files = ["~/.ssh/id_ed25519"]
 known_hosts_file = "~/.ssh/known_hosts"
 connect_timeout_seconds = 15
+executable = "/usr/bin/splinterm"      # optional remote path; this is the default
 ```
 
 Unknown fields, unsupported versions, more than 64 profiles, unsafe names,
 ambiguous host/user tokens, zero ports, timeouts outside 1–300 seconds, more
 than eight identity files, documents above 64 KiB, and path values above 4 KiB
-fail closed. Explicit paths must be absolute or begin with `~/`, name readable
-regular files, and contain no whitespace or control characters. Profiles cannot
-supply arbitrary SSH options, commands, forwarding, environment, or shell
-fragments.
+fail closed. Identity and known-hosts paths must be absolute or begin with `~/`,
+name readable local regular files, and contain no whitespace or control characters.
+The optional `executable` is instead an absolute path on the remote host; it is
+not checked locally. For a system-installed NixOS package, use
+`/run/current-system/sw/bin/splinterm`. It accepts only ASCII letters, digits,
+`/`, `.`, `_`, and `-`, with no empty, `.` or `..` components. Relay arguments
+remain fixed. Profiles cannot supply arbitrary SSH options, commands, forwarding,
+environment, or shell fragments. See `docs/nixos.md` for NixOS installation.
 
 `~/.ssh/config` may still select ordinary aliases, identities, certificates, and
 proxy routing. Splinterm's command-line safety options override conflicting
