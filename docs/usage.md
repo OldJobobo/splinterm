@@ -5,6 +5,34 @@ detaching, returning to, arranging, and deliberately ending persistent terminal
 work. See [CLI reference](cli.md) for the complete command inventory and
 [Automation](automation.md) for machine contracts.
 
+## First five minutes
+
+This walkthrough assumes Splinterm is installed, the built-in `splinterm`
+keymap is selected without shortcut overrides, and
+`multiplexer.persistent-by-default=yes` (the default). Check your
+[configuration](configuration.md#keymap-configuration) if you use a different
+profile. With persistence disabled, closing an ordinary unnamed terminal's
+Window can end its work.
+
+1. **Open a terminal.** Run `splinterm-xdg-terminal-exec` from another terminal.
+   This creates a workspace (a **Lair**) containing one layout (a **Dojo**)
+   with one terminal pane (a **Splint**).
+2. **Split it.** Press `Ctrl+Shift+Enter` to add a second pane.
+   Use `Ctrl+Shift+Arrow` to move between panes. Both panes belong to the same
+   Dojo; leave their shells running for this walkthrough.
+3. **Detach.** Press `Ctrl+Shift+Q` to close the Dojo's tab. In this fresh
+   one-tab Window, the Window closes too. With persistence enabled, the daemon
+   keeps both shells and their layout running.
+4. **Return.** From another terminal, run `splinterm dojos` and select the
+   running Dojo you just left. Its panes return with their existing work.
+   `splinterm reopen` is a shortcut to the most recently remembered Dojo whose
+   entire layout is still running.
+
+Returning attaches to running work; it does not restart an exited shell.
+Restoring an exited Dojo is a separate, explicit action that starts new
+processes. Persistence here also requires the daemon to keep running; it does
+not preserve processes across a daemon restart or reboot.
+
 ## The four persistent concepts
 
 - **Lair** — a named project or persistent session.
