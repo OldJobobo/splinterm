@@ -8009,8 +8009,9 @@ impl App {
                     ) {
                         Ok(view) => view,
                         Err(error) => {
-                            self.tab_state.session_switch_pending = false;
-                            self.explorer.fail_pending();
+                            changed |= self.explorer.fail_activation(explorer_target);
+                            self.tab_state.session_switch_pending =
+                                self.explorer.activation_pending();
                             let message = format!("{error:#}");
                             let _ = acknowledged.send(Err(message));
                             eprintln!("splinterm Dojo tab failed to open");
@@ -8140,13 +8141,17 @@ impl App {
                     self.presentation.full_redraw = true;
                     changed = true;
                 }
-                WindowTopologyUpdate::TabFailed { dojo_id, message } => {
+                WindowTopologyUpdate::TabFailed {
+                    dojo_id,
+                    message,
+                    explorer_target,
+                } => {
                     let retryable_picker = self.tab_state.session_switch_pending
                         && self.modal.session_picker_retry_command.is_some();
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
-                    self.tab_state.session_switch_pending = false;
-                    changed |= self.explorer.fail_pending();
+                    changed |= self.explorer.fail_activation(explorer_target);
+                    self.tab_state.session_switch_pending = self.explorer.activation_pending();
                     if retryable_picker {
                         let selector_kind = match self.modal.session_picker_retry_command.as_ref() {
                             Some(WindowTopologyCommand::RequestSelector { kind, .. }) => {

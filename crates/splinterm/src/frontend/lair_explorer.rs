@@ -286,11 +286,27 @@ impl LairExplorerUi {
         matches && succeeded
     }
 
+    pub(crate) fn activation_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Unrelated and stale failures cannot release a newer activation's ownership.
+    pub(crate) fn fail_activation(
+        &mut self,
+        completed: Option<LairExplorerActivationTarget>,
+    ) -> bool {
+        let was_pending = self.activation_pending();
+        if let Some(completed) = completed {
+            self.finish_activation(completed, false);
+        }
+        was_pending && !self.activation_pending()
+    }
+
     pub(crate) fn clear_pending(&mut self) -> bool {
         self.pending.take().is_some()
     }
 
-    pub(crate) fn fail_pending(&mut self) -> bool {
+    fn fail_pending(&mut self) -> bool {
         let Some(pending) = self.pending.take() else {
             return false;
         };
@@ -978,6 +994,58 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_tab_failure_preserves_pending_activation_and_later_focus_ack() {
+        for select_dojo in [false, true] {
+            let mut explorer = LairExplorerUi::default();
+            explorer.set_view(view());
+            explorer.reveal_current();
+            explorer.focus();
+            if select_dojo {
+                explorer.move_left();
+            }
+            let decision = explorer.decision().unwrap();
+            let (completed, dojo_id) = match decision {
+                LairExplorerDecision::OpenDojo(target) => (
+                    LairExplorerActivationTarget::Dojo(SessionPickerTarget {
+                        topology_revision: target.topology_revision,
+                        lair_id: target.lair_id,
+                        dojo_id: target.dojo_id,
+                        action: target.capability.action,
+                    }),
+                    target.dojo_id,
+                ),
+                LairExplorerDecision::FocusSplint(target) => {
+                    (LairExplorerActivationTarget::Splint(target), target.dojo_id)
+                }
+                LairExplorerDecision::Toggle(_) => panic!("expected activation"),
+            };
+            assert!(explorer.set_pending(decision));
+            let pending = explorer.pending;
+            // Even a failure naming the same Dojo is unrelated without an exact
+            // Explorer activation target. Exercise the production failure helper.
+            let failure = crate::frontend::WindowTopologyUpdate::TabFailed {
+                dojo_id: Some(dojo_id),
+                message: "queued unrelated topology failure".into(),
+                explorer_target: None,
+            };
+            let crate::frontend::WindowTopologyUpdate::TabFailed {
+                explorer_target, ..
+            } = failure
+            else {
+                unreachable!();
+            };
+            assert!(!explorer.fail_activation(explorer_target));
+            assert_eq!(explorer.pending, pending);
+            assert!(explorer.activation_pending());
+            assert!(explorer.focused());
+            assert!(explorer.finish_activation(completed, true));
+            explorer.return_to_terminal();
+            assert!(!explorer.activation_pending());
+            assert!(!explorer.focused());
+        }
+    }
+
+    #[test]
     fn failed_activation_retires_only_exact_request_and_allows_retry_after_refresh() {
         let mut explorer = LairExplorerUi::default();
         explorer.set_view(view());
@@ -1018,7 +1086,7 @@ mod tests {
 
         // The owner could not focus the captured incarnation. Keep keyboard
         // ownership, but release the exact request and disable its stale row.
-        assert!(!explorer.finish_activation(LairExplorerActivationTarget::Splint(target), false));
+        assert!(explorer.fail_activation(Some(LairExplorerActivationTarget::Splint(target))));
         assert!(explorer.pending.is_none());
         assert!(explorer.focused());
         assert!(explorer.rows().iter().all(|row| !row.pending));
@@ -1037,7 +1105,9 @@ mod tests {
             panic!("expected refreshed Splint target");
         };
         assert!(explorer.set_pending(retry));
-        // A delayed old acknowledgement cannot retire the new request.
+        // A delayed old failure or acknowledgement cannot retire the new request.
+        assert!(!explorer.fail_activation(Some(LairExplorerActivationTarget::Splint(target))));
+        assert!(explorer.activation_pending());
         assert!(!explorer.finish_activation(LairExplorerActivationTarget::Splint(target), true));
         assert_eq!(
             explorer.pending,

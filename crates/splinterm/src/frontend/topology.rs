@@ -228,6 +228,7 @@ pub enum WindowTopologyUpdate {
     TabFailed {
         dojo_id: Option<DojoId>,
         message: String,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ShowSessionPicker {
         catalog: SessionPickerCatalog,

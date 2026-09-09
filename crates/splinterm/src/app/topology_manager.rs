@@ -1547,6 +1547,7 @@ async fn finish_managed_window_open(
         Err(error) => {
             let _ = updates
                 .send(WindowTopologyUpdate::TabFailed {
+                    explorer_target,
                     dojo_id: target_id,
                     message: format!("{error:#}"),
                 })
@@ -1772,6 +1773,7 @@ async fn handle_session_manager_command(
                 } else {
                     let _ = updates
                         .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target,
                             dojo_id: Some(target.dojo_id),
                             message: "selected picker target is stale; refresh and try again"
                                 .into(),
@@ -1797,6 +1799,7 @@ async fn handle_session_manager_command(
             _ => {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target,
                         dojo_id: Some(target.dojo_id),
                         message: "selected picker action is unavailable".into(),
                     })
@@ -1831,6 +1834,7 @@ async fn handle_session_manager_command(
                 } else {
                     let _ = updates
                         .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: Some(LairExplorerActivationTarget::Splint(target)),
                             dojo_id: Some(target.dojo_id),
                             message: "selected Splint target is stale; refresh and try again"
                                 .into(),
@@ -1874,6 +1878,7 @@ async fn handle_session_manager_command(
                     {
                         let _ = updates
                             .send(WindowTopologyUpdate::TabFailed {
+                                explorer_target: Some(LairExplorerActivationTarget::Splint(target)),
                                 dojo_id: Some(target.dojo_id),
                                 message: "selected Splint restore preview is unavailable".into(),
                             })
@@ -1882,6 +1887,7 @@ async fn handle_session_manager_command(
                 } else {
                     let _ = updates
                         .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: Some(LairExplorerActivationTarget::Splint(target)),
                             dojo_id: Some(target.dojo_id),
                             message: "selected Splint target is stale; refresh and try again"
                                 .into(),
@@ -1893,6 +1899,7 @@ async fn handle_session_manager_command(
             _ => {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: Some(LairExplorerActivationTarget::Splint(target)),
                         dojo_id: Some(target.dojo_id),
                         message: "selected Splint action is unavailable".into(),
                     })
@@ -1913,6 +1920,7 @@ async fn handle_session_manager_command(
             if !window_has_tab_capacity(state.tabs.len()) {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!(
                             "a Window may contain at most {} Dojo tabs",
@@ -1931,6 +1939,7 @@ async fn handle_session_manager_command(
             if !factory.is_local() {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message:
                             "preset materialization is available only to the trusted local client"
@@ -1944,6 +1953,7 @@ async fn handle_session_manager_command(
             {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!(
                             "a Window may contain at most {} Dojo tabs",
@@ -1994,6 +2004,7 @@ async fn handle_session_manager_command(
                 Err(error) => {
                     let _ = updates
                         .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: None,
                             dojo_id: None,
                             message: format!("{error:#}"),
                         })
@@ -2034,6 +2045,7 @@ async fn handle_session_manager_command(
             if !window_has_tab_capacity(state.tabs.len()) {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!(
                             "a Window may contain at most {} Dojo tabs",
@@ -2110,6 +2122,7 @@ async fn handle_session_manager_command(
                 Err(error) => {
                     let _ = updates
                         .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: None,
                             dojo_id: None,
                             message: format!("{error:#}"),
                         })
@@ -2122,6 +2135,7 @@ async fn handle_session_manager_command(
             if let Err(error) = show_dojo_restore_prompt(connection, dojo_id, None, updates).await {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: Some(dojo_id),
                         message: format!("{error:#}"),
                     })
@@ -2153,6 +2167,7 @@ async fn handle_session_manager_command(
             if let Err(error) = result {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!("{error:#}"),
                     })
@@ -2185,6 +2200,7 @@ async fn handle_session_manager_command(
             if let Err(error) = result {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!("{error:#}"),
                     })
@@ -2205,6 +2221,7 @@ async fn handle_session_manager_command(
             if let Err(error) = result {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: Some(dojo_id),
                         message: format!("{error:#}"),
                     })
@@ -2248,6 +2265,7 @@ async fn handle_session_manager_command(
             if let Err(error) = result {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!("{error:#}"),
                     })
@@ -2275,6 +2293,7 @@ async fn handle_session_manager_command(
             if let Err(error) = result {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: None,
                         message: format!("{error:#}"),
                     })
@@ -2340,6 +2359,7 @@ async fn handle_session_manager_command(
             if let Err(error) = result {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: Some(dojo_id),
                         message: format!("{error:#}"),
                     })
@@ -2373,6 +2393,7 @@ async fn handle_session_manager_command(
                 Err(error) => {
                     let _ = updates
                         .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: None,
                             dojo_id: Some(dojo_id),
                             message: format!("{error:#}"),
                         })
@@ -2525,6 +2546,7 @@ async fn reconcile_managed_topology(
             Err(error) => {
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: Some(dojo_id),
                         message: format!("{error:#}"),
                     })
@@ -2732,6 +2754,7 @@ pub(in crate::app) async fn run_topology_manager(
                 let message = format!("{operation} failed: {error:#}");
                 let _ = updates
                     .send(WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
                         dojo_id: Some(dojo_id),
                         message: message.clone(),
                     })
