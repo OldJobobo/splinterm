@@ -125,6 +125,20 @@ impl LairExplorerUi {
         self.search_active
     }
 
+    pub(crate) fn view(&self) -> Option<&NavigationExplorerView> {
+        self.view.as_ref()
+    }
+
+    pub(crate) fn set_search(&mut self, query: String) {
+        self.query = BoundedTextEditor::new(query, 256, 64, false);
+        self.begin_search();
+        self.ensure_selection_visible();
+    }
+
+    pub(crate) fn focus_tree(&mut self) {
+        self.search_active = false;
+    }
+
     pub(crate) fn query(&self) -> &str {
         self.query.text()
     }
@@ -771,7 +785,7 @@ fn matches_query(label: &str, query: &[String]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use splinterm_core::{DojoId, LairId, SplintId, TopologyRevision};
 
     use super::*;
@@ -782,13 +796,15 @@ mod tests {
         NavigationExplorerTarget,
     };
 
-    fn view() -> NavigationExplorerView {
+    pub(crate) fn view() -> NavigationExplorerView {
         let lair = LairId::new();
         let other_lair = LairId::new();
         let dojo = DojoId::new();
         let other_dojo = DojoId::new();
         let splint = SplintId::new();
         NavigationExplorerView {
+            endpoint_namespace: "local".into(),
+            endpoint_generation: 1,
             topology_revision: TopologyRevision::new(7),
             freshness: EndpointFreshness::Current,
             current: Some(NavigationNodeId::Splint {

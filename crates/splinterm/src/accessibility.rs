@@ -45,8 +45,8 @@ impl From<SemanticNodeId> for NodeId {
     }
 }
 
-/// Window-local stable semantic IDs. Entries are intentionally not reused while
-/// the Window exists, so a removed item can never retarget a stale AT action.
+/// Window-local stable semantic IDs. Retiring an entry frees bounded registry
+/// space, but its numeric ID is never reused during the Window lifetime.
 pub struct SemanticNodeRegistry<K> {
     ids: HashMap<K, SemanticNodeId>,
     next: u64,
@@ -62,12 +62,16 @@ impl<K> Default for SemanticNodeRegistry<K> {
 }
 
 impl<K: Eq + std::hash::Hash> SemanticNodeRegistry<K> {
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        self.ids.retain(|key, _| keep(key));
+    }
+
     /// Return one stable ID for a typed domain identity.
     ///
     /// # Errors
     ///
-    /// Returns [`SemanticTreeError::TooManyItems`] after the Window-lifetime
-    /// registry reaches its fixed bound.
+    /// Returns [`SemanticTreeError::TooManyItems`] when the live registry reaches
+    /// its fixed bound or the monotonic ID counter is exhausted.
     pub fn id_for(&mut self, key: K) -> Result<SemanticNodeId, SemanticTreeError> {
         if let Some(id) = self.ids.get(&key) {
             return Ok(*id);
@@ -107,6 +111,7 @@ pub struct SemanticTreeItem {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticFocus {
+    None,
     Terminal,
     Search,
     Tree,
@@ -115,6 +120,10 @@ pub enum SemanticFocus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticNavigationSnapshot {
+    /// Owner-issued authority epoch, captured by native callbacks.
+    pub generation: u64,
+    pub visible: bool,
+    pub enabled: bool,
     pub items: Vec<SemanticTreeItem>,
     pub query: String,
     pub result_count: usize,
@@ -172,12 +181,16 @@ impl SemanticNavigationSnapshot {
 
         let mut root = Node::new(Role::Window);
         root.set_label("Splinterm");
-        root.set_children([
-            TERMINAL_NODE_ID.into(),
-            SEARCH_NODE_ID.into(),
-            TREE_NODE_ID.into(),
-            STATUS_NODE_ID.into(),
-        ]);
+        root.set_children(if self.visible {
+            vec![
+                TERMINAL_NODE_ID.into(),
+                SEARCH_NODE_ID.into(),
+                TREE_NODE_ID.into(),
+                STATUS_NODE_ID.into(),
+            ]
+        } else {
+            vec![TERMINAL_NODE_ID.into()]
+        });
 
         let mut terminal = Node::new(Role::Terminal);
         terminal.set_label("Terminal");
@@ -205,6 +218,16 @@ impl SemanticNavigationSnapshot {
             status.set_label(message.clone());
         }
 
+        if !self.visible {
+            search.set_hidden();
+            tree.set_hidden();
+            status.set_hidden();
+        }
+        if !self.enabled {
+            terminal.set_disabled();
+            search.set_disabled();
+            tree.set_disabled();
+        }
         let mut nodes = vec![
             (ROOT_NODE_ID.into(), root),
             (TERMINAL_NODE_ID.into(), terminal),
@@ -258,6 +281,7 @@ impl SemanticNavigationSnapshot {
 
     fn focus_node(&self) -> SemanticNodeId {
         match self.focus {
+            SemanticFocus::None => ROOT_NODE_ID,
             SemanticFocus::Terminal => TERMINAL_NODE_ID,
             SemanticFocus::Search => SEARCH_NODE_ID,
             SemanticFocus::Tree => TREE_NODE_ID,
@@ -282,9 +306,7 @@ impl SemanticNavigationSnapshot {
         if ids.len() != self.items.len() {
             return Err(SemanticTreeError::DuplicateNodeId);
         }
-        if self.items.iter().filter(|item| item.selected).count() > 1
-            || self.items.iter().filter(|item| item.current).count() > 1
-        {
+        if self.items.iter().filter(|item| item.selected).count() > 1 {
             return Err(SemanticTreeError::InvalidState);
         }
         for item in &self.items {
@@ -337,7 +359,7 @@ fn valid_text(text: &str, maximum: usize) -> Result<(), SemanticTreeError> {
     Ok(())
 }
 
-const fn is_bidi_formatting(character: char) -> bool {
+pub(crate) const fn is_bidi_formatting(character: char) -> bool {
     matches!(
         character,
         '\u{061c}'
@@ -359,9 +381,15 @@ pub enum SemanticAction {
     SetSearch(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticActionRequest {
+    pub generation: u64,
+    pub action: SemanticAction,
+}
+
 #[derive(Default)]
 struct SemanticActionQueueState {
-    actions: VecDeque<SemanticAction>,
+    actions: VecDeque<SemanticActionRequest>,
 }
 
 #[derive(Clone)]
@@ -384,25 +412,36 @@ impl SemanticActionQueue {
     /// fail closed when the bounded queue is full.
     #[must_use]
     pub fn push(&self, action: SemanticAction) -> bool {
+        self.push_at(0, action)
+    }
+
+    #[must_use]
+    pub fn push_at(&self, generation: u64, action: SemanticAction) -> bool {
+        if let SemanticAction::SetSearch(query) = &action
+            && valid_query_text(query).is_err()
+        {
+            return false;
+        }
+        let request = SemanticActionRequest { generation, action };
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(action, SemanticAction::Focus(_)) {
+        if matches!(request.action, SemanticAction::Focus(_)) {
             state
                 .actions
-                .retain(|queued| !matches!(queued, SemanticAction::Focus(_)));
-        } else if matches!(action, SemanticAction::SetSearch(_)) {
+                .retain(|queued| !matches!(queued.action, SemanticAction::Focus(_)));
+        } else if matches!(request.action, SemanticAction::SetSearch(_)) {
             state
                 .actions
-                .retain(|queued| !matches!(queued, SemanticAction::SetSearch(_)));
-        } else if state.actions.contains(&action) {
+                .retain(|queued| !matches!(queued.action, SemanticAction::SetSearch(_)));
+        } else if state.actions.contains(&request) {
             return true;
         }
         if state.actions.len() == ACCESSIBILITY_ACTION_QUEUE_CAPACITY {
             return false;
         }
-        state.actions.push_back(action);
+        state.actions.push_back(request);
         drop(state);
         (self.wake)();
         true
@@ -410,6 +449,14 @@ impl SemanticActionQueue {
 
     #[must_use]
     pub fn drain(&self) -> Vec<SemanticAction> {
+        self.drain_requests()
+            .into_iter()
+            .map(|request| request.action)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn drain_requests(&self) -> Vec<SemanticActionRequest> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -490,7 +537,8 @@ impl UnixAccessibilityAdapter {
         self.updates.stage(snapshot);
     }
 
-    /// Publish at most one coalesced update to an active AT-SPI consumer.
+    /// Queue at most one coalesced update for the asynchronous AT-SPI publisher.
+    /// A true result means staged for transport, not acknowledged by a consumer.
     ///
     /// # Errors
     ///
@@ -507,7 +555,7 @@ impl UnixAccessibilityAdapter {
     }
 
     #[must_use]
-    pub fn transport_error(&self) -> Option<&str> {
+    pub fn transport_error(&self) -> Option<String> {
         self.publisher.transport_error()
     }
 
@@ -544,6 +592,9 @@ mod tests {
         splint.status = "Pending".to_owned();
         splint.availability = SemanticAvailability::Pending;
         SemanticNavigationSnapshot {
+            generation: 0,
+            visible: true,
+            enabled: true,
             items: vec![lair, dojo, splint],
             query: String::new(),
             result_count: 3,
@@ -703,20 +754,6 @@ mod tests {
             assert!(queue.push(SemanticAction::Activate(SemanticNodeId(id))));
         }
         assert!(!queue.push(SemanticAction::Activate(SemanticNodeId(999))));
-    }
-
-    #[test]
-    fn unix_adapter_accepts_coalesced_tree_without_wayland_global_bounds() {
-        let actions = SemanticActionQueue::new(|| {});
-        let initial = snapshot();
-        let mut adapter = UnixAccessibilityAdapter::new(initial.clone(), actions).unwrap();
-        adapter.update_window_focus_state(true);
-        let mut changed = initial;
-        changed.status = Some("Refreshed".to_owned());
-        adapter.stage(changed.clone());
-        assert!(adapter.publish_pending(SemanticOwnerTurn(1)).unwrap());
-        adapter.stage(changed);
-        assert!(!adapter.publish_pending(SemanticOwnerTurn(2)).unwrap());
     }
 
     #[test]

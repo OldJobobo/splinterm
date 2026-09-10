@@ -4,6 +4,7 @@ mod action_menu;
 mod binding_help;
 mod lair_explorer;
 mod message;
+mod navigation_accessibility;
 mod options;
 mod picker;
 mod text_edit;
@@ -23,6 +24,9 @@ pub(crate) use lair_explorer::LairExplorerRowKind;
 pub(crate) use lair_explorer::{LairExplorerDecision, LairExplorerRow, LairExplorerUi};
 pub use message::{
     AuthorityStatus, FontUpdate, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
+};
+pub(crate) use navigation_accessibility::{
+    NavigationAccessAction, NavigationAccessContext, NavigationAccessibility,
 };
 pub use options::{TerminalGridLimits, TrustedConsentUi, WindowOptions, WindowPaneOptions};
 pub(crate) use picker::PickerHitTarget;

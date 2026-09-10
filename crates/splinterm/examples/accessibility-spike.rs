@@ -1,4 +1,4 @@
-//! Manual AT-SPI inspection harness for the non-graphical accessibility spike.
+//! Synthetic manual AT-SPI harness, not a live Explorer or production acceptance test.
 
 use std::{
     thread,
@@ -46,6 +46,9 @@ fn main() -> Result<()> {
     "Unavailable".clone_into(&mut unavailable.status);
     unavailable.availability = SemanticAvailability::Disabled;
     let snapshot = SemanticNavigationSnapshot {
+        generation: 0,
+        visible: true,
+        enabled: true,
         items: vec![lair, dojo, splint, unavailable],
         query: String::new(),
         result_count: 4,
@@ -55,18 +58,23 @@ fn main() -> Result<()> {
     let actions = SemanticActionQueue::new(|| {});
     let mut current = snapshot;
     let mut adapter = UnixAccessibilityAdapter::new(current.clone(), actions.clone())?;
-    if let Some(error) = adapter.transport_error() {
-        anyhow::bail!("AT-SPI transport failed: {error}");
-    }
     adapter.update_window_focus_state(true);
     let started = Instant::now();
     let mut announced = false;
     let mut owner_turn = 0_u64;
+    let mut last_transport_error = None;
     eprintln!(
-        "Accessibility spike active; one status update follows in 5 seconds. Press Ctrl+C to stop."
+        "Synthetic accessibility harness started; transport connects asynchronously. One status update follows in 5 seconds. Press Ctrl+C to stop."
     );
     loop {
         owner_turn = owner_turn.wrapping_add(1);
+        let error = adapter.transport_error();
+        if error != last_transport_error {
+            if let Some(error) = &error {
+                eprintln!("AT-SPI transport: {error}");
+            }
+            last_transport_error = error;
+        }
         let mut changed = false;
         for action in actions.drain() {
             eprintln!("AT-SPI action: {action:?}");

@@ -8,6 +8,9 @@
 // when a particular bounded implementation does not consume them.
 #![allow(clippy::unused_self, clippy::used_underscore_binding)]
 
+mod transport;
+pub(crate) use transport::NativeAtspiPublisher;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, RwLock},
@@ -19,10 +22,7 @@ use atspi::{
     events::EventBodyBorrowed, proxy::socket::SocketProxy,
 };
 use zbus::{
-    blocking::{Connection, Proxy, connection::Builder},
-    interface,
-    names::OwnedUniqueName,
-    zvariant::ObjectPath,
+    Connection, Proxy, connection::Builder, interface, names::OwnedUniqueName, zvariant::ObjectPath,
 };
 
 use crate::accessibility::{
@@ -194,6 +194,7 @@ impl NativeNode {
     fn child_ids(&self) -> Vec<SemanticNodeId> {
         let snapshot = self.tree.snapshot();
         match self.id {
+            ROOT_NODE_ID if !snapshot.visible => vec![TERMINAL_NODE_ID],
             ROOT_NODE_ID => vec![
                 TERMINAL_NODE_ID,
                 SEARCH_NODE_ID,
@@ -233,12 +234,14 @@ impl NativeNode {
 
     fn is_focused(&self, snapshot: &SemanticNavigationSnapshot) -> bool {
         let focused = match snapshot.focus {
+            SemanticFocus::None => ROOT_NODE_ID,
             SemanticFocus::Terminal => TERMINAL_NODE_ID,
             SemanticFocus::Search => SEARCH_NODE_ID,
             SemanticFocus::Tree => TREE_NODE_ID,
             SemanticFocus::Item(id) => id,
         };
-        focused == self.id
+        snapshot.focus != SemanticFocus::None
+            && focused == self.id
             && *self
                 .tree
                 .window_focused
@@ -250,6 +253,9 @@ impl NativeNode {
         let snapshot = self.tree.snapshot();
         if SemanticNodeId::item(self.id.0).is_some() && self.item(&snapshot).is_none() {
             return StateSet::new(State::Defunct);
+        }
+        if !snapshot.visible && !matches!(self.id, ROOT_NODE_ID | TERMINAL_NODE_ID) {
+            return StateSet::empty();
         }
         let mut states = StateSet::new(State::Visible | State::Showing);
         if self.id == ROOT_NODE_ID
@@ -298,6 +304,9 @@ impl NativeNode {
         } else if self.id != STATUS_NODE_ID {
             states.insert(State::Enabled | State::Sensitive);
         }
+        if !snapshot.enabled {
+            states.remove(State::Enabled | State::Sensitive | State::Editable);
+        }
         states
     }
 
@@ -326,14 +335,20 @@ impl NativeNode {
     }
 
     fn action_names(&self) -> Vec<&'static str> {
-        let snapshot = self.tree.snapshot();
+        self.action_names_for(&self.tree.snapshot())
+    }
+
+    fn action_names_for(&self, snapshot: &SemanticNavigationSnapshot) -> Vec<&'static str> {
         let mut actions = Vec::new();
+        if !snapshot.enabled {
+            return actions;
+        }
         if matches!(self.id, TERMINAL_NODE_ID | SEARCH_NODE_ID | TREE_NODE_ID)
-            || self.item(&snapshot).is_some()
+            || self.item(snapshot).is_some()
         {
             actions.push("focus");
         }
-        if let Some(item) = self.item(&snapshot) {
+        if let Some(item) = self.item(snapshot) {
             if let Some(expanded) = item.expanded {
                 actions.push(if expanded { "collapse" } else { "expand" });
             }
@@ -346,7 +361,7 @@ impl NativeNode {
 
     fn interfaces(&self) -> InterfaceSet {
         let mut interfaces = InterfaceSet::new(Interface::Accessible);
-        if !self.action_names().is_empty() {
+        if self.id != ROOT_NODE_ID && self.id != STATUS_NODE_ID {
             interfaces.insert(Interface::Action);
         }
         if self.id == SEARCH_NODE_ID {
@@ -360,7 +375,8 @@ impl NativeNode {
         let Ok(index) = usize::try_from(index) else {
             return false;
         };
-        let Some(name) = self.action_names().get(index).copied() else {
+        let snapshot = self.tree.snapshot();
+        let Some(name) = self.action_names_for(&snapshot).get(index).copied() else {
             return false;
         };
         let action = match name {
@@ -376,7 +392,7 @@ impl NativeNode {
             "activate" => SemanticAction::Activate(self.id),
             _ => return false,
         };
-        self.tree.actions.push(action)
+        self.tree.actions.push_at(snapshot.generation, action)
     }
 }
 
@@ -517,13 +533,14 @@ struct EditableTextInterface(NativeNode);
 #[interface(name = "org.a11y.atspi.EditableText")]
 impl EditableTextInterface {
     fn set_text_contents(&self, value: &str) -> bool {
-        if valid_query_text(value).is_err() {
+        let snapshot = self.0.tree.snapshot();
+        if !snapshot.enabled || !snapshot.visible || valid_query_text(value).is_err() {
             return false;
         }
-        self.0
-            .tree
-            .actions
-            .push(SemanticAction::SetSearch(value.to_owned()))
+        self.0.tree.actions.push_at(
+            snapshot.generation,
+            SemanticAction::SetSearch(value.to_owned()),
+        )
     }
 
     fn insert_text(&self, _position: i32, _text: &str, _length: i32) -> bool {
@@ -807,23 +824,28 @@ struct NativeStateEvent {
 fn focus_events(
     previous: &SemanticNavigationSnapshot,
     next: &SemanticNavigationSnapshot,
-    window_focused: bool,
+    previous_window_focused: bool,
+    next_window_focused: bool,
 ) -> Vec<NativeStateEvent> {
-    if !window_focused || focus_id(previous) == focus_id(next) {
+    let before = (previous_window_focused && previous.focus != SemanticFocus::None)
+        .then(|| focus_id(previous));
+    let after = (next_window_focused && next.focus != SemanticFocus::None).then(|| focus_id(next));
+    if before == after {
         return Vec::new();
     }
-    vec![
-        NativeStateEvent {
-            id: focus_id(previous),
+    before
+        .into_iter()
+        .map(|id| NativeStateEvent {
+            id,
             state: "focused",
             enabled: false,
-        },
-        NativeStateEvent {
-            id: focus_id(next),
+        })
+        .chain(after.into_iter().map(|id| NativeStateEvent {
+            id,
             state: "focused",
             enabled: true,
-        },
-    ]
+        }))
+        .collect()
 }
 
 fn state_events(
@@ -857,6 +879,16 @@ fn state_events(
             item.expanded == Some(true),
         );
         changed(
+            "collapsed",
+            old.expanded == Some(false),
+            item.expanded == Some(false),
+        );
+        changed(
+            "expandable",
+            old.expanded.is_some(),
+            item.expanded.is_some(),
+        );
+        changed(
             "busy",
             old.availability == SemanticAvailability::Pending,
             item.availability == SemanticAvailability::Pending,
@@ -875,25 +907,111 @@ fn state_events(
     events
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct NativeChildrenEvent {
+    parent: SemanticNodeId,
+    child: SemanticNodeId,
+    index: usize,
+    added: bool,
+}
+
+fn child_positions(
+    snapshot: &SemanticNavigationSnapshot,
+) -> Vec<(SemanticNodeId, SemanticNodeId, usize)> {
+    let mut positions = vec![(ROOT_NODE_ID, TERMINAL_NODE_ID, 0)];
+    if snapshot.visible {
+        positions.extend(
+            [SEARCH_NODE_ID, TREE_NODE_ID, STATUS_NODE_ID]
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| (ROOT_NODE_ID, id, index + 1)),
+        );
+    }
+    let mut counts = HashMap::<SemanticNodeId, usize>::new();
+    for item in &snapshot.items {
+        let parent = item.parent.unwrap_or(TREE_NODE_ID);
+        let index = counts.entry(parent).or_default();
+        positions.push((parent, item.id, *index));
+        *index += 1;
+    }
+    positions
+}
+
+fn children_events(
+    previous: &SemanticNavigationSnapshot,
+    next: &SemanticNavigationSnapshot,
+) -> Vec<NativeChildrenEvent> {
+    let old = child_positions(previous);
+    let new = child_positions(next);
+    let old_set = old.iter().copied().collect::<HashSet<_>>();
+    let new_set = new.iter().copied().collect::<HashSet<_>>();
+    old.iter()
+        .rev()
+        .filter(|entry| !new_set.contains(entry))
+        .map(|&(parent, child, index)| NativeChildrenEvent {
+            parent,
+            child,
+            index,
+            added: false,
+        })
+        .chain(new.iter().filter(|entry| !old_set.contains(entry)).map(
+            |&(parent, child, index)| NativeChildrenEvent {
+                parent,
+                child,
+                index,
+                added: true,
+            },
+        ))
+        .collect()
+}
+
+fn retired_ids(
+    registered: &HashSet<SemanticNodeId>,
+    next: &SemanticNavigationSnapshot,
+) -> Vec<SemanticNodeId> {
+    let retained = next
+        .items
+        .iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    registered
+        .iter()
+        .copied()
+        .filter(|id| SemanticNodeId::item(id.0).is_some() && !retained.contains(id))
+        .collect()
+}
+
 struct NativeConnection {
     connection: Connection,
+    _driver: transport::ConnectionDriver,
     registered: HashSet<SemanticNodeId>,
 }
 
 impl NativeConnection {
-    fn is_enabled(session: &Connection) -> zbus::Result<bool> {
-        Proxy::new(session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status")?
+    async fn is_enabled(session: &Connection) -> zbus::Result<bool> {
+        Proxy::new(session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status")
+            .await?
             .get_property("IsEnabled")
+            .await
     }
 
-    fn connect(session: &Connection, tree: &SharedTree) -> zbus::Result<Option<Self>> {
-        if !Self::is_enabled(session)? {
+    async fn connect(session: &Connection, tree: &SharedTree) -> zbus::Result<Option<Self>> {
+        if !Self::is_enabled(session).await? {
             return Ok(None);
         }
-        let bus = Proxy::new(session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus")?;
-        let address: String = bus.call("GetAddress", &())?;
+        let bus = Proxy::new(session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus").await?;
+        let address: String = bus.call("GetAddress", &()).await?;
+        if !address.starts_with("unix:") || address.contains(';') {
+            return Err(zbus::Error::Failure(
+                "non-local accessibility bus rejected".into(),
+            ));
+        }
         let address = zbus::Address::try_from(address.as_str())?;
-        let connection = Builder::address(address)?.build()?;
+        let connection = Builder::address(address)?
+            .internal_executor(false)
+            .build()
+            .await?;
+        let driver = transport::ConnectionDriver::new(&connection);
         let unique_name = connection
             .unique_name()
             .cloned()
@@ -902,21 +1020,26 @@ impl NativeConnection {
             .bus_name
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(unique_name.clone());
-        connection.object_server().at(
-            APPLICATION_PATH,
-            ApplicationAccessibleInterface(tree.clone()),
-        )?;
         connection
             .object_server()
-            .at(APPLICATION_PATH, ApplicationInterface(tree.clone()))?;
+            .at(
+                APPLICATION_PATH,
+                ApplicationAccessibleInterface(tree.clone()),
+            )
+            .await?;
+        connection
+            .object_server()
+            .at(APPLICATION_PATH, ApplicationInterface(tree.clone()))
+            .await?;
         let mut native = Self {
             connection,
+            _driver: driver,
             registered: HashSet::new(),
         };
-        native.register_current_nodes(tree)?;
-        let socket = zbus::block_on(SocketProxy::new(native.connection.inner()))?;
+        native.register_current_nodes(tree).await?;
+        let socket = SocketProxy::new(&native.connection).await?;
         let root = ObjectPath::from_static_str_unchecked(APPLICATION_PATH);
-        let desktop = zbus::block_on(socket.embed(&(unique_name.as_str(), root)))?;
+        let desktop = socket.embed(&(unique_name.as_str(), root)).await?;
         *tree
             .desktop
             .write()
@@ -924,17 +1047,20 @@ impl NativeConnection {
         Ok(Some(native))
     }
 
-    fn register_current_nodes(&mut self, tree: &SharedTree) -> zbus::Result<()> {
-        let snapshot = tree.snapshot();
-        let mut ids = vec![
-            ROOT_NODE_ID,
-            TERMINAL_NODE_ID,
-            SEARCH_NODE_ID,
-            TREE_NODE_ID,
-            STATUS_NODE_ID,
-        ];
-        ids.extend(snapshot.items.iter().map(|item| item.id));
-        drop(snapshot);
+    async fn register_current_nodes(&mut self, tree: &SharedTree) -> zbus::Result<()> {
+        let ids = {
+            let snapshot = tree.snapshot();
+            [
+                ROOT_NODE_ID,
+                TERMINAL_NODE_ID,
+                SEARCH_NODE_ID,
+                TREE_NODE_ID,
+                STATUS_NODE_ID,
+            ]
+            .into_iter()
+            .chain(snapshot.items.iter().map(|item| item.id))
+            .collect::<Vec<_>>()
+        };
         for id in ids {
             if self.registered.contains(&id) {
                 continue;
@@ -943,199 +1069,237 @@ impl NativeConnection {
             let path = node_path(id);
             self.connection
                 .object_server()
-                .at(path.clone(), AccessibleInterface(node.clone()))?;
-            if !node.action_names().is_empty() {
+                .at(path.clone(), AccessibleInterface(node.clone()))
+                .await?;
+            if id != ROOT_NODE_ID && id != STATUS_NODE_ID {
                 self.connection
                     .object_server()
-                    .at(path.clone(), ActionInterface(node.clone()))?;
+                    .at(path.clone(), ActionInterface(node.clone()))
+                    .await?;
             }
             if id == SEARCH_NODE_ID {
                 self.connection
                     .object_server()
-                    .at(path.clone(), EditableTextInterface(node.clone()))?;
+                    .at(path.clone(), EditableTextInterface(node.clone()))
+                    .await?;
                 self.connection
                     .object_server()
-                    .at(path, TextInterface(node))?;
+                    .at(path, TextInterface(node))
+                    .await?;
             }
             self.registered.insert(id);
         }
         Ok(())
     }
 
-    fn emit_announcement(&self, message: &str) -> zbus::Result<()> {
+    async fn emit_announcement(&self, message: &str) -> zbus::Result<()> {
         let mut body = EventBodyBorrowed::default();
         body.detail1 = Politeness::Polite as i32;
         body.any_data = message.into();
-        self.connection.emit_signal(
-            Option::<&str>::None,
-            node_path(STATUS_NODE_ID),
-            "org.a11y.atspi.Event.Object",
-            "Announcement",
-            &body,
-        )
+        self.connection
+            .emit_signal(
+                Option::<&str>::None,
+                node_path(STATUS_NODE_ID),
+                "org.a11y.atspi.Event.Object",
+                "Announcement",
+                &body,
+            )
+            .await
     }
 
-    fn emit_state(&self, id: SemanticNodeId, state: &str, enabled: bool) -> zbus::Result<()> {
+    async fn emit_state(&self, id: SemanticNodeId, state: &str, enabled: bool) -> zbus::Result<()> {
         let mut body = EventBodyBorrowed::default();
         body.kind = state;
         body.detail1 = i32::from(enabled);
         body.any_data = enabled.into();
-        self.connection.emit_signal(
-            Option::<&str>::None,
-            node_path(id),
-            "org.a11y.atspi.Event.Object",
-            "StateChanged",
-            &body,
-        )
+        self.connection
+            .emit_signal(
+                Option::<&str>::None,
+                node_path(id),
+                "org.a11y.atspi.Event.Object",
+                "StateChanged",
+                &body,
+            )
+            .await
     }
 
-    fn emit_window_focus(&self, focused: bool) -> zbus::Result<()> {
+    async fn emit_window_focus(&self, focused: bool) -> zbus::Result<()> {
         let mut body = EventBodyBorrowed::default();
         body.any_data = "Splinterm".into();
-        self.connection.emit_signal(
-            Option::<&str>::None,
-            node_path(ROOT_NODE_ID),
-            "org.a11y.atspi.Event.Window",
-            if focused { "Activate" } else { "Deactivate" },
-            &body,
-        )
+        self.connection
+            .emit_signal(
+                Option::<&str>::None,
+                node_path(ROOT_NODE_ID),
+                "org.a11y.atspi.Event.Window",
+                if focused { "Activate" } else { "Deactivate" },
+                &body,
+            )
+            .await
     }
 
-    fn publish_update(
+    async fn emit_property(
+        &self,
+        id: SemanticNodeId,
+        property: &str,
+        value: &str,
+    ) -> zbus::Result<()> {
+        let mut body = EventBodyBorrowed::default();
+        body.kind = property;
+        body.any_data = value.into();
+        self.connection
+            .emit_signal(
+                Option::<&str>::None,
+                node_path(id),
+                "org.a11y.atspi.Event.Object",
+                "PropertyChange",
+                &body,
+            )
+            .await
+    }
+
+    async fn emit_children(
+        &self,
+        tree: &SharedTree,
+        event: &NativeChildrenEvent,
+    ) -> zbus::Result<()> {
+        let mut body = EventBodyBorrowed::default();
+        body.kind = if event.added { "add" } else { "remove" };
+        body.detail1 = i32::try_from(event.index).unwrap_or(i32::MAX);
+        body.any_data = tree.object_ref(event.child).into();
+        self.connection
+            .emit_signal(
+                Option::<&str>::None,
+                node_path(event.parent),
+                "org.a11y.atspi.Event.Object",
+                "ChildrenChanged",
+                &body,
+            )
+            .await
+    }
+
+    async fn retire_removed_nodes(
+        &mut self,
+        next: &SemanticNavigationSnapshot,
+    ) -> zbus::Result<()> {
+        let removed = retired_ids(&self.registered, next);
+        for id in removed {
+            self.emit_state(id, "defunct", true).await?;
+            let path = node_path(id);
+            self.connection
+                .object_server()
+                .remove::<ActionInterface, _>(path.clone())
+                .await?;
+            self.connection
+                .object_server()
+                .remove::<AccessibleInterface, _>(path)
+                .await?;
+            self.registered.remove(&id);
+        }
+        Ok(())
+    }
+
+    async fn publish_update(
         &mut self,
         tree: &SharedTree,
         previous: &SemanticNavigationSnapshot,
         next: &SemanticNavigationSnapshot,
+        previous_window_focused: bool,
     ) -> zbus::Result<()> {
-        self.register_current_nodes(tree)?;
+        self.register_current_nodes(tree).await?;
+        for event in children_events(previous, next) {
+            self.emit_children(tree, &event).await?;
+        }
+        self.retire_removed_nodes(next).await?;
+        for item in &next.items {
+            if let Some(old) = previous.items.iter().find(|old| old.id == item.id) {
+                if old.name != item.name {
+                    self.emit_property(item.id, "accessible-name", &item.name)
+                        .await?;
+                }
+                if old.status != item.status {
+                    self.emit_property(item.id, "accessible-description", &item.status)
+                        .await?;
+                }
+            }
+        }
+        if previous.query != next.query {
+            for (kind, text) in [
+                ("delete", previous.query.as_str()),
+                ("insert", next.query.as_str()),
+            ] {
+                if text.is_empty() {
+                    continue;
+                }
+                let mut body = EventBodyBorrowed::default();
+                body.kind = kind;
+                body.detail2 = i32::try_from(text.chars().count()).unwrap_or(i32::MAX);
+                body.any_data = text.into();
+                self.connection
+                    .emit_signal(
+                        Option::<&str>::None,
+                        node_path(SEARCH_NODE_ID),
+                        "org.a11y.atspi.Event.Object",
+                        "TextChanged",
+                        &body,
+                    )
+                    .await?;
+            }
+        }
+        if previous.result_count != next.result_count {
+            self.emit_property(
+                SEARCH_NODE_ID,
+                "accessible-description",
+                &match next.result_count {
+                    1 => "1 result".to_owned(),
+                    count => format!("{count} results"),
+                },
+            )
+            .await?;
+        }
+        if previous.enabled != next.enabled {
+            for id in [TERMINAL_NODE_ID, SEARCH_NODE_ID, TREE_NODE_ID] {
+                self.emit_state(id, "enabled", next.enabled).await?;
+                self.emit_state(id, "sensitive", next.enabled).await?;
+            }
+        }
+        if previous.visible != next.visible {
+            for id in [SEARCH_NODE_ID, TREE_NODE_ID, STATUS_NODE_ID] {
+                self.emit_state(id, "showing", next.visible).await?;
+                self.emit_state(id, "visible", next.visible).await?;
+            }
+        }
+        if previous.status != next.status {
+            self.emit_property(
+                STATUS_NODE_ID,
+                "accessible-name",
+                next.status.as_deref().unwrap_or_default(),
+            )
+            .await?;
+        }
         if previous.status != next.status
             && let Some(message) = next.status.as_deref()
         {
-            self.emit_announcement(message)?;
+            self.emit_announcement(message).await?;
         }
         for event in state_events(previous, next) {
-            self.emit_state(event.id, event.state, event.enabled)?;
+            self.emit_state(event.id, event.state, event.enabled)
+                .await?;
         }
         let window_focused = *tree
             .window_focused
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for event in focus_events(previous, next, window_focused) {
-            self.emit_state(event.id, event.state, event.enabled)?;
+        for event in focus_events(previous, next, previous_window_focused, window_focused) {
+            self.emit_state(event.id, event.state, event.enabled)
+                .await?;
         }
         Ok(())
     }
 }
 
-pub(crate) struct NativeAtspiPublisher {
-    session: Option<Connection>,
-    native: Option<NativeConnection>,
-    tree: SharedTree,
-    transport_error: Option<String>,
-}
-
-impl NativeAtspiPublisher {
-    pub(crate) fn new(snapshot: SemanticNavigationSnapshot, actions: SemanticActionQueue) -> Self {
-        let tree = SharedTree::new(snapshot, actions);
-        let session = Connection::session().ok();
-        let (native, transport_error) = session.as_ref().map_or_else(
-            || (None, Some("session bus is unavailable".to_owned())),
-            |session| match NativeConnection::connect(session, &tree) {
-                Ok(native) => (native, None),
-                Err(error) => (None, Some(error.to_string())),
-            },
-        );
-        Self {
-            session,
-            native,
-            tree,
-            transport_error,
-        }
-    }
-
-    pub(crate) fn publish(&mut self, snapshot: &SemanticNavigationSnapshot) {
-        let previous = self.tree.snapshot().clone();
-        self.tree.set_snapshot(snapshot.clone());
-        if self.session.is_none() {
-            self.session = Connection::session().ok();
-        }
-        let Some(session) = &self.session else {
-            return;
-        };
-        match NativeConnection::is_enabled(session) {
-            Ok(false) => {
-                self.native = None;
-                self.transport_error = None;
-                *self
-                    .tree
-                    .bus_name
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                return;
-            }
-            Ok(true) => {}
-            Err(error) => {
-                self.transport_error = Some(error.to_string());
-                return;
-            }
-        }
-        let newly_connected = self.native.is_none();
-        if newly_connected {
-            match NativeConnection::connect(session, &self.tree) {
-                Ok(native) => {
-                    self.native = native;
-                    self.transport_error = None;
-                }
-                Err(error) => {
-                    self.transport_error = Some(error.to_string());
-                    return;
-                }
-            }
-        }
-        if let Some(native) = &mut self.native {
-            let result = if newly_connected {
-                native.register_current_nodes(&self.tree)
-            } else {
-                native.publish_update(&self.tree, &previous, snapshot)
-            };
-            if let Err(error) = result {
-                self.transport_error = Some(error.to_string());
-            } else {
-                self.transport_error = None;
-            }
-        }
-    }
-
-    pub(crate) fn transport_error(&self) -> Option<&str> {
-        self.transport_error.as_deref()
-    }
-
-    pub(crate) fn update_window_focus_state(&mut self, focused: bool) {
-        let mut window_focused = self
-            .tree
-            .window_focused
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *window_focused == focused {
-            return;
-        }
-        *window_focused = focused;
-        drop(window_focused);
-        if let Some(native) = &self.native {
-            let result = native.emit_window_focus(focused).and_then(|()| {
-                native.emit_state(focus_id(&self.tree.snapshot()), "focused", focused)
-            });
-            if let Err(error) = result {
-                self.transport_error = Some(error.to_string());
-            } else {
-                self.transport_error = None;
-            }
-        }
-    }
-}
-
 fn focus_id(snapshot: &SemanticNavigationSnapshot) -> SemanticNodeId {
     match snapshot.focus {
+        SemanticFocus::None => ROOT_NODE_ID,
         SemanticFocus::Terminal => TERMINAL_NODE_ID,
         SemanticFocus::Search => SEARCH_NODE_ID,
         SemanticFocus::Tree => TREE_NODE_ID,
@@ -1153,7 +1317,7 @@ mod tests {
     use super::*;
     use crate::accessibility::{MAX_ACCESSIBLE_QUERY_CHARS, SemanticTreeItem};
 
-    fn snapshot() -> SemanticNavigationSnapshot {
+    pub(super) fn snapshot() -> SemanticNavigationSnapshot {
         let mut lair = item(16, None, 1, "work");
         lair.expanded = Some(true);
         let mut dojo = item(17, Some(16), 2, "editor");
@@ -1165,6 +1329,9 @@ mod tests {
         splint.availability = SemanticAvailability::Pending;
         splint.status = "Starting".to_owned();
         SemanticNavigationSnapshot {
+            generation: 0,
+            visible: true,
+            enabled: true,
             items: vec![lair, dojo, splint],
             query: String::new(),
             result_count: 3,
@@ -1244,6 +1411,11 @@ mod tests {
                     enabled: false,
                 },
                 NativeStateEvent {
+                    id: SemanticNodeId(16),
+                    state: "collapsed",
+                    enabled: true,
+                },
+                NativeStateEvent {
                     id: SemanticNodeId(17),
                     state: "selected",
                     enabled: false,
@@ -1272,9 +1444,27 @@ mod tests {
         );
 
         next.focus = SemanticFocus::Terminal;
-        assert!(focus_events(&previous, &next, false).is_empty());
+        assert!(focus_events(&previous, &next, false, false).is_empty());
         assert_eq!(
-            focus_events(&previous, &next, true),
+            focus_events(&previous, &next, true, false),
+            vec![NativeStateEvent {
+                id: SemanticNodeId(17),
+                state: "focused",
+                enabled: false,
+            }]
+        );
+        let mut modal = next.clone();
+        modal.focus = SemanticFocus::None;
+        assert_eq!(
+            focus_events(&previous, &modal, true, true),
+            vec![NativeStateEvent {
+                id: SemanticNodeId(17),
+                state: "focused",
+                enabled: false,
+            }]
+        );
+        assert_eq!(
+            focus_events(&previous, &next, true, true),
             vec![
                 NativeStateEvent {
                     id: SemanticNodeId(17),
@@ -1327,6 +1517,56 @@ mod tests {
         assert_eq!(
             node_path(SemanticNodeId(18)).as_str(),
             "/org/splinterm/accessibility/18"
+        );
+    }
+
+    #[test]
+    fn native_registration_lifecycle_and_structural_events_are_bounded() {
+        let previous = snapshot();
+        assert!(children_events(&previous, &previous).is_empty());
+        let mut next = previous.clone();
+        next.items.pop();
+        let registered = previous
+            .items
+            .iter()
+            .map(|item| item.id)
+            .chain([ROOT_NODE_ID, SEARCH_NODE_ID])
+            .collect();
+        assert_eq!(retired_ids(&registered, &next), vec![SemanticNodeId(18)]);
+        assert_eq!(
+            children_events(&previous, &next),
+            vec![NativeChildrenEvent {
+                parent: SemanticNodeId(17),
+                child: SemanticNodeId(18),
+                index: 0,
+                added: false,
+            }]
+        );
+        next.items.clear();
+        next.visible = false;
+        next.enabled = false;
+        next.focus = SemanticFocus::None;
+        assert_eq!(children_events(&previous, &next).len(), 6);
+        let tree = SharedTree::new(next, SemanticActionQueue::new(|| {}));
+        let search = tree.node(SEARCH_NODE_ID).unwrap();
+        assert!(!search.state().contains(State::Showing));
+        assert!(!search.perform_action(0));
+        assert!(!EditableTextInterface(search).set_text_contents("denied"));
+    }
+
+    #[test]
+    fn native_callbacks_capture_the_published_authority_epoch() {
+        let actions = SemanticActionQueue::new(|| {});
+        let mut snapshot = snapshot();
+        snapshot.generation = 42;
+        let tree = SharedTree::new(snapshot, actions.clone());
+        assert!(tree.node(SemanticNodeId(17)).unwrap().perform_action(2));
+        assert_eq!(
+            actions.drain_requests(),
+            vec![crate::accessibility::SemanticActionRequest {
+                generation: 42,
+                action: SemanticAction::Activate(SemanticNodeId(17)),
+            }]
         );
     }
 

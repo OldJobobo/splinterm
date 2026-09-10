@@ -1,4 +1,4 @@
-# Semantic accessibility spike
+# Synthetic accessibility inspection harness
 
 Splinterm's custom renderer has no native widget tree. The accessibility seam is
 therefore an independent AccessKit tree whose bounded navigation projection is
@@ -6,8 +6,11 @@ published on Linux through AT-SPI over D-Bus by Splinterm's native adapter.
 AccessKit Unix is not used because its AT-SPI translation does not preserve the
 expanded/current states or distinct navigation actions required by this contract.
 
-This spike establishes the contract needed by the optional navigation explorer;
-it does not enable or render the explorer.
+The production Window now publishes its real Explorer through this seam; see
+`accessibility.md` for supported behavior and limits. This document describes only
+the synthetic example. Running that example does not exercise production action
+revalidation, restore confirmation, or the Window lifecycle, and does not establish
+live architecture or packaged accessibility acceptance.
 
 ## Contract
 
@@ -27,9 +30,11 @@ scrollback, parser state, image bodies, clipboard data, process data, or inferre
 activity.
 
 `SemanticNodeRegistry` allocates IDs from typed domain identities and never
-reuses an ID during a Window lifetime. AT actions contain only semantic IDs and
-typed operations; the calloop owner must resolve those IDs against its current
-projection and reject stale or removed targets.
+reuses a retired ID during a Window lifetime. Production callbacks capture an
+owner-issued authority epoch along with the semantic ID and typed operation.
+The calloop owner resolves them against its current projection and rejects stale
+or removed targets. The synthetic harness merely prints and reduces fixture
+actions; it has no production action authority.
 
 ## Thread and event-loop boundary
 
@@ -37,7 +42,7 @@ zbus invokes native AT-SPI handlers away from the calloop owner. They may only
 enqueue a bounded `SemanticAction` and invoke the supplied wake callback. They
 must never mutate Wayland objects, renderer state, or application focus directly.
 
-The intended runtime flow is:
+The production runtime flow is:
 
 ```text
 AT-SPI action
@@ -45,7 +50,8 @@ AT-SPI action
   -> SemanticActionQueue + calloop Ping
   -> calloop-owned App drains typed actions
   -> current projection revalidation and state reduction
-  -> one coalesced semantic publication
+  -> one coalesced latest-state publication
+  -> cancellable native transport worker
 ```
 
 Focus and search requests replace older requests of the same class. Duplicate
@@ -62,9 +68,9 @@ names.
 
 Wayland does not reveal a top-level Window's compositor-relative position.
 Accordingly Splinterm does not expose the AT-SPI Component interface or claim
-accurate global screen coordinates. Local node geometry and Component support
-may be added when explorer layout exists, but this limitation does not prevent
-AT-SPI role, hierarchy, state, focus, or action exposure.
+accurate global screen coordinates. Explorer layout exists, but local geometry
+and Component support remain unsupported. This limitation does not prevent AT-SPI role, hierarchy, state,
+focus, or action exposure.
 
 ## Manual AT-SPI inspection
 

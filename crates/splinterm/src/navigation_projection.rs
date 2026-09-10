@@ -280,6 +280,8 @@ pub struct NavigationExplorerLair {
 /// Bounded, presentation-independent policy view for the local explorer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationExplorerView {
+    pub endpoint_namespace: String,
+    pub endpoint_generation: u64,
     pub topology_revision: TopologyRevision,
     pub freshness: EndpointFreshness,
     pub lairs: Vec<NavigationExplorerLair>,
@@ -371,6 +373,8 @@ impl NavigationProjection {
             })
             .collect();
         NavigationExplorerView {
+            endpoint_namespace: self.endpoint_namespace.clone(),
+            endpoint_generation: self.endpoint_generation,
             topology_revision: self.topology_revision,
             freshness: self.freshness,
             lairs,
@@ -1447,6 +1451,40 @@ mod tests {
         assert_eq!(
             dojo.node.capabilities,
             [enabled(NavigationAction::ActivateDojo)]
+        );
+    }
+
+    #[test]
+    fn navigation_accessibility_builds_from_validated_topology_not_synthetic_rows() {
+        use crate::frontend::{LairExplorerUi, NavigationAccessContext, NavigationAccessibility};
+        let lair = running_lair("semantic work");
+        let dojo = lair.dojos[0].id;
+        let captured = snapshot(vec![lair], &[]);
+        let projection = NavigationProjection::build(&captured, context(&[dojo])).unwrap();
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(projection.explorer_view());
+        explorer.focus();
+        explorer.reveal_current();
+        let mut accessibility = NavigationAccessibility::default();
+        let semantic = accessibility.refresh(
+            &explorer,
+            NavigationAccessContext {
+                keyboard_focused: true,
+                modal: false,
+                permitted: true,
+                pending: false,
+            },
+        );
+        semantic.tree_update().unwrap();
+        assert_eq!(semantic.items.len(), explorer.rows().len());
+        assert_eq!(semantic.items[0].name, projection.lairs[0].node.label);
+        assert_eq!(
+            semantic.items[1].name,
+            projection.lairs[0].dojos[0].node.label
+        );
+        assert_eq!(
+            explorer.view().unwrap().endpoint_generation,
+            projection.endpoint_generation
         );
     }
 

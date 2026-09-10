@@ -4,6 +4,8 @@
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e` are the behavioral reference.
 //! The client owns these objects; the daemon remains headless.
 
+mod navigation_accessibility;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
@@ -808,7 +810,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             text_input_manager,
             shm,
             loop_handle: event_loop.handle(),
-            update_waker,
+            update_waker: update_waker.clone(),
             output_count: 0,
             entered_outputs: Vec::new(),
             seat_count: 0,
@@ -945,6 +947,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             dirty_inactive_panes: HashSet::new(),
         },
         explorer: LairExplorerUi::default(),
+        accessibility: navigation_accessibility::WindowAccessibility::new(update_waker.clone()),
         tab_state: TabsState {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
@@ -1013,6 +1016,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let event_loop_result: Result<()> = (|| {
         while !app.scheduling.exit {
             app.apply_updates(&queue_handle)?;
+            app.accessibility_turn(&queue_handle);
             if !app.scheduling.exit {
                 app.flush_pending_terminal_input();
                 app.retry_pending_pane_resizes()?;
@@ -2050,6 +2054,7 @@ struct App {
     clipboard: ClipboardState,
     panes: PanesState,
     explorer: LairExplorerUi,
+    accessibility: navigation_accessibility::WindowAccessibility,
     tab_state: TabsState,
     modal: ModalState,
     scheduling: SchedulingState,
