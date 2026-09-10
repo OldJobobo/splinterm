@@ -1120,10 +1120,12 @@ fn window_buffer_dimensions(
 ) -> Result<(u32, u32, i32)> {
     // Remote observers also translate content below chrome. Translation moves
     // the grid, not its source surface extent, so allocate the whole Window.
-    if !has_pane_layout && !managed_tabs && !remote {
-        if let Some(geometry) = geometry {
-            return geometry.buffer_layout();
-        }
+    if !has_pane_layout
+        && !managed_tabs
+        && !remote
+        && let Some(geometry) = geometry
+    {
+        return geometry.buffer_layout();
     }
     buffer_dimensions(logical_size.0.max(1), logical_size.1.max(1), scale_120)
 }
