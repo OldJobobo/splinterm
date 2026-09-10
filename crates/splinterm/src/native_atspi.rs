@@ -339,7 +339,7 @@ impl NativeNode {
 
     fn action_names_for(&self, snapshot: &SemanticNavigationSnapshot) -> Vec<&'static str> {
         let mut actions = Vec::new();
-        if !snapshot.enabled {
+        if !snapshot.enabled || (!snapshot.visible && self.id != TERMINAL_NODE_ID) {
             return actions;
         }
         if matches!(self.id, TERMINAL_NODE_ID | SEARCH_NODE_ID | TREE_NODE_ID)
@@ -1596,6 +1596,54 @@ mod tests {
             toggled.visible = !visible;
             toggled.enabled = !visible;
             assert!(children_events(&snapshot, &toggled).is_empty());
+        }
+    }
+
+    #[test]
+    fn navigation_actions_require_visibility_independently_of_enabled_state() {
+        for visible in [true, false] {
+            for enabled in [true, false] {
+                let mut snapshot = snapshot();
+                snapshot.visible = visible;
+                snapshot.enabled = enabled;
+                snapshot.focus = SemanticFocus::None;
+                let actions = SemanticActionQueue::new(|| {});
+                let semantic = snapshot.tree_update().unwrap();
+                let tree = SharedTree::new(snapshot.clone(), actions.clone());
+                for (id, node) in &semantic.nodes {
+                    let native = tree.node(SemanticNodeId(id.0)).unwrap();
+                    let permitted = enabled && (visible || *id == TERMINAL_NODE_ID.into());
+                    if !permitted {
+                        for action in [
+                            accesskit::Action::Focus,
+                            accesskit::Action::SetValue,
+                            accesskit::Action::Expand,
+                            accesskit::Action::Collapse,
+                            accesskit::Action::Click,
+                        ] {
+                            assert!(!node.supports_action(action));
+                        }
+                        assert!(native.action_names().is_empty());
+                        assert!(!native.perform_action(0));
+                    }
+                }
+                if !visible {
+                    assert!(
+                        !EditableTextInterface(tree.node(SEARCH_NODE_ID).unwrap())
+                            .set_text_contents("hidden")
+                    );
+                }
+                assert!(actions.drain_requests().is_empty());
+                assert_eq!(
+                    tree.node(TERMINAL_NODE_ID).unwrap().perform_action(0),
+                    enabled
+                );
+                if visible && enabled {
+                    assert!(tree.node(SEARCH_NODE_ID).unwrap().perform_action(0));
+                    assert!(tree.node(TREE_NODE_ID).unwrap().perform_action(0));
+                    assert!(tree.node(SemanticNodeId(17)).unwrap().perform_action(2));
+                }
+            }
         }
     }
 

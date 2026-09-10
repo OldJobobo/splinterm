@@ -192,7 +192,9 @@ impl SemanticNavigationSnapshot {
 
         let mut terminal = Node::new(Role::Terminal);
         terminal.set_label("Terminal");
-        terminal.add_action(Action::Focus);
+        if self.enabled {
+            terminal.add_action(Action::Focus);
+        }
 
         let mut search = Node::new(Role::SearchInput);
         search.set_label("Search navigation");
@@ -201,13 +203,17 @@ impl SemanticNavigationSnapshot {
             1 => "1 result".to_owned(),
             count => format!("{count} results"),
         });
-        search.add_action(Action::Focus);
-        search.add_action(Action::SetValue);
+        if self.visible && self.enabled {
+            search.add_action(Action::Focus);
+            search.add_action(Action::SetValue);
+        }
 
         let mut tree = Node::new(Role::Tree);
         tree.set_label("Lairs");
         tree.set_children(child_ids.remove(&None).unwrap_or_default());
-        tree.add_action(Action::Focus);
+        if self.visible && self.enabled {
+            tree.add_action(Action::Focus);
+        }
 
         let mut status = Node::new(Role::Status);
         status.set_live(Live::Polite);
@@ -234,34 +240,7 @@ impl SemanticNavigationSnapshot {
             (STATUS_NODE_ID.into(), status),
         ];
         for item in &self.items {
-            let mut node = Node::new(Role::TreeItem);
-            node.set_label(item.name.clone());
-            if !item.status.is_empty() {
-                node.set_state_description(item.status.clone());
-            }
-            node.set_level(item.level);
-            node.set_selected(item.selected);
-            if let Some(expanded) = item.expanded {
-                node.set_expanded(expanded);
-                node.add_action(if expanded {
-                    Action::Collapse
-                } else {
-                    Action::Expand
-                });
-            }
-            if item.current {
-                node.set_aria_current(AriaCurrent::True);
-            }
-            match item.availability {
-                SemanticAvailability::Enabled => node.add_action(Action::Click),
-                SemanticAvailability::Disabled => node.set_disabled(),
-                SemanticAvailability::Pending => {
-                    node.set_disabled();
-                    node.set_busy();
-                }
-            }
-            node.set_children(child_ids.remove(&Some(item.id)).unwrap_or_default());
-            node.add_action(Action::Focus);
+            let node = self.item_node(item, child_ids.remove(&Some(item.id)).unwrap_or_default());
             nodes.push((item.id.into(), node));
         }
 
@@ -275,6 +254,52 @@ impl SemanticNavigationSnapshot {
             tree_id: TreeId::ROOT,
             focus: self.focus_node().into(),
         })
+    }
+
+    fn item_node(&self, item: &SemanticTreeItem, children: Vec<NodeId>) -> Node {
+        let mut node = Node::new(Role::TreeItem);
+        node.set_label(item.name.clone());
+        if !item.status.is_empty() {
+            node.set_state_description(item.status.clone());
+        }
+        node.set_level(item.level);
+        node.set_selected(item.selected);
+        if let Some(expanded) = item.expanded {
+            node.set_expanded(expanded);
+            if self.visible && self.enabled {
+                node.add_action(if expanded {
+                    Action::Collapse
+                } else {
+                    Action::Expand
+                });
+            }
+        }
+        if item.current {
+            node.set_aria_current(AriaCurrent::True);
+        }
+        match item.availability {
+            SemanticAvailability::Enabled => {
+                if self.visible && self.enabled {
+                    node.add_action(Action::Click);
+                }
+            }
+            SemanticAvailability::Disabled => node.set_disabled(),
+            SemanticAvailability::Pending => {
+                node.set_disabled();
+                node.set_busy();
+            }
+        }
+        node.set_children(children);
+        if !self.visible {
+            node.set_hidden();
+        }
+        if !self.enabled {
+            node.set_disabled();
+        }
+        if self.visible && self.enabled {
+            node.add_action(Action::Focus);
+        }
+        node
     }
 
     fn focus_node(&self) -> SemanticNodeId {
