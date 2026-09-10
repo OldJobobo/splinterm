@@ -7,8 +7,22 @@ arch=('x86_64')
 url='https://github.com/oldjobobo/splinterm'
 license=('MIT')
 makedepends=('cargo' 'pkgconf' 'rust')
-source=("$pkgbase-$pkgver.tar.gz")
-sha256sums=('SKIP') # Local archive is generated from the reviewed Git commit.
+# Match the immutable renderer fixtures in .github/workflows/ci.yml.
+_font_base='https://raw.githubusercontent.com/ryanoasis/nerd-fonts/fa7b859994228a9c8759f99c55a8d31ee92a1b5e/patched-fonts/JetBrainsMono/Ligatures'
+source=(
+  "$pkgbase-$pkgver.tar.gz"
+  "$_font_base/Regular/JetBrainsMonoNerdFont-Regular.ttf"
+  "$_font_base/Bold/JetBrainsMonoNerdFont-Bold.ttf"
+  "$_font_base/Italic/JetBrainsMonoNerdFont-Italic.ttf"
+  "$_font_base/BoldItalic/JetBrainsMonoNerdFont-BoldItalic.ttf"
+)
+sha256sums=(
+  'SKIP' # Only the local archive generated from the reviewed Git commit.
+  '0ec29a68b539ece7078fc714cebff0c0accb2f4948f8f7963d9f5e86633b12d9'
+  'e82e27a7f37c9a0a13cc4e417503a149c6a0280586930772d2ebed803159c864'
+  '981133a258ef4c62769a7a7214a4b455ac1c63923784a70f50c48977b67f7025'
+  '961222be7bce59f310b41a3e158368d5ea22a47a0ac31defd57caac9b9e82cb0'
+)
 
 prepare() {
   cd "$pkgbase-$pkgver"
@@ -24,17 +38,22 @@ build() {
     -p splinterm -p splinterd -p splinterm-relay -p splinterm-pty -p splinterm-mcp
 }
 
-check() {
+check() (
+  # Subshell keeps the fixture out of later build/package functions.
   cd "$pkgbase-$pkgver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
+  FONTCONFIG_FILE=$(python tools/package/renderer-test-fonts.py \
+    "$srcdir" "$srcdir/.splinterm-renderer-fonts") || return
+  export FONTCONFIG_FILE
   cargo test --frozen --workspace -- --test-threads=1
   python -m unittest tools/automation/test_dojo_picker.py
   python -m unittest tools/package/test_installer_safety.py
   python -m unittest tools/package/test_omarchy_screensaver_integration.py
   python -m unittest tools/package/test_validate_mcp_package.py
   python -m unittest tools/package/test_workload_units.py
-}
+  python -m unittest tools/package/test_renderer_test_fonts.py
+)
 
 package_splinterm() {
   pkgdesc='Persistent Wayland terminal for humans and bounded automation'

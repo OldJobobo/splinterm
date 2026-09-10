@@ -130,6 +130,15 @@ pacman -Qlp packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
+Renderer checks use the same four checksum-pinned JetBrains Mono fonts as CI.
+`makepkg` fetches these immutable sources alongside the local archive and verifies
+their SHA-256 hashes. During `check()` only, a private Fontconfig file selects
+these fixtures plus installed Noto fallback fonts, with a build-local font cache.
+Ambient user/system Fontconfig settings cannot substitute a newer JetBrains Mono.
+The fixtures are neither installed nor shipped; runtime font dependencies and
+user font selection are unchanged. The fixture generator requires makepkg's
+already-verified sources. Even `--nocheck` builds still fetch the declared sources.
+
 The local archive checksum is intentionally `SKIP`: the archive is generated
 from the reviewed local Git commit, is never downloaded, and the package's
 `.BUILDINFO`/`.PKGINFO` record the actual build. The separate checked-in AUR
