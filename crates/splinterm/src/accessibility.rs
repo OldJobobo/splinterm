@@ -181,16 +181,14 @@ impl SemanticNavigationSnapshot {
 
         let mut root = Node::new(Role::Window);
         root.set_label("Splinterm");
-        root.set_children(if self.visible {
-            vec![
-                TERMINAL_NODE_ID.into(),
-                SEARCH_NODE_ID.into(),
-                TREE_NODE_ID.into(),
-                STATUS_NODE_ID.into(),
-            ]
-        } else {
-            vec![TERMINAL_NODE_ID.into()]
-        });
+        // Static children stay attached even while hidden, so clients retaining
+        // their references observe reciprocal parent/child relationships.
+        root.set_children([
+            TERMINAL_NODE_ID.into(),
+            SEARCH_NODE_ID.into(),
+            TREE_NODE_ID.into(),
+            STATUS_NODE_ID.into(),
+        ]);
 
         let mut terminal = Node::new(Role::Terminal);
         terminal.set_label("Terminal");

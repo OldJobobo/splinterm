@@ -194,7 +194,6 @@ impl NativeNode {
     fn child_ids(&self) -> Vec<SemanticNodeId> {
         let snapshot = self.tree.snapshot();
         match self.id {
-            ROOT_NODE_ID if !snapshot.visible => vec![TERMINAL_NODE_ID],
             ROOT_NODE_ID => vec![
                 TERMINAL_NODE_ID,
                 SEARCH_NODE_ID,
@@ -918,15 +917,16 @@ struct NativeChildrenEvent {
 fn child_positions(
     snapshot: &SemanticNavigationSnapshot,
 ) -> Vec<(SemanticNodeId, SemanticNodeId, usize)> {
-    let mut positions = vec![(ROOT_NODE_ID, TERMINAL_NODE_ID, 0)];
-    if snapshot.visible {
-        positions.extend(
-            [SEARCH_NODE_ID, TREE_NODE_ID, STATUS_NODE_ID]
-                .into_iter()
-                .enumerate()
-                .map(|(index, id)| (ROOT_NODE_ID, id, index + 1)),
-        );
-    }
+    let mut positions = [
+        TERMINAL_NODE_ID,
+        SEARCH_NODE_ID,
+        TREE_NODE_ID,
+        STATUS_NODE_ID,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, id)| (ROOT_NODE_ID, id, index))
+    .collect::<Vec<_>>();
     let mut counts = HashMap::<SemanticNodeId, usize>::new();
     for item in &snapshot.items {
         let parent = item.parent.unwrap_or(TREE_NODE_ID);
@@ -1546,12 +1546,57 @@ mod tests {
         next.visible = false;
         next.enabled = false;
         next.focus = SemanticFocus::None;
-        assert_eq!(children_events(&previous, &next).len(), 6);
+        assert_eq!(children_events(&previous, &next).len(), 3);
         let tree = SharedTree::new(next, SemanticActionQueue::new(|| {}));
         let search = tree.node(SEARCH_NODE_ID).unwrap();
         assert!(!search.state().contains(State::Showing));
         assert!(!search.perform_action(0));
         assert!(!EditableTextInterface(search).set_text_contents("denied"));
+    }
+
+    #[test]
+    fn hidden_static_nodes_retain_reciprocal_hierarchy_without_actions() {
+        for visible in [true, false] {
+            let mut snapshot = snapshot();
+            snapshot.items.clear();
+            snapshot.focus = SemanticFocus::None;
+            snapshot.visible = visible;
+            snapshot.enabled = visible;
+            let semantic = snapshot.tree_update().unwrap();
+            let semantic_root = &semantic
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == ROOT_NODE_ID.into())
+                .unwrap()
+                .1;
+            let tree = SharedTree::new(snapshot.clone(), SemanticActionQueue::new(|| {}));
+            let children = tree.node(ROOT_NODE_ID).unwrap().child_ids();
+            assert_eq!(
+                children,
+                vec![
+                    TERMINAL_NODE_ID,
+                    SEARCH_NODE_ID,
+                    TREE_NODE_ID,
+                    STATUS_NODE_ID
+                ]
+            );
+            assert_eq!(semantic_root.children().len(), children.len());
+            for (index, id) in children.into_iter().enumerate() {
+                assert_eq!(semantic_root.children()[index], id.into());
+                let node = tree.node(id).unwrap();
+                assert_eq!(node.parent_id(), Some(ROOT_NODE_ID));
+                assert!(child_positions(&snapshot).contains(&(ROOT_NODE_ID, id, index)));
+                if !visible && id != TERMINAL_NODE_ID {
+                    assert!(!node.state().contains(State::Showing));
+                    assert!(!node.state().contains(State::Visible));
+                    assert!(!node.perform_action(0));
+                }
+            }
+            let mut toggled = snapshot.clone();
+            toggled.visible = !visible;
+            toggled.enabled = !visible;
+            assert!(children_events(&snapshot, &toggled).is_empty());
+        }
     }
 
     #[test]

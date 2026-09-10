@@ -28,9 +28,11 @@ navigation surfaces do not yet have semantic coverage.
 
 ## Identity and privacy
 
-Item IDs are Window-local, stable across ordinary redraws/reordering, and never
-reused after retirement. Removed items, changed endpoint generations, and changed
-Splint incarnations cannot retarget an old item ID. Callbacks capture an owner
+Item IDs are Window-local and never reassigned to a different identity. They
+remain stable across ordinary redraws/reordering; a temporarily hidden item may
+be registered again under the same ID when shown. An identity removed from the
+underlying projection receives a new ID if it returns. Changed endpoint generations
+and Splint incarnations likewise cannot retarget an old item ID. Callbacks capture an owner
 state epoch; the UI owner checks it against the current typed projection,
 revision, parent identity, capabilities, and modal/pending state before dispatch.
 An outdated callback may therefore be rejected even if its target is still
@@ -50,6 +52,8 @@ Publication uses one cancellable worker per Window, a latest-state slot, and a
 states do not produce repeat announcements. Focus/search requests coalesce;
 other requests fail closed when the queue is full. Removed native items are
 unregistered, and hierarchy, state, name, and search changes produce AT-SPI events.
+Static Terminal/Search/Tree/Status nodes remain children of the Window root;
+hidden navigation nodes lose visible/showing state and offer no actions.
 
 Only local Unix D-Bus transports are accepted. The desktop accessibility service
 must be enabled. Connection/publication attempts have a 500 ms deadline;
