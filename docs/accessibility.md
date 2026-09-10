@@ -5,8 +5,9 @@ rendering. This is **navigation accessibility**, not whole-terminal screen-reade
 support. Live assistive-technology and packaged integration acceptance remain
 separate from the non-graphical source tests.
 
-When the Explorer is visible in a focused, controller-authorized Window, the
-adapter exposes:
+When the Explorer is visible, the adapter exposes its navigation state. Actions
+require a focused, controller-authorized Window; observer Windows retain a
+read-only tree. The adapter exposes:
 
 - Lair → Dojo → Splint tree items, with explicit hierarchy levels;
 - independent selected, current, expanded/collapsed, disabled, and busy states;
@@ -19,7 +20,8 @@ Actions use the same Explorer decisions as local navigation. Restorable Splints
 still enter the existing preview/confirmation flow; an accessibility action
 cannot confirm restoration, grant control, or send terminal input. Navigation
 focus changes stay inside the already-focused Window: they do not raise or focus
-a compositor window. Pending navigation blocks further actions. Modal surfaces,
+a compositor window. Pending navigation blocks further activation, but search,
+disclosure, selection, and return-to-terminal focus remain available. Modal surfaces,
 hidden Explorers, observer-only Windows, stale targets, and lost keyboard focus
 cannot be bypassed by queued accessibility requests. Modal dialogs and other
 navigation surfaces do not yet have semantic coverage.

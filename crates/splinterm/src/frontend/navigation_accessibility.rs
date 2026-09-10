@@ -25,7 +25,7 @@ pub(crate) struct NavigationAccessContext {
 
 impl NavigationAccessContext {
     fn enabled(self) -> bool {
-        self.keyboard_focused && !self.modal && self.permitted && !self.pending
+        self.keyboard_focused && !self.modal && self.permitted
     }
 }
 
@@ -68,7 +68,7 @@ impl NavigationAccessibility {
         self.registry
             .retain(|key| identities.contains_key(&key.node) && identities[&key.node] == *key);
         self.targets.clear();
-        let visible = explorer.visible() && !context.modal && context.permitted;
+        let visible = explorer.visible() && !context.modal;
         let enabled = visible && context.enabled();
         let mut items = Vec::new();
         let mut ids = HashMap::new();
@@ -100,7 +100,11 @@ impl NavigationAccessibility {
                     current: row.current,
                     availability: if row.pending {
                         SemanticAvailability::Pending
-                    } else if enabled && row.enabled {
+                    } else if enabled
+                        && row.enabled
+                        && !context.pending
+                        && !explorer.activation_pending()
+                    {
                         SemanticAvailability::Enabled
                     } else {
                         SemanticAvailability::Disabled
@@ -169,7 +173,6 @@ impl NavigationAccessibility {
     ) -> Option<NavigationAccessAction> {
         if !context.enabled()
             || !explorer.visible()
-            || explorer.activation_pending()
             || request.generation != self.generation
             || self.view.as_ref() != explorer.view()
         {
@@ -196,6 +199,9 @@ impl NavigationAccessibility {
                 target(node).map(|id| NavigationAccessAction::Expanded(id, expanded))
             }
             SemanticAction::Activate(id) => {
+                if context.pending || explorer.activation_pending() {
+                    return None;
+                }
                 snapshot.items.iter().find(|item| {
                     item.id == id && item.availability == SemanticAvailability::Enabled
                 })?;
@@ -331,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_accessibility_rejects_modal_focus_permission_pending_and_hidden_actions() {
+    fn navigation_accessibility_rejects_modal_focus_permission_and_hidden_actions() {
         let mut explorer = explorer();
         let mut accessibility = NavigationAccessibility::default();
         let snapshot = accessibility.refresh(&explorer, context());
@@ -357,10 +363,6 @@ mod tests {
                 permitted: false,
                 ..context()
             },
-            NavigationAccessContext {
-                pending: true,
-                ..context()
-            },
         ] {
             for action in &actions {
                 assert!(
@@ -371,6 +373,16 @@ mod tests {
             }
             let state = accessibility.refresh(&explorer, blocked);
             assert!(!state.enabled);
+            if !blocked.permitted {
+                assert!(state.visible);
+                assert!(!state.items.is_empty());
+                assert!(
+                    state
+                        .items
+                        .iter()
+                        .all(|item| item.availability == SemanticAvailability::Disabled)
+                );
+            }
         }
         explorer.toggle_visibility();
         let hidden = accessibility.refresh(&explorer, context());
@@ -464,10 +476,19 @@ mod tests {
             NavigationAction::PreviewRestoreSplint
         );
         assert!(explorer.set_pending(LairExplorerDecision::FocusSplint(target)));
+        let pending = accessibility.refresh(&explorer, context());
+        assert_eq!(
+            accessibility.resolve(
+                request(&pending, SemanticAction::Focus(TERMINAL_NODE_ID)),
+                &explorer,
+                context()
+            ),
+            Some(NavigationAccessAction::Terminal)
+        );
         assert!(
             accessibility
                 .resolve(
-                    request(&snapshot, SemanticAction::Focus(TERMINAL_NODE_ID)),
+                    request(&pending, SemanticAction::Activate(pending.items[2].id)),
                     &explorer,
                     context()
                 )
@@ -491,6 +512,48 @@ mod tests {
                 .is_none()
         );
         assert!(explorer.decision().is_none());
+    }
+
+    #[test]
+    fn navigation_accessibility_pending_activation_preserves_nonmutating_navigation() {
+        let explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        let pending = NavigationAccessContext {
+            pending: true,
+            ..context()
+        };
+        let snapshot = accessibility.refresh(&explorer, pending);
+        assert!(snapshot.enabled);
+        for action in [
+            SemanticAction::Focus(TERMINAL_NODE_ID),
+            SemanticAction::Focus(snapshot.items[0].id),
+            SemanticAction::SetSearch("work".into()),
+            SemanticAction::SetExpanded {
+                node: snapshot.items[0].id,
+                expanded: false,
+            },
+        ] {
+            assert!(
+                accessibility
+                    .resolve(request(&snapshot, action), &explorer, pending)
+                    .is_some()
+            );
+        }
+        assert!(
+            accessibility
+                .resolve(
+                    request(&snapshot, SemanticAction::Activate(snapshot.items[2].id)),
+                    &explorer,
+                    pending
+                )
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .items
+                .iter()
+                .all(|item| item.availability == SemanticAvailability::Disabled)
+        );
     }
 
     #[test]
