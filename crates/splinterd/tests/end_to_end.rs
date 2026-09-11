@@ -32,6 +32,8 @@ use tokio::{
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const TEST_SHUTDOWN_GRACE_MS: &str = "1000";
+const PHASE8_PACED_WORKLOAD: &[u8] = b"i=0; while [ $i -lt 2000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'paced-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.01; done; printf 'overflow-%s\\n' finished\n";
+const PHASE8_PRESSURE_WORKLOAD: &[u8] = b"i=0; while [ $i -lt 30000 ]; do printf 'pressure-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'pressure-%s\\n' finished\n";
 
 struct Daemon {
     child: Child,
@@ -4056,6 +4058,38 @@ async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resy
     .expect("Plan 0043 reconstruction scenario timed out");
 }
 
+#[test]
+fn phase8_completion_markers_are_output_only_and_preserve_workload() {
+    for (workload, prefix, count, marker) in [
+        (PHASE8_PACED_WORKLOAD, "paced", 2000, "overflow-finished"),
+        (
+            PHASE8_PRESSURE_WORKLOAD,
+            "pressure",
+            30000,
+            "pressure-finished",
+        ),
+    ] {
+        let command = std::str::from_utf8(workload).unwrap();
+        assert!(
+            !command.contains(marker),
+            "terminal echo must not signal completion"
+        );
+        let output = Command::new("/bin/sh")
+            .args(["-c", command])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run the exact pressure fixture");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let expected: String = (0..count)
+            .map(|index| format!("{prefix}-{index:05}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"))
+            .chain(std::iter::once(format!("{marker}\n")))
+            .collect();
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
@@ -4098,29 +4132,29 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             )
             .await;
         snapshot_until(&mut creator, splint_id, incarnation, "phase8-initial").await;
-        let with_pwd = snapshot_until(
-            &mut creator,
-            splint_id,
-            incarnation,
-            cwd.to_str().unwrap(),
-        )
-        .await;
+        let with_pwd =
+            snapshot_until(&mut creator, splint_id, incarnation, cwd.to_str().unwrap()).await;
         assert!(snapshot_text(&with_pwd).contains(cwd.to_str().unwrap()));
-        with_pwd.validate().expect("daemon snapshot identity is valid");
-        assert!(with_pwd
-            .visible_rows
-            .iter()
-            .chain(&with_pwd.scrollback_rows)
-            .all(|row| row.row_id.is_some_and(|id| id > 0)));
-        assert!(with_pwd
-            .visible_rows
-            .iter()
-            .chain(&with_pwd.scrollback_rows)
-            .flat_map(|row| &row.cells)
-            .any(|cell| {
-                cell.content == "R"
-                    && cell.attributes.foreground_source != ColorSource::Default
-            }));
+        with_pwd
+            .validate()
+            .expect("daemon snapshot identity is valid");
+        assert!(
+            with_pwd
+                .visible_rows
+                .iter()
+                .chain(&with_pwd.scrollback_rows)
+                .all(|row| row.row_id.is_some_and(|id| id > 0))
+        );
+        assert!(
+            with_pwd
+                .visible_rows
+                .iter()
+                .chain(&with_pwd.scrollback_rows)
+                .flat_map(|row| &row.cells)
+                .any(|cell| {
+                    cell.content == "R" && cell.attributes.foreground_source != ColorSource::Default
+                })
+        );
 
         let creator_controller = creator.acquire_control(splint_id, incarnation).await;
         assert!(matches!(
@@ -4148,17 +4182,14 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         drop(creator);
         let mut detached_writer = daemon.connect().await;
         detached_writer
-            .input(
-                splint_id,
-                incarnation,
-                b"printf 'while-detached\\n'\n",
-            )
+            .input(splint_id, incarnation, b"printf 'while-detached\\n'\n")
             .await;
         drop(detached_writer);
         time::sleep(Duration::from_millis(100)).await;
 
         let mut reattached = daemon.connect().await;
-        let detached = snapshot_until(&mut reattached, splint_id, incarnation, "while-detached").await;
+        let detached =
+            snapshot_until(&mut reattached, splint_id, incarnation, "while-detached").await;
         assert!(detached.revision > resized.revision);
 
         let reattached_controller = reattached.acquire_control(splint_id, incarnation).await;
@@ -4211,11 +4242,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         // producer frames. Slow-runner scheduling must not be conflated with the
         // separate unread-connection overflow proof below.
         producer
-            .input(
-                splint_id,
-                incarnation,
-                b"i=0; while [ $i -lt 2000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'paced-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.01; done; printf 'overflow-finished\\n'\n",
-            )
+            .input(splint_id, incarnation, PHASE8_PACED_WORKLOAD)
             .await;
         let _completion_snapshot = snapshot_until_with_timeout(
             &mut reattached,
@@ -4242,25 +4269,19 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         // must resolve through exact coalesced delivery, resynchronization, or
         // disconnection.
         let mut slow = daemon.connect().await;
-        nix::sys::socket::setsockopt(
-            &slow.stream,
-            nix::sys::socket::sockopt::RcvBuf,
-            &4096,
-        )
-        .unwrap();
+        nix::sys::socket::setsockopt(&slow.stream, nix::sys::socket::sockopt::RcvBuf, &4096)
+            .unwrap();
         let mut slow_subscriptions = std::collections::BTreeMap::new();
         for _ in 0..MAX_SUBSCRIPTIONS {
             let (subscription_id, snapshot) = slow.attach(splint_id, incarnation).await;
-            assert!(slow_subscriptions
-                .insert(subscription_id, (snapshot, 1_u64))
-                .is_none());
+            assert!(
+                slow_subscriptions
+                    .insert(subscription_id, (snapshot, 1_u64))
+                    .is_none()
+            );
         }
         producer
-            .input(
-                splint_id,
-                incarnation,
-                b"i=0; while [ $i -lt 30000 ]; do printf 'pressure-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'pressure-finished\\n'\n",
-            )
+            .input(splint_id, incarnation, PHASE8_PRESSURE_WORKLOAD)
             .await;
         let _pressure_snapshot = snapshot_until_with_timeout(
             &mut reattached,
@@ -4322,7 +4343,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 SubscriptionEvent::Snapshot { snapshot } => {
                     assert_eq!(sequence, *expected_sequence);
                     *expected_sequence += 1;
-                    snapshot.validate().expect("slow subscriber snapshot is valid");
+                    snapshot
+                        .validate()
+                        .expect("slow subscriber snapshot is valid");
                     assert_eq!(snapshot.splint_id, splint_id);
                     assert_eq!(snapshot.incarnation, incarnation);
                     *reconstructed = snapshot;
@@ -4373,14 +4396,24 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 panic!("daemon did not return a scrollback page: {response:?}");
             };
             page.validate().expect("daemon page is valid");
-            assert_eq!(page.rows.len(), splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
-            assert!(page.rows.iter().all(|row| row.row_id.unwrap() < before_row_id));
+            assert_eq!(
+                page.rows.len(),
+                splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS
+            );
+            assert!(
+                page.rows
+                    .iter()
+                    .all(|row| row.row_id.unwrap() < before_row_id)
+            );
             for row_id in page.rows.iter().filter_map(|row| row.row_id) {
                 assert!(paged_ids.insert(row_id), "pages must not overlap");
             }
             before_row_id = page.rows.first().and_then(|row| row.row_id).unwrap();
         }
-        assert_eq!(paged_ids.len(), 4 * splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
+        assert_eq!(
+            paged_ids.len(),
+            4 * splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS
+        );
 
         for (revision, generation) in [
             (
