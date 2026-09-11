@@ -671,7 +671,9 @@ mod tests {
                 | ActionId::RevokeAllAccess
                 | ActionId::AcceptControlTransfer
                 | ActionId::DenyControlTransfer => "authority route",
-                ActionId::ClipboardCopy | ActionId::ClipboardPaste => "clipboard route",
+                ActionId::ClipboardCopy
+                | ActionId::ClipboardPaste
+                | ActionId::ClipboardSaveImage => "clipboard route",
             };
             assert!(!route.is_empty(), "{}", action.config_name());
         }

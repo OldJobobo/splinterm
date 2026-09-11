@@ -96,6 +96,10 @@ pub struct WindowOptions {
     pub keymap: ResolvedKeymap,
     /// Prefix sequence timeout from the validated client configuration.
     pub prefix_timeout_ms: u64,
+    /// Explicit opt-in destination; saves also require a local endpoint.
+    pub clipboard_image_directory: Option<PathBuf>,
+    /// Fixed endpoint authority, not inferred from a UI capability or terminal data.
+    pub local_endpoint: bool,
     /// Multi-pane input. Empty retains the legacy one-pane fields above.
     pub panes: Vec<WindowPaneOptions>,
     pub layout: Option<LayoutNode>,
@@ -143,6 +147,8 @@ impl Default for WindowOptions {
             frame_title_mode: FrameTitleMode::Splint,
             keymap: ResolvedKeymap::default(),
             prefix_timeout_ms: 1_000,
+            clipboard_image_directory: None,
+            local_endpoint: false,
             panes: Vec::new(),
             layout: None,
             active_splint: None,

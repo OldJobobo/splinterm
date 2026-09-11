@@ -130,7 +130,7 @@ fn wait_for_fd(fd: &impl AsFd, events: PollFlags, deadline: Instant) -> io::Resu
     Ok(returned.intersects(events | PollFlags::HUP))
 }
 
-fn read_clipboard_with_deadline(
+pub(super) fn read_clipboard_with_deadline(
     fd: &OwnedFd,
     timeout: Duration,
     maximum_bytes: usize,

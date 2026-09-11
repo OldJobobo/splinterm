@@ -5,6 +5,91 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 `SPLINTERM_CONFIG` to test another file. Start from
 [`config/splinterm/config.ini`](../config/splinterm/config.ini).
 
+## Clipboard PNG saving (intended for 0.1.1; not yet released)
+
+`[clipboard] image-directory` opts into a persistent destination for explicit
+clipboard-image saves. Use **Save clipboard image and insert path** in the command
+palette, or bind `clipboard.save-image` in a custom keymap. Neither built-in
+profile assigns a shortcut. Ordinary clipboard/primary text paste is unchanged,
+even when the clipboard offers both text and PNG. The explicit image action
+selects `image/png`; other formats are not converted. Remote sessions are disabled
+because a local saved path is not a remote file.
+
+The focused pane must hold control, be at live output, and have keyboard focus,
+without copy mode, an input modal, a pending session switch, or a divider drag.
+Unavailable palette rows are disabled; invoking a custom binding reports why the
+save is unavailable. Focus, control, topology, pane incarnation, input generation,
+and the configured destination are checked again before publication and insertion.
+Opening another modal or changing the target cancels the original request rather
+than redirecting it. Configuration reload also cancels in-flight saves.
+
+There is at most one active image save per Window and one image worker per client
+process. The pipe has a two-second read deadline; each worker/UI authorization
+wait is also limited to two seconds. UI queues contain at most two small events
+and one decision, never PNG bodies or filesystem descriptors. Validation, file
+writes, sync, publication, verification, and descriptor cleanup stay on the worker.
+A stalled filesystem syscall can hold that worker slot until the kernel returns;
+it cannot block Wayland dispatch or cause additional image workers to accumulate.
+
+```ini
+[clipboard]
+image-directory=/home/your-user/Private clipboard images
+```
+
+Create the directory yourself with private permissions (`0700`). It must already
+exist, be owned by your user, and grant no group/other access. Every path component
+must be a real directory (no symlinks); ancestors must be owned by you or root and
+must not be group/other writable. Relative paths, `~`/environment expansion, dot
+components, repeated/trailing slashes, control characters, non-UTF-8 paths, and
+paths longer than 4000 bytes are rejected. Parsing validates syntax only; a save
+worker validates current filesystem identity and permissions. A malformed setting
+rejects the entire configuration candidate rather than partially applying it.
+
+The storage limit is **16 MiB of encoded PNG**, **8192 pixels per edge**, and
+**16,777,216 pixels total**. Validation fully decodes static image data and checks
+the end marker; APNG, truncation, malformed data, and trailing bytes are rejected.
+Decoded output is capped at **64 MiB**, with a separate **64 MiB PNG decoder
+allocation budget**. A streaming zlib check rejects excess inflated image data,
+incomplete streams, and bad checksums; it stops at the declared filtered frame
+size plus one byte rather than expanding an arbitrary compressed payload. Its
+compressed copy is at most 16 MiB and is released before pixel-output allocation.
+Text and ICC metadata are not decompressed by validation;
+original bytes, including metadata, are preserved in the saved file. Saving is
+not metadata stripping or sanitization for sharing with other applications.
+
+Validation and disk I/O run off the Wayland event loop. Staging uses Linux
+`O_TMPFILE`; unsupported filesystems fail with guidance to select another private
+directory, never a less-safe temporary-file fallback. Publication also requires
+accessible `/proc/self/fd`. The completed file is private (`0600`, or more
+restrictive under your umask), named `clipboard-<random UUID>.png`, and linked
+without overwriting any existing name, with at most 32 collision retries. File
+contents are synced before publication; crash/power-loss durability of the new
+directory entry is not promised.
+
+Cancelled or failed **unpublished** saves leave no named file. Once published,
+the image is retained until you delete it—even if subsequent path insertion
+fails or its original pane becomes stale. That failure must report the saved
+path instead of redirecting input or silently deleting a file. There is no age
+cleanup and no image-body logging. Unlinking by pathname after checking its inode
+still races replacement, so the storage API never automatically deletes a
+published name. Input is admitted only once, nonblockingly, when no earlier
+terminal input is pending. A busy/full/closed command channel retains the image
+and reports its path; saved-path input is never deferred. The payload is an
+absolute POSIX-shell-quoted path (including literal apostrophes/spaces/Unicode),
+wrapped only if the current pane enables bracketed paste, with no trailing space,
+newline, or Enter. Admission is not a daemon acknowledgment or a guarantee that
+a terminal application consumed the path.
+
+Progress/failure feedback uses a temporary Window title and stderr. Retained-path
+notices escape control/format characters for readable identification without
+logging image bytes. Normal title updates can replace the notice. If the Window
+closes after publication, the worker reports the retained path to stderr on
+channel disconnect or timeout; abrupt process termination cannot guarantee any
+notice. Successful saves also persist until manually deleted.
+
+Descriptor-relative access and identity rechecks detect ordinary
+substitution, but do not sandbox hostile processes running as your own user.
+
 ## Supported keys
 
 | Section/key | Meaning | Range/default |
@@ -28,6 +113,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |
 | `colors.blur` | optional native background-blur request | strict boolean; unset (theme-owned, otherwise `no`) |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
+| `clipboard.image-directory` | explicit absolute private directory for user-requested local clipboard PNG saves | unset; no temporary fallback |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
@@ -250,6 +336,7 @@ shell commands or callbacks. Bindable action IDs are:
 ```text
 app.command-palette       session.recent
 clipboard.copy            clipboard.paste
+clipboard.save-image
 dojo.new                  dojo.previous
 dojo.next                 dojo.close-tab
 dojo.close-other-tabs      dojo.rename

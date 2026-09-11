@@ -181,6 +181,22 @@ explicit collision-safe workflow. See [Presets](presets.md) for exact behavior.
 Clipboard and primary-selection contents are terminal data, not authority.
 Pasting requires the graphical client to hold terminal input control.
 
+### Save a clipboard screenshot as a path
+
+Intended for 0.1.1 (not yet released): configure a private existing
+`[clipboard] image-directory`, then choose **Save clipboard image and insert path**
+from the command palette. The bindable action is `clipboard.save-image`; there is
+no default shortcut. Only bounded static PNG is supported, and normal text paste
+is unchanged. This action works only in a focused, controlled, live local pane—not
+remote sessions, copy mode, or historical scrollback.
+
+The saved PNG is private and persistent. Its shell-escaped path is inserted without
+Enter. A changed pane or busy input channel never redirects or defers the path;
+a PNG already published is retained and its path reported through the temporary
+Window title and stderr. Delete saved files yourself when no longer needed.
+See [Clipboard PNG configuration](configuration.md#clipboard-png-saving-intended-for-011-not-yet-released)
+for limits, permissions, metadata preservation, cancellation, and filesystem requirements.
+
 ## Scrollback and search
 
 While the focused pane is viewing historical output, plain Enter or keypad Enter

@@ -145,3 +145,36 @@ fn keymap_list_is_small_and_machine_flags_are_rejected() {
     assert!(!rejected.status.success());
     assert!(rejected.stdout.is_empty());
 }
+
+#[test]
+fn clipboard_image_binding_and_directory_are_checked_without_filesystem_side_effects() {
+    let directory = test_directory("clipboard-image");
+    let destination = directory.join("not-created");
+    let config = directory.join("config.ini");
+    fs::write(
+        &config,
+        format!(
+            "[clipboard]\nimage-directory={}\n[key-bindings]\nfile=keybindings.toml\n",
+            destination.display()
+        ),
+    )
+    .unwrap();
+    fs::write(directory.join("keybindings.toml"), "version = 1\n[[binding]]\nsequence = [\"Ctrl+Alt+I\"]\naction = \"clipboard.save-image\"\n").unwrap();
+    let checked = output(
+        binary()
+            .env("SPLINTERM_CONFIG", &config)
+            .args(["config", "check"]),
+    );
+    assert!(checked.status.success(), "{:?}", checked.stderr);
+    let shown = output(
+        binary()
+            .env("SPLINTERM_CONFIG", &config)
+            .args(["keymap", "show"]),
+    );
+    assert!(shown.status.success(), "{:?}", shown.stderr);
+    let text = String::from_utf8(shown.stdout).unwrap();
+    assert!(text.contains("clipboard.save-image"));
+    assert!(text.contains("Ctrl+Alt+I"));
+    assert!(!destination.exists());
+    fs::remove_dir_all(directory).unwrap();
+}

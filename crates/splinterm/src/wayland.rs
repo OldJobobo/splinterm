@@ -173,6 +173,7 @@ use crate::{
 
 mod chrome;
 mod clipboard;
+mod clipboard_image;
 mod damage;
 mod dispatch;
 mod file_drop;
@@ -901,6 +902,10 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             drag_target: None,
             clipboard_sources: Vec::new(),
             primary_sources: Vec::new(),
+            image_directory: options.clipboard_image_directory,
+            local_endpoint: options.local_endpoint,
+            image_request: None,
+            palette_image_target: None,
             clipboard_tx,
             clipboard_rx,
         },
@@ -1040,6 +1045,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             }
             app.tick_signoff(&queue_handle)?;
             app.apply_clipboard_reads()?;
+            app.apply_clipboard_image_events();
             app.tick_cursor_blink(&queue_handle)?;
             let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
                 break;
@@ -2012,6 +2018,10 @@ struct InputState {
 }
 
 struct ClipboardState {
+    image_directory: Option<PathBuf>,
+    local_endpoint: bool,
+    image_request: Option<clipboard_image::ImageRequest>,
+    palette_image_target: Option<FileDropTarget>,
     data_device: Option<DataDevice>,
     primary_device: Option<PrimarySelectionDevice>,
     clipboard_offer: Option<SelectionOffer>,
@@ -3164,6 +3174,8 @@ impl App {
     }
 
     fn request_active_pane_control_release(&mut self) {
+        self.cancel_clipboard_image();
+        self.clipboard.palette_image_target = None;
         let input_pending = self.active_terminal_input_pending();
         Self::request_pane_control_release(&mut self.panes.pane, input_pending);
     }
@@ -3770,6 +3782,7 @@ impl App {
     }
 
     fn scroll_history(&mut self, action: MouseAction, lines: usize) -> Result<bool> {
+        self.cancel_clipboard_image();
         let snapshot = self
             .panes
             .pane
@@ -5027,6 +5040,7 @@ impl App {
             .iter()
             .position(|tab| tab.dojo_id == active_dojo_id)
             .context("active Dojo is missing from the Window tab set")?;
+        self.clipboard.palette_image_target = self.clipboard_image_target().ok();
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
             lair_retention: self.tab_state.active_identity.lair_retention,
@@ -5061,6 +5075,13 @@ impl App {
             focus_right: self.directional_splint(FocusDirection::Right),
             focus_up: self.directional_splint(FocusDirection::Up),
             focus_down: self.directional_splint(FocusDirection::Down),
+            clipboard_image_available: self.clipboard.palette_image_target.is_some()
+                && self.clipboard.image_request.is_none()
+                && self
+                    .clipboard
+                    .clipboard_offer
+                    .as_ref()
+                    .is_some_and(|offer| offer.with_mime_types(clipboard_image::png_offered)),
             viewport_detached: !self.panes.pane.scrollback_viewport.is_live(),
             controller_active: self.panes.pane.controller_active,
             forced_control_transfer: self.input.forced_control_transfer,
@@ -5094,6 +5115,8 @@ impl App {
     fn reload_keymap_configuration(&mut self) {
         match crate::config::load_default() {
             Ok(loaded) => {
+                self.cancel_clipboard_image();
+                self.clipboard.image_directory = loaded.config.clipboard_image_directory;
                 self.input.keymap = loaded.config.keymap;
                 self.input.prefix_timeout =
                     std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
@@ -5265,6 +5288,17 @@ impl App {
             BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(),
             BuiltInCommandDispatch::ReloadConfiguration => {
                 self.reload_keymap_configuration();
+                Ok(())
+            }
+            BuiltInCommandDispatch::SaveClipboardImage => {
+                let captured = self.clipboard.palette_image_target.take();
+                if captured.is_some() && self.clipboard_image_target().ok() == captured {
+                    self.begin_clipboard_image();
+                } else {
+                    self.clipboard_image_notice(
+                        "Clipboard image save cancelled: palette target changed",
+                    );
+                }
                 Ok(())
             }
             BuiltInCommandDispatch::EnterCopyMode => {
@@ -5853,6 +5887,7 @@ impl App {
     }
 
     fn send_topology_command(&mut self, command: WindowTopologyCommand) -> Result<()> {
+        self.cancel_clipboard_image();
         // Capture all entry points, including keyboard shortcuts, before dispatch so
         // a failed load can retry the exact picker kind and original Lair scope.
         if let Some(request) = session_picker_retry_request(&command) {
@@ -5974,6 +6009,10 @@ impl App {
     }
 
     fn set_ime_focus(&mut self, focused: bool) {
+        if !focused {
+            self.cancel_clipboard_image();
+            self.clipboard.palette_image_target = None;
+        }
         self.input.keyboard_focused = focused;
         self.input.ime.focused = focused;
         self.sync_graphical_focus();
@@ -8883,6 +8922,8 @@ impl App {
                     self.presentation.full_redraw = true;
                 }
                 WindowUpdate::Control(active) => {
+                    self.cancel_clipboard_image();
+                    self.clipboard.palette_image_target = None;
                     self.panes.pane.controller_active = active;
                     title_changed = true;
                     visual_changed = true;

@@ -221,6 +221,7 @@ async fn run_live_multipane_window_inner(
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
+    let local_endpoint = factory.is_local();
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let optimistic_remote_splits =
@@ -278,6 +279,8 @@ async fn run_live_multipane_window_inner(
             forced_control_transfer,
             remote_display_identity,
             optimistic_remote_splits,
+            local_endpoint,
+            clipboard_image_directory: window_config.clipboard_image_directory,
             initial_dojo: Some(initial_identity),
             initial_tab_strip_visible,
             initial_columns: window_config.initial_columns,
@@ -416,6 +419,7 @@ pub(super) async fn run_live_window(
     let initial_snapshot = attachment.snapshot;
     let window_config = config.clone();
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
+    let local_endpoint = factory.is_local();
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let mut window = tokio::task::spawn_blocking(move || {
@@ -430,6 +434,8 @@ pub(super) async fn run_live_window(
             forced_control_transfer,
             remote_display_identity,
             terminal_grid_limits,
+            local_endpoint,
+            clipboard_image_directory: window_config.clipboard_image_directory,
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,

@@ -11,6 +11,7 @@ pub mod accessibility;
 pub mod automation;
 pub mod background_effect;
 mod box_drawing;
+pub mod clipboard_image;
 pub mod config;
 pub mod diagnostics;
 pub mod endpoint;

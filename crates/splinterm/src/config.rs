@@ -65,6 +65,9 @@ pub struct AppConfig {
     /// Explicit project JSON override. When absent, Splinterm follows the
     /// active Omarchy theme directly.
     pub theme_path: Option<PathBuf>,
+    /// Explicit absolute private directory for user-requested clipboard PNG saves.
+    /// Filesystem checks happen in the save worker, not during configuration parsing.
+    pub clipboard_image_directory: Option<PathBuf>,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
     pub multiplexer_lifetime: MultiplexerLifetimeConfig,
@@ -141,6 +144,7 @@ impl Default for AppConfig {
             background_alpha: None,
             background_blur: None,
             theme_path: None,
+            clipboard_image_directory: None,
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
             multiplexer_lifetime: MultiplexerLifetimeConfig::default(),
@@ -252,6 +256,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                     | "key-bindings"
                     | "presets"
                     | "multiplexer"
+                    | "clipboard"
             ) {
                 diagnostics.push(format!(
                     "line {}: unsupported section [{section}]",
@@ -271,6 +276,15 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             format!("{section}.{key}")
         };
         let unsupported = match full.as_str() {
+            "clipboard.image-directory" => {
+                let path = PathBuf::from(nonempty(value, index)?);
+                crate::clipboard_image::validate_directory_path(&path)
+                    .with_context(|| format!("line {}: clipboard.image-directory", index + 1))?;
+                if config.clipboard_image_directory.replace(path).is_some() {
+                    bail!("line {}: duplicate clipboard.image-directory", index + 1);
+                }
+                false
+            }
             "main.font" | "font" => {
                 let font = nonempty(value, index)?;
                 let normalized = font.to_ascii_lowercase();
@@ -1176,6 +1190,41 @@ mod tests {
         assert!(!defaults.allow_unrestricted_commands);
         assert!(defaults.multiplexer_lifetime.persistent_by_default);
         assert!(defaults.multiplexer_lifetime.persist_on_tab_organization);
+    }
+
+    #[test]
+    fn clipboard_image_directory_is_opt_in_absolute_and_transactional() {
+        assert_eq!(parse("").unwrap().config.clipboard_image_directory, None);
+        let loaded = parse("[clipboard]\nimage-directory=/home/user/Private images\n").unwrap();
+        assert_eq!(
+            loaded.config.clipboard_image_directory,
+            Some(PathBuf::from("/home/user/Private images"))
+        );
+        assert!(loaded.diagnostics.is_empty());
+        for value in [
+            "",
+            "relative",
+            "~/Images",
+            "$HOME/Images",
+            "/a/../b",
+            "/a//b",
+            "/a/",
+            "/a\tb",
+        ] {
+            assert!(
+                parse(&format!("[clipboard]\nimage-directory={value}\n")).is_err(),
+                "{value:?}"
+            );
+        }
+        assert!(parse("[clipboard]\nimage-directory=/a\nimage-directory=/b\n").is_err());
+        // A late error cannot return a partially changed configuration to reload.
+        assert!(
+            parse("[clipboard]\nimage-directory=/a\n[main]\nfont-pixelsize=invalid\n").is_err()
+        );
+        assert_eq!(
+            parse("[clipboard]\nunknown=x\n").unwrap().diagnostics.len(),
+            1
+        );
     }
 
     #[test]

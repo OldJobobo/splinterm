@@ -695,6 +695,7 @@ pub(crate) enum BuiltInCommandId {
     ResizePaneSmaller,
     ResizePaneLarger,
     EnterCopyMode,
+    SaveClipboardImage,
     ToggleFocusedPaneZoom,
     SearchScrollback,
     PageUp,
@@ -753,6 +754,7 @@ impl BuiltInCommandId {
         Self::ResizePaneSmaller,
         Self::ResizePaneLarger,
         Self::EnterCopyMode,
+        Self::SaveClipboardImage,
         Self::ToggleFocusedPaneZoom,
         Self::SearchScrollback,
         Self::PageUp,
@@ -830,7 +832,8 @@ impl CommandTabMoveAvailability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     clippy::struct_field_names,
-    reason = "the explicit identity suffixes keep domain identifiers and captured destinations unambiguous"
+    clippy::struct_excessive_bools,
+    reason = "independent captured availability flags and the explicit identity suffixes keep domain identifiers and captured destinations unambiguous"
 )]
 pub(crate) struct CommandPaletteContext {
     pub(crate) lair_id: LairId,
@@ -849,6 +852,7 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) focus_right: Option<SplintId>,
     pub(crate) focus_up: Option<SplintId>,
     pub(crate) focus_down: Option<SplintId>,
+    pub(crate) clipboard_image_available: bool,
     pub(crate) viewport_detached: bool,
     pub(crate) controller_active: bool,
     pub(crate) forced_control_transfer: bool,
@@ -897,6 +901,7 @@ pub(crate) enum BuiltInCommandDispatch {
     ShowKeybindings,
     ReloadConfiguration,
     EnterCopyMode,
+    SaveClipboardImage,
     ToggleFocusedPaneZoom,
     MoveDojo {
         dojo_id: DojoId,
@@ -943,6 +948,13 @@ impl BuiltInCommandDescriptor {
 }
 
 pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId::ALL.len()] = [
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::SaveClipboardImage,
+        category: CommandCategory::Application,
+        title: "Save clipboard image and insert path",
+        keywords: &["clipboard", "png", "image", "save", "path", "screenshot"],
+        shortcut_action: Some(ActionId::ClipboardSaveImage),
+    },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ShowKeybindings,
         category: CommandCategory::Application,
@@ -1350,6 +1362,7 @@ fn descriptor_matches(descriptor: BuiltInCommandDescriptor, query: &str) -> bool
 
 pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteContext) -> bool {
     match id {
+        BuiltInCommandId::SaveClipboardImage => context.clipboard_image_available,
         BuiltInCommandId::PreviousDojo => context.previous_dojo_id.is_some(),
         BuiltInCommandId::NextDojo => context.next_dojo_id.is_some(),
         BuiltInCommandId::MoveDojoLeft => context.tab_move.can_move_left(),
@@ -1628,6 +1641,7 @@ pub(crate) fn command_dispatch(
         return None;
     }
     let dispatch = match id {
+        BuiltInCommandId::SaveClipboardImage => BuiltInCommandDispatch::SaveClipboardImage,
         BuiltInCommandId::ShowKeybindings => BuiltInCommandDispatch::ShowKeybindings,
         BuiltInCommandId::ReloadConfiguration => BuiltInCommandDispatch::ReloadConfiguration,
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
@@ -1864,12 +1878,33 @@ mod tests {
             focus_right: Some(SplintId::new()),
             focus_up: Some(SplintId::new()),
             focus_down: Some(SplintId::new()),
+            clipboard_image_available: false,
             viewport_detached: true,
             controller_active: false,
             forced_control_transfer: true,
             grant_ids: vec![7, 9],
             pending_transfer_id: Some(42),
         })
+    }
+
+    #[test]
+    fn clipboard_image_palette_dispatch_is_opt_in_and_has_no_default_shortcut() {
+        let mut context = palette().context();
+        let id = BuiltInCommandId::SaveClipboardImage;
+        assert!(!command_enabled(id, &context));
+        assert!(command_dispatch(id, &context).is_none());
+        context.clipboard_image_available = true;
+        assert_eq!(
+            command_dispatch(id, &context),
+            Some(BuiltInCommandDispatch::SaveClipboardImage)
+        );
+        assert_eq!(
+            command_descriptor(id).shortcut(&ResolvedKeymap::default()),
+            ""
+        );
+        let mut ui = CommandPaletteUi::new(context);
+        ui.append_text("screenshot");
+        assert_eq!(ui.filtered(), &[id]);
     }
 
     #[test]
