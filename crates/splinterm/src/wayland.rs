@@ -1110,6 +1110,26 @@ fn buffer_dimensions(
     SurfaceGeometry::new(logical_width, logical_height, scale_120)?.buffer_layout()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DrawBufferChoice {
+    Reuse(usize),
+    Allocate,
+    Wait,
+}
+
+fn choose_draw_buffer(count: usize, mut available: impl FnMut(usize) -> bool) -> DrawBufferChoice {
+    // Index zero is the last committed buffer. Even after wl_buffer.release,
+    // keep its completed chrome intact while another canvas is cleared and
+    // recomposed; this also avoids exposing intermediate SHM pixels to captures.
+    if let Some(index) = (1..count).find(|&index| available(index)) {
+        DrawBufferChoice::Reuse(index)
+    } else if count < MAX_SHM_BUFFERS {
+        DrawBufferChoice::Allocate
+    } else {
+        DrawBufferChoice::Wait
+    }
+}
+
 fn window_buffer_dimensions(
     has_pane_layout: bool,
     managed_tabs: bool,
@@ -9440,6 +9460,7 @@ impl App {
                 .surface
                 .buffers
                 .iter()
+                .skip(1)
                 .any(|buffer| self.surface.pool.canvas(&buffer.buffer).is_some());
         if terminal_draw_waits_for_frame(self.scheduling.frame_pending, draw_capacity_available) {
             self.scheduling.redraw_pending = true;
@@ -9682,16 +9703,15 @@ impl App {
             && !tab_context_menu_open
             && !self.explorer.focused();
         let backing_len = bounded_window_backing_len(width, height)?;
-        let mut buffer_index = None;
-        for (index, buffer) in self.surface.buffers.iter().enumerate() {
-            if self.surface.pool.canvas(&buffer.buffer).is_some() {
-                buffer_index = Some(index);
-                break;
-            }
-        }
-        let buffer_index = if let Some(index) = buffer_index {
+        let choice = choose_draw_buffer(self.surface.buffers.len(), |index| {
+            self.surface
+                .pool
+                .canvas(&self.surface.buffers[index].buffer)
+                .is_some()
+        });
+        let buffer_index = if let DrawBufferChoice::Reuse(index) = choice {
             index
-        } else if self.surface.buffers.len() < MAX_SHM_BUFFERS {
+        } else if choice == DrawBufferChoice::Allocate {
             let buffer = self
                 .surface
                 .pool
@@ -10272,6 +10292,9 @@ impl App {
             .attach_to(self.surface.window.wl_surface())
             .context("attach SHM buffer")?;
         self.surface.window.commit();
+        // Move the submitted buffer and its stale-damage state together. The
+        // next draw may use the previous submission, but never this one.
+        self.surface.buffers.swap(0, buffer_index);
         if let Some(diagnostics) = diagnostics() {
             diagnostics.mark_window_mapped();
         }
@@ -14286,6 +14309,47 @@ mod tests {
         assert!(note_output_leave(&mut entered, &1));
         assert!(entered.is_empty());
         // App deliberately leaves renderer's last DPI observation unchanged here.
+    }
+
+    #[test]
+    fn draw_buffer_selection_preserves_committed_canvas_and_stays_bounded() {
+        for count in 0..=MAX_SHM_BUFFERS {
+            for mask in 0..(1_usize << count) {
+                let choice = choose_draw_buffer(count, |index| mask & (1 << index) != 0);
+                let alternative = (1..count).find(|index| mask & (1 << index) != 0);
+                let expected = alternative.map_or_else(
+                    || {
+                        if count < MAX_SHM_BUFFERS {
+                            DrawBufferChoice::Allocate
+                        } else {
+                            DrawBufferChoice::Wait
+                        }
+                    },
+                    DrawBufferChoice::Reuse,
+                );
+                assert_eq!(choice, expected, "count={count} available={mask:b}");
+            }
+        }
+    }
+
+    #[test]
+    fn composing_next_canvas_does_not_clear_committed_chrome() {
+        let mut canvases = [vec![7_u8; 32], vec![0_u8; 32]];
+        for marker in 8_u8..12 {
+            let displayed = canvases[0].clone();
+            let DrawBufferChoice::Reuse(index) = choose_draw_buffer(canvases.len(), |_| true)
+            else {
+                panic!("the alternate released buffer is reusable");
+            };
+            // Full terminal backing synchronization temporarily clears chrome.
+            canvases[index].fill(0);
+            assert_eq!(canvases[0], displayed);
+            // Chrome is rebuilt before submission; then rotate whole buffers.
+            canvases[index][..8].fill(marker);
+            canvases.swap(0, index);
+            assert_eq!(&canvases[0][..8], &[marker; 8]);
+            assert_eq!(canvases[1], displayed);
+        }
     }
 
     #[test]
