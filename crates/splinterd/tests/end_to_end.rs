@@ -15,12 +15,13 @@ use splinterm_core::{
     Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision,
 };
 use splinterm_protocol::{
-    AccessScope, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
+    AccessScope, ActiveScreen, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
     ControlTransferDecision, ControlTransferOutcome, ErrorCode, HistoryTransition,
-    LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, MutationPreflight, MutationTarget,
-    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SplintLifecycle,
-    SubscriptionEvent, TerminalProvenance, TerminalSnapshot, TerminalUpdate, TopologyChangeKind,
-    encode_frame,
+    LaunchParameters, MAX_FRAME_BYTES, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
+    MouseTracking, MutationPreflight, MutationTarget, PROTOCOL_VERSION, ProtocolError, Request,
+    Response, ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalInputModes,
+    TerminalProvenance, TerminalRow, TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate,
+    TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -552,10 +553,18 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
         let append = matches!(scrollback.transition, HistoryTransition::Append { .. });
         match scrollback.transition {
             HistoryTransition::Append { trimmed_rows, .. } => {
-                snapshot
-                    .scrollback_rows
-                    .drain(..trimmed_rows.min(snapshot.scrollback_rows.len()));
+                // Server trims first consume history omitted from our bounded tail.
+                let cached_trimmed = trimmed_rows
+                    .saturating_sub(snapshot.omitted_oldest_scrollback_rows)
+                    .min(snapshot.scrollback_rows.len());
+                snapshot.scrollback_rows.drain(..cached_trimmed);
                 snapshot.scrollback_rows.extend(scrollback.rows.clone());
+                // Reconstruct a wire snapshot, not an unbounded client history cache.
+                let excess = snapshot
+                    .scrollback_rows
+                    .len()
+                    .saturating_sub(MAX_SNAPSHOT_SCROLLBACK_ROWS);
+                snapshot.scrollback_rows.drain(..excess);
             }
             HistoryTransition::Clear => snapshot.scrollback_rows.clear(),
             HistoryTransition::Reflow | HistoryTransition::Replace => {
@@ -3834,6 +3843,130 @@ async fn two_splints_spawn_and_preserve_independent_output() {
     })
     .await
     .expect("two-Splint scenario timed out");
+}
+
+fn history_test_rows(first: u64, last: u64) -> Vec<TerminalRow> {
+    (first..=last)
+        .map(|id| TerminalRow {
+            row_id: Some(id),
+            linebreak: false,
+            cells: Vec::new(),
+        })
+        .collect()
+}
+
+fn history_test_snapshot(first: u64, last: u64, available: usize) -> TerminalSnapshot {
+    let history = history_test_rows(first, last);
+    let snapshot = TerminalSnapshot {
+        splint_id: SplintId::new(),
+        incarnation: 1,
+        revision: 1,
+        columns: 1,
+        rows: 1,
+        cursor_column: 0,
+        cursor_row: 0,
+        cursor_deferred_wrap: false,
+        active_screen: ActiveScreen::Normal,
+        input_modes: TerminalInputModes {
+            application_cursor: false,
+            application_keypad: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor_visible: true,
+            cursor_blink: false,
+            mouse_tracking: MouseTracking::None,
+            sgr_mouse: false,
+        },
+        palette: vec![0; 256],
+        default_colors: [0; 3],
+        title: String::new(),
+        visible_rows: history_test_rows(10_000, 10_000),
+        history_generation: 1,
+        oldest_available_scrollback_row_id: Some(last + 1 - u64::try_from(available).unwrap()),
+        newest_available_scrollback_row_id: Some(last),
+        omitted_oldest_scrollback_rows: available - history.len(),
+        scrollback_rows: history,
+        available_scrollback_rows: available,
+        images: None,
+        exited_code: None,
+        exited_signal: None,
+    };
+    snapshot.validate().expect("valid reconstruction fixture");
+    snapshot
+}
+
+fn history_test_append(
+    snapshot: &TerminalSnapshot,
+    appended: usize,
+    trimmed: usize,
+) -> TerminalUpdate {
+    let available = snapshot.available_scrollback_rows + appended - trimmed;
+    let newest =
+        snapshot.newest_available_scrollback_row_id.unwrap() + u64::try_from(appended).unwrap();
+    let returned = appended.min(MAX_SNAPSHOT_SCROLLBACK_ROWS).min(available);
+    TerminalUpdate {
+        base_revision: snapshot.revision,
+        revision: snapshot.revision + 1,
+        rows: Vec::new(),
+        scrolls: Vec::new(),
+        cursor: None,
+        title: None,
+        input_modes: None,
+        active_screen: None,
+        palette: None,
+        default_colors: None,
+        columns: None,
+        row_count: None,
+        images: None,
+        scrollback: Some(TerminalScrollbackUpdate {
+            transition: HistoryTransition::Append {
+                appended_rows: appended,
+                trimmed_rows: trimmed,
+            },
+            history_generation: snapshot.history_generation,
+            oldest_available_row_id: Some(newest + 1 - u64::try_from(available).unwrap()),
+            newest_available_row_id: Some(newest),
+            rows: history_test_rows(newest + 1 - u64::try_from(returned).unwrap(), newest),
+            available_rows: available,
+            omitted_oldest_rows: available - returned,
+        }),
+    }
+}
+
+#[test]
+fn reconstructed_history_bounds_small_appends_to_the_wire_snapshot_limit() {
+    let mut snapshot = history_test_snapshot(1, 16, 16);
+    let update = history_test_append(&snapshot, 2, 0);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(3, 18));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 2);
+}
+
+#[test]
+fn reconstructed_history_replaces_cached_rows_when_append_exceeds_returned_tail() {
+    let mut snapshot = history_test_snapshot(1, 16, 16);
+    let update = history_test_append(&snapshot, 66, 0);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(67, 82));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 66);
+}
+
+#[test]
+fn reconstructed_history_does_not_trim_cached_rows_for_omitted_history() {
+    let mut snapshot = history_test_snapshot(13, 20, 20);
+    let update = history_test_append(&snapshot, 1, 1);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(13, 21));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 11);
+}
+
+#[test]
+fn reconstructed_history_trims_cached_rows_only_after_omitted_history() {
+    let mut snapshot = history_test_snapshot(4, 8, 8);
+    let update = history_test_append(&snapshot, 5, 5);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(6, 13));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
