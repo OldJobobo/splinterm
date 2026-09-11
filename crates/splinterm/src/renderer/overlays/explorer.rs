@@ -332,11 +332,17 @@ pub(crate) fn paint_lair_explorer(
     {
         let rect = buffer_rect(layout_row.rect, scale_120);
         if selected == Some(row.id) {
+            // Row hit areas span the panel, but selection paint must not cover
+            // its right-hand divider, including at fractional buffer scales.
+            let highlight = Rect {
+                width: rect.width.min(right.saturating_sub(rect.x)),
+                ..rect
+            };
             fill_rect(
                 canvas,
                 canvas_width,
                 canvas_height,
-                tuple(rect),
+                tuple(highlight),
                 rgba(palette.selected_fill),
             );
             fill_rect(
@@ -346,7 +352,7 @@ pub(crate) fn paint_lair_explorer(
                 (
                     i32::try_from(rect.x).unwrap_or(i32::MAX),
                     i32::try_from(rect.y).unwrap_or(i32::MAX),
-                    border.saturating_mul(3),
+                    border.saturating_mul(3).min(highlight.width),
                     rect.height,
                 ),
                 rgba(palette.selected_rail),
@@ -475,6 +481,89 @@ mod tests {
             current: false,
             enabled: true,
             pending: false,
+        }
+    }
+
+    #[test]
+    fn selected_row_preserves_divider_pixels_at_all_scales_and_widths() {
+        use super::super::picker::session_picker_palette;
+        use crate::config::ResolvedTheme;
+
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let mut palette = session_picker_palette(ResolvedTheme::default());
+        palette.frame = 0x0012_3456;
+        palette.focused_frame = 0x0098_abcd;
+        let bgra = |color| {
+            let [r, g, b, a] = rgba(color);
+            [b, g, r, a]
+        };
+        for width in [1000, 700, 2, 1] {
+            for scale in [120, 150, 180, 240] {
+                for focused in [false, true] {
+                    let content = Rect {
+                        x: 7,
+                        y: 20,
+                        width,
+                        height: 180,
+                    };
+                    let layout = lair_explorer_layout(content, 640, &rows, Some(id), 0).unwrap();
+                    let canvas_width = (content.x + content.width) * scale / 120 + 1;
+                    let canvas_height = (content.y + content.height) * scale / 120 + 1;
+                    let mut canvas = vec![0; (canvas_width * canvas_height * 4) as usize];
+                    paint_lair_explorer(
+                        &mut SessionPickerTextCache::default(),
+                        &RenderContext::new(u16::MAX),
+                        &mut canvas,
+                        canvas_width,
+                        canvas_height,
+                        scale,
+                        1,
+                        &layout,
+                        palette,
+                        &rows,
+                        Some(id),
+                        None,
+                        "",
+                        None,
+                        focused,
+                    )
+                    .unwrap();
+                    let panel = buffer_rect(layout.panel, scale);
+                    let border = scale.div_ceil(120).max(1);
+                    let right = panel.x + panel.width.saturating_sub(border);
+                    let expected = bgra(if focused {
+                        palette.focused_frame
+                    } else {
+                        palette.frame
+                    });
+                    for y in panel.y..panel.y + panel.height {
+                        for x in right..panel.x + panel.width {
+                            let offset = ((y * canvas_width + x) * 4) as usize;
+                            assert_eq!(
+                                &canvas[offset..offset + 4],
+                                &expected,
+                                "divider at {x},{y}; width={width}, scale={scale}, focused={focused}"
+                            );
+                        }
+                    }
+                    if right > panel.x {
+                        let y = buffer_rect(layout.rows[0].rect, scale).y + 1;
+                        let x = right - 1;
+                        let offset = ((y * canvas_width + x) * 4) as usize;
+                        let expected = bgra(if right - panel.x <= border * 3 {
+                            palette.selected_rail
+                        } else {
+                            palette.selected_fill
+                        });
+                        assert_eq!(
+                            &canvas[offset..offset + 4],
+                            &expected,
+                            "selection must reach the inside edge without covering the divider"
+                        );
+                    }
+                }
+            }
         }
     }
 
