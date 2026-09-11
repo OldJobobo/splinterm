@@ -4286,6 +4286,23 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
     server.send(&request(22, "resources/list", json!({})));
     server.send(&request(23, "ping", json!({})));
     assert_eq!(server.receive_id(23)["result"], json!({}));
+    // Ping may finish before the catalogue requests. Observe both replies,
+    // including any already received, before EOF cancels outstanding work.
+    let catalogue_ids = [json!("string-response-id"), json!(22)];
+    loop {
+        let responses = server.seen();
+        if catalogue_ids
+            .iter()
+            .all(|id| responses.iter().any(|response| &response["id"] == id))
+        {
+            break;
+        }
+        assert!(
+            responses.len() < 5,
+            "missing catalogue response IDs: {responses:?}"
+        );
+        server.receive();
+    }
     server.close_input();
 
     assert!(server.wait().success());
@@ -4312,12 +4329,15 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
                 .as_array()
                 .is_some_and(|tools| tools.len() == 33)
     }));
-    assert!(responses.iter().any(|response| {
-        response["id"] == 22
-            && response["result"]["resources"]
-                .as_array()
-                .is_some_and(|resources| resources.len() == 1)
-    }));
+    assert!(
+        responses.iter().any(|response| {
+            response["id"] == 22
+                && response["result"]["resources"]
+                    .as_array()
+                    .is_some_and(|resources| resources.len() == 1)
+        }),
+        "missing successful resource-list reply: {responses:?}"
+    );
     assert!(
         responses
             .iter()
