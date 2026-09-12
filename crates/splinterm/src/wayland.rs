@@ -4558,25 +4558,52 @@ impl App {
     }
 
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
-        if self.explorer.focused() && self.explorer.search_active() {
-            return Some((OwnedFieldTarget::ExplorerSearch, self.explorer.editor_mut()));
+        let modal_open = self.modal.input_modal_open()
+            || self.modal.session_picker.is_some()
+            || self.modal.trusted_consent.is_some();
+        let explorer_search = self.explorer.focused() && self.explorer.search_active();
+        let palette = if self.modal.binding_help.is_none() {
+            self.modal
+                .command_palette
+                .as_mut()
+                .map(CommandPaletteUi::editor_mut)
+        } else {
+            None
+        };
+        Self::select_owned_field(
+            modal_open,
+            palette,
+            self.modal
+                .dojo_prompt
+                .as_mut()
+                .and_then(DojoPromptUi::editor_mut),
+            explorer_search.then(|| self.explorer.editor_mut()),
+            self.panes.pane.search.input.as_mut(),
+        )
+    }
+
+    fn select_owned_field<'a>(
+        modal_open: bool,
+        palette: Option<&'a mut BoundedTextEditor>,
+        prompt: Option<&'a mut BoundedTextEditor>,
+        explorer: Option<&'a mut BoundedTextEditor>,
+        terminal_search: Option<&'a mut BoundedTextEditor>,
+    ) -> Option<(OwnedFieldTarget, &'a mut BoundedTextEditor)> {
+        // Explorer keeps its focus while a modal is open, but must not keep
+        // ownership of text editing above that modal.
+        if let Some(editor) = palette {
+            return Some((OwnedFieldTarget::CommandPalette, editor));
         }
-        if self.modal.binding_help.is_none()
-            && let Some(palette) = self.modal.command_palette.as_mut()
-        {
-            return Some((OwnedFieldTarget::CommandPalette, palette.editor_mut()));
-        }
-        if let Some(prompt) = self.modal.dojo_prompt.as_mut()
-            && let Some(editor) = prompt.editor_mut()
-        {
+        if let Some(editor) = prompt {
             return Some((OwnedFieldTarget::DojoPrompt, editor));
         }
-        self.panes
-            .pane
-            .search
-            .input
-            .as_mut()
-            .map(|editor| (OwnedFieldTarget::Search, editor))
+        if modal_open {
+            return None;
+        }
+        if let Some(editor) = explorer {
+            return Some((OwnedFieldTarget::ExplorerSearch, editor));
+        }
+        terminal_search.map(|editor| (OwnedFieldTarget::Search, editor))
     }
 
     fn owned_field_editor_mut(
@@ -10544,6 +10571,87 @@ mod tests {
             false,
             &PointerEventKind::Motion { time: 12 }
         ));
+    }
+
+    #[test]
+    fn owned_fields_route_palette_typing_above_explorer_search() {
+        let mut palette = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+        let (target, editor) = App::select_owned_field(
+            true,
+            Some(&mut palette),
+            None,
+            Some(&mut explorer),
+            Some(&mut terminal),
+        )
+        .unwrap();
+        assert_eq!(target, OwnedFieldTarget::CommandPalette);
+        assert!(editor.insert("Toggle Lair explorer"));
+        assert_eq!(palette.text(), "Toggle Lair explorer");
+        assert_eq!(explorer.text(), "keep");
+        assert_eq!(terminal.text(), "terminal");
+    }
+
+    #[test]
+    fn owned_fields_route_prompt_typing_above_background_searches() {
+        let mut prompt = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+        let (target, editor) = App::select_owned_field(
+            true,
+            None,
+            Some(&mut prompt),
+            Some(&mut explorer),
+            Some(&mut terminal),
+        )
+        .unwrap();
+        assert_eq!(target, OwnedFieldTarget::DojoPrompt);
+        assert!(editor.insert("New name"));
+        assert_eq!(prompt.text(), "New name");
+        assert_eq!(explorer.text(), "keep");
+        assert_eq!(terminal.text(), "terminal");
+    }
+
+    #[test]
+    fn owned_fields_nonediting_modal_blocks_background_searches() {
+        for explorer_active in [false, true] {
+            for terminal_active in [false, true] {
+                let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+                let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+                assert!(
+                    App::select_owned_field(
+                        true,
+                        None,
+                        None,
+                        explorer_active.then_some(&mut explorer),
+                        terminal_active.then_some(&mut terminal),
+                    )
+                    .is_none()
+                );
+                assert_eq!(explorer.text(), "keep");
+                assert_eq!(terminal.text(), "terminal");
+            }
+        }
+    }
+
+    #[test]
+    fn owned_fields_restore_background_search_priority_without_a_modal() {
+        let mut explorer = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let (target, editor) =
+            App::select_owned_field(false, None, None, Some(&mut explorer), Some(&mut terminal))
+                .unwrap();
+        assert_eq!(target, OwnedFieldTarget::ExplorerSearch);
+        assert!(editor.insert("explorer"));
+        assert_eq!(terminal.text(), "");
+        let (target, editor) =
+            App::select_owned_field(false, None, None, None, Some(&mut terminal)).unwrap();
+        assert_eq!(target, OwnedFieldTarget::Search);
+        assert!(editor.insert("terminal"));
+        assert_eq!(explorer.text(), "explorer");
+        assert_eq!(terminal.text(), "terminal");
+        assert!(App::select_owned_field(false, None, None, None, None).is_none());
     }
 
     #[test]
