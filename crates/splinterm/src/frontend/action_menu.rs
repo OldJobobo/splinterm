@@ -1753,11 +1753,12 @@ pub(crate) fn command_dispatch(
                 kind: LairPromptKind::Terminate,
             })
         }
+        // Command orientation names the divider; core axes name pane placement.
         BuiltInCommandId::SplitHorizontal => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
-                axis: Axis::Horizontal,
+                axis: Axis::Vertical,
                 pending: None,
             })
         }
@@ -1765,7 +1766,7 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
-                axis: Axis::Vertical,
+                axis: Axis::Horizontal,
                 pending: None,
             })
         }
@@ -2500,6 +2501,17 @@ mod tests {
         );
         assert_eq!(
             command_dispatch(BuiltInCommandId::SplitHorizontal, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::Split {
+                    dojo_id: context.dojo_id,
+                    target: context.splint_id,
+                    axis: Axis::Vertical,
+                    pending: None,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::SplitVertical, &context),
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::Split {
                     dojo_id: context.dojo_id,

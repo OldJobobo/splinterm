@@ -212,10 +212,13 @@ pub(in crate::wayland) fn pane_topology_action(
     action: Option<ActionId>,
 ) -> Option<PaneTopologyAction> {
     match action? {
+        // Action orientation names the divider; core axes name pane placement.
         ActionId::SplitHorizontal => {
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical))
+        }
+        ActionId::SplitVertical => {
             Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal))
         }
-        ActionId::SplitVertical => Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical)),
         ActionId::CloseFocusedPane => Some(PaneTopologyAction::Close),
         ActionId::ResizePaneSmaller => Some(PaneTopologyAction::AdjustRatio(-50)),
         ActionId::ResizePaneLarger => Some(PaneTopologyAction::AdjustRatio(50)),
@@ -680,6 +683,28 @@ mod tests {
     }
 
     #[test]
+    fn named_split_actions_follow_placement_axes() {
+        for (action, name, axis) in [
+            (
+                ActionId::SplitHorizontal,
+                "pane.split-below",
+                splinterm_core::Axis::Vertical,
+            ),
+            (
+                ActionId::SplitVertical,
+                "pane.split-right",
+                splinterm_core::Axis::Horizontal,
+            ),
+        ] {
+            assert_eq!(action.config_name(), name);
+            assert_eq!(
+                pane_topology_action(Some(action)),
+                Some(PaneTopologyAction::Split(axis))
+            );
+        }
+    }
+
+    #[test]
     fn pane_bindings_are_typed_and_do_not_capture_plain_keys() {
         assert_eq!(
             pane_focus_action(shortcut_action(Keysym::Left, ctrl_shift())),
@@ -691,11 +716,11 @@ mod tests {
         );
         assert_eq!(
             pane_topology_action(shortcut_action(Keysym::Return, ctrl_shift())),
-            Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal))
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical))
         );
         assert_eq!(
             pane_topology_action(shortcut_action(Keysym::bar, ctrl_shift())),
-            Some(PaneTopologyAction::Split(splinterm_core::Axis::Vertical))
+            Some(PaneTopologyAction::Split(splinterm_core::Axis::Horizontal))
         );
         assert_eq!(
             pane_topology_action(shortcut_action(Keysym::W, ctrl_shift())),
