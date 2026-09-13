@@ -1,14 +1,17 @@
-# Public beta Arch packaging
+# Arch packaging
 
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` prepares the `0.1.0rc.2` split packages for
-reviewed local and CI candidate builds. Its local source archive and `SKIP` checksum are
-valid only in that workflow. The current public versioned release is
-[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1).
-The closed `packaging/release-state.json` record is the machine-readable authority for that
-current public predecessor; candidate construction and promotion both reject a
+Splinterm's `packaging/PKGBUILD` prepares split packages for reviewed local and CI
+candidate builds. Its local source archive and `SKIP` checksum are valid only in
+that workflow. This checkout's recipe and the examples below use `0.1.0`; a
+source build may contain changes not yet published under a new version. Match
+archive and package filenames to the recipe when preparing another version.
+
+The closed `packaging/release-state.json` record identifies `v0.1.0` as the
+current public predecessor. It is the machine-readable authority for that
+boundary; candidate construction and promotion both reject a
 different supplied tag even when it exists. `docs/status.md` carries the same
 exact current-version marker, and release tooling rejects disagreement. The
 post-publication release-record PR must update both files atomically before any
@@ -57,7 +60,7 @@ and SHA-256 package digests before downloading either package. Historical
 
 An authenticated GitHub CLI session is used when one is already available;
 otherwise the installer uses anonymous GitHub API and release downloads through
-`curl`. Authentication is not required for ordinary public beta installs.
+`curl`. Authentication is not required for ordinary public release installs.
 
 Before Pacman installation, the script verifies package checksums and matching
 split-package versions. It rejects a shadowing user-local client, preserves an
@@ -105,8 +108,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0rc.2/ \
-  -o packaging/splinterm-0.1.0rc.2.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.0/ \
+  -o packaging/splinterm-0.1.0.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
@@ -125,8 +128,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0rc.2-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.0-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -247,7 +250,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0rc.2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.0-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -255,7 +258,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

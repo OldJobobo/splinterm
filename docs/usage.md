@@ -128,6 +128,42 @@ confirmed Terminate Dojo. Opening the menu does not first activate its tab.
 client-local. Terminating a Dojo is a named, confirmed daemon mutation and ends
 its pane processes.
 
+## Lair Explorer
+
+The optional Explorer shows Lairs, their Dojos, and individual Splints beside
+terminal panes. Open the command palette (`Ctrl+Shift+P` in the built-in keymap)
+and choose **Toggle Lair explorer** to show or hide it, or **Focus Lair explorer**
+to show it and move keyboard focus there. These Explorer actions have no default
+shortcut. **Return focus to terminal** moves focus back without hiding Explorer.
+
+While Explorer has focus:
+
+- Use Up/Down to select a row; PageUp/PageDown move by a page and Home/End select
+  the first/last row. Outside search, `j`/`k` also move the selection.
+- Outside search, use Right to expand a Lair or Dojo, then enter its first child.
+  Left moves to the parent, or collapses an expanded Lair. Space toggles a Lair
+  or Dojo's disclosure without activating terminal work.
+- Press Enter on a Lair to toggle disclosure, on a Dojo to open it, or on a live
+  Splint to focus its pane. Selecting a row alone does not activate it: the
+  **selected** row is the navigation target, while **current** identifies the
+  terminal work already active in the Window.
+- Press `/` or `Ctrl+F` to search navigation labels, not terminal output or
+  scrollback. Matching descendants retain their parent context. Escape clears
+  a nonempty query; Escape with an empty query returns focus to the terminal.
+- Outside search, `r` reveals the current work, or retries a failed refresh when
+  the Explorer offers retry.
+
+Unavailable targets cannot be activated. Restorable exited work enters the
+existing preview/confirmation flow; it is not silently restarted by selection.
+Restoring starts new processes, not a checkpoint of the old applications. A
+foreground palette or confirmation owns input rather than the Explorer search
+field behind it.
+
+The repository's `docs/accessibility.md` describes the bounded native AT-SPI
+navigation interface and its limitations; that guide is not currently included
+in the Arch package's installed documentation. This is not whole-terminal
+screen-reader support.
+
 ## Panes and layouts
 
 The built-in application controls are:
