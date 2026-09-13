@@ -21,8 +21,9 @@ inputs.splinterm.url = "github:OldJobobo/splinterm/<reviewed-revision>";
 ```
 
 Replace `<reviewed-revision>` with a reviewed 0.1 maintenance commit containing
-Nix support. The original `v0.1.0` tag predates this integration. Until the
-packaging branch is merged/published, use a local checkout containing it.
+Nix support. It is included in the maintenance ancestry used for 0.1.1, but the
+original `v0.1.0` tag predates it. Before 0.1.1 publication, use a reviewed
+maintenance revision or local checkout containing Nix support, not that older tag.
 The public release installer and Arch packages are **not** NixOS installers.
 The package's own pinned nixpkgs supplies its Rust/native toolchain; following a
 host's older nixpkgs input may not provide a sufficiently recent Rust compiler.

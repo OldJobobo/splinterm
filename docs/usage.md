@@ -159,10 +159,9 @@ Restoring starts new processes, not a checkpoint of the old applications. A
 foreground palette or confirmation owns input rather than the Explorer search
 field behind it.
 
-The repository's `docs/accessibility.md` describes the bounded native AT-SPI
-navigation interface and its limitations; that guide is not currently included
-in the Arch package's installed documentation. This is not whole-terminal
-screen-reader support.
+[Navigation accessibility](accessibility.md) describes the bounded native AT-SPI
+interface and its limitations. The guide is included in the 0.1.1 Arch and Nix
+package documentation. This is not whole-terminal screen-reader support.
 
 ## Panes and layouts
 
@@ -247,7 +246,7 @@ Pasting requires the graphical client to hold terminal input control.
 
 ### Save a clipboard screenshot as a path
 
-Intended for 0.1.1 (not yet released): configure a private existing
+Available in the 0.1.1 source (publication pending): configure a private existing
 `[clipboard] image-directory`, then choose **Save clipboard image and insert path**
 from the command palette. The bindable action is `clipboard.save-image`; there is
 no default shortcut. Only bounded static PNG is supported, and normal text paste
@@ -258,7 +257,7 @@ The saved PNG is private and persistent. Its shell-escaped path is inserted with
 Enter. A changed pane or busy input channel never redirects or defers the path;
 a PNG already published is retained and its path reported through the temporary
 Window title and stderr. Delete saved files yourself when no longer needed.
-See [Clipboard PNG configuration](configuration.md#clipboard-png-saving-intended-for-011-not-yet-released)
+See [Clipboard PNG configuration](configuration.md#clipboard-png-saving)
 for limits, permissions, metadata preservation, cancellation, and filesystem requirements.
 
 ## Scrollback and search

@@ -5,8 +5,8 @@ n8n notification role are defined in [Release automation](release-automation.md)
 
 Splinterm's `packaging/PKGBUILD` prepares split packages for reviewed local and CI
 candidate builds. Its local source archive and `SKIP` checksum are valid only in
-that workflow. This checkout's recipe and the examples below use `0.1.0`; a
-source build may contain changes not yet published under a new version. Match
+that workflow. This checkout's recipe and the examples below prepare `0.1.1`;
+publication is pending. A version bump does not establish release availability. Match
 archive and package filenames to the recipe when preparing another version.
 
 The closed `packaging/release-state.json` record identifies `v0.1.0` as the
@@ -24,6 +24,11 @@ recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it must already
 target the candidate version's immutable `v…` release URL, while candidate
 construction binds its commit and checksums to the exact approved packages so
 users never compile or test them locally.
+
+During release preparation, checked-in AUR checksums and `_commit` still refer
+to the previous artifacts until candidate tooling replaces them. These staged
+recipes are not ready for AUR submission or installation. Never invent hashes
+for unpublished assets; use the reviewed candidate's generated drafts.
 
 ## Versioned AUR installation
 
@@ -108,8 +113,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0/ \
-  -o packaging/splinterm-0.1.0.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.1/ \
+  -o packaging/splinterm-0.1.1.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
@@ -128,8 +133,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.1-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.1-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -163,7 +168,7 @@ not submit the local-build recipe to the AUR.
   `/usr/bin/splinterm-session-picker` alias, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;
-- the release README, CLI/usage/configuration guides, built-in Omarchy keymap
+- the release README, CLI/usage/configuration/accessibility guides, built-in Omarchy keymap
   documentation, preset guide and example schema, optional shell-integration
   instructions, headless lifecycle/policy guidance, terminal-image matrix, and
   integration snippets under `/usr/share/doc/splinterm/`; and
@@ -250,7 +255,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.1-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -258,7 +263,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.1-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

@@ -275,7 +275,9 @@ connections, releasing subscriptions and controller leases. It sends no kill,
 close, restore, or other process-lifecycle request, so daemon-owned remote
 Splints continue running.
 
-## Remote window hostname tag (unreleased 0.1.1)
+## Remote window hostname tag
+
+Available in the 0.1.1 source; publication is pending.
 
 Remote graphical windows show a compact `Remote: hostname` tag in the upper-right
 application header. The hostname is the connected daemon's kernel OS nodename,

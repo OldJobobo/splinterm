@@ -1,67 +1,73 @@
-# Splinterm 0.1.0
+# Splinterm 0.1.1
 
-Splinterm's first stable release is for x86_64 Omarchy/Arch Linux with native
-Wayland under Hyprland. It carries the RC3 terminal and daemon implementation
-forward unchanged; this release updates version metadata, documentation, and
-publication tooling rather than adding product features.
+Prepared release notes; publication is pending. The recorded public predecessor
+remains `v0.1.0`. Version metadata alone does not establish release availability.
 
-## What ships
+## Navigation and returning to work
 
-- Daemon-owned terminal sessions that survive closing a graphical Window,
-  multiplexed Splints and Dojos, saved Lairs, and explicit restore.
-- Scrollback and search, terminal images, native Wayland input, and configurable
-  terminal lifetime and presets.
-- Live Omarchy theme and default-font following. Invalid font generations retain
-  the last valid renderer, while explicit font choices remain authoritative.
-- Bounded JSON/NDJSON automation, remote graphical access, and an optional
-  policy-scoped MCP adapter. Terminal output never grants automation authority.
-- Source-built and prebuilt Arch packages, desktop integration, and a systemd
-  user service.
+- An optional Lair Explorer presents Lairs, Dojos, and Splints beside terminal
+  panes. Use **Toggle Lair explorer** or **Focus Lair explorer** in the command
+  palette. Selection and current terminal focus remain distinct.
+- Hierarchy-aware pickers and activation/focus recovery make it easier to return
+  to running work and reattach restored panes.
+- The first-five-minutes guide covers opening, splitting, detaching, and returning.
+  Reattachment does not restart an exited process; explicit restore starts new
+  processes rather than recovering application checkpoints.
+- Split-below and split-right now honor their named directions in both keyboard
+  and palette dispatch. Default keys and action IDs are unchanged.
 
-## Stabilization included from RC3
+## Text and clipboard
 
-- Unchanged Fontconfig sources no longer trigger repeated staging when an
-  incompatible bold or italic face falls back to the regular face.
-- FIFO policy files are rejected without waiting for a writer.
-- Revoking another automation connection preserves partially received requests.
-- Abnormal connection exits immediately remove their topology subscriptions.
-- Relay cancellation interrupts blocked writes and reclaims queues. Remote EOF
-  still delivers buffered bytes in order to slow consumers, within channel bounds.
+- Opt-in `main.font-ligatures=on` or `cursor` shapes compatible adjacent printable
+  ASCII cells. The default remains `off`; cell widths and copied text are
+  unchanged. This is not general-script or bidi run shaping.
+- `main.font-features` accepts explicit OpenType feature settings. Both settings
+  require a new client process and survive native font-family changes unchanged.
+- **Save clipboard image and insert path** saves bounded static PNG content into
+  a configured private directory and inserts its shell-quoted path without Enter.
+  It is local-only, has no default shortcut, and does not change ordinary paste.
+  Saved files persist until manually deleted; this is not metadata sanitization.
 
-The release also retains the RC1/RC2 font-lifetime fixes, current Gum colors for
-new Splints, bounded Sixel previews for Yazi, and legacy generated-Dojo name
-normalization.
+## Accessibility and remote identity
 
-## Install
+- Native Linux AT-SPI exposes Explorer navigation, search, and bounded status.
+  Actions respect focus, control, visibility, and stale-target checks. Terminal
+  text, scrollback, modal dialogs, and global pointer geometry are not exposed.
+  This is not whole-terminal screen-reader support.
+- The accessibility guide is included in the Arch and Nix package documentation.
+- Remote Windows show the connected daemon's hostname when available, with a
+  `Remote` fallback. This label is informational, not proof of connection health
+  or a security indicator.
 
-Use `yay -S splinterm-bin` for the prebuilt package or `yay -S splinterm` to build
-from source. The optional MCP packages are `splinterm-mcp-bin` and `splinterm-mcp`.
-AUR distribution follows verification of the GitHub release assets. Packages and
-source are also available on this release page.
+## Packaging and reliability
 
-## Upgrade boundary
+- The repository flake and NixOS module provide x86_64 Linux packaging, including
+  headless/module/package checks. Nix support predates this release in maintenance
+  ancestry but is absent from the original `v0.1.0` tag. The Arch release installer
+  is not a NixOS installer; universal compositor compatibility is not claimed.
+- Fixes address inactive-pane repainting, committed-canvas preservation, control
+  reacquisition, subscription progress, modal input precedence, and Explorer
+  selection clipping.
+- History caches retain prefixes only across proven continuous updates, avoiding
+  disconnected blank prefixes after bounded scrollback-tail updates. The wire
+  history cap is unchanged.
+- Arch renderer checks use checksum-pinned font fixtures, not ambient primary-font
+  selection. These fixtures are not installed as runtime fonts. MCP validation
+  now explicitly synchronizes asynchronous catalogue and cancellation boundaries.
 
-**Splinterm 0.1 does not support live daemon upgrade handoff.** Stopping or
-replacing the running daemon ends its child processes; saved topology is not a
-checkpoint of running applications. Save your work and upgrade from Foot or
-another terminal that is not owned by `splinterd`:
+## Installation and upgrade boundary
 
-```bash
-systemctl --user stop splinterd.service
-# Upgrade the splinterm package here.
-systemctl --user daemon-reload
-systemctl --user start splinterd.service
-```
+After GitHub assets and AUR updates are verified, Arch users can install
+`splinterm-bin` and optional matching `splinterm-mcp-bin`, or their source-built
+alternatives. Before publication, use the documented reviewed-source workflow;
+these notes do not announce available 0.1.1 downloads.
 
-Then reopen Splinterm Windows. Package installation does not silently restart
-the user service. See the [upgrade and rollback documentation](https://splinterm.com/docs/packaging/).
+**There is no live daemon-upgrade handoff.** Save work and upgrade from Foot,
+another independent terminal, or an independent SSH session. Stopping or replacing
+`splinterd` ends its child processes; saved layouts do not checkpoint applications.
+Reopen Splinterm Windows after replacement so they use the new packaged client
+identity. Keep the optional MCP adapter at the matching package version.
 
-## Scope and limitations
-
-Stable 0.1.0 does not add support for other distributions, compositors,
-architectures, or package formats, and does not promise live daemon replacement
-or a support lifetime. Splinterm is security-conscious, not absolutely secure;
-automation remains subject to explicit policy, consent, revocation, and resource
-bounds. Future 0.x releases may change interfaces with documented migration.
-
-[Documentation](https://splinterm.com/docs/) · [Source and issues](https://github.com/OldJobobo/splinterm)
+See `docs/packaging.md`, `docs/nixos.md`, and `docs/accessibility.md` for platform,
+upgrade, and support boundaries. No broad performance guarantee, universal
+assistive-technology compatibility, or support-duration promise is introduced.

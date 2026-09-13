@@ -163,6 +163,7 @@ rustPlatform.buildRustPackage {
     done
     test "$(head -n 1 "$out/bin/splinterm-xdg-terminal-exec")" = '#!${runtimeShell}'
     ${if withMcp then "test -x \"$out/bin/splinterm-mcp\"" else "test ! -e \"$out/bin/splinterm-mcp\""}
+    test -s "$out/share/doc/splinterm/accessibility.md"
     "$out/bin/splinterm" --help >/dev/null
     python3 nix/package-smoke.py "$out" '${runtimeShell}'
     desktop-file-validate "$out/share/applications/com.oldjobobo.splinterm.desktop"
