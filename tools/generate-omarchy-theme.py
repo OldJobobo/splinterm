@@ -51,9 +51,11 @@ def theme_settings(theme_dir: Path) -> tuple[float, bool]:
     assignments: dict[str, dict[str, str]] = {
         "colors": {},
         "colors-dark": {},
+        "colors-light": {},
+        "main": {},
     }
     sections_seen: set[str] = set()
-    section = ""
+    section = "main"
     for raw_line in foot.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if line.startswith("[") and line.endswith("]"):
@@ -65,10 +67,16 @@ def theme_settings(theme_dir: Path) -> tuple[float, bool]:
             continue
         key, separator, value = line.partition("=")
         normalized_key = key.strip().lower()
-        if separator and normalized_key in {"alpha", "blur"}:
+        if separator and normalized_key in {"alpha", "blur", "initial-color-theme"}:
             assignments[section][normalized_key] = value.strip()
 
-    selected = "colors-dark" if "colors-dark" in sections_seen else "colors"
+    initial = assignments["main"].get("initial-color-theme", "dark")
+    if initial not in {"dark", "light"}:
+        raise ValueError("foot.ini initial-color-theme must be dark or light")
+    selected = (
+        "colors-light" if initial == "light"
+        else "colors-dark" if "colors-dark" in sections_seen else "colors"
+    )
     values = assignments[selected]
     try:
         alpha = float(values.get("alpha", "1.0"))

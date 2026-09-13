@@ -553,10 +553,10 @@ Copy values rather than copying a whole `foot.ini`:
   `main.initial-rows`.
 - Foot `shell` → `main.shell`; Splinterm never evaluates it as a shell command.
 - Foot `scrollback.lines` and cursor style/blink map directly.
-- Foot `alpha` and `blur` are imported together from `[colors-dark]`, or from
-  legacy `[colors]` when no dark section exists. `[colors-light]` is ignored
-  because Splinterm has no light-theme selection state. Use `[colors] alpha`
-  and `[colors] blur` only for explicit Splinterm overrides.
+- Foot `alpha` and `blur` are imported together from `[colors-light]` when
+  Foot's `main.initial-color-theme=light`; otherwise from `[colors-dark]`, or
+  legacy `[colors]` when no dark section exists. Use `[colors] alpha` and
+  `[colors] blur` only for explicit Splinterm overrides.
 - Convert colors through the Omarchy generator below instead of pasting Foot's
   complete `[colors]` section.
 
@@ -593,8 +593,12 @@ The tab-strip and selected-tab backgrounds both inherit the terminal alpha
 while preserving their resolved colors. The selected-tab underline remains the
 opaque UI accent. Terminal selections continue to use Foot's independent
 `selection-foreground`, falling back to the terminal foreground when that Foot
-role is absent. `[colors-dark]` takes precedence over legacy `[colors]`, while
-absent alpha defaults opaque and absent blur defaults off.
+role is absent. Foot's `[main] initial-color-theme=light` selects the complete
+`[colors-light]` palette. Missing or `dark` selection uses `[colors-dark]`, which
+takes precedence over legacy `[colors]`. Palette sections are never mixed;
+missing or incomplete selected palettes are rejected. Absent alpha defaults
+opaque and absent blur defaults off. Theme switches re-read this selector along
+with the palette; Foot's separate runtime color-theme keybindings are not imported.
 
 Splinterm fingerprints the active directory plus both source files every 500 ms.
 This detects Omarchy's atomic current-theme directory replacement and applies a

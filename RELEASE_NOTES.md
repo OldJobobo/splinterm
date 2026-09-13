@@ -48,6 +48,9 @@ remains `v0.1.0`. Version metadata alone does not establish release availability
 - Fixes address inactive-pane repainting, committed-canvas preservation, control
   reacquisition, subscription progress, modal input precedence, and Explorer
   selection clipping.
+- Switching to light Omarchy themes now honors Foot's `initial-color-theme=light`
+  and loads the light palette instead of retaining the previous dark background.
+  Dark/legacy palettes and explicit alpha/blur overrides remain supported.
 - History caches retain prefixes only across proven continuous updates, avoiding
   disconnected blank prefixes after bounded scrollback-tail updates. The wire
   history cap is unchanged.
