@@ -270,12 +270,48 @@ pub(super) fn apply_scrollback_update(
         }
         _ => {}
     }
+    let first_returned = scrollback.rows.first().and_then(|row| row.row_id);
+    // A bounded update can omit newly appended rows. Joining its tail to an
+    // older cache would hide that gap from the viewport. Row IDs are ordered,
+    // not necessarily consecutive: prove continuity by counts or overlap.
+    let complete_append = match scrollback.transition {
+        HistoryTransition::Append {
+            appended_rows,
+            trimmed_rows,
+        } => {
+            scrollback.rows.len() >= appended_rows
+                && snapshot.newest_available_scrollback_row_id.is_some()
+                && snapshot.scrollback_rows.last().and_then(|row| row.row_id)
+                    == snapshot.newest_available_scrollback_row_id
+                && snapshot
+                    .available_scrollback_rows
+                    .checked_add(appended_rows)
+                    .and_then(|available| available.checked_sub(trimmed_rows))
+                    == Some(scrollback.available_rows)
+        }
+        _ => false,
+    };
+    let overlapping_tail = first_returned
+        .and_then(|first| {
+            snapshot
+                .scrollback_rows
+                .iter()
+                .position(|row| row.row_id == Some(first))
+        })
+        .is_some_and(|start| {
+            let suffix = &snapshot.scrollback_rows[start..];
+            suffix.len() <= scrollback.rows.len()
+                && suffix
+                    .iter()
+                    .zip(&scrollback.rows)
+                    .all(|(cached, returned)| cached.row_id == returned.row_id)
+        });
     let preserve_cached = scrollback.history_generation == snapshot.history_generation
         && matches!(
             scrollback.transition,
             HistoryTransition::Append { .. } | HistoryTransition::Replace
-        );
-    let first_returned = scrollback.rows.first().and_then(|row| row.row_id);
+        )
+        && (complete_append || overlapping_tail);
     let oldest_available = scrollback.oldest_available_row_id;
     let mut rows = std::mem::take(&mut snapshot.scrollback_rows);
     if preserve_cached {

@@ -13229,6 +13229,174 @@ mod tests {
         ));
     }
 
+    fn reduce_history_merge_case(
+        cached: &[u64],
+        previous_newest: u64,
+        previous_available: usize,
+        transition: HistoryTransition,
+        returned: &[u64],
+        available: usize,
+        oldest: u64,
+    ) -> TerminalSnapshot {
+        let mut current = snapshot(SplintId::new(), 1, 10);
+        current.columns = 1;
+        current.rows = 34;
+        current.visible_rows = vec![blank_row(1); 34];
+        current.scrollback_rows = cached.iter().map(|id| history_row(*id, 0)).collect();
+        current.available_scrollback_rows = previous_available;
+        current.oldest_available_scrollback_row_id = cached.first().copied();
+        current.newest_available_scrollback_row_id = Some(previous_newest);
+        let generation = current.history_generation;
+        apply_scrollback_update(
+            &mut current,
+            splinterm_protocol::TerminalScrollbackUpdate {
+                transition,
+                history_generation: generation,
+                oldest_available_row_id: Some(oldest),
+                newest_available_row_id: returned.last().copied(),
+                rows: returned.iter().map(|id| history_row(*id, 1)).collect(),
+                available_rows: available,
+                omitted_oldest_rows: available - returned.len(),
+            },
+        )
+        .unwrap();
+        current
+    }
+
+    #[test]
+    fn history_merge_truncated_append_drops_disconnected_blank_prefix() {
+        let returned = (74..=89).collect::<Vec<_>>();
+        let current = reduce_history_merge_case(
+            &[1, 2],
+            2,
+            2,
+            HistoryTransition::Append {
+                appended_rows: 87,
+                trimmed_rows: 0,
+            },
+            &returned,
+            89,
+            1,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            returned
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 73);
+        let mut viewport = crate::viewport::ScrollbackViewport::default();
+        viewport.scroll_up(33, &current);
+        assert_eq!(viewport.offset_from_bottom(), 16);
+        assert_eq!(viewport.visible_rows(&current)[0].row_id, Some(74));
+        assert!(
+            !viewport.visible_rows(&current)[0].cells[0]
+                .content
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn history_merge_replace_requires_overlap_not_numeric_adjacency() {
+        let current = reduce_history_merge_case(
+            &[10, 20],
+            20,
+            2,
+            HistoryTransition::Replace,
+            &[21, 30],
+            4,
+            10,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            vec![21, 30]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 2);
+    }
+
+    #[test]
+    fn history_merge_retains_overlap_with_nonconsecutive_ids() {
+        let current = reduce_history_merge_case(
+            &[10, 20, 30, 40],
+            40,
+            4,
+            HistoryTransition::Replace,
+            &[30, 40, 70],
+            5,
+            10,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30, 40, 70]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 0);
+    }
+
+    #[test]
+    fn history_merge_complete_append_retains_nonconsecutive_ids_and_trim() {
+        for (trimmed_rows, oldest, available, expected) in [
+            (0, 10, 6, vec![10, 20, 30, 40, 70, 90]),
+            (2, 30, 4, vec![30, 40, 70, 90]),
+        ] {
+            let current = reduce_history_merge_case(
+                &[10, 20, 30, 40],
+                40,
+                4,
+                HistoryTransition::Append {
+                    appended_rows: 2,
+                    trimmed_rows,
+                },
+                &[70, 90],
+                available,
+                oldest,
+            );
+            assert_eq!(
+                current
+                    .scrollback_rows
+                    .iter()
+                    .filter_map(|r| r.row_id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(current.omitted_oldest_scrollback_rows, 0);
+        }
+    }
+
+    #[test]
+    fn history_merge_complete_append_does_not_bridge_an_older_only_cache() {
+        let current = reduce_history_merge_case(
+            &[10, 20],
+            50,
+            5,
+            HistoryTransition::Append {
+                appended_rows: 1,
+                trimmed_rows: 0,
+            },
+            &[70],
+            6,
+            10,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            vec![70]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 5);
+    }
+
     #[test]
     fn same_generation_trim_discards_cached_rows_before_daemon_oldest() {
         let mut current = snapshot(SplintId::new(), 1, 10);
