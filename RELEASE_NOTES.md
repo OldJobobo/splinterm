@@ -1,7 +1,8 @@
-# Splinterm 0.1.1
+# Splinterm 0.1.1-rc.1
 
-Prepared release notes; publication is pending. The recorded public predecessor
-remains `v0.1.0`. Version metadata alone does not establish release availability.
+First release candidate for Splinterm 0.1.1, distributed as a GitHub prerelease
+for testing before the final release. This is not the stable 0.1.1 release.
+AUR packages remain on the stable release; no RC packages are published to AUR.
 
 ## Navigation and returning to work
 
@@ -60,10 +61,12 @@ remains `v0.1.0`. Version metadata alone does not establish release availability
 
 ## Installation and upgrade boundary
 
-After GitHub assets and AUR updates are verified, Arch users can install
-`splinterm-bin` and optional matching `splinterm-mcp-bin`, or their source-built
-alternatives. Before publication, use the documented reviewed-source workflow;
-these notes do not announce available 0.1.1 downloads.
+Use the packages attached to the GitHub `v0.1.1-rc.1` prerelease for RC testing;
+verify them against its published checksums before installation. Install the
+matching optional MCP package if needed. AUR remains on the stable release until
+0.1.1 final is approved; do not use the repository's candidate AUR templates as
+published package recipes. Final publication requires a separate readiness
+decision after RC testing.
 
 **There is no live daemon-upgrade handoff.** Save work and upgrade from Foot,
 another independent terminal, or an independent SSH session. Stopping or replacing
