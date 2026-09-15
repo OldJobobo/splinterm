@@ -22,7 +22,9 @@ pub(crate) use action_menu::{TAB_MENU_ACTIONS, tab_menu_descriptor};
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
 #[cfg(test)]
 pub(crate) use lair_explorer::LairExplorerRowKind;
-pub(crate) use lair_explorer::{LairExplorerDecision, LairExplorerRow, LairExplorerUi};
+pub(crate) use lair_explorer::{
+    LairExplorerDecision, LairExplorerFilter, LairExplorerRow, LairExplorerUi,
+};
 pub use message::{
     AuthorityStatus, FontUpdate, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
 };

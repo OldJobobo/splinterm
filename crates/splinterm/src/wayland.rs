@@ -129,13 +129,14 @@ use crate::frontend::{
     AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
-    DojoPromptUi, FontUpdate, LairDirection, LairExplorerDecision, LairExplorerUi, LairPromptKind,
-    PerfTraceCorrelation, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
-    SessionPickerDecision, SessionPickerTarget, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
-    TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
-    ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
-    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
-    close_other_tabs_command, command_dispatch, tab_menu_right_press,
+    DojoPromptUi, FontUpdate, LairDirection, LairExplorerDecision, LairExplorerFilter,
+    LairExplorerUi, LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerCatalog,
+    SessionPickerCreationTarget, SessionPickerDecision, SessionPickerTarget, SessionPickerUi,
+    TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch, TabMenuRightPress,
+    TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, WindowCommand,
+    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, command_dispatch,
+    tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -157,13 +158,13 @@ use crate::renderer::{
     SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
     background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
     dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout,
-    lair_explorer_disclosure_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
-    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_lair_explorer,
-    paint_session_picker_overlay, paint_snapshot_overlays, paint_snapshot_presented,
-    paint_snapshot_region_presented, paint_snapshot_rows_presented, paint_tab_context_menu,
-    premultiplied_theme_rgba, scroll_snapshot_pixels, session_picker_hit_test,
-    session_picker_overlay_layout, session_picker_palette, snapshot_row_rect,
-    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
+    lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
+    lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
+    paint_lair_explorer, paint_session_picker_overlay, paint_snapshot_overlays,
+    paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
+    paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
+    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
+    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -1972,7 +1973,7 @@ struct PresentationState {
     explorer_layout: Option<LairExplorerLayout>,
     explorer_text_cache: SessionPickerTextCache,
     explorer_visible_start: usize,
-    explorer_pressed: Option<(NavigationNodeId, bool)>,
+    explorer_pressed: Option<ExplorerPointerPress>,
     full_redraw: bool,
 }
 
@@ -2525,6 +2526,30 @@ fn explorer_pointer_returns_to_terminal(
                 ..
             }
         )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExplorerPointerPress {
+    Row(NavigationNodeId, bool),
+    Filter(LairExplorerFilter),
+}
+
+fn explorer_released_filter(
+    pressed: Option<ExplorerPointerPress>,
+    target: Option<LairExplorerFilter>,
+) -> Option<LairExplorerFilter> {
+    match pressed {
+        Some(ExplorerPointerPress::Filter(filter)) if Some(filter) == target => Some(filter),
+        _ => None,
+    }
+}
+
+fn explorer_filter_key(key: Keysym, modifiers: Modifiers, searching: bool) -> bool {
+    !searching
+        && !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.logo
+        && matches!(key, Keysym::f | Keysym::F)
 }
 
 fn explorer_context_menu_key(key: Keysym, modifiers: Modifiers) -> bool {
@@ -6999,6 +7024,7 @@ impl App {
             return false;
         };
         let target = lair_explorer_hit_test(layout, event.position);
+        let filter = lair_explorer_filter_hit_test(layout, event.position);
         let disclosure =
             lair_explorer_disclosure_hit_test(layout, &self.explorer.rows(), event.position);
         let mut changed = false;
@@ -7026,24 +7052,17 @@ impl App {
                 self.explorer.cancel_context_press();
                 self.set_explorer_focus(true, queue_handle);
                 self.presentation.explorer_pressed =
-                    target.map(|target| (target, disclosure == Some(target)));
+                    filter.map(ExplorerPointerPress::Filter).or_else(|| {
+                        target.map(|target| {
+                            ExplorerPointerPress::Row(target, disclosure == Some(target))
+                        })
+                    });
                 if let Some(target) = target {
                     changed |= self.explorer.select(target);
                 }
             }
             PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
-                let pressed = self.presentation.explorer_pressed.take();
-                if let Some((pressed, true)) = pressed
-                    && Some(pressed) == target
-                    && disclosure == Some(pressed)
-                {
-                    changed |= self.explorer.select(pressed);
-                    changed |= self.explorer.toggle_selected();
-                } else if pressed.is_some_and(|(pressed, _)| Some(pressed) == target)
-                    && let Some(decision) = self.explorer.decision()
-                {
-                    changed |= self.execute_lair_explorer_decision(decision);
-                }
+                changed |= self.release_lair_explorer_pointer(target, disclosure, filter);
             }
             PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
                 let delta =
@@ -7064,6 +7083,38 @@ impl App {
             self.presentation.full_redraw = true;
         }
         true
+    }
+
+    fn release_lair_explorer_pointer(
+        &mut self,
+        target: Option<NavigationNodeId>,
+        disclosure: Option<NavigationNodeId>,
+        filter: Option<LairExplorerFilter>,
+    ) -> bool {
+        let pressed = self.presentation.explorer_pressed.take();
+        if let Some(filter) = explorer_released_filter(pressed, filter) {
+            let changed = self.explorer.search_active();
+            self.explorer.focus_tree();
+            return self.explorer.set_filter(filter) || changed;
+        }
+        let Some(ExplorerPointerPress::Row(pressed, was_disclosure)) = pressed else {
+            return false;
+        };
+        if Some(pressed) != target {
+            return false;
+        }
+        let mut changed = self.explorer.select(pressed);
+        // Keyboard navigation or a refresh between press and release must not
+        // redirect this gesture to a different selected row.
+        if self.explorer.selected() != Some(pressed) {
+            return changed;
+        }
+        if was_disclosure && disclosure == Some(pressed) {
+            changed |= self.explorer.toggle_selected();
+        } else if let Some(decision) = self.explorer.decision() {
+            changed |= self.execute_lair_explorer_decision(decision);
+        }
+        changed
     }
 
     fn handle_session_picker_pointer(&mut self, event: &PointerEvent) -> bool {
@@ -7684,6 +7735,14 @@ impl App {
                     if matches!(event.keysym, Keysym::slash) || self.input.modifiers.ctrl =>
                 {
                     changed = self.explorer.begin_search();
+                }
+                key if explorer_filter_key(
+                    key,
+                    self.input.modifiers,
+                    self.explorer.search_active(),
+                ) =>
+                {
+                    changed = self.explorer.set_filter(self.explorer.filter().next());
                 }
                 Keysym::r | Keysym::R if !self.explorer.search_active() => {
                     if self.explorer.retryable() {
@@ -10411,6 +10470,7 @@ impl App {
                 self.explorer.query(),
                 status_message,
                 self.explorer.focused(),
+                self.explorer.filter(),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }
@@ -10756,6 +10816,56 @@ fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explorer_filter_gestures_require_matching_release_and_tree_key_ownership() {
+        use super::{
+            ExplorerPointerPress, Keysym, LairExplorerFilter, Modifiers, explorer_filter_key,
+            explorer_released_filter,
+        };
+        let pressed = Some(ExplorerPointerPress::Filter(LairExplorerFilter::Live));
+        assert_eq!(
+            explorer_released_filter(pressed, Some(LairExplorerFilter::Live)),
+            Some(LairExplorerFilter::Live)
+        );
+        assert_eq!(
+            explorer_released_filter(pressed, Some(LairExplorerFilter::Saved)),
+            None
+        );
+        assert_eq!(explorer_released_filter(pressed, None), None);
+        assert_eq!(
+            explorer_released_filter(None, Some(LairExplorerFilter::Live)),
+            None
+        );
+        let row = Some(ExplorerPointerPress::Row(
+            crate::navigation_projection::NavigationNodeId::Lair(splinterm_core::LairId::new()),
+            false,
+        ));
+        assert_eq!(
+            explorer_released_filter(row, Some(LairExplorerFilter::Live)),
+            None
+        );
+        assert!(explorer_filter_key(Keysym::f, Modifiers::default(), false));
+        assert!(explorer_filter_key(Keysym::F, Modifiers::default(), false));
+        assert!(!explorer_filter_key(Keysym::f, Modifiers::default(), true));
+        assert!(!explorer_filter_key(Keysym::r, Modifiers::default(), false));
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                logo: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert!(!explorer_filter_key(Keysym::f, modifiers, false));
+        }
+    }
+
     #[test]
     fn explorer_keyboard_context_menu_accepts_only_menu_and_shift_f10() {
         use super::{Keysym, Modifiers, explorer_context_menu_key};

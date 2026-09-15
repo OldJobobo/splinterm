@@ -131,18 +131,7 @@ impl NavigationAccessibility {
             visible,
             enabled,
             result_count: items.len(),
-            status: visible.then(|| {
-                explorer.status_message().map_or_else(
-                    || {
-                        if limited {
-                            "Navigation item limit reached".to_owned()
-                        } else {
-                            format!("{} results", items.len())
-                        }
-                    },
-                    str::to_owned,
-                )
-            }),
+            status: visible.then(|| navigation_status(explorer, limited, items.len())),
             items,
             query: if visible {
                 explorer.query().to_owned()
@@ -210,6 +199,23 @@ impl NavigationAccessibility {
             SemanticAction::SetSearch(_) => None,
         }
     }
+}
+
+fn navigation_status(explorer: &LairExplorerUi, limited: bool, count: usize) -> String {
+    let status = explorer.status_message().map_or_else(
+        || {
+            if limited {
+                "Navigation item limit reached".to_owned()
+            } else {
+                format!("{count} results")
+            }
+        },
+        str::to_owned,
+    );
+    format!(
+        "{} filter · {status} · F cycles filters",
+        explorer.filter().label()
+    )
 }
 
 fn identities(
@@ -323,7 +329,10 @@ mod tests {
         let empty = accessibility.refresh(&explorer, context());
         assert!(empty.items.is_empty());
         assert_eq!(empty.focus, SemanticFocus::Search);
-        assert_eq!(empty.status.as_deref(), Some("No matches"));
+        assert_eq!(
+            empty.status.as_deref(),
+            Some("All filter · No matches · F cycles filters")
+        );
         assert_eq!(empty.query, "no matches");
         assert!(
             accessibility
@@ -334,6 +343,46 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn navigation_accessibility_tracks_filter_and_rejects_hidden_targets() {
+        use crate::frontend::LairExplorerFilter;
+        let mut explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        let all = accessibility.refresh(&explorer, context());
+        let hidden = all.items[3].id;
+        explorer.set_filter(LairExplorerFilter::Saved);
+        let saved = accessibility.refresh(&explorer, context());
+        assert!(saved.generation > all.generation);
+        assert_eq!(saved.items, all.items);
+        assert!(saved.status.as_deref().unwrap().starts_with("Saved filter"));
+        explorer.set_filter(LairExplorerFilter::Live);
+        let live = accessibility.refresh(&explorer, context());
+        live.tree_update().unwrap();
+        assert_eq!(live.items.len(), 3);
+        assert!(live.status.as_deref().unwrap().starts_with("Live filter"));
+        assert!(
+            accessibility
+                .resolve(
+                    request(&live, SemanticAction::Activate(hidden)),
+                    &explorer,
+                    context()
+                )
+                .is_none()
+        );
+        assert!(
+            accessibility
+                .resolve(
+                    request(&all, SemanticAction::Activate(all.items[2].id)),
+                    &explorer,
+                    context()
+                )
+                .is_none()
+        );
+        explorer.set_filter(LairExplorerFilter::All);
+        let restored = accessibility.refresh(&explorer, context());
+        assert_eq!(restored.items, all.items);
     }
 
     #[test]
