@@ -16,7 +16,7 @@ use super::{
 const PREFERRED_WIDTH: u32 = 288;
 const HEADER_HEIGHT: u32 = 76;
 const FOOTER_HEIGHT: u32 = 30;
-const ROW_HEIGHT: u32 = 34;
+const ROW_HEIGHT: u32 = 48;
 
 const fn explorer_header_text(focused: bool) -> &'static str {
     if focused {
@@ -189,6 +189,27 @@ pub(crate) fn lair_explorer_disclosure_hit_test(
                 && position.1 < bottom)
                 .then_some(row.id)
         })
+}
+
+// Give the name and status independent full-width lines rather than squeezing
+// both into a 60/40 split. Bound insets even on a one-pixel drawer.
+fn row_text_clips(rect: Rect, level: usize, inset: u32) -> (Rect, Rect) {
+    let left = inset
+        .saturating_mul(u32::try_from(level.max(1)).unwrap_or(u32::MAX))
+        .min(rect.width);
+    let width = rect.width.saturating_sub(left).saturating_sub(inset);
+    let label = Rect {
+        x: rect.x.saturating_add(left),
+        y: rect.y,
+        width,
+        height: rect.height / 2,
+    };
+    let status = Rect {
+        y: rect.y.saturating_add(label.height),
+        height: rect.height.saturating_sub(label.height),
+        ..label
+    };
+    (label, status)
 }
 
 fn buffer_rect(rect: Rect, scale_120: u32) -> Rect {
@@ -371,27 +392,7 @@ pub(crate) fn paint_lair_explorer(
             }
         };
         let source = format!("{marker} {}", row.label);
-        let row_inset = inset.saturating_add(
-            u32::try_from(row.level.saturating_sub(1))
-                .unwrap_or(u32::MAX)
-                .saturating_mul(inset),
-        );
-        let label_clip = Rect {
-            x: rect.x.saturating_add(row_inset),
-            y: rect.y,
-            width: rect.width.saturating_sub(row_inset).saturating_mul(3) / 5,
-            height: rect.height,
-        };
-        let status_clip = Rect {
-            x: label_clip.x.saturating_add(label_clip.width),
-            y: rect.y,
-            width: rect
-                .x
-                .saturating_add(rect.width)
-                .saturating_sub(label_clip.x.saturating_add(label_clip.width))
-                .saturating_sub(inset),
-            height: rect.height,
-        };
+        let (label_clip, status_clip) = row_text_clips(rect, row.level, inset);
         let primary = if selected == Some(row.id) {
             if row.enabled {
                 palette.selected_primary
@@ -435,7 +436,7 @@ pub(crate) fn paint_lair_explorer(
             scale_120,
             renderer_generation,
             status_clip,
-            PickerTextAlignment::Right,
+            PickerTextAlignment::Left,
             secondary,
         )?;
     }
@@ -565,6 +566,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn name_and_status_have_separate_full_width_lines() {
+        for width in [1, 2, 80, 160, PREFERRED_WIDTH] {
+            for level in [1, 2, 3] {
+                for scale in [120, 150, 180, 240] {
+                    let rect = buffer_rect(
+                        Rect {
+                            x: 7,
+                            y: 20,
+                            width,
+                            height: ROW_HEIGHT,
+                        },
+                        scale,
+                    );
+                    let inset = 12_u32.saturating_mul(scale).div_ceil(120);
+                    let (name, status) = row_text_clips(rect, level, inset);
+                    assert_eq!(name.width, status.width);
+                    assert_eq!(name.y + name.height, status.y);
+                    assert_eq!(status.y + status.height, rect.y + rect.height);
+                    for clip in [name, status] {
+                        assert!(clip.x >= rect.x);
+                        assert!(clip.x + clip.width <= rect.x + rect.width);
+                    }
+                    if width == PREFERRED_WIDTH {
+                        assert!(name.width >= 240 * scale / 120);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn taller_rows_scroll_to_last_selection_without_losing_hit_targets() {
+        let rows = (0..30)
+            .map(|_| row(NavigationNodeId::Lair(LairId::new())))
+            .collect::<Vec<_>>();
+        let selected = rows.last().unwrap().id;
+        let layout = lair_explorer_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 700,
+                height: 400,
+            },
+            640,
+            &rows,
+            Some(selected),
+            0,
+        )
+        .unwrap();
+        assert_eq!(layout.visible_capacity, 6);
+        assert_eq!(layout.visible_start, 24);
+        let last = layout.rows.last().unwrap();
+        assert_eq!(last.id, selected);
+        assert!(last.rect.y + last.rect.height <= layout.footer.y);
+        assert_eq!(
+            lair_explorer_hit_test(&layout, (50.0, f64::from(last.rect.y + 1))),
+            Some(selected)
+        );
     }
 
     #[test]

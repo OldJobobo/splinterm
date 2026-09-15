@@ -2408,6 +2408,9 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
 fn resource_failure_states_clear_content_and_private_control_events() {
     let (directory, socket) = isolated_socket("resource-failures");
     let listener = UnixListener::bind(&socket).unwrap();
+    // Subscription responses and resource reads must be observed before the
+    // next event: receive_id discards notifications, and reads see latest state.
+    let (advance, ready) = mpsc::channel::<()>();
     let fake = thread::spawn(move || {
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let other_splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104".parse().unwrap();
@@ -2441,7 +2444,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
+        ready.recv_timeout(TIMEOUT).unwrap();
         write_private_frame(
             &mut stream,
             &ServerFrame::Event {
@@ -2510,7 +2513,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
+        ready.recv_timeout(TIMEOUT).unwrap();
         let mut replacement = reviewed_terminal_snapshot();
         replacement.revision = 10;
         replacement.title = "replacement".to_owned();
@@ -2524,7 +2527,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
+        ready.recv_timeout(TIMEOUT).unwrap();
         write_private_frame(
             &mut stream,
             &ServerFrame::Event {
@@ -2587,7 +2590,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                     },
                 },
             );
-            thread::sleep(Duration::from_millis(100));
+            ready.recv_timeout(TIMEOUT).unwrap();
             write_private_frame(
                 &mut stream,
                 &ServerFrame::Event {
@@ -2665,7 +2668,6 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
         for (sequence, event) in [
             (
                 1,
@@ -2704,6 +2706,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             ),
         ] {
+            ready.recv_timeout(TIMEOUT).unwrap();
             write_private_frame(
                 &mut stream,
                 &ServerFrame::Event {
@@ -2712,7 +2715,6 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                     event,
                 },
             );
-            thread::sleep(Duration::from_millis(75));
         }
         let ClientFrame::Request {
             diagnostic_correlation: _,
@@ -2752,6 +2754,8 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
+        // Do not race daemon EOF with the subscribe response either.
+        ready.recv_timeout(TIMEOUT).unwrap();
     });
 
     let mut server = Harness::spawn_with_socket(&socket, None);
@@ -2772,6 +2776,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": terminal_uri}),
     ));
     assert_eq!(server.receive_id(2)["result"], json!({}));
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -2789,6 +2794,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": terminal_uri}),
     ));
     assert_eq!(server.receive_id(4)["result"], json!({}));
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -2797,6 +2803,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
     let body = read_body(&server, 5);
     assert_eq!(body["sequence"], 2);
     assert_eq!(body["data"]["title"], "replacement");
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -2814,6 +2821,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             json!({"uri": terminal_uri}),
         ));
         assert_eq!(server.receive_id(subscribe_id)["result"], json!({}));
+        advance.send(()).unwrap();
         assert_eq!(
             server.receive()["method"],
             "notifications/resources/updated"
@@ -2832,6 +2840,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": control_uri}),
     ));
     assert_eq!(server.receive_id(11)["result"], json!({}));
+    advance.send(()).unwrap();
     for (read_id, expected_sequence, resync) in [
         (12, 2, false),
         (13, 3, false),
@@ -2857,6 +2866,9 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         assert!(!encoded.contains("67890"));
         assert!(!encoded.contains("controller_id"));
         assert!(!encoded.contains("transfer_id"));
+        if !resync {
+            advance.send(()).unwrap();
+        }
     }
 
     server.send(&request(
@@ -2865,6 +2877,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": "splinterm://topology"}),
     ));
     assert_eq!(server.receive_id(16)["result"], json!({}));
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"

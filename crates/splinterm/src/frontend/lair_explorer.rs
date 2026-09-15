@@ -94,6 +94,7 @@ pub(crate) struct LairExplorerUi {
     pending: Option<LairExplorerPending>,
     view: Option<NavigationExplorerView>,
     load_state: ExplorerLoadState,
+    context_pressed: Option<(NavigationNodeId, splinterm_core::TopologyRevision)>,
 }
 
 impl Default for LairExplorerUi {
@@ -108,11 +109,53 @@ impl Default for LairExplorerUi {
             pending: None,
             view: None,
             load_state: ExplorerLoadState::Waiting,
+            context_pressed: None,
         }
     }
 }
 
 impl LairExplorerUi {
+    pub(crate) fn can_context(&self, node: NavigationNodeId) -> bool {
+        self.visible
+            && self.load_state == ExplorerLoadState::Ready
+            && self.rows().iter().any(|row| row.id == node)
+    }
+
+    pub(crate) fn context_press(&mut self, target: Option<NavigationNodeId>) {
+        self.context_pressed = target
+            .filter(|node| self.can_context(*node))
+            .and_then(|node| {
+                self.view
+                    .as_ref()
+                    .map(|view| (node, view.topology_revision))
+            });
+    }
+
+    pub(crate) fn context_release(
+        &mut self,
+        target: Option<NavigationNodeId>,
+    ) -> Option<NavigationNodeId> {
+        self.context_pressed
+            .take()
+            .filter(|(node, revision)| {
+                Some(*node) == target
+                    && self.can_context(*node)
+                    && self
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.topology_revision == *revision)
+            })
+            .map(|(node, _)| node)
+    }
+
+    pub(crate) const fn context_press_pending(&self) -> bool {
+        self.context_pressed.is_some()
+    }
+
+    pub(crate) fn cancel_context_press(&mut self) {
+        self.context_pressed = None;
+    }
+
     pub(crate) const fn visible(&self) -> bool {
         self.visible
     }
@@ -650,6 +693,13 @@ impl LairExplorerUi {
             self.toggle_selected();
             return Some(LairExplorerDecision::Toggle(selected));
         }
+        self.activation_decision(selected)
+    }
+
+    pub(crate) fn activation_decision(
+        &self,
+        selected: NavigationNodeId,
+    ) -> Option<LairExplorerDecision> {
         let view = self.view.as_ref()?;
         for dojo in view.lairs.iter().flat_map(|lair| &lair.dojos) {
             if dojo.id == selected {
@@ -817,6 +867,7 @@ pub(super) mod tests {
                     id: NavigationNodeId::Lair(lair),
                     label: "work".into(),
                     retention: LairRetention::Saved,
+                    can_create_dojo: true,
                     current_here: true,
                     dojos: vec![NavigationExplorerDojo {
                         id: NavigationNodeId::Dojo {
@@ -863,6 +914,7 @@ pub(super) mod tests {
                     id: NavigationNodeId::Lair(other_lair),
                     label: "notes".into(),
                     retention: LairRetention::Pinned,
+                    can_create_dojo: true,
                     current_here: false,
                     dojos: vec![NavigationExplorerDojo {
                         id: NavigationNodeId::Dojo {
@@ -886,6 +938,110 @@ pub(super) mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn context_click_captures_non_current_lair_without_activation_or_selection() {
+        let mut explorer = LairExplorerUi::default();
+        let view = view();
+        let target = view.lairs[1].id;
+        explorer.set_view(view);
+        explorer.toggle_visibility();
+        let selected = explorer.selected;
+        let rows = explorer.rows();
+        explorer.context_press(Some(target));
+        assert_eq!(explorer.context_release(Some(target)), Some(target));
+        assert_eq!(explorer.selected, selected);
+        assert_eq!(explorer.rows(), rows);
+        assert_eq!(explorer.pending, None);
+        assert!(!explorer.focused());
+    }
+
+    #[test]
+    fn context_click_requires_matching_uncancelled_visible_fresh_lair() {
+        let mut explorer = LairExplorerUi::default();
+        let view = view();
+        let target = view.lairs[1].id;
+        let other = view.lairs[0].id;
+        let dojo = view.lairs[0].dojos[0].id;
+        explorer.set_view(view.clone());
+        explorer.toggle_visibility();
+        assert_eq!(explorer.context_release(Some(target)), None);
+        explorer.context_press(Some(target));
+        assert_eq!(explorer.context_release(Some(other)), None);
+        explorer.context_press(Some(target));
+        explorer.cancel_context_press();
+        assert_eq!(explorer.context_release(Some(target)), None);
+        explorer.context_press(Some(dojo));
+        assert_eq!(explorer.context_release(Some(dojo)), None);
+        explorer.context_press(Some(target));
+        explorer.begin_refresh();
+        assert_eq!(explorer.context_release(Some(target)), None);
+        explorer.set_view(view.clone());
+        explorer.context_press(Some(target));
+        explorer.mark_disconnected();
+        assert_eq!(explorer.context_release(Some(target)), None);
+        explorer.set_view(view.clone());
+        explorer.context_press(Some(target));
+        explorer.set_search("work".into());
+        assert_eq!(explorer.context_release(Some(target)), None);
+        explorer.set_search(String::new());
+        explorer.context_press(Some(target));
+        let mut deleted = view;
+        deleted.lairs.remove(1);
+        explorer.set_view(deleted);
+        assert_eq!(explorer.context_release(Some(target)), None);
+        explorer.context_press(Some(other));
+        explorer.toggle_visibility();
+        assert_eq!(explorer.context_release(Some(other)), None);
+    }
+
+    #[test]
+    fn context_click_on_visible_dojo_and_splint_keeps_selection_and_rejects_new_revision() {
+        let mut explorer = LairExplorerUi::default();
+        let view = view();
+        explorer.set_view(view.clone());
+        explorer.toggle_visibility();
+        explorer.reveal_current();
+        let selected = explorer.selected();
+        for node in [
+            view.lairs[0].dojos[0].id,
+            view.lairs[0].dojos[0].splints[0].id,
+        ] {
+            explorer.context_press(Some(node));
+            assert_eq!(explorer.context_release(Some(node)), Some(node));
+            assert_eq!(explorer.selected(), selected);
+            assert!(!explorer.activation_pending());
+            explorer.context_press(Some(node));
+            let mut updated = view.clone();
+            updated.topology_revision = TopologyRevision::new(8);
+            explorer.set_view(updated);
+            assert_eq!(explorer.context_release(Some(node)), None);
+            explorer.set_view(view.clone());
+        }
+    }
+
+    #[test]
+    fn explicit_context_focus_reuses_activation_ownership_without_selecting_the_row() {
+        let mut explorer = LairExplorerUi::default();
+        let view = view();
+        let dojo = view.lairs[0].dojos[0].id;
+        let splint = view.lairs[0].dojos[0].splints[0].target;
+        explorer.set_view(view);
+        explorer.toggle_visibility();
+        explorer.reveal_current();
+        explorer.select(dojo);
+        let decision = explorer
+            .activation_decision(NavigationNodeId::Splint {
+                lair_id: splint.lair_id,
+                dojo_id: splint.dojo_id,
+                splint_id: splint.splint_id,
+            })
+            .unwrap();
+        assert!(explorer.set_pending(decision));
+        assert_eq!(explorer.selected(), Some(dojo));
+        assert!(explorer.finish_activation(LairExplorerActivationTarget::Splint(splint), true));
+        assert!(!explorer.activation_pending());
     }
 
     #[test]

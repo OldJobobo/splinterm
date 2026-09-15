@@ -274,6 +274,7 @@ pub struct NavigationExplorerLair {
     pub label: String,
     pub retention: LairRetention,
     pub current_here: bool,
+    pub can_create_dojo: bool,
     pub dojos: Vec<NavigationExplorerDojo>,
 }
 
@@ -367,6 +368,9 @@ impl NavigationProjection {
                     id: lair.node.id,
                     label: lair.node.label.clone(),
                     retention: lair.retention,
+                    can_create_dojo: lair.node.capabilities.iter().any(|capability| {
+                        capability.action == NavigationAction::CreateDojo && capability.is_enabled()
+                    }),
                     current_here: dojos.iter().any(|dojo| dojo.active_here),
                     dojos,
                 }
@@ -629,18 +633,29 @@ impl NavigationProjection {
         let attached: HashSet<_> = context.window.attached_dojos.iter().copied().collect();
         let mut lairs = Vec::new();
 
-        for lair in snapshot
+        let persistent_lairs = snapshot
             .topology
             .lairs()
             .filter(|lair| lair.lifetime.is_persistent())
-        {
+            .collect::<Vec<_>>();
+        let labels = friendly_labels(
+            persistent_lairs.iter().map(|lair| lair.name.as_str()),
+            "Lair",
+        );
+        for (lair, label) in persistent_lairs.into_iter().zip(labels) {
             let lair_id = lair.id;
             let lair_node_id = NavigationNodeId::Lair(lair_id);
+            let dojo_labels =
+                friendly_labels(lair.dojos.iter().map(|dojo| dojo.name.as_str()), "Dojo");
             let dojos = lair
                 .dojos
                 .iter()
-                .map(|dojo| {
-                    project_dojo(dojo, lair_id, lair_node_id, &attached, &runtimes, context)
+                .zip(dojo_labels)
+                .map(|(dojo, label)| {
+                    let mut projected =
+                        project_dojo(dojo, lair_id, lair_node_id, &attached, &runtimes, context);
+                    projected.node.label = label;
+                    projected
                 })
                 .collect::<Vec<_>>();
             let lifecycle = aggregate_lifecycle(dojos.iter().map(|dojo| dojo.node.lifecycle));
@@ -648,9 +663,20 @@ impl NavigationProjection {
                 node: NavigationNode {
                     id: lair_node_id,
                     parent: None,
-                    label: bounded_label(&lair.name),
+                    label,
                     lifecycle,
-                    capabilities: Vec::new(),
+                    capabilities: (lair.dojos.len() < MAX_DOJOS_PER_LAIR)
+                        .then(|| {
+                            capability(
+                                NavigationAction::CreateDojo,
+                                context.freshness,
+                                context.authority.create_dojo.is_allowed(),
+                                true,
+                                context.window.has_tab_capacity,
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
                 },
                 lair_id,
                 retention: lair.retention,
@@ -856,6 +882,13 @@ fn project_dojo(
         context,
         &mut splints,
     );
+    let labels = friendly_labels(
+        splints.iter().map(|splint| splint.node.label.as_str()),
+        "Terminal",
+    );
+    for (splint, label) in splints.iter_mut().zip(labels) {
+        splint.node.label = label;
+    }
     let lifecycle = aggregate_lifecycle(splints.iter().map(|splint| splint.node.lifecycle));
     let mut capabilities = Vec::new();
     if attachment == WindowAttachment::Here
@@ -1082,6 +1115,56 @@ const fn is_bidi_formatting(character: char) -> bool {
         character,
         '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
     )
+}
+
+// Presentation aliases only: never rewrite stored names or use labels as action
+// authority. Allocate before filtering/MRU ordering so every navigation surface
+// agrees, and reserve explicit sibling labels before assigning generated ones.
+fn friendly_labels<'a>(names: impl Iterator<Item = &'a str>, kind: &str) -> Vec<String> {
+    let names = names.collect::<Vec<_>>();
+    let mut reserved = names
+        .iter()
+        .filter(|name| !is_generated_terminal_name(name) && !name.trim().is_empty())
+        .map(|name| bounded_label(name))
+        .collect::<HashSet<_>>();
+    let mut next = 1_usize;
+    names
+        .into_iter()
+        .map(|name| {
+            if !is_generated_terminal_name(name) && !name.trim().is_empty() {
+                return bounded_label(name);
+            }
+            loop {
+                let label = format!("{kind} {next}");
+                next += 1;
+                if reserved.insert(label.clone()) {
+                    return label;
+                }
+            }
+        })
+        .collect()
+}
+
+fn is_generated_terminal_name(name: &str) -> bool {
+    if name == "terminal" {
+        return true;
+    }
+    let Some(suffix) = name.strip_prefix("terminal-") else {
+        return false;
+    };
+    let mut components = suffix.split('-');
+    let timestamp = components.next().unwrap_or_default();
+    let pid = components.next();
+    // Shipped launchers used seconds and nanoseconds; accept millisecond and
+    // microsecond timestamps too, but preserve short/custom terminal-* names.
+    (10..=20).contains(&timestamp.len())
+        && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        && pid.is_none_or(|pid| {
+            !pid.is_empty()
+                && pid.parse::<u32>().is_ok()
+                && pid.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && components.next().is_none()
 }
 
 fn bounded_label(value: &str) -> String {
@@ -1394,6 +1477,124 @@ mod tests {
                 .rows
                 .iter()
                 .all(|row| row.target.dojo_id != exited_dojo)
+        );
+    }
+
+    #[test]
+    fn friendly_labels_reserve_custom_names_and_only_replace_generated_names() {
+        let names = [
+            "terminal-1787899189-4132",
+            "Lair 1",
+            "terminal-1787899189123456789-42",
+            "work",
+            "terminal-123",
+            "terminal-work",
+            "terminal-1787899189-worker",
+            "terminal-1787899189-42-extra",
+            "terminal-1787899189-4294967296",
+            "terminal-1787899189-",
+            "",
+            "terminal",
+        ];
+        assert_eq!(
+            friendly_labels(names.into_iter(), "Lair"),
+            [
+                "Lair 2",
+                "Lair 1",
+                "Lair 3",
+                "work",
+                "terminal-123",
+                "terminal-work",
+                "terminal-1787899189-worker",
+                "terminal-1787899189-42-extra",
+                "terminal-1787899189-4294967296",
+                "terminal-1787899189-",
+                "Lair 4",
+                "Lair 5",
+            ]
+        );
+        assert!(is_generated_terminal_name("terminal-1787899189123"));
+        assert!(!is_generated_terminal_name("terminal-1787899189-+42"));
+        assert!(!is_generated_terminal_name(
+            "terminal-178789918912345678901-42"
+        ));
+        assert_eq!(
+            friendly_labels(["日本語", "e\u{301}ditor"].into_iter(), "Lair"),
+            ["日本語", "e\u{301}ditor"]
+        );
+    }
+
+    #[test]
+    fn generated_labels_reach_explorer_search_and_picker_without_changing_authority() {
+        use crate::frontend::LairExplorerUi;
+
+        let generated = "terminal-1787899189123456789-4132";
+        let mut lair = running_lair(generated);
+        let lair_id = lair.id;
+        let dojo = &mut lair.dojos[0];
+        dojo.name = generated.into();
+        let dojo_id = dojo.id;
+        let splint_id = dojo.default_focus;
+        dojo.root.find_splint_mut(splint_id).unwrap().title = generated.into();
+        let captured = snapshot(vec![lair], &[]);
+        let mut ctx = context(&[]);
+        ctx.window.focused_splint = Some(splint_id);
+        let attached = [dojo_id];
+        ctx.window.attached_dojos = &attached;
+        ctx.window.active_dojo = Some(dojo_id);
+        let projection = NavigationProjection::build(&captured, ctx).unwrap();
+        let view = projection.explorer_view();
+        assert_eq!(view.lairs[0].label, "Lair 1");
+        assert_eq!(view.lairs[0].dojos[0].label, "Dojo 1");
+        let splint = &view.lairs[0].dojos[0].splints[0];
+        assert_eq!(splint.label, "Terminal 1");
+        assert_eq!(splint.target.lair_id, lair_id);
+        assert_eq!(splint.target.dojo_id, dojo_id);
+        assert_eq!(splint.target.splint_id, splint_id);
+        assert_eq!(splint.target.topology_revision, captured.revision);
+        assert!(splint.target.capability.is_enabled());
+        // The combined build must retain context-menu authority even though
+        // the displayed name no longer equals the daemon's generated name.
+        let menu = crate::frontend::TabContextMenuUi::for_explorer(
+            &view,
+            NavigationNodeId::Lair(lair_id),
+            Some("/demo".into()),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(menu.action_enabled(crate::frontend::TabMenuActionId::NewDojo));
+        let Some(crate::frontend::TabMenuDispatch::Topology(
+            crate::WindowTopologyCommand::ExplorerContext { target, command },
+        )) = menu.dispatch(crate::frontend::TabMenuActionId::RenameLair)
+        else {
+            panic!("friendly Lair row must retain its guarded rename action");
+        };
+        assert_eq!(target.node, NavigationNodeId::Lair(lair_id));
+        assert_eq!(target.topology_revision, captured.revision);
+        assert_eq!(
+            *command,
+            crate::WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: crate::LairPromptKind::Rename,
+            }
+        );
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        explorer.reveal_current();
+        explorer.set_search("Terminal 1".into());
+        assert!(explorer.rows().iter().any(|row| row.label == "Terminal 1"));
+        assert_eq!(
+            explorer.breadcrumb().as_deref(),
+            Some("Lair 1 / Dojo 1 / Terminal 1")
+        );
+        let picker = projection.picker_view(NavigationPickerKind::ChooseDojo { lair_id }, &[], &[]);
+        assert_eq!(picker.rows[0].display_title, "Dojo 1");
+        assert_eq!(picker.rows[0].target.dojo_id, dojo_id);
+        assert_eq!(captured.topology.lairs().next().unwrap().name, generated);
+        assert_eq!(
+            NavigationProjection::build(&captured, ctx).unwrap(),
+            projection
         );
     }
 
@@ -1711,6 +1912,39 @@ mod tests {
                     .all(|splint| splint.node.capabilities.is_empty())
             );
         }
+    }
+
+    #[test]
+    fn explorer_creation_capability_is_scoped_to_each_lair_and_endpoint_authority() {
+        let snapshot = snapshot(vec![running_lair("current"), running_lair("detached")], &[]);
+        let mut current = context(&[]);
+        let projection = NavigationProjection::build(&snapshot, current).unwrap();
+        assert!(
+            projection
+                .explorer_view()
+                .lairs
+                .iter()
+                .all(|lair| lair.can_create_dojo)
+        );
+        current.authority.create_dojo = NavigationPermission::Denied;
+        let projection = NavigationProjection::build(&snapshot, current).unwrap();
+        assert!(
+            projection
+                .explorer_view()
+                .lairs
+                .iter()
+                .all(|lair| !lair.can_create_dojo)
+        );
+        current.authority.create_dojo = NavigationPermission::Allowed;
+        current.window.has_tab_capacity = false;
+        let projection = NavigationProjection::build(&snapshot, current).unwrap();
+        assert!(
+            projection
+                .explorer_view()
+                .lairs
+                .iter()
+                .all(|lair| !lair.can_create_dojo)
+        );
     }
 
     #[test]

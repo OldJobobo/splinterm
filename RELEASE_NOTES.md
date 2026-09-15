@@ -1,8 +1,28 @@
-# Splinterm 0.1.1-rc.1
+# Splinterm 0.1.1-rc.2
 
-First release candidate for Splinterm 0.1.1, distributed as a GitHub prerelease
+Second release candidate for Splinterm 0.1.1, intended as a GitHub prerelease
 for testing before the final release. This is not the stable 0.1.1 release.
 AUR packages remain on the stable release; no RC packages are published to AUR.
+
+## Changes since RC1
+
+- Explorer right-click menus act on the clicked Lair, Dojo, or Splint without
+  implicitly navigating to it. Applicable actions include rename, creation,
+  save/pin/restore, focus/split/close, and confirmed termination. Targets are
+  revalidated before dispatch and confirmation.
+- Generated navigation names use short display labels such as `Lair 1`,
+  `Dojo 1`, and `Terminal 1`. Custom names and underlying identities remain
+  unchanged. Display numbering may change as siblings are added or removed.
+- Explorer names and status text occupy separate lines instead of competing
+  for row width.
+- A rejected tab context-menu request no longer exits the whole client when
+  another input operation or transition makes the menu unavailable.
+
+## Known issue in RC2
+
+With the Explorer open, the scrollback search field was observed accepting input
+without being visibly painted. Press Escape to leave search and return input to
+the terminal. This display issue remains under investigation.
 
 ## Navigation and returning to work
 
@@ -61,7 +81,7 @@ AUR packages remain on the stable release; no RC packages are published to AUR.
 
 ## Installation and upgrade boundary
 
-Use the packages attached to the GitHub `v0.1.1-rc.1` prerelease for RC testing;
+Once published, use the packages attached to the GitHub `v0.1.1-rc.2` prerelease for RC testing;
 verify them against its published checksums before installation. Install the
 matching optional MCP package if needed. AUR remains on the stable release until
 0.1.1 final is approved; do not use the repository's candidate AUR templates as

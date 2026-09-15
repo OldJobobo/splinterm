@@ -4,11 +4,12 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+#[cfg(test)]
+use crate::frontend::{TAB_MENU_ACTIONS, tab_menu_descriptor};
 use crate::{
     frontend::{
         BindingHelpUi, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteUi,
-        DojoPromptUi, TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId, TerminationDecision,
-        command_descriptor, tab_menu_descriptor,
+        DojoPromptUi, TabContextMenuUi, TabMenuActionId, TerminationDecision, command_descriptor,
     },
     geometry::Rect,
     keymap::ResolvedKeymap,
@@ -800,6 +801,7 @@ pub(crate) fn paint_command_palette(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TabMenuRowLayout {
     pub(crate) action: TabMenuActionId,
+    pub(crate) label: &'static str,
     pub(crate) rect: Rect,
     pub(crate) title: Rect,
 }
@@ -814,9 +816,10 @@ pub(crate) struct TabContextMenuLayout {
 pub(crate) fn tab_context_menu_layout(
     bounds: Rect,
     anchor: (u32, u32),
+    actions: &[crate::frontend::TabMenuActionDescriptor],
 ) -> Option<TabContextMenuLayout> {
-    let rows_height = TAB_MENU_ROW_HEIGHT
-        .saturating_mul(u32::try_from(TAB_MENU_ACTIONS.len()).unwrap_or(u32::MAX));
+    let rows_height =
+        TAB_MENU_ROW_HEIGHT.saturating_mul(u32::try_from(actions.len()).unwrap_or(u32::MAX));
     if bounds.width <= TAB_MENU_SHADOW
         || bounds.height < rows_height.saturating_add(TAB_MENU_SHADOW)
     {
@@ -854,7 +857,7 @@ pub(crate) fn tab_context_menu_layout(
         height: panel_height,
     };
     let horizontal_inset = TAB_MENU_CONTENT_INSET.min(panel_width / 6);
-    let rows = TAB_MENU_ACTIONS
+    let rows = actions
         .iter()
         .enumerate()
         .map(|(index, descriptor)| {
@@ -868,6 +871,7 @@ pub(crate) fn tab_context_menu_layout(
             };
             TabMenuRowLayout {
                 action: descriptor.id,
+                label: descriptor.title,
                 rect,
                 title: Rect {
                     x: rect
@@ -1059,7 +1063,7 @@ pub(crate) fn paint_tab_context_menu(
             canvas,
             width,
             height,
-            tab_menu_descriptor(row.action).title,
+            row.label,
             if selected {
                 ChromeTextStyle::Bold
             } else {
@@ -1563,6 +1567,60 @@ mod tests {
     }
 
     #[test]
+    fn lair_context_menu_layout_uses_the_available_action_catalog() {
+        let actions = [
+            TabMenuActionId::RenameLair,
+            TabMenuActionId::NewDojo,
+            TabMenuActionId::PinLair,
+            TabMenuActionId::PreviewLair,
+            TabMenuActionId::TerminateLair,
+        ]
+        .map(tab_menu_descriptor);
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 400,
+        };
+        let layout = tab_context_menu_layout(bounds, (639, 399), &actions).unwrap();
+        assert_eq!(layout.rows.len(), actions.len());
+        assert_eq!(layout.rows[0].action, TabMenuActionId::RenameLair);
+        assert_eq!(
+            layout.panel.height,
+            TAB_MENU_ROW_HEIGHT * u32::try_from(actions.len()).unwrap() + TAB_MENU_PADDING * 2
+        );
+        let row = layout.rows[0].rect;
+        assert_eq!(
+            tab_context_menu_hit_test(&layout, (f64::from(row.x), f64::from(row.y))),
+            Some(TabMenuActionId::RenameLair)
+        );
+        assert_eq!(
+            tab_context_menu_hit_test(&layout, (f64::from(row.x), f64::from(row.y + row.height))),
+            Some(actions[1].id)
+        );
+    }
+
+    #[test]
+    fn context_menu_layout_retains_explorer_label_instead_of_tab_label() {
+        let descriptor = crate::frontend::TabMenuActionDescriptor {
+            id: TabMenuActionId::ActivateTab,
+            title: "Open / Activate",
+        };
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 400,
+        };
+        let layout = tab_context_menu_layout(bounds, (0, 0), &[descriptor]).unwrap();
+        assert_eq!(layout.rows[0].label, "Open / Activate");
+        assert_ne!(
+            layout.rows[0].label,
+            tab_menu_descriptor(descriptor.id).title
+        );
+    }
+
+    #[test]
     fn tab_context_menu_clamps_all_edges_and_keeps_half_open_rows() {
         let bounds = Rect {
             x: 0,
@@ -1571,7 +1629,7 @@ mod tests {
             height: 400,
         };
         for anchor in [(0, 0), (639, 0), (0, 399), (639, 399)] {
-            let layout = tab_context_menu_layout(bounds, anchor).unwrap();
+            let layout = tab_context_menu_layout(bounds, anchor, &TAB_MENU_ACTIONS).unwrap();
             assert_eq!(layout.panel.width, TAB_MENU_WIDTH);
             assert_eq!(
                 layout.panel.height,
@@ -1765,7 +1823,7 @@ mod tests {
             width: 640,
             height: 400,
         };
-        let layout = tab_context_menu_layout(bounds, (240, 40)).unwrap();
+        let layout = tab_context_menu_layout(bounds, (240, 40), &TAB_MENU_ACTIONS).unwrap();
         let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
             focused_cwd: "/tmp".into(),
