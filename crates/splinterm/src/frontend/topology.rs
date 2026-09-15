@@ -9,7 +9,7 @@ use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 use crate::navigation_projection::{
-    NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView,
+    NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView, NavigationNodeId,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,8 +83,34 @@ pub struct LairPromptTarget {
     pub targets: Vec<MutationTarget>,
 }
 
+/// Exact Explorer row authority, retained through menu and confirmation dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerContextTarget {
+    pub topology_revision: TopologyRevision,
+    pub node: NavigationNodeId,
+    pub live_incarnation: Option<u64>,
+}
+
+impl ExplorerContextTarget {
+    #[must_use]
+    pub fn command(self, command: WindowTopologyCommand) -> WindowTopologyCommand {
+        WindowTopologyCommand::ExplorerContext {
+            target: self,
+            command: Box::new(command),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WindowTopologyCommand {
+    ExplorerContext {
+        target: ExplorerContextTarget,
+        command: Box<WindowTopologyCommand>,
+    },
+    RequestDojoPrompt {
+        dojo_id: DojoId,
+        kind: LairPromptKind,
+    },
     Split {
         dojo_id: DojoId,
         target: SplintId,
@@ -194,6 +220,11 @@ pub enum WindowTopologyCommand {
 }
 
 pub enum WindowTopologyUpdate {
+    ShowExplorerPrompt {
+        guard: ExplorerContextTarget,
+        kind: LairPromptKind,
+        target: LairPromptTarget,
+    },
     Apply {
         topology_revision: TopologyRevision,
         dojo_id: DojoId,

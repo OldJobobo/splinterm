@@ -136,6 +136,33 @@ and choose **Toggle Lair explorer** to show or hide it, or **Focus Lair explorer
 to show it and move keyboard focus there. These Explorer actions have no default
 shortcut. **Return focus to terminal** moves focus back without hiding Explorer.
 
+Right-click a row for actions on that exact item, without selecting or opening it:
+
+- **Lairs:** Rename, New Dojo, Save layout, Pin/Unpin, saved-layout Preview,
+  Restore, and Terminate.
+- **Dojos:** Open/Activate, Rename, Close tab when open, Restore, and Terminate.
+- **Splints:** Focus, Split below/right, and Close.
+
+Only applicable actions appear. Saved and non-open Lairs/Dojos can be renamed or
+managed without switching tabs; Open/Activate and Focus explicitly navigate.
+New Dojo opens the newly created tab. Save layout retains a disposable Lair;
+unpinning leaves it saved. Splitting and closing require an attached running pane
+controlled by this window. Saved-only Lairs and Dojos are restored, not deleted;
+termination requires at least one live pane and a complete captured incarnation
+set, including exited panes. Rename dialogs use current authoritative names, and
+Restore/Terminate require confirmation with Cancel selected initially. Escape
+cancels a menu or dialog.
+Stale targets are rejected rather than redirected to the active item.
+
+Launcher-generated `terminal-<timestamp>-<pid>` names appear as compact **Lair 1**,
+**Lair 2**, etc. Generated or empty Dojo and pane labels similarly fall back to
+**Dojo N** and **Terminal N**. Meaningful custom names are preserved, and aliases
+skip names already used by siblings. These are display labels, not renamed saved
+objects or CLI identifiers; numbering follows the current topology and can change
+when siblings are added or removed. Search, breadcrumbs, and the navigation
+pickers use the same labels. Each Explorer row puts status on a separate line so
+it does not crowd out the name; long text is ellipsized within the panel.
+
 While Explorer has focus:
 
 - Use Up/Down to select a row; PageUp/PageDown move by a page and Home/End select

@@ -1,7 +1,7 @@
 # Maintainer: OldJobobo
 pkgbase=splinterm-bin
 pkgname=('splinterm-bin' 'splinterm-mcp-bin')
-pkgver=0.1.1rc.1
+pkgver=0.1.1rc.2
 # Private candidate template only; do not publish RCs to AUR.
 # Candidate tooling must bind the commit and checksums.
 pkgrel=1
@@ -11,8 +11,8 @@ url='https://github.com/oldjobobo/splinterm'
 license=('MIT')
 options=('!strip' '!debug')
 source=(
-  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.1-rc.1/splinterm-$_commit-$CARCH.pkg.tar.zst"
-  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.1-rc.1/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.1-rc.2/splinterm-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.1.1-rc.2/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
 )
 noextract=(
   "splinterm-$pkgver-$CARCH.pkg.tar.zst"

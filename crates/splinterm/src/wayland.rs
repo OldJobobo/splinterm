@@ -135,7 +135,7 @@ use crate::frontend::{
     TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
     ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
     WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
-    close_other_tabs_command, command_dispatch, tab_menu_dispatch, tab_menu_right_press,
+    close_other_tabs_command, command_dispatch, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -984,6 +984,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             command_palette_open_focus: None,
             command_palette_reconcile_pending: false,
             dojo_prompt: None,
+            dojo_prompt_explorer_target: None,
             dojo_prompt_layout: None,
             dojo_prompt_pressed: None,
             dojo_prompt_text_cache: CommandPaletteTextCache::default(),
@@ -2058,6 +2059,7 @@ struct ModalState {
     command_palette_open_focus: Option<bool>,
     command_palette_reconcile_pending: bool,
     dojo_prompt: Option<DojoPromptUi>,
+    dojo_prompt_explorer_target: Option<crate::ExplorerContextTarget>,
     dojo_prompt_layout: Option<DojoPromptLayout>,
     dojo_prompt_pressed: Option<TerminationDecision>,
     dojo_prompt_text_cache: CommandPaletteTextCache,
@@ -2065,7 +2067,7 @@ struct ModalState {
     tab_context_menu_anchor: (u32, u32),
     tab_context_menu_layout: Option<TabContextMenuLayout>,
     tab_context_menu_pressed: Option<TabMenuActionId>,
-    tab_context_menu_retarget: Option<DojoId>,
+    tab_context_menu_retarget: Option<TabMenuRightPress>,
     tab_context_menu_text_cache: CommandPaletteTextCache,
     session_picker: Option<SessionPickerUi>,
     selector_kind: Option<SelectorKind>,
@@ -2523,6 +2525,16 @@ fn explorer_pointer_returns_to_terminal(
                 ..
             }
         )
+}
+
+/// A matching context-menu release belongs to chrome even if its target or
+/// admission state changed. Rejection is not a Wayland dispatch failure, and
+/// the release must not fall through to terminal input.
+fn consume_context_menu_request(open: impl FnOnce() -> Result<()>) -> bool {
+    if let Err(error) = open() {
+        eprintln!("splinterm context menu request ignored: {error:#}");
+    }
+    true
 }
 
 /// Run the local focus operation only for an eligible exact target, and verify
@@ -5596,35 +5608,69 @@ impl App {
         self.presentation.full_redraw = true;
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "finite pointer coordinates are clamped to the logical surface"
-    )]
+    fn explorer_context_menu(&self, node: NavigationNodeId) -> Option<TabContextMenuUi> {
+        if !self.explorer.can_context(node) {
+            return None;
+        }
+        let view = self.explorer.view()?;
+        let pane_controlled = match node {
+            NavigationNodeId::Splint {
+                dojo_id, splint_id, ..
+            } => {
+                let incarnation = view
+                    .lairs
+                    .iter()
+                    .flat_map(|lair| &lair.dojos)
+                    .flat_map(|dojo| &dojo.splints)
+                    .find(|splint| splint.id == node)
+                    .and_then(|splint| splint.target.live_incarnation);
+                let controlled = |pane: &PaneView| {
+                    pane.controller_active
+                        && !pane.control_release_pending
+                        && pane.snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.splint_id == splint_id
+                                && Some(snapshot.incarnation) == incarnation
+                        })
+                };
+                if self.tab_state.active_dojo_id() == dojo_id {
+                    std::iter::once(&self.panes.pane)
+                        .chain(self.panes.inactive_panes.iter())
+                        .any(controlled)
+                } else {
+                    self.tab_state
+                        .tabs
+                        .get(dojo_id)
+                        .and_then(|tab| tab.value.as_ref())
+                        .is_some_and(|view| {
+                            std::iter::once(&view.pane)
+                                .chain(view.inactive_panes.iter())
+                                .any(controlled)
+                        })
+                }
+            }
+            _ => false,
+        };
+        TabContextMenuUi::for_explorer(
+            view,
+            node,
+            self.focused_cwd().ok(),
+            pane_controlled,
+            self.tab_state.tabs.len() < crate::tab::MAX_WINDOW_TABS,
+        )
+    }
+
+    fn show_explorer_context_menu(
+        &mut self,
+        node: NavigationNodeId,
+        anchor: (f64, f64),
+    ) -> Result<()> {
+        let menu = self
+            .explorer_context_menu(node)
+            .context("Explorer menu target is unavailable")?;
+        self.show_context_menu(menu, anchor)
+    }
+
     fn show_tab_context_menu(&mut self, dojo_id: DojoId, anchor: (f64, f64)) -> Result<()> {
-        self.input.prefix_state.clear();
-        anyhow::ensure!(
-            self.tab_state.managed_tabs,
-            "tab menu requires managed tabs"
-        );
-        anyhow::ensure!(
-            self.tab_state.topology_commands.is_some(),
-            "tab menu topology commands are unavailable"
-        );
-        anyhow::ensure!(
-            self.modal.command_palette.is_none()
-                && self.modal.dojo_prompt.is_none()
-                && self.modal.session_picker.is_none()
-                && self.modal.trusted_consent.is_none()
-                && !self.modal.session_picker_requested
-                && !self.modal.session_picker_reconcile_pending
-                && !self.modal.command_palette_reconcile_pending
-                && !self.tab_state.session_switch_pending
-                && self.panes.pane.search.input.is_none()
-                && self.panes.pane.pending_control_transfer.is_none()
-                && self.input.divider_drag.is_none(),
-            "tab menu is unavailable"
-        );
         let identity = self
             .tab_state
             .tab_identity(dojo_id)
@@ -5663,6 +5709,50 @@ impl App {
             .iter()
             .filter_map(|tab| (tab.dojo_id != dojo_id).then_some(tab.dojo_id))
             .collect();
+        self.show_context_menu(
+            TabContextMenuUi::new(TabMenuContext {
+                lair_id: identity.lair_id,
+                focused_cwd: self.focused_cwd()?,
+                dojo_id,
+                dojo_name: identity.dojo_name,
+                pane_count,
+                splints,
+                active,
+                other_dojo_ids,
+            }),
+            anchor,
+        )
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "finite pointer coordinates are clamped to the logical surface"
+    )]
+    fn show_context_menu(&mut self, menu: TabContextMenuUi, anchor: (f64, f64)) -> Result<()> {
+        self.input.prefix_state.clear();
+        anyhow::ensure!(
+            self.tab_state.managed_tabs,
+            "tab menu requires managed tabs"
+        );
+        anyhow::ensure!(
+            self.tab_state.topology_commands.is_some(),
+            "tab menu topology commands are unavailable"
+        );
+        anyhow::ensure!(
+            self.modal.command_palette.is_none()
+                && self.modal.dojo_prompt.is_none()
+                && self.modal.session_picker.is_none()
+                && self.modal.trusted_consent.is_none()
+                && !self.modal.session_picker_requested
+                && !self.modal.session_picker_reconcile_pending
+                && !self.modal.command_palette_reconcile_pending
+                && !self.tab_state.session_switch_pending
+                && self.panes.pane.search.input.is_none()
+                && self.panes.pane.pending_control_transfer.is_none()
+                && self.input.divider_drag.is_none(),
+            "tab menu is unavailable"
+        );
         self.settle_terminal_presses_for_picker();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.input.ime_modal_barrier = self.input.ime.entered && self.input.text_input.is_some();
@@ -5680,16 +5770,9 @@ impl App {
                 0
             }
         };
-        self.modal.tab_context_menu = Some(TabContextMenuUi::new(TabMenuContext {
-            lair_id: identity.lair_id,
-            focused_cwd: self.focused_cwd()?,
-            dojo_id,
-            dojo_name: identity.dojo_name,
-            pane_count,
-            splints,
-            active,
-            other_dojo_ids,
-        }));
+        self.presentation.explorer_pressed = None;
+        self.explorer.cancel_context_press();
+        self.modal.tab_context_menu = Some(menu);
         self.modal.tab_context_menu_anchor = (
             logical(anchor.0, self.surface.logical_width),
             logical(anchor.1, self.surface.logical_height),
@@ -5718,17 +5801,70 @@ impl App {
     }
 
     fn execute_tab_context_menu(&mut self, action: TabMenuActionId) {
+        if let Some(target) = self
+            .modal
+            .tab_context_menu
+            .as_ref()
+            .and_then(TabContextMenuUi::explorer_target)
+            && !self.explorer_context_menu(target.node).is_some_and(|menu| {
+                menu.explorer_target() == Some(target) && menu.action_enabled(action)
+            })
+        {
+            self.close_tab_context_menu();
+            return;
+        }
         let Some(dispatch) = self
             .modal
             .tab_context_menu
             .as_ref()
-            .and_then(|menu| tab_menu_dispatch(action, &menu.context()))
+            .and_then(|menu| menu.dispatch(action))
         else {
             return;
         };
         self.close_tab_context_menu();
         let result = match dispatch {
-            TabMenuDispatch::Topology(command) => self.send_topology_command(command),
+            TabMenuDispatch::Topology(mut command) => {
+                let mut navigates = false;
+                if let WindowTopologyCommand::ExplorerContext { target, command } = &mut command
+                    && matches!(
+                        command.as_ref(),
+                        WindowTopologyCommand::OpenDojo { .. }
+                            | WindowTopologyCommand::FocusSplint { .. }
+                    )
+                {
+                    let Some(decision) = self.explorer.activation_decision(target.node) else {
+                        return;
+                    };
+                    if !self.begin_lair_explorer_action(decision) {
+                        return;
+                    }
+                    navigates = true;
+                    if let WindowTopologyCommand::OpenDojo {
+                        target,
+                        explorer_target,
+                    } = command.as_mut()
+                    {
+                        *explorer_target = Some(crate::LairExplorerActivationTarget::Dojo(*target));
+                    }
+                }
+                let requests_prompt = matches!(
+                    &command,
+                    WindowTopologyCommand::RequestLairPrompt { .. }
+                ) || matches!(&command, WindowTopologyCommand::ExplorerContext { command, .. } if matches!(command.as_ref(), WindowTopologyCommand::RequestLairPrompt { .. } | WindowTopologyCommand::RequestDojoPrompt { .. }));
+                if requests_prompt {
+                    self.modal.session_picker_requested = true;
+                    self.modal.session_picker_retry_command = None;
+                }
+                self.send_topology_command(command).inspect_err(|_| {
+                    if requests_prompt {
+                        self.modal.session_picker_requested = false;
+                    }
+                    if navigates {
+                        self.tab_state.session_switch_pending = false;
+                        self.explorer.mark_disconnected();
+                    }
+                })
+            }
             TabMenuDispatch::Rename(target) => {
                 self.show_dojo_prompt(DojoPromptUi::rename(
                     target.dojo_id,
@@ -5774,6 +5910,7 @@ impl App {
     }
 
     fn show_dojo_prompt(&mut self, prompt: DojoPromptUi) {
+        self.modal.dojo_prompt_explorer_target = None;
         self.input.prefix_state.clear();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         let title = match &prompt {
@@ -5794,6 +5931,7 @@ impl App {
     }
 
     fn close_dojo_prompt(&mut self) -> bool {
+        self.modal.dojo_prompt_explorer_target = None;
         if self.modal.dojo_prompt.take().is_none() {
             return false;
         }
@@ -5824,6 +5962,11 @@ impl App {
         {
             return;
         }
+        let command = command.map(|command| match self.modal.dojo_prompt_explorer_target {
+            Some(target) => target.command(command),
+            None => command,
+        });
+        self.modal.dojo_prompt_explorer_target = None;
         self.close_dojo_prompt();
         if let Some(command) = command
             && self.send_topology_command(command).is_err()
@@ -6494,8 +6637,9 @@ impl App {
                 };
                 if Some(pressed_target) == release_target {
                     if let (BTN_RIGHT, TabHitTarget::Activate(dojo_id)) = (button, pressed_target) {
-                        self.show_tab_context_menu(dojo_id, event.position)?;
-                        return Ok(true);
+                        return Ok(consume_context_menu_request(|| {
+                            self.show_tab_context_menu(dojo_id, event.position)
+                        }));
                     }
                     let command = match (button, pressed_target) {
                         (BTN_LEFT, TabHitTarget::Activate(dojo_id)) => {
@@ -6670,18 +6814,41 @@ impl App {
         changed
     }
 
+    fn context_menu_right_target(
+        &self,
+        position: (f64, f64),
+        inside_menu: bool,
+    ) -> TabMenuRightPress {
+        if inside_menu {
+            return TabMenuRightPress::Dismiss;
+        }
+        let tab_target = self
+            .tab_state
+            .tab_strip_layout
+            .as_ref()
+            .and_then(|layout| tab_strip_hit_test(layout, position))
+            .and_then(tab_context_target);
+        let explorer_target = self
+            .presentation
+            .explorer_layout
+            .as_ref()
+            .and_then(|layout| lair_explorer_hit_test(layout, position))
+            .and_then(|node| self.explorer_context_menu(node))
+            .and_then(|menu| menu.explorer_target());
+        tab_menu_right_press(tab_target, explorer_target)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "matching press/release and retarget actions share modal pointer ownership"
+    )]
     fn handle_tab_context_menu_pointer(&mut self, event: &PointerEvent) -> bool {
         let Some(committed_layout) = self.modal.tab_context_menu_layout.as_ref() else {
             return false;
         };
         let target = tab_context_menu_hit_test(committed_layout, event.position);
         let inside_panel = rect_contains(committed_layout.panel, event.position);
-        let tab_target = self
-            .tab_state
-            .tab_strip_layout
-            .as_ref()
-            .and_then(|layout| tab_strip_hit_test(layout, event.position))
-            .and_then(tab_context_target);
+        let right_target = self.context_menu_right_target(event.position, inside_panel);
         let mut changed = false;
         let mut execute = None;
         let mut retarget = None;
@@ -6698,10 +6865,12 @@ impl App {
             }
             PointerEventKind::Press {
                 button: BTN_RIGHT, ..
-            } => match tab_menu_right_press(tab_target) {
-                TabMenuRightPress::Retarget(dojo_id) => {
-                    if self.modal.tab_context_menu_retarget != Some(dojo_id) {
-                        self.modal.tab_context_menu_retarget = Some(dojo_id);
+            } => match right_target {
+                target @ (TabMenuRightPress::Retarget(_)
+                | TabMenuRightPress::RetargetExplorer(_)) => {
+                    self.modal.tab_context_menu_pressed = None;
+                    if self.modal.tab_context_menu_retarget != Some(target) {
+                        self.modal.tab_context_menu_retarget = Some(target);
                         changed = true;
                     }
                 }
@@ -6715,7 +6884,7 @@ impl App {
             } => {
                 let pressed = self.modal.tab_context_menu_retarget.take();
                 changed |= pressed.is_some();
-                if pressed.is_some() && pressed == tab_target {
+                if pressed.is_some() && pressed == Some(right_target) {
                     retarget = pressed;
                 }
             }
@@ -6742,16 +6911,27 @@ impl App {
             } => {
                 let pressed = self.modal.tab_context_menu_pressed.take();
                 changed |= pressed.is_some();
-                if pressed.is_some() && pressed == target {
-                    execute = pressed;
-                }
+                execute = self
+                    .modal
+                    .tab_context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.release_action(pressed, target));
             }
             PointerEventKind::Press { .. }
             | PointerEventKind::Release { .. }
             | PointerEventKind::Axis { .. } => {}
         }
-        if let Some(dojo_id) = retarget {
-            if self.show_tab_context_menu(dojo_id, event.position).is_err() {
+        if let Some(target) = retarget {
+            let result = match target {
+                TabMenuRightPress::Retarget(dojo_id) => {
+                    self.show_tab_context_menu(dojo_id, event.position)
+                }
+                TabMenuRightPress::RetargetExplorer(target) => {
+                    self.show_explorer_context_menu(target.node, event.position)
+                }
+                TabMenuRightPress::Dismiss => unreachable!("dismissal does not retain a press"),
+            };
+            if result.is_err() {
                 eprintln!("splinterm tab menu retarget failed");
             }
             changed = true;
@@ -6788,12 +6968,14 @@ impl App {
             }
         }
         if !inside_panel {
-            let owned = self.presentation.explorer_pressed.is_some();
+            let owned = self.presentation.explorer_pressed.is_some()
+                || self.explorer.context_press_pending();
             if matches!(
                 event.kind,
                 PointerEventKind::Release { .. } | PointerEventKind::Leave { .. }
             ) {
                 self.presentation.explorer_pressed = None;
+                self.explorer.cancel_context_press();
             }
             return owned;
         }
@@ -6805,7 +6987,27 @@ impl App {
             lair_explorer_disclosure_hit_test(layout, &self.explorer.rows(), event.position);
         let mut changed = false;
         match event.kind {
+            PointerEventKind::Press {
+                button: BTN_RIGHT, ..
+            } => {
+                self.presentation.explorer_pressed = None;
+                self.explorer.context_press(target);
+            }
+            PointerEventKind::Release {
+                button: BTN_RIGHT, ..
+            } => {
+                if let Some(node) = self.explorer.context_release(target) {
+                    if self
+                        .show_explorer_context_menu(node, event.position)
+                        .is_err()
+                    {
+                        eprintln!("splinterm Explorer menu is unavailable");
+                    }
+                    changed = true;
+                }
+            }
             PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                self.explorer.cancel_context_press();
                 self.set_explorer_focus(true, queue_handle);
                 self.presentation.explorer_pressed =
                     target.map(|target| (target, disclosure == Some(target)));
@@ -6837,6 +7039,7 @@ impl App {
                 changed |= self.explorer.move_selection(delta);
             }
             PointerEventKind::Leave { .. } => {
+                self.explorer.cancel_context_press();
                 self.presentation.explorer_pressed = None;
             }
             _ => {}
@@ -8362,6 +8565,43 @@ impl App {
                         changed = true;
                     }
                 }
+                WindowTopologyUpdate::ShowExplorerPrompt {
+                    guard,
+                    kind,
+                    target,
+                } => {
+                    self.modal.session_picker_requested = false;
+                    let prompt = if let Some(dojo_id) = target.dojo_id {
+                        let splints = target
+                            .targets
+                            .iter()
+                            .map(|target| (target.splint_id, target.incarnation))
+                            .collect::<Vec<_>>();
+                        match kind {
+                            LairPromptKind::Rename => {
+                                DojoPromptUi::rename(dojo_id, target.name, splints.len(), splints)
+                            }
+                            LairPromptKind::Terminate => DojoPromptUi::terminate(
+                                dojo_id,
+                                target.name,
+                                splints.len(),
+                                splints,
+                            ),
+                            LairPromptKind::Restore => DojoPromptUi::restore_lair(target),
+                            LairPromptKind::Preview => DojoPromptUi::preview_lair(target),
+                        }
+                    } else {
+                        match kind {
+                            LairPromptKind::Rename => DojoPromptUi::rename_lair(target),
+                            LairPromptKind::Terminate => DojoPromptUi::terminate_lair(target),
+                            LairPromptKind::Restore => DojoPromptUi::restore_lair(target),
+                            LairPromptKind::Preview => DojoPromptUi::preview_lair(target),
+                        }
+                    };
+                    self.show_dojo_prompt(prompt);
+                    self.modal.dojo_prompt_explorer_target = Some(guard);
+                    changed = true;
+                }
                 WindowTopologyUpdate::ShowLairPrompt { kind, target } => {
                     self.tab_state.session_switch_pending = false;
                     self.explorer.clear_pending();
@@ -9740,7 +9980,7 @@ impl App {
             .dojo_prompt
             .as_ref()
             .and_then(|prompt| dojo_prompt_layout(self.content_rect(), prompt));
-        let tab_context_menu_layout = self.modal.tab_context_menu.as_ref().and_then(|_| {
+        let tab_context_menu_layout = self.modal.tab_context_menu.as_ref().and_then(|menu| {
             tab_context_menu_layout(
                 Rect {
                     x: 0,
@@ -9749,6 +9989,7 @@ impl App {
                     height: self.surface.logical_height,
                 },
                 self.modal.tab_context_menu_anchor,
+                menu.actions(),
             )
         });
         self.prepare_remote_host_text()?;
@@ -10474,6 +10715,36 @@ fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_menu_release_rejection_is_consumed_not_a_dispatch_failure() {
+        for reason in [
+            "tab menu is unavailable",
+            "tab menu target is unavailable",
+            "tab menu topology commands are unavailable",
+        ] {
+            let mut attempts = 0;
+            let consumed = super::consume_context_menu_request(|| {
+                attempts += 1;
+                anyhow::bail!(reason)
+            });
+            assert!(
+                consumed,
+                "rejected menu release must not reach terminal input"
+            );
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[test]
+    fn context_menu_release_success_opens_once_and_is_consumed() {
+        let mut attempts = 0;
+        assert!(super::consume_context_menu_request(|| {
+            attempts += 1;
+            Ok(())
+        }));
+        assert_eq!(attempts, 1);
+    }
+
     use std::{env, fs, path::PathBuf};
 
     use super::*;

@@ -13,11 +13,12 @@ mod topology;
 pub(crate) use action_menu::{
     BuiltInCommandDispatch, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandControlAction,
     CommandHistoryAction, CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability,
-    CommandZoomAction, DojoPromptUi, TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId,
+    CommandZoomAction, DojoPromptUi, TabContextMenuUi, TabMenuActionDescriptor, TabMenuActionId,
     TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminationDecision,
-    close_other_tabs_command, command_descriptor, command_dispatch, tab_menu_descriptor,
-    tab_menu_dispatch, tab_menu_right_press,
+    close_other_tabs_command, command_descriptor, command_dispatch, tab_menu_right_press,
 };
+#[cfg(test)]
+pub(crate) use action_menu::{TAB_MENU_ACTIONS, tab_menu_descriptor};
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
 #[cfg(test)]
 pub(crate) use lair_explorer::LairExplorerRowKind;
@@ -33,7 +34,7 @@ pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
 pub(crate) use text_edit::BoundedTextEditor;
 pub use topology::{
-    LairDirection, LairExplorerActivationTarget, LairPromptKind, LairPromptTarget, SelectorKind,
-    SessionPickerCatalog, SessionPickerCreationTarget, SessionPickerTarget, WindowDojoIdentity,
-    WindowTopologyCommand, WindowTopologyUpdate,
+    ExplorerContextTarget, LairDirection, LairExplorerActivationTarget, LairPromptKind,
+    LairPromptTarget, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
+    SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate,
 };
