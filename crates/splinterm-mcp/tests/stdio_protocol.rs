@@ -3357,14 +3357,45 @@ fn duplicate_initialize_is_rejected_without_disrupting_the_session() {
 }
 
 #[test]
-fn unsupported_versions_and_client_capabilities_are_rejected() {
-    for version in [
-        "2024-11-05",
-        "2025-03-26",
-        "2025-06-18",
-        "2026-07-28",
-        "unknown-version",
-    ] {
+fn protocol_versions_are_negotiated_and_capabilities_do_not_enable_requests() {
+    for version in ["2025-06-18", "2025-11-25"] {
+        let mut server = Harness::spawn();
+        // Match the actual Codex initialize request, including both advertised
+        // elicitation modes. Advertising them must not trigger client requests.
+        server.send(&json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": version,
+                "capabilities": {"elicitation": {"form": {}, "url": {}}},
+                "clientInfo": {"name": "codex-mcp-client", "title": "Codex", "version": "0.154.0"}
+            }
+        }));
+        assert_eq!(server.receive_id(0)["result"]["protocolVersion"], version);
+        server.initialized();
+        server.send(&request(1, "tools/list", json!({})));
+        assert_eq!(
+            server.receive_id(1)["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .len(),
+            33
+        );
+        assert!(
+            server
+                .seen()
+                .iter()
+                .all(|message| message.get("method").is_none())
+        );
+        server.close_input();
+        assert!(server.wait().success());
+    }
+}
+
+#[test]
+fn unsupported_protocol_versions_are_rejected() {
+    for version in ["2024-11-05", "2025-03-26", "2026-07-28", "unknown-version"] {
         let mut server = Harness::spawn();
         server.send(&json!({
             "jsonrpc": "2.0",
@@ -3379,19 +3410,18 @@ fn unsupported_versions_and_client_capabilities_are_rejected() {
         assert_eq!(server.receive_id(1)["error"]["code"], -32600, "{version}");
         assert!(!server.wait().success());
     }
+}
 
+#[test]
+fn malformed_client_capabilities_are_rejected() {
     for capabilities in [
         json!(null),
         json!([]),
         json!({"sampling": null}),
-        json!({"sampling": {}}),
         json!({"roots": null}),
-        json!({"roots": {"listChanged": true}}),
-        json!({"elicitation": {}}),
-        json!({"tasks": {"requests": {"tools": {"call": {}}}}}),
-        json!({"experimental": {"unsafe": {}}}),
+        json!({"roots": {"listChanged": "yes"}}),
+        json!({"elicitation": false}),
         json!({"unknownCapability": null}),
-        json!({"unknownCapability": {}}),
     ] {
         let mut server = Harness::spawn();
         server.send(&json!({

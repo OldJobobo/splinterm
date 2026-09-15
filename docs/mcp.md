@@ -1,6 +1,7 @@
 # MCP adapter setup and security
 
-`splinterm-mcp` is a local, bounded MCP `2025-11-25` stdio server. It is an
+`splinterm-mcp` is a local, bounded MCP stdio server supporting `2025-06-18`
+and `2025-11-25` (preferred). It is an
 optional split package and a separately authorized third-party client, not a
 trusted part of `splinterd`. Installing it grants nothing: the daemon continues
 to deny operations until the owner installs an exact executable path/digest
@@ -77,6 +78,16 @@ host CLIs named above; other hosts are not implied to be supported.
 If the daemon uses a nondefault isolated socket, set only `SPLINTERM_SOCKET` in
 the host's `env`. `splinterm-mcp` does not read MCP roots, the host working
 directory, shell configuration, SSH material, or inherited Splinterm context.
+
+## Handshake compatibility
+
+The adapter echoes either supported protocol version; other versions remain
+rejected by its bounded profile. Client capability objects
+(such as Codex's `elicitation` advertisement) are accepted but never invoked.
+They grant no daemon permissions. Malformed capability values and duplicate
+capability names remain rejected, and all existing transport limits apply.
+The `splinterm.ping` protocol version describes the adapter's preferred version,
+not the session's negotiated version.
 
 ## Least-privileged policy
 
