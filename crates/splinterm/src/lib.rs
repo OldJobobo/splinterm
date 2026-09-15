@@ -6,16 +6,20 @@
 //! client-owned. Live protocol snapshots are replaceable derived renderer state;
 //! the daemon remains the terminal-state and shell-lifetime authority.
 
+pub mod accessibility;
 #[doc(hidden)]
 pub mod automation;
 pub mod background_effect;
 mod box_drawing;
+pub mod clipboard_image;
 pub mod config;
 pub mod diagnostics;
 pub mod endpoint;
+pub mod font_shaping;
 pub mod frontend;
 pub mod geometry;
 pub mod keymap;
+mod native_atspi;
 pub mod navigation_projection;
 pub mod pane;
 pub mod preset;
@@ -29,10 +33,11 @@ pub mod viewport;
 pub mod wayland;
 
 pub use frontend::{
-    AuthorityStatus, FontUpdate, LairDirection, LairPromptKind, LairPromptTarget,
-    PerfTraceCorrelation, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
-    SessionPickerDecision, SessionPickerItem, SessionPickerTarget, SessionPickerUi,
-    TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity,
-    WindowOptions, WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, FontUpdate, LairDirection, LairExplorerActivationTarget, LairPromptKind,
+    LairPromptTarget, PerfTraceCorrelation, SelectorKind, SessionPickerCatalog,
+    SessionPickerCreationTarget, SessionPickerDecision, SessionPickerItem, SessionPickerTarget,
+    SessionPickerUi, TerminalGridLimits, ThemeUpdate, TrustedConsentUi, WindowCommand,
+    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate,
 };
 pub use wayland::run as run_window;

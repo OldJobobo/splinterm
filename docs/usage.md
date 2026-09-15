@@ -5,6 +5,34 @@ detaching, returning to, arranging, and deliberately ending persistent terminal
 work. See [CLI reference](cli.md) for the complete command inventory and
 [Automation](automation.md) for machine contracts.
 
+## First five minutes
+
+This walkthrough assumes Splinterm is installed, the built-in `splinterm`
+keymap is selected without shortcut overrides, and
+`multiplexer.persistent-by-default=yes` (the default). Check your
+[configuration](configuration.md#keymap-configuration) if you use a different
+profile. With persistence disabled, closing an ordinary unnamed terminal's
+Window can end its work.
+
+1. **Open a terminal.** Run `splinterm-xdg-terminal-exec` from another terminal.
+   This creates a workspace (a **Lair**) containing one layout (a **Dojo**)
+   with one terminal pane (a **Splint**).
+2. **Split it.** Press `Ctrl+Shift+Enter` to add a second pane.
+   Use `Ctrl+Shift+Arrow` to move between panes. Both panes belong to the same
+   Dojo; leave their shells running for this walkthrough.
+3. **Detach.** Press `Ctrl+Shift+Q` to close the Dojo's tab. In this fresh
+   one-tab Window, the Window closes too. With persistence enabled, the daemon
+   keeps both shells and their layout running.
+4. **Return.** From another terminal, run `splinterm dojos` and select the
+   running Dojo you just left. Its panes return with their existing work.
+   `splinterm reopen` is a shortcut to the most recently remembered Dojo whose
+   entire layout is still running.
+
+Returning attaches to running work; it does not restart an exited shell.
+Restoring an exited Dojo is a separate, explicit action that starts new
+processes. Persistence here also requires the daemon to keep running; it does
+not preserve processes across a daemon restart or reboot.
+
 ## The four persistent concepts
 
 - **Lair** — a named project or persistent session.
@@ -100,6 +128,41 @@ confirmed Terminate Dojo. Opening the menu does not first activate its tab.
 client-local. Terminating a Dojo is a named, confirmed daemon mutation and ends
 its pane processes.
 
+## Lair Explorer
+
+The optional Explorer shows Lairs, their Dojos, and individual Splints beside
+terminal panes. Open the command palette (`Ctrl+Shift+P` in the built-in keymap)
+and choose **Toggle Lair explorer** to show or hide it, or **Focus Lair explorer**
+to show it and move keyboard focus there. These Explorer actions have no default
+shortcut. **Return focus to terminal** moves focus back without hiding Explorer.
+
+While Explorer has focus:
+
+- Use Up/Down to select a row; PageUp/PageDown move by a page and Home/End select
+  the first/last row. Outside search, `j`/`k` also move the selection.
+- Outside search, use Right to expand a Lair or Dojo, then enter its first child.
+  Left moves to the parent, or collapses an expanded Lair. Space toggles a Lair
+  or Dojo's disclosure without activating terminal work.
+- Press Enter on a Lair to toggle disclosure, on a Dojo to open it, or on a live
+  Splint to focus its pane. Selecting a row alone does not activate it: the
+  **selected** row is the navigation target, while **current** identifies the
+  terminal work already active in the Window.
+- Press `/` or `Ctrl+F` to search navigation labels, not terminal output or
+  scrollback. Matching descendants retain their parent context. Escape clears
+  a nonempty query; Escape with an empty query returns focus to the terminal.
+- Outside search, `r` reveals the current work, or retries a failed refresh when
+  the Explorer offers retry.
+
+Unavailable targets cannot be activated. Restorable exited work enters the
+existing preview/confirmation flow; it is not silently restarted by selection.
+Restoring starts new processes, not a checkpoint of the old applications. A
+foreground palette or confirmation owns input rather than the Explorer search
+field behind it.
+
+[Navigation accessibility](accessibility.md) describes the bounded native AT-SPI
+interface and its limitations. The guide is included in the 0.1.1 Arch and Nix
+package documentation. This is not whole-terminal screen-reader support.
+
 ## Panes and layouts
 
 The built-in application controls are:
@@ -180,6 +243,22 @@ explicit collision-safe workflow. See [Presets](presets.md) for exact behavior.
 
 Clipboard and primary-selection contents are terminal data, not authority.
 Pasting requires the graphical client to hold terminal input control.
+
+### Save a clipboard screenshot as a path
+
+Available in the 0.1.1 source (publication pending): configure a private existing
+`[clipboard] image-directory`, then choose **Save clipboard image and insert path**
+from the command palette. The bindable action is `clipboard.save-image`; there is
+no default shortcut. Only bounded static PNG is supported, and normal text paste
+is unchanged. This action works only in a focused, controlled, live local pane—not
+remote sessions, copy mode, or historical scrollback.
+
+The saved PNG is private and persistent. Its shell-escaped path is inserted without
+Enter. A changed pane or busy input channel never redirects or defers the path;
+a PNG already published is retained and its path reported through the temporary
+Window title and stderr. Delete saved files yourself when no longer needed.
+See [Clipboard PNG configuration](configuration.md#clipboard-png-saving)
+for limits, permissions, metadata preservation, cancellation, and filesystem requirements.
 
 ## Scrollback and search
 

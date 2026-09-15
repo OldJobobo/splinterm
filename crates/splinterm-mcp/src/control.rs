@@ -1357,6 +1357,7 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    #[track_caller]
     fn write_frame(stream: &mut impl Write, frame: &ServerFrame) {
         stream.write_all(&encode_frame(frame).unwrap()).unwrap();
         stream.flush().unwrap();
@@ -1377,6 +1378,7 @@ mod tests {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         stream
@@ -1405,6 +1407,7 @@ mod tests {
         let (directory, socket) = socket("registration-cancel");
         let listener = UnixListener::bind(&socket).unwrap();
         let (lair_id, dojo_id, splint_id) = ids();
+        let (transfer_closed_tx, transfer_closed_rx) = oneshot::channel();
         let daemon = thread::spawn(move || {
             let mut cancelled_acquire = accept(&listener);
             let ClientFrame::Request {
@@ -1484,6 +1487,7 @@ mod tests {
             );
             let mut eof = [0_u8; 1];
             assert_eq!(requester.read(&mut eof).unwrap(), 0);
+            transfer_closed_tx.send(()).unwrap();
             let ClientFrame::Request {
                 request_id,
                 request: Request::ReleaseControl { controller_id: 20 },
@@ -1552,6 +1556,13 @@ mod tests {
         assert_eq!(failure.code, "cancelled");
         registry.clear_post_commit_hook();
 
+        // Rollback is scheduled asynchronously. Prove that cancellation closes
+        // the transfer before global shutdown can drain it behind the owner,
+        // whose release acknowledgment the fake daemon sends only after EOF.
+        tokio::time::timeout(Duration::from_secs(2), transfer_closed_rx)
+            .await
+            .expect("cancelled transfer must close before registry shutdown")
+            .unwrap();
         registry.shutdown().await;
         resources.shutdown().await;
         join(daemon).await;

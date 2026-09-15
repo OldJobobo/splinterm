@@ -789,17 +789,48 @@ pub(in crate::app) async fn run_controller(
                 }
                 WindowCommand::RevokeAccess(grant_id) => Request::RevokeAccess { grant_id },
                 WindowCommand::RequestControlTransfer => {
-                    if !matches!(
-                        control
-                            .request(Request::RequestControlTransfer {
-                                splint_id,
-                                incarnation,
-                                modes: vec![ControlMode::Input, ControlMode::Resize],
-                            })
-                            .await?,
-                        Response::ControlTransferPending { .. }
-                    ) {
-                        bail!("splinterd did not queue the control transfer");
+                    // A released/unowned pane has nobody to consent to a
+                    // transfer. Reuse ordinary acquisition, including deferred
+                    // geometry, before asking an existing owner for consent.
+                    if ensure_pane_control(
+                        &mut control,
+                        &mut active_controller,
+                        &mut prepared_resize,
+                        &outputs.updates,
+                        splint_id,
+                        incarnation,
+                        true,
+                    )
+                    .await?
+                    .is_some()
+                    {
+                        continue;
+                    }
+                    match control
+                        .request(Request::RequestControlTransfer {
+                            splint_id,
+                            incarnation,
+                            modes: vec![ControlMode::Input, ControlMode::Resize],
+                        })
+                        .await
+                    {
+                        Ok(Response::ControlTransferPending { .. }) => {}
+                        Err(error)
+                            if protocol_error(&error).is_some_and(|error| {
+                                matches!(
+                                    error.code,
+                                    ErrorCode::ControlTransferUnavailable | ErrorCode::Unauthorized
+                                )
+                            }) =>
+                        {
+                            // Ownership can change between acquisition and the
+                            // consent request, or a transfer can already be
+                            // pending. Stay observing; a later explicit request
+                            // may retry without closing the pane or forcing it.
+                            eprintln!("splinterm control request rejected: {error}");
+                        }
+                        Err(error) => return Err(error),
+                        Ok(_) => bail!("splinterd did not queue the control transfer"),
                     }
                     continue;
                 }
@@ -976,9 +1007,25 @@ pub(in crate::app) async fn prepare_live_pane(
     image_cache: SharedImageContentCache,
     claim_control: bool,
 ) -> Result<PreparedPane> {
+    prepare_live_pane_at_incarnation(factory, config, splint_id, None, image_cache, claim_control)
+        .await
+}
+
+pub(in crate::app) async fn prepare_live_pane_at_incarnation(
+    factory: &ConnectionFactory,
+    config: &AppConfig,
+    splint_id: SplintId,
+    expected_incarnation: Option<u64>,
+    image_cache: SharedImageContentCache,
+    claim_control: bool,
+) -> Result<PreparedPane> {
     let mut connection = factory.connect().await?;
     let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
+    anyhow::ensure!(
+        expected_incarnation.is_none_or(|expected| expected == incarnation),
+        "selected Splint incarnation changed before attachment"
+    );
     let scopes = pane_access_scopes();
     if !matches!(
         connection
@@ -1340,6 +1387,10 @@ pub(in crate::app) async fn run_pane_subscription(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pane_control_tests.rs"]
+mod control_tests;
 
 #[cfg(test)]
 mod tests {

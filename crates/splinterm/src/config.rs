@@ -21,6 +21,7 @@ use serde::Deserialize;
 use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS};
 
 use crate::{
+    font_shaping::{FeatureSettings, FontLigatures},
     geometry::{FontSize, FontSizingPolicy, TerminalPadding},
     keymap::{KeymapProfile, ResolvedKeymap, resolve_keymap},
     preset::PresetCatalog,
@@ -40,6 +41,8 @@ pub enum FontAuthority {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
     pub font: String,
+    pub font_ligatures: FontLigatures,
+    pub font_features: FeatureSettings,
     pub font_authority: FontAuthority,
     pub font_size: FontSize,
     pub font_sizing_policy: FontSizingPolicy,
@@ -62,6 +65,9 @@ pub struct AppConfig {
     /// Explicit project JSON override. When absent, Splinterm follows the
     /// active Omarchy theme directly.
     pub theme_path: Option<PathBuf>,
+    /// Explicit absolute private directory for user-requested clipboard PNG saves.
+    /// Filesystem checks happen in the save worker, not during configuration parsing.
+    pub clipboard_image_directory: Option<PathBuf>,
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
     pub multiplexer_lifetime: MultiplexerLifetimeConfig,
@@ -120,6 +126,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             font: DEFAULT_FONT.to_owned(),
+            font_ligatures: FontLigatures::Off,
+            font_features: FeatureSettings::default(),
             font_authority: FontAuthority::NativeOmarchy,
             font_size: FontSize::Pixels(14.0),
             font_sizing_policy: FontSizingPolicy::OutputScale,
@@ -136,6 +144,7 @@ impl Default for AppConfig {
             background_alpha: None,
             background_blur: None,
             theme_path: None,
+            clipboard_image_directory: None,
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
             multiplexer_lifetime: MultiplexerLifetimeConfig::default(),
@@ -247,6 +256,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                     | "key-bindings"
                     | "presets"
                     | "multiplexer"
+                    | "clipboard"
             ) {
                 diagnostics.push(format!(
                     "line {}: unsupported section [{section}]",
@@ -266,6 +276,15 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             format!("{section}.{key}")
         };
         let unsupported = match full.as_str() {
+            "clipboard.image-directory" => {
+                let path = PathBuf::from(nonempty(value, index)?);
+                crate::clipboard_image::validate_directory_path(&path)
+                    .with_context(|| format!("line {}: clipboard.image-directory", index + 1))?;
+                if config.clipboard_image_directory.replace(path).is_some() {
+                    bail!("line {}: duplicate clipboard.image-directory", index + 1);
+                }
+                false
+            }
             "main.font" | "font" => {
                 let font = nonempty(value, index)?;
                 let normalized = font.to_ascii_lowercase();
@@ -277,6 +296,23 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 }
                 config.font = font;
                 config.font_authority = FontAuthority::Explicit;
+                false
+            }
+            "main.font-ligatures" => {
+                config.font_ligatures = match value {
+                    "off" => FontLigatures::Off,
+                    "on" => FontLigatures::On,
+                    "cursor" => FontLigatures::Cursor,
+                    _ => bail!(
+                        "line {}: font-ligatures must be off, on or cursor",
+                        index + 1
+                    ),
+                };
+                false
+            }
+            "main.font-features" => {
+                config.font_features = FeatureSettings::parse(value)
+                    .with_context(|| format!("line {}: invalid font-features", index + 1))?;
                 false
             }
             "main.font-size" | "font-size" | "main.font-pixelsize" => {
@@ -765,7 +801,7 @@ fn omarchy_color_values(raw: &str) -> HashMap<String, String> {
     colors
 }
 
-fn foot_color_values(raw: &str) -> HashMap<String, String> {
+fn foot_color_values(raw: &str) -> Result<HashMap<String, String>> {
     let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut section = String::new();
     let mut colors_dark_seen = false;
@@ -779,22 +815,35 @@ fn foot_color_values(raw: &str) -> HashMap<String, String> {
             colors_dark_seen |= section == "colors-dark";
             continue;
         }
-        if !matches!(section.as_str(), "colors" | "colors-dark") {
+        if !matches!(
+            section.as_str(),
+            "" | "main" | "colors" | "colors-dark" | "colors-light"
+        ) {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         sections
-            .entry(section.clone())
+            .entry(if section.is_empty() {
+                "main".to_owned()
+            } else {
+                section.clone()
+            })
             .or_default()
             .insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
     }
-    if colors_dark_seen {
-        sections.remove("colors-dark").unwrap_or_default()
-    } else {
-        sections.remove("colors").unwrap_or_default()
-    }
+    let initial = sections
+        .get("main")
+        .and_then(|values| values.get("initial-color-theme"))
+        .map_or("dark", String::as_str);
+    let selected = match initial {
+        "light" => "colors-light",
+        "dark" if colors_dark_seen => "colors-dark",
+        "dark" => "colors",
+        _ => bail!("active Omarchy foot.ini initial-color-theme must be dark or light"),
+    };
+    Ok(sections.remove(selected).unwrap_or_default())
 }
 
 fn foot_theme_color(values: &HashMap<String, String>, key: &str) -> Result<u32> {
@@ -808,9 +857,9 @@ fn foot_theme_color(values: &HashMap<String, String>, key: &str) -> Result<u32> 
 
 fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedTheme> {
     let colors = omarchy_color_values(colors_raw);
-    let foot = foot_color_values(foot_raw);
+    let foot = foot_color_values(foot_raw)?;
     if foot.is_empty() {
-        bail!("active Omarchy foot.ini has no [colors-dark] or [colors] palette");
+        bail!("active Omarchy foot.ini has no palette for the selected initial-color-theme");
     }
 
     let mut ansi = [0_u32; 16];
@@ -1061,6 +1110,69 @@ mod tests {
     }
 
     #[test]
+    fn font_shaping_startup_settings_are_explicit_bounded_and_line_numbered() {
+        let defaults = parse("").unwrap().config;
+        assert_eq!(defaults.font_ligatures, FontLigatures::Off);
+        assert_eq!(defaults.font_features, FeatureSettings::default());
+        for (text, mode) in [
+            ("off", FontLigatures::Off),
+            ("on", FontLigatures::On),
+            ("cursor", FontLigatures::Cursor),
+        ] {
+            let loaded = parse(&format!(
+                "[main]\nfont-ligatures={text}\nfont-features=calt=1,zero=1,ss01=2\n"
+            ))
+            .unwrap();
+            assert!(loaded.diagnostics.is_empty());
+            assert_eq!(loaded.config.font_ligatures, mode);
+            assert_eq!(
+                loaded.config.font_features,
+                FeatureSettings::new(&[("ss01", 2), ("zero", 1), ("calt", 1)]).unwrap()
+            );
+        }
+        assert_eq!(
+            parse("main.font-features=").unwrap().config.font_features,
+            FeatureSettings::default()
+        );
+        for value in [
+            "calt",
+            "cal=1",
+            "caltt=1",
+            "cált=1",
+            "calt=-1",
+            "calt=65536",
+            "calt=+1",
+            "calt=1,calt=0",
+            "calt=1,",
+            "calt=true",
+            "calt=",
+            "calt=1.0",
+        ] {
+            let error = parse(&format!("[main]\nfont-features={value}")).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("line 2"),
+                "{value}: {error:#}"
+            );
+        }
+        let too_many = (0..65)
+            .map(|i| format!("f{i:03}=1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            format!(
+                "{:#}",
+                parse(&format!("main.font-features={too_many}")).unwrap_err()
+            )
+            .contains("too many")
+        );
+        assert!(parse("main.font-features=ss01=65535").is_ok());
+        assert!(parse("main.font-features=calt=1,CALT=0").is_ok());
+        assert!(
+            format!("{:#}", parse("[main]\nfont-ligatures=yes").unwrap_err()).contains("line 2")
+        );
+    }
+
+    #[test]
     fn defaults_match_foot_font_and_resize_behavior() {
         let defaults = AppConfig::default();
         assert_eq!(defaults.font, "monospace:style=Regular");
@@ -1091,6 +1203,41 @@ mod tests {
         assert!(!defaults.allow_unrestricted_commands);
         assert!(defaults.multiplexer_lifetime.persistent_by_default);
         assert!(defaults.multiplexer_lifetime.persist_on_tab_organization);
+    }
+
+    #[test]
+    fn clipboard_image_directory_is_opt_in_absolute_and_transactional() {
+        assert_eq!(parse("").unwrap().config.clipboard_image_directory, None);
+        let loaded = parse("[clipboard]\nimage-directory=/home/user/Private images\n").unwrap();
+        assert_eq!(
+            loaded.config.clipboard_image_directory,
+            Some(PathBuf::from("/home/user/Private images"))
+        );
+        assert!(loaded.diagnostics.is_empty());
+        for value in [
+            "",
+            "relative",
+            "~/Images",
+            "$HOME/Images",
+            "/a/../b",
+            "/a//b",
+            "/a/",
+            "/a\tb",
+        ] {
+            assert!(
+                parse(&format!("[clipboard]\nimage-directory={value}\n")).is_err(),
+                "{value:?}"
+            );
+        }
+        assert!(parse("[clipboard]\nimage-directory=/a\nimage-directory=/b\n").is_err());
+        // A late error cannot return a partially changed configuration to reload.
+        assert!(
+            parse("[clipboard]\nimage-directory=/a\n[main]\nfont-pixelsize=invalid\n").is_err()
+        );
+        assert_eq!(
+            parse("[clipboard]\nunknown=x\n").unwrap().diagnostics.len(),
+            1
+        );
     }
 
     #[test]
@@ -1410,7 +1557,47 @@ mod tests {
             resolve_omarchy_theme("accent=\"#000006\"", &empty_dark)
                 .unwrap_err()
                 .to_string()
-                .contains("no [colors-dark] or [colors] palette")
+                .contains("no palette for the selected initial-color-theme")
+        );
+    }
+
+    #[test]
+    fn native_omarchy_theme_honors_initial_light_palette_without_mixing_sections() {
+        let dark = complete_foot_palette("101112", "d0d1d2", "303132", "e0e1e2");
+        let light = complete_foot_palette("f8f9fa", "202122", "c0c1c2", "101112")
+            .replace("[colors-dark]", "[colors-light]")
+            + "alpha=0.85\nblur=yes\n";
+        let expected =
+            resolve_omarchy_theme("", &format!("[main]\ninitial-color-theme=light\n{light}"))
+                .unwrap();
+        assert_eq!(expected.background, 0xf8_f9_fa);
+        assert_eq!(expected.foreground, 0x20_21_22);
+        assert_eq!(expected.selection, 0xc0_c1_c2);
+        assert_eq!(expected.selection_foreground, 0x10_11_12);
+        assert_eq!(expected.background_alpha, foot_alpha(0.85));
+        assert!(expected.background_blur);
+        for palettes in [format!("{dark}{light}"), format!("{light}{dark}")] {
+            for main in ["[main]\n", ""] {
+                let foot = format!("{main}initial-color-theme=light\n{palettes}");
+                assert_eq!(resolve_omarchy_theme("", &foot).unwrap(), expected);
+            }
+            assert_eq!(
+                resolve_omarchy_theme("", &palettes).unwrap().background,
+                0x10_11_12
+            );
+        }
+        for selected in ["[colors-light]\n", "[colors-light]\nbackground=f8f9fa\n"] {
+            assert!(
+                resolve_omarchy_theme(
+                    "",
+                    &format!("[main]\ninitial-color-theme=light\n{dark}{selected}")
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            resolve_omarchy_theme("", &format!("[main]\ninitial-color-theme=invalid\n{dark}"))
+                .is_err()
         );
     }
 

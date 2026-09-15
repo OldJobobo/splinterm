@@ -7,6 +7,30 @@ use splinterm_automation_client::Connection;
 
 use crate::{remote::RemoteProfile, remote_session::RemoteSession};
 
+/// Informational connection-time identity, not a security or authority signal.
+/// Constructed only from a remote endpoint's negotiated daemon metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteDisplayIdentity {
+    hostname: Option<String>,
+}
+
+impl RemoteDisplayIdentity {
+    fn from_advertised(hostname: Option<&str>) -> Self {
+        Self {
+            hostname: hostname
+                .and_then(splinterm_protocol::usable_daemon_hostname)
+                .map(str::to_owned),
+        }
+    }
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.hostname
+            .as_ref()
+            .map_or_else(|| "Remote".to_owned(), |host| format!("Remote: {host}"))
+    }
+}
+
 /// Whether terminal image bodies may be retrieved for an endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageTransport {
@@ -118,6 +142,16 @@ impl ConnectionFactory {
         Ok(connection)
     }
 
+    /// Freeze this Window's display identity from its initial protocol connection.
+    /// Local daemons advertise the same metadata but never receive remote chrome.
+    #[must_use]
+    pub fn remote_display_identity(
+        &self,
+        connection: &Connection,
+    ) -> Option<RemoteDisplayIdentity> {
+        remote_display_identity(self.is_local(), connection.daemon_hostname())
+    }
+
     /// Returns the explicit endpoint behavior contract.
     #[must_use]
     pub fn capabilities(&self) -> &EndpointCapabilities {
@@ -131,9 +165,48 @@ impl ConnectionFactory {
     }
 }
 
+fn remote_display_identity(local: bool, hostname: Option<&str>) -> Option<RemoteDisplayIdentity> {
+    (!local).then(|| RemoteDisplayIdentity::from_advertised(hostname))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_identity_uses_only_usable_negotiated_metadata_and_local_is_suppressed() {
+        for value in [
+            None,
+            Some("actual-daemon"),
+            Some("bad\nname"),
+            Some("\u{202e}evil"),
+        ] {
+            assert!(remote_display_identity(true, value).is_none());
+        }
+        assert_eq!(
+            remote_display_identity(false, Some("actual-daemon"))
+                .unwrap()
+                .label(),
+            "Remote: actual-daemon"
+        );
+        for value in [
+            None,
+            Some(""),
+            Some("bad\nname"),
+            Some("\u{202e}evil"),
+            Some(&"x".repeat(256)),
+        ] {
+            assert_eq!(
+                remote_display_identity(false, value).unwrap().label(),
+                "Remote"
+            );
+        }
+        assert!(
+            crate::frontend::WindowOptions::default()
+                .remote_display_identity
+                .is_none()
+        );
+    }
 
     #[test]
     fn local_capabilities_remain_trusted_and_remote_only_values_are_distinct() {

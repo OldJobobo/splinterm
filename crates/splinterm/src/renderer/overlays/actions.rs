@@ -1851,6 +1851,7 @@ mod tests {
             focus_right: None,
             focus_up: None,
             focus_down: None,
+            clipboard_image_available: false,
             viewport_detached: false,
             controller_active: false,
             forced_control_transfer: true,

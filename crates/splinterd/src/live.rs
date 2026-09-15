@@ -1344,6 +1344,7 @@ struct CompactMailboxState {
 struct CompactSnapshotSlot {
     current: Mutex<CompactMailboxState>,
     producer_batch_active: AtomicBool,
+    producer_batch_completions: AtomicU64,
     producer_batch_done: Notify,
     #[cfg(test)]
     producer_batch_waits: AtomicUsize,
@@ -1375,17 +1376,26 @@ impl CompactSnapshotSlot {
 
     fn end_producer_batch(&self) {
         self.producer_batch_active.store(false, Ordering::Release);
+        self.producer_batch_completions
+            .fetch_add(1, Ordering::Release);
         self.producer_batch_done.notify_one();
     }
 
     async fn wait_for_producer_batch(&self, resnapshot: &mut watch::Receiver<bool>) -> bool {
+        let completions = self.producer_batch_completions.load(Ordering::Acquire);
         loop {
             if *resnapshot.borrow() {
                 return true;
             }
             let completed = self.producer_batch_done.notified();
             tokio::pin!(completed);
-            if !self.producer_batch_active.load(Ordering::Acquire) {
+            // A completed read permits draining the exact, mutex-protected tail
+            // even when the producer has already begun its next read. Requiring
+            // an idle producer here can repeatedly park a ready consumer until
+            // the bounded queue overflows.
+            if !self.producer_batch_active.load(Ordering::Acquire)
+                || self.producer_batch_completions.load(Ordering::Acquire) != completions
+            {
                 return false;
             }
             #[cfg(test)]
@@ -5520,6 +5530,67 @@ mod tests {
         assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
         assert_eq!(metrics.snapshot().subscriber_queue_events_current, 0);
         drop(subscriber);
+    }
+
+    #[tokio::test]
+    async fn completed_producer_batch_releases_waiter_when_next_batch_starts() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let slot = CompactSnapshotSlot::default();
+        let (_sender, mut resnapshot) = watch::channel(false);
+        slot.begin_producer_batch();
+        let mut waiter = Box::pin(slot.wait_for_producer_batch(&mut resnapshot));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+
+        // Reproduce a producer winning the scheduling race after notifying its
+        // parked consumer: the completed batch must still permit a drain.
+        slot.end_producer_batch();
+        slot.begin_producer_batch();
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(false));
+        slot.end_producer_batch();
+    }
+
+    #[tokio::test]
+    async fn stale_batch_notification_does_not_release_active_batch_waiter() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let slot = CompactSnapshotSlot::default();
+        let (_sender, mut resnapshot) = watch::channel(false);
+        slot.begin_producer_batch();
+        slot.end_producer_batch(); // Leave an unconsumed Notify permit.
+        slot.begin_producer_batch();
+        let mut waiter = Box::pin(slot.wait_for_producer_batch(&mut resnapshot));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+        slot.end_producer_batch();
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(false));
+    }
+
+    #[tokio::test]
+    async fn resnapshot_wins_over_completed_producer_batch() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let slot = CompactSnapshotSlot::default();
+        let (sender, mut resnapshot) = watch::channel(false);
+        slot.begin_producer_batch();
+        let mut waiter = Box::pin(slot.wait_for_producer_batch(&mut resnapshot));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+        slot.end_producer_batch();
+        slot.begin_producer_batch();
+        sender.send_replace(true);
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(true));
+        slot.end_producer_batch();
     }
 
     #[tokio::test]

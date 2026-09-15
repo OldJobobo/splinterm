@@ -51,6 +51,7 @@ REQUIRED = {
     "usr/share/doc/splinterm/presets.md",
     "usr/share/doc/splinterm/remote.md",
     "usr/share/doc/splinterm/usage.md",
+    "usr/share/doc/splinterm/accessibility.md",
     "usr/share/doc/splinterm/theme.json",
     "usr/share/doc/splinterm/xdg-terminals.list",
     "usr/share/licenses/splinterm/LICENSE",

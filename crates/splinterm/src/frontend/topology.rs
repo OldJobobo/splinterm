@@ -8,7 +8,9 @@ use splinterm_core::{
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
-use crate::navigation_projection::NavigationAction;
+use crate::navigation_projection::{
+    NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
@@ -38,6 +40,12 @@ pub struct SessionPickerTarget {
     pub lair_id: LairId,
     pub dojo_id: DojoId,
     pub action: NavigationAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LairExplorerActivationTarget {
+    Dojo(SessionPickerTarget),
+    Splint(NavigationExplorerSplintTarget),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,12 +108,19 @@ pub enum WindowTopologyCommand {
         ratio: SplitRatio,
     },
     RequestSessionPicker,
+    RequestLairExplorer {
+        focused_splint: Option<SplintId>,
+    },
     RequestSelector {
         kind: SelectorKind,
         lair_id: LairId,
     },
     OpenDojo {
         target: SessionPickerTarget,
+        explorer_target: Option<LairExplorerActivationTarget>,
+    },
+    FocusSplint {
+        target: NavigationExplorerSplintTarget,
     },
     NewLair {
         cwd: PathBuf,
@@ -193,9 +208,17 @@ pub enum WindowTopologyUpdate {
         panes: Vec<WindowPaneOptions>,
         focused: SplintId,
         acknowledged: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ActivateTab {
         dojo_id: DojoId,
+        explorer_target: Option<LairExplorerActivationTarget>,
+    },
+    ActivateSplint {
+        dojo_id: DojoId,
+        splint_id: SplintId,
+        live_incarnation: Option<u64>,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     RemoveTab {
         dojo_id: DojoId,
@@ -205,9 +228,13 @@ pub enum WindowTopologyUpdate {
     TabFailed {
         dojo_id: Option<DojoId>,
         message: String,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ShowSessionPicker {
         catalog: SessionPickerCatalog,
+    },
+    ShowLairExplorer {
+        view: NavigationExplorerView,
     },
     ShowSelector {
         kind: SelectorKind,
@@ -218,6 +245,7 @@ pub enum WindowTopologyUpdate {
         target: LairPromptTarget,
     },
     SessionPickerFailed(String),
+    LairExplorerFailed,
     Theme(ThemeUpdate),
     Font(FontUpdate),
     Closed,

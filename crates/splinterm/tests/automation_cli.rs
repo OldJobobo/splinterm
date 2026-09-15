@@ -56,6 +56,7 @@ fn accept_client(listener: &UnixListener) -> UnixStream {
                 version: PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             })
             .unwrap(),
         )
@@ -208,6 +209,7 @@ fn serve_history_response(search: bool, result: Response) -> (PathBuf, thread::J
                     version: PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 })
                 .unwrap(),
             )
@@ -753,6 +755,7 @@ fn serve_one(result: Result<Response, ProtocolError>) -> (PathBuf, thread::JoinH
                     version: PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 })
                 .unwrap(),
             )
@@ -926,6 +929,7 @@ fn output_json_snapshot_uses_exact_provenance_and_detaches() {
                     version: PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 })
                 .unwrap(),
             )
@@ -1519,6 +1523,7 @@ fn output_json_ping_keeps_stdout_pristine() {
                     version: PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 })
                 .unwrap(),
             )

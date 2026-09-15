@@ -186,10 +186,13 @@ async fn run_live_multipane_window_inner(
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
     }
-    let initial_identity = initial_window_dojo_identity(&factory, dojo_model.id).await?;
+    let (initial_identity, remote_display_identity) =
+        initial_window_dojo_identity(&factory, dojo_model.id).await?;
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_ligatures: config.font_ligatures,
+        font_features: config.font_features.clone(),
         font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
@@ -218,6 +221,7 @@ async fn run_live_multipane_window_inner(
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
+    let local_endpoint = factory.is_local();
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let optimistic_remote_splits =
@@ -273,7 +277,10 @@ async fn run_live_multipane_window_inner(
             topology_commands: Some(topology_commands),
             graphical_focus,
             forced_control_transfer,
+            remote_display_identity,
             optimistic_remote_splits,
+            local_endpoint,
+            clipboard_image_directory: window_config.clipboard_image_directory,
             initial_dojo: Some(initial_identity),
             initial_tab_strip_visible,
             initial_columns: window_config.initial_columns,
@@ -318,6 +325,8 @@ pub(super) async fn run_live_window(
     let theme = load_startup_theme(&config);
     renderer::configure(RendererOptions {
         font: config.font.clone(),
+        font_ligatures: config.font_ligatures,
+        font_features: config.font_features.clone(),
         font_authority: config.font_authority,
         font_size: config.font_size,
         font_sizing_policy: config.font_sizing_policy,
@@ -327,6 +336,7 @@ pub(super) async fn run_live_window(
     })?;
     let initial_font_generation = Arc::clone(renderer::snapshot_font_generation()?);
     let mut connection = factory.connect().await?;
+    let remote_display_identity = factory.remote_display_identity(&connection);
     let terminal_grid_limits = terminal_grid_limits(connection.limits());
     let incarnation = connection.live_incarnation(splint_id).await?;
     let requested_scopes = pane_access_scopes();
@@ -409,6 +419,7 @@ pub(super) async fn run_live_window(
     let initial_snapshot = attachment.snapshot;
     let window_config = config.clone();
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
+    let local_endpoint = factory.is_local();
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let mut window = tokio::task::spawn_blocking(move || {
@@ -421,7 +432,10 @@ pub(super) async fn run_live_window(
             controlled: controller_id.is_some(),
             graphical_focus,
             forced_control_transfer,
+            remote_display_identity,
             terminal_grid_limits,
+            local_endpoint,
+            clipboard_image_directory: window_config.clipboard_image_directory,
             initial_columns: window_config.initial_columns,
             initial_rows: window_config.initial_rows,
             cursor_style: window_config.cursor_style,

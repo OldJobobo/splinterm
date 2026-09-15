@@ -504,6 +504,11 @@ impl KeyboardHandler for App {
         }
         if shortcut == Some(ActionId::ClipboardCopy) {
             self.publish_clipboard(queue_handle, serial, false);
+        } else if shortcut == Some(ActionId::ClipboardSaveImage) {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            self.begin_clipboard_image();
         } else if shortcut == Some(ActionId::ClipboardPaste) {
             self.begin_clipboard_read(PasteTarget::Clipboard);
         } else {

@@ -79,6 +79,29 @@ class McpHost:
                 return response
             self.notifications.append(response)
 
+    def wait_for_resource_update(self, uri: str, timeout: float = 15) -> dict[str, object]:
+        """Consume the matching update whether it preceded or followed a response."""
+        deadline = time.monotonic() + timeout
+
+        def matches(message: dict[str, object]) -> bool:
+            params = message.get("params")
+            return (
+                message.get("method") == "notifications/resources/updated"
+                and isinstance(params, dict)
+                and params.get("uri") == uri
+            )
+
+        for index, notification in enumerate(self.notifications):
+            if matches(notification):
+                return self.notifications.pop(index)
+        while True:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"missing MCP resource update for {uri}"
+            notification = self.receive(remaining)
+            if matches(notification):
+                return notification
+            self.notifications.append(notification)
+
     def initialize(self) -> dict[str, object]:
         response = self.request("initialize", {
             "protocolVersion": "2025-11-25",
@@ -257,14 +280,7 @@ def main() -> int:
                 "splint_id": splint_id, "title": "package-mcp-renamed",
             })
             assert renamed["isError"] is False
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                note = host.receive(deadline - time.monotonic())
-                if note.get("method") == "notifications/resources/updated":
-                    assert note["params"]["uri"] == uri
-                    break
-            else:
-                raise AssertionError("missing MCP resource update")
+            host.wait_for_resource_update(uri)
             unsubscribed = host.request("resources/unsubscribe", {"uri": uri})
             assert "error" not in unsubscribed
 

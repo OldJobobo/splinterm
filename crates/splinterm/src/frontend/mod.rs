@@ -2,7 +2,9 @@
 
 mod action_menu;
 mod binding_help;
+mod lair_explorer;
 mod message;
+mod navigation_accessibility;
 mod options;
 mod picker;
 mod text_edit;
@@ -17,15 +19,21 @@ pub(crate) use action_menu::{
     tab_menu_dispatch, tab_menu_right_press,
 };
 pub(crate) use binding_help::{BINDING_HELP_PAGE_ITEMS, BindingHelpUi};
+#[cfg(test)]
+pub(crate) use lair_explorer::LairExplorerRowKind;
+pub(crate) use lair_explorer::{LairExplorerDecision, LairExplorerRow, LairExplorerUi};
 pub use message::{
     AuthorityStatus, FontUpdate, PerfTraceCorrelation, ThemeUpdate, WindowCommand, WindowUpdate,
+};
+pub(crate) use navigation_accessibility::{
+    NavigationAccessAction, NavigationAccessContext, NavigationAccessibility,
 };
 pub use options::{TerminalGridLimits, TrustedConsentUi, WindowOptions, WindowPaneOptions};
 pub(crate) use picker::PickerHitTarget;
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
 pub(crate) use text_edit::BoundedTextEditor;
 pub use topology::{
-    LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, SessionPickerCatalog,
-    SessionPickerCreationTarget, SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand,
-    WindowTopologyUpdate,
+    LairDirection, LairExplorerActivationTarget, LairPromptKind, LairPromptTarget, SelectorKind,
+    SessionPickerCatalog, SessionPickerCreationTarget, SessionPickerTarget, WindowDojoIdentity,
+    WindowTopologyCommand, WindowTopologyUpdate,
 };

@@ -96,6 +96,10 @@ pub struct WindowOptions {
     pub keymap: ResolvedKeymap,
     /// Prefix sequence timeout from the validated client configuration.
     pub prefix_timeout_ms: u64,
+    /// Explicit opt-in destination; saves also require a local endpoint.
+    pub clipboard_image_directory: Option<PathBuf>,
+    /// Fixed endpoint authority, not inferred from a UI capability or terminal data.
+    pub local_endpoint: bool,
     /// Multi-pane input. Empty retains the legacy one-pane fields above.
     pub panes: Vec<WindowPaneOptions>,
     pub layout: Option<LayoutNode>,
@@ -113,6 +117,8 @@ pub struct WindowOptions {
     pub initial_dojo: Option<WindowDojoIdentity>,
     /// Initial tab-strip policy for managed Dojo windows.
     pub initial_tab_strip_visible: bool,
+    /// Remote daemon identity from this Window's initial connection; never terminal content.
+    pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
 }
 
 impl Default for WindowOptions {
@@ -141,6 +147,8 @@ impl Default for WindowOptions {
             frame_title_mode: FrameTitleMode::Splint,
             keymap: ResolvedKeymap::default(),
             prefix_timeout_ms: 1_000,
+            clipboard_image_directory: None,
+            local_endpoint: false,
             panes: Vec::new(),
             layout: None,
             active_splint: None,
@@ -151,6 +159,7 @@ impl Default for WindowOptions {
             optimistic_remote_splits: false,
             initial_dojo: None,
             initial_tab_strip_visible: true,
+            remote_display_identity: None,
         }
     }
 }

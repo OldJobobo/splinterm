@@ -507,7 +507,7 @@ pub(crate) struct SessionPickerTextItem<'a> {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct SessionPickerTextKey {
+pub(super) struct SessionPickerTextKey {
     source: String,
     constrained_width: u32,
     style: ChromeTextStyle,
@@ -527,7 +527,7 @@ impl SessionPickerTextCache {
         self.recent_frames.clear();
     }
 
-    fn finish_frame(&mut self, used: HashSet<SessionPickerTextKey>) {
+    pub(super) fn finish_frame(&mut self, used: HashSet<SessionPickerTextKey>) {
         self.recent_frames.push_back(used);
         while self.recent_frames.len() > 3 {
             self.recent_frames.pop_front();
@@ -586,7 +586,7 @@ fn opaque_rgba(color: u32) -> [u8; 4] {
 }
 
 #[derive(Clone, Copy)]
-enum PickerTextAlignment {
+pub(super) enum PickerTextAlignment {
     Left,
     Center,
     Right,
@@ -619,7 +619,7 @@ fn truncate_picker_text(source: &str, maximum_cells: usize) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_picker_text(
+pub(super) fn paint_picker_text(
     cache: &mut SessionPickerTextCache,
     context: &RenderContext,
     used: &mut HashSet<SessionPickerTextKey>,

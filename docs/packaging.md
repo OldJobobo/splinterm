@@ -1,14 +1,17 @@
-# Public beta Arch packaging
+# Arch packaging
 
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` prepares the `0.1.0rc.2` split packages for
-reviewed local and CI candidate builds. Its local source archive and `SKIP` checksum are
-valid only in that workflow. The current public versioned release is
-[`v0.1.0-rc.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-rc.1).
-The closed `packaging/release-state.json` record is the machine-readable authority for that
-current public predecessor; candidate construction and promotion both reject a
+Splinterm's `packaging/PKGBUILD` prepares split packages for reviewed local and CI
+candidate builds. Its local source archive and `SKIP` checksum are valid only in
+that workflow. This checkout's recipe and the examples below prepare `0.1.1`;
+publication is pending. A version bump does not establish release availability. Match
+archive and package filenames to the recipe when preparing another version.
+
+The closed `packaging/release-state.json` record identifies `v0.1.0` as the
+current public predecessor. It is the machine-readable authority for that
+boundary; candidate construction and promotion both reject a
 different supplied tag even when it exists. `docs/status.md` carries the same
 exact current-version marker, and release tooling rejects disagreement. The
 post-publication release-record PR must update both files atomically before any
@@ -21,6 +24,11 @@ recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it must already
 target the candidate version's immutable `v…` release URL, while candidate
 construction binds its commit and checksums to the exact approved packages so
 users never compile or test them locally.
+
+During release preparation, checked-in AUR checksums and `_commit` still refer
+to the previous artifacts until candidate tooling replaces them. These staged
+recipes are not ready for AUR submission or installation. Never invent hashes
+for unpublished assets; use the reviewed candidate's generated drafts.
 
 ## Versioned AUR installation
 
@@ -57,7 +65,7 @@ and SHA-256 package digests before downloading either package. Historical
 
 An authenticated GitHub CLI session is used when one is already available;
 otherwise the installer uses anonymous GitHub API and release downloads through
-`curl`. Authentication is not required for ordinary public beta installs.
+`curl`. Authentication is not required for ordinary public release installs.
 
 Before Pacman installation, the script verifies package checksums and matching
 split-package versions. It rejects a shadowing user-local client, preserves an
@@ -105,8 +113,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0rc.2/ \
-  -o packaging/splinterm-0.1.0rc.2.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.1/ \
+  -o packaging/splinterm-0.1.1.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
@@ -125,10 +133,19 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0rc.2-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.1-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.1-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
+
+Renderer checks use the same four checksum-pinned JetBrains Mono fonts as CI.
+`makepkg` fetches these immutable sources alongside the local archive and verifies
+their SHA-256 hashes. During `check()` only, a private Fontconfig file selects
+these fixtures plus installed Noto fallback fonts, with a build-local font cache.
+Ambient user/system Fontconfig settings cannot substitute a newer JetBrains Mono.
+The fixtures are neither installed nor shipped; runtime font dependencies and
+user font selection are unchanged. The fixture generator requires makepkg's
+already-verified sources. Even `--nocheck` builds still fetch the declared sources.
 
 The local archive checksum is intentionally `SKIP`: the archive is generated
 from the reviewed local Git commit, is never downloaded, and the package's
@@ -151,7 +168,7 @@ not submit the local-build recipe to the AUR.
   `/usr/bin/splinterm-session-picker` alias, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;
-- the release README, CLI/usage/configuration guides, built-in Omarchy keymap
+- the release README, CLI/usage/configuration/accessibility guides, built-in Omarchy keymap
   documentation, preset guide and example schema, optional shell-integration
   instructions, headless lifecycle/policy guidance, terminal-image matrix, and
   integration snippets under `/usr/share/doc/splinterm/`; and
@@ -238,7 +255,7 @@ The equivalent manual lifecycle is:
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0rc.2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.1-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -246,7 +263,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0rc.2-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.1-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

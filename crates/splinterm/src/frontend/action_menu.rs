@@ -695,12 +695,16 @@ pub(crate) enum BuiltInCommandId {
     ResizePaneSmaller,
     ResizePaneLarger,
     EnterCopyMode,
+    SaveClipboardImage,
     ToggleFocusedPaneZoom,
     SearchScrollback,
     PageUp,
     PageDown,
     ReturnToLive,
     ToggleTabStrip,
+    ToggleLairExplorer,
+    FocusLairExplorer,
+    ReturnFocusToTerminal,
     ZoomIn,
     ZoomOut,
     ResetZoom,
@@ -750,12 +754,16 @@ impl BuiltInCommandId {
         Self::ResizePaneSmaller,
         Self::ResizePaneLarger,
         Self::EnterCopyMode,
+        Self::SaveClipboardImage,
         Self::ToggleFocusedPaneZoom,
         Self::SearchScrollback,
         Self::PageUp,
         Self::PageDown,
         Self::ReturnToLive,
         Self::ToggleTabStrip,
+        Self::ToggleLairExplorer,
+        Self::FocusLairExplorer,
+        Self::ReturnFocusToTerminal,
         Self::ZoomIn,
         Self::ZoomOut,
         Self::ResetZoom,
@@ -824,7 +832,8 @@ impl CommandTabMoveAvailability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     clippy::struct_field_names,
-    reason = "the explicit identity suffixes keep domain identifiers and captured destinations unambiguous"
+    clippy::struct_excessive_bools,
+    reason = "independent captured availability flags and the explicit identity suffixes keep domain identifiers and captured destinations unambiguous"
 )]
 pub(crate) struct CommandPaletteContext {
     pub(crate) lair_id: LairId,
@@ -843,6 +852,7 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) focus_right: Option<SplintId>,
     pub(crate) focus_up: Option<SplintId>,
     pub(crate) focus_down: Option<SplintId>,
+    pub(crate) clipboard_image_available: bool,
     pub(crate) viewport_detached: bool,
     pub(crate) controller_active: bool,
     pub(crate) forced_control_transfer: bool,
@@ -891,6 +901,7 @@ pub(crate) enum BuiltInCommandDispatch {
     ShowKeybindings,
     ReloadConfiguration,
     EnterCopyMode,
+    SaveClipboardImage,
     ToggleFocusedPaneZoom,
     MoveDojo {
         dojo_id: DojoId,
@@ -900,6 +911,9 @@ pub(crate) enum BuiltInCommandDispatch {
     Focus(SplintId),
     Zoom(CommandZoomAction),
     ToggleTabStrip,
+    ToggleLairExplorer,
+    FocusLairExplorer,
+    ReturnFocusToTerminal,
     History {
         target: SplintId,
         action: CommandHistoryAction,
@@ -934,6 +948,13 @@ impl BuiltInCommandDescriptor {
 }
 
 pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId::ALL.len()] = [
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::SaveClipboardImage,
+        category: CommandCategory::Application,
+        title: "Save clipboard image and insert path",
+        keywords: &["clipboard", "png", "image", "save", "path", "screenshot"],
+        shortcut_action: Some(ActionId::ClipboardSaveImage),
+    },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ShowKeybindings,
         category: CommandCategory::Application,
@@ -1222,6 +1243,27 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         shortcut_action: Some(ActionId::ToggleTabStrip),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ToggleLairExplorer,
+        category: CommandCategory::View,
+        title: "Toggle Lair explorer",
+        keywords: &["toggle", "show", "hide", "lair", "explorer", "tree", "view"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::FocusLairExplorer,
+        category: CommandCategory::View,
+        title: "Focus Lair explorer",
+        keywords: &["focus", "lair", "explorer", "tree", "navigation"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ReturnFocusToTerminal,
+        category: CommandCategory::View,
+        title: "Return focus to terminal",
+        keywords: &["focus", "return", "terminal", "explorer", "navigation"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::ZoomIn,
         category: CommandCategory::View,
         title: "Zoom in",
@@ -1320,6 +1362,7 @@ fn descriptor_matches(descriptor: BuiltInCommandDescriptor, query: &str) -> bool
 
 pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteContext) -> bool {
     match id {
+        BuiltInCommandId::SaveClipboardImage => context.clipboard_image_available,
         BuiltInCommandId::PreviousDojo => context.previous_dojo_id.is_some(),
         BuiltInCommandId::NextDojo => context.next_dojo_id.is_some(),
         BuiltInCommandId::MoveDojoLeft => context.tab_move.can_move_left(),
@@ -1371,6 +1414,9 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         | BuiltInCommandId::PageUp
         | BuiltInCommandId::PageDown
         | BuiltInCommandId::ToggleTabStrip
+        | BuiltInCommandId::ToggleLairExplorer
+        | BuiltInCommandId::FocusLairExplorer
+        | BuiltInCommandId::ReturnFocusToTerminal
         | BuiltInCommandId::ZoomIn
         | BuiltInCommandId::ZoomOut
         | BuiltInCommandId::ResetZoom
@@ -1595,6 +1641,7 @@ pub(crate) fn command_dispatch(
         return None;
     }
     let dispatch = match id {
+        BuiltInCommandId::SaveClipboardImage => BuiltInCommandDispatch::SaveClipboardImage,
         BuiltInCommandId::ShowKeybindings => BuiltInCommandDispatch::ShowKeybindings,
         BuiltInCommandId::ReloadConfiguration => BuiltInCommandDispatch::ReloadConfiguration,
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
@@ -1706,11 +1753,12 @@ pub(crate) fn command_dispatch(
                 kind: LairPromptKind::Terminate,
             })
         }
+        // Command orientation names the divider; core axes name pane placement.
         BuiltInCommandId::SplitHorizontal => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
-                axis: Axis::Horizontal,
+                axis: Axis::Vertical,
                 pending: None,
             })
         }
@@ -1718,7 +1766,7 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
-                axis: Axis::Vertical,
+                axis: Axis::Horizontal,
                 pending: None,
             })
         }
@@ -1765,6 +1813,9 @@ pub(crate) fn command_dispatch(
             action: CommandHistoryAction::ReturnToLive,
         },
         BuiltInCommandId::ToggleTabStrip => BuiltInCommandDispatch::ToggleTabStrip,
+        BuiltInCommandId::ToggleLairExplorer => BuiltInCommandDispatch::ToggleLairExplorer,
+        BuiltInCommandId::FocusLairExplorer => BuiltInCommandDispatch::FocusLairExplorer,
+        BuiltInCommandId::ReturnFocusToTerminal => BuiltInCommandDispatch::ReturnFocusToTerminal,
         BuiltInCommandId::ZoomIn => BuiltInCommandDispatch::Zoom(CommandZoomAction::Increase),
         BuiltInCommandId::ZoomOut => BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease),
         BuiltInCommandId::ResetZoom => BuiltInCommandDispatch::Zoom(CommandZoomAction::Reset),
@@ -1828,12 +1879,33 @@ mod tests {
             focus_right: Some(SplintId::new()),
             focus_up: Some(SplintId::new()),
             focus_down: Some(SplintId::new()),
+            clipboard_image_available: false,
             viewport_detached: true,
             controller_active: false,
             forced_control_transfer: true,
             grant_ids: vec![7, 9],
             pending_transfer_id: Some(42),
         })
+    }
+
+    #[test]
+    fn clipboard_image_palette_dispatch_is_opt_in_and_has_no_default_shortcut() {
+        let mut context = palette().context();
+        let id = BuiltInCommandId::SaveClipboardImage;
+        assert!(!command_enabled(id, &context));
+        assert!(command_dispatch(id, &context).is_none());
+        context.clipboard_image_available = true;
+        assert_eq!(
+            command_dispatch(id, &context),
+            Some(BuiltInCommandDispatch::SaveClipboardImage)
+        );
+        assert_eq!(
+            command_descriptor(id).shortcut(&ResolvedKeymap::default()),
+            ""
+        );
+        let mut ui = CommandPaletteUi::new(context);
+        ui.append_text("screenshot");
+        assert_eq!(ui.filtered(), &[id]);
     }
 
     #[test]
@@ -2031,6 +2103,9 @@ mod tests {
             palette.filtered,
             vec![
                 BuiltInCommandId::ToggleTabStrip,
+                BuiltInCommandId::ToggleLairExplorer,
+                BuiltInCommandId::FocusLairExplorer,
+                BuiltInCommandId::ReturnFocusToTerminal,
                 BuiltInCommandId::ZoomIn,
                 BuiltInCommandId::ZoomOut,
                 BuiltInCommandId::ResetZoom,
@@ -2430,6 +2505,17 @@ mod tests {
                 WindowTopologyCommand::Split {
                     dojo_id: context.dojo_id,
                     target: context.splint_id,
+                    axis: Axis::Vertical,
+                    pending: None,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::SplitVertical, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::Split {
+                    dojo_id: context.dojo_id,
+                    target: context.splint_id,
                     axis: Axis::Horizontal,
                     pending: None,
                 }
@@ -2460,6 +2546,26 @@ mod tests {
             command_dispatch(BuiltInCommandId::ToggleTabStrip, &context),
             Some(BuiltInCommandDispatch::ToggleTabStrip)
         );
+        for (id, dispatch) in [
+            (
+                BuiltInCommandId::ToggleLairExplorer,
+                BuiltInCommandDispatch::ToggleLairExplorer,
+            ),
+            (
+                BuiltInCommandId::FocusLairExplorer,
+                BuiltInCommandDispatch::FocusLairExplorer,
+            ),
+            (
+                BuiltInCommandId::ReturnFocusToTerminal,
+                BuiltInCommandDispatch::ReturnFocusToTerminal,
+            ),
+        ] {
+            assert_eq!(command_dispatch(id, &context), Some(dispatch));
+            assert_eq!(
+                command_descriptor(id).shortcut(&ResolvedKeymap::default()),
+                ""
+            );
+        }
         assert_eq!(
             command_dispatch(BuiltInCommandId::ZoomOut, &context),
             Some(BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease))

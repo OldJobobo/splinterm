@@ -5,11 +5,101 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 `SPLINTERM_CONFIG` to test another file. Start from
 [`config/splinterm/config.ini`](../config/splinterm/config.ini).
 
+## Clipboard PNG saving
+
+Available in the 0.1.1 source; publication is pending. The published `v0.1.0`
+release does not include this action.
+
+`[clipboard] image-directory` opts into a persistent destination for explicit
+clipboard-image saves. Use **Save clipboard image and insert path** in the command
+palette, or bind `clipboard.save-image` in a custom keymap. Neither built-in
+profile assigns a shortcut. Ordinary clipboard/primary text paste is unchanged,
+even when the clipboard offers both text and PNG. The explicit image action
+selects `image/png`; other formats are not converted. Remote sessions are disabled
+because a local saved path is not a remote file.
+
+The focused pane must hold control, be at live output, and have keyboard focus,
+without copy mode, an input modal, a pending session switch, or a divider drag.
+Unavailable palette rows are disabled; invoking a custom binding reports why the
+save is unavailable. Focus, control, topology, pane incarnation, input generation,
+and the configured destination are checked again before publication and insertion.
+Opening another modal or changing the target cancels the original request rather
+than redirecting it. Configuration reload also cancels in-flight saves.
+
+There is at most one active image save per Window and one image worker per client
+process. The pipe has a two-second read deadline; each worker/UI authorization
+wait is also limited to two seconds. UI queues contain at most two small events
+and one decision, never PNG bodies or filesystem descriptors. Validation, file
+writes, sync, publication, verification, and descriptor cleanup stay on the worker.
+A stalled filesystem syscall can hold that worker slot until the kernel returns;
+it cannot block Wayland dispatch or cause additional image workers to accumulate.
+
+```ini
+[clipboard]
+image-directory=/home/your-user/Private clipboard images
+```
+
+Create the directory yourself with private permissions (`0700`). It must already
+exist, be owned by your user, and grant no group/other access. Every path component
+must be a real directory (no symlinks); ancestors must be owned by you or root and
+must not be group/other writable. Relative paths, `~`/environment expansion, dot
+components, repeated/trailing slashes, control characters, non-UTF-8 paths, and
+paths longer than 4000 bytes are rejected. Parsing validates syntax only; a save
+worker validates current filesystem identity and permissions. A malformed setting
+rejects the entire configuration candidate rather than partially applying it.
+
+The storage limit is **16 MiB of encoded PNG**, **8192 pixels per edge**, and
+**16,777,216 pixels total**. Validation fully decodes static image data and checks
+the end marker; APNG, truncation, malformed data, and trailing bytes are rejected.
+Decoded output is capped at **64 MiB**, with a separate **64 MiB PNG decoder
+allocation budget**. A streaming zlib check rejects excess inflated image data,
+incomplete streams, and bad checksums; it stops at the declared filtered frame
+size plus one byte rather than expanding an arbitrary compressed payload. Its
+compressed copy is at most 16 MiB and is released before pixel-output allocation.
+Text and ICC metadata are not decompressed by validation;
+original bytes, including metadata, are preserved in the saved file. Saving is
+not metadata stripping or sanitization for sharing with other applications.
+
+Validation and disk I/O run off the Wayland event loop. Staging uses Linux
+`O_TMPFILE`; unsupported filesystems fail with guidance to select another private
+directory, never a less-safe temporary-file fallback. Publication also requires
+accessible `/proc/self/fd`. The completed file is private (`0600`, or more
+restrictive under your umask), named `clipboard-<random UUID>.png`, and linked
+without overwriting any existing name, with at most 32 collision retries. File
+contents are synced before publication; crash/power-loss durability of the new
+directory entry is not promised.
+
+Cancelled or failed **unpublished** saves leave no named file. Once published,
+the image is retained until you delete it—even if subsequent path insertion
+fails or its original pane becomes stale. That failure must report the saved
+path instead of redirecting input or silently deleting a file. There is no age
+cleanup and no image-body logging. Unlinking by pathname after checking its inode
+still races replacement, so the storage API never automatically deletes a
+published name. Input is admitted only once, nonblockingly, when no earlier
+terminal input is pending. A busy/full/closed command channel retains the image
+and reports its path; saved-path input is never deferred. The payload is an
+absolute POSIX-shell-quoted path (including literal apostrophes/spaces/Unicode),
+wrapped only if the current pane enables bracketed paste, with no trailing space,
+newline, or Enter. Admission is not a daemon acknowledgment or a guarantee that
+a terminal application consumed the path.
+
+Progress/failure feedback uses a temporary Window title and stderr. Retained-path
+notices escape control/format characters for readable identification without
+logging image bytes. Normal title updates can replace the notice. If the Window
+closes after publication, the worker reports the retained path to stderr on
+channel disconnect or timeout; abrupt process termination cannot guarantee any
+notice. Successful saves also persist until manually deleted.
+
+Descriptor-relative access and identity rechecks detect ordinary
+substitution, but do not sandbox hostile processes running as your own user.
+
 ## Supported keys
 
 | Section/key | Meaning | Range/default |
 | --- | --- | --- |
 | `main.font` | explicit fontconfig pattern; when unset, follow Omarchy's effective `monospace` family | unset |
+| `main.font-ligatures` | startup-only cross-cell shaping: `off`, `on`, or `cursor` | off |
+| `main.font-features` | startup-only comma-separated OpenType `tag=value` settings | empty; at most 64 unique tags |
 | `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
@@ -26,6 +116,7 @@ default path is `${XDG_CONFIG_HOME:-~/.config}/splinterm/config.ini`; set
 | `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |
 | `colors.blur` | optional native background-blur request | strict boolean; unset (theme-owned, otherwise `no`) |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
+| `clipboard.image-directory` | explicit absolute private directory for user-requested local clipboard PNG saves | unset; no temporary fallback |
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
@@ -67,6 +158,50 @@ atomically, rebuilds active and hidden pane frames, and lets only an
 existing pane controller issue the final PTY resize. Observer panes prepare a
 future size without acquiring control. Font changes do not imply live reload of
 font size, padding, shell, scrollback, cursor, or keymap settings.
+
+### Opt-in terminal font shaping
+
+```ini
+[main]
+font-ligatures=cursor
+font-features=calt=1,zero=1,ss01=2
+```
+
+`off` (the default) retains per-cell rendering: no joining across terminal
+cells. Features still apply within each cell, including combining/emoji
+clusters; `off` does not disable required intra-cell shaping. `on` shapes
+compatible runs regardless of the cursor. `cursor` breaks runs immediately
+before and after the reported visible cursor cell, restoring neighboring
+context when it moves away. Blink and focus presentation do not reshape text.
+The cursor's logical span is never enlarged to the ligature's ink or source span.
+
+This first live slice joins **only adjacent single-width printable ASCII cells**,
+including spaces, with identical attributes and selected face. Style, colors,
+decorations, conceal, generated box drawing, non-ASCII/wide/grapheme cells,
+missing cells, and row ends are hard boundaries. Other text retains existing
+per-cell fallback, with the configured features. Run shaping failure falls back
+to that same per-cell path. Terminal widths, original text, selection/copy, and
+daemon/protocol semantics are unchanged. Selection colors clip glyph ink to
+selected cells, even where contextual glyphs originate in neighboring cells.
+
+Feature tags are case-sensitive, exactly four printable ASCII bytes; settings
+are comma-separated, with explicit unsigned decimal values from 0 to 65535.
+Whitespace around comma-separated entries is ignored. No bare tags, duplicate
+tags, signed/boolean values, or more than 64 settings are accepted; invalid
+values fail startup with a line-numbered diagnostic. Empty `font-features=`
+uses font/engine defaults. Tags and selectors unsupported by the selected font
+have no effect; numeric selectors do not imply that a font provides that variant.
+For example, `font-ligatures=off` with `font-features=zero=1` requests a slashed
+zero without enabling cross-cell joining.
+
+Both settings require a new client process; configuration reload and the native
+font-family watcher do not change them. They remain attached to immutable
+renderer resources through font-family changes. Named font instances retain
+their existing normalized coordinates. Per-face settings, arbitrary variation
+axes, general script/bidi run shaping, and Kitty/Ghostty parity are not provided.
+History scroll-copy is retained for cursor-free rows; transitions involving a
+visible cursor in `cursor` mode use the existing full-frame rebuild fallback to
+avoid copying stale context breaks.
 
 By default, palette roles come directly from the
 active Omarchy theme's `colors.toml` and effective `foot.ini`; `[colors] alpha`
@@ -204,6 +339,7 @@ shell commands or callbacks. Bindable action IDs are:
 ```text
 app.command-palette       session.recent
 clipboard.copy            clipboard.paste
+clipboard.save-image
 dojo.new                  dojo.previous
 dojo.next                 dojo.close-tab
 dojo.close-other-tabs      dojo.rename
@@ -417,10 +553,10 @@ Copy values rather than copying a whole `foot.ini`:
   `main.initial-rows`.
 - Foot `shell` → `main.shell`; Splinterm never evaluates it as a shell command.
 - Foot `scrollback.lines` and cursor style/blink map directly.
-- Foot `alpha` and `blur` are imported together from `[colors-dark]`, or from
-  legacy `[colors]` when no dark section exists. `[colors-light]` is ignored
-  because Splinterm has no light-theme selection state. Use `[colors] alpha`
-  and `[colors] blur` only for explicit Splinterm overrides.
+- Foot `alpha` and `blur` are imported together from `[colors-light]` when
+  Foot's `main.initial-color-theme=light`; otherwise from `[colors-dark]`, or
+  legacy `[colors]` when no dark section exists. Use `[colors] alpha` and
+  `[colors] blur` only for explicit Splinterm overrides.
 - Convert colors through the Omarchy generator below instead of pasting Foot's
   complete `[colors]` section.
 
@@ -457,8 +593,12 @@ The tab-strip and selected-tab backgrounds both inherit the terminal alpha
 while preserving their resolved colors. The selected-tab underline remains the
 opaque UI accent. Terminal selections continue to use Foot's independent
 `selection-foreground`, falling back to the terminal foreground when that Foot
-role is absent. `[colors-dark]` takes precedence over legacy `[colors]`, while
-absent alpha defaults opaque and absent blur defaults off.
+role is absent. Foot's `[main] initial-color-theme=light` selects the complete
+`[colors-light]` palette. Missing or `dark` selection uses `[colors-dark]`, which
+takes precedence over legacy `[colors]`. Palette sections are never mixed;
+missing or incomplete selected palettes are rejected. Absent alpha defaults
+opaque and absent blur defaults off. Theme switches re-read this selector along
+with the palette; Foot's separate runtime color-theme keybindings are not imported.
 
 Splinterm fingerprints the active directory plus both source files every 500 ms.
 This detects Omarchy's atomic current-theme directory replacement and applies a

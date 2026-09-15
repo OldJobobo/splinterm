@@ -15,12 +15,13 @@ use splinterm_core::{
     Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide, TopologyRevision,
 };
 use splinterm_protocol::{
-    AccessScope, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
+    AccessScope, ActiveScreen, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
     ControlTransferDecision, ControlTransferOutcome, ErrorCode, HistoryTransition,
-    LaunchParameters, MAX_FRAME_BYTES, MAX_SUBSCRIPTIONS, MutationPreflight, MutationTarget,
-    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, SplintLifecycle,
-    SubscriptionEvent, TerminalProvenance, TerminalSnapshot, TerminalUpdate, TopologyChangeKind,
-    encode_frame,
+    LaunchParameters, MAX_FRAME_BYTES, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
+    MouseTracking, MutationPreflight, MutationTarget, PROTOCOL_VERSION, ProtocolError, Request,
+    Response, ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalInputModes,
+    TerminalProvenance, TerminalRow, TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate,
+    TopologyChangeKind, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -31,6 +32,8 @@ use tokio::{
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const TEST_SHUTDOWN_GRACE_MS: &str = "1000";
+const PHASE8_PACED_WORKLOAD: &[u8] = b"i=0; while [ $i -lt 2000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'paced-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.01; done; printf 'overflow-%s\\n' finished\n";
+const PHASE8_PRESSURE_WORKLOAD: &[u8] = b"i=0; while [ $i -lt 30000 ]; do printf 'pressure-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'pressure-%s\\n' finished\n";
 
 struct Daemon {
     child: Child,
@@ -552,10 +555,18 @@ fn apply_terminal_update(snapshot: &mut TerminalSnapshot, update: TerminalUpdate
         let append = matches!(scrollback.transition, HistoryTransition::Append { .. });
         match scrollback.transition {
             HistoryTransition::Append { trimmed_rows, .. } => {
-                snapshot
-                    .scrollback_rows
-                    .drain(..trimmed_rows.min(snapshot.scrollback_rows.len()));
+                // Server trims first consume history omitted from our bounded tail.
+                let cached_trimmed = trimmed_rows
+                    .saturating_sub(snapshot.omitted_oldest_scrollback_rows)
+                    .min(snapshot.scrollback_rows.len());
+                snapshot.scrollback_rows.drain(..cached_trimmed);
                 snapshot.scrollback_rows.extend(scrollback.rows.clone());
+                // Reconstruct a wire snapshot, not an unbounded client history cache.
+                let excess = snapshot
+                    .scrollback_rows
+                    .len()
+                    .saturating_sub(MAX_SNAPSHOT_SCROLLBACK_ROWS);
+                snapshot.scrollback_rows.drain(..excess);
             }
             HistoryTransition::Clear => snapshot.scrollback_rows.clear(),
             HistoryTransition::Reflow | HistoryTransition::Replace => {
@@ -3836,6 +3847,130 @@ async fn two_splints_spawn_and_preserve_independent_output() {
     .expect("two-Splint scenario timed out");
 }
 
+fn history_test_rows(first: u64, last: u64) -> Vec<TerminalRow> {
+    (first..=last)
+        .map(|id| TerminalRow {
+            row_id: Some(id),
+            linebreak: false,
+            cells: Vec::new(),
+        })
+        .collect()
+}
+
+fn history_test_snapshot(first: u64, last: u64, available: usize) -> TerminalSnapshot {
+    let history = history_test_rows(first, last);
+    let snapshot = TerminalSnapshot {
+        splint_id: SplintId::new(),
+        incarnation: 1,
+        revision: 1,
+        columns: 1,
+        rows: 1,
+        cursor_column: 0,
+        cursor_row: 0,
+        cursor_deferred_wrap: false,
+        active_screen: ActiveScreen::Normal,
+        input_modes: TerminalInputModes {
+            application_cursor: false,
+            application_keypad: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor_visible: true,
+            cursor_blink: false,
+            mouse_tracking: MouseTracking::None,
+            sgr_mouse: false,
+        },
+        palette: vec![0; 256],
+        default_colors: [0; 3],
+        title: String::new(),
+        visible_rows: history_test_rows(10_000, 10_000),
+        history_generation: 1,
+        oldest_available_scrollback_row_id: Some(last + 1 - u64::try_from(available).unwrap()),
+        newest_available_scrollback_row_id: Some(last),
+        omitted_oldest_scrollback_rows: available - history.len(),
+        scrollback_rows: history,
+        available_scrollback_rows: available,
+        images: None,
+        exited_code: None,
+        exited_signal: None,
+    };
+    snapshot.validate().expect("valid reconstruction fixture");
+    snapshot
+}
+
+fn history_test_append(
+    snapshot: &TerminalSnapshot,
+    appended: usize,
+    trimmed: usize,
+) -> TerminalUpdate {
+    let available = snapshot.available_scrollback_rows + appended - trimmed;
+    let newest =
+        snapshot.newest_available_scrollback_row_id.unwrap() + u64::try_from(appended).unwrap();
+    let returned = appended.min(MAX_SNAPSHOT_SCROLLBACK_ROWS).min(available);
+    TerminalUpdate {
+        base_revision: snapshot.revision,
+        revision: snapshot.revision + 1,
+        rows: Vec::new(),
+        scrolls: Vec::new(),
+        cursor: None,
+        title: None,
+        input_modes: None,
+        active_screen: None,
+        palette: None,
+        default_colors: None,
+        columns: None,
+        row_count: None,
+        images: None,
+        scrollback: Some(TerminalScrollbackUpdate {
+            transition: HistoryTransition::Append {
+                appended_rows: appended,
+                trimmed_rows: trimmed,
+            },
+            history_generation: snapshot.history_generation,
+            oldest_available_row_id: Some(newest + 1 - u64::try_from(available).unwrap()),
+            newest_available_row_id: Some(newest),
+            rows: history_test_rows(newest + 1 - u64::try_from(returned).unwrap(), newest),
+            available_rows: available,
+            omitted_oldest_rows: available - returned,
+        }),
+    }
+}
+
+#[test]
+fn reconstructed_history_bounds_small_appends_to_the_wire_snapshot_limit() {
+    let mut snapshot = history_test_snapshot(1, 16, 16);
+    let update = history_test_append(&snapshot, 2, 0);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(3, 18));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 2);
+}
+
+#[test]
+fn reconstructed_history_replaces_cached_rows_when_append_exceeds_returned_tail() {
+    let mut snapshot = history_test_snapshot(1, 16, 16);
+    let update = history_test_append(&snapshot, 66, 0);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(67, 82));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 66);
+}
+
+#[test]
+fn reconstructed_history_does_not_trim_cached_rows_for_omitted_history() {
+    let mut snapshot = history_test_snapshot(13, 20, 20);
+    let update = history_test_append(&snapshot, 1, 1);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(13, 21));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 11);
+}
+
+#[test]
+fn reconstructed_history_trims_cached_rows_only_after_omitted_history() {
+    let mut snapshot = history_test_snapshot(4, 8, 8);
+    let update = history_test_append(&snapshot, 5, 5);
+    apply_terminal_update(&mut snapshot, update);
+    assert_eq!(snapshot.scrollback_rows, history_test_rows(6, 13));
+    assert_eq!(snapshot.omitted_oldest_scrollback_rows, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resync() {
     time::timeout(Duration::from_secs(60), async {
@@ -3923,6 +4058,38 @@ async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resy
     .expect("Plan 0043 reconstruction scenario timed out");
 }
 
+#[test]
+fn phase8_completion_markers_are_output_only_and_preserve_workload() {
+    for (workload, prefix, count, marker) in [
+        (PHASE8_PACED_WORKLOAD, "paced", 2000, "overflow-finished"),
+        (
+            PHASE8_PRESSURE_WORKLOAD,
+            "pressure",
+            30000,
+            "pressure-finished",
+        ),
+    ] {
+        let command = std::str::from_utf8(workload).unwrap();
+        assert!(
+            !command.contains(marker),
+            "terminal echo must not signal completion"
+        );
+        let output = Command::new("/bin/sh")
+            .args(["-c", command])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run the exact pressure fixture");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let expected: String = (0..count)
+            .map(|index| format!("{prefix}-{index:05}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"))
+            .chain(std::iter::once(format!("{marker}\n")))
+            .collect();
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
@@ -3965,29 +4132,29 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
             )
             .await;
         snapshot_until(&mut creator, splint_id, incarnation, "phase8-initial").await;
-        let with_pwd = snapshot_until(
-            &mut creator,
-            splint_id,
-            incarnation,
-            cwd.to_str().unwrap(),
-        )
-        .await;
+        let with_pwd =
+            snapshot_until(&mut creator, splint_id, incarnation, cwd.to_str().unwrap()).await;
         assert!(snapshot_text(&with_pwd).contains(cwd.to_str().unwrap()));
-        with_pwd.validate().expect("daemon snapshot identity is valid");
-        assert!(with_pwd
-            .visible_rows
-            .iter()
-            .chain(&with_pwd.scrollback_rows)
-            .all(|row| row.row_id.is_some_and(|id| id > 0)));
-        assert!(with_pwd
-            .visible_rows
-            .iter()
-            .chain(&with_pwd.scrollback_rows)
-            .flat_map(|row| &row.cells)
-            .any(|cell| {
-                cell.content == "R"
-                    && cell.attributes.foreground_source != ColorSource::Default
-            }));
+        with_pwd
+            .validate()
+            .expect("daemon snapshot identity is valid");
+        assert!(
+            with_pwd
+                .visible_rows
+                .iter()
+                .chain(&with_pwd.scrollback_rows)
+                .all(|row| row.row_id.is_some_and(|id| id > 0))
+        );
+        assert!(
+            with_pwd
+                .visible_rows
+                .iter()
+                .chain(&with_pwd.scrollback_rows)
+                .flat_map(|row| &row.cells)
+                .any(|cell| {
+                    cell.content == "R" && cell.attributes.foreground_source != ColorSource::Default
+                })
+        );
 
         let creator_controller = creator.acquire_control(splint_id, incarnation).await;
         assert!(matches!(
@@ -4015,17 +4182,14 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         drop(creator);
         let mut detached_writer = daemon.connect().await;
         detached_writer
-            .input(
-                splint_id,
-                incarnation,
-                b"printf 'while-detached\\n'\n",
-            )
+            .input(splint_id, incarnation, b"printf 'while-detached\\n'\n")
             .await;
         drop(detached_writer);
         time::sleep(Duration::from_millis(100)).await;
 
         let mut reattached = daemon.connect().await;
-        let detached = snapshot_until(&mut reattached, splint_id, incarnation, "while-detached").await;
+        let detached =
+            snapshot_until(&mut reattached, splint_id, incarnation, "while-detached").await;
         assert!(detached.revision > resized.revision);
 
         let reattached_controller = reattached.acquire_control(splint_id, incarnation).await;
@@ -4078,11 +4242,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         // producer frames. Slow-runner scheduling must not be conflated with the
         // separate unread-connection overflow proof below.
         producer
-            .input(
-                splint_id,
-                incarnation,
-                b"i=0; while [ $i -lt 2000 ]; do limit=$((i+20)); while [ $i -lt $limit ]; do printf 'paced-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; sleep 0.01; done; printf 'overflow-finished\\n'\n",
-            )
+            .input(splint_id, incarnation, PHASE8_PACED_WORKLOAD)
             .await;
         let _completion_snapshot = snapshot_until_with_timeout(
             &mut reattached,
@@ -4109,25 +4269,19 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
         // must resolve through exact coalesced delivery, resynchronization, or
         // disconnection.
         let mut slow = daemon.connect().await;
-        nix::sys::socket::setsockopt(
-            &slow.stream,
-            nix::sys::socket::sockopt::RcvBuf,
-            &4096,
-        )
-        .unwrap();
+        nix::sys::socket::setsockopt(&slow.stream, nix::sys::socket::sockopt::RcvBuf, &4096)
+            .unwrap();
         let mut slow_subscriptions = std::collections::BTreeMap::new();
         for _ in 0..MAX_SUBSCRIPTIONS {
             let (subscription_id, snapshot) = slow.attach(splint_id, incarnation).await;
-            assert!(slow_subscriptions
-                .insert(subscription_id, (snapshot, 1_u64))
-                .is_none());
+            assert!(
+                slow_subscriptions
+                    .insert(subscription_id, (snapshot, 1_u64))
+                    .is_none()
+            );
         }
         producer
-            .input(
-                splint_id,
-                incarnation,
-                b"i=0; while [ $i -lt 30000 ]; do printf 'pressure-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' $i; i=$((i+1)); done; printf 'pressure-finished\\n'\n",
-            )
+            .input(splint_id, incarnation, PHASE8_PRESSURE_WORKLOAD)
             .await;
         let _pressure_snapshot = snapshot_until_with_timeout(
             &mut reattached,
@@ -4189,7 +4343,9 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 SubscriptionEvent::Snapshot { snapshot } => {
                     assert_eq!(sequence, *expected_sequence);
                     *expected_sequence += 1;
-                    snapshot.validate().expect("slow subscriber snapshot is valid");
+                    snapshot
+                        .validate()
+                        .expect("slow subscriber snapshot is valid");
                     assert_eq!(snapshot.splint_id, splint_id);
                     assert_eq!(snapshot.incarnation, incarnation);
                     *reconstructed = snapshot;
@@ -4240,14 +4396,24 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                 panic!("daemon did not return a scrollback page: {response:?}");
             };
             page.validate().expect("daemon page is valid");
-            assert_eq!(page.rows.len(), splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
-            assert!(page.rows.iter().all(|row| row.row_id.unwrap() < before_row_id));
+            assert_eq!(
+                page.rows.len(),
+                splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS
+            );
+            assert!(
+                page.rows
+                    .iter()
+                    .all(|row| row.row_id.unwrap() < before_row_id)
+            );
             for row_id in page.rows.iter().filter_map(|row| row.row_id) {
                 assert!(paged_ids.insert(row_id), "pages must not overlap");
             }
             before_row_id = page.rows.first().and_then(|row| row.row_id).unwrap();
         }
-        assert_eq!(paged_ids.len(), 4 * splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS);
+        assert_eq!(
+            paged_ids.len(),
+            4 * splinterm_protocol::MAX_SCROLLBACK_PAGE_ROWS
+        );
 
         for (revision, generation) in [
             (

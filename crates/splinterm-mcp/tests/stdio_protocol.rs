@@ -271,6 +271,7 @@ fn accept_automation(listener: &UnixListener) -> UnixStream {
             version: splinterm_protocol::PROTOCOL_VERSION,
             limits: ServerLimits::default(),
             development_terminal_access: false,
+            daemon_hostname: None,
         },
     );
     stream
@@ -625,6 +626,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     version: splinterm_protocol::PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 },
             );
             let ClientFrame::Request {
@@ -984,6 +986,7 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         let ClientFrame::Request {
@@ -1082,6 +1085,7 @@ fn terminal_tools_use_exact_scoped_requests_cursors_and_cleanup() {
                     version: splinterm_protocol::PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 },
             );
             let ClientFrame::Request {
@@ -1842,6 +1846,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         let ClientFrame::Request {
@@ -1920,6 +1925,7 @@ fn daemon_deadline_returns_stable_timeout_and_disposes_connection() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         assert!(matches!(
@@ -4280,6 +4286,23 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
     server.send(&request(22, "resources/list", json!({})));
     server.send(&request(23, "ping", json!({})));
     assert_eq!(server.receive_id(23)["result"], json!({}));
+    // Ping may finish before the catalogue requests. Observe both replies,
+    // including any already received, before EOF cancels outstanding work.
+    let catalogue_ids = [json!("string-response-id"), json!(22)];
+    loop {
+        let responses = server.seen();
+        if catalogue_ids
+            .iter()
+            .all(|id| responses.iter().any(|response| &response["id"] == id))
+        {
+            break;
+        }
+        assert!(
+            responses.len() < 5,
+            "missing catalogue response IDs: {responses:?}"
+        );
+        server.receive();
+    }
     server.close_input();
 
     assert!(server.wait().success());
@@ -4306,12 +4329,15 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
                 .as_array()
                 .is_some_and(|tools| tools.len() == 33)
     }));
-    assert!(responses.iter().any(|response| {
-        response["id"] == 22
-            && response["result"]["resources"]
-                .as_array()
-                .is_some_and(|resources| resources.len() == 1)
-    }));
+    assert!(
+        responses.iter().any(|response| {
+            response["id"] == 22
+                && response["result"]["resources"]
+                    .as_array()
+                    .is_some_and(|resources| resources.len() == 1)
+        }),
+        "missing successful resource-list reply: {responses:?}"
+    );
     assert!(
         responses
             .iter()
