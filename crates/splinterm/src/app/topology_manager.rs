@@ -1851,6 +1851,15 @@ async fn explorer_prompt(
     else {
         bail!("splinterd did not return Lairs");
     };
+    explorer_prompt_from_catalog(&lairs, topology_revision, guard, kind)
+}
+
+fn explorer_prompt_from_catalog(
+    lairs: &[splinterm_core::Lair],
+    topology_revision: TopologyRevision,
+    guard: ExplorerContextTarget,
+    kind: LairPromptKind,
+) -> Result<LairPromptTarget> {
     anyhow::ensure!(
         topology_revision == guard.topology_revision,
         "Explorer prompt target is stale"
@@ -2038,21 +2047,16 @@ async fn handle_session_manager_command(
             TopologyManagerCommandOutcome::Continue
         }
         WindowTopologyCommand::RequestLairExplorer { focused_splint } => {
-            if let Ok(view) =
-                lair_explorer_view(factory, connection, focused_splint, &state.tabs).await
-            {
-                if updates
-                    .send(WindowTopologyUpdate::ShowLairExplorer { view })
-                    .await
-                    .is_err()
-                {
-                    return TopologyManagerCommandOutcome::Stop;
-                }
+            let update =
+                match lair_explorer_view(factory, connection, focused_splint, &state.tabs).await {
+                    Ok(view) => WindowTopologyUpdate::ShowLairExplorer { view },
+                    Err(error) => WindowTopologyUpdate::LairExplorerFailed(format!("{error:#}")),
+                };
+            if updates.send(update).await.is_err() {
+                TopologyManagerCommandOutcome::Stop
             } else {
-                eprintln!("splinterm Lair explorer refresh failed");
-                let _ = updates.send(WindowTopologyUpdate::LairExplorerFailed).await;
+                TopologyManagerCommandOutcome::Continue
             }
-            TopologyManagerCommandOutcome::Continue
         }
         WindowTopologyCommand::RequestSelector { kind, lair_id } => {
             match selector_catalog(factory, connection, kind, lair_id, &state.tabs).await {
@@ -2125,6 +2129,33 @@ async fn handle_session_manager_command(
                     explorer_target,
                 )
                 .await
+            }
+            NavigationAction::PreviewRestoreDojo => {
+                let guard = ExplorerContextTarget {
+                    topology_revision: target.topology_revision,
+                    node: NavigationNodeId::Dojo {
+                        lair_id: target.lair_id,
+                        dojo_id: target.dojo_id,
+                    },
+                    live_incarnation: None,
+                };
+                let update = match explorer_prompt(connection, guard, LairPromptKind::Restore).await
+                {
+                    Ok(target) => WindowTopologyUpdate::ShowLairPrompt {
+                        kind: LairPromptKind::Restore,
+                        target,
+                    },
+                    Err(error) => WindowTopologyUpdate::TabFailed {
+                        explorer_target,
+                        dojo_id: Some(target.dojo_id),
+                        message: format!("selected Dojo restore preview is unavailable: {error:#}"),
+                    },
+                };
+                if updates.send(update).await.is_err() {
+                    TopologyManagerCommandOutcome::Stop
+                } else {
+                    TopologyManagerCommandOutcome::Continue
+                }
             }
             _ => {
                 let _ = updates
@@ -2530,14 +2561,21 @@ async fn handle_session_manager_command(
                 Ok::<(), anyhow::Error>(())
             }
             .await;
-            if let Err(error) = result {
-                let _ = updates
-                    .send(WindowTopologyUpdate::TabFailed {
-                        explorer_target: None,
-                        dojo_id: None,
-                        message: format!("{error:#}"),
-                    })
-                    .await;
+            match result {
+                Ok(()) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::LairExplorerInvalidated)
+                        .await;
+                }
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: None,
+                            dojo_id: None,
+                            message: format!("{error:#}"),
+                        })
+                        .await;
+                }
             }
             TopologyManagerCommandOutcome::Continue
         }
@@ -2545,20 +2583,35 @@ async fn handle_session_manager_command(
             expected_topology_revision,
             dojo_id,
         } => {
-            let result = connection
-                .request(Request::RestoreDojo {
-                    expected_topology_revision,
-                    dojo_id,
-                })
-                .await;
-            if let Err(error) = result {
-                let _ = updates
-                    .send(WindowTopologyUpdate::TabFailed {
-                        explorer_target: None,
-                        dojo_id: Some(dojo_id),
-                        message: format!("{error:#}"),
+            let result = async {
+                let response = connection
+                    .request(Request::RestoreDojo {
+                        expected_topology_revision,
+                        dojo_id,
                     })
-                    .await;
+                    .await?;
+                anyhow::ensure!(
+                    matches!(response, Response::RestoreCompleted { .. }),
+                    "splinterd did not acknowledge Dojo restore"
+                );
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::LairExplorerInvalidated)
+                        .await;
+                }
+                Err(error) => {
+                    let _ = updates
+                        .send(WindowTopologyUpdate::TabFailed {
+                            explorer_target: None,
+                            dojo_id: Some(dojo_id),
+                            message: format!("{error:#}"),
+                        })
+                        .await;
+                }
             }
             TopologyManagerCommandOutcome::Continue
         }
@@ -2914,6 +2967,29 @@ async fn reconcile_managed_topology(
     Ok(true)
 }
 
+/// Runtime transitions need not advance the structural revision, and detached
+/// Dojos produce no managed-tab updates. Observe both, without polling `ListLairs`
+/// or waking the frontend on unchanged snapshots (runtime order is immaterial).
+#[derive(Default)]
+struct ExplorerObservation {
+    revision: Option<TopologyRevision>,
+    runtimes: HashMap<SplintId, splinterm_protocol::SplintRuntimeSummary>,
+}
+
+impl ExplorerObservation {
+    fn observe(&mut self, snapshot: &splinterm_protocol::TopologySnapshot) -> bool {
+        let runtimes = snapshot
+            .runtimes
+            .iter()
+            .map(|runtime| (runtime.splint_id, runtime.clone()))
+            .collect::<HashMap<_, _>>();
+        let changed = self.revision != Some(snapshot.revision) || self.runtimes != runtimes;
+        self.revision = Some(snapshot.revision);
+        self.runtimes = runtimes;
+        changed
+    }
+}
+
 enum TopologyManagerWake {
     Command(WindowTopologyCommand),
     Poll,
@@ -2974,6 +3050,7 @@ pub(in crate::app) async fn run_topology_manager(
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut poll_priority = false;
+    let mut explorer_observation = ExplorerObservation::default();
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
     let mut transient_owners = HashMap::new();
@@ -3028,6 +3105,14 @@ pub(in crate::app) async fn run_topology_manager(
                 return Err(error);
             }
         };
+        if explorer_observation.observe(&snapshot)
+            && updates
+                .send(WindowTopologyUpdate::LairExplorerInvalidated)
+                .await
+                .is_err()
+        {
+            break;
+        }
         // The placeholder exists only in the frontend until this mutation is
         // acknowledged. An unrelated external topology change must therefore
         // reconcile together with the split, not against the placeholder alone.
@@ -3230,12 +3315,14 @@ mod tests {
         TopologyCommandOutcome, TopologyManagerWake, TopologyRevision, WindowTabSet,
         WindowTopologyCommand, WindowTopologyUpdate, cancel_pane_tasks, captured_dojo_kill_targets,
         close_action, close_other_tab_targets, collect_lair_targets, command_has_pending_split,
-        explorer_splint_from_snapshot, lair_navigation_target, materialized_dojo_targets,
-        next_topology_manager_wake, parent_ratio, pending_focus_for_observation, picker_catalog,
-        refreshed_close_state, select_live_dojo_from, send_existing_tab_activation,
-        tab_organization_promotes, topology_command_outcome, topology_edit_target,
-        topology_identity_diff, validate_exited_close_target, window_has_tab_capacity,
+        explorer_prompt_from_catalog, explorer_splint_from_snapshot, lair_navigation_target,
+        materialized_dojo_targets, next_topology_manager_wake, parent_ratio,
+        pending_focus_for_observation, picker_catalog, refreshed_close_state,
+        select_live_dojo_from, send_existing_tab_activation, tab_organization_promotes,
+        topology_command_outcome, topology_edit_target, topology_identity_diff,
+        validate_exited_close_target, window_has_tab_capacity,
     };
+    use super::{ExplorerContextTarget, LairPromptKind, NavigationNodeId};
     use crate::app::pane_bridge::{PaneTask, pane_claims_initial_control};
     use splinterm::navigation_projection::{
         NavigationAction, NavigationAvailability, NavigationCapability,
@@ -3414,6 +3501,67 @@ mod tests {
             .unwrap()
             .state = SplintState::Exited(0);
         assert!(select_live_dojo_from(&[transient.clone()], transient.id, dojo_id).is_err());
+    }
+
+    #[test]
+    fn explorer_dojo_restore_preview_is_revision_bound_and_scoped() {
+        let mut lair = splinterm_core::Lair::new("saved", PathBuf::from("/tmp"));
+        let dojo_id = lair.dojos[0].id;
+        let splint_id = lair.dojos[0].default_focus;
+        let pane = lair.dojos[0].root.find_splint_mut(splint_id).unwrap();
+        pane.state = SplintState::Exited(0);
+        pane.last_incarnation = Some(7);
+        let other = splinterm_core::Lair::new("other", PathBuf::from("/tmp"));
+        lair.dojos.push(other.dojos[0].clone());
+        let revision = TopologyRevision::new(7);
+        let guard = ExplorerContextTarget {
+            topology_revision: revision,
+            node: NavigationNodeId::Dojo {
+                lair_id: lair.id,
+                dojo_id,
+            },
+            live_incarnation: None,
+        };
+        let catalog = [lair];
+        let target =
+            explorer_prompt_from_catalog(&catalog, revision, guard, LairPromptKind::Restore)
+                .unwrap();
+        assert_eq!(target.dojo_id, Some(dojo_id));
+        assert_eq!(target.topology_revision, revision);
+        assert_eq!(target.targets.len(), 1);
+        assert_eq!(target.targets[0].splint_id, splint_id);
+        assert_eq!(target.targets[0].incarnation, 7);
+        assert!(
+            explorer_prompt_from_catalog(
+                &catalog,
+                TopologyRevision::new(8),
+                guard,
+                LairPromptKind::Restore
+            )
+            .is_err()
+        );
+        let wrong_parent = ExplorerContextTarget {
+            node: NavigationNodeId::Dojo {
+                lair_id: LairId::new(),
+                dojo_id,
+            },
+            ..guard
+        };
+        assert!(
+            explorer_prompt_from_catalog(&catalog, revision, wrong_parent, LairPromptKind::Restore)
+                .is_err()
+        );
+        let live = ExplorerContextTarget {
+            node: NavigationNodeId::Dojo {
+                lair_id: catalog[0].id,
+                dojo_id: catalog[0].dojos[1].id,
+            },
+            ..guard
+        };
+        assert!(
+            explorer_prompt_from_catalog(&catalog, revision, live, LairPromptKind::Restore)
+                .is_err()
+        );
     }
 
     #[test]

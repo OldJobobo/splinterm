@@ -136,12 +136,14 @@ and choose **Toggle Lair explorer** to show or hide it, or **Focus Lair explorer
 to show it and move keyboard focus there. These Explorer actions have no default
 shortcut. **Return focus to terminal** moves focus back without hiding Explorer.
 
-Right-click a row for actions on that exact item, without selecting or opening it:
+Right-click a row for actions on that exact item, without selecting or opening it.
+With Explorer focused, Menu or Shift+F10 opens the selected row's menu; use
+Up/Down, Enter, and Escape to choose, run, or cancel an action:
 
 - **Lairs:** Rename, New Dojo, Save layout, Pin/Unpin, saved-layout Preview,
   Restore, and Terminate.
 - **Dojos:** Open/Activate, Rename, Close tab when open, Restore, and Terminate.
-- **Splints:** Focus, Split below/right, and Close.
+- **Splints:** Focus, Split below/right, Close, and Restore for restorable work.
 
 Only applicable actions appear. Saved and non-open Lairs/Dojos can be renamed or
 managed without switching tabs; Open/Activate and Focus explicitly navigate.
@@ -163,13 +165,21 @@ when siblings are added or removed. Search, breadcrumbs, and the navigation
 pickers use the same labels. Each Explorer row puts status on a separate line so
 it does not crowd out the name; long text is ellipsized within the panel.
 
+Parent rows summarize runtime state independently of retention and window
+attachment. A saved Lair can still be running. A Dojo marked **Not open here**
+can also be running; it is not attached to this Window. **Current** identifies
+the active Dojo, while **Open here** identifies another attached tab. A stopped
+restorable Dojo opens a restore confirmation rather than reporting a permission
+failure. Detached starting or mixed-state Dojos still cannot be attached;
+Explorer explains this lifecycle restriction instead of calling it a denial.
+
 While Explorer has focus:
 
 - Use Up/Down to select a row; PageUp/PageDown move by a page and Home/End select
   the first/last row. Outside search, `j`/`k` also move the selection.
 - Outside search, use Right to expand a Lair or Dojo, then enter its first child.
-  Left moves to the parent, or collapses an expanded Lair. Space toggles a Lair
-  or Dojo's disclosure without activating terminal work.
+  Left collapses an expanded Lair or Dojo before moving to its parent. Space
+  toggles a Lair or Dojo's disclosure without activating terminal work.
 - Press Enter on a Lair to toggle disclosure, on a Dojo to open it, or on a live
   Splint to focus its pane. Selecting a row alone does not activate it: the
   **selected** row is the navigation target, while **current** identifies the
@@ -177,8 +187,8 @@ While Explorer has focus:
 - Press `/` or `Ctrl+F` to search navigation labels, not terminal output or
   scrollback. Matching descendants retain their parent context. Escape clears
   a nonempty query; Escape with an empty query returns focus to the terminal.
-- Outside search, `r` reveals the current work, or retries a failed refresh when
-  the Explorer offers retry.
+- Outside search, `r` reveals the current work, clearing any retained filter,
+  or retries a failed refresh when the Explorer offers retry.
 
 Unavailable targets cannot be activated. Restorable exited work enters the
 existing preview/confirmation flow; it is not silently restarted by selection.

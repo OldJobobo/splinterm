@@ -2527,6 +2527,13 @@ fn explorer_pointer_returns_to_terminal(
         )
 }
 
+fn explorer_context_menu_key(key: Keysym, modifiers: Modifiers) -> bool {
+    !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.logo
+        && ((key == Keysym::Menu && !modifiers.shift) || (key == Keysym::F10 && modifiers.shift))
+}
+
 /// A matching context-menu release belongs to chrome even if its target or
 /// admission state changed. Rejection is not a Wayland dispatch failure, and
 /// the release must not fall through to terminal input.
@@ -5252,6 +5259,8 @@ impl App {
             focused_splint: self.panes.focused_splint(),
         }) {
             self.explorer.mark_disconnected();
+            self.explorer
+                .set_notice(&format!("Navigation unavailable · R retry: {error:#}"));
             return Err(error);
         }
         self.presentation.full_redraw = true;
@@ -5811,6 +5820,8 @@ impl App {
             })
         {
             self.close_tab_context_menu();
+            self.explorer
+                .set_notice("Menu target changed; reopen its menu and try again");
             return;
         }
         let Some(dispatch) = self
@@ -5884,8 +5895,10 @@ impl App {
                 Ok(())
             }
         };
-        if result.is_err() {
-            eprintln!("splinterm tab menu action failed");
+        if let Err(error) = result {
+            self.explorer
+                .set_notice(&format!("Menu action failed: {error:#}"));
+            eprintln!("splinterm tab menu action failed: {error:#}");
         }
     }
 
@@ -5981,7 +5994,10 @@ impl App {
     }
 
     fn refresh_tab_context_menu(&mut self) {
-        self.modal.tab_context_menu_layout = None;
+        // Hover, press, and keyboard selection do not change menu geometry.
+        // Retain the committed hit map until redraw: Wayland can batch motion,
+        // press, and release before another frame is painted. Opening, closing,
+        // retargeting, and resizing invalidate the layout separately.
         self.presentation.full_redraw = true;
     }
 
@@ -7611,6 +7627,21 @@ impl App {
         if self.explorer.focused() {
             let mut changed = false;
             match event.keysym {
+                key if explorer_context_menu_key(key, self.input.modifiers) => {
+                    if let Some(node) = self.explorer.selected()
+                        && let Some(row) = self
+                            .presentation
+                            .explorer_layout
+                            .as_ref()
+                            .and_then(|layout| layout.rows.iter().find(|row| row.id == node))
+                    {
+                        let anchor = (f64::from(row.rect.x), f64::from(row.rect.y));
+                        if let Err(error) = self.show_explorer_context_menu(node, anchor) {
+                            eprintln!("splinterm Explorer menu is unavailable: {error:#}");
+                        }
+                        changed = true;
+                    }
+                }
                 Keysym::Up => changed = self.explorer.move_selection(-1),
                 Keysym::Down => changed = self.explorer.move_selection(1),
                 Keysym::k | Keysym::K if !self.explorer.search_active() => {
@@ -8302,6 +8333,7 @@ impl App {
                         | WindowTopologyUpdate::ActivateSplint { .. }
                         | WindowTopologyUpdate::RemoveTab { .. }
                         | WindowTopologyUpdate::UpdateIdentity(_)
+                        | WindowTopologyUpdate::LairExplorerInvalidated
                 );
             match update {
                 WindowTopologyUpdate::Apply {
@@ -8528,6 +8560,12 @@ impl App {
                         )?;
                         changed = true;
                     }
+                    if self.explorer.visible() {
+                        self.explorer
+                            .set_notice(&format!("Action failed: {message}"));
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
                     eprintln!(
                         "splinterm topology action failed{}: {message}",
                         dojo_id.map_or_else(String::new, |id| format!(" for Dojo {id}"))
@@ -8549,8 +8587,11 @@ impl App {
                     self.presentation.full_redraw = true;
                     changed = true;
                 }
-                WindowTopologyUpdate::LairExplorerFailed => {
+                WindowTopologyUpdate::LairExplorerInvalidated => {}
+                WindowTopologyUpdate::LairExplorerFailed(message) => {
                     self.explorer.mark_disconnected();
+                    self.explorer
+                        .set_notice(&format!("Navigation unavailable · R retry: {message}"));
                     self.presentation.full_redraw = true;
                     changed = true;
                 }
@@ -10715,6 +10756,25 @@ fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explorer_keyboard_context_menu_accepts_only_menu_and_shift_f10() {
+        use super::{Keysym, Modifiers, explorer_context_menu_key};
+        let mut modifiers = Modifiers::default();
+        assert!(explorer_context_menu_key(Keysym::Menu, modifiers));
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+        modifiers.shift = true;
+        assert!(explorer_context_menu_key(Keysym::F10, modifiers));
+        assert!(!explorer_context_menu_key(Keysym::Menu, modifiers));
+        modifiers.ctrl = true;
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+        modifiers.ctrl = false;
+        modifiers.alt = true;
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+        modifiers.alt = false;
+        modifiers.logo = true;
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+    }
+
     #[test]
     fn context_menu_release_rejection_is_consumed_not_a_dispatch_failure() {
         for reason in [

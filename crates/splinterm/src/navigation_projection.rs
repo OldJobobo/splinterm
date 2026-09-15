@@ -83,6 +83,10 @@ pub enum NavigationBlocker {
     Disconnected,
     PermissionDenied,
     TabCapacityReached,
+    Starting,
+    MixedLayout,
+    NotRestorable,
+    Unavailable,
 }
 
 impl NavigationBlocker {
@@ -94,6 +98,10 @@ impl NavigationBlocker {
             Self::Disconnected => "Endpoint is disconnected",
             Self::PermissionDenied => "Permission denied",
             Self::TabCapacityReached => "Window tab capacity reached",
+            Self::Starting => "Work is still starting",
+            Self::MixedLayout => "Dojo must be fully running to open here",
+            Self::NotRestorable => "Stopped work has no restorable process",
+            Self::Unavailable => "No navigation action is available",
         }
     }
 }
@@ -278,6 +286,20 @@ pub struct NavigationExplorerLair {
     pub dojos: Vec<NavigationExplorerDojo>,
 }
 
+impl NavigationExplorerDojo {
+    #[must_use]
+    pub fn lifecycle(&self) -> NavigationLifecycle {
+        aggregate_lifecycle(self.splints.iter().map(|splint| splint.lifecycle))
+    }
+}
+
+impl NavigationExplorerLair {
+    #[must_use]
+    pub fn lifecycle(&self) -> NavigationLifecycle {
+        aggregate_lifecycle(self.dojos.iter().map(NavigationExplorerDojo::lifecycle))
+    }
+}
+
 /// Bounded, presentation-independent policy view for the local explorer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationExplorerView {
@@ -413,7 +435,9 @@ impl NavigationProjection {
                             capability.action == NavigationAction::PreviewRestoreSplint
                         })
                     })
-                    .unwrap_or_else(|| capability(action, self.freshness, false, false, true));
+                    .unwrap_or_else(|| {
+                        unavailable_capability(action, self.freshness, splint.node.lifecycle)
+                    });
                 NavigationExplorerSplint {
                     id: splint.node.id,
                     label: splint.node.label.clone(),
@@ -447,7 +471,14 @@ impl NavigationProjection {
             .iter()
             .copied()
             .find(|capability| capability.action == action)
-            .unwrap_or_else(|| capability(action, self.freshness, false, false, true));
+            .or_else(|| {
+                dojo.node
+                    .capabilities
+                    .iter()
+                    .copied()
+                    .find(|capability| capability.action == NavigationAction::PreviewRestoreDojo)
+            })
+            .unwrap_or_else(|| unavailable_capability(action, self.freshness, dojo.node.lifecycle));
         NavigationExplorerDojo {
             id: dojo.node.id,
             label: dojo.node.label.clone(),
@@ -759,6 +790,29 @@ const fn capability(
             None => NavigationAvailability::Enabled,
         },
     }
+}
+
+// No matching action is a lifecycle restriction, not an authorization decision.
+// Keep endpoint freshness ahead of the lifecycle explanation, as for real capabilities.
+const fn unavailable_capability(
+    action: NavigationAction,
+    freshness: EndpointFreshness,
+    lifecycle: NavigationLifecycle,
+) -> NavigationCapability {
+    let mut result = capability(action, freshness, true, false, true);
+    if result.is_enabled() {
+        result.availability = NavigationAvailability::Disabled(match lifecycle {
+            NavigationLifecycle::Starting => NavigationBlocker::Starting,
+            NavigationLifecycle::Running | NavigationLifecycle::Mixed => {
+                NavigationBlocker::MixedLayout
+            }
+            NavigationLifecycle::Exited => NavigationBlocker::NotRestorable,
+            NavigationLifecycle::Restorable | NavigationLifecycle::Unavailable => {
+                NavigationBlocker::Unavailable
+            }
+        });
+    }
+    result
 }
 
 fn valid_projection_structure(
@@ -1838,6 +1892,66 @@ mod tests {
         );
         assert_eq!(dojos[&restorable_dojo].splints[0].live_incarnation, None);
         assert_eq!(dojos[&restorable_dojo].splints[0].last_incarnation, Some(2));
+    }
+
+    #[test]
+    fn explorer_restorable_dojo_preserves_restore_authority() {
+        let mut lair = running_lair("saved");
+        let splint_id = lair.dojos[0].default_focus;
+        let pane = lair.dojos[0].root.find_splint_mut(splint_id).unwrap();
+        pane.state = SplintState::Exited(0);
+        pane.last_incarnation = Some(2);
+        let snapshot = snapshot(vec![lair], &[splint_id]);
+        for permission in [NavigationPermission::Allowed, NavigationPermission::Denied] {
+            let mut context = context(&[]);
+            context.authority.restore = permission;
+            let projection = NavigationProjection::build(&snapshot, context).unwrap();
+            let view = projection.explorer_view();
+            let target = view.lairs[0].dojos[0].target;
+            assert_eq!(
+                target.capability.action,
+                NavigationAction::PreviewRestoreDojo
+            );
+            assert_eq!(target.capability.is_enabled(), permission.is_allowed());
+            assert_eq!(
+                target.capability.availability,
+                view.lairs[0].dojos[0].splints[0]
+                    .target
+                    .capability
+                    .availability
+            );
+        }
+    }
+
+    #[test]
+    fn explorer_missing_action_does_not_claim_permission_denied() {
+        let starting = Lair::new("starting", PathBuf::from("/starting"));
+        let mut exited = running_lair("exited");
+        let id = exited.dojos[0].default_focus;
+        let pane = exited.dojos[0].root.find_splint_mut(id).unwrap();
+        pane.state = SplintState::Exited(1);
+        pane.last_incarnation = Some(2);
+        let snapshot = snapshot(vec![starting, exited], &[]);
+        let projection = NavigationProjection::build(&snapshot, context(&[])).unwrap();
+        for dojo in projection
+            .explorer_view()
+            .lairs
+            .iter()
+            .flat_map(|lair| &lair.dojos)
+        {
+            assert!(!dojo.target.capability.is_enabled());
+            assert_ne!(
+                dojo.target.capability.availability,
+                NavigationAvailability::Disabled(NavigationBlocker::PermissionDenied)
+            );
+            for splint in &dojo.splints {
+                assert!(!splint.target.capability.is_enabled());
+                assert_ne!(
+                    splint.target.capability.availability,
+                    NavigationAvailability::Disabled(NavigationBlocker::PermissionDenied)
+                );
+            }
+        }
     }
 
     #[test]

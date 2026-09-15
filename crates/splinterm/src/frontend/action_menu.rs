@@ -806,6 +806,16 @@ impl TabContextMenuUi {
                         },
                     ));
                 }
+                if splint.target.capability.is_enabled()
+                    && splint.target.capability.action == NavigationAction::PreviewRestoreSplint
+                {
+                    entries.push((
+                        TabMenuActionId::Restore,
+                        WindowTopologyCommand::FocusSplint {
+                            target: splint.target,
+                        },
+                    ));
+                }
                 if pane_controlled
                     && dojo.attachment == WindowAttachment::Here
                     && splint.lifecycle == NavigationLifecycle::Running
@@ -2522,12 +2532,35 @@ mod tests {
         assert!(menu(&view).action_enabled(TabMenuActionId::Restore));
         assert!(!menu(&view).action_enabled(TabMenuActionId::TerminateDojo));
         assert!(!menu(&view).action_enabled(TabMenuActionId::ActivateTab));
+        let splint = &view.lairs[0].dojos[0].splints[0];
+        let menu = TabContextMenuUi::for_explorer(&view, splint.id, None, false, true).unwrap();
+        assert_eq!(menu.actions().len(), 1);
+        assert!(menu.action_enabled(TabMenuActionId::Restore));
+        assert_eq!(
+            menu.dispatch(TabMenuActionId::Restore),
+            Some(TabMenuDispatch::Topology(
+                ExplorerContextTarget {
+                    topology_revision: view.topology_revision,
+                    node: splint.id,
+                    live_incarnation: None,
+                }
+                .command(WindowTopologyCommand::FocusSplint {
+                    target: splint.target
+                })
+            ))
+        );
+        view.lairs[0].dojos[0].splints[0]
+            .target
+            .capability
+            .availability = crate::navigation_projection::NavigationAvailability::Disabled(
+            crate::navigation_projection::NavigationBlocker::PermissionDenied,
+        );
         assert!(
             TabContextMenuUi::for_explorer(
                 &view,
                 view.lairs[0].dojos[0].splints[0].id,
-                Some("/tmp".into()),
-                true,
+                None,
+                false,
                 true
             )
             .is_none()

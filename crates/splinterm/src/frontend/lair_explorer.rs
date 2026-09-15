@@ -94,6 +94,7 @@ pub(crate) struct LairExplorerUi {
     pending: Option<LairExplorerPending>,
     view: Option<NavigationExplorerView>,
     load_state: ExplorerLoadState,
+    notice: Option<String>,
     context_pressed: Option<(NavigationNodeId, splinterm_core::TopologyRevision)>,
 }
 
@@ -109,6 +110,7 @@ impl Default for LairExplorerUi {
             pending: None,
             view: None,
             load_state: ExplorerLoadState::Waiting,
+            notice: None,
             context_pressed: None,
         }
     }
@@ -259,9 +261,12 @@ impl LairExplorerUi {
             EndpointFreshness::Disconnected => ExplorerLoadState::Disconnected,
         };
         self.view = Some(view);
+        self.notice = None;
+        self.ensure_selection_visible();
     }
 
     pub(crate) fn begin_refresh(&mut self) {
+        self.notice = None;
         if let Some(view) = &mut self.view {
             view.freshness = EndpointFreshness::Refreshing;
             for dojo in view.lairs.iter_mut().flat_map(|lair| &mut lair.dojos) {
@@ -304,6 +309,7 @@ impl LairExplorerUi {
         if self.pending.is_some() || !self.rows().iter().any(|row| row.id == id && row.enabled) {
             return false;
         }
+        self.notice = None;
         self.pending = Some(pending);
         true
     }
@@ -403,7 +409,16 @@ impl LairExplorerUi {
         )
     }
 
-    pub(crate) fn status_message(&self) -> Option<&'static str> {
+    pub(crate) fn set_notice(&mut self, message: &str) {
+        let mut text = BoundedTextEditor::new(String::new(), 256, 160, false);
+        text.insert(message);
+        self.notice = Some(text.text().to_owned());
+    }
+
+    pub(crate) fn status_message(&self) -> Option<&str> {
+        if let Some(notice) = self.notice.as_deref() {
+            return Some(notice);
+        }
         if self.load_state == ExplorerLoadState::Disconnected {
             Some("Navigation unavailable · R retry")
         } else if self.load_state == ExplorerLoadState::Stale {
@@ -455,7 +470,9 @@ impl LairExplorerUi {
         }) else {
             return false;
         };
-        let mut changed = self.expanded.insert(lair_id);
+        let mut changed = !self.query.text().is_empty();
+        self.query = BoundedTextEditor::new(String::new(), 256, 64, true);
+        changed |= self.expanded.insert(lair_id);
         if matches!(current, NavigationNodeId::Splint { .. }) {
             changed |= self.expanded.insert(dojo_id);
         }
@@ -488,7 +505,11 @@ impl LairExplorerUi {
                 id: lair.id,
                 kind: LairExplorerRowKind::Lair,
                 label: lair.label.clone(),
-                status: retention_label(lair.retention).to_owned(),
+                status: format!(
+                    "{} · {}",
+                    lifecycle_label(lair.lifecycle()),
+                    retention_label(lair.retention)
+                ),
                 level: 1,
                 expanded: Some(lair_expanded),
                 current: lair.current_here,
@@ -523,8 +544,9 @@ impl LairExplorerUi {
         }
         let (enabled, blocker) = availability(dojo.target.capability.availability);
         let attachment = match dojo.attachment {
-            WindowAttachment::Here => "Here",
-            WindowAttachment::NotHere => "Not here",
+            WindowAttachment::Here if dojo.active_here => "Current",
+            WindowAttachment::Here => "Open here",
+            WindowAttachment::NotHere => "Not open here",
         };
         let dojo_expanded = self.expanded.contains(&dojo.id);
         let pending = self.pending.is_some_and(|pending| pending.id() == dojo.id);
@@ -532,7 +554,11 @@ impl LairExplorerUi {
             id: dojo.id,
             kind: LairExplorerRowKind::Dojo,
             label: dojo.label.clone(),
-            status: row_status(pending, attachment, blocker),
+            status: row_status(
+                pending,
+                &format!("{} · {attachment}", lifecycle_label(dojo.lifecycle())),
+                blocker,
+            ),
             level: 2,
             expanded: Some(dojo_expanded),
             current: dojo.active_here,
@@ -625,7 +651,13 @@ impl LairExplorerUi {
         let Some(selected) = self.selected else {
             return false;
         };
-        if matches!(selected, NavigationNodeId::Lair(_)) && self.expanded.remove(&selected) {
+        if self.query.text().is_empty()
+            && matches!(
+                selected,
+                NavigationNodeId::Lair(_) | NavigationNodeId::Dojo { .. }
+            )
+            && self.expanded.remove(&selected)
+        {
             return true;
         }
         let Some(view) = &self.view else {
@@ -654,26 +686,21 @@ impl LairExplorerUi {
         let Some(selected) = self.selected else {
             return false;
         };
-        let Some(view) = &self.view else {
+        let rows = self.rows();
+        let Some(index) = rows.iter().position(|row| row.id == selected) else {
             return false;
         };
-        let first_child = view.lairs.iter().find_map(|lair| {
-            if lair.id == selected {
-                lair.dojos.first().map(|dojo| dojo.id)
-            } else {
-                lair.dojos
-                    .iter()
-                    .find(|dojo| dojo.id == selected)
-                    .and_then(|dojo| dojo.splints.first().map(|splint| splint.id))
-            }
-        });
+        let first_child = rows
+            .get(index + 1)
+            .filter(|row| row.level > rows[index].level)
+            .map(|row| row.id);
         if !matches!(
             selected,
             NavigationNodeId::Lair(_) | NavigationNodeId::Dojo { .. }
         ) {
             return false;
         }
-        if !self.expanded.contains(&selected) {
+        if self.query.text().is_empty() && !self.expanded.contains(&selected) {
             return self.expanded.insert(selected);
         }
         if let Some(first) = first_child {
@@ -700,6 +727,9 @@ impl LairExplorerUi {
         &self,
         selected: NavigationNodeId,
     ) -> Option<LairExplorerDecision> {
+        if !self.rows().iter().any(|row| row.id == selected) {
+            return None;
+        }
         let view = self.view.as_ref()?;
         for dojo in view.lairs.iter().flat_map(|lair| &lair.dojos) {
             if dojo.id == selected {
@@ -810,9 +840,9 @@ const fn lifecycle_label(lifecycle: NavigationLifecycle) -> &'static str {
     match lifecycle {
         NavigationLifecycle::Starting => "Starting",
         NavigationLifecycle::Running => "Running",
-        NavigationLifecycle::Mixed => "Mixed",
-        NavigationLifecycle::Exited => "Exited",
-        NavigationLifecycle::Restorable => "Restorable",
+        NavigationLifecycle::Mixed => "Mixed state",
+        NavigationLifecycle::Exited => "Stopped",
+        NavigationLifecycle::Restorable => "Stopped · Restorable",
         NavigationLifecycle::Unavailable => "Unavailable",
     }
 }
@@ -1074,7 +1104,12 @@ pub(super) mod tests {
                 .decision()
                 .is_some_and(LairExplorerDecision::returns_focus_to_terminal)
         );
-        assert!(explorer.move_left());
+        assert!(explorer.move_left()); // Collapse the expanded Dojo without navigating.
+        assert!(matches!(
+            explorer.selected(),
+            Some(NavigationNodeId::Dojo { .. })
+        ));
+        assert!(explorer.move_left()); // Then move to its Lair.
         assert!(
             explorer
                 .decision()
@@ -1101,13 +1136,71 @@ pub(super) mod tests {
             Some(NavigationNodeId::Dojo { .. })
         ));
         assert!(explorer.move_left());
+        let selected = explorer.selected();
+        assert!(matches!(selected, Some(NavigationNodeId::Dojo { .. })));
+        assert_eq!(
+            explorer
+                .rows()
+                .iter()
+                .find(|row| Some(row.id) == selected)
+                .unwrap()
+                .expanded,
+            Some(false)
+        );
+        assert!(explorer.move_left());
         assert!(matches!(
             explorer.selected(),
             Some(NavigationNodeId::Lair(_))
         ));
         assert!(explorer.move_right());
         assert!(explorer.move_right());
+        assert!(explorer.move_right());
         assert_eq!(explorer.selected(), current);
+    }
+
+    #[test]
+    fn filtered_refresh_never_keeps_a_hidden_activation_target() {
+        let mut explorer = LairExplorerUi::default();
+        let mut view = view();
+        let id = view.lairs[0].dojos[0].splints[0].id;
+        explorer.set_view(view.clone());
+        explorer.set_search("shell".into());
+        explorer.select(id);
+        view.lairs[0].dojos[0].splints[0].label = "renamed".into();
+        explorer.set_view(view);
+        assert!(explorer.rows().is_empty());
+        assert_eq!(explorer.selected(), None);
+        assert_eq!(explorer.activation_decision(id), None);
+        assert_eq!(explorer.decision(), None);
+        assert!(explorer.reveal_current());
+        assert!(explorer.query().is_empty());
+        assert_eq!(explorer.selected(), Some(id));
+        assert!(explorer.decision().is_some());
+    }
+
+    #[test]
+    fn right_navigation_uses_filtered_children_not_hidden_siblings() {
+        let mut explorer = LairExplorerUi::default();
+        let mut view = view();
+        let mut child = view.lairs[0].dojos[0].splints[0].clone();
+        child.target.splint_id = SplintId::new();
+        child.id = NavigationNodeId::Splint {
+            lair_id: child.target.lair_id,
+            dojo_id: child.target.dojo_id,
+            splint_id: child.target.splint_id,
+        };
+        child.label = "needle".into();
+        child.focused_here = false;
+        let id = child.id;
+        view.lairs[0].dojos[0].splints.push(child);
+        let dojo = view.lairs[0].dojos[0].id;
+        explorer.set_view(view);
+        explorer.set_search("needle".into());
+        explorer.focus_tree();
+        explorer.select(dojo);
+        assert!(explorer.move_right());
+        assert_eq!(explorer.selected(), Some(id));
+        assert!(explorer.rows().iter().any(|row| row.id == id));
     }
 
     #[test]
@@ -1121,6 +1214,20 @@ pub(super) mod tests {
         assert_eq!(rows[0].label, "notes");
         assert_eq!(rows[1].label, "draft");
         assert!(!explorer.append_search("\n\u{202e}"));
+    }
+
+    #[test]
+    fn failure_notice_is_bounded_sanitized_and_cleared_by_retry() {
+        let mut explorer = LairExplorerUi::default();
+        explorer.mark_disconnected();
+        explorer.set_notice(&format!("failed\n\u{202e}{}", "界".repeat(300)));
+        let message = explorer.status_message().unwrap();
+        assert!(message.len() <= 256);
+        assert!(!message.contains('\n'));
+        assert!(!message.contains('\u{202e}'));
+        assert!(explorer.retryable());
+        explorer.begin_refresh();
+        assert_eq!(explorer.notice, None);
     }
 
     #[test]
@@ -1345,6 +1452,38 @@ pub(super) mod tests {
         wrong.topology_revision = TopologyRevision::new(8);
         assert!(!explorer.finish_activation(LairExplorerActivationTarget::Dojo(wrong), true));
         assert!(explorer.finish_activation(LairExplorerActivationTarget::Dojo(completed), true));
+    }
+
+    #[test]
+    fn parent_status_separates_runtime_attachment_and_retention() {
+        let mut explorer = LairExplorerUi::default();
+        let mut view = view();
+        let lair = view.lairs[0].id;
+        let dojo = view.lairs[0].dojos[0].id;
+        explorer.set_view(view.clone());
+        explorer.reveal_current();
+        let rows = explorer.rows();
+        assert_eq!(
+            rows.iter().find(|row| row.id == lair).unwrap().status,
+            "Running · Saved"
+        );
+        assert_eq!(
+            rows.iter().find(|row| row.id == dojo).unwrap().status,
+            "Running · Current"
+        );
+        view.lairs[0].dojos[0].active_here = false;
+        view.lairs[0].dojos[0].attachment = WindowAttachment::NotHere;
+        view.lairs[0].dojos[0].splints[0].lifecycle = NavigationLifecycle::Restorable;
+        explorer.set_view(view);
+        let rows = explorer.rows();
+        assert_eq!(
+            rows.iter().find(|row| row.id == lair).unwrap().status,
+            "Stopped · Restorable · Saved"
+        );
+        assert_eq!(
+            rows.iter().find(|row| row.id == dojo).unwrap().status,
+            "Stopped · Restorable · Not open here"
+        );
     }
 
     #[test]
