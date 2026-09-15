@@ -276,7 +276,9 @@ pub enum WindowTopologyUpdate {
         target: LairPromptTarget,
     },
     SessionPickerFailed(String),
-    LairExplorerFailed,
+    LairExplorerFailed(String),
+    /// Daemon lifecycle or topology changed, including work not open in a tab.
+    LairExplorerInvalidated,
     Theme(ThemeUpdate),
     Font(FontUpdate),
     Closed,

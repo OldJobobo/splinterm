@@ -146,6 +146,161 @@ fn committed() -> Response {
 }
 
 #[tokio::test]
+async fn successful_restore_notifies_explorer_without_attaching() {
+    let (lair, target) = saved();
+    for command in [
+        WindowTopologyCommand::RestoreLair {
+            lair_id: lair.id,
+            expected_topology_revision: target.topology_revision,
+        },
+        WindowTopologyCommand::RestoreDojo {
+            dojo_id: lair.dojos[0].id,
+            expected_topology_revision: target.topology_revision,
+        },
+    ] {
+        let mut target = target;
+        if let WindowTopologyCommand::RestoreDojo { dojo_id, .. } = &command {
+            target.node = NavigationNodeId::Dojo {
+                lair_id: lair.id,
+                dojo_id: *dojo_id,
+            };
+        }
+        let (_, updates) = routed(
+            target.command(command),
+            vec![
+                catalog(&lair, target),
+                Response::RestoreCompleted {
+                    topology_revision: target.topology_revision,
+                    results: Vec::new(),
+                },
+            ],
+        )
+        .await;
+        assert!(matches!(
+            updates.as_slice(),
+            [WindowTopologyUpdate::LairExplorerInvalidated]
+        ));
+        assert!(
+            !updates
+                .iter()
+                .any(|update| matches!(update, WindowTopologyUpdate::TabFailed { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn restore_rejects_invalid_acknowledgement_without_success_notification() {
+    let (lair, target) = saved();
+    for command in [
+        WindowTopologyCommand::RestoreLair {
+            lair_id: lair.id,
+            expected_topology_revision: target.topology_revision,
+        },
+        WindowTopologyCommand::RestoreDojo {
+            dojo_id: lair.dojos[0].id,
+            expected_topology_revision: target.topology_revision,
+        },
+    ] {
+        let mut target = target;
+        if let WindowTopologyCommand::RestoreDojo { dojo_id, .. } = &command {
+            target.node = NavigationNodeId::Dojo {
+                lair_id: lair.id,
+                dojo_id: *dojo_id,
+            };
+        }
+        let (_, updates) = routed(
+            target.command(command),
+            vec![catalog(&lair, target), committed()],
+        )
+        .await;
+        assert!(matches!(
+            updates.as_slice(),
+            [WindowTopologyUpdate::TabFailed { .. }]
+        ));
+    }
+}
+
+#[test]
+fn explorer_observes_detached_stop_and_restore_without_revision_change() {
+    use splinterm_core::Topology;
+    use splinterm_protocol::{SplintLifecycle, SplintRuntimeSummary, TopologySnapshot};
+    let lair = Lair::new("detached", "/tmp".into());
+    let splint_id = lair.dojos[0].default_focus;
+    let snapshot = |runtime: SplintRuntimeSummary| {
+        let mut lair = lair.clone();
+        lair.dojos[0]
+            .root
+            .find_splint_mut(splint_id)
+            .unwrap()
+            .last_incarnation = runtime.last_incarnation;
+        let mut topology = Topology::new();
+        topology.insert_lair_at(topology.revision(), lair).unwrap();
+        let snapshot = TopologySnapshot {
+            revision: topology.revision(),
+            topology,
+            runtimes: vec![runtime],
+        };
+        snapshot.validate().unwrap();
+        snapshot
+    };
+    let running = SplintRuntimeSummary {
+        splint_id,
+        live_incarnation: Some(7),
+        last_incarnation: Some(7),
+        restorable: false,
+        lifecycle: SplintLifecycle::Running,
+        exit_status: None,
+    };
+    let stopped = SplintRuntimeSummary {
+        live_incarnation: None,
+        restorable: true,
+        lifecycle: SplintLifecycle::Exited,
+        ..running.clone()
+    };
+    let restored = SplintRuntimeSummary {
+        live_incarnation: Some(8),
+        last_incarnation: Some(8),
+        ..running.clone()
+    };
+    let mut observer = ExplorerObservation::default();
+    for runtime in [running, stopped, restored] {
+        let snapshot = snapshot(runtime);
+        assert!(observer.observe(&snapshot));
+        assert!(
+            !observer.observe(&snapshot),
+            "unchanged polls must not trigger refresh loops"
+        );
+    }
+}
+
+#[test]
+fn explorer_observation_tracks_revision_and_ignores_runtime_order() {
+    use splinterm_protocol::{SplintLifecycle, SplintRuntimeSummary, TopologySnapshot};
+    let mut snapshot = TopologySnapshot {
+        topology: splinterm_core::Topology::new(),
+        revision: TopologyRevision::new(1),
+        runtimes: (0..2)
+            .map(|_| SplintRuntimeSummary {
+                splint_id: SplintId::new(),
+                live_incarnation: None,
+                last_incarnation: None,
+                restorable: false,
+                lifecycle: SplintLifecycle::Exited,
+                exit_status: None,
+            })
+            .collect(),
+    };
+    let mut observer = ExplorerObservation::default();
+    assert!(observer.observe(&snapshot));
+    snapshot.runtimes.reverse();
+    assert!(!observer.observe(&snapshot));
+    snapshot.revision = TopologyRevision::new(2);
+    assert!(observer.observe(&snapshot));
+    snapshot.runtimes.pop();
+    assert!(observer.observe(&snapshot));
+}
+
+#[tokio::test]
 async fn detached_saved_lair_mutations_reach_protocol_without_attaching() {
     let (lair, target) = saved();
     for (command, request, response) in [
@@ -193,8 +348,70 @@ async fn detached_saved_lair_mutations_reach_protocol_without_attaching() {
             vec![catalog(&lair, target), response],
         )
         .await;
+        let restore = matches!(request, Request::RestoreLair { .. });
         assert_eq!(requests, vec![Request::ListLairs, request]);
-        assert!(updates.is_empty());
+        if restore {
+            assert!(matches!(
+                updates.as_slice(),
+                [WindowTopologyUpdate::LairExplorerInvalidated]
+            ));
+        } else {
+            assert!(updates.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn explorer_primary_dojo_restore_only_previews_and_correlates_stale_failure() {
+    let (lair, guard) = saved();
+    let dojo_id = lair.dojos[0].id;
+    let target = SessionPickerTarget {
+        topology_revision: guard.topology_revision,
+        lair_id: lair.id,
+        dojo_id,
+        action: NavigationAction::PreviewRestoreDojo,
+    };
+    let correlation = Some(LairExplorerActivationTarget::Dojo(target));
+    for stale in [false, true] {
+        let reply_guard = ExplorerContextTarget {
+            topology_revision: if stale {
+                TopologyRevision::new(9)
+            } else {
+                guard.topology_revision
+            },
+            ..guard
+        };
+        let (requests, updates) = routed(
+            WindowTopologyCommand::OpenDojo {
+                target,
+                explorer_target: correlation,
+            },
+            vec![catalog(&lair, reply_guard)],
+        )
+        .await;
+        // Primary activation requests a preview only; no Attach/Restore/Focus is sent.
+        assert_eq!(requests, vec![Request::ListLairs]);
+        assert_eq!(updates.len(), 1);
+        if stale {
+            assert!(matches!(&updates[0], WindowTopologyUpdate::TabFailed {
+                explorer_target, dojo_id: Some(id), ..
+            } if *explorer_target == correlation && *id == dojo_id));
+        } else {
+            let WindowTopologyUpdate::ShowLairPrompt {
+                kind,
+                target: prompt,
+            } = &updates[0]
+            else {
+                panic!("expected restore confirmation")
+            };
+            assert_eq!(*kind, LairPromptKind::Restore);
+            assert_eq!(prompt.topology_revision, guard.topology_revision);
+            assert_eq!(prompt.lair_id, lair.id);
+            assert_eq!(prompt.dojo_id, Some(dojo_id));
+            assert_eq!(prompt.targets.len(), 1);
+            assert_eq!(prompt.targets[0].splint_id, lair.dojos[0].default_focus);
+            assert_eq!(prompt.targets[0].incarnation, 7);
+        }
     }
 }
 
@@ -230,13 +447,29 @@ async fn detached_dojo_rename_and_restore_reach_exact_authoritative_target() {
             },
         ),
     ] {
+        let restore = matches!(request, Request::RestoreDojo { .. });
+        let response = if restore {
+            Response::RestoreCompleted {
+                topology_revision: target.topology_revision,
+                results: Vec::new(),
+            }
+        } else {
+            committed()
+        };
         let (requests, updates) = routed(
             target.command(command),
-            vec![catalog(&lair, target), committed()],
+            vec![catalog(&lair, target), response],
         )
         .await;
         assert_eq!(requests, vec![Request::ListLairs, request]);
-        assert!(updates.is_empty());
+        if restore {
+            assert!(matches!(
+                updates.as_slice(),
+                [WindowTopologyUpdate::LairExplorerInvalidated]
+            ));
+        } else {
+            assert!(updates.is_empty());
+        }
     }
 }
 
