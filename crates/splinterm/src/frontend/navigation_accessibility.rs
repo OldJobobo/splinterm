@@ -131,18 +131,7 @@ impl NavigationAccessibility {
             visible,
             enabled,
             result_count: items.len(),
-            status: visible.then(|| {
-                explorer.status_message().map_or_else(
-                    || {
-                        if limited {
-                            "Navigation item limit reached".to_owned()
-                        } else {
-                            format!("{} results", items.len())
-                        }
-                    },
-                    str::to_owned,
-                )
-            }),
+            status: visible.then(|| navigation_status(explorer, limited, items.len(), &focus)),
             items,
             query: if visible {
                 explorer.query().to_owned()
@@ -210,6 +199,31 @@ impl NavigationAccessibility {
             SemanticAction::SetSearch(_) => None,
         }
     }
+}
+
+fn navigation_status(
+    explorer: &LairExplorerUi,
+    limited: bool,
+    count: usize,
+    focus: &SemanticFocus,
+) -> String {
+    let status = explorer.status_message().map_or_else(
+        || {
+            if limited {
+                "Navigation item limit reached".to_owned()
+            } else {
+                format!("{count} results")
+            }
+        },
+        str::to_owned,
+    );
+    let hint = match focus {
+        SemanticFocus::Search => "Typing searches labels",
+        SemanticFocus::Tree | SemanticFocus::Item(_) => "F cycles filters",
+        SemanticFocus::Terminal => "Focus Explorer to change filters",
+        SemanticFocus::None => "Navigation shortcuts unavailable",
+    };
+    format!("{} filter · {status} · {hint}", explorer.filter().label())
 }
 
 fn identities(
@@ -323,7 +337,10 @@ mod tests {
         let empty = accessibility.refresh(&explorer, context());
         assert!(empty.items.is_empty());
         assert_eq!(empty.focus, SemanticFocus::Search);
-        assert_eq!(empty.status.as_deref(), Some("No matches"));
+        assert_eq!(
+            empty.status.as_deref(),
+            Some("All filter · No matches · Typing searches labels")
+        );
         assert_eq!(empty.query, "no matches");
         assert!(
             accessibility
@@ -334,6 +351,97 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn navigation_accessibility_filter_hint_matches_input_owner() {
+        let mut explorer = explorer();
+        assert!(
+            super::navigation_status(&explorer, false, 4, &SemanticFocus::Tree)
+                .contains("F cycles filters")
+        );
+        explorer.begin_search();
+        let search = super::navigation_status(&explorer, false, 4, &SemanticFocus::Search);
+        assert!(search.contains("Typing searches labels"));
+        assert!(!search.contains("F cycles filters"));
+        explorer.return_to_terminal();
+        let terminal = super::navigation_status(&explorer, false, 4, &SemanticFocus::Terminal);
+        assert!(terminal.contains("Focus Explorer"));
+        assert!(!terminal.contains("F cycles filters"));
+    }
+
+    #[test]
+    fn navigation_accessibility_hints_follow_effective_window_focus_and_authority() {
+        let mut explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        for searching in [false, true] {
+            if searching {
+                explorer.begin_search();
+            }
+            for blocked in [
+                NavigationAccessContext {
+                    keyboard_focused: false,
+                    ..context()
+                },
+                NavigationAccessContext {
+                    permitted: false,
+                    ..context()
+                },
+            ] {
+                let snapshot = accessibility.refresh(&explorer, blocked);
+                assert_eq!(snapshot.focus, SemanticFocus::None);
+                let status = snapshot.status.as_deref().unwrap();
+                assert!(status.contains("Navigation shortcuts unavailable"));
+                assert!(!status.contains("F cycles filters"));
+                assert!(!status.contains("Typing searches labels"));
+            }
+            let restored = accessibility.refresh(&explorer, context());
+            assert!(restored.status.as_deref().unwrap().contains(if searching {
+                "Typing searches labels"
+            } else {
+                "F cycles filters"
+            }));
+        }
+    }
+
+    #[test]
+    fn navigation_accessibility_tracks_filter_and_rejects_hidden_targets() {
+        use crate::frontend::LairExplorerFilter;
+        let mut explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        let all = accessibility.refresh(&explorer, context());
+        let hidden = all.items[3].id;
+        explorer.set_filter(LairExplorerFilter::Saved);
+        let saved = accessibility.refresh(&explorer, context());
+        assert!(saved.generation > all.generation);
+        assert_eq!(saved.items, all.items);
+        assert!(saved.status.as_deref().unwrap().starts_with("Saved filter"));
+        explorer.set_filter(LairExplorerFilter::Live);
+        let live = accessibility.refresh(&explorer, context());
+        live.tree_update().unwrap();
+        assert_eq!(live.items.len(), 3);
+        assert!(live.status.as_deref().unwrap().starts_with("Live filter"));
+        assert!(
+            accessibility
+                .resolve(
+                    request(&live, SemanticAction::Activate(hidden)),
+                    &explorer,
+                    context()
+                )
+                .is_none()
+        );
+        assert!(
+            accessibility
+                .resolve(
+                    request(&all, SemanticAction::Activate(all.items[2].id)),
+                    &explorer,
+                    context()
+                )
+                .is_none()
+        );
+        explorer.set_filter(LairExplorerFilter::All);
+        let restored = accessibility.refresh(&explorer, context());
+        assert_eq!(restored.items, all.items);
     }
 
     #[test]

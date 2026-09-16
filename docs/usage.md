@@ -173,6 +173,15 @@ restorable Dojo opens a restore confirmation rather than reporting a permission
 failure. Detached starting or mixed-state Dojos still cannot be attached;
 Explorer explains this lifecycle restriction instead of calling it a denial.
 
+The header offers **All / Live / Saved**, initially **All**. **Live** keeps
+running or starting Splints and their parent context; a mixed parent containing
+only stopped or unavailable Splints is not live. **Saved** keeps saved and pinned Lairs,
+including any live work inside them. These filters preserve the authoritative
+Lair → Dojo → Splint order; pinning adds a status marker, not refresh-driven
+sorting. Branches begin collapsed, and refreshing preserves disclosure choices.
+Label search operates within the chosen filter. The accessibility status names
+the active filter and announces the keyboard shortcut.
+
 While Explorer has focus:
 
 - Use Up/Down to select a row; PageUp/PageDown move by a page and Home/End select
@@ -184,11 +193,14 @@ While Explorer has focus:
   Splint to focus its pane. Selecting a row alone does not activate it: the
   **selected** row is the navigation target, while **current** identifies the
   terminal work already active in the Window.
+- Outside search, press `f` to cycle All / Live / Saved, or click a header filter.
+  If filtering hides the selected row, selection moves to a visible row without
+  activating it. Hidden rows cannot receive navigation actions.
 - Press `/` or `Ctrl+F` to search navigation labels, not terminal output or
   scrollback. Matching descendants retain their parent context. Escape clears
   a nonempty query; Escape with an empty query returns focus to the terminal.
-- Outside search, `r` reveals the current work, clearing any retained filter,
-  or retries a failed refresh when the Explorer offers retry.
+- Outside search, `r` reveals the current work, resetting to All and clearing
+  the label query, or retries a failed refresh when the Explorer offers retry.
 
 Unavailable targets cannot be activated. Restorable exited work enters the
 existing preview/confirmation flow; it is not silently restarted by selection.

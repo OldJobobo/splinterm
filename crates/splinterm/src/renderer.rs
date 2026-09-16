@@ -93,7 +93,8 @@ pub(crate) use overlays::actions::{
 )]
 pub(crate) use overlays::explorer::{
     LairExplorerLayout, LairExplorerPresentationMode, lair_explorer_disclosure_hit_test,
-    lair_explorer_hit_test, lair_explorer_layout, paint_lair_explorer,
+    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout,
+    paint_lair_explorer,
 };
 pub(crate) use overlays::history::{
     HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout, paint_history_overlay,

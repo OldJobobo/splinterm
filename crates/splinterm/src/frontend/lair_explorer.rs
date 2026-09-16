@@ -11,6 +11,34 @@ use crate::navigation_projection::{
     NavigationLifecycle, NavigationNodeId, WindowAttachment,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum LairExplorerFilter {
+    #[default]
+    All,
+    Live,
+    Saved,
+}
+
+impl LairExplorerFilter {
+    pub(crate) const ALL: [Self; 3] = [Self::All, Self::Live, Self::Saved];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Live => "Live",
+            Self::Saved => "Saved",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Live,
+            Self::Live => Self::Saved,
+            Self::Saved => Self::All,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LairExplorerRowKind {
     Lair,
@@ -88,6 +116,7 @@ pub(crate) struct LairExplorerUi {
     visible: bool,
     focused: bool,
     search_active: bool,
+    filter: LairExplorerFilter,
     query: BoundedTextEditor,
     expanded: HashSet<NavigationNodeId>,
     selected: Option<NavigationNodeId>,
@@ -104,6 +133,7 @@ impl Default for LairExplorerUi {
             visible: false,
             focused: false,
             search_active: false,
+            filter: LairExplorerFilter::All,
             query: BoundedTextEditor::new(String::new(), 256, 64, true),
             expanded: HashSet::new(),
             selected: None,
@@ -168,6 +198,37 @@ impl LairExplorerUi {
 
     pub(crate) const fn search_active(&self) -> bool {
         self.search_active
+    }
+
+    pub(crate) const fn filter(&self) -> LairExplorerFilter {
+        self.filter
+    }
+
+    pub(crate) fn set_filter(&mut self, filter: LairExplorerFilter) -> bool {
+        if self.filter == filter {
+            return false;
+        }
+        self.filter = filter;
+        self.context_pressed = None;
+        self.notice = None;
+        self.ensure_selection_visible();
+        true
+    }
+
+    fn includes_lifecycle(&self, lifecycle: NavigationLifecycle) -> bool {
+        self.filter != LairExplorerFilter::Live
+            || matches!(
+                lifecycle,
+                NavigationLifecycle::Running | NavigationLifecycle::Starting
+            )
+    }
+
+    fn includes_dojo(&self, dojo: &NavigationExplorerDojo) -> bool {
+        self.filter != LairExplorerFilter::Live
+            || dojo
+                .splints
+                .iter()
+                .any(|splint| self.includes_lifecycle(splint.lifecycle))
     }
 
     pub(crate) fn view(&self) -> Option<&NavigationExplorerView> {
@@ -429,7 +490,11 @@ impl LairExplorerUi {
             Some("Loading navigation…")
         } else if self.rows().is_empty() {
             if self.query.text().is_empty() {
-                Some("No saved Lairs")
+                Some(match self.filter {
+                    LairExplorerFilter::All => "No Lairs",
+                    LairExplorerFilter::Live => "No live work",
+                    LairExplorerFilter::Saved => "No saved Lairs",
+                })
             } else {
                 Some("No matches")
             }
@@ -470,7 +535,9 @@ impl LairExplorerUi {
         }) else {
             return false;
         };
-        let mut changed = !self.query.text().is_empty();
+        let mut changed = !self.query.text().is_empty() || self.filter != LairExplorerFilter::All;
+        self.filter = LairExplorerFilter::All;
+        self.context_pressed = None;
         self.query = BoundedTextEditor::new(String::new(), 256, 64, true);
         changed |= self.expanded.insert(lair_id);
         if matches!(current, NavigationNodeId::Splint { .. }) {
@@ -489,14 +556,24 @@ impl LairExplorerUi {
         let searching = !query.is_empty();
         let mut rows = Vec::new();
         for lair in &view.lairs {
+            if (self.filter == LairExplorerFilter::Saved && !lair.retention.is_protected())
+                || (self.filter == LairExplorerFilter::Live
+                    && !lair.dojos.iter().any(|dojo| self.includes_dojo(dojo)))
+            {
+                continue;
+            }
             let lair_matches = matches_query(&lair.label, &query);
-            let lair_has_descendant_match = lair.dojos.iter().any(|dojo| {
-                matches_query(&dojo.label, &query)
-                    || dojo
-                        .splints
-                        .iter()
-                        .any(|splint| matches_query(&splint.label, &query))
-            });
+            let lair_has_descendant_match = lair
+                .dojos
+                .iter()
+                .filter(|dojo| self.includes_dojo(dojo))
+                .any(|dojo| {
+                    matches_query(&dojo.label, &query)
+                        || dojo.splints.iter().any(|splint| {
+                            self.includes_lifecycle(splint.lifecycle)
+                                && matches_query(&splint.label, &query)
+                        })
+                });
             if searching && !lair_matches && !lair_has_descendant_match {
                 continue;
             }
@@ -534,11 +611,13 @@ impl LairExplorerUi {
         lair_matches: bool,
         query: &[String],
     ) {
+        if !self.includes_dojo(dojo) {
+            return;
+        }
         let dojo_matches = matches_query(&dojo.label, query);
-        let descendant_matches = dojo
-            .splints
-            .iter()
-            .any(|splint| matches_query(&splint.label, query));
+        let descendant_matches = dojo.splints.iter().any(|splint| {
+            self.includes_lifecycle(splint.lifecycle) && matches_query(&splint.label, query)
+        });
         if searching && !lair_matches && !dojo_matches && !descendant_matches {
             return;
         }
@@ -569,6 +648,9 @@ impl LairExplorerUi {
             return;
         }
         for splint in &dojo.splints {
+            if !self.includes_lifecycle(splint.lifecycle) {
+                continue;
+            }
             if searching && !lair_matches && !dojo_matches && !matches_query(&splint.label, query) {
                 continue;
             }
@@ -875,6 +957,139 @@ pub(super) mod tests {
         NavigationExplorerLair, NavigationExplorerSplint, NavigationExplorerSplintTarget,
         NavigationExplorerTarget,
     };
+
+    #[test]
+    fn activity_filters_keep_identity_order_and_default_stopped_collapse() {
+        let view = view();
+        let ids = view.lairs.iter().map(|lair| lair.id).collect::<Vec<_>>();
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        assert_eq!(explorer.filter(), LairExplorerFilter::All);
+        assert!(
+            explorer
+                .rows()
+                .iter()
+                .all(|row| row.expanded == Some(false))
+        );
+        explorer.set_filter(LairExplorerFilter::Saved);
+        assert_eq!(
+            explorer.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            ids
+        );
+        explorer.set_filter(LairExplorerFilter::Live);
+        assert_eq!(
+            explorer.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![ids[0]]
+        );
+        explorer.set_filter(LairExplorerFilter::All);
+        assert_eq!(
+            explorer.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            ids
+        );
+    }
+
+    #[test]
+    fn saved_filter_hides_disposable_current_until_reveal() {
+        let mut view = view();
+        view.lairs[0].retention = LairRetention::Disposable;
+        let current = view.current.unwrap();
+        let retained = view.lairs[1].id;
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        explorer.reveal_current();
+        explorer.focus();
+        explorer.context_press(Some(current));
+        assert!(explorer.context_press_pending());
+        assert!(explorer.set_filter(LairExplorerFilter::Saved));
+        assert_eq!(explorer.selected(), Some(retained));
+        assert!(!explorer.rows().iter().any(|row| row.id == current));
+        assert!(!explorer.can_context(current));
+        assert!(explorer.activation_decision(current).is_none());
+        assert!(!explorer.context_press_pending());
+        assert!(explorer.reveal_current());
+        assert_eq!(explorer.filter(), LairExplorerFilter::All);
+        assert_eq!(explorer.selected(), Some(current));
+        assert!(explorer.rows().iter().any(|row| row.id == current));
+    }
+
+    #[test]
+    fn live_filter_removes_stopped_selection_on_refresh_without_reordering() {
+        let mut view = view();
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view.clone());
+        explorer.reveal_current();
+        explorer.set_filter(LairExplorerFilter::Live);
+        assert!(explorer.selected().is_some());
+        view.lairs[0].dojos[0].splints[0].lifecycle = NavigationLifecycle::Restorable;
+        explorer.set_view(view.clone());
+        assert!(explorer.rows().is_empty());
+        assert_eq!(explorer.selected(), None);
+        assert_eq!(explorer.status_message(), Some("No live work"));
+        view.lairs[0].dojos[0].splints[0].lifecycle = NavigationLifecycle::Starting;
+        explorer.set_view(view);
+        assert!(!explorer.rows().is_empty());
+        assert!(explorer.selected().is_some());
+    }
+
+    #[test]
+    fn live_filter_excludes_non_live_mixed_aggregates_but_saved_keeps_them() {
+        let mut view = view();
+        let splints = &mut view.lairs[0].dojos[0].splints;
+        splints[0].lifecycle = NavigationLifecycle::Restorable;
+        let mut unavailable = splints[0].clone();
+        unavailable.target.splint_id = SplintId::new();
+        unavailable.id = NavigationNodeId::Splint {
+            lair_id: unavailable.target.lair_id,
+            dojo_id: unavailable.target.dojo_id,
+            splint_id: unavailable.target.splint_id,
+        };
+        unavailable.lifecycle = NavigationLifecycle::Unavailable;
+        splints.push(unavailable);
+        assert_eq!(
+            view.lairs[0].dojos[0].lifecycle(),
+            NavigationLifecycle::Mixed
+        );
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        explorer.set_filter(LairExplorerFilter::Live);
+        assert!(explorer.rows().is_empty());
+        explorer.set_filter(LairExplorerFilter::Saved);
+        assert_eq!(explorer.rows().len(), 2);
+        assert!(
+            explorer
+                .rows()
+                .iter()
+                .all(|row| row.expanded == Some(false))
+        );
+    }
+
+    #[test]
+    fn live_search_does_not_leak_ancestors_of_filtered_descendants() {
+        let mut view = view();
+        let first = &mut view.lairs[0].dojos[0].splints[0];
+        first.label = "stopped-only-label".into();
+        first.lifecycle = NavigationLifecycle::Restorable;
+        let mut live = first.clone();
+        live.target.splint_id = SplintId::new();
+        live.id = NavigationNodeId::Splint {
+            lair_id: live.target.lair_id,
+            dojo_id: live.target.dojo_id,
+            splint_id: live.target.splint_id,
+        };
+        live.label = "live-label".into();
+        live.lifecycle = NavigationLifecycle::Running;
+        view.lairs[0].dojos[0].splints.push(live);
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view);
+        explorer.set_filter(LairExplorerFilter::Live);
+        explorer.set_search("stopped-only-label".into());
+        assert!(explorer.rows().is_empty());
+        explorer.set_search("live-label".into());
+        assert_eq!(explorer.rows().len(), 3);
+        explorer.set_filter(LairExplorerFilter::All);
+        explorer.set_search("stopped-only-label".into());
+        assert_eq!(explorer.rows().len(), 3);
+    }
 
     pub(crate) fn view() -> NavigationExplorerView {
         let lair = LairId::new();

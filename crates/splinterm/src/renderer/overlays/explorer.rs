@@ -4,7 +4,11 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::{frontend::LairExplorerRow, geometry::Rect, navigation_projection::NavigationNodeId};
+use crate::{
+    frontend::{LairExplorerFilter, LairExplorerRow},
+    geometry::Rect,
+    navigation_projection::NavigationNodeId,
+};
 
 use super::{
     super::{ChromeTextStyle, RenderContext, fill_rect},
@@ -14,7 +18,8 @@ use super::{
 };
 
 const PREFERRED_WIDTH: u32 = 288;
-const HEADER_HEIGHT: u32 = 76;
+const HEADER_HEIGHT: u32 = 104;
+const FILTER_HEIGHT: u32 = 28;
 const FOOTER_HEIGHT: u32 = 30;
 const ROW_HEIGHT: u32 = 48;
 
@@ -26,11 +31,13 @@ const fn explorer_header_text(focused: bool) -> &'static str {
     }
 }
 
-const fn explorer_footer_text(focused: bool) -> &'static str {
-    if focused {
-        "↑↓ move  ←→ open  Esc terminal"
-    } else {
+const fn explorer_footer_text(focused: bool, searching: bool) -> &'static str {
+    if !focused {
         "Click rows · terminal input active"
+    } else if searching {
+        "Search labels · Esc clear/exit"
+    } else {
+        "↑↓ move · F filter · Esc terminal"
     }
 }
 
@@ -52,6 +59,7 @@ pub(crate) struct LairExplorerLayout {
     pub(crate) terminal: Rect,
     pub(crate) header: Rect,
     pub(crate) footer: Rect,
+    pub(crate) filters: Vec<(LairExplorerFilter, Rect)>,
     pub(crate) rows: Vec<LairExplorerRowLayout>,
     pub(crate) visible_start: usize,
     pub(crate) visible_capacity: usize,
@@ -136,10 +144,48 @@ pub(crate) fn lair_explorer_layout(
             width: panel.width,
             height: footer_height,
         },
+        filters: if header_height == HEADER_HEIGHT {
+            let inset = 12.min(panel.width / 2);
+            let available = panel.width.saturating_sub(inset * 2);
+            LairExplorerFilter::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, filter)| {
+                    let index = u32::try_from(index).unwrap_or(0);
+                    let left = available * index / 3;
+                    let right = available * (index + 1) / 3;
+                    (
+                        filter,
+                        Rect {
+                            x: panel.x.saturating_add(inset).saturating_add(left),
+                            y: panel.y.saturating_add(HEADER_HEIGHT - FILTER_HEIGHT),
+                            width: right - left,
+                            height: FILTER_HEIGHT,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         rows: row_layouts,
         visible_start: start,
         visible_capacity: capacity,
         mode,
+    })
+}
+
+#[must_use]
+pub(crate) fn lair_explorer_filter_hit_test(
+    layout: &LairExplorerLayout,
+    position: (f64, f64),
+) -> Option<LairExplorerFilter> {
+    layout.filters.iter().find_map(|(filter, rect)| {
+        (position.0 >= f64::from(rect.x)
+            && position.0 < f64::from(rect.x.saturating_add(rect.width))
+            && position.1 >= f64::from(rect.y)
+            && position.1 < f64::from(rect.y.saturating_add(rect.height)))
+        .then_some(*filter)
     })
 }
 
@@ -268,6 +314,8 @@ pub(crate) fn paint_lair_explorer(
     query: &str,
     status_message: Option<&str>,
     focused: bool,
+    filter: LairExplorerFilter,
+    searching: bool,
 ) -> Result<()> {
     let panel = buffer_rect(layout.panel, scale_120);
     fill_rect(
@@ -302,7 +350,11 @@ pub(crate) fn paint_lair_explorer(
         x: header.x.saturating_add(inset),
         y: header.y,
         width: header.width.saturating_sub(inset.saturating_mul(2)),
-        height: header.height / 2,
+        height: (HEADER_HEIGHT - FILTER_HEIGHT)
+            .saturating_mul(scale_120)
+            .div_ceil(120)
+            .min(header.height)
+            / 2,
     };
     paint_picker_text(
         cache,
@@ -320,7 +372,7 @@ pub(crate) fn paint_lair_explorer(
         palette.primary,
     )?;
     let context_line = Rect {
-        y: header.y.saturating_add(header.height / 2),
+        y: header.y.saturating_add(header_line.height),
         ..header_line
     };
     let context_text = if let Some(status_message) = status_message {
@@ -345,6 +397,47 @@ pub(crate) fn paint_lair_explorer(
         PickerTextAlignment::Left,
         palette.secondary,
     )?;
+
+    for (choice, rect) in &layout.filters {
+        let rect = buffer_rect(*rect, scale_120);
+        let rect = Rect {
+            width: rect.width.min(right.saturating_sub(rect.x)),
+            ..rect
+        };
+        let active = *choice == filter;
+        if active {
+            fill_rect(
+                canvas,
+                canvas_width,
+                canvas_height,
+                tuple(rect),
+                rgba(palette.selected_fill),
+            );
+        }
+        paint_picker_text(
+            cache,
+            context,
+            &mut used,
+            canvas,
+            canvas_width,
+            canvas_height,
+            choice.label(),
+            if active {
+                ChromeTextStyle::Bold
+            } else {
+                ChromeTextStyle::Regular
+            },
+            scale_120,
+            renderer_generation,
+            rect,
+            PickerTextAlignment::Center,
+            if active {
+                palette.selected_primary
+            } else {
+                palette.secondary
+            },
+        )?;
+    }
 
     for (layout_row, row) in layout
         .rows
@@ -448,7 +541,7 @@ pub(crate) fn paint_lair_explorer(
         canvas,
         canvas_width,
         canvas_height,
-        explorer_footer_text(focused),
+        explorer_footer_text(focused, searching),
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -499,14 +592,17 @@ mod tests {
             let [r, g, b, a] = rgba(color);
             [b, g, r, a]
         };
-        for width in [1000, 700, 2, 1] {
+        for (width, filter) in [1000, 700, 2, 1]
+            .into_iter()
+            .flat_map(|width| LairExplorerFilter::ALL.map(|filter| (width, filter)))
+        {
             for scale in [120, 150, 180, 240] {
                 for focused in [false, true] {
                     let content = Rect {
                         x: 7,
                         y: 20,
                         width,
-                        height: 180,
+                        height: HEADER_HEIGHT + FOOTER_HEIGHT + ROW_HEIGHT,
                     };
                     let layout = lair_explorer_layout(content, 640, &rows, Some(id), 0).unwrap();
                     let canvas_width = (content.x + content.width) * scale / 120 + 1;
@@ -528,6 +624,8 @@ mod tests {
                         "",
                         None,
                         focused,
+                        filter,
+                        false,
                     )
                     .unwrap();
                     let panel = buffer_rect(layout.panel, scale);
@@ -544,7 +642,7 @@ mod tests {
                             assert_eq!(
                                 &canvas[offset..offset + 4],
                                 &expected,
-                                "divider at {x},{y}; width={width}, scale={scale}, focused={focused}"
+                                "divider at {x},{y}; width={width}, scale={scale}, focused={focused}, filter={filter:?}"
                             );
                         }
                     }
@@ -618,8 +716,8 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(layout.visible_capacity, 6);
-        assert_eq!(layout.visible_start, 24);
+        assert_eq!(layout.visible_capacity, 5);
+        assert_eq!(layout.visible_start, 25);
         let last = layout.rows.last().unwrap();
         assert_eq!(last.id, selected);
         assert!(last.rect.y + last.rect.height <= layout.footer.y);
@@ -630,14 +728,91 @@ mod tests {
     }
 
     #[test]
+    fn filter_hit_regions_never_overlap_rows_or_footer() {
+        let rows = [row(NavigationNodeId::Lair(LairId::new()))];
+        for width in [1, 2, 100, 700, 1000] {
+            for height in [1, 75, 104, 134, 182, 400] {
+                let layout = lair_explorer_layout(
+                    Rect {
+                        x: 7,
+                        y: 20,
+                        width,
+                        height,
+                    },
+                    640,
+                    &rows,
+                    None,
+                    0,
+                )
+                .unwrap();
+                for (filter, rect) in &layout.filters {
+                    assert!(rect.y + rect.height <= layout.header.y + layout.header.height);
+                    if rect.width == 0 {
+                        continue;
+                    }
+                    let point = (
+                        f64::from(rect.x) + f64::from(rect.width) / 2.0,
+                        f64::from(rect.y) + 1.0,
+                    );
+                    assert_eq!(lair_explorer_filter_hit_test(&layout, point), Some(*filter));
+                    assert_eq!(lair_explorer_hit_test(&layout, point), None);
+                    assert_eq!(
+                        lair_explorer_disclosure_hit_test(&layout, &rows, point),
+                        None
+                    );
+                    assert_eq!(
+                        lair_explorer_filter_hit_test(
+                            &layout,
+                            (point.0, f64::from(rect.y + rect.height))
+                        ),
+                        None
+                    );
+                }
+                for row in &layout.rows {
+                    assert_eq!(
+                        lair_explorer_filter_hit_test(
+                            &layout,
+                            (f64::from(row.rect.x), f64::from(row.rect.y))
+                        ),
+                        None
+                    );
+                }
+                assert_eq!(
+                    lair_explorer_filter_hit_test(
+                        &layout,
+                        (f64::from(layout.footer.x), f64::from(layout.footer.y))
+                    ),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
     fn focus_copy_makes_input_ownership_explicit() {
         assert_eq!(explorer_header_text(false), "LAIRS");
         assert_eq!(
-            explorer_footer_text(false),
+            explorer_footer_text(false, false),
             "Click rows · terminal input active"
         );
         assert_eq!(explorer_header_text(true), "LAIRS · KEYBOARD FOCUS");
-        assert_eq!(explorer_footer_text(true), "↑↓ move  ←→ open  Esc terminal");
+        assert_eq!(
+            explorer_footer_text(true, false),
+            "↑↓ move · F filter · Esc terminal"
+        );
+    }
+
+    #[test]
+    fn search_footer_does_not_advertise_tree_filter_shortcut() {
+        assert_eq!(
+            explorer_footer_text(true, true),
+            "Search labels · Esc clear/exit"
+        );
+        assert!(!explorer_footer_text(true, true).contains("F filter"));
+        assert_eq!(
+            explorer_footer_text(false, true),
+            explorer_footer_text(false, false)
+        );
     }
 
     #[test]
@@ -674,13 +849,14 @@ mod tests {
         .unwrap();
         assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
         assert_eq!(drawer.terminal.width, 700);
-        assert_eq!(lair_explorer_hit_test(&drawer, (10.0, 110.0)), Some(id));
+        let row_y = f64::from(drawer.rows[0].rect.y + 1);
+        assert_eq!(lair_explorer_hit_test(&drawer, (10.0, row_y)), Some(id));
         assert_eq!(
-            lair_explorer_disclosure_hit_test(&drawer, &rows, (10.0, 110.0)),
+            lair_explorer_disclosure_hit_test(&drawer, &rows, (10.0, row_y)),
             Some(id)
         );
         assert_eq!(
-            lair_explorer_disclosure_hit_test(&drawer, &rows, (100.0, 110.0)),
+            lair_explorer_disclosure_hit_test(&drawer, &rows, (100.0, row_y)),
             None
         );
     }
