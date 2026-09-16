@@ -10471,6 +10471,7 @@ impl App {
                 status_message,
                 self.explorer.focused(),
                 self.explorer.filter(),
+                self.explorer.search_active(),
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }

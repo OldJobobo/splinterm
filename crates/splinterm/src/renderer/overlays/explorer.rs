@@ -31,11 +31,13 @@ const fn explorer_header_text(focused: bool) -> &'static str {
     }
 }
 
-const fn explorer_footer_text(focused: bool) -> &'static str {
-    if focused {
-        "↑↓ move · F filter · Esc terminal"
-    } else {
+const fn explorer_footer_text(focused: bool, searching: bool) -> &'static str {
+    if !focused {
         "Click rows · terminal input active"
+    } else if searching {
+        "Search labels · Esc clear/exit"
+    } else {
+        "↑↓ move · F filter · Esc terminal"
     }
 }
 
@@ -313,6 +315,7 @@ pub(crate) fn paint_lair_explorer(
     status_message: Option<&str>,
     focused: bool,
     filter: LairExplorerFilter,
+    searching: bool,
 ) -> Result<()> {
     let panel = buffer_rect(layout.panel, scale_120);
     fill_rect(
@@ -538,7 +541,7 @@ pub(crate) fn paint_lair_explorer(
         canvas,
         canvas_width,
         canvas_height,
-        explorer_footer_text(focused),
+        explorer_footer_text(focused, searching),
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -622,6 +625,7 @@ mod tests {
                         None,
                         focused,
                         filter,
+                        false,
                     )
                     .unwrap();
                     let panel = buffer_rect(layout.panel, scale);
@@ -788,13 +792,26 @@ mod tests {
     fn focus_copy_makes_input_ownership_explicit() {
         assert_eq!(explorer_header_text(false), "LAIRS");
         assert_eq!(
-            explorer_footer_text(false),
+            explorer_footer_text(false, false),
             "Click rows · terminal input active"
         );
         assert_eq!(explorer_header_text(true), "LAIRS · KEYBOARD FOCUS");
         assert_eq!(
-            explorer_footer_text(true),
+            explorer_footer_text(true, false),
             "↑↓ move · F filter · Esc terminal"
+        );
+    }
+
+    #[test]
+    fn search_footer_does_not_advertise_tree_filter_shortcut() {
+        assert_eq!(
+            explorer_footer_text(true, true),
+            "Search labels · Esc clear/exit"
+        );
+        assert!(!explorer_footer_text(true, true).contains("F filter"));
+        assert_eq!(
+            explorer_footer_text(false, true),
+            explorer_footer_text(false, false)
         );
     }
 

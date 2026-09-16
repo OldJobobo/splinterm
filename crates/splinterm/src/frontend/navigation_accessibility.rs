@@ -212,10 +212,14 @@ fn navigation_status(explorer: &LairExplorerUi, limited: bool, count: usize) -> 
         },
         str::to_owned,
     );
-    format!(
-        "{} filter · {status} · F cycles filters",
-        explorer.filter().label()
-    )
+    let hint = if explorer.search_active() {
+        "Typing searches labels"
+    } else if explorer.focused() {
+        "F cycles filters"
+    } else {
+        "Focus Explorer to change filters"
+    };
+    format!("{} filter · {status} · {hint}", explorer.filter().label())
 }
 
 fn identities(
@@ -331,7 +335,7 @@ mod tests {
         assert_eq!(empty.focus, SemanticFocus::Search);
         assert_eq!(
             empty.status.as_deref(),
-            Some("All filter · No matches · F cycles filters")
+            Some("All filter · No matches · Typing searches labels")
         );
         assert_eq!(empty.query, "no matches");
         assert!(
@@ -343,6 +347,20 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn navigation_accessibility_filter_hint_matches_input_owner() {
+        let mut explorer = explorer();
+        assert!(super::navigation_status(&explorer, false, 4).contains("F cycles filters"));
+        explorer.begin_search();
+        let search = super::navigation_status(&explorer, false, 4);
+        assert!(search.contains("Typing searches labels"));
+        assert!(!search.contains("F cycles filters"));
+        explorer.return_to_terminal();
+        let terminal = super::navigation_status(&explorer, false, 4);
+        assert!(terminal.contains("Focus Explorer"));
+        assert!(!terminal.contains("F cycles filters"));
     }
 
     #[test]

@@ -492,8 +492,8 @@ impl LairExplorerUi {
             if self.query.text().is_empty() {
                 Some(match self.filter {
                     LairExplorerFilter::All => "No Lairs",
-                    LairExplorerFilter::Live => "No live work · F filter",
-                    LairExplorerFilter::Saved => "No saved Lairs · F filter",
+                    LairExplorerFilter::Live => "No live work",
+                    LairExplorerFilter::Saved => "No saved Lairs",
                 })
             } else {
                 Some("No matches")
@@ -1024,7 +1024,7 @@ pub(super) mod tests {
         explorer.set_view(view.clone());
         assert!(explorer.rows().is_empty());
         assert_eq!(explorer.selected(), None);
-        assert_eq!(explorer.status_message(), Some("No live work · F filter"));
+        assert_eq!(explorer.status_message(), Some("No live work"));
         view.lairs[0].dojos[0].splints[0].lifecycle = NavigationLifecycle::Starting;
         explorer.set_view(view);
         assert!(!explorer.rows().is_empty());
