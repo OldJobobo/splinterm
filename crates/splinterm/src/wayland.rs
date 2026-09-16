@@ -10080,7 +10080,16 @@ impl App {
             .dojo_prompt
             .as_ref()
             .and_then(|prompt| dojo_prompt_layout(self.content_rect(), prompt));
-        let tab_context_menu_layout = self.modal.tab_context_menu.as_ref().and_then(|menu| {
+        let tab_context_menu_layout = if let Some(menu) = self.modal.tab_context_menu.as_ref() {
+            let label_width = self
+                .modal
+                .tab_context_menu_text_cache
+                .tab_menu_label_width(
+                    &self.presentation.render_context,
+                    menu.actions(),
+                    self.surface.scale_120,
+                    self.presentation.renderer_generation,
+                )?;
             tab_context_menu_layout(
                 Rect {
                     x: 0,
@@ -10090,8 +10099,11 @@ impl App {
                 },
                 self.modal.tab_context_menu_anchor,
                 menu.actions(),
+                label_width,
             )
-        });
+        } else {
+            None
+        };
         self.prepare_remote_host_text()?;
         let tab_layout = self.current_tab_strip_layout();
         let content_rect = self.content_rect();
