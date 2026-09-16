@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io,
     pin::Pin,
     sync::{
@@ -8,10 +9,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use rmcp::model::ClientJsonRpcMessage;
+use rmcp::model::{ClientJsonRpcMessage, InitializeRequestParams};
 use serde::{
     Deserialize, Deserializer,
-    de::{Error as _, IgnoredAny, MapAccess, Visitor},
+    de::{Error as _, MapAccess, Visitor},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
@@ -246,9 +247,12 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FailClosedWriter<W> {
 fn validate_json_rpc_line(line: &[u8]) -> Result<(), serde_json::Error> {
     let value: serde_json::Value = serde_json::from_slice(line)?;
     if value.get("method").and_then(serde_json::Value::as_str) == Some("initialize") {
-        // Parse the raw initialize shape before rmcp's optional capability
-        // fields can turn unsupported `null` values or ignored keys into None.
+        // Validate raw capability objects before typed deserialization can
+        // erase duplicate keys or turn malformed null values into None.
         serde_json::from_slice::<RawInitializeRequest>(line)?;
+        // ClientJsonRpcMessage can fall back to a custom request when typed
+        // initialize parsing fails. Validate the known request explicitly.
+        serde_json::from_value::<InitializeRequestParams>(value["params"].clone())?;
     }
     serde_json::from_value::<ClientJsonRpcMessage>(value).map(|_| ())
 }
@@ -286,30 +290,38 @@ impl<'de> Deserialize<'de> for RawClientCapabilities {
     where
         D: Deserializer<'de>,
     {
-        struct EmptyCapabilitiesVisitor;
+        struct CapabilitiesVisitor;
 
-        impl<'de> Visitor<'de> for EmptyCapabilitiesVisitor {
+        impl<'de> Visitor<'de> for CapabilitiesVisitor {
             type Value = RawClientCapabilities;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an empty client capabilities object")
+                formatter.write_str("a client capabilities object")
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
             {
-                if let Some(key) = map.next_key::<String>()? {
-                    let _ = map.next_value::<IgnoredAny>()?;
-                    return Err(A::Error::custom(format_args!(
-                        "unsupported client capability {key:?}"
-                    )));
+                let mut keys = HashSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !keys.insert(key.clone()) {
+                        return Err(A::Error::custom(format_args!(
+                            "duplicate client capability {key:?}"
+                        )));
+                    }
+                    let value = map.next_value::<serde_json::Value>()?;
+                    if !value.is_object() {
+                        return Err(A::Error::custom(format_args!(
+                            "client capability {key:?} must be an object"
+                        )));
+                    }
                 }
                 Ok(RawClientCapabilities)
             }
         }
 
-        deserializer.deserialize_map(EmptyCapabilitiesVisitor)
+        deserializer.deserialize_map(CapabilitiesVisitor)
     }
 }
 
@@ -351,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_initialize_capabilities_allow_exactly_an_empty_object() {
+    fn raw_initialize_capabilities_require_unique_object_values() {
         let valid = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -363,12 +375,23 @@ mod tests {
             }
         });
         assert!(validate_json_rpc_line(valid.to_string().as_bytes()).is_ok());
+        for capabilities in [
+            json!({"sampling": {}}),
+            json!({"roots": {"listChanged": true}}),
+            json!({"elicitation": {"form": {}, "url": {}}}),
+            json!({"experimental": {"extension": {}}}),
+            json!({"futureCapability": {}}),
+        ] {
+            let mut advertised = valid.clone();
+            advertised["params"]["capabilities"] = capabilities;
+            assert!(validate_json_rpc_line(advertised.to_string().as_bytes()).is_ok());
+        }
 
         for capabilities in [
             json!(null),
             json!([]),
             json!({"sampling": null}),
-            json!({"sampling": {}}),
+            json!({"roots": {"listChanged": "yes"}}),
             json!({"unknown": null}),
         ] {
             let mut invalid = valid.clone();
@@ -377,7 +400,7 @@ mod tests {
         }
         assert!(
             validate_json_rpc_line(
-                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"sampling":null,"sampling":{}},"clientInfo":{"name":"test","version":"1"}}}"#
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"sampling":{},"sampling":{}},"clientInfo":{"name":"test","version":"1"}}}"#
             )
             .is_err()
         );

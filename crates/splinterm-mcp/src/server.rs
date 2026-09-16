@@ -9,10 +9,10 @@ use std::{
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientNotification,
-        ClientRequest, ErrorCode, Implementation, InitializeRequestParams, InitializeResult,
-        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, Resource, ResourceTemplate,
+        CallToolRequestParams, CallToolResult, ClientNotification, ClientRequest, ErrorCode,
+        Implementation, InitializeRequestParams, InitializeResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceTemplate,
         ServerCapabilities, ServerResult, SubscribeRequestParams, Tool, UnsubscribeRequestParams,
     },
     service::{NotificationContext, RequestContext, Service},
@@ -162,20 +162,17 @@ impl ServerHandler for SplintermServer {
                 None,
             ));
         }
-        if request.protocol_version != ProtocolVersion::V_2025_11_25 {
+        if ![ProtocolVersion::V_2025_06_18, ProtocolVersion::V_2025_11_25]
+            .contains(&request.protocol_version)
+        {
             return Err(ErrorData::invalid_request(
-                "only MCP protocol version 2025-11-25 is supported",
+                "supported MCP protocol versions are 2025-06-18 and 2025-11-25",
                 None,
             ));
         }
-        // The raw line validator enforces the exact `{}` wire shape. Keep the
-        // typed check as defense in depth for non-stdio embedding.
-        if request.capabilities != ClientCapabilities::default() {
-            return Err(ErrorData::invalid_request(
-                "client capabilities are unsupported by the bounded stdio profile",
-                None,
-            ));
-        }
+        // rmcp echoes the accepted version in the initialize response.
+        // Client capabilities advertise requests the client could handle. They
+        // grant no daemon authority, and this adapter never invokes them.
         if self
             .lifecycle
             .initialize_accepted
