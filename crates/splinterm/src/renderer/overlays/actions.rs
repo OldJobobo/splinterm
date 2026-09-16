@@ -288,6 +288,25 @@ impl CommandPaletteTextCache {
             .expect("inserted command text remains"))
     }
 
+    pub(crate) fn tab_menu_label_width(
+        &mut self,
+        context: &RenderContext,
+        actions: &[crate::frontend::TabMenuActionDescriptor],
+        scale_120: u32,
+        renderer_generation: u64,
+    ) -> Result<u32> {
+        let mut width = 0;
+        for action in actions {
+            for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                width = width.max(
+                    self.text(context, action.title, style, scale_120, renderer_generation)?
+                        .pixel_width(),
+                );
+            }
+        }
+        Ok(width.saturating_mul(120).div_ceil(scale_120.max(1)))
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
@@ -817,6 +836,7 @@ pub(crate) fn tab_context_menu_layout(
     bounds: Rect,
     anchor: (u32, u32),
     actions: &[crate::frontend::TabMenuActionDescriptor],
+    label_width: u32,
 ) -> Option<TabContextMenuLayout> {
     let rows_height =
         TAB_MENU_ROW_HEIGHT.saturating_mul(u32::try_from(actions.len()).unwrap_or(u32::MAX));
@@ -825,7 +845,11 @@ pub(crate) fn tab_context_menu_layout(
     {
         return None;
     }
-    let panel_width = TAB_MENU_WIDTH.min(bounds.width.saturating_sub(TAB_MENU_SHADOW));
+    let preferred_width = label_width
+        .saturating_add(TAB_MENU_CONTENT_INSET.saturating_mul(2))
+        .saturating_add(TAB_MENU_INDICATOR_WIDTH)
+        .max(TAB_MENU_WIDTH);
+    let panel_width = preferred_width.min(bounds.width.saturating_sub(TAB_MENU_SHADOW));
     let available_height = bounds.height.saturating_sub(TAB_MENU_SHADOW);
     let vertical_padding = TAB_MENU_PADDING.min(available_height.saturating_sub(rows_height) / 2);
     let panel_height = rows_height.saturating_add(vertical_padding.saturating_mul(2));
@@ -857,6 +881,8 @@ pub(crate) fn tab_context_menu_layout(
         height: panel_height,
     };
     let horizontal_inset = TAB_MENU_CONTENT_INSET.min(panel_width / 6);
+    let indicator_width = TAB_MENU_INDICATOR_WIDTH
+        .min(panel_width.saturating_sub(horizontal_inset.saturating_mul(2)));
     let rows = actions
         .iter()
         .enumerate()
@@ -877,12 +903,12 @@ pub(crate) fn tab_context_menu_layout(
                     x: rect
                         .x
                         .saturating_add(horizontal_inset)
-                        .saturating_add(TAB_MENU_INDICATOR_WIDTH),
+                        .saturating_add(indicator_width),
                     y: rect.y,
                     width: rect
                         .width
                         .saturating_sub(horizontal_inset.saturating_mul(2))
-                        .saturating_sub(TAB_MENU_INDICATOR_WIDTH),
+                        .saturating_sub(indicator_width),
                     height: rect.height,
                 },
             }
@@ -1032,14 +1058,17 @@ pub(crate) fn paint_tab_context_menu(
             palette.primary
         };
         if selected {
+            let inset = 3_u32
+                .saturating_mul(scale_120)
+                .div_ceil(120)
+                .min(rect.width);
             let indicator = Rect {
-                x: rect
-                    .x
-                    .saturating_add(3_u32.saturating_mul(scale_120).div_ceil(120)),
+                x: rect.x.saturating_add(inset),
                 y: rect.y,
                 width: TAB_MENU_INDICATOR_WIDTH
                     .saturating_mul(scale_120)
-                    .div_ceil(120),
+                    .div_ceil(120)
+                    .min(rect.width.saturating_sub(inset)),
                 height: rect.height,
             };
             paint_text(
@@ -1582,7 +1611,7 @@ mod tests {
             width: 640,
             height: 400,
         };
-        let layout = tab_context_menu_layout(bounds, (639, 399), &actions).unwrap();
+        let layout = tab_context_menu_layout(bounds, (639, 399), &actions, 0).unwrap();
         assert_eq!(layout.rows.len(), actions.len());
         assert_eq!(layout.rows[0].action, TabMenuActionId::RenameLair);
         assert_eq!(
@@ -1612,12 +1641,105 @@ mod tests {
             width: 640,
             height: 400,
         };
-        let layout = tab_context_menu_layout(bounds, (0, 0), &[descriptor]).unwrap();
+        let layout = tab_context_menu_layout(bounds, (0, 0), &[descriptor], 0).unwrap();
         assert_eq!(layout.rows[0].label, "Open / Activate");
         assert_ne!(
             layout.rows[0].label,
             tab_menu_descriptor(descriptor.id).title
         );
+    }
+
+    #[test]
+    fn context_menu_full_action_labels_fit_at_supported_scales() {
+        let context = RenderContext::new(u16::MAX);
+        let mut cache = CommandPaletteTextCache::default();
+        let actions = TAB_MENU_ACTIONS.into_iter().chain(
+            [
+                TabMenuActionId::RenameLair,
+                TabMenuActionId::SaveLayout,
+                TabMenuActionId::PinLair,
+                TabMenuActionId::UnpinLair,
+                TabMenuActionId::PreviewLair,
+                TabMenuActionId::Restore,
+                TabMenuActionId::TerminateLair,
+                TabMenuActionId::FocusSplint,
+                TabMenuActionId::SplitBelow,
+                TabMenuActionId::SplitRight,
+                TabMenuActionId::CloseSplint,
+            ]
+            .map(tab_menu_descriptor),
+        );
+        for action in actions {
+            for width in [320, 640] {
+                let bounds = Rect {
+                    x: 17,
+                    y: 23,
+                    width,
+                    height: 400,
+                };
+                for scale in [120, 150, 180, 240] {
+                    let label_width = cache
+                        .tab_menu_label_width(&context, &[action], scale, 1)
+                        .unwrap();
+                    let layout = tab_context_menu_layout(
+                        bounds,
+                        (bounds.x + width, 400),
+                        &[action],
+                        label_width,
+                    )
+                    .unwrap();
+                    let clip = buffer_rect(layout.rows[0].title, scale);
+                    for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                        let text = cache.text(&context, action.title, style, scale, 1).unwrap();
+                        assert!(
+                            text.pixel_width() <= clip.width,
+                            "{} at width {width}, scale {scale}: {} > {}",
+                            action.title,
+                            text.pixel_width(),
+                            clip.width
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_menu_narrow_viewports_bound_labels_and_action_hits() {
+        for width in [1, 6, 7, 12, 40, 156, 223, 224, 230, 240, 640] {
+            let bounds = Rect {
+                x: 17,
+                y: 23,
+                width,
+                height: 400,
+            };
+            for anchor in [(0, 0), (bounds.x + width, bounds.y + bounds.height)] {
+                let Some(layout) =
+                    tab_context_menu_layout(bounds, anchor, &TAB_MENU_ACTIONS, u32::MAX)
+                else {
+                    assert!(width <= TAB_MENU_SHADOW);
+                    continue;
+                };
+                assert!(layout.panel.x >= bounds.x);
+                assert!(layout.panel.x + layout.panel.width + TAB_MENU_SHADOW <= bounds.x + width);
+                for row in &layout.rows {
+                    assert!(row.title.x >= row.rect.x);
+                    assert!(row.title.x + row.title.width <= row.rect.x + row.rect.width);
+                    let y = f64::from(row.rect.y);
+                    assert_eq!(
+                        tab_context_menu_hit_test(&layout, (f64::from(row.rect.x), y)),
+                        Some(row.action)
+                    );
+                    assert_eq!(
+                        tab_context_menu_hit_test(
+                            &layout,
+                            (f64::from(row.rect.x + row.rect.width), y)
+                        ),
+                        None
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1629,7 +1751,7 @@ mod tests {
             height: 400,
         };
         for anchor in [(0, 0), (639, 0), (0, 399), (639, 399)] {
-            let layout = tab_context_menu_layout(bounds, anchor, &TAB_MENU_ACTIONS).unwrap();
+            let layout = tab_context_menu_layout(bounds, anchor, &TAB_MENU_ACTIONS, 0).unwrap();
             assert_eq!(layout.panel.width, TAB_MENU_WIDTH);
             assert_eq!(
                 layout.panel.height,
@@ -1816,6 +1938,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "bounded paint, cache and narrow viewport scenario"
+    )]
     fn tab_context_menu_paints_without_a_window_scrim() {
         let bounds = Rect {
             x: 0,
@@ -1823,7 +1949,7 @@ mod tests {
             width: 640,
             height: 400,
         };
-        let layout = tab_context_menu_layout(bounds, (240, 40), &TAB_MENU_ACTIONS).unwrap();
+        let layout = tab_context_menu_layout(bounds, (240, 40), &TAB_MENU_ACTIONS, 0).unwrap();
         let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
             focused_cwd: "/tmp".into(),
@@ -1881,6 +2007,34 @@ mod tests {
             );
         }
         assert!(cache.len() <= TAB_MENU_ACTIONS.len() + 1);
+        for viewport_width in [7, 12, 40, 230] {
+            let narrow = Rect {
+                width: viewport_width,
+                ..bounds
+            };
+            let layout = tab_context_menu_layout(narrow, (0, 0), &TAB_MENU_ACTIONS, 260).unwrap();
+            canvas.fill(0);
+            paint_tab_context_menu(
+                &mut cache,
+                &RenderContext::new(u16::MAX),
+                &mut canvas,
+                640,
+                400,
+                120,
+                1,
+                &layout,
+                session_picker_palette(ResolvedTheme::default()),
+                &state,
+                None,
+                true,
+            )
+            .unwrap();
+            for y in 0..400 {
+                let outside = (y * 640 + viewport_width as usize) * 4;
+                let end = (y + 1) * 640 * 4;
+                assert!(canvas[outside..end].iter().all(|byte| *byte == 0));
+            }
+        }
     }
 
     #[test]
