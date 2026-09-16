@@ -131,7 +131,7 @@ impl NavigationAccessibility {
             visible,
             enabled,
             result_count: items.len(),
-            status: visible.then(|| navigation_status(explorer, limited, items.len())),
+            status: visible.then(|| navigation_status(explorer, limited, items.len(), &focus)),
             items,
             query: if visible {
                 explorer.query().to_owned()
@@ -201,7 +201,12 @@ impl NavigationAccessibility {
     }
 }
 
-fn navigation_status(explorer: &LairExplorerUi, limited: bool, count: usize) -> String {
+fn navigation_status(
+    explorer: &LairExplorerUi,
+    limited: bool,
+    count: usize,
+    focus: &SemanticFocus,
+) -> String {
     let status = explorer.status_message().map_or_else(
         || {
             if limited {
@@ -212,12 +217,11 @@ fn navigation_status(explorer: &LairExplorerUi, limited: bool, count: usize) -> 
         },
         str::to_owned,
     );
-    let hint = if explorer.search_active() {
-        "Typing searches labels"
-    } else if explorer.focused() {
-        "F cycles filters"
-    } else {
-        "Focus Explorer to change filters"
+    let hint = match focus {
+        SemanticFocus::Search => "Typing searches labels",
+        SemanticFocus::Tree | SemanticFocus::Item(_) => "F cycles filters",
+        SemanticFocus::Terminal => "Focus Explorer to change filters",
+        SemanticFocus::None => "Navigation shortcuts unavailable",
     };
     format!("{} filter · {status} · {hint}", explorer.filter().label())
 }
@@ -352,15 +356,52 @@ mod tests {
     #[test]
     fn navigation_accessibility_filter_hint_matches_input_owner() {
         let mut explorer = explorer();
-        assert!(super::navigation_status(&explorer, false, 4).contains("F cycles filters"));
+        assert!(
+            super::navigation_status(&explorer, false, 4, &SemanticFocus::Tree)
+                .contains("F cycles filters")
+        );
         explorer.begin_search();
-        let search = super::navigation_status(&explorer, false, 4);
+        let search = super::navigation_status(&explorer, false, 4, &SemanticFocus::Search);
         assert!(search.contains("Typing searches labels"));
         assert!(!search.contains("F cycles filters"));
         explorer.return_to_terminal();
-        let terminal = super::navigation_status(&explorer, false, 4);
+        let terminal = super::navigation_status(&explorer, false, 4, &SemanticFocus::Terminal);
         assert!(terminal.contains("Focus Explorer"));
         assert!(!terminal.contains("F cycles filters"));
+    }
+
+    #[test]
+    fn navigation_accessibility_hints_follow_effective_window_focus_and_authority() {
+        let mut explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        for searching in [false, true] {
+            if searching {
+                explorer.begin_search();
+            }
+            for blocked in [
+                NavigationAccessContext {
+                    keyboard_focused: false,
+                    ..context()
+                },
+                NavigationAccessContext {
+                    permitted: false,
+                    ..context()
+                },
+            ] {
+                let snapshot = accessibility.refresh(&explorer, blocked);
+                assert_eq!(snapshot.focus, SemanticFocus::None);
+                let status = snapshot.status.as_deref().unwrap();
+                assert!(status.contains("Navigation shortcuts unavailable"));
+                assert!(!status.contains("F cycles filters"));
+                assert!(!status.contains("Typing searches labels"));
+            }
+            let restored = accessibility.refresh(&explorer, context());
+            assert!(restored.status.as_deref().unwrap().contains(if searching {
+                "Typing searches labels"
+            } else {
+                "F cycles filters"
+            }));
+        }
     }
 
     #[test]
