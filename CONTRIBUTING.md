@@ -1,8 +1,9 @@
 # Contributing
 
-Splinterm is a **public beta**. Keep changes small, preserve
-crate and authority boundaries, and add focused tests for domain, protocol,
-terminal, renderer, or lifecycle behavior.
+Splinterm **0.1.0 is stable** for the documented x86_64 Omarchy/Arch Linux
+platform; broader compatibility and a support lifetime are not promised.
+Keep changes small, preserve crate and authority boundaries, and add focused
+tests for domain, protocol, terminal, renderer, or lifecycle behavior.
 
 Read [`docs/status.md`](docs/status.md) for current product scope and
 [`docs/architecture.md`](docs/architecture.md) before changing ownership or
