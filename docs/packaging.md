@@ -26,8 +26,14 @@ users never compile or test them locally.
 
 ## Versioned AUR installation
 
-Install the recommended prebuilt main package and optional exact-version MCP
-adapter with an AUR helper:
+**AUR is prerelease-capable, not stable-only.** The same `splinterm` and
+`splinterm-bin` package bases distribute stable releases and release candidates;
+a candidate can be offered as an upgrade over stable 0.1.0. Check the offered
+version before confirming. For stable 0.1.0 specifically, use the exact-tag
+build below or its verified release assets instead.
+
+Install the prebuilt main package and optional exact-version MCP adapter with
+an AUR helper:
 
 ```bash
 yay -S splinterm-bin

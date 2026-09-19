@@ -41,7 +41,7 @@ https://github.com/OldJobobo/splinterm/releases
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` and optional MCP split packages also available |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Prebuilt `splinterm-bin`, source-built `splinterm`, and optional MCP split packages; this channel can include release candidates, not only stable releases |
 | Stable release | 0.1.0 for the documented platform |
 | Broader compatibility and support lifetime | Not promised |
 | Nix and broader distributions | Planned |

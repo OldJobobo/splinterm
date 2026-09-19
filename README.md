@@ -62,7 +62,7 @@ For limitations and release gates, read [Current status](docs/status.md). Exact 
 
 ## Install
 
-The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The recommended AUR packages download verified prebuilt binaries and do not compile locally:
+The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The prebuilt AUR packages download verified binaries and do not compile locally. **AUR is prerelease-capable, not stable-only:** these same package names can advance to release candidates. Check the offered version before installing or upgrading. For stable 0.1.0 specifically, use the exact-tag instructions in [Packaging](docs/packaging.md).
 
 ```bash
 yay -S splinterm-bin
@@ -70,7 +70,7 @@ yay -S splinterm-bin
 yay -S splinterm-mcp-bin
 ```
 
-The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. The stable release is scoped to the documented platform; it does not promise a support lifetime. Release candidates are prereleases, not replacements for the latest stable release.
+The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. The stable release is scoped to the documented platform; it does not promise a support lifetime. Release candidates remain prereleases even when AUR offers them as upgrades.
 
 For the newest published versioned release package, clone the public repository and run:
 

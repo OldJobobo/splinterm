@@ -7,6 +7,13 @@ The validated installation target is **x86_64 Omarchy/Arch Linux with native Way
 
 ## Install the prebuilt AUR package
 
+**AUR is prerelease-capable, not stable-only.** The same package names can advance
+to release candidates and offer them as upgrades over stable 0.1.0. Check the
+version before confirming installation or upgrades. For stable 0.1.0 specifically,
+use its verified release assets or the packaging guide's exact-tag build:
+
+https://github.com/OldJobobo/splinterm/blob/main/docs/packaging.md
+
 Install the recommended [splinterm-bin AUR package](https://aur.archlinux.org/packages/splinterm-bin). It downloads verified prebuilt x86_64 binaries and resolves the `xdg-terminal-exec` AUR dependency without compiling Splinterm locally:
 
 ```bash
