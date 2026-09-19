@@ -1,10 +1,34 @@
+# Current releases
+
+Splinterm **0.1.0**, published on 2026-09-05, is the first stable release for
+x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. It carries the
+RC3 terminal and daemon implementation forward unchanged.
+
+Full stable release notes and assets:
+
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+
+The newer **0.1.1-rc.2**, published on 2026-09-15, is a release candidate,
+not a stable release. See the release listing for current prereleases:
+
+https://github.com/OldJobobo/splinterm/releases
+
+Stable 0.1.0 does not promise broader platform compatibility or a support
+lifetime. Future 0.x releases may change interfaces with documented migration.
+There is no live daemon upgrade handoff: stopping or replacing `splinterd`
+ends its child processes. Save your work and upgrade from another terminal;
+see [Packaging](docs/packaging.md).
+
 # Unreleased
 
 - Splinterm-owned semantic, renderer, contract, package, and guarded graphical
   tests are now release authority. The pinned Foot 1.27.0 harness remains an
   exact optional historical differential and no longer couples releases to a
   particular compiler, Cargo lockfile, or complete ambient Fontconfig inventory.
-- Native Omarchy font following is now live when `main.font` is unset. Valid
+
+# Live font synchronization — shipped in 0.1.0
+
+- Native Omarchy font following is live when `main.font` is unset. Valid
   fontconfig `monospace` family changes replace one complete immutable renderer
   generation without restarting the Window, daemon, shell, or applications.
 - Explicit font patterns remain authoritative. Invalid live generations retain
@@ -16,8 +40,13 @@
 - Fontconfig named variable-font instances survive shaping and rasterization.
   Accepted staging remains synchronized with watcher probes, and cached
   FreeType faces share immutable font mappings across raster sizes.
-- Non-graphical implementation checks are recorded; packaged graphical
-  acceptance and publication remain separate unreleased gates.
+- The stable release includes the release-candidate font-lifetime fixes and
+  retains the last valid renderer when a live font generation is invalid.
+
+# Historical release notes
+
+The announcement below is retained as a historical record; its beta status and
+limitations describe that release, not Splinterm's current maturity.
 
 # Splinterm 0.1.0 Beta 1 — The Foundation Holds
 

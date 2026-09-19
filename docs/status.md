@@ -8,14 +8,15 @@ sequence, and this page owns what the product is today.
 
 ## Maturity
 
-**Splinterm is a public beta.**
+**Splinterm 0.1.0 is the first stable release.**
 
 Source, documentation, and immutable versioned GitHub and AUR packages are
 publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
 native Wayland presentation, Arch packaging, and bounded automation workflows
 are implemented and validated in the scopes named below. Public availability is
-not a stable-support promise: beta interfaces may change, the validated target
-remains narrow, and broader compatibility guarantees have not been released.
+not a promise of broader platform compatibility or a support lifetime. The
+validated target remains narrow, and future 0.x releases may change interfaces
+with documented migration.
 
 Splinterm is **security-conscious**, not absolutely secure. Automation is
 constrained by exact executable identity, explicit scopes, resource and message
@@ -33,8 +34,7 @@ The current product target is:
   tests as release authority; Foot 1.27.0 commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical
   differential under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
-- public Beta 2 `0.1.0beta2-1` Arch packages built from clean committed
-  source; and
+- stable `v0.1.0` release assets built from clean committed source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
   exact-package acceptance for the Alpha3.1 transient-tab hotfixes; accepted
@@ -44,14 +44,13 @@ The current product target is:
 
 Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
-graphical environment, but its packaged and remote workflows remain beta
-interfaces on the documented platform.
+graphical environment; its packaged and remote workflows are scoped to the
+documented platform.
 
-## Unreleased main
+## Live font synchronization
 
-Current `main` contains the non-graphical implementation for live native
-Omarchy system-font synchronization. When `main.font` is unset, a graphical
-client follows the effective fontconfig `monospace` family, stages complete
+Stable 0.1.0 includes live native Omarchy system-font synchronization. When
+`main.font` is unset, a graphical client follows the effective fontconfig `monospace` family, stages complete
 immutable face generations off dispatch paths, and atomically rebuilds active
 and hidden presentation state while preserving configured size/policy, padding,
 DPI, runtime zoom, topology, focus, history, modal input, and IME preedit.
@@ -65,8 +64,34 @@ mappings across sizes instead of copying complete files.
 Focused renderer, watcher, cache-generation, source-replacement, geometry, and
 resize-authority tests pass. The exact RC2 maintenance package also passed
 guarded live valid-font replacement and invalid-candidate rollback acceptance
-without replacing the Window, daemon, shell, or Splint incarnation. Publication
-remains separate; Beta 2 remains the latest published package authority.
+without replacing the Window, daemon, shell, or Splint incarnation. This behavior
+shipped in stable 0.1.0 after the release-candidate cycle.
+
+## Stable 0.1.0 and subsequent release candidates
+
+Splinterm 0.1.0 was published on 2026-09-05 as the first stable release. It
+carries the RC3 terminal and daemon implementation forward unchanged and
+includes live Omarchy theme and default-font following, bounded automation,
+and source-built and prebuilt Arch packages.
+
+Stable release notes and assets:
+
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+
+The newer `v0.1.1-rc.2`, published on 2026-09-15, is a prerelease, not a new
+stable release. Check the release listing for subsequent publications:
+
+https://github.com/OldJobobo/splinterm/releases
+
+**Splinterm 0.1 does not support live daemon upgrade handoff.** Stopping or
+replacing the daemon ends its child processes; saved topology does not
+checkpoint running applications. Save your work and upgrade from a terminal
+not owned by `splinterd`, then reopen Splinterm Windows. See
+[Packaging](packaging.md) for upgrade and recovery instructions.
+
+## Historical releases
+
+The beta and alpha records below describe earlier releases, not current maturity.
 
 ## Beta 2 release
 
@@ -277,10 +302,10 @@ post-alpha3, pre-1.0 roadmap milestone.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Remote access](remote.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Public beta packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0beta2-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0beta2-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
-| Public source and versioned releases | Available | The repository, documentation, protected GitHub prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
-| Stable support | Unreleased | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
+| Arch/Omarchy packaging | Stable release available | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| AUR packages | Available | Recommended prebuilt [`splinterm-bin`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| Public source and versioned releases | Available | The repository, documentation, versioned GitHub releases and prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
+| Stable release scope | 0.1.0 released | The documented Omarchy/Arch Linux target only; broader compatibility and a support lifetime are not promised. |
 | Nix and broader distribution | Planned | Not current product behavior or support. |
 
 **Classification meanings:** implemented means present in current code; validated
@@ -311,10 +336,10 @@ behavior; deferred means intentionally outside the present product.
   comparison gates. Earlier burst-output no-go evidence remains historical; new
   performance concerns require fresh attribution against the current baseline.
 
-## Stable-release gates
+## Boundaries beyond stable 0.1.0
 
-Before Splinterm can graduate from public beta to a supported stable release,
-maintainers must make and validate explicit decisions about:
+The stable release does not imply broader guarantees. Expanding its scope
+requires explicit decisions and validation about:
 
 - release channels, signed/immutable source publication, upgrades, and rollback;
 - supported architectures, distributions, compositor versions, and compatibility
@@ -325,8 +350,8 @@ maintainers must make and validate explicit decisions about:
 - public installation and recovery testing beyond the maintainer workflow; and
 - any promised Nix, sandboxed package, or broader Linux support.
 
-None of those unresolved decisions weakens the accepted public-beta
-capabilities above; none may be inferred as a stable-support promise.
+These boundaries do not change the published stable 0.1.0 designation and
+must not be inferred as additional compatibility or support promises.
 
 ## Documentation authority
 
@@ -343,7 +368,7 @@ capabilities above; none may be inferred as a stable-support promise.
 | MCP integration | [MCP](mcp.md) |
 | Image compatibility | [Images](images.md) |
 | Service, persistence, policy, backup, and reset | [Headless operation](headless.md) |
-| Public beta package installation and upgrades | [Packaging](packaging.md) |
+| Package installation and upgrades | [Packaging](packaging.md) |
 | Product direction, audiences, and outcome horizons | [Product roadmap](product-roadmap.md) |
 | Development workflow and test guardrails | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 
