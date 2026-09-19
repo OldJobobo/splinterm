@@ -1,7 +1,7 @@
 # Splinterm Product Requirements Document
 
 - **Status:** Draft
-- **Product maturity:** Public beta
+- **Product maturity:** Stable 0.1.0 on the documented Omarchy/Arch target
 - **As of:** 2026-08-11
 - **Strategic direction authority:** [Product roadmap](product-roadmap.md)
 - **Normative requirements authority:** This PRD after review and acceptance
@@ -152,13 +152,13 @@ The following table summarizes the current repository state. “Validated” mea
 | Sixel | Supported Foot-compatible bounded implementation. |
 | Kitty graphics | Supported practical static-image subset; not full Kitty compatibility. |
 | iTerm2 inline images | Supported bounded inline-PNG subset. |
-| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; beta compatibility remains versioned and may change between releases. |
+| JSON/NDJSON automation | Implemented as the publicly documented machine compatibility contract; 0.x compatibility remains versioned and may change with documented migration. |
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
 | Native remote graphical transport | Implemented and validated: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
 | Arch/Omarchy package and release installer | Immutable versioned GitHub/AUR packages and installation paths implemented and validated. |
 | Public source and documentation | Available. |
-| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available as `0.1.0beta1-1`; stable support remains unreleased. |
+| AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available; stable 0.1.0 does not promise broader compatibility or a support lifetime. |
 | Stable support policy | Not released. |
 | Nix and broader distribution | Planned. |
 | Public product/documentation website | Implemented and build/link validated; repository `docs/status.md` remains the maturity authority. |
@@ -175,8 +175,8 @@ The following table summarizes the current repository state. “Validated” mea
 - Keep human consent, trusted UI, automation policy, and control ownership visibly distinct.
 - Preserve Foot-derived behavior with reproducible differential evidence.
 - Keep ordinary text-only terminal use efficient and ensure optional image support has bounded resource cost.
-- Package and upgrade the public beta without silently changing user-owned desktop configuration.
-- Keep current-status, usage, CLI, security, and release documentation explicit throughout the beta.
+- Package and upgrade Splinterm without silently changing user-owned desktop configuration.
+- Keep current-status, usage, CLI, security, and release documentation explicit throughout the release lifecycle.
 
 ### 8.2 Stable-release goals
 
@@ -196,8 +196,8 @@ A supported stable release should let a user:
 
 The current product does not promise:
 
-- production readiness, stability, or guaranteed support during beta;
-- process continuity across any package upgrade in the currently released beta;
+- broader platform compatibility or a guaranteed support lifetime;
+- live daemon upgrade handoff in Splinterm 0.1;
   [ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) defines an unimplemented
   `0.2.0` target only for explicitly negotiated compatible planned upgrades;
 - transparent process continuity across daemon crash, logout, reboot, or host
@@ -315,7 +315,7 @@ Priority meanings:
 | `FR-PKG-02` | P0 | Installation and upgrade must verify exact artifacts, warn before ending daemon-owned shells, and report the lack of cross-version process continuity. | Implemented |
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
-| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Public beta GitHub and AUR artifacts are immutable, versioned, and checksummed; a stable support policy remains pending |
+| `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Versioned GitHub and AUR artifacts are available; stable 0.1.0 retains documented platform and upgrade boundaries without promising a support lifetime |
 | `FR-PKG-06` | P0 | A handoff-capable launcher must automatically perform only a fully negotiated compatible handoff on human launch, restart automatically only when idle after the `0.1.x` bootstrap boundary, and require exact-count confirmation for the first `0.1.x` to `0.2.0` restart and any active destructive fallback. Package scriptlets must never initiate user-service handoff or restart. | Accepted target in ADR 0011; not implemented |
 
 ## 11. Security and privacy requirements
@@ -411,10 +411,13 @@ Splinterm meets its defining product promise when:
 - Foot-derived behavior and intentional divergences remain reproducible and documented; and
 - optional capabilities remain bounded and do not regress ordinary terminal use.
 
-### 14.2 Stable-release readiness
+### 14.2 Original stable-release readiness criteria
 
-Graduation from public beta to a supported stable release is blocked until all
-of the following are true:
+The following criteria are retained from the pre-0.1.0 product plan. They do not
+mean the published stable 0.1.0 release is still beta, or attest that every
+original support-policy aspiration shipped. [Current status](status.md) and the
+published release notes define the actual release scope; broader compatibility
+and a support lifetime remain unpromised.
 
 1. a current status document defines supported environments, validated capabilities, known limitations, deferred work, and open gates;
 2. product, usage, CLI, installation, configuration, security, troubleshooting, and automation documentation have clear authoritative homes;
@@ -435,7 +438,7 @@ A new evaluator should be able to answer within one minute:
 - Why does daemon-owned persistence matter?
 - How do humans and bounded automation share one topology?
 - Which environment and capabilities are validated?
-- Why is it a public beta rather than a stable release?
+- What does stable 0.1.0 promise, and what remains outside its scope?
 - What is the first safe workflow?
 
 ## 15. Risks and mitigations
@@ -449,7 +452,7 @@ A new evaluator should be able to answer within one minute:
 | Multiplexer concepts become harder than tmux | Primary workflow becomes inaccessible | Lead with user outcomes, native controls, clear vocabulary, and discoverable trusted menus. |
 | Optional images or history regress ordinary use | Core terminal responsiveness and memory suffer | Preserve explicit budgets, no-image gates, event-driven expiry, and benchmark matrices. |
 | Trusted UI and terminal content blur together | Spoofing or accidental authority | Keep trusted chrome visually distinct and input-isolated; never derive authority from terminal content. |
-| Public beta packaging is mistaken for stable support | Users depend on compatibility the beta does not promise | Keep public-beta labeling and upgrade/lifetime warnings prominent until stable-release gates are met. |
+| Stable 0.1.0 is mistaken for broader support | Users depend on compatibility or a support lifetime the release does not promise | Keep validated-platform limits and daemon-upgrade warnings prominent; distinguish prereleases from stable releases. |
 | Platform expansion dilutes the validated Omarchy path | More environments than the project can test | Require separate evidence and support decisions for each platform. |
 
 ## 16. Open product decisions
@@ -505,7 +508,7 @@ This draft synthesizes the current implementation and, principally:
 - [ADR 0012: defer durable terminal-body archives](adr/0012-defer-durable-terminal-archives.md)
 - [Supported automation contracts](automation.md)
 - [Configuration and Foot migration](configuration.md)
-- [Public beta packaging](packaging.md)
+- [Arch packaging](packaging.md)
 - [Terminal image compatibility](images.md)
 
 ## 19. Draft review questions

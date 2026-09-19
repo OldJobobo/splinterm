@@ -1,13 +1,16 @@
 ---
 title: Roadmap
-description: Product direction from the current public beta toward a supported persistent workspace.
+description: Product direction from stable 0.1.0 toward a broader 1.0 support contract.
 ---
 
 Splinterm's roadmap uses **Now / Next / Later / Explore** horizons instead of release dates. These horizons describe intended product outcomes. They are not delivery dates, implementation order, compatibility guarantees, or promises that every listed idea will ship.
 
 [Current status](/docs/status/) remains the authority for what works today. The repository [product roadmap](https://github.com/OldJobobo/splinterm/blob/main/docs/product-roadmap.md) contains the full strategic rationale. Maintainer dependency order, implementation plans, and delivery gates are tracked separately from the public product repository; accepted decisions needed to understand shipped behavior are promoted into public ADRs and documentation.
 
-## Now: make the public beta a confident daily driver
+Stable 0.1.0 is available on the documented Omarchy/Arch target. The future 1.0
+support contract below is a roadmap goal, not a guarantee added by that release.
+
+## Now: strengthen daily-driver confidence
 
 The current priority is to make persistence understandable, desktop behavior coherent, and installation trustworthy on the validated x86_64 Omarchy/Arch environment.
 
@@ -18,7 +21,7 @@ Planned outcomes include:
 - exact theme fidelity and supported Omarchy desktop integration;
 - bounded local-file drop path insertion in Alpha3, with clipboard-image saving retained as later work;
 - stronger installation, upgrade, recovery, diagnostics, and automation-consent journeys; and
-- a passing beta performance and memory gate, or an explicit product disposition.
+- continued performance and memory validation, with explicit dispositions for regressions.
 
 This horizon succeeds when a new user can install Splinterm, organize work, close its Window, return safely, and predict destructive actions without maintainer assistance.
 

@@ -1,9 +1,9 @@
 ---
 title: Installation
-description: Install or update the current Splinterm public beta on Arch Linux and Omarchy.
+description: Install or update Splinterm on Arch Linux and Omarchy.
 ---
 
-The validated installation target is an **x86_64 Omarchy system based on Arch Linux**. Splinterm is a public beta, not a supported stable release; upgrades may change interfaces and end daemon-owned shells.
+The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland under Hyprland**. **0.1.0 is the first stable release**; newer release candidates are prereleases. Stable 0.1.0 does not promise broader platform compatibility or a support lifetime. Future 0.x releases may change interfaces with documented migration. Stopping or replacing the daemon ends its child processes; save your work and upgrade from a terminal not owned by `splinterd`.
 
 ## Install the prebuilt AUR package
 
@@ -19,7 +19,7 @@ The optional policy-scoped MCP adapter is a separate exact-version prebuilt pack
 yay -S splinterm-mcp-bin
 ```
 
-Source-built `splinterm` and `splinterm-mcp` packages remain available. Migrating from them prompts once to approve replacement by the conflicting `-bin` packages. `paru` may be used instead of `yay`. AUR availability does not expand the supported target or create stable compatibility and support-duration guarantees.
+Source-built `splinterm` and `splinterm-mcp` packages remain available. Migrating from them prompts once to approve replacement by the conflicting `-bin` packages. `paru` may be used instead of `yay`. AUR availability does not expand the supported target or promise a support lifetime. Check the package version offered by your helper before confirming an upgrade.
 
 ## Install the current versioned release directly
 
@@ -31,12 +31,16 @@ cd splinterm
 ./install.sh
 ```
 
-The installer selects the newest published SemVer `v…` release, verifies the GitHub-recorded candidate-manifest digest and exact package checksums, preserves an emergency binary snapshot, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback.
+The installer selects the newest published qualifying SemVer `v…` release, **including prereleases**; it is not a stable-only selector. For stable 0.1.0 specifically, use its release assets or the exact-tag build instructions in the packaging guide:
+
+https://github.com/OldJobobo/splinterm/blob/main/docs/packaging.md
+
+The installer verifies the GitHub-recorded candidate-manifest digest and exact package checksums, preserves an emergency binary snapshot, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback.
 
 The repository and versioned release assets are public. GitHub CLI authentication is optional; the installer falls back to anonymous verified downloads.
 
 :::caution
-The default installer downloads only a published versioned release; it never selects historical `edge-*` releases or an arbitrary `main` commit. Source mode operates on a clean committed `HEAD` and does not package uncommitted worktree changes. Review the current worktree before using source mode.
+The default installer downloads only a published versioned release; it never selects historical `edge-*` releases or an arbitrary `main` commit. Source mode operates on a clean committed `HEAD` and does not package uncommitted worktree changes. A development checkout is not the published stable release; use the exact `v0.1.0` tag when building stable 0.1.0. Review the current worktree before using source mode.
 :::
 
 ## Build from committed source

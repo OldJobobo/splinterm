@@ -80,7 +80,7 @@ cd splinterm
 ./install.sh
 ```
 
-The release installer selects the newest published SemVer `v…` release, verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
+The release installer selects the newest published qualifying SemVer `v…` release, **including prereleases**; it is not a stable-only selector. For stable 0.1.0 specifically, follow the exact-tag instructions in [Packaging](docs/packaging.md). The installer verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
 
 To build and package the current committed checkout locally, run the installer
 from Foot or another terminal not owned by `splinterd`:

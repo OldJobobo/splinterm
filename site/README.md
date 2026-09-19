@@ -1,6 +1,6 @@
 # Splinterm site
 
-This directory contains the unified public Astro/Starlight alpha site for Splinterm.
+This directory contains the unified public Astro/Starlight site for Splinterm.
 
 ## Surfaces
 
