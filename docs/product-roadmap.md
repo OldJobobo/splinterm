@@ -2,7 +2,7 @@
 
 - **Status:** Active strategic direction
 - **Horizon model:** Now / Next / Later / Explore; no date promise
-- **Product maturity:** Public beta
+- **Product maturity:** Stable 0.1.0 on the documented Omarchy/Arch target
 - **Current-state authority:** [Current product status](status.md)
 - **Delivery authority:** Maintainer-controlled delivery coordination; accepted public decisions are promoted to the PRD, ADRs, and specialist documentation
 
@@ -56,10 +56,10 @@ product; it does not redefine Splinterm as an “AI terminal.”
 
 The labels in this document have deliberate meanings:
 
-- **Now** — product outcomes required to turn the public beta into a confident
-  daily driver on the validated Omarchy/Arch target.
-- **Next** — outcomes required for a supported 1.0 after the beta gates are
-  satisfied.
+- **Now** — product outcomes that strengthen daily-driver confidence on the
+  validated Omarchy/Arch target.
+- **Next** — outcomes required for a broader 1.0 support contract; these future
+  guarantees are not implied by stable 0.1.0.
 - **Later** — strategic expansion that follows a trustworthy primary product.
 - **Explore** — options worth researching, not commitments.
 
@@ -67,7 +67,7 @@ Moving an item between horizons is a product decision. Implementation plans may
 change without changing the product outcome, but they may not silently promote
 an Explore option into a promise.
 
-## Horizon 1 — Public beta: earn daily-driver confidence (Now)
+## Horizon 1 — Stable 0.1: strengthen daily-driver confidence (Now)
 
 ### Product promise
 
@@ -90,7 +90,7 @@ work only through explicit bounded authority.
 - Bounded automation is demonstrable through a calm consent-to-revocation
   journey, not only through protocol tests.
 - Known client memory and responsiveness limits have a passing result or an
-  explicit product disposition before beta is claimed.
+  explicit product disposition before expanding support claims.
 
 ### Current product bets
 
@@ -115,9 +115,9 @@ Horizon 1 is successful when:
 - users can distinguish detached, exited, restorable, and destructive states;
 - packaged upgrade and recovery behavior is tested and understood;
 - daily-driver blockers on the validated target have explicit dispositions;
-- the beta performance gate passes without moving cost from daemon to client or
+- continued performance validation passes without moving cost from daemon to client or
   regressing responsiveness; and
-- alpha feedback identifies workflow problems rather than basic uncertainty
+- user feedback identifies workflow problems rather than basic uncertainty
   about what the product is.
 
 This horizon does **not** promise broad compositor support, reboot-transparent

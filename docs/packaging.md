@@ -1,13 +1,20 @@
-# Public beta Arch packaging
+# Arch packaging
 
 Release authority, candidate construction, approval boundaries, and the future
 n8n notification role are defined in [Release automation](release-automation.md).
 
-Splinterm's `packaging/PKGBUILD` produces the `0.1.0beta1` split packages for
-reviewed local and CI builds. Its local source archive and `SKIP` checksum are
-valid only in that workflow. The current public versioned release is
-[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1),
-and both AUR package bases publish `0.1.0beta1-1`.
+Splinterm **0.1.0 is the first stable release** for x86_64 Omarchy/Arch Linux
+with native Wayland under Hyprland. Newer release candidates are prereleases,
+not new stable releases. Stable notes and immutable assets:
+
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+
+`packaging/PKGBUILD` produces split packages for reviewed local and CI builds.
+Its version comes from the checked-out commit; `main` is development code, not
+the stable release, and may retain older version metadata. Published 0.1
+releases originate from `maint/0.1`. Use the exact `v0.1.0` tag for a stable
+0.1.0 source build, as shown below; do not relabel a development build as stable.
+The local source archive and `SKIP` checksum are valid only in that workflow.
 
 The source-built AUR authority is `packaging/aur/PKGBUILD`; candidate
 construction replaces its source-archive checksum with the exact immutable
@@ -19,8 +26,14 @@ users never compile or test them locally.
 
 ## Versioned AUR installation
 
-Install the recommended prebuilt main package and optional exact-version MCP
-adapter with an AUR helper:
+**AUR is prerelease-capable, not stable-only.** The same `splinterm` and
+`splinterm-bin` package bases distribute stable releases and release candidates;
+a candidate can be offered as an upgrade over stable 0.1.0. Check the offered
+version before confirming. For stable 0.1.0 specifically, use the exact-tag
+build below or its verified release assets instead.
+
+Install the prebuilt main package and optional exact-version MCP adapter with
+an AUR helper:
 
 ```bash
 yay -S splinterm-bin
@@ -31,7 +44,9 @@ The source-built alternatives are `splinterm` and `splinterm-mcp`. Migrating to
 the `-bin` packages prompts once to replace those conflicting source packages.
 `paru` may be used instead of `yay`. AUR availability does not expand the
 validated target beyond x86_64 Arch/Omarchy with native Wayland/Hyprland or add
-a stable compatibility and support-duration promise.
+a support-lifetime promise. Check the version offered by your AUR helper before
+confirming an upgrade; the package listing, not this guide, owns its current
+version.
 
 ## One-command versioned release installation
 
@@ -48,11 +63,13 @@ selects the most recently published qualifying release, verifies the manifest
 against the digest recorded by GitHub, then validates the reviewed candidate
 identity, repository, version, architecture, exact commit-bound package pair,
 and SHA-256 package digests before downloading either package. Historical
-`edge-*` releases cannot be selected.
+`edge-*` releases cannot be selected. **Prereleases are eligible**: this is not
+a stable-only selector. To install stable 0.1.0 specifically, use the exact-tag
+source build below or the verified assets from its release page.
 
 An authenticated GitHub CLI session is used when one is already available;
 otherwise the installer uses anonymous GitHub API and release downloads through
-`curl`. Authentication is not required for ordinary public beta installs.
+`curl`. Authentication is not required for ordinary public installs.
 
 Before Pacman installation, the script verifies package checksums and matching
 split-package versions. It rejects a shadowing user-local client, preserves an
@@ -86,8 +103,20 @@ implies `--source`) to run the complete `PKGBUILD` `check()` function.
 
 ## Build without installing
 
-The package source must be an exact committed snapshot. The guarded build and
-validation entry point is:
+The package source must be an exact committed snapshot. For stable 0.1.0, create
+a separate checkout of the published tag rather than building development
+`main` or changing its version metadata:
+
+```bash
+git fetch origin tag v0.1.0
+git worktree add --detach ../splinterm-stable-0.1.0 v0.1.0
+cd ../splinterm-stable-0.1.0
+```
+
+Run the following build and install examples from that stable checkout. Its
+`packaging/PKGBUILD` declares `pkgver=0.1.0` and `pkgrel=1`. For other reviewed
+commits, use the version declared by that commit rather than these filenames.
+The guarded build and validation entry point is:
 
 ```bash
 tools/package/build-local-package.sh
@@ -100,8 +129,8 @@ complete package test suite. This is the mode used by `./install.sh --source`;
 Its equivalent manual build from a clean checkout is:
 
 ```bash
-git archive --format=tar.gz --prefix=splinterm-0.1.0beta1/ \
-  -o packaging/splinterm-0.1.0beta1.tar.gz HEAD
+git archive --format=tar.gz --prefix=splinterm-0.1.0/ \
+  -o packaging/splinterm-0.1.0.tar.gz HEAD
 ```
 
 The archive honors `.gitattributes` `export-ignore` entries; website source and
@@ -120,8 +149,8 @@ creates the main package plus the explicitly optional `splinterm-mcp` split
 package without installing either. Inspect them with:
 
 ```bash
-pacman -Qlp packaging/splinterm-0.1.0beta1-1-x86_64.pkg.tar.zst
-pacman -Qlp packaging/splinterm-mcp-0.1.0beta1-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-0.1.0-1-x86_64.pkg.tar.zst
+pacman -Qlp packaging/splinterm-mcp-0.1.0-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
@@ -229,11 +258,13 @@ rejected as unauthorized. Verify the new daemon/client sibling identity before
 launching graphical acceptance; graphical testing remains a separately approved,
 guarded operation.
 
-The equivalent manual lifecycle is:
+The equivalent manual lifecycle for the stable 0.1.0 packages built above is
+shown below. Run it from a terminal not owned by `splinterd`; stopping the daemon
+ends its child processes. Saved topology does not checkpoint running programs.
 
 ```bash
 systemctl --user stop splinterd.service
-sudo pacman -U packaging/splinterm-0.1.0beta1-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-0.1.0-1-x86_64.pkg.tar.zst
 systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
@@ -241,7 +272,7 @@ systemctl --user start splinterd.service
 Install the adapter only when an MCP host will be configured:
 
 ```bash
-sudo pacman -U packaging/splinterm-mcp-0.1.0beta1-1-x86_64.pkg.tar.zst
+sudo pacman -U packaging/splinterm-mcp-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
 The guarded upgrade script upgrades `splinterm-mcp` only when that optional

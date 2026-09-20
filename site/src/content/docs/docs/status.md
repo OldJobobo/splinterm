@@ -3,9 +3,15 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm is a **public beta**. Source, documentation, and immutable versioned GitHub and AUR packages are public. Substantial core behavior is implemented and validated, while the validated target remains narrow and stable compatibility guarantees have not been released.
+Splinterm **0.1.0 is the first stable release**, published on 2026-09-05 for x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Source, documentation, GitHub releases, and AUR packages are public. Broader platform compatibility and a support lifetime are not promised; future 0.x releases may change interfaces with documented migration.
 
-[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1) is the current public prerelease. It adds wide-grid support through `480×128`, bounded sparse terminal publication frames, and active-tab contrast that remains independent from terminal selection colors, while retaining the accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
+Stable release notes and assets:
+
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+
+The newer **0.1.1-rc.2**, published on 2026-09-15, is a prerelease, not a new stable release. Check the release listing for subsequent publications:
+
+https://github.com/OldJobobo/splinterm/releases
 
 ## What that means
 
@@ -35,16 +41,19 @@ Splinterm is a **public beta**. Source, documentation, and immutable versioned G
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
-| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Recommended prebuilt `splinterm-bin`; source-built `splinterm` also available, both `0.1.0beta1-1` |
-| Stable support and broader compatibility | Not released |
+| [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Prebuilt `splinterm-bin`, source-built `splinterm`, and optional MCP split packages; this channel can include release candidates, not only stable releases |
+| Stable release | 0.1.0 for the documented platform |
+| Broader compatibility and support lifetime | Not promised |
 | Nix and broader distributions | Planned |
 
 ## Important boundaries
 
 Splinterm is **security-conscious**, not absolutely secure. [Automation](/docs/automation/) is constrained by executable identity, explicit scopes, resource limits, controller ownership, revocation, and bounded audit metadata. Terminal output is always untrusted data and cannot grant authority.
 
+**Splinterm 0.1 does not support live daemon upgrade handoff.** Stopping or replacing the daemon ends its child processes; saved topology does not checkpoint applications. Save your work and upgrade from another terminal, then reopen Splinterm Windows. See [Installation](/docs/install/).
+
 Persistent topology is also separate from graphical presentation. Creating or mutating a Dojo does not map, focus, move, or resize a native Wayland window. Read [Why native Wayland?](/docs/wayland/) for the direct-compositor benefits, comparison model, and explicit non-claims.
 
 ## Before depending on it
 
-Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Public beta availability is not a new compatibility guarantee; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Stable 0.1.0 does not expand the documented compatibility scope; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
