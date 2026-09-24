@@ -484,7 +484,32 @@ for path in "$state" "$config"; do
     exit 1
   }
 done
-mkdir -m 700 "$runtime" "$state" "$config"
+daemon_pid=
+client_pid=
+created_runtime=false
+created_state=false
+created_config=false
+cleanup_failed_launch() {
+  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
+  [[ -z $daemon_pid ]] || kill "$daemon_pid" 2>/dev/null || true
+  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
+  [[ -z $daemon_pid ]] || wait "$daemon_pid" 2>/dev/null || true
+  if [[ $created_runtime == true && -e $window_state ]]; then
+    python "$package_root/source/tools/testbed/guest-window.py" restore \
+      --state "$window_state" || true
+  fi
+  # The preflight rejects existing paths; remove only directories this launch made.
+  [[ $created_config == false ]] || rm -rf -- "$config"
+  [[ $created_state == false ]] || rm -rf -- "$state"
+  [[ $created_runtime == false ]] || rm -rf -- "$runtime"
+}
+trap cleanup_failed_launch ERR
+mkdir -m 700 "$runtime"
+created_runtime=true
+mkdir -m 700 "$state"
+created_state=true
+mkdir -m 700 "$config"
+created_config=true
 printf '%s\n' "$package_root" >"$runtime/testbed-root"
 instance=$(hyprctl instances -j | jq -er \
   'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
@@ -495,18 +520,6 @@ export HYPRLAND_INSTANCE_SIGNATURE
 HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket"
-daemon_pid=
-client_pid=
-cleanup_failed_launch() {
-  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
-  [[ -z $daemon_pid ]] || kill "$daemon_pid" 2>/dev/null || true
-  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
-  [[ -z $daemon_pid ]] || wait "$daemon_pid" 2>/dev/null || true
-  [[ ! -e $window_state ]] \
-    || python "$package_root/source/tools/testbed/guest-window.py" restore \
-      --state "$window_state" || true
-}
-trap cleanup_failed_launch ERR
 python "$package_root/source/tools/testbed/guest-window.py" prepare --state "$window_state"
 SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &

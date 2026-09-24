@@ -118,7 +118,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         )[0]
         self.assertLess(
             package_launch.index(active_guard),
-            package_launch.index('mkdir -m 700 "$runtime" "$state" "$config"'),
+            package_launch.index('mkdir -m 700 "$runtime"'),
         )
 
     def test_package_runtime_is_checkout_scoped_and_stop_checks_owner(self) -> None:
@@ -136,7 +136,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         )
         self.assertLess(
             launch.index('[[ ! -e $runtime && ! -L $runtime ]]'),
-            launch.index('mkdir -m 700 "$runtime" "$state" "$config"'),
+            launch.index('mkdir -m 700 "$runtime"'),
         )
         self.assertIn('printf \'%s\\n\' "$package_root" >"$runtime/testbed-root"', launch)
         self.assertLess(stop.index('testbed-root'), stop.index('stop_matching /usr/bin/splinterm'))
@@ -150,6 +150,101 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             "SPLINTERM_TESTBED_RUNTIME_LEAF=splinterm-testbed-rc3_review",
             log.read_text(),
         )
+
+    def test_package_launch_cleans_only_its_own_state_on_failures(self) -> None:
+        launch = RUNNER.read_text(encoding="utf-8").split("  package-launch)", 1)[
+            1
+        ].split("  package-stop)", 1)[0]
+        section = launch[
+            launch.index("daemon_pid=\nclient_pid=\n") : launch.index(
+                'python "$package_root/source/tools/testbed/guest-window.py" prepare'
+            )
+        ]
+        self.assertLess(
+            section.index("trap cleanup_failed_launch ERR"),
+            section.index('mkdir -m 700 "$runtime"'),
+        )
+        self.assertLess(
+            section.index("trap cleanup_failed_launch ERR"),
+            section.index("instance=$(hyprctl instances -j"),
+        )
+        self.assertLess(
+            section.index('guest-window.py" restore'),
+            section.index('rm -rf -- "$runtime"'),
+        )
+        script = "\n".join(
+            (
+                "set -euo pipefail",
+                'package_root="$TEST_PACKAGE_ROOT"',
+                'runtime="$TEST_RUNTIME"',
+                'state="$TEST_STATE"',
+                'config="$TEST_CONFIG"',
+                'window_state="$runtime/guest-window.json"',
+                section,
+                'if [[ $TEST_FAILURE == late ]]; then printf "prepared\\n" >"$window_state"; fi',
+                "false",
+            )
+        )
+        for failure in ("early", "late", "partial"):
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory(dir=ROOT / ".validation") as temporary:
+                    base = Path(temporary)
+                    package_root = base / "package"
+                    package_root.mkdir()
+                    fake_bin = base / "bin"
+                    fake_bin.mkdir()
+                    hyprctl = fake_bin / "hyprctl"
+                    hyprctl.write_text(
+                        "#!/bin/sh\n"
+                        'if [ "$TEST_FAILURE" = early ]; then exit 17; fi\n'
+                        "printf '%s\\n' '[{\"wl_socket\":\"wayland-0\",\"instance\":\"test\"}]'\n"
+                    )
+                    hyprctl.chmod(0o755)
+                    python = fake_bin / "python"
+                    python.write_text(
+                        "#!/bin/sh\n"
+                        'test -f "$TEST_RUNTIME/guest-window.json" || exit 1\n'
+                        'printf "%s\\n" "$@" >"$TEST_RESTORE_LOG"\n'
+                    )
+                    python.chmod(0o755)
+                    runtime = base / "runtime"
+                    state = package_root / "acceptance-state"
+                    config = package_root / "acceptance-config"
+                    restore_log = base / "restore.log"
+                    if failure == "partial":
+                        state.mkdir()
+                        (state / "existing").write_text("preserve me")
+                    environment = os.environ.copy()
+                    environment.update(
+                        {
+                            "PATH": f"{fake_bin}:{environment['PATH']}",
+                            "TEST_PACKAGE_ROOT": str(package_root),
+                            "TEST_RUNTIME": str(runtime),
+                            "TEST_STATE": str(state),
+                            "TEST_CONFIG": str(config),
+                            "TEST_RESTORE_LOG": str(restore_log),
+                            "TEST_FAILURE": failure,
+                        }
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=ROOT,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse(runtime.exists(), result.stderr)
+                    self.assertFalse(config.exists(), result.stderr)
+                    if failure == "partial":
+                        self.assertEqual((state / "existing").read_text(), "preserve me")
+                    else:
+                        self.assertFalse(state.exists(), result.stderr)
+                    if failure == "late":
+                        self.assertIn("restore", restore_log.read_text())
+                    else:
+                        self.assertFalse(restore_log.exists())
 
     def test_graphical_launches_use_guarded_guest_window_lifecycle(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
