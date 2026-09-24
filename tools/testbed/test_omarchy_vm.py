@@ -102,7 +102,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertIn("/usr/bin/splinterm launch", runner)
         self.assertIn('XDG_STATE_HOME="$state"', runner)
         self.assertIn('XDG_CONFIG_HOME="$config"', runner)
-        self.assertIn("splinterm-package-install-check", runner)
+        self.assertIn('${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-install-check', runner)
         self.assertIn(
             'SPLINTERM_SOCKET="$socket" /usr/bin/splinterm list', runner
         )
@@ -114,7 +114,37 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         )[0]
         self.assertLess(
             package_launch.index(active_guard),
-            package_launch.index('rm -rf "$runtime"'),
+            package_launch.index('mkdir -m 700 "$runtime" "$state" "$config"'),
+        )
+
+    def test_package_runtime_is_checkout_scoped_and_stop_checks_owner(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        install = runner.split("  package-install)", 1)[1].split("  package-launch)", 1)[0]
+        launch = runner.split("  package-launch)", 1)[1].split("  package-stop)", 1)[0]
+        stop = runner.split("  package-stop)", 1)[1].split("  exec)", 1)[0]
+        self.assertIn('SPLINTERM_TESTBED_RUNTIME_LEAF=', runner)
+        for action in (install, launch, stop):
+            self.assertIn('${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-', action)
+            self.assertNotIn('"/run/user/$(id -u)/splinterm-package-', action)
+        self.assertLess(
+            install.index('[[ ! -e $runtime && ! -L $runtime ]]'),
+            install.index('./tools/package/upgrade-local-package.sh --yes'),
+        )
+        self.assertLess(
+            launch.index('[[ ! -e $runtime && ! -L $runtime ]]'),
+            launch.index('mkdir -m 700 "$runtime" "$state" "$config"'),
+        )
+        self.assertIn('printf \'%s\\n\' "$package_root" >"$runtime/testbed-root"', launch)
+        self.assertLess(stop.index('testbed-root'), stop.index('stop_matching /usr/bin/splinterm'))
+        self.assertLess(stop.index('testbed-root'), stop.index('rm -rf "$runtime"'))
+        result, log = self.run_runner(
+            "package-stop",
+            remote_root="/home/omarchy/Projects/splinterm-testbed-rc3_review",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "SPLINTERM_TESTBED_RUNTIME_LEAF=splinterm-testbed-rc3_review",
+            log.read_text(),
         )
 
     def test_graphical_launches_use_guarded_guest_window_lifecycle(self) -> None:
