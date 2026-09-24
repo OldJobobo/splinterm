@@ -160,11 +160,12 @@ use crate::renderer::{
     dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout,
     lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
     lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
-    paint_lair_explorer, paint_session_picker_overlay, paint_snapshot_overlays,
-    paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
-    paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
-    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
-    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
+    paint_lair_explorer, paint_search_overlay, paint_session_picker_overlay,
+    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
+    paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
+    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
+    session_picker_palette, snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout,
+    write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -860,6 +861,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             initial_columns: options.initial_columns,
             explorer_layout: None,
             explorer_text_cache: SessionPickerTextCache::default(),
+            search_text_cache: SessionPickerTextCache::default(),
             explorer_visible_start: 0,
             explorer_pressed: None,
             full_redraw: true,
@@ -1972,6 +1974,7 @@ struct PresentationState {
     initial_columns: u16,
     explorer_layout: Option<LairExplorerLayout>,
     explorer_text_cache: SessionPickerTextCache,
+    search_text_cache: SessionPickerTextCache,
     explorer_visible_start: usize,
     explorer_pressed: Option<ExplorerPointerPress>,
     full_redraw: bool,
@@ -5524,7 +5527,7 @@ impl App {
                         self.panes.pane.search.input = Some(new_search_editor());
                         self.panes.pane.search.matches.clear();
                         self.panes.pane.search.next_cursor = None;
-                        self.update_window_title();
+                        self.refresh_search_overlay(queue_handle);
                     }
                     CommandHistoryAction::PageUp | CommandHistoryAction::PageDown => {
                         let page = self
@@ -6417,6 +6420,7 @@ impl App {
         self.presentation.frame_titles.clear();
         self.modal.session_picker_text_cache.clear();
         self.presentation.explorer_text_cache.clear();
+        self.presentation.search_text_cache.clear();
         self.modal.command_palette_text_cache.clear();
         self.modal.dojo_prompt_text_cache.clear();
         self.modal.tab_context_menu_text_cache.clear();
@@ -7299,6 +7303,18 @@ impl App {
         }
     }
 
+    fn refresh_search_overlay(&mut self, queue_handle: &QueueHandle<Self>) {
+        self.update_window_title();
+        for buffer in &mut self.surface.buffers {
+            buffer.stale.mark_full();
+        }
+        if self.surface.configured
+            && let Err(error) = self.schedule_draw(queue_handle)
+        {
+            self.scheduling.fail(error);
+        }
+    }
+
     fn reveal_pending_search_match(&mut self) {
         let Some(item) = self.panes.pane.search.pending_reveal.clone() else {
             return;
@@ -7794,7 +7810,7 @@ impl App {
                 } else if let Some(cursor) = self.panes.pane.search.next_cursor.clone() {
                     self.submit_search(Some(cursor));
                 }
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             if self.input.modifiers.ctrl && matches!(event.keysym, Keysym::p | Keysym::P) {
@@ -7807,7 +7823,7 @@ impl App {
                     .get(self.panes.pane.search.selected)
                     .cloned();
                 self.reveal_pending_search_match();
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             match event.keysym {
@@ -7841,7 +7857,7 @@ impl App {
                 }
                 _ => {}
             }
-            self.update_window_title();
+            self.refresh_search_overlay(queue_handle);
             return;
         }
         match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
@@ -7881,7 +7897,7 @@ impl App {
                 self.panes.pane.search.input = Some(new_search_editor());
                 self.panes.pane.search.matches.clear();
                 self.panes.pane.search.next_cursor = None;
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             Some(ActionId::ForceControl) => {
@@ -10342,7 +10358,8 @@ impl App {
                 || command_palette_open
                 || dojo_prompt_open
                 || tab_context_menu_open
-                || explorer_layout.is_some();
+                || explorer_layout.is_some()
+                || self.panes.pane.search.input.is_some();
             let full_backing_sync =
                 self.presentation.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.surface.buffers {
@@ -10486,6 +10503,24 @@ impl App {
                 self.explorer.focused(),
                 self.explorer.filter(),
                 self.explorer.search_active(),
+            )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        if let Some(input) = self.panes.pane.search.input.as_ref() {
+            paint_search_overlay(
+                &mut self.presentation.search_text_cache,
+                &self.presentation.render_context,
+                canvas,
+                width,
+                height,
+                content_buffer_rect,
+                self.surface.scale_120,
+                self.presentation.renderer_generation,
+                session_picker_palette(self.presentation.theme),
+                input.text(),
+                &self.panes.pane.search.query,
+                self.panes.pane.search.matches.len(),
+                self.panes.pane.search.selected,
             )?;
             self.surface.buffers[buffer_index].stale.mark_full();
         }

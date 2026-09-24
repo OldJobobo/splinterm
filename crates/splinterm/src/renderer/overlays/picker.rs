@@ -672,6 +672,152 @@ pub(super) fn paint_picker_text(
     Ok(())
 }
 
+/// Paint a bounded terminal search field inside the terminal side of any Explorer split.
+/// The compositor title alone is not a visible search surface on every desktop.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the bounded search field keeps geometry and two text rows in one paint seam"
+)]
+pub(crate) fn paint_search_overlay(
+    cache: &mut SessionPickerTextCache,
+    context: &RenderContext,
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    terminal: Rect,
+    scale_120: u32,
+    renderer_generation: u64,
+    palette: SessionPickerPalette,
+    input: &str,
+    searched_query: &str,
+    matches: usize,
+    selected: usize,
+) -> Result<bool> {
+    if scale_120 == 0 {
+        return Ok(false);
+    }
+    let scaled = |logical: u32| logical.saturating_mul(scale_120).div_ceil(120).max(1);
+    let margin = scaled(8);
+    let width = terminal
+        .width
+        .saturating_sub(margin.saturating_mul(2))
+        .min(scaled(440));
+    let height = terminal
+        .height
+        .saturating_sub(margin.saturating_mul(2))
+        .min(scaled(48));
+    if width < scaled(96) || height < scaled(28) {
+        return Ok(false);
+    }
+    let panel = Rect {
+        x: terminal.x.saturating_add(margin),
+        y: terminal.y.saturating_add(
+            terminal
+                .height
+                .saturating_sub(margin)
+                .saturating_sub(height),
+        ),
+        width,
+        height,
+    };
+    fill_rect(
+        canvas,
+        canvas_width,
+        canvas_height,
+        rect_tuple(panel),
+        opaque_rgba(palette.panel),
+    );
+    let border = scale_120.div_ceil(120).max(1);
+    for stripe in [
+        (panel.x, panel.y, panel.width, border),
+        (panel.x, panel.y, border, panel.height),
+    ] {
+        fill_rect(
+            canvas,
+            canvas_width,
+            canvas_height,
+            (
+                i32::try_from(stripe.0).unwrap_or(i32::MAX),
+                i32::try_from(stripe.1).unwrap_or(i32::MAX),
+                stripe.2,
+                stripe.3,
+            ),
+            opaque_rgba(palette.focused_frame),
+        );
+    }
+    let padding = scaled(10);
+    let inner = Rect {
+        x: panel.x.saturating_add(padding),
+        y: panel.y,
+        width: panel.width.saturating_sub(padding.saturating_mul(2)),
+        height: panel.height,
+    };
+    let query = input
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(256)
+        .collect::<String>();
+    let single_line = height < scaled(40);
+    let query_clip = Rect {
+        height: if single_line {
+            inner.height
+        } else {
+            inner.height / 2
+        },
+        ..inner
+    };
+    let mut used = HashSet::new();
+    paint_picker_text(
+        cache,
+        context,
+        &mut used,
+        canvas,
+        canvas_width,
+        canvas_height,
+        &format!("Search: {query}_"),
+        ChromeTextStyle::Regular,
+        scale_120,
+        renderer_generation,
+        query_clip,
+        PickerTextAlignment::Left,
+        palette.primary,
+    )?;
+    if !single_line {
+        let status = if input == searched_query {
+            format!(
+                "{}/{} matches · Ctrl+N/P next/prev · Esc close",
+                selected.saturating_add(1).min(matches),
+                matches
+            )
+        } else {
+            "Enter to search · Esc close".to_owned()
+        };
+        let status_clip = Rect {
+            y: inner.y.saturating_add(query_clip.height),
+            height: inner.height.saturating_sub(query_clip.height),
+            ..inner
+        };
+        paint_picker_text(
+            cache,
+            context,
+            &mut used,
+            canvas,
+            canvas_width,
+            canvas_height,
+            &status,
+            ChromeTextStyle::Regular,
+            scale_120,
+            renderer_generation,
+            status_clip,
+            PickerTextAlignment::Left,
+            palette.secondary,
+        )?;
+    }
+    cache.finish_frame(used);
+    Ok(true)
+}
+
 #[allow(
     clippy::similar_names,
     clippy::too_many_arguments,
@@ -1169,6 +1315,134 @@ pub(crate) fn paint_session_picker_overlay(
 mod tests {
     use super::super::super::pixel_index;
     use super::*;
+
+    #[test]
+    fn scrollback_search_paints_query_inside_terminal_when_explorer_is_open() {
+        let content = Rect {
+            x: 260,
+            y: 40,
+            width: 600,
+            height: 360,
+        };
+        let palette = session_picker_palette(ResolvedTheme::default());
+        let render = |query: &str| {
+            let mut canvas = vec![0_u8; 900 * 480 * 4];
+            let mut cache = SessionPickerTextCache::default();
+            assert!(
+                paint_search_overlay(
+                    &mut cache,
+                    &RenderContext::new(u16::MAX),
+                    &mut canvas,
+                    900,
+                    480,
+                    content,
+                    120,
+                    1,
+                    palette,
+                    query,
+                    query,
+                    3,
+                    0,
+                )
+                .unwrap()
+            );
+            assert!(cache.len() > 0);
+            canvas
+        };
+        let alpha = render("alpha");
+        let bravo = render("bravo");
+        assert_ne!(
+            alpha, bravo,
+            "changing the search text must change painted pixels"
+        );
+        for y in 0..480 {
+            for x in 0..900 {
+                if x >= content.x
+                    && x < content.x + content.width
+                    && y >= content.y
+                    && y < content.y + content.height
+                {
+                    continue;
+                }
+                let pixel = pixel_index(
+                    900,
+                    480,
+                    i32::try_from(x).unwrap(),
+                    i32::try_from(y).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    &alpha[pixel..pixel + 4],
+                    &[0; 4],
+                    "paint escaped terminal area"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scrollback_search_clips_oversized_input_and_skips_unusable_geometry() {
+        let mut canvas = vec![0_u8; 900 * 480 * 4];
+        let mut cache = SessionPickerTextCache::default();
+        let context = RenderContext::new(u16::MAX);
+        let palette = session_picker_palette(ResolvedTheme::default());
+        let tiny = Rect {
+            x: 260,
+            y: 40,
+            width: 60,
+            height: 50,
+        };
+        assert!(
+            !paint_search_overlay(
+                &mut cache,
+                &context,
+                &mut canvas,
+                900,
+                480,
+                tiny,
+                120,
+                1,
+                palette,
+                "needle",
+                "needle",
+                0,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(canvas.iter().all(|byte| *byte == 0));
+        let terminal = Rect {
+            x: 260,
+            y: 40,
+            width: 600,
+            height: 360,
+        };
+        assert!(
+            paint_search_overlay(
+                &mut cache,
+                &context,
+                &mut canvas,
+                900,
+                480,
+                terminal,
+                180,
+                1,
+                palette,
+                &format!("{}\n", "x".repeat(2_000)),
+                "",
+                0,
+                0,
+            )
+            .unwrap()
+        );
+        assert!(
+            cache
+                .entries
+                .keys()
+                .all(|key| key.source.len() <= 270 && !key.source.contains('\n'))
+        );
+        assert!(cache.len() <= 2);
+    }
 
     #[test]
     fn picker_text_truncation_reserves_ellipsis_and_preserves_combining_marks() {
