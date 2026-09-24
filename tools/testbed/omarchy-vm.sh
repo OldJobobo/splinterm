@@ -5,6 +5,8 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 config_file=${SPLINTERM_TESTBED_CONFIG:-"$repo_root/.splinterm-testbed.env"}
+# A caller-selected test checkout must not be replaced by the shared config root.
+requested_remote_root=${SPLINTERM_TESTBED_REMOTE_ROOT:-}
 
 if [[ -r $config_file ]]; then
   # This is an explicitly selected, maintainer-owned shell configuration file.
@@ -17,7 +19,7 @@ port=${SPLINTERM_TESTBED_PORT:-2222}
 user=${SPLINTERM_TESTBED_USER:-omarchy}
 identity=${SPLINTERM_TESTBED_IDENTITY:-}
 known_hosts=${SPLINTERM_TESTBED_KNOWN_HOSTS:-}
-remote_root=${SPLINTERM_TESTBED_REMOTE_ROOT:-"/home/$user/Projects/splinterm-testbed"}
+remote_root=${requested_remote_root:-${SPLINTERM_TESTBED_REMOTE_ROOT:-"/home/$user/Projects/splinterm-testbed"}}
 qmp_socket=${SPLINTERM_TESTBED_QMP_SOCKET:-}
 action=${1:-status}
 if (($# > 0)); then

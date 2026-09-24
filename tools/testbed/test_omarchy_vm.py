@@ -20,6 +20,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         *args: str,
         configured: bool = True,
         remote_root: str = "/home/omarchy/Projects/splinterm-testbed-review",
+        root_override: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -55,6 +56,9 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             )
 
         environment = os.environ.copy()
+        environment.pop("SPLINTERM_TESTBED_REMOTE_ROOT", None)
+        if root_override is not None:
+            environment["SPLINTERM_TESTBED_REMOTE_ROOT"] = root_override
         environment.update(
             {
                 "CALL_LOG": str(log),
@@ -182,6 +186,15 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         call = log.read_text()
         self.assertIn("cd /home/omarchy/Projects/splinterm-testbed-review", call)
         self.assertIn("exec printf %s two\\ words", call)
+
+    def test_explicit_root_override_wins_over_config_for_package_actions(self) -> None:
+        unique = "/home/omarchy/Projects/splinterm-testbed-rc3_0ba40003"
+        result, log = self.run_runner("package-stop", root_override=unique)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = log.read_text()
+        self.assertIn(f"SPLINTERM_TESTBED_PACKAGE_ROOT={unique}/.testbed-package", call)
+        self.assertIn("SPLINTERM_TESTBED_RUNTIME_LEAF=splinterm-testbed-rc3_0ba40003", call)
+        self.assertNotIn("splinterm-testbed-review", call)
 
     def test_desktop_exec_discovers_guest_wayland_environment(self) -> None:
         result, log = self.run_runner("desktop-exec", "wtype", "--", "two words")
