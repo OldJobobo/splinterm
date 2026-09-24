@@ -797,18 +797,24 @@ fn append_bounded_sparse_rows(
         rows,
         rows.len().saturating_add(source.len()).min(final_rows),
     );
-    while rows.len() > final_rows {
-        rows.remove(0);
-    }
-    for source_row in source {
-        if rows.len() == final_rows {
-            let mut reused = rows.remove(0);
+    // Rotate all evicted rows to the tail once, then reuse their nested cell
+    // allocations for incoming rows. Repeated remove(0) shifts the whole
+    // retained history for every appended row under subscriber backpressure.
+    let evicted = rows
+        .len()
+        .saturating_add(source.len())
+        .saturating_sub(final_rows)
+        .min(rows.len());
+    rows.rotate_left(evicted);
+    let kept = rows.len() - evicted;
+    for (index, source_row) in source.iter().enumerate() {
+        if let Some(reused) = rows.get_mut(kept + index) {
             reused.clone_from(source_row);
-            rows.push(reused);
         } else {
             rows.push(source_row.clone());
         }
     }
+    rows.truncate(kept + source.len());
 }
 
 fn take_sparse_history_rows(history: &mut SparseHistoryDelta) -> Vec<CompactLiveRow> {
@@ -6527,6 +6533,64 @@ mod tests {
         let mut expected = final_state;
         expected.history_policy = CompactHistoryPolicy::FullHistory;
         assert_eq!(sealed.apply_to(&base), Some(expected));
+    }
+
+    #[test]
+    fn bounded_sparse_history_append_matches_tail_for_shrinking_limits() {
+        for retained in 0..=5_u64 {
+            for appended in 0..=7_u64 {
+                for limit in 0..=6_usize {
+                    let make_row = |id| CompactLiveRow {
+                        row_id: Some(id),
+                        linebreak: false,
+                        cells: Vec::new(),
+                    };
+                    let mut rows = (0..retained).map(make_row).collect::<Vec<_>>();
+                    let source = (retained..retained + appended)
+                        .map(make_row)
+                        .collect::<Vec<_>>();
+                    let mut expected = rows.clone();
+                    expected.extend(source.iter().cloned());
+                    let evicted = expected.len().saturating_sub(limit);
+                    expected.drain(..evicted);
+                    append_bounded_sparse_rows(&mut rows, &source, limit);
+                    assert_eq!(
+                        rows, expected,
+                        "retained={retained} appended={appended} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual scrollback-tail performance measurement"]
+    fn benchmark_bounded_sparse_history_append() {
+        let retained = 20_000;
+        let appended = 2_000;
+        let mut rows = (0..retained)
+            .map(|id| CompactLiveRow {
+                row_id: Some(id),
+                linebreak: false,
+                cells: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let source = (retained..retained + appended)
+            .map(|id| CompactLiveRow {
+                row_id: Some(id),
+                linebreak: false,
+                cells: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        append_bounded_sparse_rows(&mut rows, &source, usize::try_from(retained).unwrap());
+        let elapsed = start.elapsed();
+        assert_eq!(rows.first().and_then(|row| row.row_id), Some(appended));
+        assert_eq!(
+            rows.last().and_then(|row| row.row_id),
+            Some(retained + appended - 1)
+        );
+        eprintln!("bounded sparse history: {retained} retained + {appended} appended: {elapsed:?}");
     }
 
     #[test]
