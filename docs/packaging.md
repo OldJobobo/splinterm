@@ -193,7 +193,8 @@ The local and remote packages must be version-compatible, and the relay must
 remain adjacent to the exact packaged `splinterd` executable because every
 logical graphical channel repeats executable-identity validation. See
 [headless.md](headless.md) for the complete service, policy, backup, and
-recovery workflow, [remote.md](remote.md) for both policy-scoped SSH relay modes,
+recovery workflow, [remote.md](remote.md) for policy-scoped automation and
+authenticated human graphical SSH relay modes,
 [integrations.md](integrations.md) for reference-client and in-Splint workflows,
 and [mcp.md](mcp.md) for the optional adapter's host and digest-policy setup.
 

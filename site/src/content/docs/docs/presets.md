@@ -26,7 +26,13 @@ splinterm preset check
 splinterm preset run omarchy.tdl --cwd "$PWD" --param ai=opencode --dry-run
 ```
 
-Run a preset with:
+For a real run, invoke the command from a managed Splinterm pane, or provide a
+current trusted graphical-focus context. Splinterm verifies that exact context
+and fails rather than selecting an arbitrary pane. `--cwd` chooses the launch
+directory; it does not replace the context requirement. This also applies to
+`--no-open`. Inspection and `--dry-run` above need no managed context.
+
+From a managed pane, run a preset with:
 
 ```bash
 splinterm preset run omarchy.tdl --cwd "$PWD" --param ai=opencode

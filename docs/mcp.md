@@ -3,9 +3,10 @@
 `splinterm-mcp` is a local, bounded MCP stdio server supporting `2025-06-18`
 and `2025-11-25` (preferred). It is an
 optional split package and a separately authorized third-party client, not a
-trusted part of `splinterd`. Installing it grants nothing: the daemon continues
-to deny operations until the owner installs an exact executable path/digest
-policy.
+trusted part of `splinterd`. Installing it grants no daemon authority.
+Unattended access requires an exact executable path/digest policy; interactive
+access requires explicit approval through the trusted consent UI, as described
+under [Interactive access](#interactive-access-to-a-live-lair).
 
 ## Install identity and launch
 
@@ -91,8 +92,15 @@ not the session's negotiated version.
 
 ## Least-privileged policy
 
-Create `~/.config/splinterm/policy.json` mode `0600`, substituting the digest and
-real IDs. Lair/Dojo selectors snapshot only descendants present when the
+First complete [owner-only policy setup](headless.md#install-an-owner-only-policy),
+including the `SPLINTERM_POLICY` entry in `~/.config/splinterm/daemon.env`.
+Creating a policy file alone does not make the daemon load it. Configure the
+environment before service startup where possible; changing it on a running
+daemon requires the documented restart, which ends its processes.
+
+Edit `~/.config/splinterm/policy.json` with mode `0600`, substituting the digest and
+real IDs. Preserve existing rules unless you intend to replace them. Lair/Dojo
+selectors snapshot only descendants present when the
 policy generation is published. New descendants remain denied until a reviewed
 policy reload.
 
@@ -158,17 +166,28 @@ recommended default:
 }
 ```
 
-Validate and atomically reload:
+Validate and inspect the file offline:
 
 ```bash
-splinterm policy validate ~/.config/splinterm/policy.json
-systemctl --user reload splinterd.service
-splinterm policy inspect
+splinterm policy validate "$HOME/.config/splinterm/policy.json"
+splinterm policy inspect "$HOME/.config/splinterm/policy.json"
 ```
 
-No policy, a different digest, missing scope, wrong resource/incarnation, stale
-revision, false destructive confirmation, or controller owned by another client
-fails closed. A read policy cannot input, resize, spawn, restore, close, kill, or
+If the running daemon already has the correct `SPLINTERM_POLICY` environment,
+reload the edited JSON and check the journal for acceptance:
+
+```bash
+systemctl --user reload splinterd.service
+journalctl --user-unit splinterd.service -n 30 --no-pager
+```
+
+Otherwise, follow the first-start or environment-change instructions in
+[Headless operation](headless.md#install-an-owner-only-policy). `policy inspect`
+reads the file, not the daemon's published generation.
+
+Policy-authorized operations fail closed if there is no policy, the digest
+differs, a scope is missing, the resource/incarnation is wrong, the revision is
+stale, destructive confirmation is false, or another client owns the controller. A read policy cannot input, resize, spawn, restore, close, kill, or
 rename. MCP transport access is not authority.
 
 ## Limits, trust, and lifecycle
@@ -233,9 +252,12 @@ invalidates connection-owned state.
 Troubleshooting checklist:
 
 1. `test -x /usr/bin/splinterm-mcp` and verify `sha256sum` matches policy.
-2. Confirm `SPLINTERM_SOCKET`, or `$XDG_RUNTIME_DIR/splinterd.sock`, belongs to
+2. Confirm `SPLINTERM_SOCKET`, or `$XDG_RUNTIME_DIR/splinterm/splinterd.sock`, belongs to
    the same user and the daemon is running.
-3. Run `splinterm policy validate` and inspect the published generation.
+3. Run `splinterm policy validate "$HOME/.config/splinterm/policy.json"`.
+   Confirm the daemon started with the intended `SPLINTERM_POLICY`; check the
+   journal for startup or reload acceptance rather than treating offline
+   inspection as evidence of the published generation.
 4. Treat `unauthorized`, `stale_topology`, `stale_incarnation`, controller
    denial, timeout, and `resync_required` as state to reconcile—not permission
    to retry blindly or broaden policy.

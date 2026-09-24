@@ -45,7 +45,8 @@ to `splinterd` to display Dojos or perform supported operations.
 A compositor-managed native Wayland toplevel. One Window may present an ordered
 client-local set of up to 32 distinct Dojos, including Dojos from different
 Lairs. Opening, closing, moving, or focusing a Window is separate from changing
-the daemon's persistent topology.
+the daemon's persistent topology. Exception: a transient XDG command Window
+owns a client-bound Lair; its disconnect terminates that Lair and its processes.
 
 ### Tab
 
@@ -53,7 +54,8 @@ A non-persistent, Window-local reference to one daemon-owned Dojo. Opening an
 already-present Dojo activates its existing tab. Tab order and the active tab
 are discarded when the Window exits. Closing a tab detaches subscriptions and
 controller leases but does not close the Dojo, terminate a Splint, or restore an
-exited process.
+exited process. Closing the final tab also closes the Window, so a transient
+XDG owner Window's lifetime rule still applies.
 
 ### PTY
 
@@ -69,8 +71,8 @@ not create or restart its process.
 
 ### Detach
 
-Stop displaying a Dojo by closing its Window-local tab, without terminating its
-Splints or their processes. Closing the final tab also closes the native Window.
+Stop displaying a persistent Dojo by closing its Window-local tab, without
+terminating its Splints or their processes. Closing the final tab also closes the native Window.
 This differs from closing a Splint, which removes an exited pane (or explicitly
 terminates then removes a live pane), and from closing a Dojo in daemon topology.
 
@@ -148,8 +150,10 @@ NDJSON represents bounded subscriptions and event streams.
 ### Relay
 
 The dedicated `splinterm-relay` SSH stdio transport. It connects remote callers
-to the local daemon without making `splinterd` a network service and receives
-only the authority assigned to its exact executable identity.
+to the local daemon without making `splinterd` a network service. Raw `--stdio`
+automation is policy-scoped; `--graphical-stdio` carries authenticated human
+remote sessions without inheriting trusted-local image or forced-transfer
+authority.
 
 ### MCP adapter
 

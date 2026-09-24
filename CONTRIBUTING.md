@@ -169,6 +169,9 @@ install a package as an incidental test step.
   `python -m pytest -q tools/automation/test_dojo_picker.py`
 - Public contract fixtures:
   `python tools/automation/validate-contract-fixtures.py`
+- Runnable documentation examples (requires Bash and `jq`; uses a temporary
+  home, never the running daemon):
+  `python -m unittest tools/automation/test_documentation_examples.py`
 - Benchmark harness tests:
   `python -m pytest -q tools/benchmark/test_benchmark.py`
 
@@ -343,8 +346,10 @@ remain in force unless the user explicitly names an active host Window.
 
 ## Packaging and installation
 
-`./install.sh` packages a clean committed `HEAD`; it cannot install uncommitted
-work. Building is not authorization to replace a Pacman-owned binary. Read
+`./install.sh --source` packages a clean committed `HEAD`; it cannot install
+uncommitted work. Without `--source`, `./install.sh` downloads the newest
+qualifying published release, including prereleases. Run either installer mode
+from a terminal not owned by `splinterd`. Building is not authorization to replace a Pacman-owned binary. Read
 [`docs/packaging.md`](docs/packaging.md) before package work.
 
 For local source packaging without installation:

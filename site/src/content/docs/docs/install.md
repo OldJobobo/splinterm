@@ -30,6 +30,10 @@ Source-built `splinterm` and `splinterm-mcp` packages remain available. Migratin
 
 ## Install the current versioned release directly
 
+Run either installer mode from Foot or another terminal not owned by `splinterd`.
+The installer refuses a Splinterm-owned shell because stopping the daemon would
+terminate the installer too. Save active work before upgrading.
+
 For the newest published versioned package, clone the public repository and run the release installer:
 
 ```bash
@@ -52,7 +56,7 @@ The default installer downloads only a published versioned release; it never sel
 
 ## Build from committed source
 
-To compile and package the current committed checkout locally:
+From the same external terminal, compile and package the current committed checkout locally:
 
 ```bash
 ./install.sh --source
@@ -72,5 +76,15 @@ The installer does not:
 - edit Omarchy or Hyprland configuration;
 - enable persistent systemd user lingering; or
 - opt a fresh installation into the optional MCP package.
+
+To opt into the reversible Omarchy default-terminal, terminal-tag, and screensaver setup after installation:
+
+```bash
+splinterm integration omarchy enable
+splinterm integration omarchy status
+```
+
+Use `splinterm integration omarchy disable` to remove its managed changes. This
+is optional; the installed desktop entry works without it.
 
 Continue to the [quickstart](/docs/quickstart/) after installation. If an MCP host needs bounded access, follow the separate [MCP adapter setup](/docs/mcp/); installing the adapter alone grants no authority.

@@ -5,6 +5,20 @@ description: Diagnose common local Splinterm installation, daemon, session, and 
 
 This page covers the first local checks. Splinterm 0.1.0 is stable within a narrow validated Omarchy/Arch environment, so failures outside that target may not have a supported resolution.
 
+## Collect local diagnostics
+
+```bash
+splinterm diagnostics
+splinterm diagnostics --last-exit
+splinterm diagnostics --last-crash
+```
+
+The summary includes executable identities, build information, service status,
+and available client and systemd crash evidence. Use the two flags separately
+to narrow the report. Unavailable evidence does not establish a clean exit.
+These human-only commands do not open a Window or restart the daemon; they may
+prune old diagnostic files under the retention policy.
+
 ## Check the installed command
 
 ```bash
@@ -69,13 +83,16 @@ Do not install a development client to an earlier user-local `PATH` entry and tr
 
 ## Configuration fails at startup
 
-Run with the intended file and read the line-numbered diagnostic:
+Check the intended file without opening a Window or contacting the daemon:
 
 ```bash
-SPLINTERM_CONFIG=/path/to/config.ini splinterm launch
+SPLINTERM_CONFIG=/path/to/config.ini splinterm config check
 ```
 
-Unknown keys and malformed values fail rather than being guessed. Compare the file with the [supported configuration](/docs/configure/configuration/).
+Malformed supported values fail validation. Unknown INI keys and sections are
+ignored with line-numbered diagnostics, so read those warnings even when the
+command reports `Configuration OK`. The keymap overlay rejects unknown fields
+and invalid bindings. Compare the file with the [supported configuration](/docs/configure/configuration/).
 
 ## A Dojo is missing from Recent Dojos
 

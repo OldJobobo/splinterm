@@ -236,7 +236,7 @@ printf '%s\n' "$topology" | jq -e \
   --argjson incarnation "$SPLINTERM_SPLINT_INCARNATION" '
   any(.data.splints[];
     .lair_id == $lair and .dojo_id == $dojo and
-    .splint_id == $splint and .incarnation == $incarnation and
+    .splint_id == $splint and .current_incarnation == $incarnation and
     .lifecycle == "running")
 ' >/dev/null
 ```

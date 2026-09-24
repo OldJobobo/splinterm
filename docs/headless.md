@@ -10,7 +10,9 @@ file; graphical `splinterm window` clients remain separate processes.
 
 ## Service lifetime
 
-The package installs but does not enable `splinterd.service`. Start it on demand:
+The package installs but does not enable `splinterd.service`. For first-time
+automation setup, [configure the policy environment](#install-an-owner-only-policy)
+before starting the service. Otherwise, start it on demand:
 
 ```bash
 systemctl --user start splinterd.service
@@ -93,24 +95,29 @@ contents are not shell code and later interactive-shell exports do not alter an
 already running user manager. `SPLINTERM_POLICY` must be an absolute canonical
 path.
 
-Create policy files without a permissive intermediate file:
+**First-time setup only:** the following block creates owner-only files and
+refuses existing files or symlinks. If either file already exists, review it and
+preserve its settings; add or update only the intended policy rules and
+`SPLINTERM_POLICY` entry. Never replace an existing policy with the empty example
+just to enable MCP.
 
 ```bash
-install -d -m 700 "$HOME/.config/splinterm"
-umask 077
-policy_tmp=$(mktemp "$HOME/.config/splinterm/policy.json.XXXXXX")
-cat >"$policy_tmp" <<'JSON'
-{
-  "schema": "splinterm.policy.v2",
-  "rules": []
-}
-JSON
-chmod 600 "$policy_tmp"
-mv -f "$policy_tmp" "$HOME/.config/splinterm/policy.json"
-
-printf 'SPLINTERM_POLICY=%s\n' "$HOME/.config/splinterm/policy.json" \
-  >"$HOME/.config/splinterm/daemon.env"
-chmod 600 "$HOME/.config/splinterm/daemon.env"
+(
+  set -eu
+  umask 077
+  policy="$HOME/.config/splinterm/policy.json"
+  env_file="$HOME/.config/splinterm/daemon.env"
+  for file in "$policy" "$env_file"; do
+    if [ -e "$file" ] || [ -L "$file" ]; then
+      printf 'Refusing to replace %s; review the existing configuration.\n' "$file" >&2
+      exit 1
+    fi
+  done
+  install -d -m 700 "$HOME/.config/splinterm"
+  set -C # Refuse files created by another process after the checks above.
+  printf '{"schema":"splinterm.policy.v2","rules":[]}\n' >"$policy"
+  printf 'SPLINTERM_POLICY=%s\n' "$policy" >"$env_file"
+)
 ```
 
 An empty rule list is the explicit deny-all starting point. Add only reviewed
@@ -141,14 +148,25 @@ Validation enforces the daemon's owner, mode, hard-link, no-symlink, size, JSON,
 and semantic rules. Inspection prints normalized validated JSON; it does not
 query or mutate the running daemon.
 
-After editing, validate first and request a reload through the canonical unit:
+After validating the file, choose the service action according to what changed:
+
+- **Service not running:** `systemctl --user start splinterd.service` loads
+  `daemon.env` and the configured policy.
+- **Added or changed `SPLINTERM_POLICY` in `daemon.env`:** a running daemon needs
+  a restart to receive the new environment. Save your work first. From Foot or
+  another terminal not owned by `splinterd`, run
+  `systemctl --user restart splinterd.service`. **This ends every daemon-owned
+  process.** Reloading cannot change the running daemon's environment.
+- **Only the policy JSON changed, at the already configured path:** reload
+  without restarting shells:
 
 ```bash
 splinterm policy reload
 ```
 
-This command reports only that systemd delivered the reload request. Confirm the
-result through the user journal or authorized bounded audit inspection:
+Reload reports only that systemd delivered the request. Offline `policy inspect`
+prints the file, not the published generation. Confirm the result through the
+user journal or authorized bounded audit inspection:
 
 ```bash
 journalctl --user-unit splinterd.service -n 30 --no-pager

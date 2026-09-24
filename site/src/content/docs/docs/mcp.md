@@ -3,9 +3,9 @@ title: MCP adapter
 description: Install the optional Splinterm MCP adapter, connect a supported host, authorize the minimum required surface, and revoke it safely.
 ---
 
-`splinterm-mcp` is a local, bounded MCP `2025-11-25` stdio server. It presents a fixed catalog of 33 tools plus topology and terminal/control resources over the same daemon-owned topology used by the native client.
+The current `splinterm-mcp` adapter is a local, bounded MCP stdio server supporting `2025-06-18` and `2025-11-25` (preferred). It presents a fixed catalog of 33 tools plus topology and terminal/control resources over the same daemon-owned topology used by the native client.
 
-The adapter is an optional, separately identified third-party client—not a trusted part of `splinterd`. Installing or launching it grants nothing until an owner-controlled policy authorizes its exact executable identity, operations, resources, and limits.
+The adapter is an optional, separately identified third-party client—not a trusted part of `splinterd`. Installing or launching it grants no daemon authority. Unattended access requires owner-controlled policy for its exact executable identity, operations, resources, and limits. Interactive access can instead use `request_lair_access`: the trusted consent UI must receive explicit user approval before granting temporary access to the named Lair.
 
 :::note
 The optional MCP adapter is included in the stable 0.1.0 release. The host examples below document the currently validated local environment, not broad host compatibility or a stable API promise.
@@ -82,7 +82,13 @@ Workspace MCP configuration executes code. Inspect both the configuration and ex
 
 ## 3. Grant the minimum policy
 
-Create `~/.config/splinterm/policy.json` with mode `0600`. This observation-only example authorizes bounded reads and subscriptions for one current Splint incarnation:
+For unattended access, first configure `SPLINTERM_POLICY` in `~/.config/splinterm/daemon.env` using the repository's owner-only setup instructions:
+
+https://github.com/OldJobobo/splinterm/blob/main/docs/headless.md#install-an-owner-only-policy
+
+Configure this before starting the service if possible. Creating `policy.json` alone is not enough, and reloading does not update a running daemon's environment. Changing that environment requires a restart, which ends daemon-owned processes; save work and use a separate terminal first.
+
+Edit `~/.config/splinterm/policy.json` with mode `0600`, preserving existing rules unless you intend to replace them. This observation-only example authorizes bounded reads and subscriptions for one current Splint incarnation:
 
 ```json
 {
@@ -121,16 +127,26 @@ This rule cannot send input, resize, spawn, restore, terminate, rename, or inspe
 
 Lair and Dojo selectors snapshot only descendants present when that policy generation is published. New descendants remain denied until a reviewed reload.
 
-## 4. Validate and reload
+## 4. Validate and activate
+
+Validate and inspect the policy file offline:
 
 ```bash
-chmod 600 ~/.config/splinterm/policy.json
-splinterm policy validate ~/.config/splinterm/policy.json
-systemctl --user reload splinterd.service
-splinterm policy inspect
+chmod 600 "$HOME/.config/splinterm/policy.json"
+splinterm policy validate "$HOME/.config/splinterm/policy.json"
+splinterm policy inspect "$HOME/.config/splinterm/policy.json"
 ```
 
-No policy, a different digest, missing scope, wrong resource or incarnation, stale revision, missing destructive confirmation, exceeded limit, or controller owned by another client fails closed. MCP transport access is not authority.
+If the running daemon already has the correct `SPLINTERM_POLICY` environment, reload the edited JSON:
+
+```bash
+systemctl --user reload splinterd.service
+journalctl --user-unit splinterd.service -n 30 --no-pager
+```
+
+For first startup or a changed environment, follow the service steps in the headless guide above instead. Check the journal for acceptance: `policy inspect` reads the file, not the daemon's published generation.
+
+Policy-authorized operations fail closed if there is no policy, the digest differs, a scope is missing, the resource or incarnation is wrong, the revision is stale, destructive confirmation is missing, a limit is exceeded, or another client owns the controller. MCP transport access is not authority.
 
 ## Fixed capabilities and limits
 
@@ -164,7 +180,7 @@ Reload disconnects affected daemon sessions and invalidates their connection-own
 
 1. Confirm `/usr/bin/splinterm-mcp` exists and its digest matches policy.
 2. Confirm the daemon socket belongs to the same user and `splinterd` is running.
-3. Validate policy and inspect the published generation.
+3. Run `splinterm policy validate "$HOME/.config/splinterm/policy.json"`, confirm the daemon started with the intended `SPLINTERM_POLICY`, and check its journal for policy acceptance.
 4. Reconcile `unauthorized`, `stale_topology`, `stale_incarnation`, controller denial, timeout, and `resync_required`; do not retry blindly or broaden policy.
 5. Keep stdout reserved for MCP frames. Bounded diagnostics are written to stderr.
 

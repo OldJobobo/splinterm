@@ -171,14 +171,15 @@ stale targets rather than acting on a replacement process.
 
 ```bash
 splinterm snapshot SPLINT_ID
-splinterm scrollback SPLINT_ID --max-rows 32
+splinterm scrollback SPLINT_ID --max-rows 16
 splinterm search SPLINT_ID 'failed' --max-results 20
 splinterm send SPLINT_ID $'printf "ready\\n"\n'
 splinterm resize SPLINT_ID 120 40
 ```
 
 Terminal reads carry exact Splint, incarnation, terminal revision, and history
-generation. Continuation cursors are opaque. Public machine records contain
+generation. Scrollback pages contain at most 16 rows; pass the returned opaque
+continuation cursor with `--cursor` to read another page. Public machine records contain
 semantic Unicode cells, not raw daemon frames. Input and search bodies are never
 copied into bounded audit metadata.
 
@@ -214,6 +215,25 @@ reload is atomic, disconnects automation-role clients, and fails closed to a new
 deny-all generation if the configured document is rejected. Read
 [Automation](automation.md) and [Headless operation](headless.md) before changing
 policy.
+
+## Local diagnostics
+
+```bash
+splinterm diagnostics
+splinterm diagnostics --last-exit
+splinterm diagnostics --last-crash
+```
+
+The summary reports executable identities, build information, service status,
+retained client exits, and available correlated daemon or systemd crash evidence.
+`--last-exit` reads the last graphical client exit; `--last-crash` selects the
+newest retained panic or externally inferred systemd crash. The flags are
+mutually exclusive. Missing evidence is reported as unavailable, not as proof
+of a clean exit.
+
+Diagnostics are local and human-only: they reject `--remote` and machine-output
+options, do not map a Window or restart the daemon, and may prune old diagnostic
+files under the retention policy.
 
 ## Configuration, keymaps, and remotes
 

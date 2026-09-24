@@ -382,7 +382,9 @@ running Dojo opens or activates its tab; New Terminal creates a fresh
 Lair and opens its initial Dojo as a tab. One Window accepts at most 32 distinct
 Dojo tabs, may mix Lairs, and does not restore tab order after exit. Tabs use a
 sanitized Dojo label unless ambiguity requires sanitized `Lair / Dojo` context.
-Closing a tab never closes its Dojo or Splints. The overlay adapts to compact and minimal
+Closing a persistent tab never closes its Dojo or Splints. Closing the final tab
+also closes the Window; if it owns a transient XDG Lair, that disconnect ends
+the transient work. The overlay adapts to compact and minimal
 sizes, and vertical wheel or touchpad scrolling navigates hidden actions without
 reaching terminal history or mouse reporting.
 

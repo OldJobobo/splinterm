@@ -1,9 +1,9 @@
 # Architecture
 
-[ADR 0001](adr/0001-foot-rust-port.md) establishes Foot as the authoritative
-implementation and behavioral foundation for Splinterm's Rust terminal port.
-The boundaries below reorganize ownership for persistence; they do not replace
-Foot with another terminal engine.
+[ADR 0001](adr/0001-foot-rust-port.md) establishes Foot as the source and
+behavioral foundation for Splinterm's Rust terminal port. Splinterm-owned tests
+and fixtures are release authority under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
+the pinned Foot implementation remains an optional historical differential.
 
 Splinterm has two lifetimes: the graphical client may come and go, while the
 daemon owns terminal processes and session state. A third-party automation
@@ -37,7 +37,9 @@ This crate must not depend on Wayland, async runtimes, PTYs, or a wire format.
 Request/response types shared by both processes. The current development
 protocol uses bounded length-prefixed JSON frames, version-range negotiation,
 request IDs, peer-UID verification, stable errors, and explicit subscription
-resynchronization. Protocol v27 carries closed access scopes, grant status,
+resynchronization. The private protocol version is declared by `PROTOCOL_VERSION`
+in `crates/splinterm-protocol/src/lib.rs`; it is not the public schema major.
+The protocol carries closed access scopes, grant status,
 revocation events, bounded direct command argv/working-directory/shell launch
 fields, semantic terminal updates, topology and history generations, stable row
 IDs, revision-bound scrollback/search pages, visible-row identity, and bounded
@@ -48,8 +50,9 @@ terminal and daemon runtime structs.
 ### `splinterd`
 
 Owns the authoritative Topology and all PTY file descriptors, child
-processes, scrollback, and durable snapshots. Clients should be disposable
-without ending sessions. The daemon must not depend on Wayland and should run
+processes, scrollback, and durable metadata snapshots. Persistent Lairs survive
+client disconnection; transient XDG command Lairs instead end when their initial
+command exits or their owning connection disconnects. The daemon must not depend on Wayland and should run
 on headless Linux hosts such as `neuromancer`.
 
 For ungranted terminal access, the daemon launches a disposable sibling
@@ -108,11 +111,15 @@ backing/Wayland SHM path, clipped independently per pane. Public automation,
 audit, and relay records never expose image bodies. See [images.md](images.md)
 for the compatibility and resource matrix.
 
-The graphical identity is fixed to `com.oldjobobo.splinterm` across Wayland and
-desktop metadata. `splinterm launch` is the `xdg-terminal-exec` boundary.
-Client-owned configuration controls renderer/window policy; a generated,
-project-owned theme maps Omarchy roles and reloads without mutating daemon
-terminal state or process lifetime.
+The normal graphical identity is `com.oldjobobo.splinterm`. The packaged
+`splinterm-xdg-terminal-exec` adapter invokes the private `splinterm xdg-launch`
+entry point, preserving structured arguments and an optional XDG app ID. A
+commandless XDG launch is persistent; a command-bearing one is transient.
+Native `splinterm launch -- COMMAND...` remains persistent.
+Client-owned configuration controls renderer/window policy. With `main.theme`
+unset, the client reads Omarchy's effective `foot.ini` and `colors.toml` directly
+and reloads valid palette changes without changing daemon terminal state or
+process lifetime. A generated JSON theme is an optional explicit override.
 
 A daemon `Dojo` is persistent topology, not a compositor-native surface.
 Automation may create or mutate Dojos and their Splint trees without mapping a
@@ -308,8 +315,8 @@ The local Foot source at `~/Playground/foot` suggests useful subsystem seams:
 | Foot area | Splinterm destination |
 | --- | --- |
 | `client.c`, `server.c`, `client-protocol.h` | protocol + daemon transport |
-| `terminal.c`, `commands.c`, `csi.c`, `osc.c`, `dcs.c` | future terminal engine crate |
-| `grid.c` | future screen/scrollback model |
+| `terminal.c`, `commands.c`, `csi.c`, `osc.c`, `dcs.c` | `splinterm-terminal` parser and terminal engine |
+| `grid.c` | `splinterm-terminal` screen and scrollback model |
 | `slave.c`, `spawn.c`, `reaper.c` | daemon PTY/process ownership |
 | `render.c`, `shm.c` | client renderer |
 | Wayland/input/IME modules | client platform layer |
@@ -320,7 +327,8 @@ Wayland client's lifetime.
 
 ## Near-term invariants
 
-1. A client crash must not terminate a splint.
+1. A client crash must not terminate a Splint in a persistent Lair. A transient
+   XDG Lair must terminate when its owning client disconnects.
 2. Persistent state has one writer: `splinterd`.
 3. Domain types do not know about rendering or transport.
 4. The protocol is versioned and rejects incompatible peers.

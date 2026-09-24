@@ -14,8 +14,10 @@ work. See [CLI reference](cli.md) for the complete command inventory and
   client-local tabs, including Dojos from different Lairs.
 
 `splinterd` owns Lairs, Dojos, Splints, shells, layouts, terminal state, and
-scrollback. `splinterm` displays and controls that state. Closing a Window or tab
-detaches a view; it does not terminate the corresponding daemon resources.
+scrollback. `splinterm` displays and controls that state. Closing a persistent
+Window or tab detaches a view without terminating its daemon resources.
+**Command-bearing XDG Windows are different:** their Lairs are transient;
+closing the owning Window terminates their processes and removes their topology.
 
 ## Start, detach, and return
 
@@ -25,8 +27,12 @@ Open a fresh terminal through the installed desktop entry or XDG launcher:
 splinterm-xdg-terminal-exec
 ```
 
-The normal launch creates a fresh Lair with one Dojo and one live Splint. Closing
-the Window leaves the work running in `splinterd`.
+This commandless launch creates a fresh persistent Lair with one Dojo and one
+live Splint. Closing the Window leaves the work running in `splinterd`.
+When another application supplies a command to the XDG launcher, its Lair instead
+ends when the initial command exits or the owning Window disconnects. Transient
+Lairs do not enter Recent Dojos or saved state. Use native
+`splinterm launch -- COMMAND...` when an explicit command must remain persistent.
 
 Return through the native recent-Dojo workflow:
 
@@ -85,9 +91,10 @@ new tab opens. Right-clicking a visible tab opens a tab-targeted menu for Rename
 Activate Tab, New Dojo, detach-only Close Tab, detach-only Close Other Tabs, and
 confirmed Terminate Dojo. Opening the menu does not first activate its tab.
 
-**Detach and terminate are different operations.** Closing tabs or Windows is
-client-local. Terminating a Dojo is a named, confirmed daemon mutation and ends
-its pane processes.
+**Detach and terminate are different operations for persistent work.** Closing
+persistent tabs or Windows is client-local. Closing a transient XDG command
+Window ends its Lair instead. Terminating a Dojo is a named, confirmed daemon
+mutation and ends its pane processes.
 
 ## Panes and layouts
 
@@ -190,12 +197,12 @@ preserves follow-live behavior when returning with `Shift+End`.
 The CLI can also read bounded history pages and search without mapping a Window:
 
 ```bash
-splinterm scrollback SPLINT_ID --max-rows 32
+splinterm scrollback SPLINT_ID --max-rows 16
 splinterm search SPLINT_ID 'literal text'
 ```
 
-Use opaque continuation cursors returned by machine output rather than inventing
-positions. See [CLI reference](cli.md#terminal-observation-and-input).
+Each scrollback page contains at most 16 rows. Use opaque continuation cursors
+returned by machine output to read further pages rather than inventing positions. See [CLI reference](cli.md#terminal-observation-and-input).
 
 ## Control ownership
 

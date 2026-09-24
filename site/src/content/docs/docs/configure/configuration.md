@@ -15,7 +15,8 @@ Start from the repository example at `config/splinterm/config.ini`. Set `SPLINTE
 
 ```ini
 [main]
-font=JetBrains Mono Nerd Font:style=Regular
+# Leave font unset to follow the system's fontconfig monospace family.
+# font=JetBrains Mono Nerd Font:style=Regular
 font-pixelsize=14
 font-sizing-policy=output-scale
 padding-left=12
@@ -53,13 +54,13 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 
 | Key | Meaning | Default or range |
 | --- | --- | --- |
-| `main.font` | fontconfig pattern | JetBrains Mono Nerd Font Regular |
+| `main.font` | explicit fontconfig pattern; disables live family following | unset; follows `monospace` |
 | `main.font-pixelsize` | pixel font size | 6–96; 14 |
 | `main.font-point-size` | alternative point size | 6–96; unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` | `output-scale` |
 | `main.padding-*` | four independent logical edges | 0–10000; 12 |
-| `main.initial-columns` | initial grid columns | 2–240; 80 |
-| `main.initial-rows` | initial grid rows | 2–80; 24 |
+| `main.initial-columns` | initial grid columns | 2–480; 80 |
+| `main.initial-rows` | initial grid rows | 2–128; 24 |
 | `main.shell` | executable for an empty launch | account login shell |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
 | `cursor.style` | `block`, `beam`, or `underline` | `block` |
@@ -72,6 +73,12 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `presets.allow-unrestricted-commands` | enable packaged `c`, `cx`, `cy` aliases | `no` |
 
 ## Font sizing and Wayland scale
+
+With `main.font` unset, graphical clients follow fontconfig's effective
+`monospace` family live. An explicit pattern—even `font=monospace`—disables
+that following. Valid family changes preserve configured size and runtime zoom;
+invalid live changes retain the last valid font. JetBrains Mono Nerd Font is a
+startup fallback if native family resolution fails, not the default selection.
 
 The default `main.font-sizing-policy=output-scale` follows Wayland compositor output geometry, including fractional output scale. Choose `physical-dpi` when point-sized fonts should instead follow the output's reported mode and physical-size DPI.
 
