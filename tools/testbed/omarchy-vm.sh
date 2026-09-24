@@ -495,8 +495,12 @@ cleanup_failed_launch() {
   [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
   [[ -z $daemon_pid ]] || wait "$daemon_pid" 2>/dev/null || true
   if [[ $created_runtime == true && -e $window_state ]]; then
-    python "$package_root/source/tools/testbed/guest-window.py" restore \
-      --state "$window_state" || true
+    if ! python "$package_root/source/tools/testbed/guest-window.py" restore \
+      --state "$window_state"; then
+      printf 'guest restoration failed; private state retained for package-stop: %s\n' \
+        "$runtime" >&2
+      return 1
+    fi
   fi
   # The preflight rejects existing paths; remove only directories this launch made.
   [[ $created_config == false ]] || rm -rf -- "$config"

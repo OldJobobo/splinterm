@@ -172,6 +172,10 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             section.index('guest-window.py" restore'),
             section.index('rm -rf -- "$runtime"'),
         )
+        self.assertLess(
+            section.index("return 1"),
+            section.index('rm -rf -- "$runtime"'),
+        )
         script = "\n".join(
             (
                 "set -euo pipefail",
@@ -181,13 +185,15 @@ class OmarchyVmRunnerTests(unittest.TestCase):
                 'config="$TEST_CONFIG"',
                 'window_state="$runtime/guest-window.json"',
                 section,
-                'if [[ $TEST_FAILURE == late ]]; then printf "prepared\\n" >"$window_state"; fi',
+                'if [[ $TEST_FAILURE == late || $TEST_FAILURE == restore ]]; then printf "prepared\\n" >"$window_state"; fi',
                 "false",
             )
         )
-        for failure in ("early", "late", "partial"):
+        validation = ROOT / ".validation"
+        validation.mkdir(exist_ok=True)
+        for failure in ("early", "late", "partial", "restore"):
             with self.subTest(failure=failure):
-                with tempfile.TemporaryDirectory(dir=ROOT / ".validation") as temporary:
+                with tempfile.TemporaryDirectory(dir=validation) as temporary:
                     base = Path(temporary)
                     package_root = base / "package"
                     package_root.mkdir()
@@ -205,6 +211,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
                         "#!/bin/sh\n"
                         'test -f "$TEST_RUNTIME/guest-window.json" || exit 1\n'
                         'printf "%s\\n" "$@" >"$TEST_RESTORE_LOG"\n'
+                        'if [ "$TEST_FAILURE" = restore ]; then exit 17; fi\n'
                     )
                     python.chmod(0o755)
                     runtime = base / "runtime"
@@ -235,13 +242,23 @@ class OmarchyVmRunnerTests(unittest.TestCase):
                         check=False,
                     )
                     self.assertNotEqual(result.returncode, 0, result.stdout)
-                    self.assertFalse(runtime.exists(), result.stderr)
-                    self.assertFalse(config.exists(), result.stderr)
-                    if failure == "partial":
-                        self.assertEqual((state / "existing").read_text(), "preserve me")
+                    if failure == "restore":
+                        self.assertIn("private state retained", result.stderr)
+                        self.assertTrue((runtime / "guest-window.json").exists())
+                        self.assertEqual(
+                            (runtime / "testbed-root").read_text().strip(),
+                            str(package_root),
+                        )
+                        self.assertTrue(state.exists())
+                        self.assertTrue(config.exists())
                     else:
-                        self.assertFalse(state.exists(), result.stderr)
-                    if failure == "late":
+                        self.assertFalse(runtime.exists(), result.stderr)
+                        self.assertFalse(config.exists(), result.stderr)
+                        if failure == "partial":
+                            self.assertEqual((state / "existing").read_text(), "preserve me")
+                        else:
+                            self.assertFalse(state.exists(), result.stderr)
+                    if failure in ("late", "restore"):
                         self.assertIn("restore", restore_log.read_text())
                     else:
                         self.assertFalse(restore_log.exists())
