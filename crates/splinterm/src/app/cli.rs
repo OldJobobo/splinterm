@@ -419,7 +419,14 @@ async fn run_headless(
             };
             require_expected_incarnation(&snapshot, target_splint_id, expected_incarnation)?;
             let expected_topology_revision = snapshot.revision;
-            let cwd = endpoint_launch_cwd(factory, cwd)?;
+            let cwd = match cwd {
+                Some(cwd) => Some(cwd),
+                None if factory.is_local() => Some(
+                    super::session_catalog::source_splint_cwd(&mut connection, target_splint_id)
+                        .await?,
+                ),
+                None => None,
+            };
             let request = match factory.capabilities().launch_semantics {
                 LaunchSemantics::LocalTrusted => Request::SplitSplint {
                     expected_topology_revision,

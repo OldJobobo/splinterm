@@ -1952,7 +1952,7 @@ mod tests {
         let layout = tab_context_menu_layout(bounds, (240, 40), &TAB_MENU_ACTIONS, 0).unwrap();
         let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
-            focused_cwd: "/tmp".into(),
+            source_splint_id: SplintId::new(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
             pane_count: 2,
@@ -2049,7 +2049,6 @@ mod tests {
         let state = CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
             lair_retention: splinterm_core::LairRetention::Disposable,
-            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
             pane_count: 1,

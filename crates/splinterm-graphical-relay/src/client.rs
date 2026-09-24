@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
     task::{Context as TaskContext, Poll},
 };
 
@@ -60,6 +63,9 @@ struct ClientState {
     incoming_session_bytes: Arc<Semaphore>,
     channel_slots: Arc<Semaphore>,
     routes: Mutex<HashMap<u32, Route>>,
+    // IDs never repeat. Live routes take precedence; this watermark remembers
+    // local closes without retaining one tombstone per channel for the session.
+    locally_closed_through: AtomicU32,
     allocator: Mutex<ChannelIdAllocator>,
     failure: Mutex<Option<String>>,
     cancellation: CancellationToken,
@@ -96,6 +102,8 @@ impl ClientState {
         if let Ok(mut routes) = self.routes.lock()
             && let Some(mut route) = routes.remove(&channel_id)
         {
+            self.locally_closed_through
+                .fetch_max(channel_id, Ordering::Relaxed);
             route.incoming_cancellation.cancel();
             if let Some(opened) = route.opened.take() {
                 let _ = opened.send(Err(
@@ -176,6 +184,7 @@ impl ClientMultiplexer {
             incoming_session_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_BYTES)),
             channel_slots: Arc::new(Semaphore::new(MAX_LOGICAL_CHANNELS)),
             routes: Mutex::new(HashMap::new()),
+            locally_closed_through: AtomicU32::new(0),
             allocator: Mutex::new(ChannelIdAllocator::default()),
             failure: Mutex::new(None),
             cancellation: CancellationToken::new(),
@@ -412,9 +421,20 @@ fn send_incoming_data(
         .routes
         .lock()
         .map_err(|_| "graphical relay route table is poisoned".to_owned())?;
-    let route = routes
-        .get(&channel_id)
-        .ok_or_else(|| "data targeted an unknown graphical relay channel".to_owned())?;
+    let Some(route) = routes.get(&channel_id) else {
+        // A local close can overtake data already queued by the remote peer.
+        // Never charge those bytes to a closed channel or fail its siblings.
+        // Zero and IDs above the last local close remain protocol errors.
+        // Retired IDs below the watermark may also be discarded: the wire has
+        // no close acknowledgement, so exact tombstones would grow forever.
+        return if channel_id != 0
+            && channel_id <= state.locally_closed_through.load(Ordering::Relaxed)
+        {
+            Ok(())
+        } else {
+            Err("data targeted an unknown graphical relay channel".to_owned())
+        };
+    };
     if route.opened.is_some() {
         return Err("data preceded graphical relay channel admission".to_owned());
     }
@@ -901,6 +921,7 @@ mod tests {
                 incoming_session_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_BYTES)),
                 channel_slots: Arc::new(Semaphore::new(MAX_LOGICAL_CHANNELS)),
                 routes: Mutex::new(HashMap::new()),
+                locally_closed_through: AtomicU32::new(0),
                 allocator: Mutex::new(ChannelIdAllocator::default()),
                 failure: Mutex::new(None),
                 cancellation: CancellationToken::new(),
@@ -1179,6 +1200,52 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_flight_data_after_local_close_does_not_kill_sibling() {
+        time::timeout(Duration::from_secs(2), async {
+            let (client, mut server) = test_client(64 * 1024).await;
+            let first = test_open(&client, &mut server).await;
+            let mut sibling = test_open(&client, &mut server).await;
+            let first_id = first.channel_id();
+            let sibling_id = sibling.channel_id();
+            drop(first);
+            write_frame(
+                &mut server,
+                &Frame::Data {
+                    channel_id: first_id,
+                    bytes: b"late".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut server,
+                &Frame::Data {
+                    channel_id: sibling_id,
+                    bytes: b"still here".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+            let mut received = [0; 10];
+            sibling.read_exact(&mut received).await.unwrap();
+            assert_eq!(&received, b"still here");
+            assert_eq!(client.terminal_failure(), None);
+            assert!(
+                dispatch_frame(
+                    &client.handle.state,
+                    Frame::Data {
+                        channel_id: sibling_id + 1,
+                        bytes: b"invalid".to_vec(),
+                    }
+                )
+                .is_err()
+            );
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -1,7 +1,5 @@
 //! Platform-independent built-in command-palette state.
 
-use std::path::PathBuf;
-
 use splinterm_core::{Axis, DojoId, LairId, LairRetention, SplintId};
 
 use super::{ExplorerContextTarget, SessionPickerTarget};
@@ -465,7 +463,7 @@ pub(crate) enum TabMenuActionId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TabMenuContext {
     pub(crate) lair_id: LairId,
-    pub(crate) focused_cwd: PathBuf,
+    pub(crate) source_splint_id: SplintId,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
     pub(crate) pane_count: usize,
@@ -597,7 +595,7 @@ impl TabContextMenuUi {
     pub(crate) fn for_explorer(
         view: &NavigationExplorerView,
         node: NavigationNodeId,
-        cwd: Option<PathBuf>,
+        source_splint_id: Option<SplintId>,
         pane_controlled: bool,
         has_tab_capacity: bool,
     ) -> Option<Self> {
@@ -637,14 +635,14 @@ impl TabContextMenuUi {
                 ));
                 if has_tab_capacity
                     && lair.can_create_dojo
-                    && let Some(cwd) = cwd
+                    && let Some(source_splint_id) = source_splint_id
                 {
                     entries.push((
                         TabMenuActionId::NewDojo,
                         WindowTopologyCommand::PickerNewDojo {
                             topology_revision: view.topology_revision,
                             lair_id,
-                            cwd,
+                            source_splint_id,
                         },
                     ));
                 }
@@ -1017,7 +1015,7 @@ pub(crate) fn tab_menu_dispatch(
         TabMenuActionId::NewDojo => {
             Some(TabMenuDispatch::Topology(WindowTopologyCommand::NewDojo {
                 lair_id: context.lair_id,
-                cwd: context.focused_cwd.clone(),
+                source_splint_id: context.source_splint_id,
             }))
         }
         TabMenuActionId::CloseTab => {
@@ -1269,7 +1267,6 @@ impl CommandTabMoveAvailability {
 pub(crate) struct CommandPaletteContext {
     pub(crate) lair_id: LairId,
     pub(crate) lair_retention: LairRetention,
-    pub(crate) focused_cwd: PathBuf,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
     pub(crate) pane_count: usize,
@@ -2078,7 +2075,7 @@ pub(crate) fn command_dispatch(
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
         BuiltInCommandId::NewSession => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewLair {
-                cwd: context.focused_cwd.clone(),
+                source_splint_id: context.splint_id,
             })
         }
         BuiltInCommandId::RenameCurrentTab => {
@@ -2087,7 +2084,7 @@ pub(crate) fn command_dispatch(
         BuiltInCommandId::NewDojo => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewDojo {
                 lair_id: context.lair_id,
-                cwd: context.focused_cwd.clone(),
+                source_splint_id: context.splint_id,
             })
         }
         BuiltInCommandId::ChooseDojo => {
@@ -2296,7 +2293,6 @@ mod tests {
         CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
             lair_retention: LairRetention::Disposable,
-            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "current".to_owned(),
             pane_count: 3,
@@ -2434,7 +2430,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let menu = |view: &NavigationExplorerView, node, controlled| {
-            TabContextMenuUi::for_explorer(view, node, Some("/tmp".into()), controlled, true)
+            TabContextMenuUi::for_explorer(view, node, Some(SplintId::new()), controlled, true)
                 .unwrap()
         };
         let lair = view.lairs[0].id;
@@ -2505,7 +2501,8 @@ mod tests {
         assert!(!ids(&menu(&view, lair, false)).contains(&TabMenuActionId::NewDojo));
         view.freshness = crate::navigation_projection::EndpointFreshness::Stale;
         assert!(
-            TabContextMenuUi::for_explorer(&view, lair, Some("/tmp".into()), true, true).is_none()
+            TabContextMenuUi::for_explorer(&view, lair, Some(SplintId::new()), true, true)
+                .is_none()
         );
     }
 
@@ -2517,7 +2514,7 @@ mod tests {
         view.lairs[0].dojos[0].active_here = false;
         view.lairs[0].dojos[0].target.capability.action = NavigationAction::AttachDojo;
         let menu = |view: &NavigationExplorerView| {
-            TabContextMenuUi::for_explorer(view, node, Some("/tmp".into()), true, true).unwrap()
+            TabContextMenuUi::for_explorer(view, node, Some(SplintId::new()), true, true).unwrap()
         };
         assert!(menu(&view).action_enabled(TabMenuActionId::ActivateTab));
         assert!(!menu(&view).action_enabled(TabMenuActionId::CloseTab));
@@ -2643,7 +2640,7 @@ mod tests {
         let other_dojo_ids = vec![DojoId::new(), DojoId::new()];
         let context = TabMenuContext {
             lair_id: LairId::new(),
-            focused_cwd: "/tmp".into(),
+            source_splint_id: SplintId::new(),
             dojo_id: DojoId::new(),
             dojo_name: "captured".to_owned(),
             pane_count: 3,
@@ -2656,6 +2653,13 @@ mod tests {
             other_dojo_ids: other_dojo_ids.clone(),
         };
         let mut menu = TabContextMenuUi::new(context.clone());
+        assert_eq!(
+            menu.dispatch(TabMenuActionId::NewDojo),
+            Some(TabMenuDispatch::Topology(WindowTopologyCommand::NewDojo {
+                lair_id: context.lair_id,
+                source_splint_id: context.source_splint_id,
+            }))
+        );
         assert_eq!(menu.selected_action(), TabMenuActionId::RenameTab);
         assert!(menu.move_selection(-1));
         assert_eq!(menu.selected_action(), TabMenuActionId::TerminateDojo);
@@ -3038,7 +3042,7 @@ mod tests {
             command_dispatch(BuiltInCommandId::NewSession, &context),
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::NewLair {
-                    cwd: context.focused_cwd.clone(),
+                    source_splint_id: context.splint_id,
                 }
             ))
         );
@@ -3047,7 +3051,7 @@ mod tests {
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::NewDojo {
                     lair_id: context.lair_id,
-                    cwd: context.focused_cwd.clone(),
+                    source_splint_id: context.splint_id,
                 }
             ))
         );

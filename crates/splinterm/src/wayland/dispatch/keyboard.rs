@@ -214,10 +214,10 @@ impl KeyboardHandler for App {
                         .tabs
                         .previous()
                         .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
-                    TabShortcutAction::NewDojo => match self.focused_cwd() {
-                        Ok(cwd) => Some(WindowTopologyCommand::NewDojo {
+                    TabShortcutAction::NewDojo => match self.focused_cwd_source() {
+                        Ok(source_splint_id) => Some(WindowTopologyCommand::NewDojo {
                             lair_id: self.tab_state.active_identity.lair_id,
-                            cwd,
+                            source_splint_id,
                         }),
                         Err(error) => {
                             self.scheduling.fail(error);
@@ -334,8 +334,8 @@ impl KeyboardHandler for App {
                 return;
             }
             let command = match shortcut.expect("matched Lair action") {
-                ActionId::NewSession => match self.focused_cwd() {
-                    Ok(cwd) => WindowTopologyCommand::NewLair { cwd },
+                ActionId::NewSession => match self.focused_cwd_source() {
+                    Ok(source_splint_id) => WindowTopologyCommand::NewLair { source_splint_id },
                     Err(error) => {
                         self.scheduling.fail(error);
                         return;

@@ -63,7 +63,7 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/LICENSE",
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
-PRIVATE_PROTOCOL_VERSION = 35
+PRIVATE_PROTOCOL_VERSION = 36
 
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",

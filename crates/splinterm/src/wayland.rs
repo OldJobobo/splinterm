@@ -153,14 +153,15 @@ use crate::pane::{
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
     ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
-    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, PickerHitTarget, RenderContext,
-    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
-    SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
-    background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
-    dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout,
-    lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
-    lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
-    paint_lair_explorer, paint_session_picker_overlay, paint_snapshot_overlays,
+    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, LairExplorerPresentationMode,
+    PickerHitTarget, RenderContext, SessionPickerOverlayLayout, SessionPickerPurpose,
+    SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame, SnapshotOverlays,
+    TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
+    fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
+    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
+    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_lair_explorer,
+    paint_search_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
     paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
     paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
     session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
@@ -860,6 +861,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             initial_columns: options.initial_columns,
             explorer_layout: None,
             explorer_text_cache: SessionPickerTextCache::default(),
+            search_text_cache: SessionPickerTextCache::default(),
             explorer_visible_start: 0,
             explorer_pressed: None,
             full_redraw: true,
@@ -1972,6 +1974,7 @@ struct PresentationState {
     initial_columns: u16,
     explorer_layout: Option<LairExplorerLayout>,
     explorer_text_cache: SessionPickerTextCache,
+    search_text_cache: SessionPickerTextCache,
     explorer_visible_start: usize,
     explorer_pressed: Option<ExplorerPointerPress>,
     full_redraw: bool,
@@ -2677,6 +2680,25 @@ fn reduced_motion_requested() -> bool {
         .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
 }
 
+fn search_paint_rect(content: Rect, explorer: Option<&LairExplorerLayout>) -> Option<Rect> {
+    let Some(explorer) =
+        explorer.filter(|layout| layout.mode == LairExplorerPresentationMode::Drawer)
+    else {
+        return Some(content);
+    };
+    let right = content.x.saturating_add(content.width);
+    let left = explorer
+        .panel
+        .x
+        .saturating_add(explorer.panel.width)
+        .max(content.x);
+    (left < right).then_some(Rect {
+        x: left,
+        width: right.saturating_sub(left),
+        ..content
+    })
+}
+
 fn window_title(
     snapshot_title: Option<&str>,
     controller_active: bool,
@@ -3067,7 +3089,7 @@ const fn session_picker_title(selector_kind: Option<SelectorKind>) -> &'static s
 fn session_picker_new_command(
     selector_kind: Option<SelectorKind>,
     lair_id: LairId,
-    cwd: PathBuf,
+    source_splint_id: SplintId,
     target: SessionPickerCreationTarget,
 ) -> Result<WindowTopologyCommand> {
     match (selector_kind, target.action) {
@@ -3075,13 +3097,13 @@ fn session_picker_new_command(
             Ok(WindowTopologyCommand::PickerNewDojo {
                 topology_revision: target.topology_revision,
                 lair_id,
-                cwd,
+                source_splint_id,
             })
         }
         (Some(SelectorKind::Lair) | None, NavigationAction::CreateLair) => {
             Ok(WindowTopologyCommand::PickerNewLair {
                 topology_revision: target.topology_revision,
-                cwd,
+                source_splint_id,
             })
         }
         _ => anyhow::bail!("picker creation target disagrees with picker purpose"),
@@ -5068,17 +5090,20 @@ impl App {
             && self.input.divider_drag.is_none()
     }
 
-    fn focused_cwd(&self) -> Result<std::path::PathBuf> {
+    fn focused_cwd_source(&self) -> Result<SplintId> {
         let focused = self
             .panes
             .focused_splint()
-            .context("focused cwd requires a focused Splint")?;
-        self.panes
-            .layout
-            .as_ref()
-            .and_then(|layout| layout.find_splint(focused))
-            .map(|splint| splint.cwd.clone())
-            .context("focused Splint is absent from authoritative topology")
+            .context("cwd inheritance requires a focused Splint")?;
+        anyhow::ensure!(
+            self.panes
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.find_splint(focused))
+                .is_some(),
+            "focused Splint is absent from authoritative topology"
+        );
+        Ok(focused)
     }
 
     fn show_command_palette(&mut self) -> Result<()> {
@@ -5115,7 +5140,6 @@ impl App {
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
             lair_retention: self.tab_state.active_identity.lair_retention,
-            focused_cwd: self.focused_cwd()?,
             dojo_id: active_dojo_id,
             dojo_name: self.tab_state.active_identity.dojo_name.clone(),
             pane_count: 1_usize.saturating_add(self.panes.inactive_panes.len()),
@@ -5522,7 +5546,7 @@ impl App {
                         self.panes.pane.search.input = Some(new_search_editor());
                         self.panes.pane.search.matches.clear();
                         self.panes.pane.search.next_cursor = None;
-                        self.update_window_title();
+                        self.refresh_search_overlay(queue_handle);
                     }
                     CommandHistoryAction::PageUp | CommandHistoryAction::PageDown => {
                         let page = self
@@ -5687,7 +5711,7 @@ impl App {
         TabContextMenuUi::for_explorer(
             view,
             node,
-            self.focused_cwd().ok(),
+            self.focused_cwd_source().ok(),
             pane_controlled,
             self.tab_state.tabs.len() < crate::tab::MAX_WINDOW_TABS,
         )
@@ -5746,7 +5770,7 @@ impl App {
         self.show_context_menu(
             TabContextMenuUi::new(TabMenuContext {
                 lair_id: identity.lair_id,
-                focused_cwd: self.focused_cwd()?,
+                source_splint_id: self.focused_cwd_source()?,
                 dojo_id,
                 dojo_name: identity.dojo_name,
                 pane_count,
@@ -6415,6 +6439,7 @@ impl App {
         self.presentation.frame_titles.clear();
         self.modal.session_picker_text_cache.clear();
         self.presentation.explorer_text_cache.clear();
+        self.presentation.search_text_cache.clear();
         self.modal.command_palette_text_cache.clear();
         self.modal.dojo_prompt_text_cache.clear();
         self.modal.tab_context_menu_text_cache.clear();
@@ -6692,7 +6717,7 @@ impl App {
                         }
                         (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
                             lair_id: self.tab_state.active_identity.lair_id,
-                            cwd: self.focused_cwd()?,
+                            source_splint_id: self.focused_cwd_source()?,
                         }),
                         _ => None,
                     };
@@ -7209,8 +7234,8 @@ impl App {
             let selector_kind = self.modal.selector_kind;
             let command = match decision {
                 SessionPickerDecision::New => {
-                    let cwd = match self.focused_cwd() {
-                        Ok(cwd) => cwd,
+                    let source_splint_id = match self.focused_cwd_source() {
+                        Ok(source_splint_id) => source_splint_id,
                         Err(error) => {
                             self.scheduling.fail(error);
                             return;
@@ -7225,7 +7250,7 @@ impl App {
                     match session_picker_new_command(
                         selector_kind,
                         self.tab_state.active_identity.lair_id,
-                        cwd,
+                        source_splint_id,
                         target,
                     ) {
                         Ok(command) => command,
@@ -7294,6 +7319,18 @@ impl App {
                 self.panes.pane.pending_control_transfer.is_some(),
                 Some(&self.panes.pane.search),
             ));
+        }
+    }
+
+    fn refresh_search_overlay(&mut self, queue_handle: &QueueHandle<Self>) {
+        self.update_window_title();
+        for buffer in &mut self.surface.buffers {
+            buffer.stale.mark_full();
+        }
+        if self.surface.configured
+            && let Err(error) = self.schedule_draw(queue_handle)
+        {
+            self.scheduling.fail(error);
         }
     }
 
@@ -7792,7 +7829,7 @@ impl App {
                 } else if let Some(cursor) = self.panes.pane.search.next_cursor.clone() {
                     self.submit_search(Some(cursor));
                 }
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             if self.input.modifiers.ctrl && matches!(event.keysym, Keysym::p | Keysym::P) {
@@ -7805,7 +7842,7 @@ impl App {
                     .get(self.panes.pane.search.selected)
                     .cloned();
                 self.reveal_pending_search_match();
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             match event.keysym {
@@ -7839,7 +7876,7 @@ impl App {
                 }
                 _ => {}
             }
-            self.update_window_title();
+            self.refresh_search_overlay(queue_handle);
             return;
         }
         match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
@@ -7879,7 +7916,7 @@ impl App {
                 self.panes.pane.search.input = Some(new_search_editor());
                 self.panes.pane.search.matches.clear();
                 self.panes.pane.search.next_cursor = None;
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             Some(ActionId::ForceControl) => {
@@ -10340,7 +10377,8 @@ impl App {
                 || command_palette_open
                 || dojo_prompt_open
                 || tab_context_menu_open
-                || explorer_layout.is_some();
+                || explorer_layout.is_some()
+                || self.panes.pane.search.input.is_some();
             let full_backing_sync =
                 self.presentation.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.surface.buffers {
@@ -10485,6 +10523,26 @@ impl App {
                 self.explorer.filter(),
                 self.explorer.search_active(),
             )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        if let Some(input) = self.panes.pane.search.input.as_ref() {
+            if let Some(terminal) = search_paint_rect(content_rect, explorer_layout.as_ref()) {
+                paint_search_overlay(
+                    &mut self.presentation.search_text_cache,
+                    &self.presentation.render_context,
+                    canvas,
+                    width,
+                    height,
+                    Self::buffer_rect(terminal, self.surface.scale_120)?,
+                    self.surface.scale_120,
+                    self.presentation.renderer_generation,
+                    session_picker_palette(self.presentation.theme),
+                    input.text(),
+                    &self.panes.pane.search.query,
+                    self.panes.pane.search.matches.len(),
+                    self.panes.pane.search.selected,
+                )?;
+            }
             self.surface.buffers[buffer_index].stale.mark_full();
         }
         if let (Some(layout), Some(picker)) =
@@ -11193,15 +11251,17 @@ mod tests {
             ));
         }
         assert!(
-            session_picker_retry_request(&WindowTopologyCommand::NewLair { cwd: "/tmp".into() })
-                .is_none()
+            session_picker_retry_request(&WindowTopologyCommand::NewLair {
+                source_splint_id: SplintId::new()
+            })
+            .is_none()
         );
     }
 
     #[test]
     fn picker_hierarchy_routes_copy_and_new_actions_at_the_selected_level() {
         let lair_id = LairId::new();
-        let cwd = PathBuf::from("/work");
+        let source_splint_id = SplintId::new();
         assert_eq!(
             session_picker_purpose(None),
             SessionPickerPurpose::RecentDojos
@@ -11228,7 +11288,7 @@ mod tests {
             session_picker_new_command(
                 Some(SelectorKind::Dojo),
                 lair_id,
-                cwd.clone(),
+                source_splint_id,
                 SessionPickerCreationTarget {
                     topology_revision: revision,
                     action: NavigationAction::CreateDojo,
@@ -11238,7 +11298,7 @@ mod tests {
             WindowTopologyCommand::PickerNewDojo {
                 topology_revision: revision,
                 lair_id,
-                cwd: cwd.clone(),
+                source_splint_id,
             }
         );
         for selector_kind in [None, Some(SelectorKind::Lair)] {
@@ -11246,7 +11306,7 @@ mod tests {
                 session_picker_new_command(
                     selector_kind,
                     lair_id,
-                    cwd.clone(),
+                    source_splint_id,
                     SessionPickerCreationTarget {
                         topology_revision: revision,
                         action: NavigationAction::CreateLair,
@@ -11255,7 +11315,7 @@ mod tests {
                 .unwrap(),
                 WindowTopologyCommand::PickerNewLair {
                     topology_revision: revision,
-                    cwd: cwd.clone(),
+                    source_splint_id,
                 }
             );
         }
@@ -14251,6 +14311,38 @@ mod tests {
     }
 
     #[test]
+    fn search_paint_rect_excludes_explorer_drawer() {
+        let content = Rect {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 320,
+        };
+        let drawer = lair_explorer_layout(content, 160, &[], None, 0).unwrap();
+        assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
+        let terminal = search_paint_rect(drawer.terminal, Some(&drawer)).unwrap();
+        assert_eq!(terminal.x, drawer.panel.width);
+        assert_eq!(terminal.width, content.width - drawer.panel.width);
+        let too_narrow = Rect {
+            width: 200,
+            ..content
+        };
+        let drawer = lair_explorer_layout(too_narrow, 160, &[], None, 0).unwrap();
+        assert!(search_paint_rect(drawer.terminal, Some(&drawer)).is_none());
+        let wide = Rect {
+            width: 800,
+            ..content
+        };
+        let docked = lair_explorer_layout(wide, 160, &[], None, 0).unwrap();
+        assert_eq!(docked.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(
+            search_paint_rect(docked.terminal, Some(&docked)),
+            Some(docked.terminal)
+        );
+        assert_eq!(search_paint_rect(wide, None), Some(wide));
+    }
+
+    #[test]
     fn trusted_title_surfaces_control_decision_and_bounded_search_state() {
         let authority = AuthorityStatus::default();
         let mut search = SearchUiState {
@@ -14965,17 +15057,17 @@ mod tests {
             ControlReleaseOutcome::Disconnected
         );
 
+        let new_lair = WindowTopologyCommand::NewLair {
+            source_splint_id: SplintId::new(),
+        };
         let (topology_sender, mut topology_receiver) = tokio::sync::mpsc::channel(1);
         try_topology_command(
             &topology_sender,
             WindowTopologyCommand::RequestSessionPicker,
         )
         .expect("first topology command");
-        let error = try_topology_command(
-            &topology_sender,
-            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
-        )
-        .expect_err("bounded topology overflow");
+        let error = try_topology_command(&topology_sender, new_lair.clone())
+            .expect_err("bounded topology overflow");
         assert!(error.to_string().contains("full"));
         assert!(topology_receiver.try_recv().is_ok());
         drop(topology_receiver);
@@ -14995,11 +15087,7 @@ mod tests {
             pending: Some(pending),
         };
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        try_topology_command(
-            &sender,
-            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
-        )
-        .unwrap();
+        try_topology_command(&sender, new_lair).unwrap();
         let mut rolled_back = None;
         let error = try_topology_command_with_rollback(
             Some(&sender),

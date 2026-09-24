@@ -1,7 +1,5 @@
 //! Window-local topology commands and updates shared across runtime boundaries.
 
-use std::path::PathBuf;
-
 use splinterm_core::{
     DojoId, LairId, LairRetention, LayoutNode, SplintId, SplitRatio, TopologyRevision,
 };
@@ -149,20 +147,20 @@ pub enum WindowTopologyCommand {
         target: NavigationExplorerSplintTarget,
     },
     NewLair {
-        cwd: PathBuf,
+        source_splint_id: SplintId,
     },
     PickerNewLair {
         topology_revision: TopologyRevision,
-        cwd: PathBuf,
+        source_splint_id: SplintId,
     },
     NewDojo {
         lair_id: LairId,
-        cwd: PathBuf,
+        source_splint_id: SplintId,
     },
     PickerNewDojo {
         topology_revision: TopologyRevision,
         lair_id: LairId,
-        cwd: PathBuf,
+        source_splint_id: SplintId,
     },
     MaterializePreset {
         target: PresetTarget,

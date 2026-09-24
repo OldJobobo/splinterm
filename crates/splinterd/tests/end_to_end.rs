@@ -2390,6 +2390,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
             title: inspected_title,
             topology_revision: inspected_revision,
             runtime: inspected_runtime,
+            ..
         } = restarted
             .request(Request::InspectSplint { splint_id })
             .await

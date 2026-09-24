@@ -386,6 +386,7 @@ fn serve_subscription(stream_kind: ExpectedSubscription) -> (PathBuf, thread::Jo
                     &mut stream,
                     1,
                     Response::Splint {
+                        resolved_cwd: None,
                         lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
                         dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                         title: "build".to_owned(),

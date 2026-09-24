@@ -1998,6 +1998,7 @@ pub(crate) async fn dispatch(
                     title,
                     topology_revision,
                     runtime,
+                    ..
                 } if runtime.splint_id == splint_id => Ok(success(
                     tool,
                     json!({
