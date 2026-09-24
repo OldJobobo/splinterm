@@ -153,19 +153,19 @@ use crate::pane::{
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
     ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
-    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, PickerHitTarget, RenderContext,
-    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
-    SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
-    background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
-    dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout,
-    lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
-    lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
-    paint_lair_explorer, paint_search_overlay, paint_session_picker_overlay,
-    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
-    paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
-    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
-    session_picker_palette, snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout,
-    write_ppm,
+    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, LairExplorerPresentationMode,
+    PickerHitTarget, RenderContext, SessionPickerOverlayLayout, SessionPickerPurpose,
+    SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame, SnapshotOverlays,
+    TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
+    fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
+    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
+    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_lair_explorer,
+    paint_search_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
+    paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
+    paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
+    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
+    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -2678,6 +2678,25 @@ const fn terminal_resize_allowed(cause: TerminalResizeCause, resize_known: bool)
 fn reduced_motion_requested() -> bool {
     std::env::var_os("SPLINTERM_REDUCED_MOTION")
         .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
+}
+
+fn search_paint_rect(content: Rect, explorer: Option<&LairExplorerLayout>) -> Option<Rect> {
+    let Some(explorer) =
+        explorer.filter(|layout| layout.mode == LairExplorerPresentationMode::Drawer)
+    else {
+        return Some(content);
+    };
+    let right = content.x.saturating_add(content.width);
+    let left = explorer
+        .panel
+        .x
+        .saturating_add(explorer.panel.width)
+        .max(content.x);
+    (left < right).then_some(Rect {
+        x: left,
+        width: right.saturating_sub(left),
+        ..content
+    })
 }
 
 fn window_title(
@@ -10507,21 +10526,23 @@ impl App {
             self.surface.buffers[buffer_index].stale.mark_full();
         }
         if let Some(input) = self.panes.pane.search.input.as_ref() {
-            paint_search_overlay(
-                &mut self.presentation.search_text_cache,
-                &self.presentation.render_context,
-                canvas,
-                width,
-                height,
-                content_buffer_rect,
-                self.surface.scale_120,
-                self.presentation.renderer_generation,
-                session_picker_palette(self.presentation.theme),
-                input.text(),
-                &self.panes.pane.search.query,
-                self.panes.pane.search.matches.len(),
-                self.panes.pane.search.selected,
-            )?;
+            if let Some(terminal) = search_paint_rect(content_rect, explorer_layout.as_ref()) {
+                paint_search_overlay(
+                    &mut self.presentation.search_text_cache,
+                    &self.presentation.render_context,
+                    canvas,
+                    width,
+                    height,
+                    Self::buffer_rect(terminal, self.surface.scale_120)?,
+                    self.surface.scale_120,
+                    self.presentation.renderer_generation,
+                    session_picker_palette(self.presentation.theme),
+                    input.text(),
+                    &self.panes.pane.search.query,
+                    self.panes.pane.search.matches.len(),
+                    self.panes.pane.search.selected,
+                )?;
+            }
             self.surface.buffers[buffer_index].stale.mark_full();
         }
         if let (Some(layout), Some(picker)) =
@@ -14287,6 +14308,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn search_paint_rect_excludes_explorer_drawer() {
+        let content = Rect {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 320,
+        };
+        let drawer = lair_explorer_layout(content, 160, &[], None, 0).unwrap();
+        assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
+        let terminal = search_paint_rect(drawer.terminal, Some(&drawer)).unwrap();
+        assert_eq!(terminal.x, drawer.panel.width);
+        assert_eq!(terminal.width, content.width - drawer.panel.width);
+        let too_narrow = Rect {
+            width: 200,
+            ..content
+        };
+        let drawer = lair_explorer_layout(too_narrow, 160, &[], None, 0).unwrap();
+        assert!(search_paint_rect(drawer.terminal, Some(&drawer)).is_none());
+        let wide = Rect {
+            width: 800,
+            ..content
+        };
+        let docked = lair_explorer_layout(wide, 160, &[], None, 0).unwrap();
+        assert_eq!(docked.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(
+            search_paint_rect(docked.terminal, Some(&docked)),
+            Some(docked.terminal)
+        );
+        assert_eq!(search_paint_rect(wide, None), Some(wide));
     }
 
     #[test]
