@@ -618,6 +618,57 @@ fn truncate_picker_text(source: &str, maximum_cells: usize) -> String {
     truncated
 }
 
+fn editable_search_text(query: &str, maximum_cells: usize) -> String {
+    let width = |source: &str| {
+        source
+            .chars()
+            .map(|character| character.width().unwrap_or(0).min(2))
+            .sum::<usize>()
+    };
+    let full = format!("Search: {query}_");
+    if width(&full) <= maximum_cells {
+        return full;
+    }
+    if maximum_cells == 0 {
+        return String::new();
+    }
+    if maximum_cells == 1 {
+        return "_".to_owned();
+    }
+    let unlabelled = format!("{query}_");
+    if width(&unlabelled) <= maximum_cells {
+        return unlabelled;
+    }
+    let last_character_width = query
+        .chars()
+        .rev()
+        .map(|character| character.width().unwrap_or(0).min(2))
+        .find(|width| *width > 0)
+        .unwrap_or(0);
+    let label = if maximum_cells >= width("Search: ") + 2 + last_character_width {
+        "Search: "
+    } else {
+        ""
+    };
+    let available = maximum_cells.saturating_sub(width(label) + 2);
+    let mut cells = 0;
+    let mut reversed = Vec::new();
+    for character in query.chars().rev() {
+        let character_width = character.width().unwrap_or(0).min(2);
+        if cells + character_width > available {
+            break;
+        }
+        cells += character_width;
+        reversed.push(character);
+    }
+    let suffix = reversed
+        .into_iter()
+        .rev()
+        .skip_while(|character| character.width().unwrap_or(0) == 0)
+        .collect::<String>();
+    format!("{label}…{suffix}_")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn paint_picker_text(
     cache: &mut SessionPickerTextCache,
@@ -767,6 +818,13 @@ pub(crate) fn paint_search_overlay(
         },
         ..inner
     };
+    let cell_width =
+        ChromeText::load_styled_with_context("_", scale_120, ChromeTextStyle::Regular, context)?
+            .frame
+            .cell_width
+            .max(1);
+    let maximum_cells = usize::try_from(query_clip.width / cell_width).unwrap_or(usize::MAX);
+    let display = editable_search_text(&query, maximum_cells);
     let mut used = HashSet::new();
     paint_picker_text(
         cache,
@@ -775,7 +833,7 @@ pub(crate) fn paint_search_overlay(
         canvas,
         canvas_width,
         canvas_height,
-        &format!("Search: {query}_"),
+        &display,
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
@@ -1355,6 +1413,12 @@ mod tests {
             alpha, bravo,
             "changing the search text must change painted pixels"
         );
+        let long = "abcdef".repeat(15);
+        assert_ne!(
+            render(&format!("{long}x")),
+            render(&format!("{long}y")),
+            "editing the clipped query tail must change painted pixels"
+        );
         for y in 0..480 {
             for x in 0..900 {
                 if x >= content.x
@@ -1442,6 +1506,32 @@ mod tests {
                 .all(|key| key.source.len() <= 270 && !key.source.contains('\n'))
         );
         assert!(cache.len() <= 2);
+    }
+
+    #[test]
+    fn editable_search_keeps_tail_and_cursor_in_narrow_fields() {
+        assert_eq!(editable_search_text("abc", 20), "Search: abc_");
+        assert_eq!(
+            editable_search_text("abcdefghijklmnopqrstuvwxyz", 14),
+            "Search: …wxyz_"
+        );
+        assert_eq!(
+            editable_search_text("abcdefghijklmnopqrstuvwxyz", 8),
+            "…uvwxyz_"
+        );
+        assert_eq!(editable_search_text("abc", 4), "abc_");
+        assert_eq!(editable_search_text("abc", 2), "…_");
+        assert_eq!(editable_search_text("abc", 1), "_");
+        assert_eq!(editable_search_text("abc", 0), "");
+        assert_eq!(editable_search_text("ab界e\u{301}新", 6), "…e\u{301}新_");
+        assert_eq!(
+            editable_search_text("ab界e\u{301}新", 12),
+            "ab界e\u{301}新_"
+        );
+        assert_eq!(
+            editable_search_text("ab界e\u{301}新abcd新", 12),
+            "Search: …新_"
+        );
     }
 
     #[test]

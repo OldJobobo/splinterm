@@ -167,6 +167,18 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertEqual(runner.count('--client-token "$client_token"'), 2)
         self.assertEqual(runner.count('SPLINTERM_TEST_WINDOW_TOKEN="$client_token"'), 2)
         development_launch = runner.split("  launch)", 1)[1].split("  stop)", 1)[0]
+        build = development_launch.index("case ${SPLINTERM_TEST_PROFILE:-release} in")
+        prepare = development_launch.index("guest-window.py prepare")
+        self.assertLess(build, development_launch.index("trap cleanup_failed_launch ERR"))
+        self.assertLess(build, prepare)
+        self.assertIn(
+            "cargo build -q --release -p splinterd -p splinterm -p splinterm-pty",
+            development_launch,
+        )
+        self.assertIn(
+            "cargo build -q -p splinterd -p splinterm -p splinterm-pty",
+            development_launch,
+        )
         self.assertIn('kill "$client_pid"', development_launch)
         self.assertIn('wait "$client_pid"', development_launch)
 

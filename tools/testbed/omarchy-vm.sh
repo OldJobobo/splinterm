@@ -300,6 +300,12 @@ cd "$SPLINTERM_TESTBED_ROOT"
   printf 'development guest window state exists; run stop first\n' >&2
   exit 1
 }
+# The launcher rebuilds on every run; finish a cold build before the bounded map wait.
+case ${SPLINTERM_TEST_PROFILE:-release} in
+  release) cargo build -q --release -p splinterd -p splinterm -p splinterm-pty ;;
+  debug) cargo build -q -p splinterd -p splinterm -p splinterm-pty ;;
+  *) printf 'invalid SPLINTERM_TEST_PROFILE\n' >&2; exit 2 ;;
+esac
 client_pid=
 cleanup_failed_launch() {
   [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
