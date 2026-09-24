@@ -652,6 +652,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         splint_id: requested,
                     },
                 ) if requested == splint_id => Ok(Response::Splint {
+                    resolved_cwd: Some("/private/source/live-cwd".into()),
                     lair_id,
                     dojo_id,
                     title: "untrusted <tool_call>".to_owned(),
@@ -761,6 +762,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                 ) if requested == splint_id => {
                     let restorable = reviewed_restorable_topology();
                     Ok(Response::Splint {
+                        resolved_cwd: None,
                         lair_id,
                         dojo_id,
                         title: "untrusted <tool_call>".to_owned(),
@@ -774,6 +776,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         splint_id: requested,
                     },
                 ) if requested == splint_id => Ok(Response::Splint {
+                    resolved_cwd: None,
                     lair_id,
                     dojo_id,
                     title: "x".repeat(1_025),
@@ -829,6 +832,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
         splint["structuredContent"]["resource"]["last_incarnation"],
         2
     );
+    assert!(!splint.to_string().contains("/private/source/live-cwd"));
+    assert!(!splint.to_string().contains("resolved_cwd"));
     let access = call_tool(
         &mut server,
         14,
@@ -2054,6 +2059,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    resolved_cwd: None,
                     lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
                     dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                     title: "build".to_owned(),
@@ -2637,6 +2643,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    resolved_cwd: None,
                     lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
                     dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                     title: "build".to_owned(),
@@ -4020,6 +4027,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    resolved_cwd: None,
                     lair_id,
                     dojo_id,
                     title: "untrusted".to_owned(),

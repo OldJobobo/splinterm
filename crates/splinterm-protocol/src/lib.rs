@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 35;
+pub const PROTOCOL_VERSION: u16 = 36;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -739,6 +739,8 @@ pub enum Response {
         title: String,
         topology_revision: TopologyRevision,
         runtime: SplintRuntimeSummary,
+        /// Point-in-time launch default resolved on the owning daemon, not durable topology.
+        resolved_cwd: Option<PathBuf>,
     },
     GraphicalFocus {
         focused_splint_id: Option<SplintId>,
@@ -3626,7 +3628,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 35);
+        assert_eq!(PROTOCOL_VERSION, 36);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

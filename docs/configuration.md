@@ -281,8 +281,17 @@ client-local pane zoom, Dojo/Lair creation and selection, numeric and reordered
 Window-local tabs, stable-ID trusted choosers, confirmed rename/termination,
 Lair navigation, clean Window detach, a per-Window `Prefix+B` Dojo tab-strip
 toggle, a generated trusted `Prefix+?` help overlay, vi copy mode, and
-transactional config reload. New Dojos and Lairs
-inherit the focused Splint cwd.
+transactional config reload. New Splints, Dojos, and Lairs created within a Window
+inherit the exact focused/source Splint's live root-process working directory
+(normally its shell), resolved on that Splint's owning daemon, including remote
+sessions. Foreground descendants and terminal text are not consulted. If that
+cwd is deleted, inaccessible, or unavailable, creation uses the same source's
+valid saved launch directory, then the daemon owner's valid home directory;
+otherwise it reports that the source working directory is unavailable. A missing
+source is rejected rather than replaced by another Window's focus. This is a
+point-in-time default: the shell can change directory again before launch.
+Explicit `--cwd` takes precedence; shell, login-shell, scrollback, and command
+settings are unchanged. Saved layouts retain their durable launch directories.
 
 `Prefix+[` enters copy mode at the live cursor or current history viewport.
 `h/j/k/l` and arrows move over visible and loaded historical rows; Home/End move

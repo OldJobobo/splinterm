@@ -3067,7 +3067,7 @@ const fn session_picker_title(selector_kind: Option<SelectorKind>) -> &'static s
 fn session_picker_new_command(
     selector_kind: Option<SelectorKind>,
     lair_id: LairId,
-    cwd: PathBuf,
+    source_splint_id: SplintId,
     target: SessionPickerCreationTarget,
 ) -> Result<WindowTopologyCommand> {
     match (selector_kind, target.action) {
@@ -3075,13 +3075,13 @@ fn session_picker_new_command(
             Ok(WindowTopologyCommand::PickerNewDojo {
                 topology_revision: target.topology_revision,
                 lair_id,
-                cwd,
+                source_splint_id,
             })
         }
         (Some(SelectorKind::Lair) | None, NavigationAction::CreateLair) => {
             Ok(WindowTopologyCommand::PickerNewLair {
                 topology_revision: target.topology_revision,
-                cwd,
+                source_splint_id,
             })
         }
         _ => anyhow::bail!("picker creation target disagrees with picker purpose"),
@@ -5068,17 +5068,20 @@ impl App {
             && self.input.divider_drag.is_none()
     }
 
-    fn focused_cwd(&self) -> Result<std::path::PathBuf> {
+    fn focused_cwd_source(&self) -> Result<SplintId> {
         let focused = self
             .panes
             .focused_splint()
-            .context("focused cwd requires a focused Splint")?;
-        self.panes
-            .layout
-            .as_ref()
-            .and_then(|layout| layout.find_splint(focused))
-            .map(|splint| splint.cwd.clone())
-            .context("focused Splint is absent from authoritative topology")
+            .context("cwd inheritance requires a focused Splint")?;
+        anyhow::ensure!(
+            self.panes
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.find_splint(focused))
+                .is_some(),
+            "focused Splint is absent from authoritative topology"
+        );
+        Ok(focused)
     }
 
     fn show_command_palette(&mut self) -> Result<()> {
@@ -5115,7 +5118,6 @@ impl App {
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
             lair_retention: self.tab_state.active_identity.lair_retention,
-            focused_cwd: self.focused_cwd()?,
             dojo_id: active_dojo_id,
             dojo_name: self.tab_state.active_identity.dojo_name.clone(),
             pane_count: 1_usize.saturating_add(self.panes.inactive_panes.len()),
@@ -5687,7 +5689,7 @@ impl App {
         TabContextMenuUi::for_explorer(
             view,
             node,
-            self.focused_cwd().ok(),
+            self.focused_cwd_source().ok(),
             pane_controlled,
             self.tab_state.tabs.len() < crate::tab::MAX_WINDOW_TABS,
         )
@@ -5746,7 +5748,7 @@ impl App {
         self.show_context_menu(
             TabContextMenuUi::new(TabMenuContext {
                 lair_id: identity.lair_id,
-                focused_cwd: self.focused_cwd()?,
+                source_splint_id: self.focused_cwd_source()?,
                 dojo_id,
                 dojo_name: identity.dojo_name,
                 pane_count,
@@ -6692,7 +6694,7 @@ impl App {
                         }
                         (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
                             lair_id: self.tab_state.active_identity.lair_id,
-                            cwd: self.focused_cwd()?,
+                            source_splint_id: self.focused_cwd_source()?,
                         }),
                         _ => None,
                     };
@@ -7209,8 +7211,8 @@ impl App {
             let selector_kind = self.modal.selector_kind;
             let command = match decision {
                 SessionPickerDecision::New => {
-                    let cwd = match self.focused_cwd() {
-                        Ok(cwd) => cwd,
+                    let source_splint_id = match self.focused_cwd_source() {
+                        Ok(source_splint_id) => source_splint_id,
                         Err(error) => {
                             self.scheduling.fail(error);
                             return;
@@ -7225,7 +7227,7 @@ impl App {
                     match session_picker_new_command(
                         selector_kind,
                         self.tab_state.active_identity.lair_id,
-                        cwd,
+                        source_splint_id,
                         target,
                     ) {
                         Ok(command) => command,
@@ -11193,15 +11195,17 @@ mod tests {
             ));
         }
         assert!(
-            session_picker_retry_request(&WindowTopologyCommand::NewLair { cwd: "/tmp".into() })
-                .is_none()
+            session_picker_retry_request(&WindowTopologyCommand::NewLair {
+                source_splint_id: SplintId::new()
+            })
+            .is_none()
         );
     }
 
     #[test]
     fn picker_hierarchy_routes_copy_and_new_actions_at_the_selected_level() {
         let lair_id = LairId::new();
-        let cwd = PathBuf::from("/work");
+        let source_splint_id = SplintId::new();
         assert_eq!(
             session_picker_purpose(None),
             SessionPickerPurpose::RecentDojos
@@ -11228,7 +11232,7 @@ mod tests {
             session_picker_new_command(
                 Some(SelectorKind::Dojo),
                 lair_id,
-                cwd.clone(),
+                source_splint_id,
                 SessionPickerCreationTarget {
                     topology_revision: revision,
                     action: NavigationAction::CreateDojo,
@@ -11238,7 +11242,7 @@ mod tests {
             WindowTopologyCommand::PickerNewDojo {
                 topology_revision: revision,
                 lair_id,
-                cwd: cwd.clone(),
+                source_splint_id,
             }
         );
         for selector_kind in [None, Some(SelectorKind::Lair)] {
@@ -11246,7 +11250,7 @@ mod tests {
                 session_picker_new_command(
                     selector_kind,
                     lair_id,
-                    cwd.clone(),
+                    source_splint_id,
                     SessionPickerCreationTarget {
                         topology_revision: revision,
                         action: NavigationAction::CreateLair,
@@ -11255,7 +11259,7 @@ mod tests {
                 .unwrap(),
                 WindowTopologyCommand::PickerNewLair {
                     topology_revision: revision,
-                    cwd: cwd.clone(),
+                    source_splint_id,
                 }
             );
         }
@@ -14965,17 +14969,17 @@ mod tests {
             ControlReleaseOutcome::Disconnected
         );
 
+        let new_lair = WindowTopologyCommand::NewLair {
+            source_splint_id: SplintId::new(),
+        };
         let (topology_sender, mut topology_receiver) = tokio::sync::mpsc::channel(1);
         try_topology_command(
             &topology_sender,
             WindowTopologyCommand::RequestSessionPicker,
         )
         .expect("first topology command");
-        let error = try_topology_command(
-            &topology_sender,
-            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
-        )
-        .expect_err("bounded topology overflow");
+        let error = try_topology_command(&topology_sender, new_lair.clone())
+            .expect_err("bounded topology overflow");
         assert!(error.to_string().contains("full"));
         assert!(topology_receiver.try_recv().is_ok());
         drop(topology_receiver);
@@ -14995,11 +14999,7 @@ mod tests {
             pending: Some(pending),
         };
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        try_topology_command(
-            &sender,
-            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
-        )
-        .unwrap();
+        try_topology_command(&sender, new_lair).unwrap();
         let mut rolled_back = None;
         let error = try_topology_command_with_rollback(
             Some(&sender),

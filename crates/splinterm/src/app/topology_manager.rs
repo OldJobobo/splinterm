@@ -35,7 +35,7 @@ use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane_at_incarnation},
     session_catalog::{
         GraphicalLairLifetime, automation_launch, graphical_create_request, launch_parameters,
-        new_dojo_request_for, recent_dojo_ids, remember_dojo, select_dojo_from,
+        new_dojo_request_for, recent_dojo_ids, remember_dojo, select_dojo_from, source_splint_cwd,
     },
 };
 
@@ -427,7 +427,7 @@ async fn apply_topology_command(
                     side: SplitSide::Second,
                     ratio,
                     launch: launch_parameters(
-                        env::current_dir().context("failed to read current directory")?,
+                        source_splint_cwd(connection, target).await?,
                         Vec::new(),
                         config,
                     ),
@@ -1022,7 +1022,7 @@ async fn create_daily_dojo(
     factory: &ConnectionFactory,
     connection: &mut Connection,
     config: &AppConfig,
-    cwd: std::path::PathBuf,
+    source_splint_id: SplintId,
     captured_revision: Option<TopologyRevision>,
 ) -> Result<ManagedWindowOpen> {
     let stamp = SystemTime::now()
@@ -1036,6 +1036,7 @@ async fn create_daily_dojo(
             "picker creation target is stale"
         );
     }
+    let cwd = source_splint_cwd(connection, source_splint_id).await?;
     let (request, lifetime) = graphical_create_request(
         factory,
         expected,
@@ -1081,7 +1082,7 @@ async fn create_dojo_in_lair(
     transient_owner: Option<&mut Connection>,
     config: &AppConfig,
     lair_id: LairId,
-    cwd: std::path::PathBuf,
+    source_splint_id: SplintId,
     captured_revision: Option<TopologyRevision>,
 ) -> Result<(WindowDojoIdentity, splinterm_core::Dojo, bool)> {
     let (connection, uses_transient_owner) = match transient_owner {
@@ -1101,6 +1102,7 @@ async fn create_dojo_in_lair(
             "picker creation target is stale"
         );
     }
+    let cwd = source_splint_cwd(connection, source_splint_id).await?;
     let request = new_dojo_request_for(
         factory.capabilities().launch_semantics,
         expected_topology_revision,
@@ -2270,12 +2272,12 @@ async fn handle_session_manager_command(
         },
         command @ (WindowTopologyCommand::NewLair { .. }
         | WindowTopologyCommand::PickerNewLair { .. }) => {
-            let (cwd, captured_revision) = match command {
-                WindowTopologyCommand::NewLair { cwd } => (cwd, None),
+            let (source_splint_id, captured_revision) = match command {
+                WindowTopologyCommand::NewLair { source_splint_id } => (source_splint_id, None),
                 WindowTopologyCommand::PickerNewLair {
                     topology_revision,
-                    cwd,
-                } => (cwd, Some(topology_revision)),
+                    source_splint_id,
+                } => (source_splint_id, Some(topology_revision)),
                 _ => unreachable!("new Lair command classification changed"),
             };
             if !window_has_tab_capacity(state.tabs.len()) {
@@ -2291,8 +2293,14 @@ async fn handle_session_manager_command(
                     .await;
                 return TopologyManagerCommandOutcome::Continue;
             }
-            let target =
-                create_daily_dojo(factory, connection, config, cwd, captured_revision).await;
+            let target = create_daily_dojo(
+                factory,
+                connection,
+                config,
+                source_splint_id,
+                captured_revision,
+            )
+            .await;
             finish_managed_window_open(factory, target, state, config, image_cache, updates, None)
                 .await
         }
@@ -2394,13 +2402,16 @@ async fn handle_session_manager_command(
         }
         command @ (WindowTopologyCommand::NewDojo { .. }
         | WindowTopologyCommand::PickerNewDojo { .. }) => {
-            let (lair_id, cwd, captured_revision) = match command {
-                WindowTopologyCommand::NewDojo { lair_id, cwd } => (lair_id, cwd, None),
+            let (lair_id, source_splint_id, captured_revision) = match command {
+                WindowTopologyCommand::NewDojo {
+                    lair_id,
+                    source_splint_id,
+                } => (lair_id, source_splint_id, None),
                 WindowTopologyCommand::PickerNewDojo {
                     topology_revision,
                     lair_id,
-                    cwd,
-                } => (lair_id, cwd, Some(topology_revision)),
+                    source_splint_id,
+                } => (lair_id, source_splint_id, Some(topology_revision)),
                 _ => unreachable!("new Dojo command classification changed"),
             };
             if !window_has_tab_capacity(state.tabs.len()) {
@@ -2428,7 +2439,7 @@ async fn handle_session_manager_command(
                     Some(owner),
                     config,
                     lair_id,
-                    cwd,
+                    source_splint_id,
                     captured_revision,
                 )
                 .await
@@ -2439,7 +2450,7 @@ async fn handle_session_manager_command(
                     None,
                     config,
                     lair_id,
-                    cwd,
+                    source_splint_id,
                     captured_revision,
                 )
                 .await

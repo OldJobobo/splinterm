@@ -4746,7 +4746,17 @@ async fn resolve_automation_mutation(
             ratio,
             launch,
         } => {
-            let cwd = splint_durable_cwd(&*state.topology.read().await, target_splint_id)?;
+            let cwd = match launch.cwd.clone() {
+                Some(cwd) => cwd,
+                None => resolve_splint_cwd(state, target_splint_id)
+                    .await?
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "source working directory is unavailable",
+                        )
+                    })?,
+            };
             Request::SplitSplint {
                 expected_topology_revision,
                 target_splint_id,
@@ -4961,7 +4971,9 @@ async fn handle_authorized_request(
                 .ok_or_else(not_found)?;
             let (lair_id, dojo_id, title) =
                 splint_containment(&snapshot.topology, splint_id).ok_or_else(not_found)?;
+            let resolved_cwd = resolve_splint_cwd(state, splint_id).await?;
             Response::Splint {
+                resolved_cwd,
                 lair_id,
                 dojo_id,
                 title,
@@ -6933,6 +6945,67 @@ fn validated_graphical_cwd(path: PathBuf) -> Option<PathBuf> {
         .filter(|path| path.to_str().is_some())
         .filter(|path| path.as_os_str().as_encoded_bytes().len() <= MAX_CWD_BYTES)
         .filter(|path| !path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)"))
+}
+
+// Only the root process of this exact Splint is authoritative. Never consult
+// graphical focus, foreground descendants, or terminal contents.
+async fn resolve_splint_cwd(
+    state: &DaemonState,
+    splint_id: SplintId,
+) -> Result<Option<PathBuf>, ProtocolError> {
+    let durable = splint_durable_cwd(&*state.topology.read().await, splint_id)?;
+    let runtime = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .map(|handle| (handle.incarnation, handle.child_pid()));
+    let cwd = match read_splint_root_cwd(state, splint_id, runtime).await {
+        Some(cwd) => Some(cwd),
+        None => match usable_launch_cwd(durable).await {
+            Some(cwd) => Some(cwd),
+            None => match state.owner_home.clone() {
+                Some(home) => usable_launch_cwd(home).await,
+                None => None,
+            },
+        },
+    };
+    // A removed source must not turn into a home-directory launch.
+    splint_durable_cwd(&*state.topology.read().await, splint_id)?;
+    Ok(cwd)
+}
+
+async fn read_splint_root_cwd(
+    state: &DaemonState,
+    splint_id: SplintId,
+    observed: Option<(ProcessIncarnation, u32)>,
+) -> Option<PathBuf> {
+    let handle = state.runtimes.lock().await.handle(splint_id)?;
+    if observed != Some((handle.incarnation, handle.child_pid())) {
+        return None;
+    }
+    let cwd = usable_launch_cwd(handle.root_cwd().await?).await?;
+    let current = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .map(|handle| (handle.incarnation, handle.child_pid()));
+    let topology = state.topology.read().await;
+    let splint = topology.find_splint(splint_id)?;
+    (observed == current
+        && !matches!(splint.state, SplintState::Exited(_))
+        && splint.last_incarnation == observed.map(|(incarnation, _)| incarnation.value()))
+    .then_some(cwd)
+}
+
+async fn usable_launch_cwd(path: PathBuf) -> Option<PathBuf> {
+    let path = validated_graphical_cwd(path)?;
+    let metadata = fs::metadata(&path).await.ok()?;
+    if !metadata.is_dir() || rustix::fs::access(&path, rustix::fs::Access::EXEC_OK).is_err() {
+        return None;
+    }
+    Some(path)
 }
 
 async fn read_graphical_focus(state: &DaemonState) -> (Option<SplintId>, Option<PathBuf>) {
@@ -10414,6 +10487,273 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_cwd_unavailable_does_not_break_inspection() {
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().owner_home = None;
+        let source = state
+            .topology
+            .write()
+            .await
+            .create_lair("missing-cwd", PathBuf::from("/missing/source/cwd"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        let response = trusted_request(&state, 41, Request::InspectSplint { splint_id: source })
+            .await
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::Splint {
+                resolved_cwd: None,
+                ..
+            }
+        ));
+        let round_trip: Response =
+            serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
+        assert_eq!(round_trip, response);
+        let error = resolve_automation_mutation(
+            Request::SplitSplintAutomation {
+                expected_topology_revision: state.topology.read().await.revision(),
+                target_splint_id: source,
+                axis: splinterm_core::Axis::Horizontal,
+                side: splinterm_core::SplitSide::Second,
+                ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.message, "source working directory is unavailable");
+    }
+
+    #[tokio::test]
+    async fn source_cwd_fallback_is_bounded_and_never_uses_global_focus() {
+        let base = temp_dir();
+        std::fs::create_dir_all(base.join("durable")).unwrap();
+        std::fs::create_dir(base.join("home")).unwrap();
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().owner_home = Some(base.join("home"));
+        let source = state
+            .topology
+            .write()
+            .await
+            .create_lair("source", base.join("durable"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        let other = state
+            .topology
+            .write()
+            .await
+            .create_lair("other", base.clone())
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        publish_graphical_focus(&state, 41, Some(other))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(base.join("durable"))
+        );
+        std::fs::remove_dir(base.join("durable")).unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(base.join("home"))
+        );
+        std::fs::remove_dir(base.join("home")).unwrap();
+        assert_eq!(resolve_splint_cwd(&state, source).await.unwrap(), None);
+        assert!(resolve_splint_cwd(&state, SplintId::new()).await.is_err());
+        for path in [
+            PathBuf::from("relative"),
+            base.join("missing"),
+            base.join("gone (deleted)"),
+            PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES))),
+        ] {
+            assert!(usable_launch_cwd(path).await.is_none());
+        }
+        std::fs::write(base.join("file"), b"not a directory").unwrap();
+        assert!(usable_launch_cwd(base.join("file")).await.is_none());
+        // Explicit overrides do not consult inheritance, even if no source cwd exists.
+        let request = Request::SplitSplintAutomation {
+            expected_topology_revision: state.topology.read().await.revision(),
+            target_splint_id: source,
+            axis: splinterm_core::Axis::Horizontal,
+            side: splinterm_core::SplitSide::Second,
+            ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+            launch: splinterm_protocol::AutomationLaunch {
+                cwd: Some(base.join("explicit")),
+                argv: vec!["echo".into()],
+            },
+        };
+        let Request::SplitSplint { launch, .. } =
+            resolve_automation_mutation(request, &state).await.unwrap()
+        else {
+            panic!("split")
+        };
+        assert_eq!(launch.cwd, base.join("explicit"));
+        assert_eq!(launch.command, ["echo"]);
+        assert_eq!(launch.shell, None);
+        assert!(!launch.login_shell);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one live process exercises cwd observation, replacement rejection, and deleted-directory cleanup"
+    )]
+    async fn source_cwd_tracks_live_cd_and_rejects_replaced_runtime_observations() {
+        let base = temp_dir();
+        std::fs::create_dir_all(base.join("live")).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let state = test_state_with_backend(false, test_pty_backend());
+        let live = base.join("live");
+        let ready = base.join("ready");
+        let mut launch = test_launch(&[
+            "/bin/sh",
+            "-c",
+            "cd \"$1\" && touch \"$2\"; while :; do sleep 1; done",
+            "sh",
+            live.to_str().unwrap(),
+            ready.to_str().unwrap(),
+        ]);
+        launch.cwd = base.clone();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            41,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "cwd".into(),
+                launch,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("create")
+        };
+        let source = lair.dojos[0].default_focus;
+        time::timeout(Duration::from_secs(5), async {
+            while !ready.exists() {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let other = state
+            .topology
+            .write()
+            .await
+            .create_lair("elsewhere", base.clone())
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        publish_graphical_focus(&state, 42, Some(other))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(live.clone())
+        );
+        assert_eq!(
+            resolve_splint_cwd(&state, other).await.unwrap(),
+            Some(base.clone())
+        );
+        assert_eq!(
+            state.topology.read().await.find_splint(source).unwrap().cwd,
+            base
+        );
+        let handle = state.runtimes.lock().await.handle(source).unwrap();
+        assert!(
+            read_splint_root_cwd(
+                &state,
+                source,
+                Some((ProcessIncarnation::allocate(), handle.child_pid()))
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            read_splint_root_cwd(
+                &state,
+                source,
+                Some((handle.incarnation, std::process::id()))
+            )
+            .await
+            .is_none()
+        );
+        for (cwd, expected_cwd) in [(None, &live), (Some(base.clone()), &base)] {
+            let revision = state.topology.read().await.revision();
+            let Response::SplintStarted { splint_id, .. } = trusted_request(
+                &state,
+                41,
+                Request::SplitSplintAutomation {
+                    expected_topology_revision: revision,
+                    target_splint_id: source,
+                    axis: splinterm_core::Axis::Horizontal,
+                    side: splinterm_core::SplitSide::Second,
+                    ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                    launch: splinterm_protocol::AutomationLaunch {
+                        cwd,
+                        argv: vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            "while :; do sleep 1; done".into(),
+                        ],
+                    },
+                },
+            )
+            .await
+            .unwrap() else {
+                panic!("split")
+            };
+            let child_pid = state
+                .runtimes
+                .lock()
+                .await
+                .handle(splint_id)
+                .unwrap()
+                .child_pid();
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let actual = fs::read_link(format!("/proc/{child_pid}/cwd"))
+                        .await
+                        .unwrap();
+                    if actual == *expected_cwd {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("new child did not inherit the requested cwd");
+            assert_eq!(
+                state
+                    .topology
+                    .read()
+                    .await
+                    .find_splint(splint_id)
+                    .unwrap()
+                    .cwd,
+                *expected_cwd
+            );
+        }
+        std::fs::remove_dir(&live).unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(base.clone())
+        );
+        cleanup_connection(&state, 41).await;
+        assert!(resolve_splint_cwd(&state, source).await.is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
     async fn graphical_focus_read_is_authenticated_but_publication_requires_trusted_ui() {
         let state = test_state(true);
         let peer = PeerIdentity::for_test();
@@ -10626,7 +10966,7 @@ mod tests {
             .topology
             .write()
             .await
-            .create_lair("test", PathBuf::from("/target"))
+            .create_lair("test", env::current_dir().unwrap())
             .unwrap()
             .clone();
         let lair_id = dojo.id;
@@ -10712,7 +11052,7 @@ mod tests {
                 if is_create {
                     PathBuf::from("/home/test")
                 } else {
-                    PathBuf::from("/target")
+                    env::current_dir().unwrap()
                 }
             );
             assert!(launch.command.is_empty());

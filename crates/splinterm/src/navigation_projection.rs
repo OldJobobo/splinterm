@@ -1612,7 +1612,7 @@ mod tests {
         let menu = crate::frontend::TabContextMenuUi::for_explorer(
             &view,
             NavigationNodeId::Lair(lair_id),
-            Some("/demo".into()),
+            Some(SplintId::new()),
             false,
             true,
         )

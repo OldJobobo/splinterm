@@ -3,7 +3,8 @@ use std::{
     ffi::OsString,
     io::{self, Read, Write},
     mem::size_of,
-    os::unix::process::ExitStatusExt,
+    os::{fd::OwnedFd, unix::process::ExitStatusExt},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -2894,11 +2895,44 @@ impl RuntimeMetrics {
     }
 }
 
+fn capture_child_pidfd(pid: u32) -> Option<OwnedFd> {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+}
+
+fn root_process_is_live(pidfd: &OwnedFd) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let mut descriptors = [PollFd::new(pidfd, PollFlags::IN)];
+    matches!(
+        poll(
+            &mut descriptors,
+            Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0
+            })
+        ),
+        Ok(0)
+    ) && descriptors[0].revents().is_empty()
+}
+
+async fn read_root_process_cwd(pid: u32, pidfd: &OwnedFd) -> Option<PathBuf> {
+    if !root_process_is_live(pidfd) {
+        return None;
+    }
+    let cwd = tokio::fs::read_link(format!("/proc/{pid}/cwd"))
+        .await
+        .ok()?;
+    // A readable pidfd means the original root exited. Reject even if /proc
+    // successfully resolved a replacement that reused the numeric PID.
+    root_process_is_live(pidfd).then_some(cwd)
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveSplintHandle {
     pub splint_id: SplintId,
     pub incarnation: ProcessIncarnation,
     child_pid: u32,
+    child_pidfd: Option<Arc<OwnedFd>>,
     commands: mpsc::Sender<Command>,
     default_snapshot_rows: usize,
     default_subscriber_capacity: usize,
@@ -2915,6 +2949,12 @@ impl LiveSplintHandle {
     #[must_use]
     pub const fn child_pid(&self) -> u32 {
         self.child_pid
+    }
+
+    /// Observe only this root process's cwd. Missing pidfd support or an exited
+    /// root fails closed, even if its numeric PID now names a different process.
+    pub async fn root_cwd(&self) -> Option<PathBuf> {
+        read_root_process_cwd(self.child_pid, self.child_pidfd.as_deref()?).await
     }
 
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
@@ -3290,10 +3330,14 @@ impl LiveSplintRuntime {
         let (exit_sender, exit) = watch::channel(None);
         let metrics = Arc::new(RuntimeMetrics::default());
         let child_pid = session.child_id();
+        // The session still owns its unreaped std::process::Child here; the
+        // actor that can reap it has not started. Capture identity before spawn.
+        let child_pidfd = capture_child_pidfd(child_pid).map(Arc::new);
         let handle = LiveSplintHandle {
             splint_id,
             incarnation,
             child_pid,
+            child_pidfd,
             commands: sender,
             default_snapshot_rows: config.max_scrollback_snapshot_rows,
             default_subscriber_capacity: config.subscriber_capacity,
@@ -4912,6 +4956,30 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[tokio::test]
+    async fn root_cwd_pidfd_rejects_reaped_identity_even_when_pid_names_live_process() {
+        let current_pid = std::process::id();
+        let current_identity = capture_child_pidfd(current_pid).unwrap();
+        assert_eq!(
+            read_root_process_cwd(current_pid, &current_identity).await,
+            Some(std::env::current_dir().unwrap())
+        );
+
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        // Capture while the Child is unreaped, just as from_session does.
+        let stale_identity = capture_child_pidfd(child.id());
+        assert!(child.wait().unwrap().success());
+        let stale_identity = stale_identity.unwrap();
+        assert!(!root_process_is_live(&stale_identity));
+        // Deterministically model PID reuse: the lookup PID names a real live
+        // process, but the retained identity belongs to the exited root.
+        assert!(
+            read_root_process_cwd(current_pid, &stale_identity)
+                .await
+                .is_none()
+        );
+    }
 
     fn test_subscriber(
         terminal: &Terminal,

@@ -12,6 +12,29 @@ use splinterm::{
 use splinterm_core::{DojoId, LairId, TopologyRevision};
 use splinterm_protocol::{AutomationLaunch, LaunchParameters, Request};
 
+pub(in crate::app) async fn source_splint_cwd(
+    connection: &mut splinterm::automation::Connection,
+    source_splint_id: splinterm_core::SplintId,
+) -> Result<PathBuf> {
+    let splinterm_protocol::Response::Splint {
+        runtime,
+        resolved_cwd,
+        ..
+    } = connection
+        .request(Request::InspectSplint {
+            splint_id: source_splint_id,
+        })
+        .await?
+    else {
+        anyhow::bail!("splinterd returned an unexpected Splint response");
+    };
+    anyhow::ensure!(
+        runtime.splint_id == source_splint_id,
+        "splinterd returned another Splint"
+    );
+    resolved_cwd.context("source working directory is unavailable")
+}
+
 pub(in crate::app) fn launch_parameters(
     cwd: PathBuf,
     command: Vec<String>,
@@ -292,6 +315,127 @@ mod tests {
             ),
             GraphicalLairLifetime::Persistent
         );
+    }
+
+    #[tokio::test]
+    async fn source_splint_cwd_requests_exact_identity_and_rejects_unavailable_responses() {
+        use splinterm::automation::Connection;
+        use splinterm_core::SplintId;
+        use splinterm_protocol::{
+            ClientFrame, PROTOCOL_VERSION, Response, ServerFrame, ServerLimits, SplintLifecycle,
+            SplintRuntimeSummary, encode_frame,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(stream: &mut tokio::io::DuplexStream) -> ClientFrame {
+            let length = stream.read_u32().await.unwrap();
+            let mut body = vec![0; length as usize];
+            stream.read_exact(&mut body).await.unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        let source = SplintId::new();
+        let other = SplintId::new();
+        let (client, mut server) = tokio::io::duplex(8192);
+        let (reader, writer) = tokio::io::split(client);
+        let task = tokio::spawn(async move {
+            assert!(matches!(
+                read_request(&mut server).await,
+                ClientFrame::Hello { .. }
+            ));
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                        daemon_hostname: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            for (returned_id, resolved_cwd) in [
+                (source, Some(PathBuf::from("/owner/live"))),
+                (other, Some(PathBuf::from("/owner/other"))),
+                (source, None),
+            ] {
+                let ClientFrame::Request {
+                    request_id,
+                    request,
+                    ..
+                } = read_request(&mut server).await
+                else {
+                    panic!("expected inspection request")
+                };
+                assert_eq!(request, Request::InspectSplint { splint_id: source });
+                server
+                    .write_all(
+                        &encode_frame(&ServerFrame::Response {
+                            request_id,
+                            result: Response::Splint {
+                                lair_id: LairId::new(),
+                                dojo_id: DojoId::new(),
+                                title: String::new(),
+                                topology_revision: TopologyRevision::default(),
+                                resolved_cwd,
+                                runtime: SplintRuntimeSummary {
+                                    splint_id: returned_id,
+                                    live_incarnation: None,
+                                    last_incarnation: None,
+                                    restorable: false,
+                                    lifecycle: SplintLifecycle::Exited,
+                                    exit_status: None,
+                                },
+                            },
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut connection = Connection::connect_remote_interactive_transport(reader, writer)
+            .await
+            .unwrap();
+        assert_eq!(
+            source_splint_cwd(&mut connection, source).await.unwrap(),
+            PathBuf::from("/owner/live")
+        );
+        assert!(
+            source_splint_cwd(&mut connection, source)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("another Splint")
+        );
+        assert!(
+            source_splint_cwd(&mut connection, source)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn inherited_cwd_preserves_local_launch_configuration_and_remote_argv() {
+        let cwd = PathBuf::from("/owner/live-project");
+        let config = AppConfig {
+            shell: Some("/bin/custom-shell".into()),
+            login_shell: true,
+            scrollback_lines: 1234,
+            ..AppConfig::default()
+        };
+        let launch = launch_parameters(cwd.clone(), vec!["command".into()], &config);
+        assert_eq!(launch.cwd, cwd);
+        assert_eq!(launch.shell, config.shell);
+        assert!(launch.login_shell);
+        assert_eq!(launch.scrollback_lines, 1234);
+        assert_eq!(launch.command, ["command"]);
+        let remote = automation_launch(Some(cwd.clone()), vec!["remote-command".into()]);
+        assert_eq!(remote.cwd, Some(cwd));
+        assert_eq!(remote.argv, ["remote-command"]);
     }
 
     #[test]
