@@ -1,10 +1,24 @@
-# Splinterm 0.1.1-rc.2
+# Splinterm 0.1.1-rc.3
 
-Second release candidate for Splinterm 0.1.1, intended as a GitHub prerelease
+Third release candidate for Splinterm 0.1.1, intended as a GitHub prerelease
 for testing before the final release. This is not the stable 0.1.1 release.
 AUR packages remain on the stable release; no RC packages are published to AUR.
 
-## Changes since RC1
+## Changes since RC2
+
+- Scrollback search paints its query and match status inside the Window canvas,
+  including when the Explorer is open. The field stays on the terminal side of
+  the Explorer drawer and is omitted if there is no room to show it.
+- New Splints, Dojos, and Lairs created within a Window inherit the focused
+  Splint's live root-process working directory when available, including remote
+  sessions. Explicit working directories still take precedence.
+- Locally closed graphical relay channels discard valid late responses without
+  failing unrelated channels. Scrollback-tail merges avoid repeated front
+  shifts while retaining the existing bounded history behavior.
+- Explorer activity filters, context-action reconciliation, and context-menu
+  sizing received maintenance fixes after RC2.
+
+## Included from RC2
 
 - Explorer right-click menus act on the clicked Lair, Dojo, or Splint without
   implicitly navigating to it. Applicable actions include rename, creation,
@@ -17,12 +31,6 @@ AUR packages remain on the stable release; no RC packages are published to AUR.
   for row width.
 - A rejected tab context-menu request no longer exits the whole client when
   another input operation or transition makes the menu unavailable.
-
-## Known issue in RC2
-
-With the Explorer open, the scrollback search field was observed accepting input
-without being visibly painted. Press Escape to leave search and return input to
-the terminal. This display issue remains under investigation.
 
 ## Navigation and returning to work
 
@@ -81,7 +89,7 @@ the terminal. This display issue remains under investigation.
 
 ## Installation and upgrade boundary
 
-Once published, use the packages attached to the GitHub `v0.1.1-rc.2` prerelease for RC testing;
+Once published, use the packages attached to the GitHub `v0.1.1-rc.3` prerelease for RC testing;
 verify them against its published checksums before installation. Install the
 matching optional MCP package if needed. AUR remains on the stable release until
 0.1.1 final is approved; do not use the repository's candidate AUR templates as
