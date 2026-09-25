@@ -741,9 +741,7 @@ pub(crate) fn paint_search_overlay(
     renderer_generation: u64,
     palette: SessionPickerPalette,
     input: &str,
-    searched_query: &str,
-    matches: usize,
-    selected: usize,
+    status: &str,
 ) -> Result<bool> {
     if scale_120 == 0 {
         return Ok(false);
@@ -842,15 +840,6 @@ pub(crate) fn paint_search_overlay(
         palette.primary,
     )?;
     if !single_line {
-        let status = if input == searched_query {
-            format!(
-                "{}/{} matches · Ctrl+N/P next/prev · Esc close",
-                selected.saturating_add(1).min(matches),
-                matches
-            )
-        } else {
-            "Enter to search · Esc close".to_owned()
-        };
         let status_clip = Rect {
             y: inner.y.saturating_add(query_clip.height),
             height: inner.height.saturating_sub(query_clip.height),
@@ -863,7 +852,7 @@ pub(crate) fn paint_search_overlay(
             canvas,
             canvas_width,
             canvas_height,
-            &status,
+            status,
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
@@ -1398,9 +1387,7 @@ mod tests {
                     1,
                     palette,
                     query,
-                    query,
-                    3,
-                    0,
+                    "1/3 matches · Ctrl+N/P next/prev · Esc close",
                 )
                 .unwrap()
             );
@@ -1445,6 +1432,48 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_search_paints_distinct_lifecycle_statuses() {
+        let statuses = [
+            "Enter to search · Esc close",
+            "Searching… · Esc close",
+            "0/0 matches · Ctrl+N/P next/prev · Esc close",
+            "0/0 matches · partial (time limit) · Esc close",
+            "Search expired · Enter to retry · Esc close",
+        ];
+        let mut cache = SessionPickerTextCache::default();
+        let context = RenderContext::new(u16::MAX);
+        let mut frames = Vec::new();
+        for status in statuses {
+            let mut canvas = vec![0_u8; 600 * 200 * 4];
+            assert!(
+                paint_search_overlay(
+                    &mut cache,
+                    &context,
+                    &mut canvas,
+                    600,
+                    200,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 600,
+                        height: 200
+                    },
+                    120,
+                    1,
+                    session_picker_palette(ResolvedTheme::default()),
+                    "needle",
+                    status,
+                )
+                .unwrap()
+            );
+            assert!(frames.iter().all(|frame| frame != &canvas));
+            frames.push(canvas);
+            // One shared query plus the cache's three retained status frames.
+            assert!(cache.len() <= 4);
+        }
+    }
+
+    #[test]
     fn scrollback_search_clips_oversized_input_and_skips_unusable_geometry() {
         let mut canvas = vec![0_u8; 900 * 480 * 4];
         let mut cache = SessionPickerTextCache::default();
@@ -1468,9 +1497,7 @@ mod tests {
                 1,
                 palette,
                 "needle",
-                "needle",
-                0,
-                0,
+                "Searching… · Esc close",
             )
             .unwrap()
         );
@@ -1493,9 +1520,7 @@ mod tests {
                 1,
                 palette,
                 &format!("{}\n", "x".repeat(2_000)),
-                "",
-                0,
-                0,
+                "Enter to search · Esc close",
             )
             .unwrap()
         );

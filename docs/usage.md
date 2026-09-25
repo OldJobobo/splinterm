@@ -316,8 +316,15 @@ returns it to live output and sends no PTY bytes; a later Enter pressed while
 already live submits normally. `Ctrl+Shift+F` opens local literal scrollback
 search. Enter submits, `Ctrl+N` and
 `Ctrl+P` navigate matches, and Escape closes the trusted search surface. Search
-queries are not injected into the terminal. History paging remains bounded and
-preserves follow-live behavior when returning with `Shift+End`.
+queries are not injected into the terminal. Submitting a new query clears the
+previous results and shows `Searching…` until that request finishes. Result
+counts describe the current page; `more available` indicates another page,
+and `partial (time limit)` means the search stopped before completing its scan.
+An expired search offers Enter to retry. Editing the query shows the submission
+hint rather than attributing old results to the new text. Escape dismisses the
+search immediately; delayed replies cannot reopen it or reveal an old match.
+History paging remains bounded and preserves follow-live behavior when
+returning with `Shift+End`.
 
 The CLI can also read bounded history pages and search without mapping a Window:
 

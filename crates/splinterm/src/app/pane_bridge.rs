@@ -863,6 +863,7 @@ pub(in crate::app) async fn run_controller(
                     continue;
                 }
                 WindowCommand::Search {
+                    request_id,
                     terminal_revision,
                     history_generation,
                     query,
@@ -885,13 +886,13 @@ pub(in crate::app) async fn run_controller(
                         Response::SearchResults { page, .. } => {
                             let _ = outputs
                                 .updates
-                                .send(WindowUpdate::SearchResults(page))
+                                .send(WindowUpdate::SearchResults { request_id, page })
                                 .await;
                         }
                         Response::SearchResyncRequired { .. } => {
                             let _ = outputs
                                 .updates
-                                .send(WindowUpdate::SearchResyncRequired)
+                                .send(WindowUpdate::SearchResyncRequired { request_id })
                                 .await;
                             let _ = outputs.resyncs.send(()).await;
                         }

@@ -93,8 +93,8 @@ use splinterm_core::{
     Axis, DojoId, LairId, LairRetention, LayoutNode, Splint, SplintId, SplitRatio, TopologyRevision,
 };
 use splinterm_protocol::{
-    ActiveScreen, ControlTransferDecision, MouseTracking, SearchMatch, TerminalCell,
-    TerminalInputModes, TerminalRow, TerminalSnapshot,
+    ActiveScreen, ControlTransferDecision, MouseTracking, TerminalCell, TerminalInputModes,
+    TerminalRow, TerminalSnapshot,
     perf_trace::{
         PerfTraceEvent, emit_perf_trace, emit_perf_trace_at, monotonic_raw_ns, perf_trace_enabled,
     },
@@ -180,6 +180,7 @@ mod damage;
 mod dispatch;
 mod file_drop;
 mod input;
+mod search;
 mod selection;
 mod tabs;
 mod terminal_state;
@@ -212,6 +213,7 @@ use input::{
     pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
     shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
 };
+use search::SearchUiState;
 use selection::{
     CellPosition, CopyModeState, CopyMotion, CopyMoveOutcome, Selection, SelectionEndpoint,
     copy_mode_enter, copy_mode_is_valid, move_copy_cursor, selection_display_bounds,
@@ -1171,16 +1173,6 @@ fn note_output_leave<T: Eq>(entered: &mut Vec<T>, output: &T) -> bool {
     was_most_recent
 }
 
-#[derive(Clone, Debug, Default)]
-struct SearchUiState {
-    input: Option<BoundedTextEditor>,
-    query: String,
-    matches: Vec<SearchMatch>,
-    selected: usize,
-    next_cursor: Option<String>,
-    pending_reveal: Option<SearchMatch>,
-}
-
 fn new_search_editor() -> BoundedTextEditor {
     BoundedTextEditor::new(
         String::new(),
@@ -1774,18 +1766,19 @@ impl PaneView {
                 self.pending_control_transfer = None;
                 Ok(BackgroundUpdateImpact::VISUAL)
             }
-            WindowUpdate::SearchResults(page) => {
-                self.search.matches = page.matches;
-                self.search.selected = 0;
-                self.search.next_cursor = page.next_cursor;
-                self.search.pending_reveal = self.search.matches.first().cloned();
-                Ok(BackgroundUpdateImpact::VISUAL)
+            WindowUpdate::SearchResults { request_id, page } => {
+                Ok(if self.search.results(request_id, page) {
+                    BackgroundUpdateImpact::VISUAL
+                } else {
+                    BackgroundUpdateImpact::NONE
+                })
             }
-            WindowUpdate::SearchResyncRequired => {
-                self.search.matches.clear();
-                self.search.next_cursor = None;
-                self.search.pending_reveal = None;
-                Ok(BackgroundUpdateImpact::VISUAL)
+            WindowUpdate::SearchResyncRequired { request_id } => {
+                Ok(if self.search.expired(request_id) {
+                    BackgroundUpdateImpact::VISUAL
+                } else {
+                    BackgroundUpdateImpact::NONE
+                })
             }
             WindowUpdate::ScrollbackResyncRequired => {
                 self.history_page_pending = false;
@@ -2736,10 +2729,7 @@ fn window_title(
             .filter(|ch| !ch.is_control())
             .take(64)
             .collect::<String>();
-        format!(
-            "{title} — SEARCH: {query} [{} match(es), Ctrl+N/P]",
-            search.matches.len()
-        )
+        format!("{title} — SEARCH: {query} [{}]", search.status_text())
     } else {
         title
     }
@@ -5543,9 +5533,7 @@ impl App {
                 match action {
                     CommandHistoryAction::Search => {
                         self.input.input_generation = self.input.input_generation.saturating_add(1);
-                        self.panes.pane.search.input = Some(new_search_editor());
-                        self.panes.pane.search.matches.clear();
-                        self.panes.pane.search.next_cursor = None;
+                        self.panes.pane.search.open();
                         self.refresh_search_overlay(queue_handle);
                     }
                     CommandHistoryAction::PageUp | CommandHistoryAction::PageDown => {
@@ -7390,13 +7378,25 @@ impl App {
         let Some(snapshot) = self.panes.pane.snapshot.as_ref() else {
             return;
         };
-        let query = self.panes.pane.search.query.clone();
-        if query.is_empty() {
+        if self.panes.pane.commands.is_none() {
             return;
         }
+        let terminal_revision = snapshot.revision;
+        let history_generation = snapshot.history_generation;
+        let query = self.panes.pane.search.query.clone();
+        self.panes.pane.selection = None;
+        let Some(request_id) = self
+            .panes
+            .pane
+            .search
+            .begin(query.clone(), cursor.is_some())
+        else {
+            return;
+        };
         self.send_command(WindowCommand::Search {
-            terminal_revision: snapshot.revision,
-            history_generation: snapshot.history_generation,
+            request_id,
+            terminal_revision,
+            history_generation,
             query,
             case_sensitive: false,
             cursor,
@@ -7848,7 +7848,7 @@ impl App {
             match event.keysym {
                 Keysym::Escape => {
                     self.input.input_generation = self.input.input_generation.saturating_add(1);
-                    self.panes.pane.search = SearchUiState::default();
+                    self.panes.pane.search.close();
                     self.panes.pane.selection = None;
                 }
                 Keysym::Return | Keysym::KP_Enter => {
@@ -7913,9 +7913,7 @@ impl App {
             }
             Some(ActionId::SearchScrollback) => {
                 self.input.input_generation = self.input.input_generation.saturating_add(1);
-                self.panes.pane.search.input = Some(new_search_editor());
-                self.panes.pane.search.matches.clear();
-                self.panes.pane.search.next_cursor = None;
+                self.panes.pane.search.open();
                 self.refresh_search_overlay(queue_handle);
                 return;
             }
@@ -9342,21 +9340,19 @@ impl App {
                     self.panes.pane.pending_control_transfer = None;
                     title_changed = true;
                 }
-                WindowUpdate::SearchResults(page) => {
-                    self.panes.pane.search.matches = page.matches;
-                    self.panes.pane.search.selected = 0;
-                    self.panes.pane.search.next_cursor = page.next_cursor;
-                    self.panes.pane.search.pending_reveal =
-                        self.panes.pane.search.matches.first().cloned();
+                WindowUpdate::SearchResults { request_id, page } => {
+                    if !self.panes.pane.search.results(request_id, page) {
+                        continue;
+                    }
                     title_changed = true;
                     visual_changed = true;
                     focused_visual_changed = true;
                     self.presentation.full_redraw = true;
                 }
-                WindowUpdate::SearchResyncRequired => {
-                    self.panes.pane.search.matches.clear();
-                    self.panes.pane.search.next_cursor = None;
-                    self.panes.pane.search.pending_reveal = None;
+                WindowUpdate::SearchResyncRequired { request_id } => {
+                    if !self.panes.pane.search.expired(request_id) {
+                        continue;
+                    }
                     title_changed = true;
                     visual_changed = true;
                     focused_visual_changed = true;
@@ -10538,9 +10534,7 @@ impl App {
                     self.presentation.renderer_generation,
                     session_picker_palette(self.presentation.theme),
                     input.text(),
-                    &self.panes.pane.search.query,
-                    self.panes.pane.search.matches.len(),
-                    self.panes.pane.search.selected,
+                    &self.panes.pane.search.status_text(),
                 )?;
             }
             self.surface.buffers[buffer_index].stale.mark_full();
@@ -13051,6 +13045,54 @@ mod tests {
     }
 
     #[test]
+    fn inactive_pane_search_rejects_cancelled_and_superseded_replies() {
+        let splint_id = SplintId::new();
+        let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
+        pane.search.open();
+        let old = pane.search.begin("old".into(), false).unwrap();
+        pane.search.close();
+        pane.search.open();
+        let current = pane.search.begin("current".into(), false).unwrap();
+        let results = splinterm_protocol::SearchPage {
+            splint_id,
+            incarnation: 1,
+            terminal_revision: 1,
+            history_generation: 1,
+            matches: Vec::new(),
+            next_cursor: None,
+            timed_out: true,
+        };
+        for update in [
+            WindowUpdate::SearchResults {
+                request_id: old,
+                page: results.clone(),
+            },
+            WindowUpdate::SearchResyncRequired { request_id: old },
+        ] {
+            assert_eq!(
+                pane.apply_background_update(update, ResolvedTheme::default(), "test")
+                    .unwrap(),
+                BackgroundUpdateImpact::NONE
+            );
+        }
+        assert_eq!(pane.search.pending_request, Some(current));
+        assert!(pane.search.pending_reveal.is_none());
+        assert_eq!(
+            pane.apply_background_update(
+                WindowUpdate::SearchResults {
+                    request_id: current,
+                    page: results,
+                },
+                ResolvedTheme::default(),
+                "test",
+            )
+            .unwrap(),
+            BackgroundUpdateImpact::VISUAL
+        );
+        assert_eq!(pane.search.status, search::SearchStatus::Partial);
+    }
+
+    #[test]
     fn inactive_pane_reducer_applies_only_contiguous_matching_updates() {
         let splint_id = SplintId::new();
         let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
@@ -14354,7 +14396,7 @@ mod tests {
             )),
             ..SearchUiState::default()
         };
-        search.matches.push(SearchMatch {
+        search.matches.push(splinterm_protocol::SearchMatch {
             row_id: 1,
             start_column: 0,
             end_column: 2,
@@ -14363,7 +14405,7 @@ mod tests {
         let title = window_title(Some("shell"), true, &authority, true, Some(&search));
         assert!(title.starts_with("Splinterm — shell — local controller"));
         assert!(title.contains("CONTROL REQUEST"));
-        assert!(title.contains("SEARCH: needlespoof [1 match(es)"));
+        assert!(title.contains("SEARCH: needlespoof [Enter to search"));
         assert!(!title.contains('\n'));
     }
 

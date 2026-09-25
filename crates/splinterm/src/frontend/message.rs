@@ -48,8 +48,13 @@ pub enum WindowUpdate {
     Control(bool),
     ControlTransferRequested(u64),
     ControlTransferResolved(ControlTransferOutcome),
-    SearchResults(SearchPage),
-    SearchResyncRequired,
+    SearchResults {
+        request_id: u64,
+        page: SearchPage,
+    },
+    SearchResyncRequired {
+        request_id: u64,
+    },
     Theme(ThemeUpdate),
     Font(FontUpdate),
     Exited {
@@ -101,6 +106,8 @@ pub enum WindowCommand {
     },
     ForceControlTransfer,
     Search {
+        /// Client-local correlation; never sent over the daemon protocol.
+        request_id: u64,
         terminal_revision: u64,
         history_generation: u64,
         query: String,
