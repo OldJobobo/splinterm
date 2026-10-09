@@ -3,15 +3,26 @@ title: Current status
 description: What is implemented, validated, limited, planned, and unreleased in Splinterm.
 ---
 
-Splinterm **0.1.0 is the first stable release**, published on 2026-09-05 for x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Source, documentation, GitHub releases, and AUR packages are public. Broader platform compatibility and a support lifetime are not promised; future 0.x releases may change interfaces with documented migration.
+Splinterm **0.1.1 is the current stable release**, published on 2026-10-09 for x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. 0.1.0 remains the first stable release. Source, documentation, GitHub releases, and AUR packages are public. Broader platform compatibility and a support lifetime are not promised; future 0.x releases may change interfaces with documented migration.
 
 Stable release notes and assets:
 
-https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
 
-The newer **0.1.1-rc.2**, published on 2026-09-15, is a prerelease, not a new stable release. Check the release listing for subsequent publications:
+Stable 0.1.1 supersedes the RC series and includes Explorer navigation/context
+actions and activity filters, opt-in ligatures, bounded local clipboard-image
+saving, scoped accessibility, remote hostname labels, and reliability fixes.
+AT-SPI exposes navigation/status only, not terminal bodies or whole-terminal
+screen-reader support; remote image transfer and saved-layout removal are not
+included.
 
-https://github.com/OldJobobo/splinterm/releases
+The maintenance release is commit `136ef81d268d9734f5ffb687089859438ba99579`.
+Candidate run `37879898683` built the verified packages once; protected promotion
+run `37881194238` published them without rebuilding and verified all five assets.
+Both AUR package bases publish `0.1.1-1`, including exact-version optional MCP
+packages. No new graphical sequence or final installed-package matrix was run
+for finalization; recorded RC3 guest evidence remains scoped product evidence.
+The development source on `main` may differ from the immutable release.
 
 ## What that means
 
@@ -42,9 +53,9 @@ https://github.com/OldJobobo/splinterm/releases
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
 | [AUR packages](https://aur.archlinux.org/packages/splinterm-bin) | Prebuilt `splinterm-bin`, source-built `splinterm`, and optional MCP split packages; this channel can include release candidates, not only stable releases |
-| Stable release | 0.1.0 for the documented platform |
+| Stable release | 0.1.1 for the documented platform |
 | Broader compatibility and support lifetime | Not promised |
-| Nix and broader distributions | Planned |
+| Nix and broader distributions | 0.1.1 release flake/module and headless checks; wider deployment acceptance and broader Linux support remain separate |
 
 ## Important boundaries
 
@@ -56,4 +67,4 @@ Persistent topology is also separate from graphical presentation. Creating or mu
 
 ## Before depending on it
 
-Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Stable 0.1.0 does not expand the documented compatibility scope; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Stable 0.1.1 does not expand the documented compatibility scope; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.

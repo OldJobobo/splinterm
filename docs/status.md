@@ -8,7 +8,8 @@ sequence, and this page owns what the product is today.
 
 ## Maturity
 
-**Splinterm 0.1.0 is the first stable release.**
+**Splinterm 0.1.1 is the current stable release.**
+0.1.0 remains the first stable release.
 
 Source, documentation, and immutable versioned GitHub and AUR packages are
 publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
@@ -34,7 +35,7 @@ The current product target is:
   tests as release authority; Foot 1.27.0 commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical
   differential under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
-- stable `v0.1.0` release assets built from clean committed source; and
+- stable `v0.1.1` release assets built from clean committed source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
   exact-package acceptance for the Alpha3.1 transient-tab hotfixes; accepted
@@ -67,19 +68,64 @@ guarded live valid-font replacement and invalid-candidate rollback acceptance
 without replacing the Window, daemon, shell, or Splint incarnation. This behavior
 shipped in stable 0.1.0 after the release-candidate cycle.
 
-## Stable 0.1.0 and subsequent release candidates
+## Stable 0.1.1 publication
+
+`v0.1.1` was published on 2026-10-09 from
+`136ef81d268d9734f5ffb687089859438ba99579` on `maint/0.1`.
+It retains the product implementation from `v0.1.1-rc.3` unchanged;
+finalization changed workspace/package version metadata and release notes,
+not runtime source, configuration, dependencies, or fixtures.
+
+Current stable release notes and assets:
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
+
+The release adds the RC series' Explorer navigation and context actions,
+activity filters, opt-in ligatures, bounded local clipboard-image saving,
+scoped AT-SPI navigation/status, remote hostname labels, and reliability fixes.
+Accessibility does not expose terminal bodies or provide whole-terminal
+screen-reader support. Saved-layout removal is not included. Nix package,
+module and headless checks passed for the release; this does not extend Arch
+installed graphical acceptance to NixOS or aarch64. The development source on
+`main` is not the immutable maintenance release and may differ from it.
+
+- Independent source review and local serialized workspace, strict Clippy,
+  release/package, semantic and contract checks passed.
+- Exact merged-commit CI run `37878336998` passed, including Nix checks.
+- Candidate run `37879898683` built the main and optional MCP packages once;
+  extracted package and MCP runtime validation passed.
+- Protected promotion run `37881194238` published those exact artifacts as
+  stable, without rebuilding. The immutable tag, all five downloaded assets,
+  and GitHub Latest designation were reverified.
+- Manifest SHA-256:
+  `e1df8b23e950c93fcfd30a029c401cb3422abb9d57c68b84a00bc101bf0c294b`.
+- AUR source package base commit:
+  `6137f541b01d8410a318a3f5219d8058998176b2`.
+- AUR prebuilt package base commit:
+  `6dd91233abb044fcdbfd37dfc33fddb8a5eb8a17`.
+  Fresh anonymous clones matched all three approved draft files in each base;
+  public package pages showed `0.1.1-1`, including exact optional MCP pairing.
+
+No new graphical sequence or package installation was run for finalization.
+Recorded RC3 guest package/search/cwd acceptance used `55d7c7b9`; its product
+source matches published RC3, with only testbed cleanup changes afterward.
+This does not claim a fresh installed-final-package matrix or close every
+Explorer follow-up. There is no live daemon-upgrade handoff. Save work and
+upgrade from an independent terminal; stopping the daemon ends its child
+processes. See [Packaging](packaging.md) for exact-tag installation and recovery.
+
+## Historical stable 0.1.0 and release candidates
 
 Splinterm 0.1.0 was published on 2026-09-05 as the first stable release. It
 carries the RC3 terminal and daemon implementation forward unchanged and
 includes live Omarchy theme and default-font following, bounded automation,
 and source-built and prebuilt Arch packages.
 
-Stable release notes and assets:
+Historical 0.1.0 release notes and assets:
 
 https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
 
-The newer `v0.1.1-rc.2`, published on 2026-09-15, is a prerelease, not a new
-stable release. Check the release listing for subsequent publications:
+The subsequent `v0.1.1-rc.2`, published on 2026-09-15, and `v0.1.1-rc.3`
+are historical prereleases now superseded by stable `v0.1.1`. Release listing:
 
 https://github.com/OldJobobo/splinterm/releases
 
@@ -305,8 +351,8 @@ post-alpha3, pre-1.0 roadmap milestone.
 | Arch/Omarchy packaging | Stable release available | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
 | AUR packages | Available | Prerelease-capable channel, not stable-only. Prebuilt [`splinterm-bin`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, versioned GitHub releases and prereleases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
-| Stable release scope | 0.1.0 released | The documented Omarchy/Arch Linux target only; broader compatibility and a support lifetime are not promised. |
-| Nix and broader distribution | Planned | Not current product behavior or support. |
+| Stable release scope | 0.1.1 released | The documented Omarchy/Arch Linux target only; broader compatibility and a support lifetime are not promised. |
+| Nix and broader distribution | Release-scoped Nix checks | Stable 0.1.1 includes a source flake and desktop/headless module; wider deployment acceptance and broader Linux support remain separate. |
 
 **Classification meanings:** implemented means present in current code; validated
 means required recorded evidence exists for the named scope; supported means a
