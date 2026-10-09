@@ -1,10 +1,12 @@
-# Splinterm 0.1.1-rc.3
+# Splinterm 0.1.1
 
-Third release candidate for Splinterm 0.1.1, intended as a GitHub prerelease
-for testing before the final release. This is not the stable 0.1.1 release.
-AUR packages remain on the stable release; no RC packages are published to AUR.
+Splinterm 0.1.1 is a stable update for the documented x86_64 Linux target.
+It retains the product implementation from `v0.1.1-rc.3` unchanged; finalization
+updates version metadata, package recipe templates, and release notes rather
+than adding runtime features. The changes below summarize the 0.1.1 RC series
+relative to 0.1.0; Nix support entered maintenance ancestry before this series.
 
-## Changes since RC2
+## Final RC3 fixes
 
 - Scrollback search paints its query and match status inside the Window canvas,
   including when the Explorer is open. The field stays on the terminal side of
@@ -18,7 +20,7 @@ AUR packages remain on the stable release; no RC packages are published to AUR.
 - Explorer activity filters, context-action reconciliation, and context-menu
   sizing received maintenance fixes after RC2.
 
-## Included from RC2
+## Explorer context actions and labels
 
 - Explorer right-click menus act on the clicked Lair, Dojo, or Splint without
   implicitly navigating to it. Applicable actions include rename, creation,
@@ -89,12 +91,12 @@ AUR packages remain on the stable release; no RC packages are published to AUR.
 
 ## Installation and upgrade boundary
 
-Once published, use the packages attached to the GitHub `v0.1.1-rc.3` prerelease for RC testing;
+After publication, use the packages attached to the GitHub `v0.1.1` release;
 verify them against its published checksums before installation. Install the
-matching optional MCP package if needed. AUR remains on the stable release until
-0.1.1 final is approved; do not use the repository's candidate AUR templates as
-published package recipes. Final publication requires a separate readiness
-decision after RC testing.
+matching optional MCP package if needed. Source-built and prebuilt AUR package
+bases are updated separately after GitHub asset verification. Until that update
+is verified, AUR remains on 0.1.0; repository candidate templates are not
+published AUR recipes.
 
 **There is no live daemon-upgrade handoff.** Save work and upgrade from Foot,
 another independent terminal, or an independent SSH session. Stopping or replacing
