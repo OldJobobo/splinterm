@@ -1340,10 +1340,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "splinterm-mcp-control-{label}-{}-{nonce}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("mc-{label:.12}-{}-{nonce:x}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let socket = directory.join("daemon.sock");
         (directory, socket)

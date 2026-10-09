@@ -234,10 +234,8 @@ fn isolated_socket(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "splinterm-mcp-{label}-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory =
+        std::env::temp_dir().join(format!("mcp-{label:.12}-{}-{nonce:x}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let socket = directory.join("daemon.sock");
     (directory, socket)

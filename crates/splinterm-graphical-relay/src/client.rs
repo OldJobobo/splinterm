@@ -708,7 +708,7 @@ impl AsyncWrite for LogicalChannel {
 mod tests {
     use std::time::Duration;
 
-    use tokio::{io::AsyncReadExt as _, time};
+    use tokio::time;
 
     use super::*;
 

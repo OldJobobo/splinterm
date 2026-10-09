@@ -27,8 +27,29 @@ jobs:
       - name: Check packages, module, and headless VMs
         run: nix flake check --print-build-logs --max-jobs 2 --cores 4
 
+  arch-warning-check:
+    name: Current Arch Rust warning-free sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: archlinux:base-devel
+    steps:
+      - name: Install current Arch compiler and native dependencies
+        run: pacman -Syu --noconfirm --needed git rust fontconfig freetype2 pixman libxkbcommon pkgconf
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record the distribution toolchain
+        run: rustc --version && cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Deny warnings in release sources and test targets
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo check --locked --workspace --all-targets
+          cargo check --locked --release --workspace
+
   check:
-    needs: nix
+    needs: [nix, arch-warning-check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +92,7 @@ jobs:
             tools/package/test_validate_mcp_package.py \
             tools/release/test_prepare_candidate.py \
             tools/release/test_nix_ci_workflow.py \
+            tools/release/test_rust_warning_gates.py \
             tools/release/test_promote_release.py \
             tools/release/test_release_candidate_workflow.py \
             tools/release/test_promote_release_workflow.py

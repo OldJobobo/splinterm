@@ -135,8 +135,8 @@ impl Daemon {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runtime =
-            std::env::temp_dir().join(format!("splinterm-phase8-{}-{nonce}", std::process::id()));
+        // Leave room for the companion `.content` socket under a repo-local TMPDIR.
+        let runtime = std::env::temp_dir().join(format!("sp8-{}-{nonce:x}", std::process::id()));
         fs::create_dir(&runtime).unwrap();
         let socket = runtime.join("splinterd.sock");
         let child = Self::spawn_child(&runtime, &socket);
@@ -155,10 +155,7 @@ impl Daemon {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runtime = std::env::temp_dir().join(format!(
-            "splinterm-gum-environment-{}-{nonce}",
-            std::process::id()
-        ));
+        let runtime = std::env::temp_dir().join(format!("spgum-{}-{nonce:x}", std::process::id()));
         let theme = runtime.join("state/omarchy/current/theme");
         fs::create_dir_all(&theme).unwrap();
         fs::write(theme.join("gum_env.lua"), palette).unwrap();
@@ -189,10 +186,8 @@ impl Daemon {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let runtime = std::env::temp_dir().join(format!(
-            "splinterm-headless-policy-{}-{nonce}",
-            std::process::id()
-        ));
+        let runtime =
+            std::env::temp_dir().join(format!("sppolicy-{}-{nonce:x}", std::process::id()));
         fs::create_dir(&runtime).unwrap();
         let policy = runtime.join("policy.json");
         fs::write(&policy, policy_contents).unwrap();

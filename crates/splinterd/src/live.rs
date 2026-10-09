@@ -94,12 +94,21 @@ impl ProcessIncarnation {
     /// Panics if the process has exhausted the `u64` incarnation space.
     #[must_use]
     pub fn allocate() -> Self {
-        let value = NEXT_INCARNATION
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .expect("process incarnation space exhausted");
-        Self(value)
+        let mut current = NEXT_INCARNATION.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(1)
+                .expect("process incarnation space exhausted");
+            match NEXT_INCARNATION.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Self(current),
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     #[must_use]
@@ -1501,11 +1510,17 @@ impl QueueAccounting {
     }
 
     fn try_reserve_counter(counter: &AtomicU64, amount: u64, limit: u64) -> bool {
-        counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(amount).filter(|next| *next <= limit)
-            })
-            .is_ok()
+        let mut current = counter.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(amount).filter(|next| *next <= limit) else {
+                return false;
+            };
+            match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn try_admit_producer_bytes(&self, amount: u64) -> Option<TerminalPublicationMemoryLease> {
@@ -2620,33 +2635,47 @@ impl RuntimeMetrics {
     }
 
     fn add_usize_saturating(value: &AtomicUsize, amount: usize) -> usize {
-        let previous = value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(amount))
-            })
-            .unwrap_or_else(|current| current);
-        previous.saturating_add(amount)
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_add(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn sub_usize_saturating(value: &AtomicUsize, amount: usize) {
-        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_sub(amount))
-        });
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn add_u64_saturating(value: &AtomicU64, amount: u64) -> u64 {
-        let previous = value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(amount))
-            })
-            .unwrap_or_else(|current| current);
-        previous.saturating_add(amount)
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_add(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn sub_u64_saturating(value: &AtomicU64, amount: u64) {
-        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_sub(amount))
-        });
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn add_saturating(value: &AtomicU64, amount: u64) {
@@ -4962,6 +4991,91 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn atomic_accounting_preserves_saturation_and_admission_boundaries() {
+        let count = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(RuntimeMetrics::add_usize_saturating(&count, 2), usize::MAX);
+        assert_eq!(RuntimeMetrics::add_usize_saturating(&count, 0), usize::MAX);
+        RuntimeMetrics::sub_usize_saturating(&count, usize::MAX);
+        RuntimeMetrics::sub_usize_saturating(&count, 1);
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+
+        let bytes = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(RuntimeMetrics::add_u64_saturating(&bytes, 2), u64::MAX);
+        assert_eq!(RuntimeMetrics::add_u64_saturating(&bytes, 0), u64::MAX);
+        RuntimeMetrics::sub_u64_saturating(&bytes, u64::MAX);
+        RuntimeMetrics::sub_u64_saturating(&bytes, 1);
+        assert_eq!(bytes.load(Ordering::Relaxed), 0);
+
+        assert!(QueueAccounting::try_reserve_counter(&bytes, 10, 10));
+        assert!(QueueAccounting::try_reserve_counter(&bytes, 0, 10));
+        assert!(!QueueAccounting::try_reserve_counter(&bytes, 1, 10));
+        assert_eq!(bytes.load(Ordering::Acquire), 10);
+        bytes.store(u64::MAX, Ordering::Release);
+        assert!(!QueueAccounting::try_reserve_counter(&bytes, 1, u64::MAX));
+        assert_eq!(bytes.load(Ordering::Acquire), u64::MAX);
+    }
+
+    #[test]
+    fn atomic_accounting_updates_are_exact_under_contention() {
+        let count = AtomicUsize::new(0);
+        let bytes = AtomicU64::new(0);
+        let admitted = AtomicU64::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..1_000 {
+                        RuntimeMetrics::add_usize_saturating(&count, 1);
+                        RuntimeMetrics::add_u64_saturating(&bytes, 1);
+                        QueueAccounting::try_reserve_counter(&admitted, 1, 17);
+                    }
+                });
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 8_000);
+        assert_eq!(bytes.load(Ordering::Relaxed), 8_000);
+        assert_eq!(admitted.load(Ordering::Acquire), 17);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..1_000 {
+                        RuntimeMetrics::sub_usize_saturating(&count, 1);
+                        RuntimeMetrics::sub_u64_saturating(&bytes, 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        assert_eq!(bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn atomic_incarnation_allocation_is_unique_under_contention() {
+        let barrier = std::sync::Barrier::new(8);
+        let mut values = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        (0..100)
+                            .map(|_| ProcessIncarnation::allocate().value())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("allocation thread"))
+                .collect::<Vec<_>>()
+        });
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(values.len(), 800);
+    }
 
     #[tokio::test]
     async fn root_cwd_pidfd_rejects_reaped_identity_even_when_pid_names_live_process() {

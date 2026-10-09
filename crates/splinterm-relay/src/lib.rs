@@ -1038,10 +1038,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = env::temp_dir().join(format!(
-            "splinterm-relay-{label}-{}-{nonce}",
-            std::process::id()
-        ));
+        let path = env::temp_dir().join(format!("r-{label:.12}-{}-{nonce:x}", std::process::id()));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
