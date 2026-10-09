@@ -5,7 +5,7 @@
 
 **A persistent, security-conscious terminal substrate for humans and bounded automation.**
 
-[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [0.1.0 release notes](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
+[Website](https://splinterm.com/) · [Documentation](https://splinterm.com/docs/) · [0.1.1 release notes](RELEASE_NOTES.md) · [Quickstart](https://splinterm.com/docs/quickstart/) · [Product roadmap](docs/product-roadmap.md) · [Current status](docs/status.md)
 
 </div>
 

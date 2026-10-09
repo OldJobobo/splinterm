@@ -1,6 +1,6 @@
 # Current product status
 
-- **Current public version tag:** `v0.1.0`
+- **Current public version tag:** `v0.1.1`
 
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. The [product roadmap](product-roadmap.md)
@@ -10,7 +10,8 @@ outside the public product repository.
 
 ## Maturity
 
-**Splinterm 0.1.0 is the first stable release for the documented target.**
+**Splinterm 0.1.1 is the current stable release for the documented target.**
+0.1.0 remains the first stable release.
 
 Source, documentation, and immutable versioned GitHub and AUR packages are
 publicly available. Core terminal emulation, daemon-owned persistence, multiplexing,
@@ -36,7 +37,7 @@ The current product target is:
   tests as release authority; Foot 1.27.0 commit
   `3c5b584b0eafa772eb4376fb6eaf6643399e190e` remains an optional historical
   differential under [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md);
-- public stable `0.1.0-1` Arch packages built from clean committed
+- public stable `0.1.1-1` Arch packages built from clean committed
   source; and
 - guarded installed-package evidence for the Alpha3 command, scrollback,
   saved-Lair, Wayland file-drop, and Omarchy screensaver workflows; isolated
@@ -50,6 +51,56 @@ Other Linux distributions, compositors, architectures, and package formats are
 not current compatibility promises. Headless `splinterd` does not require a
 graphical environment; its packaged and remote workflows retain the documented
 0.1 scope and upgrade limitations.
+
+## 0.1.1 stable release
+
+`v0.1.1` was published on 2026-10-09 from
+`136ef81d268d9734f5ffb687089859438ba99579` on `maint/0.1`.
+It retains the product implementation from `v0.1.1-rc.3` unchanged;
+finalization changed workspace/package version metadata and release notes,
+not runtime source, configuration, dependencies, or fixtures.
+
+Release:
+https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
+
+The release adds the RC series' Explorer navigation and context actions,
+activity filters, opt-in ligatures, bounded local clipboard-image saving,
+scoped AT-SPI navigation/status, remote hostname labels, and reliability fixes.
+Nix package/module/headless checks passed; this does not extend the Arch
+installed graphical acceptance claim to NixOS or aarch64. Accessibility does
+not expose terminal bodies or provide whole-terminal screen-reader support.
+Saved-layout removal is not included, and there is no live daemon-upgrade handoff.
+
+- Independent source review and local serialized workspace, strict Clippy,
+  release/package, semantic and contract checks passed.
+- Exact merged-commit CI run `37878336998` passed, including Nix checks.
+- Candidate run `37879898683` built the main and optional MCP packages once;
+  extracted package and MCP runtime validation passed.
+- Protected promotion run `37881194238` published those exact artifacts as
+  stable, without rebuilding. The immutable tag, all five downloaded assets,
+  and GitHub Latest designation were reverified.
+- Manifest SHA-256:
+  `e1df8b23e950c93fcfd30a029c401cb3422abb9d57c68b84a00bc101bf0c294b`.
+- Source archive SHA-256:
+  `276770c8f3b4ae10466ff965c07af2860ae91a8649d312f32cb760aef5b784f2`.
+- Main package SHA-256:
+  `63fa181440433fdb351e71339554befdf75e7961e5a142aa03827c95fc886be5`.
+- MCP package SHA-256:
+  `3572291ae5a9f7ea0d0adbd88e53be05159b05916a3992133af283e85f5decc7`.
+- AUR source package base commit:
+  `6137f541b01d8410a318a3f5219d8058998176b2`.
+- AUR prebuilt package base commit:
+  `6dd91233abb044fcdbfd37dfc33fddb8a5eb8a17`.
+  Fresh anonymous clones matched all three approved draft files in each base;
+  public package pages showed `0.1.1-1`, including exact optional MCP pairing.
+  The RPC index initially retained cached 0.1.0 metadata.
+
+No new graphical sequence or package installation was run for finalization.
+Recorded RC3 guest package/search/cwd acceptance used `55d7c7b9`; its product
+source matches published RC3, with only testbed cleanup changes afterward.
+This does not claim a fresh installed-final-package matrix or close every
+Explorer follow-up. Save work and upgrade from an independent terminal;
+stopping the daemon ends its child processes.
 
 ## 0.1.0 stable release
 
@@ -70,7 +121,7 @@ daemon-upgrade guarantee is introduced.
 - All five public assets were downloaded and checked against the approved
   manifest, SHA-256
   `483534767a55558d2b85d1844b0c148f5dd688d8c048a7afe5e2b77a41cceb16`.
-- Both AUR package bases publish the verified `0.1.0-1` recipes:
+- Both AUR package bases published the verified `0.1.0-1` recipes:
   [`splinterm`](https://aur.archlinux.org/packages/splinterm) at
   `71f761f4cec2a29e4df00c2fb506e1cf164f8fe5` and
   [`splinterm-bin`](https://aur.archlinux.org/packages/splinterm-bin) at
@@ -103,7 +154,7 @@ against the candidate manifest. Both AUR package bases,
 `0.1.0rc.3-1` with the matching source and binary hashes. Their optional MCP
 subpackages retain the same version. See [release automation](release-automation.md).
 
-RC3 remains available as an immutable historical prerelease; `0.1.0` is the
+RC3 remains available as an immutable historical prerelease; `0.1.1` is the
 current stable release.
 
 ## 0.1.0 RC2 release
@@ -375,8 +426,8 @@ post-alpha3, pre-1.0 roadmap milestone.
 | Native remote graphical client | Implemented and validated | Profile-bound OpenSSH transport, native picker/window workflow, control, reconnect diagnostics, and client-local lifecycle; remote image transfer is not supported. See [Remote access](remote.md). |
 | MCP adapter | Implemented and validated | Optional, separately packaged, exact-identity adapter over the supported automation surface. See [MCP](mcp.md). |
 | Terminal images | Supported documented subset | Sixel, practical static Kitty, and inline iTerm2 PNG subsets are bounded; full Kitty graphics is not claimed. See [Images](images.md). |
-| Arch/Omarchy packaging | Stable 0.1.0 packages validated | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
-| AUR packages | Available | Recommended prebuilt [`splinterm-bin` `0.1.0-1`](https://aur.archlinux.org/packages/splinterm-bin) publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built [`splinterm` `0.1.0-1`](https://aur.archlinux.org/packages/splinterm) and `splinterm-mcp` remain available. |
+| Arch/Omarchy packaging | Prior installed-package validation: 0.1.0 | Immutable versioned GitHub and AUR split packages, service, desktop metadata, upgrade checks, trusted-client identity, and rollback guidance. See [Packaging](packaging.md). |
+| AUR packages | Available | Recommended prebuilt `splinterm-bin` `0.1.1-1` publishes `splinterm-bin` and optional `splinterm-mcp-bin` from checksummed immutable versioned-release assets without local compilation. Source-built `splinterm` `0.1.1-1` and `splinterm-mcp` remain available. |
 | Public source and versioned releases | Available | The repository, documentation, protected GitHub releases, and AUR packages are public. The retired rolling edge channel is no longer produced or consumed. |
 | Long-term or broader support | Not promised | No compatibility window, support duration, or formal support/security-reporting process is promised yet. |
 | NixOS packaging | Source flake and module | Full Wayland GUI and headless service packaging; live NixOS/graphical acceptance remains separate. See `docs/nixos.md`. |

@@ -5,12 +5,13 @@ n8n notification role are defined in [Release automation](release-automation.md)
 
 Splinterm's `packaging/PKGBUILD` prepares split packages for reviewed local and CI
 candidate builds. Its local source archive and `SKIP` checksum are valid only in
-that workflow. This checkout's recipe and the examples below prepare `0.1.1`;
-publication is pending. A version bump does not establish release availability. Match
-archive and package filenames to the recipe when preparing another version.
+that workflow. Stable `v0.1.1` and the matching `0.1.1-1` AUR packages are
+published; the examples below use that version. A version bump alone does not
+establish availability. Match archive and package filenames to the recipe when
+preparing another version.
 
-The closed `packaging/release-state.json` record identifies `v0.1.0` as the
-current public predecessor. It is the machine-readable authority for that
+The closed `packaging/release-state.json` record identifies `v0.1.1` as the
+current public release and predecessor for future candidates. It is the machine-readable authority for that
 boundary; candidate construction and promotion both reject a
 different supplied tag even when it exists. `docs/status.md` carries the same
 exact current-version marker, and release tooling rejects disagreement. The
