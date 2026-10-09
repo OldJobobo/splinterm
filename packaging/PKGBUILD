@@ -34,6 +34,8 @@ build() {
   cd "$pkgbase-$pkgver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
+  # A release must be warning-free on the packaging distribution's compiler.
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings"
   cargo build --frozen --release \
     -p splinterm -p splinterd -p splinterm-relay -p splinterm-pty -p splinterm-mcp
 }

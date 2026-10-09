@@ -17,7 +17,7 @@ fn test_directory(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "splinterm-relay-cli-{label}-{}-{nonce}",
+        "relay-{label:.12}-{}-{nonce:x}",
         std::process::id()
     ));
     fs::create_dir(&path).unwrap();

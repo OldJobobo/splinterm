@@ -971,9 +971,10 @@ mod tests {
 
     fn test_directory(label: &str) -> PathBuf {
         let path = env::temp_dir().join(format!(
-            "splinterm-diagnostics-{label}-{}-{}",
+            // Keep journal socket paths within SUN_LEN under a repo-local TMPDIR.
+            "sd-{label}-{}-{}",
             std::process::id(),
-            Uuid::new_v4()
+            Uuid::new_v4().simple()
         ));
         fs::create_dir(&path).unwrap();
         path

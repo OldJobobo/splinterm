@@ -98,12 +98,21 @@ pub(super) fn safe_paste(bytes: &[u8]) -> Result<&[u8]> {
 }
 
 pub(super) fn try_clipboard_worker(active: &AtomicUsize) -> Option<ClipboardWorkerPermit<'_>> {
-    active
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            (count < MAX_CLIPBOARD_WORKERS).then_some(count + 1)
-        })
-        .ok()
-        .map(|_| ClipboardWorkerPermit { active })
+    let mut current = active.load(Ordering::Acquire);
+    loop {
+        if current >= MAX_CLIPBOARD_WORKERS {
+            return None;
+        }
+        match active.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(ClipboardWorkerPermit { active }),
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 fn poll_timeout(deadline: Instant) -> Option<Timespec> {
@@ -277,6 +286,30 @@ mod tests {
         drop(permits);
         assert_eq!(active.load(Ordering::Acquire), 0);
         assert!(try_clipboard_worker(&active).is_some());
+    }
+
+    #[test]
+    fn clipboard_worker_budget_remains_strict_under_contention() {
+        let active = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(9);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    let permit = try_clipboard_worker(&active);
+                    barrier.wait();
+                    barrier.wait();
+                    drop(permit);
+                });
+            }
+            barrier.wait();
+            barrier.wait();
+            let admitted = active.load(Ordering::Acquire);
+            barrier.wait();
+            assert_eq!(admitted, MAX_CLIPBOARD_WORKERS);
+        });
+        assert_eq!(active.load(Ordering::Acquire), 0);
+        assert!(try_clipboard_worker(&AtomicUsize::new(usize::MAX)).is_none());
     }
 
     #[test]

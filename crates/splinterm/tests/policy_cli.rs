@@ -15,10 +15,7 @@ fn test_directory(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = env::temp_dir().join(format!(
-        "splinterm-policy-cli-{label}-{}-{nonce}",
-        std::process::id()
-    ));
+    let path = env::temp_dir().join(format!("pc-{label:.12}-{}-{nonce:x}", std::process::id()));
     fs::create_dir(&path).unwrap();
     path
 }

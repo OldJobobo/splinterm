@@ -43,6 +43,8 @@ build() {
   cd "$pkgbase-$_upstream_ver"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
+  # Keep source installs warning-free without discarding user compiler flags.
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings"
   cargo build --frozen --release \
     -p splinterm -p splinterd -p splinterm-relay -p splinterm-pty -p splinterm-mcp
 }
