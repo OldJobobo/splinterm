@@ -14,7 +14,7 @@ Splinterm combines a native Wayland terminal with a headless daemon that keeps s
 Humans use that persistent topology through native windows, tabs, and panes. Authorized tools can reach the same sessions through bounded JSON/NDJSON, SSH relay, and MCP interfaces. Splinterm is built in Rust from [Foot](https://codeberg.org/dnkl/foot)'s terminal behavior and designed first for Omarchy and Arch Linux.
 
 > [!IMPORTANT]
-> **Status: stable 0.1.0.** Splinterm's first stable release is available for x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Source, versioned GitHub release assets, AUR packages, and documentation are public. Stable 0.1.0 does not promise broader platform compatibility, live daemon upgrade handoff, or a support lifetime. Future 0.x releases may change interfaces with documented migration.
+> **Status: stable 0.1.1.** Splinterm's current stable release is available for x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. Source, versioned GitHub release assets, AUR packages, and documentation are public. Stable 0.1.1 does not promise broader platform compatibility, live daemon upgrade handoff, or a support lifetime. Future 0.x releases may change interfaces with documented migration.
 >
 > See the repository-authoritative [current status](docs/status.md) for the exact capability and availability boundaries.
 
@@ -54,15 +54,15 @@ Foot is Splinterm's behavioral foundation, not just visual inspiration. The term
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |
 | AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm`; optional MCP split packages |
-| Stable release | 0.1.0 for the documented Omarchy/Arch Linux target |
+| Stable release | 0.1.1 for the documented Omarchy/Arch Linux target |
 | Broader compatibility and support lifetime | Not promised |
-| Nix and broader distributions | Planned |
+| Nix and broader distributions | 0.1.1 release flake/module and headless checks; wider acceptance remains separate |
 
 For limitations and release gates, read [Current status](docs/status.md). Exact image support is documented in [`docs/images.md`](docs/images.md).
 
 ## Install
 
-The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The prebuilt AUR packages download verified binaries and do not compile locally. **AUR is prerelease-capable, not stable-only:** these same package names can advance to release candidates. Check the offered version before installing or upgrading. For stable 0.1.0 specifically, use the exact-tag instructions in [Packaging](docs/packaging.md).
+The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The prebuilt AUR packages download verified binaries and do not compile locally. **AUR is prerelease-capable, not stable-only:** these same package names can advance to release candidates. Check the offered version before installing or upgrading. For stable 0.1.1 specifically, use the exact-tag instructions in [Packaging](docs/packaging.md).
 
 ```bash
 yay -S splinterm-bin
@@ -80,7 +80,7 @@ cd splinterm
 ./install.sh
 ```
 
-The release installer selects the newest published qualifying SemVer `v…` release, **including prereleases**; it is not a stable-only selector. For stable 0.1.0 specifically, follow the exact-tag instructions in [Packaging](docs/packaging.md). The installer verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
+The release installer selects the newest published qualifying SemVer `v…` release, **including prereleases**; it is not a stable-only selector. For stable 0.1.1 specifically, follow the exact-tag instructions in [Packaging](docs/packaging.md). The installer verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
 
 To build and package the current committed checkout locally, run the installer
 from Foot or another terminal not owned by `splinterd`:
