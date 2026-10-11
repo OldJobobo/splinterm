@@ -267,6 +267,14 @@ native remote Window. Policy reload disconnects automation-role connections so
 they re-evaluate the new generation; it does not disconnect local or remote
 human graphical clients.
 
+The human role is not a boundary against software already running as the
+account. `splinterd` recognizes the graphical relay by its installed executable
+and `--graphical-stdio` mode, and the relay forwards whatever its caller sends,
+so any process running as the account can start it and receive the same
+authority without a prompt. Policy and consent keep cooperating tools within
+what was granted and make their access visible; they do not contain a hostile
+process, which can already read the account's files and run its commands.
+
 Remote snapshots must omit image metadata. The client never opens a `.content`
 socket for a remote endpoint; unexpected remote image metadata fails the pane
 closed before any body request. `PublishGraphicalFocus` is never sent remotely.
