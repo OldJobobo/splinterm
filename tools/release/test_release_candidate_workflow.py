@@ -57,6 +57,7 @@ class ReleaseCandidateWorkflowTests(unittest.TestCase):
         doctor = workflow.index("python tools/release/release-doctor.py --version")
         candidate_check = workflow.index("prepare-candidate.py check")
         self.assertLess(doctor, candidate_check)
+        self.assertGreater(candidate_check, workflow.index("useradd --create-home validator"))
         self.assertNotIn("tools/foot-oracle/check-provenance.py", workflow)
         self.assertIn("runuser -u validator -- python -m unittest", workflow)
         self.assertNotIn("safe.directory '*'", workflow)

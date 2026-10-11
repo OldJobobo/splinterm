@@ -211,7 +211,18 @@ class PromoteReleaseTests(unittest.TestCase):
                     COMMIT,
                     BRANCH,
                     fixture.manifest_sha256,
+                    require_current_predecessor=True,
                 )
+            # Distribution and recovery reverify after the public state advances.
+            promotion = MODULE.verify_candidate(
+                fixture.root,
+                REPOSITORY,
+                RUN_ID,
+                COMMIT,
+                BRANCH,
+                fixture.manifest_sha256,
+            )
+            self.assertEqual(promotion["commit"], COMMIT)
 
     def test_candidate_rejects_tampering_extra_files_and_unsafe_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-promotion-") as value:

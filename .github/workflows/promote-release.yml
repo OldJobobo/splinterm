@@ -104,6 +104,7 @@ jobs:
             --expected-commit "${{ steps.source.outputs.commit }}" \
             --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --require-current-predecessor \
             --output promotion.json
           python - <<'PY'
           import json
@@ -199,6 +200,7 @@ jobs:
             --expected-commit "${{ needs.verify.outputs.commit }}" \
             --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --require-current-predecessor \
             --output promotion-reverified.json >/dev/null
           cmp verified/promotion.json promotion-reverified.json
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"

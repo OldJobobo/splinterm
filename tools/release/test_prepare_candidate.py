@@ -190,12 +190,16 @@ class PrepareCandidateTests(unittest.TestCase):
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
         with tempfile.TemporaryDirectory(prefix="splinterm-release-notes-") as value:
             output = Path(value) / "RELEASE-NOTES.md"
-            MODULE.create_notes(commit, output)
+            heading = MODULE.run(["git", "show", f"{commit}:RELEASE_NOTES.md"]).splitlines()[0]
+            version = heading.removeprefix("# Splinterm ")
+            MODULE.create_notes(commit, version, output)
             self.assertEqual(
                 output.read_text(encoding="utf-8"),
                 MODULE.run(["git", "show", f"{commit}:RELEASE_NOTES.md"]) + "\n",
             )
             self.assertTrue(output.read_text(encoding="utf-8").startswith("# Splinterm "))
+            with self.assertRaisesRegex(ValueError, "heading does not match"):
+                MODULE.create_notes(commit, f"{version}.1", output)
 
     def test_ci_attestation_is_exact_and_authority_bound(self) -> None:
         value = {

@@ -67,8 +67,8 @@ def create_workload(machine: Machine, label: str) -> tuple[str, str]:
     assert "splinterd.service" not in cgroup
     scope = cgroup.rsplit("/", 1)[-1]
     dojo = cgroup.rsplit("/", 2)[-2]
-    # The 0.1 daemon has nested memory limits, not 0.2's per-Dojo/Splint
-    # task policy. Both descendants must inherit the module's aggregate cap.
+    # The daemon has nested memory limits and no per-Dojo/Splint task
+    # policy. Both descendants must inherit the module's aggregate cap.
     assert property_value(machine, "app-splinterm.slice", "TasksMax") == "2048"
     for unit in (scope, dojo):
         effective_tasks = int(property_value(machine, unit, "EffectiveTasksMax"))

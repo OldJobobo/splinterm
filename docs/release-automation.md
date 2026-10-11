@@ -41,6 +41,12 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - repository permission limited to `actions: read` and `contents: read`;
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
+- the dispatch names the previous version tag, which must equal
+  `packaging/release-state.json`; promotion rechecks that binding, while AUR
+  distribution and recovery do not, so the recorded public state may advance
+  once publication completes;
+- release notes are the candidate commit's `RELEASE_NOTES.md`, whose first line
+  must be `# Splinterm <version>` for the candidate version;
 - the requested version must exactly match Cargo and all three Arch recipes;
 - website sources and deployment automation are absent from the source archive;
 - package validation runs against extracted package contents;

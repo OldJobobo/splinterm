@@ -172,6 +172,7 @@ def verify_candidate(
     expected_commit: str,
     expected_branch: str,
     manifest_sha256: str,
+    require_current_predecessor: bool = False,
 ) -> dict[str, Any]:
     if SHA256.fullmatch(manifest_sha256) is None:
         raise ValueError("candidate manifest SHA-256 is malformed")
@@ -207,7 +208,9 @@ def verify_candidate(
     previous = manifest["previous_version_tag"]
     if not isinstance(previous, str) or not previous.startswith("v") or SEMVER.fullmatch(previous[1:]) is None:
         raise ValueError("candidate previous version tag is malformed")
-    if previous != current_public_release_tag():
+    # Only pre-publication promotion binds the predecessor to the recorded
+    # public state; distribution and recovery run after that state advances.
+    if require_current_predecessor and previous != current_public_release_tag():
         raise ValueError("candidate predecessor does not match current public release state")
     run_match = RUN_URL.fullmatch(manifest["workflow_run"] if isinstance(manifest["workflow_run"], str) else "")
     if run_match is None or run_match.group(1).lower() != repository.lower() or int(run_match.group(2)) != run_id:
@@ -588,6 +591,7 @@ def parser() -> argparse.ArgumentParser:
         "--expected-branch", choices=sorted(RELEASE_BRANCHES), required=True
     )
     verify.add_argument("--manifest-sha256", required=True)
+    verify.add_argument("--require-current-predecessor", action="store_true")
     verify.add_argument("--output", type=Path, required=True)
     receipt = commands.add_parser("receipt")
     receipt.add_argument("--promotion", type=Path, required=True)
@@ -656,6 +660,7 @@ def main() -> int:
                 arguments.expected_commit,
                 arguments.expected_branch,
                 arguments.manifest_sha256,
+                arguments.require_current_predecessor,
             )
             write_json(arguments.output, promotion)
             print(json.dumps(promotion, sort_keys=True))

@@ -209,10 +209,12 @@ def validate_previous_version_tag(previous: str, release_tag: str) -> str:
     return previous
 
 
-def create_notes(commit: str, output: Path) -> None:
+def create_notes(commit: str, version: str, output: Path) -> None:
     notes = run(["git", "show", f"{commit}:RELEASE_NOTES.md"])
     if not notes:
         raise ValueError("candidate RELEASE_NOTES.md is empty")
+    if notes.splitlines()[0] != f"# Splinterm {version}":
+        raise ValueError("candidate RELEASE_NOTES.md heading does not match the candidate version")
     output.write_text(notes + "\n", encoding="utf-8")
 
 
@@ -325,7 +327,7 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
     binary_srcinfo = write_srcinfo(binary_recipe)
 
     notes = output / "RELEASE-NOTES.md"
-    create_notes(commit, notes)
+    create_notes(commit, version, notes)
     assets = [
         asset_record(source_archive, "source-archive", output),
         asset_record(main_package, "arch-package", output),

@@ -4676,9 +4676,7 @@ impl App {
                 .as_mut()
                 .map(|help| (OwnedFieldTarget::BindingHelp, help.editor_mut()));
         }
-        let modal_open = self.modal.input_modal_open()
-            || self.modal.session_picker.is_some()
-            || self.modal.trusted_consent.is_some();
+        let modal_open = self.owned_field_modal_open();
         let explorer_search = self.explorer.focused() && self.explorer.search_active();
         Self::select_owned_field(
             modal_open,
@@ -5346,7 +5344,7 @@ impl App {
             self.input.ime.entered,
         ) {
             PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
-            PickerImeReconcile::Enable => self.enable_text_input(),
+            PickerImeReconcile::Enable => self.enable_text_input_if_allowed(),
             PickerImeReconcile::None => {}
         }
         let modal_focus_changed = self
@@ -5385,7 +5383,7 @@ impl App {
                     self.input.ime.entered,
                 ) {
                     PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
-                    PickerImeReconcile::Enable => self.enable_text_input(),
+                    PickerImeReconcile::Enable => self.enable_text_input_if_allowed(),
                     PickerImeReconcile::None => {}
                 }
             }
@@ -6382,6 +6380,25 @@ impl App {
             self.input.text_input =
                 Some(manager.get_text_input(seat, queue_handle, self.input.ime_generation));
         }
+    }
+
+    /// Re-enables IME after a modal closes only when the surviving focus may
+    /// compose; Explorer focus keeps the text input disabled.
+    fn enable_text_input_if_allowed(&mut self) {
+        if terminal_ime_allowed(
+            self.input.keyboard_focused,
+            self.modal.input_modal_open(),
+            self.explorer.focused(),
+            self.ime_owned_field_target(),
+        ) {
+            self.enable_text_input();
+            return;
+        }
+        if let Some(text_input) = &self.input.text_input {
+            text_input.disable();
+        }
+        self.commit_text_input();
+        self.clear_ime_preedit();
     }
 
     fn enable_text_input(&mut self) {
@@ -9782,7 +9799,7 @@ impl App {
                 self.input.ime.entered,
             ) {
                 PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
-                PickerImeReconcile::Enable => self.enable_text_input(),
+                PickerImeReconcile::Enable => self.enable_text_input_if_allowed(),
                 PickerImeReconcile::None => {}
             }
             let modal_focus_changed = self
@@ -11130,9 +11147,27 @@ mod tests {
             true,
             Some(OwnedFieldTarget::CommandPalette)
         ));
+        assert!(!terminal_ime_allowed(
+            false,
+            true,
+            true,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
         assert!(ime_batch_blocked(false, true, false, None));
         assert!(ime_batch_blocked(false, false, true, None));
         assert!(!ime_batch_blocked(false, false, false, None));
+        assert!(!ime_batch_blocked(
+            true,
+            true,
+            false,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(ime_batch_blocked(
+            true,
+            true,
+            true,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
         assert_eq!(
             picker_ime_reconcile(true, true, true),
             PickerImeReconcile::Renew

@@ -770,7 +770,7 @@ fn fontconfig_fallback_renders_the_prompt_arrow_instead_of_replacement() {
     let face_index = select_face_for_text(faces, "⇕", &attributes).unwrap();
     assert!(
         face_index >= SNAPSHOT_FALLBACK_START,
-        "the pinned primary, CJK, and emoji faces do not cover U+21D5"
+        "the selected primary, CJK, and emoji faces do not cover U+21D5"
     );
     assert!(
         faces[face_index].data.is_none(),

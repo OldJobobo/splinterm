@@ -49,6 +49,10 @@ class PromoteReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("python -m zipfile", workflow)
         self.assertIn("verify-candidate", workflow)
         self.assertGreaterEqual(workflow.count("verify-candidate"), 2)
+        self.assertEqual(
+            workflow.count("--require-current-predecessor"),
+            workflow.count("verify-candidate"),
+        )
         self.assertEqual(workflow.count('--expected-branch "$GITHUB_REF_NAME"'), 3)
         self.assertIn("cmp verified/promotion.json promotion-reverified.json", workflow)
         self.assertIn("name: Reattest candidate CI provenance through the Actions API", workflow)
