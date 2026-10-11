@@ -22,6 +22,11 @@ jobs:
           fetch-depth: 0
       - name: Validate deterministic release state
         run: python tools/release/release-doctor.py
+      - name: Require every release tag in main's history
+        # Maintenance releases reach main by merge; a missing tag means
+        # maint/0.1 has not been merged forward.
+        if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+        run: python tools/release/check-release-ancestry.py
       - name: Validate executable workflow syntax with pinned actionlint
         # actionlint v1.7.7 multi-platform image index.
         uses: docker://rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
@@ -197,6 +202,7 @@ jobs:
             tools/package/test_workload_units.py \
             tools/package/test_renderer_test_fonts.py \
             tools/release/test_ci_attestation.py \
+            tools/release/test_check_release_ancestry.py \
             tools/release/test_prepare_candidate.py \
             tools/release/test_nix_ci_workflow.py \
             tools/release/test_rust_warning_gates.py \

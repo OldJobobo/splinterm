@@ -27,9 +27,11 @@ cd "$worktree"
 Use `plan/…`, `feat/…`, `fix/…`, `docs/…`, or `release/…` names with one coherent
 milestone per branch. Base 0.2 and general work on `origin/main`; base an
 explicitly authorized 0.1 maintenance patch on `origin/maint/0.1`. Merge the
-maintenance patch back to `maint/0.1`, then forward-port any applicable fix to
-`main` through a separate reviewed branch rather than merging the long-lived
-branches together. One writer owns each branch/worktree; dependent or overlapping
+maintenance patch back to `maint/0.1`. After each maintenance release, a
+maintainer merges `maint/0.1` into `main` with a merge commit, never a squash
+or cherry-pick, so every published release stays in `main`'s history; `main`
+CI fails while a release tag is missing from it. New features land on `main`
+first, and `maint/0.1` receives fixes only. One writer owns each branch/worktree; dependent or overlapping
 milestones remain serial. Read-only review may inspect the same worktree, while
 intentionally concurrent writers require separate worktrees and explicit
 approval under [`AGENTS.md`](AGENTS.md).

@@ -49,11 +49,23 @@ the pull request.
 
 Prefer squash merge so the owning integration branch receives one coherent
 milestone commit. Merge 0.2 and general work into `main`; merge 0.1 maintenance
-patches into `maint/0.1` and forward-port applicable fixes to `main` through a
-separate reviewed branch. Delete the merged task branch and remove its worktree
-after verifying the merge. Release candidates, promotions, tags, and publication
-may originate only from `main` or `maint/0.1`; the candidate and promotion must
-use the same authority branch and retain their separate approval requirements.
+patches into `maint/0.1`. Delete the merged task branch and remove its worktree
+after verifying the merge.
+
+`maint/0.1` reaches `main` only by merging it, never by squash, rebase, or
+cherry-pick, so every published release stays an ancestor of `main`. After each
+maintenance release, merge `origin/maint/0.1` into a reviewed integration branch
+cut from `origin/main` and land that pull request with a merge commit before
+other work lands on `main`; `main` CI fails while a release tag is missing from
+its history. The repository allows only squash merges and `main` requires linear
+history, so the integration merge needs the maintainer to enable merge commits
+and suspend the linear-history rule for that one merge, then restore both. That
+settings change requires explicit user approval each time. New features land on
+`main` first; `maint/0.1` receives fixes only.
+
+Release candidates, promotions, tags, and publication may originate only from
+`main` or `maint/0.1`; the candidate and promotion must use the same authority
+branch and retain their separate approval requirements.
 
 ## 1. Cost and Delegation Stop-Loss
 
