@@ -1,10 +1,13 @@
 //! Platform-independent built-in command-palette state.
 
-use std::path::PathBuf;
-
 use splinterm_core::{Axis, DojoId, LairId, LairRetention, SplintId};
 
+use super::{ExplorerContextTarget, SessionPickerTarget};
 use crate::keymap::{ActionId, ResolvedKeymap};
+use crate::navigation_projection::{
+    NavigationAction, NavigationExplorerView, NavigationLifecycle, NavigationNodeId,
+    WindowAttachment,
+};
 
 use super::{
     LairDirection, LairPromptKind, LairPromptTarget, SelectorKind, WindowTopologyCommand,
@@ -439,6 +442,17 @@ impl DojoPromptUi {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum TabMenuActionId {
     RenameTab,
+    RenameLair,
+    SaveLayout,
+    PinLair,
+    UnpinLair,
+    PreviewLair,
+    Restore,
+    TerminateLair,
+    FocusSplint,
+    SplitBelow,
+    SplitRight,
+    CloseSplint,
     ActivateTab,
     NewDojo,
     CloseTab,
@@ -449,7 +463,7 @@ pub(crate) enum TabMenuActionId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TabMenuContext {
     pub(crate) lair_id: LairId,
-    pub(crate) focused_cwd: PathBuf,
+    pub(crate) source_splint_id: SplintId,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
     pub(crate) pane_count: usize,
@@ -505,10 +519,17 @@ pub(crate) const TAB_MENU_ACTIONS: [TabMenuActionDescriptor; 6] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TabMenuRightPress {
     Retarget(DojoId),
+    RetargetExplorer(ExplorerContextTarget),
     Dismiss,
 }
 
-pub(crate) const fn tab_menu_right_press(target: Option<DojoId>) -> TabMenuRightPress {
+pub(crate) const fn tab_menu_right_press(
+    target: Option<DojoId>,
+    explorer: Option<ExplorerContextTarget>,
+) -> TabMenuRightPress {
+    if let Some(target) = explorer {
+        return TabMenuRightPress::RetargetExplorer(target);
+    }
     match target {
         Some(dojo_id) => TabMenuRightPress::Retarget(dojo_id),
         None => TabMenuRightPress::Dismiss,
@@ -517,6 +538,17 @@ pub(crate) const fn tab_menu_right_press(target: Option<DojoId>) -> TabMenuRight
 
 pub(crate) fn tab_menu_action_enabled(id: TabMenuActionId, context: &TabMenuContext) -> bool {
     match id {
+        TabMenuActionId::RenameLair
+        | TabMenuActionId::SaveLayout
+        | TabMenuActionId::PinLair
+        | TabMenuActionId::UnpinLair
+        | TabMenuActionId::PreviewLair
+        | TabMenuActionId::Restore
+        | TabMenuActionId::TerminateLair
+        | TabMenuActionId::FocusSplint
+        | TabMenuActionId::SplitBelow
+        | TabMenuActionId::SplitRight
+        | TabMenuActionId::CloseSplint => false,
         TabMenuActionId::ActivateTab => !context.active,
         TabMenuActionId::CloseOtherTabs => !context.other_dojo_ids.is_empty(),
         TabMenuActionId::RenameTab
@@ -527,8 +559,18 @@ pub(crate) fn tab_menu_action_enabled(id: TabMenuActionId, context: &TabMenuCont
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum ContextMenuTarget {
+    Tab(TabMenuContext),
+    Explorer {
+        target: ExplorerContextTarget,
+        actions: Vec<TabMenuActionDescriptor>,
+        commands: Vec<WindowTopologyCommand>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TabContextMenuUi {
-    context: TabMenuContext,
+    context: ContextMenuTarget,
     selected: usize,
     hovered: Option<TabMenuActionId>,
 }
@@ -540,22 +582,359 @@ impl TabContextMenuUi {
             .position(|action| tab_menu_action_enabled(action.id, &context))
             .unwrap_or(0);
         Self {
-            context,
+            context: ContextMenuTarget::Tab(context),
             selected,
             hovered: None,
         }
     }
 
-    pub(crate) fn context(&self) -> TabMenuContext {
-        self.context.clone()
+    #[allow(
+        clippy::too_many_lines,
+        reason = "closed row-specific action catalogs share one exact capture boundary"
+    )]
+    pub(crate) fn for_explorer(
+        view: &NavigationExplorerView,
+        node: NavigationNodeId,
+        source_splint_id: Option<SplintId>,
+        pane_controlled: bool,
+        has_tab_capacity: bool,
+    ) -> Option<Self> {
+        if view.freshness != crate::navigation_projection::EndpointFreshness::Current {
+            return None;
+        }
+        let lair_id = match node {
+            NavigationNodeId::Lair(id) => id,
+            NavigationNodeId::Dojo { lair_id, .. } | NavigationNodeId::Splint { lair_id, .. } => {
+                lair_id
+            }
+        };
+        let lair = view
+            .lairs
+            .iter()
+            .find(|lair| lair.id == NavigationNodeId::Lair(lair_id))?;
+        let mut target = ExplorerContextTarget {
+            topology_revision: view.topology_revision,
+            node,
+            live_incarnation: None,
+        };
+        let mut entries = Vec::new();
+        let live = |state| {
+            matches!(
+                state,
+                NavigationLifecycle::Running | NavigationLifecycle::Starting
+            )
+        };
+        match node {
+            NavigationNodeId::Lair(_) => {
+                entries.push((
+                    TabMenuActionId::RenameLair,
+                    WindowTopologyCommand::RequestLairPrompt {
+                        lair_id,
+                        kind: LairPromptKind::Rename,
+                        expected_retention: None,
+                    },
+                ));
+                if has_tab_capacity
+                    && lair.can_create_dojo
+                    && let Some(source_splint_id) = source_splint_id
+                {
+                    entries.push((
+                        TabMenuActionId::NewDojo,
+                        WindowTopologyCommand::PickerNewDojo {
+                            topology_revision: view.topology_revision,
+                            lair_id,
+                            source_splint_id,
+                        },
+                    ));
+                }
+                if lair.retention == LairRetention::Disposable {
+                    entries.push((
+                        TabMenuActionId::SaveLayout,
+                        WindowTopologyCommand::SetLairRetention {
+                            lair_id,
+                            expected_retention: lair.retention,
+                            retention: LairRetention::Saved,
+                        },
+                    ));
+                }
+                let (id, retention) = if lair.retention == LairRetention::Pinned {
+                    (TabMenuActionId::UnpinLair, LairRetention::Saved)
+                } else {
+                    (TabMenuActionId::PinLair, LairRetention::Pinned)
+                };
+                entries.push((
+                    id,
+                    WindowTopologyCommand::SetLairRetention {
+                        lair_id,
+                        expected_retention: lair.retention,
+                        retention,
+                    },
+                ));
+                if lair.retention != LairRetention::Disposable {
+                    entries.push((
+                        TabMenuActionId::PreviewLair,
+                        WindowTopologyCommand::RequestLairPrompt {
+                            lair_id,
+                            kind: LairPromptKind::Preview,
+                            expected_retention: None,
+                        },
+                    ));
+                }
+                if lair
+                    .dojos
+                    .iter()
+                    .flat_map(|dojo| &dojo.splints)
+                    .any(|splint| {
+                        splint.target.capability.is_enabled()
+                            && matches!(
+                                splint.target.capability.action,
+                                NavigationAction::PreviewRestoreSplint
+                            )
+                    })
+                {
+                    entries.push((
+                        TabMenuActionId::Restore,
+                        WindowTopologyCommand::RequestLairPrompt {
+                            lair_id,
+                            kind: LairPromptKind::Restore,
+                            expected_retention: None,
+                        },
+                    ));
+                }
+                if lair
+                    .dojos
+                    .iter()
+                    .flat_map(|dojo| &dojo.splints)
+                    .any(|splint| live(splint.lifecycle))
+                    && lair
+                        .dojos
+                        .iter()
+                        .flat_map(|dojo| &dojo.splints)
+                        .all(|splint| splint.target.last_incarnation.is_some())
+                {
+                    entries.push((
+                        TabMenuActionId::TerminateLair,
+                        WindowTopologyCommand::RequestLairPrompt {
+                            lair_id,
+                            kind: LairPromptKind::Terminate,
+                            expected_retention: None,
+                        },
+                    ));
+                }
+            }
+            NavigationNodeId::Dojo { dojo_id, .. } => {
+                let dojo = lair
+                    .dojos
+                    .iter()
+                    .find(|dojo| dojo.target.dojo_id == dojo_id)?;
+                let capability = dojo.target.capability;
+                if capability.is_enabled()
+                    && matches!(
+                        capability.action,
+                        NavigationAction::AttachDojo | NavigationAction::ActivateDojo
+                    )
+                    && !dojo.active_here
+                {
+                    entries.push((
+                        TabMenuActionId::ActivateTab,
+                        WindowTopologyCommand::OpenDojo {
+                            target: SessionPickerTarget {
+                                topology_revision: view.topology_revision,
+                                lair_id,
+                                dojo_id,
+                                action: capability.action,
+                            },
+                            explorer_target: None,
+                        },
+                    ));
+                }
+                entries.push((
+                    TabMenuActionId::RenameTab,
+                    WindowTopologyCommand::RequestDojoPrompt {
+                        dojo_id,
+                        kind: LairPromptKind::Rename,
+                    },
+                ));
+                if dojo.attachment == WindowAttachment::Here {
+                    entries.push((
+                        TabMenuActionId::CloseTab,
+                        WindowTopologyCommand::CloseTab { dojo_id },
+                    ));
+                }
+                if dojo.splints.iter().any(|splint| {
+                    splint.target.capability.is_enabled()
+                        && splint.target.capability.action == NavigationAction::PreviewRestoreSplint
+                }) {
+                    entries.push((
+                        TabMenuActionId::Restore,
+                        WindowTopologyCommand::RequestDojoPrompt {
+                            dojo_id,
+                            kind: LairPromptKind::Restore,
+                        },
+                    ));
+                }
+                if dojo.splints.iter().any(|splint| live(splint.lifecycle))
+                    && dojo
+                        .splints
+                        .iter()
+                        .all(|splint| splint.target.last_incarnation.is_some())
+                {
+                    entries.push((
+                        TabMenuActionId::TerminateDojo,
+                        WindowTopologyCommand::RequestDojoPrompt {
+                            dojo_id,
+                            kind: LairPromptKind::Terminate,
+                        },
+                    ));
+                }
+            }
+            NavigationNodeId::Splint {
+                dojo_id, splint_id, ..
+            } => {
+                let dojo = lair
+                    .dojos
+                    .iter()
+                    .find(|dojo| dojo.target.dojo_id == dojo_id)?;
+                let splint = dojo
+                    .splints
+                    .iter()
+                    .find(|splint| splint.target.splint_id == splint_id)?;
+                target.live_incarnation = splint.target.live_incarnation;
+                if splint.target.capability.is_enabled()
+                    && matches!(
+                        splint.target.capability.action,
+                        NavigationAction::FocusSplint | NavigationAction::AttachAndFocusSplint
+                    )
+                {
+                    entries.push((
+                        TabMenuActionId::FocusSplint,
+                        WindowTopologyCommand::FocusSplint {
+                            target: splint.target,
+                        },
+                    ));
+                }
+                if splint.target.capability.is_enabled()
+                    && splint.target.capability.action == NavigationAction::PreviewRestoreSplint
+                {
+                    entries.push((
+                        TabMenuActionId::Restore,
+                        WindowTopologyCommand::FocusSplint {
+                            target: splint.target,
+                        },
+                    ));
+                }
+                if pane_controlled
+                    && dojo.attachment == WindowAttachment::Here
+                    && splint.lifecycle == NavigationLifecycle::Running
+                    && target.live_incarnation.is_some()
+                {
+                    entries.push((
+                        TabMenuActionId::SplitBelow,
+                        WindowTopologyCommand::Split {
+                            dojo_id,
+                            target: splint_id,
+                            axis: Axis::Vertical,
+                            pending: None,
+                        },
+                    ));
+                    entries.push((
+                        TabMenuActionId::SplitRight,
+                        WindowTopologyCommand::Split {
+                            dojo_id,
+                            target: splint_id,
+                            axis: Axis::Horizontal,
+                            pending: None,
+                        },
+                    ));
+                    entries.push((
+                        TabMenuActionId::CloseSplint,
+                        WindowTopologyCommand::Close {
+                            dojo_id,
+                            target: splint_id,
+                        },
+                    ));
+                }
+            }
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        let (actions, commands) = entries
+            .into_iter()
+            .map(|(id, command)| {
+                (
+                    TabMenuActionDescriptor {
+                        id,
+                        title: match id {
+                            TabMenuActionId::RenameTab => "Rename…",
+                            TabMenuActionId::ActivateTab => "Open / Activate",
+                            TabMenuActionId::CloseTab => "Close tab",
+                            _ => tab_menu_descriptor(id).title,
+                        },
+                    },
+                    target.command(command),
+                )
+            })
+            .unzip();
+        Some(Self {
+            context: ContextMenuTarget::Explorer {
+                target,
+                actions,
+                commands,
+            },
+            selected: 0,
+            hovered: None,
+        })
+    }
+
+    pub(crate) const fn explorer_target(&self) -> Option<ExplorerContextTarget> {
+        match self.context {
+            ContextMenuTarget::Explorer { target, .. } => Some(target),
+            ContextMenuTarget::Tab(_) => None,
+        }
+    }
+
+    pub(crate) fn actions(&self) -> &[TabMenuActionDescriptor] {
+        match &self.context {
+            ContextMenuTarget::Explorer { actions, .. } => actions,
+            ContextMenuTarget::Tab(_) => &TAB_MENU_ACTIONS,
+        }
+    }
+
+    pub(crate) fn dispatch(&self, action: TabMenuActionId) -> Option<TabMenuDispatch> {
+        if !self.action_enabled(action) {
+            return None;
+        }
+        match &self.context {
+            ContextMenuTarget::Explorer {
+                actions, commands, ..
+            } => actions
+                .iter()
+                .position(|entry| entry.id == action)
+                .map(|index| TabMenuDispatch::Topology(commands[index].clone())),
+            ContextMenuTarget::Tab(context) => tab_menu_dispatch(action, context),
+        }
+    }
+
+    pub(crate) fn release_action(
+        &self,
+        pressed: Option<TabMenuActionId>,
+        released: Option<TabMenuActionId>,
+    ) -> Option<TabMenuActionId> {
+        pressed.filter(|action| Some(*action) == released && self.action_enabled(*action))
     }
 
     pub(crate) fn action_enabled(&self, action: TabMenuActionId) -> bool {
-        tab_menu_action_enabled(action, &self.context)
+        match &self.context {
+            ContextMenuTarget::Explorer { actions, .. } => {
+                actions.iter().any(|entry| entry.id == action)
+            }
+            ContextMenuTarget::Tab(context) => tab_menu_action_enabled(action, context),
+        }
     }
 
-    pub(crate) const fn selected_action(&self) -> TabMenuActionId {
-        TAB_MENU_ACTIONS[self.selected].id
+    pub(crate) fn selected_action(&self) -> TabMenuActionId {
+        self.actions()[self.selected].id
     }
 
     pub(crate) const fn hovered(&self) -> Option<TabMenuActionId> {
@@ -573,8 +952,9 @@ impl TabContextMenuUi {
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
         let previous = self.selected;
-        let count = TAB_MENU_ACTIONS.len();
-        let enabled_count = TAB_MENU_ACTIONS
+        let count = self.actions().len();
+        let enabled_count = self
+            .actions()
             .iter()
             .filter(|action| self.action_enabled(action.id))
             .count();
@@ -589,7 +969,7 @@ impl TabContextMenuUi {
                 } else {
                     self.selected.saturating_add(distance) % count
                 };
-                if self.action_enabled(TAB_MENU_ACTIONS[candidate].id) {
+                if self.action_enabled(self.actions()[candidate].id) {
                     self.selected = candidate;
                     break;
                 }
@@ -624,6 +1004,17 @@ pub(crate) fn tab_menu_dispatch(
         return None;
     }
     match id {
+        TabMenuActionId::RenameLair
+        | TabMenuActionId::SaveLayout
+        | TabMenuActionId::PinLair
+        | TabMenuActionId::UnpinLair
+        | TabMenuActionId::PreviewLair
+        | TabMenuActionId::Restore
+        | TabMenuActionId::TerminateLair
+        | TabMenuActionId::FocusSplint
+        | TabMenuActionId::SplitBelow
+        | TabMenuActionId::SplitRight
+        | TabMenuActionId::CloseSplint => None,
         TabMenuActionId::RenameTab => Some(TabMenuDispatch::Rename(context.action_target())),
         TabMenuActionId::ActivateTab => Some(TabMenuDispatch::Topology(
             WindowTopologyCommand::ActivateTab {
@@ -633,7 +1024,7 @@ pub(crate) fn tab_menu_dispatch(
         TabMenuActionId::NewDojo => {
             Some(TabMenuDispatch::Topology(WindowTopologyCommand::NewDojo {
                 lair_id: context.lair_id,
-                cwd: context.focused_cwd.clone(),
+                source_splint_id: context.source_splint_id,
             }))
         }
         TabMenuActionId::CloseTab => {
@@ -651,8 +1042,55 @@ pub(crate) fn tab_menu_dispatch(
 }
 
 pub(crate) fn tab_menu_descriptor(id: TabMenuActionId) -> TabMenuActionDescriptor {
+    const EXPLORER_ACTIONS: &[TabMenuActionDescriptor] = &[
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::RenameLair,
+            title: "Rename…",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::SaveLayout,
+            title: "Save layout",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::PinLair,
+            title: "Pin",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::UnpinLair,
+            title: "Unpin",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::PreviewLair,
+            title: "Preview saved layout",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::Restore,
+            title: "Restore…",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::TerminateLair,
+            title: "Terminate…",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::FocusSplint,
+            title: "Focus",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::SplitBelow,
+            title: "Split below",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::SplitRight,
+            title: "Split right",
+        },
+        TabMenuActionDescriptor {
+            id: TabMenuActionId::CloseSplint,
+            title: "Close",
+        },
+    ];
     TAB_MENU_ACTIONS
         .iter()
+        .chain(EXPLORER_ACTIONS.iter())
         .copied()
         .find(|descriptor| descriptor.id == id)
         .expect("tab menu action identity has one descriptor")
@@ -695,12 +1133,16 @@ pub(crate) enum BuiltInCommandId {
     ResizePaneSmaller,
     ResizePaneLarger,
     EnterCopyMode,
+    SaveClipboardImage,
     ToggleFocusedPaneZoom,
     SearchScrollback,
     PageUp,
     PageDown,
     ReturnToLive,
     ToggleTabStrip,
+    ToggleLairExplorer,
+    FocusLairExplorer,
+    ReturnFocusToTerminal,
     ZoomIn,
     ZoomOut,
     ResetZoom,
@@ -750,12 +1192,16 @@ impl BuiltInCommandId {
         Self::ResizePaneSmaller,
         Self::ResizePaneLarger,
         Self::EnterCopyMode,
+        Self::SaveClipboardImage,
         Self::ToggleFocusedPaneZoom,
         Self::SearchScrollback,
         Self::PageUp,
         Self::PageDown,
         Self::ReturnToLive,
         Self::ToggleTabStrip,
+        Self::ToggleLairExplorer,
+        Self::FocusLairExplorer,
+        Self::ReturnFocusToTerminal,
         Self::ZoomIn,
         Self::ZoomOut,
         Self::ResetZoom,
@@ -824,12 +1270,12 @@ impl CommandTabMoveAvailability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     clippy::struct_field_names,
-    reason = "the explicit identity suffixes keep domain identifiers and captured destinations unambiguous"
+    clippy::struct_excessive_bools,
+    reason = "independent captured availability flags and the explicit identity suffixes keep domain identifiers and captured destinations unambiguous"
 )]
 pub(crate) struct CommandPaletteContext {
     pub(crate) lair_id: LairId,
     pub(crate) lair_retention: LairRetention,
-    pub(crate) focused_cwd: PathBuf,
     pub(crate) dojo_id: DojoId,
     pub(crate) dojo_name: String,
     pub(crate) pane_count: usize,
@@ -843,6 +1289,7 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) focus_right: Option<SplintId>,
     pub(crate) focus_up: Option<SplintId>,
     pub(crate) focus_down: Option<SplintId>,
+    pub(crate) clipboard_image_available: bool,
     pub(crate) viewport_detached: bool,
     pub(crate) controller_active: bool,
     pub(crate) forced_control_transfer: bool,
@@ -891,6 +1338,7 @@ pub(crate) enum BuiltInCommandDispatch {
     ShowKeybindings,
     ReloadConfiguration,
     EnterCopyMode,
+    SaveClipboardImage,
     ToggleFocusedPaneZoom,
     MoveDojo {
         dojo_id: DojoId,
@@ -900,6 +1348,9 @@ pub(crate) enum BuiltInCommandDispatch {
     Focus(SplintId),
     Zoom(CommandZoomAction),
     ToggleTabStrip,
+    ToggleLairExplorer,
+    FocusLairExplorer,
+    ReturnFocusToTerminal,
     History {
         target: SplintId,
         action: CommandHistoryAction,
@@ -996,6 +1447,13 @@ impl BuiltInCommandDescriptor {
 }
 
 pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId::ALL.len()] = [
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::SaveClipboardImage,
+        category: CommandCategory::Application,
+        title: "Save clipboard image and insert path",
+        keywords: &["clipboard", "png", "image", "save", "path", "screenshot"],
+        shortcut_action: Some(ActionId::ClipboardSaveImage),
+    },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::ShowKeybindings,
         category: CommandCategory::Application,
@@ -1284,6 +1742,27 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         shortcut_action: Some(ActionId::ToggleTabStrip),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ToggleLairExplorer,
+        category: CommandCategory::View,
+        title: "Toggle Lair explorer",
+        keywords: &["toggle", "show", "hide", "lair", "explorer", "tree", "view"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::FocusLairExplorer,
+        category: CommandCategory::View,
+        title: "Focus Lair explorer",
+        keywords: &["focus", "lair", "explorer", "tree", "navigation"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ReturnFocusToTerminal,
+        category: CommandCategory::View,
+        title: "Return focus to terminal",
+        keywords: &["focus", "return", "terminal", "explorer", "navigation"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::ZoomIn,
         category: CommandCategory::View,
         title: "Zoom in",
@@ -1382,6 +1861,7 @@ fn descriptor_matches(descriptor: BuiltInCommandDescriptor, query: &str) -> bool
 
 pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteContext) -> bool {
     match id {
+        BuiltInCommandId::SaveClipboardImage => context.clipboard_image_available,
         BuiltInCommandId::PreviousDojo => context.previous_dojo_id.is_some(),
         BuiltInCommandId::NextDojo => context.next_dojo_id.is_some(),
         BuiltInCommandId::MoveDojoLeft => context.tab_move.can_move_left(),
@@ -1433,6 +1913,9 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         | BuiltInCommandId::PageUp
         | BuiltInCommandId::PageDown
         | BuiltInCommandId::ToggleTabStrip
+        | BuiltInCommandId::ToggleLairExplorer
+        | BuiltInCommandId::FocusLairExplorer
+        | BuiltInCommandId::ReturnFocusToTerminal
         | BuiltInCommandId::ZoomIn
         | BuiltInCommandId::ZoomOut
         | BuiltInCommandId::ResetZoom
@@ -1657,12 +2140,13 @@ pub(crate) fn command_dispatch(
         return None;
     }
     let dispatch = match id {
+        BuiltInCommandId::SaveClipboardImage => BuiltInCommandDispatch::SaveClipboardImage,
         BuiltInCommandId::ShowKeybindings => BuiltInCommandDispatch::ShowKeybindings,
         BuiltInCommandId::ReloadConfiguration => BuiltInCommandDispatch::ReloadConfiguration,
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
         BuiltInCommandId::NewSession => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewLair {
-                cwd: context.focused_cwd.clone(),
+                source_splint_id: context.splint_id,
             })
         }
         BuiltInCommandId::RenameCurrentTab => {
@@ -1671,7 +2155,7 @@ pub(crate) fn command_dispatch(
         BuiltInCommandId::NewDojo => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewDojo {
                 lair_id: context.lair_id,
-                cwd: context.focused_cwd.clone(),
+                source_splint_id: context.splint_id,
             })
         }
         BuiltInCommandId::ChooseDojo => {
@@ -1780,11 +2264,12 @@ pub(crate) fn command_dispatch(
                 expected_retention: None,
             })
         }
+        // Command orientation names the divider; core axes name pane placement.
         BuiltInCommandId::SplitHorizontal => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
-                axis: Axis::Horizontal,
+                axis: Axis::Vertical,
                 pending: None,
             })
         }
@@ -1792,7 +2277,7 @@ pub(crate) fn command_dispatch(
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::Split {
                 dojo_id: context.dojo_id,
                 target: context.splint_id,
-                axis: Axis::Vertical,
+                axis: Axis::Horizontal,
                 pending: None,
             })
         }
@@ -1839,6 +2324,9 @@ pub(crate) fn command_dispatch(
             action: CommandHistoryAction::ReturnToLive,
         },
         BuiltInCommandId::ToggleTabStrip => BuiltInCommandDispatch::ToggleTabStrip,
+        BuiltInCommandId::ToggleLairExplorer => BuiltInCommandDispatch::ToggleLairExplorer,
+        BuiltInCommandId::FocusLairExplorer => BuiltInCommandDispatch::FocusLairExplorer,
+        BuiltInCommandId::ReturnFocusToTerminal => BuiltInCommandDispatch::ReturnFocusToTerminal,
         BuiltInCommandId::ZoomIn => BuiltInCommandDispatch::Zoom(CommandZoomAction::Increase),
         BuiltInCommandId::ZoomOut => BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease),
         BuiltInCommandId::ResetZoom => BuiltInCommandDispatch::Zoom(CommandZoomAction::Reset),
@@ -1888,7 +2376,6 @@ mod tests {
         CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
             lair_retention: LairRetention::Disposable,
-            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "current".to_owned(),
             pane_count: 3,
@@ -1902,12 +2389,33 @@ mod tests {
             focus_right: Some(SplintId::new()),
             focus_up: Some(SplintId::new()),
             focus_down: Some(SplintId::new()),
+            clipboard_image_available: false,
             viewport_detached: true,
             controller_active: false,
             forced_control_transfer: true,
             grant_ids: vec![7, 9],
             pending_transfer_id: Some(42),
         })
+    }
+
+    #[test]
+    fn clipboard_image_palette_dispatch_is_opt_in_and_has_no_default_shortcut() {
+        let mut context = palette().context();
+        let id = BuiltInCommandId::SaveClipboardImage;
+        assert!(!command_enabled(id, &context));
+        assert!(command_dispatch(id, &context).is_none());
+        context.clipboard_image_available = true;
+        assert_eq!(
+            command_dispatch(id, &context),
+            Some(BuiltInCommandDispatch::SaveClipboardImage)
+        );
+        assert_eq!(
+            command_descriptor(id).shortcut(&ResolvedKeymap::default()),
+            ""
+        );
+        let mut ui = CommandPaletteUi::new(context);
+        ui.append_text("screenshot");
+        assert_eq!(ui.filtered(), &[id]);
     }
 
     #[test]
@@ -1996,13 +2504,218 @@ mod tests {
     }
 
     #[test]
+    fn explorer_context_catalogs_are_closed_and_capture_exact_targets() {
+        let mut view = super::super::lair_explorer::tests::view();
+        let ids = |menu: &TabContextMenuUi| {
+            menu.actions()
+                .iter()
+                .map(|action| action.id)
+                .collect::<Vec<_>>()
+        };
+        let menu = |view: &NavigationExplorerView, node, controlled| {
+            TabContextMenuUi::for_explorer(view, node, Some(SplintId::new()), controlled, true)
+                .unwrap()
+        };
+        let lair = view.lairs[0].id;
+        let dojo = view.lairs[0].dojos[0].id;
+        let splint = view.lairs[0].dojos[0].splints[0].id;
+        assert_eq!(
+            ids(&menu(&view, lair, false)),
+            vec![
+                TabMenuActionId::RenameLair,
+                TabMenuActionId::NewDojo,
+                TabMenuActionId::PinLair,
+                TabMenuActionId::PreviewLair,
+                TabMenuActionId::TerminateLair
+            ]
+        );
+        assert_eq!(
+            ids(&menu(&view, dojo, false)),
+            vec![
+                TabMenuActionId::RenameTab,
+                TabMenuActionId::CloseTab,
+                TabMenuActionId::TerminateDojo
+            ]
+        );
+        let mut panes = menu(&view, splint, true);
+        assert_eq!(
+            ids(&panes),
+            vec![
+                TabMenuActionId::FocusSplint,
+                TabMenuActionId::SplitBelow,
+                TabMenuActionId::SplitRight,
+                TabMenuActionId::CloseSplint
+            ]
+        );
+        assert_eq!(
+            ids(&menu(&view, splint, false)),
+            vec![TabMenuActionId::FocusSplint]
+        );
+        for action in panes.actions() {
+            let Some(TabMenuDispatch::Topology(WindowTopologyCommand::ExplorerContext {
+                target,
+                ..
+            })) = panes.dispatch(action.id)
+            else {
+                panic!("expected guarded command")
+            };
+            assert_eq!(target.node, splint);
+            assert_eq!(target.topology_revision, view.topology_revision);
+            assert_eq!(target.live_incarnation, Some(3));
+        }
+        assert!(panes.move_selection(-1));
+        assert_eq!(panes.selected_action(), TabMenuActionId::CloseSplint);
+        let close = Some(TabMenuActionId::CloseSplint);
+        assert_eq!(panes.release_action(close, close), close);
+        assert_eq!(panes.release_action(None, close), None);
+        assert_eq!(
+            panes.release_action(close, Some(TabMenuActionId::SplitRight)),
+            None
+        );
+        assert_eq!(panes.dispatch(TabMenuActionId::TerminateDojo), None);
+        let no_cwd = TabContextMenuUi::for_explorer(&view, lair, None, false, true).unwrap();
+        assert!(no_cwd.action_enabled(TabMenuActionId::RenameLair));
+        assert!(!no_cwd.action_enabled(TabMenuActionId::NewDojo));
+        view.lairs[0].retention = LairRetention::Disposable;
+        assert!(ids(&menu(&view, lair, false)).contains(&TabMenuActionId::SaveLayout));
+        view.lairs[0].retention = LairRetention::Pinned;
+        assert!(ids(&menu(&view, lair, false)).contains(&TabMenuActionId::UnpinLair));
+        view.lairs[0].can_create_dojo = false;
+        assert!(!ids(&menu(&view, lair, false)).contains(&TabMenuActionId::NewDojo));
+        view.freshness = crate::navigation_projection::EndpointFreshness::Stale;
+        assert!(
+            TabContextMenuUi::for_explorer(&view, lair, Some(SplintId::new()), true, true)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn explorer_detached_saved_and_missing_incarnation_actions_are_applicable_only() {
+        let mut view = super::super::lair_explorer::tests::view();
+        let node = view.lairs[0].dojos[0].id;
+        view.lairs[0].dojos[0].attachment = WindowAttachment::NotHere;
+        view.lairs[0].dojos[0].active_here = false;
+        view.lairs[0].dojos[0].target.capability.action = NavigationAction::AttachDojo;
+        let menu = |view: &NavigationExplorerView| {
+            TabContextMenuUi::for_explorer(view, node, Some(SplintId::new()), true, true).unwrap()
+        };
+        assert!(menu(&view).action_enabled(TabMenuActionId::ActivateTab));
+        assert!(!menu(&view).action_enabled(TabMenuActionId::CloseTab));
+        view.lairs[0].dojos[0].splints[0].target.last_incarnation = None;
+        assert!(!menu(&view).action_enabled(TabMenuActionId::TerminateDojo));
+        let splint = &mut view.lairs[0].dojos[0].splints[0];
+        splint.lifecycle = NavigationLifecycle::Restorable;
+        splint.target.live_incarnation = None;
+        splint.target.last_incarnation = Some(3);
+        splint.target.capability.action = NavigationAction::PreviewRestoreSplint;
+        view.lairs[0].dojos[0].target.capability.action = NavigationAction::PreviewRestoreDojo;
+        assert!(menu(&view).action_enabled(TabMenuActionId::Restore));
+        assert!(!menu(&view).action_enabled(TabMenuActionId::TerminateDojo));
+        assert!(!menu(&view).action_enabled(TabMenuActionId::ActivateTab));
+        let splint = &view.lairs[0].dojos[0].splints[0];
+        let menu = TabContextMenuUi::for_explorer(&view, splint.id, None, false, true).unwrap();
+        assert_eq!(menu.actions().len(), 1);
+        assert!(menu.action_enabled(TabMenuActionId::Restore));
+        assert_eq!(
+            menu.dispatch(TabMenuActionId::Restore),
+            Some(TabMenuDispatch::Topology(
+                ExplorerContextTarget {
+                    topology_revision: view.topology_revision,
+                    node: splint.id,
+                    live_incarnation: None,
+                }
+                .command(WindowTopologyCommand::FocusSplint {
+                    target: splint.target
+                })
+            ))
+        );
+        view.lairs[0].dojos[0].splints[0]
+            .target
+            .capability
+            .availability = crate::navigation_projection::NavigationAvailability::Disabled(
+            crate::navigation_projection::NavigationBlocker::PermissionDenied,
+        );
+        assert!(
+            TabContextMenuUi::for_explorer(
+                &view,
+                view.lairs[0].dojos[0].splints[0].id,
+                None,
+                false,
+                true
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn explorer_lair_termination_requires_complete_capture_and_some_live_work() {
+        let mut view = super::super::lair_explorer::tests::view();
+        let node = view.lairs[0].id;
+        let mut exited = view.lairs[0].dojos[0].splints[0].clone();
+        exited.target.splint_id = SplintId::new();
+        exited.lifecycle = NavigationLifecycle::Restorable;
+        exited.target.live_incarnation = None;
+        view.lairs[0].dojos[0].splints.push(exited);
+        let enabled = |view: &NavigationExplorerView| {
+            TabContextMenuUi::for_explorer(view, node, None, false, true)
+                .unwrap()
+                .action_enabled(TabMenuActionId::TerminateLair)
+        };
+        assert!(enabled(&view));
+        view.lairs[0].dojos[0].splints[1].target.last_incarnation = None;
+        assert!(!enabled(&view));
+        view.lairs[0].dojos[0].splints[1].target.last_incarnation = Some(3);
+        view.lairs[0].dojos[0].splints[0].lifecycle = NavigationLifecycle::Restorable;
+        assert!(!enabled(&view));
+    }
+
+    #[test]
+    fn rename_lair_prompt_preserves_authoritative_name_and_identity_for_all_retentions() {
+        for retention in [
+            LairRetention::Saved,
+            LairRetention::Disposable,
+            LairRetention::Pinned,
+        ] {
+            let id = LairId::new();
+            let DojoPromptUi::RenameLair(prompt) = DojoPromptUi::rename_lair(LairPromptTarget {
+                topology_revision: splinterm_core::TopologyRevision::new(8),
+                lair_id: id,
+                dojo_id: None,
+                name: "latest name".into(),
+                retention,
+                preview: String::new(),
+                targets: Vec::new(),
+            }) else {
+                unreachable!()
+            };
+            assert_eq!(prompt.input(), "latest name");
+            assert_eq!(
+                prompt.command(),
+                Some(WindowTopologyCommand::RenameLair {
+                    lair_id: id,
+                    name: "latest name".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
     fn right_press_retargets_only_visible_tabs_and_otherwise_dismisses() {
         let dojo_id = DojoId::new();
         assert_eq!(
-            tab_menu_right_press(Some(dojo_id)),
+            tab_menu_right_press(Some(dojo_id), None),
             TabMenuRightPress::Retarget(dojo_id)
         );
-        assert_eq!(tab_menu_right_press(None), TabMenuRightPress::Dismiss);
+        assert_eq!(tab_menu_right_press(None, None), TabMenuRightPress::Dismiss);
+        let target = ExplorerContextTarget {
+            topology_revision: splinterm_core::TopologyRevision::new(7),
+            node: NavigationNodeId::Lair(LairId::new()),
+            live_incarnation: None,
+        };
+        assert_eq!(
+            tab_menu_right_press(None, Some(target)),
+            TabMenuRightPress::RetargetExplorer(target)
+        );
     }
 
     #[test]
@@ -2010,7 +2723,7 @@ mod tests {
         let other_dojo_ids = vec![DojoId::new(), DojoId::new()];
         let context = TabMenuContext {
             lair_id: LairId::new(),
-            focused_cwd: "/tmp".into(),
+            source_splint_id: SplintId::new(),
             dojo_id: DojoId::new(),
             dojo_name: "captured".to_owned(),
             pane_count: 3,
@@ -2023,12 +2736,19 @@ mod tests {
             other_dojo_ids: other_dojo_ids.clone(),
         };
         let mut menu = TabContextMenuUi::new(context.clone());
+        assert_eq!(
+            menu.dispatch(TabMenuActionId::NewDojo),
+            Some(TabMenuDispatch::Topology(WindowTopologyCommand::NewDojo {
+                lair_id: context.lair_id,
+                source_splint_id: context.source_splint_id,
+            }))
+        );
         assert_eq!(menu.selected_action(), TabMenuActionId::RenameTab);
         assert!(menu.move_selection(-1));
         assert_eq!(menu.selected_action(), TabMenuActionId::TerminateDojo);
-        assert_eq!(menu.context(), context);
+        assert_eq!(menu.context, ContextMenuTarget::Tab(context.clone()));
         assert_eq!(
-            tab_menu_dispatch(TabMenuActionId::RenameTab, &context),
+            menu.dispatch(TabMenuActionId::RenameTab),
             Some(TabMenuDispatch::Rename(DojoActionTarget {
                 dojo_id: context.dojo_id,
                 name: "captured".to_owned(),
@@ -2105,6 +2825,9 @@ mod tests {
             palette.filtered,
             vec![
                 BuiltInCommandId::ToggleTabStrip,
+                BuiltInCommandId::ToggleLairExplorer,
+                BuiltInCommandId::FocusLairExplorer,
+                BuiltInCommandId::ReturnFocusToTerminal,
                 BuiltInCommandId::ZoomIn,
                 BuiltInCommandId::ZoomOut,
                 BuiltInCommandId::ResetZoom,
@@ -2475,7 +3198,7 @@ mod tests {
             command_dispatch(BuiltInCommandId::NewSession, &context),
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::NewLair {
-                    cwd: context.focused_cwd.clone(),
+                    source_splint_id: context.splint_id,
                 }
             ))
         );
@@ -2484,7 +3207,7 @@ mod tests {
             Some(BuiltInCommandDispatch::Topology(
                 WindowTopologyCommand::NewDojo {
                     lair_id: context.lair_id,
-                    cwd: context.focused_cwd.clone(),
+                    source_splint_id: context.splint_id,
                 }
             ))
         );
@@ -2579,6 +3302,17 @@ mod tests {
                 WindowTopologyCommand::Split {
                     dojo_id: context.dojo_id,
                     target: context.splint_id,
+                    axis: Axis::Vertical,
+                    pending: None,
+                }
+            ))
+        );
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::SplitVertical, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::Split {
+                    dojo_id: context.dojo_id,
+                    target: context.splint_id,
                     axis: Axis::Horizontal,
                     pending: None,
                 }
@@ -2609,6 +3343,26 @@ mod tests {
             command_dispatch(BuiltInCommandId::ToggleTabStrip, &context),
             Some(BuiltInCommandDispatch::ToggleTabStrip)
         );
+        for (id, dispatch) in [
+            (
+                BuiltInCommandId::ToggleLairExplorer,
+                BuiltInCommandDispatch::ToggleLairExplorer,
+            ),
+            (
+                BuiltInCommandId::FocusLairExplorer,
+                BuiltInCommandDispatch::FocusLairExplorer,
+            ),
+            (
+                BuiltInCommandId::ReturnFocusToTerminal,
+                BuiltInCommandDispatch::ReturnFocusToTerminal,
+            ),
+        ] {
+            assert_eq!(command_dispatch(id, &context), Some(dispatch));
+            assert_eq!(
+                command_descriptor(id).shortcut(&ResolvedKeymap::default()),
+                ""
+            );
+        }
         assert_eq!(
             command_dispatch(BuiltInCommandId::ZoomOut, &context),
             Some(BuiltInCommandDispatch::Zoom(CommandZoomAction::Decrease))

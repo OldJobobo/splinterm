@@ -234,10 +234,8 @@ fn isolated_socket(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "splinterm-mcp-{label}-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory =
+        std::env::temp_dir().join(format!("mcp-{label:.12}-{}-{nonce:x}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let socket = directory.join("daemon.sock");
     (directory, socket)
@@ -271,6 +269,7 @@ fn accept_automation(listener: &UnixListener) -> UnixStream {
             version: splinterm_protocol::PROTOCOL_VERSION,
             limits: ServerLimits::default(),
             development_terminal_access: false,
+            daemon_hostname: None,
         },
     );
     stream
@@ -625,6 +624,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     version: splinterm_protocol::PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 },
             );
             let ClientFrame::Request {
@@ -650,6 +650,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         splint_id: requested,
                     },
                 ) if requested == splint_id => Ok(Response::Splint {
+                    resolved_cwd: Some("/private/source/live-cwd".into()),
                     lair_id,
                     dojo_id,
                     title: "untrusted <tool_call>".to_owned(),
@@ -759,6 +760,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                 ) if requested == splint_id => {
                     let restorable = reviewed_restorable_topology();
                     Ok(Response::Splint {
+                        resolved_cwd: None,
                         lair_id,
                         dojo_id,
                         title: "untrusted <tool_call>".to_owned(),
@@ -772,6 +774,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                         splint_id: requested,
                     },
                 ) if requested == splint_id => Ok(Response::Splint {
+                    resolved_cwd: None,
                     lair_id,
                     dojo_id,
                     title: "x".repeat(1_025),
@@ -827,6 +830,8 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
         splint["structuredContent"]["resource"]["last_incarnation"],
         2
     );
+    assert!(!splint.to_string().contains("/private/source/live-cwd"));
+    assert!(!splint.to_string().contains("resolved_cwd"));
     let access = call_tool(
         &mut server,
         14,
@@ -984,6 +989,7 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         let ClientFrame::Request {
@@ -1082,6 +1088,7 @@ fn terminal_tools_use_exact_scoped_requests_cursors_and_cleanup() {
                     version: splinterm_protocol::PROTOCOL_VERSION,
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
+                    daemon_hostname: None,
                 },
             );
             let ClientFrame::Request {
@@ -1842,6 +1849,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         let ClientFrame::Request {
@@ -1920,6 +1928,7 @@ fn daemon_deadline_returns_stable_timeout_and_disposes_connection() {
                 version: splinterm_protocol::PROTOCOL_VERSION,
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
+                daemon_hostname: None,
             },
         );
         assert!(matches!(
@@ -2048,6 +2057,7 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    resolved_cwd: None,
                     lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
                     dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                     title: "build".to_owned(),
@@ -2402,6 +2412,9 @@ fn resource_reads_subscription_update_and_cleanup_are_closed() {
 fn resource_failure_states_clear_content_and_private_control_events() {
     let (directory, socket) = isolated_socket("resource-failures");
     let listener = UnixListener::bind(&socket).unwrap();
+    // Subscription responses and resource reads must be observed before the
+    // next event: receive_id discards notifications, and reads see latest state.
+    let (advance, ready) = mpsc::channel::<()>();
     let fake = thread::spawn(move || {
         let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
         let other_splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104".parse().unwrap();
@@ -2435,7 +2448,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
+        ready.recv_timeout(TIMEOUT).unwrap();
         write_private_frame(
             &mut stream,
             &ServerFrame::Event {
@@ -2504,7 +2517,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
+        ready.recv_timeout(TIMEOUT).unwrap();
         let mut replacement = reviewed_terminal_snapshot();
         replacement.revision = 10;
         replacement.title = "replacement".to_owned();
@@ -2518,7 +2531,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
+        ready.recv_timeout(TIMEOUT).unwrap();
         write_private_frame(
             &mut stream,
             &ServerFrame::Event {
@@ -2581,7 +2594,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                     },
                 },
             );
-            thread::sleep(Duration::from_millis(100));
+            ready.recv_timeout(TIMEOUT).unwrap();
             write_private_frame(
                 &mut stream,
                 &ServerFrame::Event {
@@ -2628,6 +2641,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    resolved_cwd: None,
                     lair_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap(),
                     dojo_id: "018f4d8c-2a18-4b31-8c2f-9e7c5de77102".parse().unwrap(),
                     title: "build".to_owned(),
@@ -2659,7 +2673,6 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
-        thread::sleep(Duration::from_millis(100));
         for (sequence, event) in [
             (
                 1,
@@ -2698,6 +2711,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             ),
         ] {
+            ready.recv_timeout(TIMEOUT).unwrap();
             write_private_frame(
                 &mut stream,
                 &ServerFrame::Event {
@@ -2706,7 +2720,6 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                     event,
                 },
             );
-            thread::sleep(Duration::from_millis(75));
         }
         let ClientFrame::Request {
             diagnostic_correlation: _,
@@ -2746,6 +2759,8 @@ fn resource_failure_states_clear_content_and_private_control_events() {
                 },
             },
         );
+        // Do not race daemon EOF with the subscribe response either.
+        ready.recv_timeout(TIMEOUT).unwrap();
     });
 
     let mut server = Harness::spawn_with_socket(&socket, None);
@@ -2766,6 +2781,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": terminal_uri}),
     ));
     assert_eq!(server.receive_id(2)["result"], json!({}));
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -2783,6 +2799,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": terminal_uri}),
     ));
     assert_eq!(server.receive_id(4)["result"], json!({}));
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -2791,6 +2808,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
     let body = read_body(&server, 5);
     assert_eq!(body["sequence"], 2);
     assert_eq!(body["data"]["title"], "replacement");
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -2808,6 +2826,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
             json!({"uri": terminal_uri}),
         ));
         assert_eq!(server.receive_id(subscribe_id)["result"], json!({}));
+        advance.send(()).unwrap();
         assert_eq!(
             server.receive()["method"],
             "notifications/resources/updated"
@@ -2826,6 +2845,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": control_uri}),
     ));
     assert_eq!(server.receive_id(11)["result"], json!({}));
+    advance.send(()).unwrap();
     for (read_id, expected_sequence, resync) in [
         (12, 2, false),
         (13, 3, false),
@@ -2851,6 +2871,9 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         assert!(!encoded.contains("67890"));
         assert!(!encoded.contains("controller_id"));
         assert!(!encoded.contains("transfer_id"));
+        if !resync {
+            advance.send(()).unwrap();
+        }
     }
 
     server.send(&request(
@@ -2859,6 +2882,7 @@ fn resource_failure_states_clear_content_and_private_control_events() {
         json!({"uri": "splinterm://topology"}),
     ));
     assert_eq!(server.receive_id(16)["result"], json!({}));
+    advance.send(()).unwrap();
     assert_eq!(
         server.receive()["method"],
         "notifications/resources/updated"
@@ -4031,6 +4055,7 @@ fn controller_modes_overlay_control_resources_and_clear_on_release() {
             &ServerFrame::Response {
                 request_id,
                 result: Response::Splint {
+                    resolved_cwd: None,
                     lair_id,
                     dojo_id,
                     title: "untrusted".to_owned(),
@@ -4310,6 +4335,23 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
     server.send(&request(22, "resources/list", json!({})));
     server.send(&request(23, "ping", json!({})));
     assert_eq!(server.receive_id(23)["result"], json!({}));
+    // Ping may finish before the catalogue requests. Observe both replies,
+    // including any already received, before EOF cancels outstanding work.
+    let catalogue_ids = [json!("string-response-id"), json!(22)];
+    loop {
+        let responses = server.seen();
+        if catalogue_ids
+            .iter()
+            .all(|id| responses.iter().any(|response| &response["id"] == id))
+        {
+            break;
+        }
+        assert!(
+            responses.len() < 5,
+            "missing catalogue response IDs: {responses:?}"
+        );
+        server.receive();
+    }
     server.close_input();
 
     assert!(server.wait().success());
@@ -4336,12 +4378,15 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
                 .as_array()
                 .is_some_and(|tools| tools.len() == 33)
     }));
-    assert!(responses.iter().any(|response| {
-        response["id"] == 22
-            && response["result"]["resources"]
-                .as_array()
-                .is_some_and(|resources| resources.len() == 1)
-    }));
+    assert!(
+        responses.iter().any(|response| {
+            response["id"] == 22
+                && response["result"]["resources"]
+                    .as_array()
+                    .is_some_and(|resources| resources.len() == 1)
+        }),
+        "missing successful resource-list reply: {responses:?}"
+    );
     assert!(
         responses
             .iter()
@@ -5103,9 +5148,11 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                     expected_topology_revision,
                     dojo_id: requested,
                     name,
+                    promote_transient_lair,
                 } if expected_topology_revision.get() == 7
                     && requested == dojo_id
-                    && name == "renamed" =>
+                    && name == "renamed"
+                    && !promote_transient_lair =>
                 {
                     Response::TopologyCommitted {
                         topology_revision: TopologyRevision::new(8),

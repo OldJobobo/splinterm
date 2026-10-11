@@ -216,8 +216,13 @@ jobs:
           }
           if has_operation create-release; then
             title=$(python -c 'import json; print(json.load(open("verified/promotion.json"))["release_title"])')
+            prerelease=$(python -c 'import json; print(str(json.load(open("verified/promotion.json"))["release_prerelease"]).lower())')
+            case "$prerelease" in
+              true|false) ;;
+              *) printf 'invalid verified prerelease state\n' >&2; exit 1 ;;
+            esac
             gh release create "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" \
-              --target "$RELEASE_COMMIT" --prerelease --title "$title" \
+              --target "$RELEASE_COMMIT" --prerelease="$prerelease" --title "$title" \
               --notes-file verified/candidate/RELEASE-NOTES.md
           fi
           mapfile -t assets < <(python - <<'PY'

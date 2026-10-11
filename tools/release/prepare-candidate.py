@@ -176,19 +176,46 @@ def create_source_archive(commit: str, version: str, output: Path) -> None:
         raise ValueError("source archive is missing package build inputs")
 
 
-def create_notes(commit: str, version: str, output: Path) -> str | None:
-    tags = run(
-        ["git", "tag", "--sort=-version:refname", "--merged", commit]
-    ).splitlines()
-    version_tags = [
-        tag for tag in tags if tag.startswith("v") and SEMVER.fullmatch(tag[1:])
-    ]
-    previous = version_tags[0] if version_tags else None
-    range_spec = f"{previous}..{commit}" if previous else commit
-    entries = run(["git", "log", "--format=- %s (`%h`)", range_spec])
-    lines = [f"# Splinterm {version}", "", "## Changes", "", entries or "- Initial release", ""]
-    output.write_text("\n".join(lines), encoding="utf-8")
+def current_public_release_tag() -> str:
+    path = ROOT / "packaging/release-state.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("packaging/release-state.json is invalid") from error
+    if set(state) != {"schema", "current_version_tag"} or state["schema"] != 1:
+        raise ValueError("packaging/release-state.json has an unexpected shape")
+    tag = state["current_version_tag"]
+    if not isinstance(tag, str) or not tag.startswith("v") or SEMVER.fullmatch(tag[1:]) is None:
+        raise ValueError("current public release tag must be a complete v-prefixed SemVer value")
+    status = (ROOT / "docs/status.md").read_text(encoding="utf-8")
+    matches = re.findall(
+        r"^- \*\*Current public version tag:\*\* `([^`]+)`$", status, re.MULTILINE
+    )
+    if matches != [tag]:
+        raise ValueError("documented and machine-readable public release tags disagree")
+    return tag
+
+
+def validate_previous_version_tag(previous: str, release_tag: str) -> str:
+    if not previous.startswith("v") or SEMVER.fullmatch(previous[1:]) is None:
+        raise ValueError("previous version tag must be a complete v-prefixed SemVer value")
+    if previous == release_tag:
+        raise ValueError("previous version tag must differ from the candidate tag")
+    if previous != current_public_release_tag():
+        raise ValueError("previous version tag does not match the current public release")
+    resolved = run(["git", "rev-parse", f"refs/tags/{previous}^{{commit}}"])
+    if COMMIT.fullmatch(resolved) is None:
+        raise ValueError("previous version tag does not resolve to a commit")
     return previous
+
+
+def create_notes(commit: str, version: str, output: Path) -> None:
+    notes = run(["git", "show", f"{commit}:RELEASE_NOTES.md"])
+    if not notes:
+        raise ValueError("candidate RELEASE_NOTES.md is empty")
+    if notes.splitlines()[0] != f"# Splinterm {version}":
+        raise ValueError("candidate RELEASE_NOTES.md heading does not match the candidate version")
+    output.write_text(notes + "\n", encoding="utf-8")
 
 
 def asset_record(path: Path, kind: str, root: Path) -> dict[str, str]:
@@ -199,7 +226,9 @@ def asset_record(path: Path, kind: str, root: Path) -> dict[str, str]:
     }
 
 
-def validate_candidate(repository: str, commit: str, version: str) -> tuple[str, str]:
+def validate_candidate(
+    repository: str, commit: str, version: str, previous_version_tag: str
+) -> tuple[str, str, str]:
     if REPOSITORY.fullmatch(repository) is None:
         raise ValueError("repository must be an owner/name pair")
     commit = commit.lower()
@@ -211,7 +240,8 @@ def validate_candidate(repository: str, commit: str, version: str) -> tuple[str,
     tag = f"v{version}"
     if run(["git", "tag", "--list", tag]):
         raise ValueError(f"release tag already exists: {tag}")
-    return commit, package_version
+    previous_version_tag = validate_previous_version_tag(previous_version_tag, tag)
+    return commit, package_version, previous_version_tag
 
 
 def validate_ci_attestation(
@@ -250,8 +280,11 @@ def validate_ci_attestation(
 
 
 def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
-    commit, package_version = validate_candidate(
-        arguments.repository, arguments.commit, arguments.version
+    commit, package_version, previous_version_tag = validate_candidate(
+        arguments.repository,
+        arguments.commit,
+        arguments.version,
+        arguments.previous_version_tag,
     )
     ci_attestation = validate_ci_attestation(
         arguments.ci_attestation, arguments.repository, commit
@@ -294,7 +327,7 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
     binary_srcinfo = write_srcinfo(binary_recipe)
 
     notes = output / "RELEASE-NOTES.md"
-    previous_tag = create_notes(commit, arguments.version, notes)
+    create_notes(commit, version, notes)
     assets = [
         asset_record(source_archive, "source-archive", output),
         asset_record(main_package, "arch-package", output),
@@ -318,7 +351,7 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
         "package_version": package_version,
         "tag": tag,
         "architecture": "x86_64",
-        "previous_version_tag": previous_tag,
+        "previous_version_tag": previous_version_tag,
         "workflow_run": arguments.workflow_run,
         "ci": ci_attestation,
         "assets": assets,
@@ -342,6 +375,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--repository", required=True)
         command.add_argument("--commit", required=True)
         command.add_argument("--version", required=True)
+        command.add_argument("--previous-version-tag", required=True)
     create.add_argument("--workflow-run", required=True)
     create.add_argument("--ci-attestation", type=Path, required=True)
     create.add_argument("--splinterm", type=Path, required=True)
@@ -354,10 +388,21 @@ def main() -> int:
     arguments = parser().parse_args()
     try:
         if arguments.command == "check":
-            commit, package_version = validate_candidate(
-                arguments.repository, arguments.commit, arguments.version
+            commit, package_version, previous_version_tag = validate_candidate(
+                arguments.repository,
+                arguments.commit,
+                arguments.version,
+                arguments.previous_version_tag,
             )
-            print(json.dumps({"commit": commit, "package_version": package_version}))
+            print(
+                json.dumps(
+                    {
+                        "commit": commit,
+                        "package_version": package_version,
+                        "previous_version_tag": previous_version_tag,
+                    }
+                )
+            )
         else:
             manifest = assemble(arguments)
             print(json.dumps(manifest, sort_keys=True))

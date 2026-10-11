@@ -7,6 +7,32 @@ use super::{
     rect_contains, sanitized_tab_label,
 };
 
+/// Install new streams for durable IDs that were retired and added in one update.
+/// Shared by visible and hidden tabs; preserve pane positions and logical focus.
+/// Remaining prepared panes are genuinely new layout members.
+pub(super) fn replace_retired_panes<T>(
+    active: &mut T,
+    inactive: &mut [T],
+    prepared: &mut Vec<T>,
+    removed: &HashSet<SplintId>,
+    identity: impl Fn(&T) -> Option<SplintId>,
+) -> bool {
+    let mut active_replaced = false;
+    for (position, old) in std::iter::once(active)
+        .chain(inactive.iter_mut())
+        .enumerate()
+    {
+        let Some(id) = identity(old).filter(|id| removed.contains(id)) else {
+            continue;
+        };
+        if let Some(index) = prepared.iter().position(|pane| identity(pane) == Some(id)) {
+            *old = prepared.swap_remove(index);
+            active_replaced |= position == 0;
+        }
+    }
+    active_replaced
+}
+
 pub(super) const TAB_STRIP_LOGICAL_HEIGHT: u32 = 34;
 const TAB_PREFERRED_LOGICAL_WIDTH: u32 = 180;
 const TAB_MIN_LOGICAL_WIDTH: u32 = 96;
@@ -32,6 +58,7 @@ pub(super) struct TabStripLayout {
     pub(super) rect: Rect,
     pub(super) tabs: Vec<VisibleTabLayout>,
     pub(super) new_rect: Rect,
+    pub(super) host_rect: Option<Rect>,
 }
 
 pub(super) fn tab_strip_layout(
@@ -92,13 +119,113 @@ pub(super) fn tab_strip_layout(
             height: TAB_STRIP_LOGICAL_HEIGHT,
         },
         tabs,
+        host_rect: None,
         new_rect: Rect {
-            x: width.saturating_sub(new_width),
+            x,
             y: 0,
-            width: new_width,
+            width: new_width.min(width.saturating_sub(x)),
             height: TAB_STRIP_LOGICAL_HEIGHT,
         },
     })
+}
+
+/// The remote tag owns its entire region, including in hidden-tab/observer windows.
+/// Reducing the tab layout's input width keeps every existing action out of the tag.
+fn remote_header_layout(
+    width: u32,
+    dojo_ids: &[DojoId],
+    active: usize,
+    host_width: u32,
+) -> Option<TabStripLayout> {
+    if width == 0 {
+        return None;
+    }
+    let host_width = host_width.min(width);
+    let tab_width = width.saturating_sub(host_width);
+    let empty = Rect {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+    let mut layout = tab_strip_layout(tab_width, dojo_ids, active).unwrap_or(TabStripLayout {
+        rect: empty,
+        tabs: Vec::new(),
+        new_rect: empty,
+        host_rect: None,
+    });
+    layout.rect = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height: TAB_STRIP_LOGICAL_HEIGHT,
+    };
+    layout.host_rect = Some(Rect {
+        x: tab_width,
+        y: 0,
+        width: host_width,
+        height: TAB_STRIP_LOGICAL_HEIGHT,
+    });
+    Some(layout)
+}
+
+fn paint_remote_host(
+    canvas: &mut [u8],
+    size: (u32, u32),
+    host_rect: Option<Rect>,
+    scale_120: u32,
+    foreground: u32,
+    host_text: Option<&ChromeText>,
+) -> Result<()> {
+    let (width, height) = size;
+    if let (Some(rect), Some(text)) = (host_rect, host_text) {
+        let rect = App::buffer_rect(host_label_rect(rect), scale_120)?;
+        text.paint(
+            canvas,
+            width,
+            height,
+            (
+                rect.x
+                    .saturating_add(rect.width.saturating_sub(text.pixel_width())),
+                rect.y
+                    .saturating_add(rect.height.saturating_sub(text.pixel_height()) / 2),
+            ),
+            rect,
+            foreground,
+        );
+    }
+    Ok(())
+}
+
+fn host_label_rect(rect: Rect) -> Rect {
+    let inset = 8.min(rect.width / 8);
+    Rect {
+        x: rect.x.saturating_add(inset),
+        width: rect.width.saturating_sub(inset * 2),
+        ..rect
+    }
+}
+
+fn clipped_remote_label(source: &str, maximum_cells: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if source.width() <= maximum_cells {
+        return source.to_owned();
+    }
+    if maximum_cells <= 6 {
+        return "Remote".chars().take(maximum_cells).collect();
+    }
+    let mut label = String::new();
+    let mut cells = 0;
+    for character in source.chars() {
+        let width = character.width().unwrap_or(0);
+        if cells + width >= maximum_cells {
+            break;
+        }
+        label.push(character);
+        cells += width;
+    }
+    label.push('…');
+    label
 }
 
 pub(super) const fn tab_context_target(target: TabHitTarget) -> Option<DojoId> {
@@ -127,6 +254,81 @@ const fn opaque_rgba(color: u32) -> [u8; 4] {
 
 fn tab_strip_background_rgba(theme: ResolvedTheme) -> [u8; 4] {
     premultiplied_theme_rgba(theme.background, theme.background_alpha)
+}
+
+fn paint_inactive_tab_divider(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: Rect,
+    scale_120: u32,
+    theme: ResolvedTheme,
+) -> Result<()> {
+    let divider = logical_extent_to_buffer(1, scale_120)?.max(1);
+    fill_rect(
+        canvas,
+        width,
+        height,
+        (
+            i32::try_from(rect.x.saturating_add(rect.width).saturating_sub(divider))
+                .unwrap_or(i32::MAX),
+            i32::try_from(rect.y).unwrap_or(i32::MAX),
+            divider.min(rect.width),
+            rect.height,
+        ),
+        opaque_rgba(theme.pane_border),
+    );
+    Ok(())
+}
+
+fn is_legacy_generated_lair_name(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("terminal-") else {
+        return false;
+    };
+    let mut components = suffix.split('-');
+    let Some(stamp) = components.next() else {
+        return false;
+    };
+    let Some(process) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && stamp.len() == 10
+        && stamp.bytes().all(|byte| byte.is_ascii_digit())
+        && (1..=10).contains(&process.len())
+        && process.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn uses_legacy_generated_dojo_label(identity: &WindowDojoIdentity) -> bool {
+    identity.dojo_name == "terminal" && is_legacy_generated_lair_name(&identity.lair_name)
+}
+
+fn tab_dojo_label(identity: &WindowDojoIdentity) -> String {
+    if uses_legacy_generated_dojo_label(identity) {
+        "Dojo 1".to_owned()
+    } else {
+        sanitized_tab_label(&identity.dojo_name, 128, 48)
+    }
+}
+
+fn ambiguous_tab_label(
+    identity: &WindowDojoIdentity,
+    dojo_label: &str,
+    matching_ordinal: usize,
+) -> String {
+    if uses_legacy_generated_dojo_label(identity) {
+        sanitized_tab_label(
+            &format!("{dojo_label} ({})", matching_ordinal.saturating_add(1)),
+            128,
+            48,
+        )
+    } else {
+        sanitized_tab_label(
+            &format!("{} / {}", identity.lair_name, identity.dojo_name),
+            128,
+            48,
+        )
+    }
 }
 
 pub(super) fn tab_strip_hit_test(
@@ -221,7 +423,7 @@ impl DojoTabView {
         );
         let next_focus = focused.or_else(|| {
             self.focused_splint()
-                .filter(|splint_id| !removed.contains(splint_id))
+                .filter(|splint_id| identities.contains(splint_id))
         });
         let next_focus = next_focus.unwrap_or_else(|| layout.first_splint_id());
         anyhow::ensure!(
@@ -233,13 +435,20 @@ impl DojoTabView {
             .retain(|splint_id| !removed.contains(splint_id));
         self.pending_remote_splits
             .retain(|_, pending| layout.find_splint(*pending).is_some());
+        replace_retired_panes(
+            &mut self.pane,
+            &mut self.inactive_panes,
+            &mut prepared,
+            &removed,
+            |pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+        );
         self.inactive_panes.extend(prepared);
         let focused = self.focus_splint(next_focus);
         debug_assert!(focused);
         self.inactive_panes.retain(|pane| {
             pane.snapshot
                 .as_ref()
-                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+                .is_none_or(|snapshot| layout.find_splint(snapshot.splint_id).is_some())
         });
         self.layout = Some(layout);
         Ok(())
@@ -334,6 +543,9 @@ pub(super) struct TabsState {
     pub(super) active_identity: WindowDojoIdentity,
     pub(super) managed_tabs: bool,
     pub(super) tab_strip_visible: bool,
+    pub(super) remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
+    pub(super) remote_host_text: Option<(u32, ChromeText)>,
+    pub(super) remote_host_clipped: Option<CachedFrameTitle>,
     pub(super) tab_strip_layout: Option<TabStripLayout>,
     pub(super) tab_strip_pressed: Option<(u32, TabHitTarget)>,
     pub(super) tab_label_cache: HashMap<DojoId, CachedFrameTitle>,
@@ -364,18 +576,22 @@ impl TabsState {
         let Some(identity) = self.tab_identity(dojo_id) else {
             return "Untitled Dojo".to_owned();
         };
-        let dojo_label = sanitized_tab_label(&identity.dojo_name, 128, 48);
-        let ambiguous = self.tabs.iter().filter(|tab| {
-            self.tab_identity(tab.dojo_id).is_some_and(|candidate| {
-                sanitized_tab_label(&candidate.dojo_name, 128, 48) == dojo_label
-            })
-        });
-        if ambiguous.count() > 1 {
-            sanitized_tab_label(
-                &format!("{} / {}", identity.lair_name, identity.dojo_name),
-                128,
-                48,
-            )
+        let dojo_label = tab_dojo_label(identity);
+        let mut matching_count = 0;
+        let mut matching_ordinal = 0;
+        for tab in self.tabs.iter() {
+            if self
+                .tab_identity(tab.dojo_id)
+                .is_some_and(|candidate| tab_dojo_label(candidate) == dojo_label)
+            {
+                if tab.dojo_id == dojo_id {
+                    matching_ordinal = matching_count;
+                }
+                matching_count += 1;
+            }
+        }
+        if matching_count > 1 {
+            ambiguous_tab_label(identity, &dojo_label, matching_ordinal)
         } else {
             dojo_label
         }
@@ -383,23 +599,106 @@ impl TabsState {
 }
 
 impl App {
-    pub(super) fn current_tab_strip_layout(&self) -> Option<TabStripLayout> {
-        if !self.tab_state.managed_tabs || !self.tab_state.tab_strip_visible {
-            return None;
-        }
-        let ids = self
+    pub(super) fn prepare_remote_host_text(&mut self) -> Result<()> {
+        let Some(identity) = &self.tab_state.remote_display_identity else {
+            return Ok(());
+        };
+        if self
             .tab_state
-            .tabs
-            .iter()
-            .map(|tab| tab.dojo_id)
-            .collect::<Vec<_>>();
-        let active = ids
-            .iter()
-            .position(|dojo_id| *dojo_id == self.tab_state.active_dojo_id())?;
-        tab_strip_layout(self.surface.logical_width, &ids, active)
+            .remote_host_text
+            .as_ref()
+            .is_none_or(|(scale, _)| *scale != self.surface.scale_120)
+        {
+            self.tab_state.remote_host_text = Some((
+                self.surface.scale_120,
+                ChromeText::load_with_context(
+                    &identity.label(),
+                    self.surface.scale_120,
+                    &self.presentation.render_context,
+                )?,
+            ));
+            self.tab_state.remote_host_clipped = None;
+        }
+        Ok(())
+    }
+
+    pub(super) fn current_tab_strip_layout(&self) -> Option<TabStripLayout> {
+        let show_tabs = self.tab_state.managed_tabs && self.tab_state.tab_strip_visible;
+        let ids = if show_tabs {
+            self.tab_state
+                .tabs
+                .iter()
+                .map(|tab| tab.dojo_id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let active = if ids.is_empty() {
+            0
+        } else {
+            ids.iter()
+                .position(|dojo_id| *dojo_id == self.tab_state.active_dojo_id())?
+        };
+        let width = self.surface.logical_width;
+        if let Some((_, text)) = &self.tab_state.remote_host_text {
+            let cell = text.pixel_width() / text.cells().max(1);
+            let logical = |pixels| {
+                super::buffer_to_logical_ceil(pixels, self.surface.scale_120).unwrap_or(u32::MAX)
+            };
+            let minimum = logical(cell.saturating_mul(6)).saturating_add(16);
+            let desired = logical(text.pixel_width())
+                .saturating_add(16)
+                .min(280)
+                .max(minimum);
+            return remote_header_layout(
+                width,
+                &ids,
+                active,
+                desired.min((width / 3).max(minimum)),
+            );
+        }
+        tab_strip_layout(width, &ids, active)
+    }
+
+    fn prepare_clipped_remote_host_text(&mut self, layout: &TabStripLayout) -> Result<()> {
+        if let (Some(rect), Some(identity), Some((_, full))) = (
+            layout.host_rect,
+            &self.tab_state.remote_display_identity,
+            &self.tab_state.remote_host_text,
+        ) {
+            let rect = Self::buffer_rect(host_label_rect(rect), self.surface.scale_120)?;
+            let cell = full.pixel_width() / full.cells().max(1);
+            let maximum_cells = rect.width / cell.max(1);
+            let source = identity.label();
+            if self
+                .tab_state
+                .remote_host_clipped
+                .as_ref()
+                .is_none_or(|cached| {
+                    cached.maximum_cells != maximum_cells
+                        || cached.source != source
+                        || cached.scale_120 != self.surface.scale_120
+                })
+            {
+                let clipped = clipped_remote_label(&source, maximum_cells as usize);
+                self.tab_state.remote_host_clipped = Some(CachedFrameTitle {
+                    text: ChromeText::load_with_context(
+                        &clipped,
+                        self.surface.scale_120,
+                        &self.presentation.render_context,
+                    )?,
+                    source,
+                    maximum_cells,
+                    scale_120: self.surface.scale_120,
+                    bold: false,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn prepare_tab_strip_text(&mut self, layout: &TabStripLayout) -> Result<()> {
+        self.prepare_clipped_remote_host_text(layout)?;
         let visible = layout
             .tabs
             .iter()
@@ -471,7 +770,11 @@ impl App {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one bounded pass paints tab actions and the noninteractive remote tag"
+    )]
     pub(super) fn paint_tab_strip(
         canvas: &mut [u8],
         width: u32,
@@ -483,6 +786,7 @@ impl App {
         labels: &HashMap<DojoId, CachedFrameTitle>,
         close_text: Option<&ChromeText>,
         new_text: Option<&ChromeText>,
+        host_text: Option<&ChromeText>,
     ) -> Result<()> {
         let position = |value| i32::try_from(value).unwrap_or(i32::MAX);
         let strip = Self::buffer_rect(layout.rect, scale_120)?;
@@ -523,6 +827,8 @@ impl App {
                     ),
                     opaque_rgba(theme.ui_accent),
                 );
+            } else {
+                paint_inactive_tab_divider(canvas, width, height, rect, scale_120, theme)?;
             }
             let label_rect = Self::buffer_rect(tab.label_rect, scale_120)?;
             if let Some(label) = labels.get(&tab.dojo_id) {
@@ -575,18 +881,214 @@ impl App {
                 theme.ui_accent,
             );
         }
+        paint_remote_host(
+            canvas,
+            (width, height),
+            layout.host_rect,
+            scale_120,
+            theme.foreground,
+            host_text,
+        )?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_streams_replace_active_and_hidden_panes_without_duplicate_ids() {
+        let active_id = super::SplintId::new();
+        let hidden_id = super::SplintId::new();
+        let added_id = super::SplintId::new();
+        let unchanged_id = super::SplintId::new();
+        let mut active = (active_id, 7);
+        let mut inactive = vec![(hidden_id, 3), (unchanged_id, 1)];
+        let mut prepared = vec![(hidden_id, 4), (added_id, 1), (active_id, 8)];
+        let removed = super::HashSet::from([active_id, hidden_id]);
+        assert!(super::replace_retired_panes(
+            &mut active,
+            &mut inactive,
+            &mut prepared,
+            &removed,
+            |pane| Some(pane.0)
+        ));
+        assert_eq!(active, (active_id, 8));
+        assert_eq!(inactive, vec![(hidden_id, 4), (unchanged_id, 1)]);
+        assert_eq!(prepared, vec![(added_id, 1)]);
+        inactive.extend(prepared);
+        assert_eq!(
+            inactive.iter().filter(|pane| pane.0 == hidden_id).count(),
+            1
+        );
+        assert!(!inactive.iter().any(|pane| pane.0 == active_id));
+    }
+
+    #[test]
+    fn restoring_hidden_stream_does_not_change_active_pane() {
+        let active_id = super::SplintId::new();
+        let hidden_id = super::SplintId::new();
+        let mut active = (active_id, 7);
+        let mut inactive = vec![(hidden_id, 3)];
+        let mut prepared = vec![(hidden_id, 4)];
+        assert!(!super::replace_retired_panes(
+            &mut active,
+            &mut inactive,
+            &mut prepared,
+            &super::HashSet::from([hidden_id]),
+            |pane| Some(pane.0)
+        ));
+        assert_eq!(active, (active_id, 7));
+        assert_eq!(inactive, vec![(hidden_id, 4)]);
+        assert!(prepared.is_empty());
+        // Ordinary removal leaves the old pane for the caller's focus-and-prune step.
+        assert!(!super::replace_retired_panes(
+            &mut active,
+            &mut inactive,
+            &mut prepared,
+            &super::HashSet::from([active_id]),
+            |pane| Some(pane.0)
+        ));
+        assert_eq!(active, (active_id, 7));
+    }
+
     use std::collections::HashMap;
 
+    use splinterm_core::{LairId, TopologyRevision};
+
     use super::{
-        App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, opaque_rgba,
-        tab_context_target, tab_foreground, tab_strip_hit_test, tab_strip_layout,
+        App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, WindowDojoIdentity,
+        ambiguous_tab_label, is_legacy_generated_lair_name, opaque_rgba, tab_context_target,
+        tab_dojo_label, tab_foreground, tab_strip_hit_test, tab_strip_layout,
     };
+
+    #[test]
+    fn remote_header_reserves_tag_space_without_tab_hit_targets_even_when_hidden() {
+        let ids = (0..12).map(|_| DojoId::new()).collect::<Vec<_>>();
+        for width in [0, 1, 3, 35, 80, 120, 420, 1200] {
+            for visible in [true, false] {
+                let ids = if visible { &ids[..] } else { &[] };
+                let Some(layout) = super::remote_header_layout(width, ids, 10, 100) else {
+                    assert_eq!(width, 0);
+                    continue;
+                };
+                let host = layout.host_rect.unwrap();
+                assert_eq!(host.x + host.width, width);
+                assert!(layout.new_rect.x + layout.new_rect.width <= host.x);
+                for tab in &layout.tabs {
+                    assert!(tab.rect.x + tab.rect.width <= host.x);
+                    assert!(tab.label_rect.x + tab.label_rect.width <= tab.close_rect.x);
+                    assert!(tab.close_rect.x + tab.close_rect.width <= host.x);
+                }
+                for x in host.x..width {
+                    assert_eq!(tab_strip_hit_test(&layout, (f64::from(x), 1.0)), None);
+                }
+                if visible && width > 100 {
+                    assert!(layout.tabs.iter().any(|tab| tab.dojo_id == ids[10]));
+                } else {
+                    assert!(layout.tabs.is_empty());
+                    assert_eq!(layout.new_rect.width, 0);
+                }
+                assert_eq!(layout.rect.height, TAB_STRIP_LOGICAL_HEIGHT);
+            }
+        }
+        assert!(tab_strip_layout(420, &[], 0).is_none());
+        assert!(tab_strip_layout(420, &ids, 0).unwrap().host_rect.is_none());
+    }
+
+    #[test]
+    fn remote_label_truncates_by_unicode_cells_and_keeps_remote_prefix() {
+        use unicode_width::UnicodeWidthStr;
+        let source = "Remote: 界界.example";
+        for cells in 0..30 {
+            let label = super::clipped_remote_label(source, cells);
+            assert!(label.width() <= cells);
+            if cells >= 6 {
+                assert!(label.starts_with("Remote"));
+            }
+            if cells >= source.width() {
+                assert_eq!(label, source);
+            }
+        }
+        assert_eq!(super::clipped_remote_label(source, 10), "Remote: …");
+    }
+
+    #[test]
+    fn remote_tag_paints_only_reserved_header_at_fractional_scales_and_theme_colors() {
+        use super::{ChromeText, Rect};
+        for scale in [120, 150, 180, 240] {
+            let logical_width = 420;
+            let logical_height = 64;
+            let width = super::logical_extent_to_buffer(logical_width, scale).unwrap();
+            let height = super::logical_extent_to_buffer(logical_height, scale).unwrap();
+            let layout = super::remote_header_layout(logical_width, &[], 0, 180).unwrap();
+            let host = App::buffer_rect(layout.host_rect.unwrap(), scale).unwrap();
+            let label = ChromeText::load("Remote: node", scale).unwrap();
+            for foreground in [0xff_00_00, 0x00_ff_00] {
+                let theme = ResolvedTheme {
+                    background: 0,
+                    background_alpha: u16::MAX,
+                    foreground,
+                    ..ResolvedTheme::default()
+                };
+                let mut without = vec![0x41; (width * height * 4) as usize];
+                App::paint_tab_strip(
+                    &mut without,
+                    width,
+                    height,
+                    &layout,
+                    scale,
+                    theme,
+                    DojoId::new(),
+                    &HashMap::new(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+                let mut tagged = vec![0x41; (width * height * 4) as usize];
+                App::paint_tab_strip(
+                    &mut tagged,
+                    width,
+                    height,
+                    &layout,
+                    scale,
+                    theme,
+                    DojoId::new(),
+                    &HashMap::new(),
+                    None,
+                    None,
+                    Some(&label),
+                )
+                .unwrap();
+                let mut changed = 0;
+                for (index, (a, b)) in tagged
+                    .chunks_exact(4)
+                    .zip(without.chunks_exact(4))
+                    .enumerate()
+                {
+                    let x = u32::try_from(index).unwrap() % width;
+                    let y = u32::try_from(index).unwrap() / width;
+                    if a != b {
+                        changed += 1;
+                        assert!(super::rect_contains(host, (f64::from(x), f64::from(y))));
+                        assert_eq!(a[0], 0);
+                        assert_eq!(a[if foreground == 0xff_00_00 { 1 } else { 2 }], 0);
+                    }
+                    let below = Rect {
+                        x: 0,
+                        y: super::logical_extent_to_buffer(TAB_STRIP_LOGICAL_HEIGHT, scale)
+                            .unwrap(),
+                        width,
+                        height,
+                    };
+                    if super::rect_contains(below, (f64::from(x), f64::from(y))) {
+                        assert_eq!(a, &[0x41; 4]);
+                    }
+                }
+                assert!(changed > 0);
+            }
+        }
+    }
 
     #[test]
     fn tab_strip_and_active_tab_respect_background_alpha_with_exact_theme_roles() {
@@ -617,6 +1119,7 @@ mod tests {
             theme,
             active_dojo,
             &HashMap::new(),
+            None,
             None,
             None,
         )
@@ -677,11 +1180,106 @@ mod tests {
         for pair in layout.tabs.windows(2) {
             assert!(pair[0].rect.x.saturating_add(pair[0].rect.width) <= pair[1].rect.x);
         }
+        assert_eq!(
+            layout.new_rect.x,
+            layout
+                .tabs
+                .last()
+                .unwrap()
+                .rect
+                .x
+                .saturating_add(layout.tabs.last().unwrap().rect.width)
+        );
         let close = layout.tabs[0].close_rect;
         assert_eq!(
             tab_strip_hit_test(&layout, (f64::from(close.x), f64::from(close.y)),),
             Some(TabHitTarget::Close(layout.tabs[0].dojo_id))
         );
+    }
+
+    #[test]
+    fn inactive_tabs_have_exact_semantic_dividers() {
+        let inactive_dojo = DojoId::new();
+        let active_dojo = DojoId::new();
+        let layout = tab_strip_layout(420, &[inactive_dojo, active_dojo], 1).unwrap();
+        let theme = ResolvedTheme {
+            background: 0x10_20_30,
+            pane_border: 0x44_55_66,
+            ..ResolvedTheme::default()
+        };
+        let mut canvas = vec![0; 420 * usize::try_from(TAB_STRIP_LOGICAL_HEIGHT).unwrap() * 4];
+        App::paint_tab_strip(
+            &mut canvas,
+            420,
+            TAB_STRIP_LOGICAL_HEIGHT,
+            &layout,
+            120,
+            theme,
+            active_dojo,
+            &HashMap::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let inactive = &layout.tabs[0].rect;
+        let divider_x =
+            usize::try_from(inactive.x.saturating_add(inactive.width).saturating_sub(1)).unwrap();
+        let divider_y = usize::try_from(inactive.height / 2).unwrap();
+        let divider_offset = (divider_y * 420 + divider_x) * 4;
+        assert_eq!(
+            &canvas[divider_offset..divider_offset + 4],
+            &[0x66, 0x55, 0x44, 0xff]
+        );
+    }
+
+    #[test]
+    fn legacy_generated_initial_dojo_names_have_a_stable_friendly_tab_label() {
+        assert!(is_legacy_generated_lair_name("terminal-1787899189-4132"));
+        for explicit in [
+            "terminal",
+            "terminal-123",
+            "terminal-work",
+            "terminal-123-work",
+            "terminal-1787899189",
+            "terminal-178789918-4132",
+            "terminal-17878991890-4132",
+            "terminal-1787899189-12345678901",
+            "terminal-1787899189-4132-extra",
+        ] {
+            assert!(!is_legacy_generated_lair_name(explicit));
+        }
+
+        let identity = WindowDojoIdentity {
+            topology_revision: TopologyRevision::new(1),
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            lair_name: "terminal-1787899189-4132".to_owned(),
+            lair_retention: splinterm_core::LairRetention::Disposable,
+            dojo_name: "terminal".to_owned(),
+        };
+        assert_eq!(tab_dojo_label(&identity), "Dojo 1");
+
+        assert_eq!(ambiguous_tab_label(&identity, "Dojo 1", 0), "Dojo 1 (1)");
+        assert_eq!(ambiguous_tab_label(&identity, "Dojo 1", 1), "Dojo 1 (2)");
+        assert!(!ambiguous_tab_label(&identity, "Dojo 1", 1).contains("terminal-"));
+
+        let explicitly_generated_looking = WindowDojoIdentity {
+            dojo_name: "terminal-1787899189-4132".to_owned(),
+            ..identity.clone()
+        };
+        assert_eq!(
+            tab_dojo_label(&explicitly_generated_looking),
+            "terminal-1787899189-4132"
+        );
+
+        let explicitly_named = WindowDojoIdentity {
+            lair_name: "terminal-123".to_owned(),
+            dojo_name: "terminal-123".to_owned(),
+            ..identity
+        };
+        assert_eq!(tab_dojo_label(&explicitly_named), "terminal-123");
     }
 
     #[test]

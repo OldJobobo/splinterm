@@ -1,13 +1,14 @@
 //! Window-local topology commands and updates shared across runtime boundaries.
 
-use std::path::PathBuf;
-
 use splinterm_core::{
     DojoId, LairId, LairRetention, LayoutNode, SplintId, SplitRatio, TopologyRevision,
 };
 use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
+use crate::navigation_projection::{
+    NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView, NavigationNodeId,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowDojoIdentity {
@@ -23,6 +24,36 @@ pub struct WindowDojoIdentity {
 pub enum SelectorKind {
     Dojo,
     Lair,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionPickerCreationTarget {
+    pub topology_revision: TopologyRevision,
+    pub action: NavigationAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionPickerTarget {
+    pub topology_revision: TopologyRevision,
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub action: NavigationAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LairExplorerActivationTarget {
+    Dojo(SessionPickerTarget),
+    Splint(NavigationExplorerSplintTarget),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPickerCatalog {
+    pub items: Vec<SessionPickerItem>,
+    pub targets: Vec<SessionPickerTarget>,
+    pub creation_enabled: bool,
+    pub creation_blocker: Option<&'static str>,
+    pub creation_target: Option<SessionPickerCreationTarget>,
+    pub initial_row: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,8 +81,34 @@ pub struct LairPromptTarget {
     pub targets: Vec<MutationTarget>,
 }
 
+/// Exact Explorer row authority, retained through menu and confirmation dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplorerContextTarget {
+    pub topology_revision: TopologyRevision,
+    pub node: NavigationNodeId,
+    pub live_incarnation: Option<u64>,
+}
+
+impl ExplorerContextTarget {
+    #[must_use]
+    pub fn command(self, command: WindowTopologyCommand) -> WindowTopologyCommand {
+        WindowTopologyCommand::ExplorerContext {
+            target: self,
+            command: Box::new(command),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WindowTopologyCommand {
+    ExplorerContext {
+        target: ExplorerContextTarget,
+        command: Box<WindowTopologyCommand>,
+    },
+    RequestDojoPrompt {
+        dojo_id: DojoId,
+        kind: LairPromptKind,
+    },
     Split {
         dojo_id: DojoId,
         target: SplintId,
@@ -75,20 +132,35 @@ pub enum WindowTopologyCommand {
         ratio: SplitRatio,
     },
     RequestSessionPicker,
+    RequestLairExplorer {
+        focused_splint: Option<SplintId>,
+    },
     RequestSelector {
         kind: SelectorKind,
         lair_id: LairId,
     },
     OpenDojo {
-        lair_id: LairId,
-        dojo_id: DojoId,
+        target: SessionPickerTarget,
+        explorer_target: Option<LairExplorerActivationTarget>,
+    },
+    FocusSplint {
+        target: NavigationExplorerSplintTarget,
     },
     NewLair {
-        cwd: PathBuf,
+        source_splint_id: SplintId,
+    },
+    PickerNewLair {
+        topology_revision: TopologyRevision,
+        source_splint_id: SplintId,
     },
     NewDojo {
         lair_id: LairId,
-        cwd: PathBuf,
+        source_splint_id: SplintId,
+    },
+    PickerNewDojo {
+        topology_revision: TopologyRevision,
+        lair_id: LairId,
+        source_splint_id: SplintId,
     },
     MaterializePreset {
         target: PresetTarget,
@@ -148,6 +220,11 @@ pub enum WindowTopologyCommand {
 }
 
 pub enum WindowTopologyUpdate {
+    ShowExplorerPrompt {
+        guard: ExplorerContextTarget,
+        kind: LairPromptKind,
+        target: LairPromptTarget,
+    },
     Apply {
         topology_revision: TopologyRevision,
         dojo_id: DojoId,
@@ -162,9 +239,17 @@ pub enum WindowTopologyUpdate {
         panes: Vec<WindowPaneOptions>,
         focused: SplintId,
         acknowledged: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ActivateTab {
         dojo_id: DojoId,
+        explorer_target: Option<LairExplorerActivationTarget>,
+    },
+    ActivateSplint {
+        dojo_id: DojoId,
+        splint_id: SplintId,
+        live_incarnation: Option<u64>,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     RemoveTab {
         dojo_id: DojoId,
@@ -174,21 +259,26 @@ pub enum WindowTopologyUpdate {
     TabFailed {
         dojo_id: Option<DojoId>,
         message: String,
+        explorer_target: Option<LairExplorerActivationTarget>,
     },
     ShowSessionPicker {
-        items: Vec<SessionPickerItem>,
-        targets: Vec<(LairId, DojoId)>,
+        catalog: SessionPickerCatalog,
+    },
+    ShowLairExplorer {
+        view: NavigationExplorerView,
     },
     ShowSelector {
         kind: SelectorKind,
-        items: Vec<SessionPickerItem>,
-        targets: Vec<(LairId, DojoId)>,
+        catalog: SessionPickerCatalog,
     },
     ShowLairPrompt {
         kind: LairPromptKind,
         target: LairPromptTarget,
     },
     SessionPickerFailed(String),
+    LairExplorerFailed(String),
+    /// Daemon lifecycle or topology changed, including work not open in a tab.
+    LairExplorerInvalidated,
     Theme(ThemeUpdate),
     Font(FontUpdate),
     Closed,

@@ -23,7 +23,7 @@ n8n is not trusted with release authority. Its unavailability may delay a notifi
 1. **Source** — an exact reviewed commit on `main` or `maint/0.1` contains a consistent workspace version, package recipes, documentation, and tests.
 2. **Candidate** — a manually dispatched, read-only workflow builds that commit once and emits a closed manifest, source archive, packages, checksums, release-notes draft, and AUR recipe drafts. Candidate artifacts are private GitHub workflow artifacts and are explicitly marked non-published.
 3. **Approved** — a maintainer starts `.github/workflows/promote-release.yml` with the exact candidate workflow run ID and manifest SHA-256, reviews the verified summary, and approves the protected GitHub `release` environment. Creating or selecting a candidate never implies approval.
-4. **Published** — the protected job creates the versioned tag and GitHub prerelease from the approved candidate artifacts without rebuilding them, downloads every published asset, verifies the tag target, title, prerelease state, release-notes digest, and exact asset set, and retains a publication receipt. An unsuccessful publication run may advance only through the bounded recovery path below, including receipt-only recovery when public state completed before durable receipt retention.
+4. **Published** — the protected job creates the versioned tag and GitHub release from the approved candidate artifacts without rebuilding them, downloads every published asset, verifies the tag target, title, prerelease state, release-notes digest, and exact asset set, and retains a publication receipt. An unsuccessful publication run may advance only through the bounded recovery path below, including receipt-only recovery when public state completed before durable receipt retention.
 5. **Distributed** — `.github/workflows/distribute-aur.yml`, protected independently by `aur-release`, consumes the exact candidate plus a successful publication/recovery receipt, pushes the closed AUR drafts without force, reverifies their public commits and recipe hashes, and retains a distribution receipt.
 6. **Recorded** — release URLs, hashes, workflow run, AUR versions, and resulting status-document changes are retained as release evidence.
 
@@ -41,6 +41,12 @@ A failure never advances the state. Retrying candidate construction creates a ne
 - repository permission limited to `actions: read` and `contents: read`;
 - no GitHub Environment, release token, AUR credential, tag creation, push, or release API call;
 - full Git history is fetched so the exact commit and previous version tag can be recorded;
+- the dispatch names the previous version tag, which must equal
+  `packaging/release-state.json`; promotion rechecks that binding, while AUR
+  distribution and recovery do not, so the recorded public state may advance
+  once publication completes;
+- release notes are the candidate commit's `RELEASE_NOTES.md`, whose first line
+  must be `# Splinterm <version>` for the candidate version;
 - the requested version must exactly match Cargo and all three Arch recipes;
 - website sources and deployment automation are absent from the source archive;
 - package validation runs against extracted package contents;
@@ -118,6 +124,13 @@ a failure remains a failed run rather than being retried to green. Manual use is
 for maintainers investigating flakes and does not grant candidate or publication
 authority.
 
+Foot 1.27.0 remains available as an optional historical differential. Its
+portable tooling job is advisory, while the exact pinned-host differential
+lives in the separate manual/scheduled `foot-oracle-pinned.yml` workflow so an
+offline self-hosted runner cannot delay required CI or candidate eligibility.
+Cargo/compiler changes do not require Foot-provenance refreshes. See
+[ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md).
+
 ## Human approval boundary
 
 The publishing job uses `environment: release`. Configure at least one required reviewer and exactly two custom deployment-branch policies named `main` and `maint/0.1` in the GitHub repository settings before running it. The protected job independently queries the Environment and fails closed unless both controls are present; merely referencing an automatically created unprotected Environment cannot publish. The read-only verification job has only `actions: read` and `contents: read`; it accepts a candidate run ID and candidate-manifest SHA-256, proves that the source was one successful manual candidate run from the same authority branch as the promotion dispatch, paginates the run artifact inventory, requires exactly one unexpired artifact, binds its workflow commit to the candidate manifest commit, and closes over the exact file set and hashes before the protected job becomes approvable. The write-authorized job executes release tooling only from the reviewed promotion-workflow dispatch commit, never from candidate-controlled source, and checkout credentials are not persisted.
@@ -130,6 +143,12 @@ read/write permission. The read-only verifier cannot access it. The protected
 publisher needs Workflows permission because the versioned tag may point to a
 candidate that changes files under `.github/workflows/`; GitHub rejects that
 ref creation when only the job's ordinary `GITHUB_TOKEN` is used.
+
+The verified candidate version determines the GitHub prerelease flag: versions
+with a prerelease suffix remain prereleases, while a plain `X.Y.Z` version is a
+stable release. This flag is derived before approval, shown in the approval
+summary, reverified afterward, and checked against the public release before a
+receipt is retained. It is not a dispatch-time override.
 
 The publisher uploads only the source archive, main/MCP packages, candidate
 manifest, and checksums. Its promotion record also closes over the exact release

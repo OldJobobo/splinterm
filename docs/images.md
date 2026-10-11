@@ -9,7 +9,7 @@ SSH relay metadata.
 
 | Protocol/operation | Status | Notes |
 | --- | --- | --- |
-| Sixel DCS `q` | supported | Foot 1.27.0-compatible streaming decode, palette modes, raster attributes, repeat, carriage return, graphical newline, cursor/scroller modes, overlap, resize, and reflow |
+| Sixel DCS `q` | supported | When enabled, advertised through primary device attribute `4`; Foot 1.27.0-compatible streaming decode, palette modes, raster attributes, repeat, carriage return, graphical newline, cursor/scroller modes, overlap, resize, and reflow |
 | Kitty direct RGB/RGBA | supported | direct and chunked static transmission; optional zlib |
 | Kitty direct PNG | supported | bounded PNG decode; `kitten icat` 0.48.0 and Chafa 1.18.2 streams are pinned fixtures |
 | Kitty transmit/display/query | supported subset | IDs, placements, crop, aspect-preserving extents, cell offsets, cursor policy, and signed z tiers |

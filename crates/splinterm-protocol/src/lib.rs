@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 35;
+pub const PROTOCOL_VERSION: u16 = 37;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -149,6 +149,30 @@ pub enum ClientFrame {
     },
 }
 
+/// Maximum UTF-8 byte length of informational daemon hostname metadata.
+pub const MAX_DAEMON_HOSTNAME_BYTES: usize = 255;
+
+/// Accept only bounded hostname-like text. Reject controls, whitespace, formatting
+/// and bidi characters rather than attempting to repair an untrusted identity.
+#[must_use]
+pub fn usable_daemon_hostname(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= MAX_DAEMON_HOSTNAME_BYTES
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_')))
+    .then_some(value)
+}
+
+fn deserialize_daemon_hostname<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Frame decoding is transport-bounded; retain only usable, bounded metadata.
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|hostname| usable_daemon_hostname(hostname).is_some()))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
@@ -156,6 +180,13 @@ pub enum ServerFrame {
         version: u16,
         limits: ServerLimits,
         development_terminal_access: bool,
+        /// Informational OS hostname at connection time, never authentication authority.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_daemon_hostname"
+        )]
+        daemon_hostname: Option<String>,
     },
     Response {
         request_id: u64,
@@ -524,6 +555,9 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: LaunchParameters,
+        /// Trusted owner request to atomically make a transient Lair durable.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        promote_transient_lair: bool,
     },
     MaterializePreset {
         expected_topology_revision: TopologyRevision,
@@ -550,6 +584,9 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
         name: String,
+        /// Trusted owner request to atomically make a transient Lair durable.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        promote_transient_lair: bool,
     },
     SetDojoDefaultFocus {
         expected_topology_revision: TopologyRevision,
@@ -708,6 +745,8 @@ pub enum Response {
         title: String,
         topology_revision: TopologyRevision,
         runtime: SplintRuntimeSummary,
+        /// Point-in-time launch default resolved on the owning daemon, not durable topology.
+        resolved_cwd: Option<PathBuf>,
     },
     GraphicalFocus {
         focused_splint_id: Option<SplintId>,
@@ -3039,6 +3078,80 @@ mod tests {
     }
 
     #[test]
+    fn hello_hostname_is_additive_and_old_clients_ignore_it() {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldServerFrame {
+            Hello {
+                version: u16,
+                limits: ServerLimits,
+                development_terminal_access: bool,
+            },
+        }
+        let old = ServerFrame::Hello {
+            version: PROTOCOL_VERSION,
+            limits: ServerLimits::default(),
+            development_terminal_access: false,
+            daemon_hostname: None,
+        };
+        let old_json = serde_json::to_value(&old).unwrap();
+        assert!(old_json.get("daemon_hostname").is_none());
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(old_json.clone()).unwrap(),
+            old
+        );
+        let mut new_json = old_json;
+        new_json["daemon_hostname"] = serde_json::json!("daemon-actual.example");
+        let decoded: ServerFrame = serde_json::from_value(new_json.clone()).unwrap();
+        assert!(
+            matches!(decoded, ServerFrame::Hello { daemon_hostname: Some(ref host), .. } if host == "daemon-actual.example")
+        );
+        let OldServerFrame::Hello {
+            version,
+            limits,
+            development_terminal_access,
+        } = serde_json::from_value(new_json).unwrap();
+        assert_eq!(version, PROTOCOL_VERSION);
+        assert_eq!(limits, ServerLimits::default());
+        assert!(!development_terminal_access);
+    }
+
+    #[test]
+    fn hello_hostname_rejects_unusable_metadata_without_losing_the_handshake() {
+        for hostname in [
+            String::new(),
+            "a".repeat(MAX_DAEMON_HOSTNAME_BYTES + 1),
+            "bad\nname".to_owned(),
+            "bad\0name".to_owned(),
+            "bad\u{202e}name".to_owned(),
+            "bad\u{2066}name".to_owned(),
+            "bad\u{200b}name".to_owned(),
+            "white space".to_owned(),
+        ] {
+            let frame = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: Some(hostname),
+            };
+            let decoded: ServerFrame =
+                serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+            assert!(matches!(
+                decoded,
+                ServerFrame::Hello {
+                    daemon_hostname: None,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            usable_daemon_hostname("node-界.example"),
+            Some("node-界.example")
+        );
+        assert!(usable_daemon_hostname(&"a".repeat(MAX_DAEMON_HOSTNAME_BYTES)).is_some());
+    }
+
+    #[test]
     fn frames_are_length_prefixed_and_explicit() {
         let value = ClientFrame::Hello {
             minimum_version: PROTOCOL_VERSION,
@@ -3628,7 +3741,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 35);
+        assert_eq!(PROTOCOL_VERSION, 37);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -3867,6 +3980,39 @@ mod tests {
             value["launch"]["command"],
             serde_json::json!(["printf", "%s"])
         );
+
+        let promotion = Request::NewDojo {
+            expected_topology_revision: TopologyRevision::new(8),
+            lair_id: LairId::new(),
+            name: "work".into(),
+            launch: launch.clone(),
+            promote_transient_lair: true,
+        };
+        let mut promotion_value = serde_json::to_value(&promotion).unwrap();
+        assert_eq!(promotion_value["promote_transient_lair"], true);
+        assert_eq!(
+            serde_json::from_value::<Request>(promotion_value.clone()).unwrap(),
+            promotion
+        );
+        promotion_value
+            .as_object_mut()
+            .unwrap()
+            .remove("promote_transient_lair");
+        assert!(matches!(
+            serde_json::from_value::<Request>(promotion_value).unwrap(),
+            Request::NewDojo {
+                promote_transient_lair: false,
+                ..
+            }
+        ));
+        let ordinary_rename = serde_json::to_value(Request::RenameDojo {
+            expected_topology_revision: TopologyRevision::new(9),
+            dojo_id: DojoId::new(),
+            name: "ordinary".into(),
+            promote_transient_lair: false,
+        })
+        .unwrap();
+        assert!(ordinary_rename.get("promote_transient_lair").is_none());
 
         let mut invalid = launch.clone();
         invalid.command = vec!["x".into(); MAX_LAUNCH_ARGUMENTS + 1];

@@ -431,15 +431,31 @@ impl Topology {
         lair_id: LairId,
         dojo: Dojo,
     ) -> Result<TopologyRevision, TopologyError> {
+        self.new_dojo_with_promotion_at(expected, lair_id, dojo, false)
+            .map(|(revision, _)| revision)
+    }
+
+    /// Atomically promotes a transient Lair when requested and appends one Dojo.
+    pub fn new_dojo_with_promotion_at(
+        &mut self,
+        expected: TopologyRevision,
+        lair_id: LairId,
+        dojo: Dojo,
+        promote_transient_lair: bool,
+    ) -> Result<(TopologyRevision, bool), TopologyError> {
         self.check_revision(expected)?;
         self.validate_new_dojos(std::slice::from_ref(&dojo))?;
-        self.lairs
+        let lair = self
+            .lairs
             .get_mut(&lair_id)
-            .ok_or(TopologyError::LairNotFound(lair_id))?
-            .dojos
-            .push(dojo);
+            .ok_or(TopologyError::LairNotFound(lair_id))?;
+        let promoted = promote_transient_lair && lair.lifetime == LairLifetime::Transient;
+        if promoted {
+            lair.lifetime = LairLifetime::Persistent;
+        }
+        lair.dojos.push(dojo);
         self.advance_revision();
-        Ok(self.revision)
+        Ok((self.revision, promoted))
     }
 
     /// Atomically appends a complete bounded Dojo set and optionally renames its Lair.
@@ -603,13 +619,36 @@ impl Topology {
         dojo_id: DojoId,
         name: impl Into<String>,
     ) -> Result<TopologyRevision, TopologyError> {
+        self.rename_dojo_with_promotion_at(expected, dojo_id, name, false)
+            .map(|(revision, _)| revision)
+    }
+
+    /// Atomically promotes a transient Lair when requested and renames one Dojo.
+    pub fn rename_dojo_with_promotion_at(
+        &mut self,
+        expected: TopologyRevision,
+        dojo_id: DojoId,
+        name: impl Into<String>,
+        promote_transient_lair: bool,
+    ) -> Result<(TopologyRevision, bool), TopologyError> {
         self.check_revision(expected)?;
         let name = normalized_name(&name.into())?;
-        self.find_dojo_mut(dojo_id)
+        let lair = self
+            .lairs
+            .values_mut()
+            .find(|lair| lair.dojos.iter().any(|dojo| dojo.id == dojo_id))
+            .ok_or(TopologyError::DojoNotFound(dojo_id))?;
+        let promoted = promote_transient_lair && lair.lifetime == LairLifetime::Transient;
+        if promoted {
+            lair.lifetime = LairLifetime::Persistent;
+        }
+        lair.dojos
+            .iter_mut()
+            .find(|dojo| dojo.id == dojo_id)
             .ok_or(TopologyError::DojoNotFound(dojo_id))?
             .name = name;
         self.advance_revision();
-        Ok(self.revision)
+        Ok((self.revision, promoted))
     }
 
     pub fn set_dojo_default_focus_at(
@@ -916,6 +955,65 @@ mod tests {
     fn transient_lairs_also_start_with_dojo_one() {
         let lair = Lair::transient("private", PathBuf::from("/tmp"));
         assert_eq!(lair.dojos[0].name, "Dojo 1");
+    }
+
+    #[test]
+    fn tab_organization_promotes_transient_lairs_in_one_revision() {
+        let mut topology = Topology::new();
+        let transient = Lair::transient("private", PathBuf::from("/tmp"));
+        let lair_id = transient.id;
+        let initial_dojo_id = transient.dojos[0].id;
+        topology
+            .insert_lair_at(TopologyRevision::default(), transient)
+            .unwrap();
+
+        let expected = topology.revision();
+        let (revision, promoted) = topology
+            .new_dojo_with_promotion_at(
+                expected,
+                lair_id,
+                Dojo::with_shell("Dojo 2", PathBuf::from("/tmp")),
+                true,
+            )
+            .unwrap();
+        assert!(promoted);
+        assert_eq!(revision.get(), expected.get() + 1);
+        assert_eq!(
+            topology.find_lair(lair_id).unwrap().lifetime,
+            LairLifetime::Persistent
+        );
+        assert_eq!(topology.find_lair(lair_id).unwrap().dojos.len(), 2);
+
+        let expected = topology.revision();
+        let (revision, promoted) = topology
+            .rename_dojo_with_promotion_at(expected, initial_dojo_id, "work", true)
+            .unwrap();
+        assert!(!promoted);
+        assert_eq!(revision.get(), expected.get() + 1);
+        assert_eq!(topology.find_dojo(initial_dojo_id).unwrap().name, "work");
+    }
+
+    #[test]
+    fn failed_tab_organization_does_not_partially_promote() {
+        let mut topology = Topology::new();
+        let transient = Lair::transient("private", PathBuf::from("/tmp"));
+        let lair_id = transient.id;
+        let dojo_id = transient.dojos[0].id;
+        topology
+            .insert_lair_at(TopologyRevision::default(), transient)
+            .unwrap();
+        let stale = TopologyRevision::default();
+
+        assert!(
+            topology
+                .rename_dojo_with_promotion_at(stale, dojo_id, "work", true)
+                .is_err()
+        );
+        assert_eq!(
+            topology.find_lair(lair_id).unwrap().lifetime,
+            LairLifetime::Transient
+        );
+        assert_eq!(topology.find_dojo(dojo_id).unwrap().name, "Dojo 1");
     }
 
     #[test]

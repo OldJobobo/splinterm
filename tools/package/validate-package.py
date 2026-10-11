@@ -51,6 +51,7 @@ REQUIRED = {
     "usr/share/doc/splinterm/presets.md",
     "usr/share/doc/splinterm/remote.md",
     "usr/share/doc/splinterm/usage.md",
+    "usr/share/doc/splinterm/accessibility.md",
     "usr/share/doc/splinterm/theme.json",
     "usr/share/doc/splinterm/xdg-terminals.list",
     "usr/share/licenses/splinterm/LICENSE",
@@ -62,7 +63,7 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/LICENSE",
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
-PRIVATE_PROTOCOL_VERSION = 35
+PRIVATE_PROTOCOL_VERSION = 37
 
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
@@ -229,13 +230,15 @@ def validate_systemd_unit(root: Path) -> None:
     required_slice = {
         "StopWhenUnneeded=yes",
         "[Slice]",
-        "TasksMax=2048",
         "MemoryHigh=75%",
     }
     missing_slice = required_slice - slice_lines
     assert not missing_slice, (
         "workload slice is missing aggregate guards: "
         f"{sorted(missing_slice)}"
+    )
+    assert not any(line.startswith("TasksMax=") for line in slice_lines), (
+        "workload units must inherit the user manager task limit"
     )
     assert not any(line.startswith("MemoryMax=") for line in slice_lines)
 

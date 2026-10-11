@@ -5,6 +5,8 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 config_file=${SPLINTERM_TESTBED_CONFIG:-"$repo_root/.splinterm-testbed.env"}
+# A caller-selected test checkout must not be replaced by the shared config root.
+requested_remote_root=${SPLINTERM_TESTBED_REMOTE_ROOT:-}
 
 if [[ -r $config_file ]]; then
   # This is an explicitly selected, maintainer-owned shell configuration file.
@@ -17,7 +19,7 @@ port=${SPLINTERM_TESTBED_PORT:-2222}
 user=${SPLINTERM_TESTBED_USER:-omarchy}
 identity=${SPLINTERM_TESTBED_IDENTITY:-}
 known_hosts=${SPLINTERM_TESTBED_KNOWN_HOSTS:-}
-remote_root=${SPLINTERM_TESTBED_REMOTE_ROOT:-"/home/$user/Projects/splinterm-testbed"}
+remote_root=${requested_remote_root:-${SPLINTERM_TESTBED_REMOTE_ROOT:-"/home/$user/Projects/splinterm-testbed"}}
 qmp_socket=${SPLINTERM_TESTBED_QMP_SOCKET:-}
 action=${1:-status}
 if (($# > 0)); then
@@ -72,6 +74,7 @@ remote_leaf=${remote_root##*/}
 [[ $remote_root == "$remote_parent/$remote_leaf" \
   && $remote_leaf =~ ^splinterm-testbed(-[A-Za-z0-9._]+)?$ ]] \
   || fail "SPLINTERM_TESTBED_REMOTE_ROOT must be $remote_parent/splinterm-testbed[-suffix]"
+((${#remote_leaf} <= 48)) || fail 'SPLINTERM_TESTBED_REMOTE_ROOT leaf exceeds socket path limit'
 [[ -n $identity ]] || fail "set SPLINTERM_TESTBED_IDENTITY in $config_file"
 [[ -r $identity ]] || fail "identity file is not readable: $identity"
 [[ -n $known_hosts ]] || fail "set SPLINTERM_TESTBED_KNOWN_HOSTS in $config_file"
@@ -297,6 +300,12 @@ cd "$SPLINTERM_TESTBED_ROOT"
   printf 'development guest window state exists; run stop first\n' >&2
   exit 1
 }
+# The launcher rebuilds on every run; finish a cold build before the bounded map wait.
+case ${SPLINTERM_TEST_PROFILE:-release} in
+  release) cargo build -q --release -p splinterd -p splinterm -p splinterm-pty ;;
+  debug) cargo build -q -p splinterd -p splinterm -p splinterm-pty ;;
+  *) printf 'invalid SPLINTERM_TEST_PROFILE\n' >&2; exit 2 ;;
+esac
 client_pid=
 cleanup_failed_launch() {
   [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
@@ -376,10 +385,21 @@ REMOTE
       || fail 'package-install requires --confirm-guest-install'
     package_root="$remote_root/.testbed-package"
     ssh "${ssh_options[@]}" "$target" \
-      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") bash -s" <<'REMOTE'
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") bash -s" <<'REMOTE'
 set -euo pipefail
 package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
 source_root="$package_root/source"
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-install-check"
+socket="$runtime/splinterd.sock"
+state="$package_root/install-check-state"
+[[ ! -e $runtime && ! -L $runtime ]] || {
+  printf 'guest package install-check runtime already exists: %s\n' "$runtime" >&2
+  exit 1
+}
+[[ ! -e $state && ! -L $state ]] || {
+  printf 'guest package install-check state already exists: %s\n' "$state" >&2
+  exit 1
+}
 test -d "$source_root/.git"
 test ! -L "$package_root"
 resolved=$(command -v splinterm 2>/dev/null || true)
@@ -401,10 +421,6 @@ command -v splinterm | grep -Fx /usr/bin/splinterm
 pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
 stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
 desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
-runtime="/run/user/$(id -u)/splinterm-package-install-check"
-socket="$runtime/splinterd.sock"
-state="$package_root/install-check-state"
-rm -rf "$runtime" "$state"
 mkdir -m 700 "$runtime" "$state"
 SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" \
   /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &
@@ -433,7 +449,7 @@ REMOTE
     (($# == 0)) || fail 'package-launch takes no arguments'
     package_root="$remote_root/.testbed-package"
     ssh "${ssh_options[@]}" "$target" \
-      "SPLINTERM_TESTBED_ROOT=$(printf '%q' "$remote_root") SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") bash -s" <<'REMOTE'
+      "SPLINTERM_TESTBED_ROOT=$(printf '%q' "$remote_root") SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") bash -s" <<'REMOTE'
 set -euo pipefail
 resolved=$(command -v splinterm 2>/dev/null || true)
 [[ $resolved == /usr/bin/splinterm ]]
@@ -441,7 +457,7 @@ pacman -Qo /usr/bin/splinterm /usr/bin/splinterd >/dev/null
 package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
 test -d "$package_root/source/.git"
 test ! -L "$package_root"
-runtime="/run/user/$(id -u)/splinterm-package-test"
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
 socket="$runtime/splinterd.sock"
 window_state="$runtime/guest-window.json"
 state="$package_root/acceptance-state"
@@ -458,12 +474,47 @@ for process in /proc/[0-9]*; do
       ;;
   esac
 done
-[[ ! -e $window_state ]] || {
-  printf 'packaged guest window state exists; run package-stop first\n' >&2
+[[ ! -e $runtime && ! -L $runtime ]] || {
+  printf 'packaged guest runtime exists; inspect its owner before cleanup: %s\n' "$runtime" >&2
   exit 1
 }
-rm -rf "$runtime" "$state" "$config"
-mkdir -m 700 "$runtime" "$state" "$config"
+for path in "$state" "$config"; do
+  [[ ! -e $path && ! -L $path ]] || {
+    printf 'packaged guest state exists; inspect its owner before cleanup: %s\n' "$path" >&2
+    exit 1
+  }
+done
+daemon_pid=
+client_pid=
+created_runtime=false
+created_state=false
+created_config=false
+cleanup_failed_launch() {
+  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
+  [[ -z $daemon_pid ]] || kill "$daemon_pid" 2>/dev/null || true
+  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
+  [[ -z $daemon_pid ]] || wait "$daemon_pid" 2>/dev/null || true
+  if [[ $created_runtime == true && -e $window_state ]]; then
+    if ! python "$package_root/source/tools/testbed/guest-window.py" restore \
+      --state "$window_state"; then
+      printf 'guest restoration failed; private state retained for package-stop: %s\n' \
+        "$runtime" >&2
+      return 1
+    fi
+  fi
+  # The preflight rejects existing paths; remove only directories this launch made.
+  [[ $created_config == false ]] || rm -rf -- "$config"
+  [[ $created_state == false ]] || rm -rf -- "$state"
+  [[ $created_runtime == false ]] || rm -rf -- "$runtime"
+}
+trap cleanup_failed_launch ERR
+mkdir -m 700 "$runtime"
+created_runtime=true
+mkdir -m 700 "$state"
+created_state=true
+mkdir -m 700 "$config"
+created_config=true
+printf '%s\n' "$package_root" >"$runtime/testbed-root"
 instance=$(hyprctl instances -j | jq -er \
   'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -473,18 +524,6 @@ export HYPRLAND_INSTANCE_SIGNATURE
 HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket"
-daemon_pid=
-client_pid=
-cleanup_failed_launch() {
-  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
-  [[ -z $daemon_pid ]] || kill "$daemon_pid" 2>/dev/null || true
-  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
-  [[ -z $daemon_pid ]] || wait "$daemon_pid" 2>/dev/null || true
-  [[ ! -e $window_state ]] \
-    || python "$package_root/source/tools/testbed/guest-window.py" restore \
-      --state "$window_state" || true
-}
-trap cleanup_failed_launch ERR
 python "$package_root/source/tools/testbed/guest-window.py" prepare --state "$window_state"
 SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &
@@ -515,11 +554,21 @@ REMOTE
     (($# == 0)) || fail 'package-stop takes no arguments'
     package_root="$remote_root/.testbed-package"
     ssh "${ssh_options[@]}" "$target" \
-      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") bash -s" <<'REMOTE'
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") bash -s" <<'REMOTE'
 set -euo pipefail
-runtime="/run/user/$(id -u)/splinterm-package-test"
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
 socket="$runtime/splinterd.sock"
 window_state="$runtime/guest-window.json"
+[[ -d $runtime && ! -L $runtime ]] || {
+  printf 'no owned packaged guest runtime: %s\n' "$runtime" >&2
+  exit 1
+}
+owner="$runtime/testbed-root"
+[[ -f $owner && ! -L $owner \
+  && $(<"$owner") == "$SPLINTERM_TESTBED_PACKAGE_ROOT" ]] || {
+  printf 'packaged guest runtime owner mismatch: %s\n' "$runtime" >&2
+  exit 1
+}
 stop_matching() {
   local expected=$1 process executable
   for process in /proc/[0-9]*; do

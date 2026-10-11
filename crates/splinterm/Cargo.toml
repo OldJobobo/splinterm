@@ -11,10 +11,14 @@ repository.workspace = true
 font-stack-spike = ["dep:fontdb"]
 
 [dependencies]
+accesskit.workspace = true
 anyhow.workspace = true
+atspi.workspace = true
 clap.workspace = true
+flate2.workspace = true
 fontdb = { workspace = true, optional = true }
 libc.workspace = true
+png.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -36,6 +40,7 @@ unicode-width.workspace = true
 uuid.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
 sha2.workspace = true

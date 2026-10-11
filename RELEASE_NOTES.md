@@ -1,176 +1,109 @@
-# Current releases
+# Splinterm 0.1.1
 
-Splinterm **0.1.0**, published on 2026-09-05, is the first stable release for
-x86_64 Omarchy/Arch Linux with native Wayland under Hyprland. It carries the
-RC3 terminal and daemon implementation forward unchanged.
+Splinterm 0.1.1 is a stable update for the documented x86_64 Linux target.
+It retains the product implementation from `v0.1.1-rc.3` unchanged; finalization
+updates version metadata, package recipe templates, and release notes rather
+than adding runtime features. The changes below summarize the 0.1.1 RC series
+relative to 0.1.0; Nix support entered maintenance ancestry before this series.
 
-Full stable release notes and assets:
+## Final RC3 fixes
 
-https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+- Scrollback search paints its query and match status inside the Window canvas,
+  including when the Explorer is open. The field stays on the terminal side of
+  the Explorer drawer and is omitted if there is no room to show it.
+- New Splints, Dojos, and Lairs created within a Window inherit the focused
+  Splint's live root-process working directory when available, including remote
+  sessions. Explicit working directories still take precedence.
+- Locally closed graphical relay channels discard valid late responses without
+  failing unrelated channels. Scrollback-tail merges avoid repeated front
+  shifts while retaining the existing bounded history behavior.
+- Explorer activity filters, context-action reconciliation, and context-menu
+  sizing received maintenance fixes after RC2.
 
-The newer **0.1.1-rc.2**, published on 2026-09-15, is a release candidate,
-not a stable release. See the release listing for current prereleases:
+## Explorer context actions and labels
 
-https://github.com/OldJobobo/splinterm/releases
+- Explorer right-click menus act on the clicked Lair, Dojo, or Splint without
+  implicitly navigating to it. Applicable actions include rename, creation,
+  save/pin/restore, focus/split/close, and confirmed termination. Targets are
+  revalidated before dispatch and confirmation.
+- Generated navigation names use short display labels such as `Lair 1`,
+  `Dojo 1`, and `Terminal 1`. Custom names and underlying identities remain
+  unchanged. Display numbering may change as siblings are added or removed.
+- Explorer names and status text occupy separate lines instead of competing
+  for row width.
+- A rejected tab context-menu request no longer exits the whole client when
+  another input operation or transition makes the menu unavailable.
 
-Stable 0.1.0 does not promise broader platform compatibility or a support
-lifetime. Future 0.x releases may change interfaces with documented migration.
-There is no live daemon upgrade handoff: stopping or replacing `splinterd`
-ends its child processes. Save your work and upgrade from another terminal;
-see [Packaging](docs/packaging.md).
+## Navigation and returning to work
 
-# Unreleased
+- An optional Lair Explorer presents Lairs, Dojos, and Splints beside terminal
+  panes. Use **Toggle Lair explorer** or **Focus Lair explorer** in the command
+  palette. Selection and current terminal focus remain distinct.
+- Hierarchy-aware pickers and activation/focus recovery make it easier to return
+  to running work and reattach restored panes.
+- The first-five-minutes guide covers opening, splitting, detaching, and returning.
+  Reattachment does not restart an exited process; explicit restore starts new
+  processes rather than recovering application checkpoints.
+- Split-below and split-right now honor their named directions in both keyboard
+  and palette dispatch. Default keys and action IDs are unchanged.
 
-- Splinterm-owned semantic, renderer, contract, package, and guarded graphical
-  tests are now release authority. The pinned Foot 1.27.0 harness remains an
-  exact optional historical differential and no longer couples releases to a
-  particular compiler, Cargo lockfile, or complete ambient Fontconfig inventory.
+## Text and clipboard
 
-# Live font synchronization — shipped in 0.1.0
+- Opt-in `main.font-ligatures=on` or `cursor` shapes compatible adjacent printable
+  ASCII cells. The default remains `off`; cell widths and copied text are
+  unchanged. This is not general-script or bidi run shaping.
+- `main.font-features` accepts explicit OpenType feature settings. Both settings
+  require a new client process and survive native font-family changes unchanged.
+- **Save clipboard image and insert path** saves bounded static PNG content into
+  a configured private directory and inserts its shell-quoted path without Enter.
+  It is local-only, has no default shortcut, and does not change ordinary paste.
+  Saved files persist until manually deleted; this is not metadata sanitization.
 
-- Native Omarchy font following is live when `main.font` is unset. Valid
-  fontconfig `monospace` family changes replace one complete immutable renderer
-  generation without restarting the Window, daemon, shell, or applications.
-- Explicit font patterns remain authoritative. Invalid live generations retain
-  the last valid family; the documented JetBrains fallback is startup-only.
-- Family changes preserve configured size/policy, padding, DPI, runtime zoom,
-  topology, focus, history, modal and IME state, and controller authority.
-  Observer panes never acquire control solely to resize after a font change;
-  deferred resizes retry and ambient probes use a bounded ten-second cadence.
-- Fontconfig named variable-font instances survive shaping and rasterization.
-  Accepted staging remains synchronized with watcher probes, and cached
-  FreeType faces share immutable font mappings across raster sizes.
-- The stable release includes the release-candidate font-lifetime fixes and
-  retains the last valid renderer when a live font generation is invalid.
+## Accessibility and remote identity
 
-# Historical release notes
+- Native Linux AT-SPI exposes Explorer navigation, search, and bounded status.
+  Actions respect focus, control, visibility, and stale-target checks. Terminal
+  text, scrollback, modal dialogs, and global pointer geometry are not exposed.
+  This is not whole-terminal screen-reader support.
+- The accessibility guide is included in the Arch and Nix package documentation.
+- Remote Windows show the connected daemon's hostname when available, with a
+  `Remote` fallback. This label is informational, not proof of connection health
+  or a security indicator.
 
-The announcement below is retained as a historical record; its beta status and
-limitations describe that release, not Splinterm's current maturity.
+## Packaging and reliability
 
-# Splinterm 0.1.0 Beta 1 — The Foundation Holds
+- The repository flake and NixOS module provide x86_64 Linux packaging, including
+  headless/module/package checks. Nix support predates this release in maintenance
+  ancestry but is absent from the original `v0.1.0` tag. The Arch release installer
+  is not a NixOS installer; universal compositor compatibility is not claimed.
+- Fixes address inactive-pane repainting, committed-canvas preservation, control
+  reacquisition, subscription progress, modal input precedence, and Explorer
+  selection clipping.
+- Switching to light Omarchy themes now honors Foot's `initial-color-theme=light`
+  and loads the light palette instead of retaining the previous dark background.
+  Dark/legacy palettes and explicit alpha/blur overrides remain supported.
+- History caches retain prefixes only across proven continuous updates, avoiding
+  disconnected blank prefixes after bounded scrollback-tail updates. The wire
+  history cap is unchanged.
+- Arch renderer checks use checksum-pinned font fixtures, not ambient primary-font
+  selection. These fixtures are not installed as runtime fonts. MCP validation
+  now explicitly synchronizes asynchronous catalogue and cancellation boundaries.
 
-Splinterm has reached public beta.
+## Installation and upgrade boundary
 
-That is more than a version-label change. The alpha releases proved that the
-core idea could work: a native terminal whose shells, layouts, and state belong
-to a persistent daemon instead of a window. Beta 1 is the point where that idea
-has become a coherent product we are comfortable asking people to use, test,
-and build workflows around.
+After publication, use the packages attached to the GitHub `v0.1.1` release;
+verify them against its published checksums before installation. Install the
+matching optional MCP package if needed. Source-built and prebuilt AUR package
+bases are updated separately after GitHub asset verification. Until that update
+is verified, AUR remains on 0.1.0; repository candidate templates are not
+published AUR recipes.
 
-Close a window attached to a persistent Splinterm session and your work keeps
-running. Come back through the session picker (the Dojo picker) or
-`splinterm reopen`, and it is still there. Tabs and panes are views into
-persistent sessions rather than fragile containers for them. Command-hosting
-XDG launches are deliberately transient and end with their owner window. The
-same topology is available to people, remote clients, scripts, and the optional
-MCP adapter—without giving automation the authority of a human at the keyboard.
+**There is no live daemon-upgrade handoff.** Save work and upgrade from Foot,
+another independent terminal, or an independent SSH session. Stopping or replacing
+`splinterd` ends its child processes; saved layouts do not checkpoint applications.
+Reopen Splinterm Windows after replacement so they use the new packaged client
+identity. Keep the optional MCP adapter at the matching package version.
 
-## What is ready in Beta 1
-
-- **Persistent terminal sessions.** Shells and processes in persistent sessions
-  survive graphical client disconnects, with explicit restore behavior when a
-  process has exited. Command-hosting XDG launches remain intentionally
-  transient.
-- **A native Wayland workflow.** Splinterm provides windows, panes, window-local
-  Dojo tabs, search, copy mode, clipboard integration, IME support, and
-  multi-client control on the validated Omarchy/Arch Linux target.
-- **First-class Omarchy integration.** Splinterm follows the active Omarchy
-  palette, can reload valid theme changes without restarting your shell, and
-  offers an explicit, reversible default-terminal integration.
-- **One terminal world for humans and tools.** The human CLI, structured
-  JSON/NDJSON clients, SSH relay, native remote client, and optional MCP adapter
-  all work with the same persistent sessions.
-- **Bounded automation.** Machine access uses explicit policy, scopes, resource
-  limits, controller ownership, consent, and revocation. Terminal output remains
-  untrusted data; it cannot grant itself authority.
-- **Real packages.** Immutable GitHub release assets and both prebuilt and
-  source-built AUR packages are now public and versioned.
-
-## What changed for Beta 1
-
-### Large terminals no longer hit the old grid ceiling
-
-Splinterm now supports terminal grids up to `480×128`, replacing the earlier
-`240×80` ceiling. Maximized terminals on validated 1440p and non-graphically
-verified 4K profiles can use their available cell area instead of silently
-stopping at an inherited protocol limit. Negotiated limits, oversized terminal
-transactions, renderer state, and publication memory all remain bounded.
-
-### Heavy output is steadier and more predictable
-
-Terminal updates now travel through sparse publication frames that own the rows
-and metadata that actually changed rather than repeatedly retaining complete
-terminal checkpoints. This reduces unnecessary retained state and large
-cross-batch materialization while preserving exact ordering, resynchronization,
-exit delivery, and hard memory ceilings.
-
-In practical terms: sustained and bursty terminal output has a much healthier
-path through the daemon and graphical client, without weakening correctness to
-win a benchmark.
-
-### Active tabs are readable without corrupting selection colors
-
-On native Omarchy themes, the active tab now derives its background from
-standard theme roles and chooses a high-contrast foreground independently from
-terminal selection colors. Theme authors do not need Splinterm-specific keys,
-terminal text selection keeps its intended palette, and valid live theme
-changes remain atomic.
-
-### Wide-grid and automation edge cases were hardened
-
-The session picker now accepts the full Beta 1 grid envelope, constrained
-endpoints retain their negotiated dimensions, and a control-subscription
-ordering race found by repeated CI was fixed before release. Release review also
-caught user-facing package metadata defects, so the candidate was corrected and
-rebuilt before promotion.
-
-That matters. Beta does not mean “finished.” It means the release boundary is
-strong enough to catch problems before users inherit them.
-
-## Install
-
-Splinterm Beta 1 currently targets **x86_64 Omarchy/Arch Linux on native
-Wayland**. The recommended prebuilt packages are:
-
-```bash
-yay -S splinterm-bin
-# Optional policy-scoped MCP adapter:
-yay -S splinterm-mcp-bin
-```
-
-Source-built packages are available as `splinterm` and `splinterm-mcp`. See the
-[installation guide](https://splinterm.com/docs/install/) for trusted-client
-identity, upgrades, integration, and troubleshooting.
-
-## What “beta” means here
-
-The persistent-session model, terminal core, native presentation, multiplexing,
-packaging, and bounded automation workflows are implemented and validated for
-the documented target. This is the first Splinterm release intended for serious
-public evaluation rather than early architectural proof.
-
-It is still beta software. Interfaces may change. The supported environment is
-narrow. Broader compositor, distribution, architecture, and package support is
-not promised yet, and stable compatibility or support windows have not been
-announced. The renderer is currently CPU-composed Wayland shared memory, remote
-image transfer is not supported, and full Kitty graphics compatibility is not
-claimed.
-
-Those boundaries are deliberate. Splinterm would rather make a small promise it
-can defend than a large one it cannot.
-
-## From here
-
-Beta 1 gives Splinterm a solid public floor: persistent by design, native where
-it matters, useful to humans, accessible to tools, and explicit about authority.
-The next phase is refinement—better everyday ergonomics, broader compatibility,
-and a careful path toward stable interfaces—without sacrificing the ownership
-and safety model that made Splinterm worth building in the first place.
-
-Thank you to everyone willing to install it, stress it, report what feels wrong,
-and help shape what comes next.
-
-- **Release:** [`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1)
-- **Current status:** [`docs/status.md`](https://raw.githubusercontent.com/OldJobobo/splinterm/main/docs/status.md)
-- **Documentation:** [splinterm.com/docs](https://splinterm.com/docs/)
+See `docs/packaging.md`, `docs/nixos.md`, and `docs/accessibility.md` for platform,
+upgrade, and support boundaries. No broad performance guarantee, universal
+assistive-technology compatibility, or support-duration promise is introduced.

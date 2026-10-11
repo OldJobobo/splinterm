@@ -1,6 +1,7 @@
 mod audit;
 mod cgroup;
 mod consent;
+mod omarchy_environment;
 mod persistence;
 
 use std::{
@@ -22,7 +23,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use cgroup::{WorkloadResourcePolicy, WorkloadUnitManager};
+use cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
@@ -791,6 +792,12 @@ struct DaemonState {
     development_terminal_access: bool,
 }
 
+/// Read the kernel nodename once for this handshake, without environment or subprocesses.
+fn daemon_hostname() -> Option<String> {
+    let name = rustix::system::uname();
+    splinterm_protocol::usable_daemon_hostname(name.nodename().to_str().ok()?).map(str::to_owned)
+}
+
 async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> time::Instant {
     let mut transfers = state.image_transfers.lock().await;
     if expire {
@@ -910,7 +917,7 @@ async fn run_daemon() -> Result<()> {
         inode: Some(daemon_identity.inode),
     };
     let workload_units = match WorkloadUnitManager::connect(
-        WorkloadResourcePolicy::default(),
+        WorkloadMemoryPolicy::default(),
         require_workload_cgroups.then_some("splinterd.service"),
     ) {
         Ok(manager) => Some(manager),
@@ -1356,8 +1363,7 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
         tokio::select! {
             result = authenticated => result,
             exited = peer_monitor.exited() => {
-                exited?;
-                Err(anyhow::anyhow!("socket peer exited"))
+                exited.and_then(|()| Err(anyhow::anyhow!("socket peer exited")))
             }
         }
     } else {
@@ -1486,6 +1492,11 @@ async fn append_preset_leaf_audit(state: &DaemonState, splint_id: SplintId, succ
 }
 
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    state
+        .topology_hub
+        .lock()
+        .await
+        .remove_connections(&HashSet::from([connection_id]));
     retire_transient_lair_for_owner(state, connection_id).await;
     state
         .automation_connections
@@ -1724,6 +1735,7 @@ async fn serve_authenticated(
             version: PROTOCOL_VERSION,
             limits: server_limits(),
             development_terminal_access: state.development_terminal_access,
+            daemon_hostname: daemon_hostname(),
         },
     )
     .await?;
@@ -1749,11 +1761,17 @@ async fn serve_authenticated(
                 }
                 break;
             }
-            revoked = connection_revocations.recv(), if connection_revocation_disconnects(role) => match revoked {
-                Ok(revoked) if revoked == connection_id => break,
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
+            // Filtering inside this future keeps read_exact's partial header/body alive
+            // when a different connection is revoked.
+            () = async {
+                loop {
+                    match connection_revocations.recv().await {
+                        Ok(revoked) if revoked == connection_id => break,
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }, if connection_revocation_disconnects(role) => break,
             frame = read_optional_frame(&mut reader) => frame?,
         };
         let Some(frame) = frame else { break };
@@ -2506,6 +2524,7 @@ async fn spawn_runtime_with_size(
     .env("SPLINTERM_LAIR_ID", context.lair.to_string())
     .env("SPLINTERM_DOJO_ID", context.dojo.to_string())
     .env("SPLINTERM_SPLINT_ID", context.splint.to_string());
+    let pty_command = omarchy_environment::refresh_gum_environment(pty_command).await;
     let mut config = LiveSplintConfig::default();
     #[cfg(debug_assertions)]
     if let Some(grace) = debug_test_shutdown_grace(env::var_os("SPLINTERM_TEST_SHUTDOWN_GRACE_MS"))
@@ -2879,6 +2898,37 @@ enum TransientRetirementTrigger {
         splint_id: SplintId,
         incarnation: u64,
     },
+}
+
+fn authorize_transient_promotion(
+    state: &DaemonState,
+    topology: &Topology,
+    connection_id: u64,
+    lair_id: LairId,
+    requested: bool,
+) -> std::result::Result<bool, ProtocolError> {
+    if !requested {
+        return Ok(false);
+    }
+    let lair = topology
+        .find_lair(lair_id)
+        .ok_or_else(|| model_error(TopologyError::LairNotFound(lair_id)))?;
+    if lair.lifetime == LairLifetime::Persistent {
+        return Ok(false);
+    }
+    let lease = state
+        .transient_leases
+        .lock()
+        .unwrap()
+        .for_lair(lair_id)
+        .ok_or_else(internal)?;
+    if lease.owner_connection_id != connection_id {
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "transient Lair promotion requires its owning graphical client",
+        ));
+    }
+    Ok(true)
 }
 
 fn transient_trigger_matches(
@@ -4716,7 +4766,17 @@ async fn resolve_automation_mutation(
             ratio,
             launch,
         } => {
-            let cwd = splint_durable_cwd(&*state.topology.read().await, target_splint_id)?;
+            let cwd = match launch.cwd.clone() {
+                Some(cwd) => cwd,
+                None => resolve_splint_cwd(state, target_splint_id)
+                    .await?
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "source working directory is unavailable",
+                        )
+                    })?,
+            };
             Request::SplitSplint {
                 expected_topology_revision,
                 target_splint_id,
@@ -4753,6 +4813,7 @@ async fn resolve_automation_mutation(
                 lair_id,
                 name,
                 launch: resolved_automation_launch(launch, cwd)?,
+                promote_transient_lair: false,
             }
         }
         request => request,
@@ -4930,7 +4991,9 @@ async fn handle_authorized_request(
                 .ok_or_else(not_found)?;
             let (lair_id, dojo_id, title) =
                 splint_containment(&snapshot.topology, splint_id).ok_or_else(not_found)?;
+            let resolved_cwd = resolve_splint_cwd(state, splint_id).await?;
             Response::Splint {
+                resolved_cwd,
                 lair_id,
                 dojo_id,
                 title,
@@ -5231,9 +5294,6 @@ async fn handle_authorized_request(
                 .await
                 .map_err(|_| internal())?;
             launch.validate()?;
-            if launch.command.is_empty() {
-                return Err(invalid("transient Lair requires a direct command"));
-            }
             let current = state.topology.read().await.revision();
             if current != expected_topology_revision {
                 return Err(model_error(TopologyError::StaleTopology {
@@ -5696,6 +5756,7 @@ async fn handle_authorized_request(
             lair_id,
             name,
             launch,
+            promote_transient_lair,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5710,6 +5771,13 @@ async fn handle_authorized_request(
                     current,
                 }));
             }
+            let promote_transient_lair = authorize_transient_promotion(
+                state,
+                &*state.topology.read().await,
+                connection_id,
+                lair_id,
+                promote_transient_lair,
+            )?;
             let mut dojo = Dojo::with_shell(name, launch.cwd.clone());
             let LayoutNode::Leaf(splint) = &mut dojo.root else {
                 unreachable!()
@@ -5730,10 +5798,15 @@ async fn handle_authorized_request(
             splint.state = SplintState::Running;
             let previous = state.topology.read().await.clone();
             let prepared = durable_topology_candidate(state, |lair| {
-                lair.new_dojo_at(expected_topology_revision, lair_id, dojo)
+                lair.new_dojo_with_promotion_at(
+                    expected_topology_revision,
+                    lair_id,
+                    dojo,
+                    promote_transient_lair,
+                )
             })
             .await;
-            let (candidate, topology_revision) = match prepared {
+            let (candidate, (topology_revision, promoted)) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let _ = runtime.shutdown().await;
@@ -5760,6 +5833,14 @@ async fn handle_authorized_request(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
+            }
+            if promoted {
+                state
+                    .transient_leases
+                    .lock()
+                    .unwrap()
+                    .remove_lair(lair_id)
+                    .expect("authorized transient promotion retains its lease");
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
@@ -6060,17 +6141,48 @@ async fn handle_authorized_request(
             expected_topology_revision,
             dojo_id,
             name,
+            promote_transient_lair,
         } => {
             let _transaction = state
                 .topology_transactions
                 .acquire()
                 .await
                 .map_err(|_| internal())?;
-            let (candidate, topology_revision) = durable_topology_candidate(state, |lair| {
-                lair.rename_dojo_at(expected_topology_revision, dojo_id, name)
-            })
-            .await?;
+            let (lair_id, promote_transient_lair) = {
+                let topology = state.topology.read().await;
+                let lair_id = topology
+                    .lairs()
+                    .find(|lair| lair.dojos.iter().any(|dojo| dojo.id == dojo_id))
+                    .map(|lair| lair.id)
+                    .ok_or_else(|| model_error(TopologyError::DojoNotFound(dojo_id)))?;
+                let promote = authorize_transient_promotion(
+                    state,
+                    &topology,
+                    connection_id,
+                    lair_id,
+                    promote_transient_lair,
+                )?;
+                (lair_id, promote)
+            };
+            let (candidate, (topology_revision, promoted)) =
+                durable_topology_candidate(state, |lair| {
+                    lair.rename_dojo_with_promotion_at(
+                        expected_topology_revision,
+                        dojo_id,
+                        name,
+                        promote_transient_lair,
+                    )
+                })
+                .await?;
             install_topology(state, candidate).await;
+            if promoted {
+                state
+                    .transient_leases
+                    .lock()
+                    .unwrap()
+                    .remove_lair(lair_id)
+                    .expect("authorized transient promotion retains its lease");
+            }
             publish_topology(state, topology_revision, TopologyChangeKind::DojoRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -6856,6 +6968,67 @@ fn validated_graphical_cwd(path: PathBuf) -> Option<PathBuf> {
         .filter(|path| path.to_str().is_some())
         .filter(|path| path.as_os_str().as_encoded_bytes().len() <= MAX_CWD_BYTES)
         .filter(|path| !path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)"))
+}
+
+// Only the root process of this exact Splint is authoritative. Never consult
+// graphical focus, foreground descendants, or terminal contents.
+async fn resolve_splint_cwd(
+    state: &DaemonState,
+    splint_id: SplintId,
+) -> Result<Option<PathBuf>, ProtocolError> {
+    let durable = splint_durable_cwd(&*state.topology.read().await, splint_id)?;
+    let runtime = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .map(|handle| (handle.incarnation, handle.child_pid()));
+    let cwd = match read_splint_root_cwd(state, splint_id, runtime).await {
+        Some(cwd) => Some(cwd),
+        None => match usable_launch_cwd(durable).await {
+            Some(cwd) => Some(cwd),
+            None => match state.owner_home.clone() {
+                Some(home) => usable_launch_cwd(home).await,
+                None => None,
+            },
+        },
+    };
+    // A removed source must not turn into a home-directory launch.
+    splint_durable_cwd(&*state.topology.read().await, splint_id)?;
+    Ok(cwd)
+}
+
+async fn read_splint_root_cwd(
+    state: &DaemonState,
+    splint_id: SplintId,
+    observed: Option<(ProcessIncarnation, u32)>,
+) -> Option<PathBuf> {
+    let handle = state.runtimes.lock().await.handle(splint_id)?;
+    if observed != Some((handle.incarnation, handle.child_pid())) {
+        return None;
+    }
+    let cwd = usable_launch_cwd(handle.root_cwd().await?).await?;
+    let current = state
+        .runtimes
+        .lock()
+        .await
+        .handle(splint_id)
+        .map(|handle| (handle.incarnation, handle.child_pid()));
+    let topology = state.topology.read().await;
+    let splint = topology.find_splint(splint_id)?;
+    (observed == current
+        && !matches!(splint.state, SplintState::Exited(_))
+        && splint.last_incarnation == observed.map(|(incarnation, _)| incarnation.value()))
+    .then_some(cwd)
+}
+
+async fn usable_launch_cwd(path: PathBuf) -> Option<PathBuf> {
+    let path = validated_graphical_cwd(path)?;
+    let metadata = fs::metadata(&path).await.ok()?;
+    if !metadata.is_dir() || rustix::fs::access(&path, rustix::fs::Access::EXEC_OK).is_err() {
+        return None;
+    }
+    Some(path)
 }
 
 async fn read_graphical_focus(state: &DaemonState) -> (Option<SplintId>, Option<PathBuf>) {
@@ -8331,6 +8504,250 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    async fn exercise_fragmented_authenticated_read(split: usize, reload: bool) {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(false);
+            let peer = PeerIdentity::for_test();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            // A cloned descriptor lets the test observe consumption, not just elapsed time.
+            let observer = server.into_std().unwrap();
+            let server = UnixStream::from_std(observer.try_clone().unwrap()).unwrap();
+            let (reader, _writer) = server.into_split();
+            let (outbound, mut responses) = mpsc::channel(4);
+            let (control, mut controls) = mpsc::channel(4);
+            let (_closed, writer_closed) = watch::channel(false);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                Box::pin(serve_authenticated(
+                    reader,
+                    &task_state,
+                    &peer,
+                    41,
+                    &outbound,
+                    &control,
+                    writer_closed,
+                ))
+                .await
+            });
+            client
+                .write_all(
+                    &splinterm_protocol::encode_frame(&ClientFrame::Hello {
+                        minimum_version: PROTOCOL_VERSION,
+                        maximum_version: PROTOCOL_VERSION,
+                        role: ClientRole::Automation,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                controls.recv().await,
+                Some(ServerFrame::Hello { .. })
+            ));
+            let frame =
+                splinterm_protocol::encode_frame(&ClientFrame::Cancel { request_id: 7 }).unwrap();
+            client.write_all(&frame[..split]).await.unwrap();
+            while rustix::io::ioctl_fionread(&observer).unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+            // Ensure the unrelated broadcast was consumed while the frame is partial.
+            state.connection_revocations.send(99).unwrap();
+            while !state.connection_revocations.is_empty() {
+                tokio::task::yield_now().await;
+            }
+            client.write_all(&frame[split..]).await.unwrap();
+            assert!(matches!(
+                responses.recv().await.unwrap().frame,
+                ServerFrame::Error {
+                    request_id: Some(7),
+                    ..
+                }
+            ));
+            // Leave another body incomplete: targeted teardown must still interrupt it.
+            client.write_all(&frame[..5]).await.unwrap();
+            while rustix::io::ioctl_fionread(&observer).unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+            if reload {
+                state.policy_reloads.send(1).unwrap();
+                assert!(matches!(
+                    controls.recv().await,
+                    Some(ServerFrame::Error { .. })
+                ));
+            } else {
+                state.connection_revocations.send(41).unwrap();
+            }
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn advertised_daemon_hostname_comes_from_the_kernel_and_is_bounded() {
+        let uname = rustix::system::uname();
+        let expected = uname
+            .nodename()
+            .to_str()
+            .ok()
+            .and_then(splinterm_protocol::usable_daemon_hostname);
+        assert_eq!(super::daemon_hostname().as_deref(), expected);
+        assert!(
+            super::daemon_hostname()
+                .is_none_or(|host| host.len() <= splinterm_protocol::MAX_DAEMON_HOSTNAME_BYTES)
+        );
+        assert!(c"invalid\xff".to_str().is_err());
+    }
+
+    #[tokio::test]
+    async fn fragmented_header_survives_unrelated_revocation_and_targeted_revoke_ends_read() {
+        exercise_fragmented_authenticated_read(2, false).await;
+    }
+
+    #[tokio::test]
+    async fn fragmented_body_survives_unrelated_revocation_and_policy_reload_ends_read() {
+        exercise_fragmented_authenticated_read(6, true).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_connection_removes_only_its_topology_subscriptions() {
+        time::timeout(Duration::from_secs(1), async {
+            let state = test_state(false);
+            let mut first = state.topology_hub.lock().await.subscribe(1, 41);
+            let mut second = state.topology_hub.lock().await.subscribe(2, 41);
+            let mut sibling = state.topology_hub.lock().await.subscribe(3, 42);
+            cleanup_connection(&state, 41).await;
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 1);
+            assert!(first.changes.recv().await.is_none());
+            assert!(second.changes.recv().await.is_none());
+            assert!(matches!(
+                sibling.changes.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            cleanup_connection(&state, 41).await;
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 1);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_authenticated_future_still_allows_owner_topology_cleanup() {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(true);
+            let peer = PeerIdentity::for_test();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let (reader, _writer) = server.into_split();
+            let (outbound, mut responses) = mpsc::channel(4);
+            let (control, mut controls) = mpsc::channel(4);
+            let (_closed, writer_closed) = watch::channel(false);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                Box::pin(serve_authenticated(
+                    reader,
+                    &task_state,
+                    &peer,
+                    41,
+                    &outbound,
+                    &control,
+                    writer_closed,
+                ))
+                .await
+            });
+            for frame in [
+                ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role: ClientRole::Automation,
+                },
+                ClientFrame::Request {
+                    request_id: 1,
+                    diagnostic_correlation: None,
+                    request: Request::SubscribeTopology,
+                },
+            ] {
+                client
+                    .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                controls.recv().await,
+                Some(ServerFrame::Hello { .. })
+            ));
+            assert!(matches!(
+                responses.recv().await.unwrap().frame,
+                ServerFrame::Response {
+                    result: Response::TopologySubscribed { .. },
+                    ..
+                }
+            ));
+            let _sibling = state.topology_hub.lock().await.subscribe(u64::MAX, 42);
+            // Peer-monitor completion drops this future rather than running its epilogue.
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 2);
+            cleanup_connection(&state, 41).await;
+            let hub = state.topology_hub.lock().await;
+            assert_eq!(hub.subscribers.len(), 1);
+            assert!(hub.subscribers.contains_key(&u64::MAX));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_frame_runs_owner_topology_cleanup() {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(true);
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(serve_client(server, state.clone()));
+            for frame in [
+                ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role: ClientRole::Automation,
+                },
+                ClientFrame::Request {
+                    request_id: 1,
+                    diagnostic_correlation: None,
+                    request: Request::SubscribeTopology,
+                },
+            ] {
+                client
+                    .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+                let mut length = [0; 4];
+                client.read_exact(&mut length).await.unwrap();
+                let mut body = vec![0; u32::from_be_bytes(length) as usize];
+                client.read_exact(&mut body).await.unwrap();
+                let reply: ServerFrame = serde_json::from_slice(&body).unwrap();
+                assert!(matches!(
+                    reply,
+                    ServerFrame::Hello { .. }
+                        | ServerFrame::Response {
+                            result: Response::TopologySubscribed { .. },
+                            ..
+                        }
+                ));
+            }
+            assert_eq!(state.topology_hub.lock().await.subscribers.len(), 1);
+            let _sibling = state
+                .topology_hub
+                .lock()
+                .await
+                .subscribe(u64::MAX, u64::MAX);
+            client.write_all(&[0; 4]).await.unwrap();
+            assert!(task.await.unwrap().is_err());
+            let hub = state.topology_hub.lock().await;
+            assert_eq!(hub.subscribers.len(), 1);
+            assert!(hub.subscribers.contains_key(&u64::MAX));
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn packaged_workload_cgroup_argument_is_exact() {
         assert!(!parse_daemon_arguments(Vec::new()).unwrap());
@@ -9607,6 +10024,257 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    #[test]
+    fn transient_leases_keep_one_independent_owner_per_lair() {
+        let first_lair = LairId::new();
+        let second_lair = LairId::new();
+        let third_lair = LairId::new();
+        let mut leases = TransientLeaseRegistry::default();
+        assert!(leases.reserve(10, first_lair, SplintId::new()));
+        assert!(leases.reserve(11, second_lair, SplintId::new()));
+        assert!(!leases.reserve(10, third_lair, SplintId::new()));
+        assert_eq!(leases.for_connection(10).unwrap().lair_id, first_lair);
+        assert_eq!(leases.for_connection(11).unwrap().lair_id, second_lair);
+
+        assert_eq!(
+            leases.remove_lair(first_lair).unwrap().owner_connection_id,
+            10
+        );
+        assert!(leases.reserve(10, third_lair, SplintId::new()));
+        assert_eq!(leases.for_connection(10).unwrap().lair_id, third_lair);
+        assert_eq!(leases.for_connection(11).unwrap().lair_id, second_lair);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commandless_transient_uses_configured_shell_and_owner_lifetime() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let connection_id = 40;
+        let mut launch = test_launch(&[]);
+        launch.shell = Some("/bin/sh".to_owned());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            connection_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "commandless-transient".into(),
+                launch,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let splint = state
+            .topology
+            .read()
+            .await
+            .find_splint(splint_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(lair.lifetime, LairLifetime::Transient);
+        assert!(splint.command.is_empty());
+        assert_eq!(splint.launch.shell.as_deref(), Some("/bin/sh"));
+        assert!(state.runtimes.lock().await.handle(splint_id).is_some());
+
+        cleanup_connection(&state, connection_id).await;
+        assert!(state.topology.read().await.lairs().next().is_none());
+        assert!(state.runtimes.lock().await.handle(splint_id).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_tab_creation_promotion_is_owner_only_and_survives_disconnect() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let owner_id = 140;
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            owner_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "promoted-by-tab".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let before = state.topology.read().await.clone();
+        let rejected = trusted_request(
+            &state,
+            owner_id + 1,
+            Request::NewDojo {
+                expected_topology_revision: before.revision(),
+                lair_id: lair.id,
+                name: "unowned".into(),
+                launch: test_launch(&["/bin/true"]),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.code, ErrorCode::Unauthorized);
+        assert_eq!(*state.topology.read().await, before);
+
+        let Response::DojoStarted { dojo_id, .. } = trusted_request(
+            &state,
+            owner_id,
+            Request::NewDojo {
+                expected_topology_revision: before.revision(),
+                lair_id: lair.id,
+                name: "organized".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("promoting Dojo response was not returned");
+        };
+        let promoted = state
+            .topology
+            .read()
+            .await
+            .find_lair(lair.id)
+            .unwrap()
+            .clone();
+        assert_eq!(promoted.lifetime, LairLifetime::Persistent);
+        assert!(promoted.dojos.iter().any(|dojo| dojo.id == dojo_id));
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_lair(lair.id)
+                .is_none()
+        );
+
+        cleanup_connection(&state, owner_id).await;
+        assert!(state.topology.read().await.find_lair(lair.id).is_some());
+        let runtimes = state.runtimes.lock().await.drain();
+        for runtime in runtimes {
+            let _ = runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded test proves wrong-owner, persistence failure, retry, and disconnect invariants"
+    )]
+    async fn rename_promotion_is_atomic_on_persistence_failure() {
+        let base = temp_dir();
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = test_state_with_backend_and_metadata(
+            false,
+            test_pty_backend(),
+            Some(MetadataStore::from_base(&base)),
+        );
+        let owner_id = 141;
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            owner_id,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "promoted-by-name".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let dojo_id = lair.dojos[0].id;
+        let before = state.topology.read().await.clone();
+        let unauthorized = trusted_request(
+            &state,
+            owner_id + 1,
+            Request::RenameDojo {
+                expected_topology_revision: before.revision(),
+                dojo_id,
+                name: "unowned".into(),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthorized.code, ErrorCode::Unauthorized);
+        assert_eq!(*state.topology.read().await, before);
+
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        let error = trusted_request(
+            &state,
+            owner_id,
+            Request::RenameDojo {
+                expected_topology_revision: before.revision(),
+                dojo_id,
+                name: "work".into(),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(*state.topology.read().await, before);
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_lair(lair.id)
+                .is_some()
+        );
+
+        state
+            .topology_save_failure_countdown
+            .store(u64::MAX, Ordering::SeqCst);
+        let response = trusted_request(
+            &state,
+            owner_id,
+            Request::RenameDojo {
+                expected_topology_revision: before.revision(),
+                dojo_id,
+                name: "work".into(),
+                promote_transient_lair: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, Response::TopologyCommitted { .. }));
+        let promoted = state
+            .topology
+            .read()
+            .await
+            .find_lair(lair.id)
+            .unwrap()
+            .clone();
+        assert_eq!(promoted.lifetime, LairLifetime::Persistent);
+        assert_eq!(promoted.dojos[0].name, "work");
+        assert!(
+            state
+                .transient_leases
+                .lock()
+                .unwrap()
+                .for_lair(lair.id)
+                .is_none()
+        );
+        cleanup_connection(&state, owner_id).await;
+        assert!(state.topology.read().await.find_lair(lair.id).is_some());
+        let runtimes = state.runtimes.lock().await.drain();
+        state.exit_observers.close();
+        for runtime in runtimes {
+            let _ = runtime.shutdown().await;
+        }
+        time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
+            .await
+            .expect("exit observers did not finish before metadata cleanup");
+        drop(state);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transient_owner_disconnect_reaps_runtime_and_removes_complete_lair() {
         let state = test_state_with_backend(false, test_pty_backend());
@@ -9688,6 +10356,7 @@ mod tests {
                     lair_id: lair.id,
                     name: "secondary".into(),
                     launch: test_launch(&["/bin/true"]),
+                    promote_transient_lair: false,
                 },
             ),
         )
@@ -9877,6 +10546,273 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_cwd_unavailable_does_not_break_inspection() {
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().owner_home = None;
+        let source = state
+            .topology
+            .write()
+            .await
+            .create_lair("missing-cwd", PathBuf::from("/missing/source/cwd"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        let response = trusted_request(&state, 41, Request::InspectSplint { splint_id: source })
+            .await
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::Splint {
+                resolved_cwd: None,
+                ..
+            }
+        ));
+        let round_trip: Response =
+            serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
+        assert_eq!(round_trip, response);
+        let error = resolve_automation_mutation(
+            Request::SplitSplintAutomation {
+                expected_topology_revision: state.topology.read().await.revision(),
+                target_splint_id: source,
+                axis: splinterm_core::Axis::Horizontal,
+                side: splinterm_core::SplitSide::Second,
+                ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                launch: splinterm_protocol::AutomationLaunch {
+                    cwd: None,
+                    argv: Vec::new(),
+                },
+            },
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.message, "source working directory is unavailable");
+    }
+
+    #[tokio::test]
+    async fn source_cwd_fallback_is_bounded_and_never_uses_global_focus() {
+        let base = temp_dir();
+        std::fs::create_dir_all(base.join("durable")).unwrap();
+        std::fs::create_dir(base.join("home")).unwrap();
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().owner_home = Some(base.join("home"));
+        let source = state
+            .topology
+            .write()
+            .await
+            .create_lair("source", base.join("durable"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        let other = state
+            .topology
+            .write()
+            .await
+            .create_lair("other", base.clone())
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        publish_graphical_focus(&state, 41, Some(other))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(base.join("durable"))
+        );
+        std::fs::remove_dir(base.join("durable")).unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(base.join("home"))
+        );
+        std::fs::remove_dir(base.join("home")).unwrap();
+        assert_eq!(resolve_splint_cwd(&state, source).await.unwrap(), None);
+        assert!(resolve_splint_cwd(&state, SplintId::new()).await.is_err());
+        for path in [
+            PathBuf::from("relative"),
+            base.join("missing"),
+            base.join("gone (deleted)"),
+            PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES))),
+        ] {
+            assert!(usable_launch_cwd(path).await.is_none());
+        }
+        std::fs::write(base.join("file"), b"not a directory").unwrap();
+        assert!(usable_launch_cwd(base.join("file")).await.is_none());
+        // Explicit overrides do not consult inheritance, even if no source cwd exists.
+        let request = Request::SplitSplintAutomation {
+            expected_topology_revision: state.topology.read().await.revision(),
+            target_splint_id: source,
+            axis: splinterm_core::Axis::Horizontal,
+            side: splinterm_core::SplitSide::Second,
+            ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+            launch: splinterm_protocol::AutomationLaunch {
+                cwd: Some(base.join("explicit")),
+                argv: vec!["echo".into()],
+            },
+        };
+        let Request::SplitSplint { launch, .. } =
+            resolve_automation_mutation(request, &state).await.unwrap()
+        else {
+            panic!("split")
+        };
+        assert_eq!(launch.cwd, base.join("explicit"));
+        assert_eq!(launch.command, ["echo"]);
+        assert_eq!(launch.shell, None);
+        assert!(!launch.login_shell);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one live process exercises cwd observation, replacement rejection, and deleted-directory cleanup"
+    )]
+    async fn source_cwd_tracks_live_cd_and_rejects_replaced_runtime_observations() {
+        let base = temp_dir();
+        std::fs::create_dir_all(base.join("live")).unwrap();
+        let base = std::fs::canonicalize(base).unwrap();
+        let state = test_state_with_backend(false, test_pty_backend());
+        let live = base.join("live");
+        let ready = base.join("ready");
+        let mut launch = test_launch(&[
+            "/bin/sh",
+            "-c",
+            "cd \"$1\" && touch \"$2\"; while :; do sleep 1; done",
+            "sh",
+            live.to_str().unwrap(),
+            ready.to_str().unwrap(),
+        ]);
+        launch.cwd = base.clone();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            41,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "cwd".into(),
+                launch,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("create")
+        };
+        let source = lair.dojos[0].default_focus;
+        time::timeout(Duration::from_secs(5), async {
+            while !ready.exists() {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let other = state
+            .topology
+            .write()
+            .await
+            .create_lair("elsewhere", base.clone())
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        publish_graphical_focus(&state, 42, Some(other))
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(live.clone())
+        );
+        assert_eq!(
+            resolve_splint_cwd(&state, other).await.unwrap(),
+            Some(base.clone())
+        );
+        assert_eq!(
+            state.topology.read().await.find_splint(source).unwrap().cwd,
+            base
+        );
+        let handle = state.runtimes.lock().await.handle(source).unwrap();
+        assert!(
+            read_splint_root_cwd(
+                &state,
+                source,
+                Some((ProcessIncarnation::allocate(), handle.child_pid()))
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            read_splint_root_cwd(
+                &state,
+                source,
+                Some((handle.incarnation, std::process::id()))
+            )
+            .await
+            .is_none()
+        );
+        for (cwd, expected_cwd) in [(None, &live), (Some(base.clone()), &base)] {
+            let revision = state.topology.read().await.revision();
+            let Response::SplintStarted { splint_id, .. } = trusted_request(
+                &state,
+                41,
+                Request::SplitSplintAutomation {
+                    expected_topology_revision: revision,
+                    target_splint_id: source,
+                    axis: splinterm_core::Axis::Horizontal,
+                    side: splinterm_core::SplitSide::Second,
+                    ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                    launch: splinterm_protocol::AutomationLaunch {
+                        cwd,
+                        argv: vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            "while :; do sleep 1; done".into(),
+                        ],
+                    },
+                },
+            )
+            .await
+            .unwrap() else {
+                panic!("split")
+            };
+            let child_pid = state
+                .runtimes
+                .lock()
+                .await
+                .handle(splint_id)
+                .unwrap()
+                .child_pid();
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let actual = fs::read_link(format!("/proc/{child_pid}/cwd"))
+                        .await
+                        .unwrap();
+                    if actual == *expected_cwd {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("new child did not inherit the requested cwd");
+            assert_eq!(
+                state
+                    .topology
+                    .read()
+                    .await
+                    .find_splint(splint_id)
+                    .unwrap()
+                    .cwd,
+                *expected_cwd
+            );
+        }
+        std::fs::remove_dir(&live).unwrap();
+        assert_eq!(
+            resolve_splint_cwd(&state, source).await.unwrap(),
+            Some(base.clone())
+        );
+        cleanup_connection(&state, 41).await;
+        assert!(resolve_splint_cwd(&state, source).await.is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
     async fn graphical_focus_read_is_authenticated_but_publication_requires_trusted_ui() {
         let state = test_state(true);
         let peer = PeerIdentity::for_test();
@@ -9926,6 +10862,7 @@ mod tests {
                 expected_topology_revision: revision,
                 dojo_id: first_dojo_id,
                 name: "renamed".to_owned(),
+                promote_transient_lair: false,
             },
             &state,
             &peer,
@@ -9942,6 +10879,7 @@ mod tests {
                 expected_topology_revision: revision,
                 dojo_id: second_dojo_id,
                 name: "denied".to_owned(),
+                promote_transient_lair: false,
             },
             &state,
             &peer,
@@ -10087,7 +11025,7 @@ mod tests {
             .topology
             .write()
             .await
-            .create_lair("test", PathBuf::from("/target"))
+            .create_lair("test", env::current_dir().unwrap())
             .unwrap()
             .clone();
         let lair_id = dojo.id;
@@ -10173,7 +11111,7 @@ mod tests {
                 if is_create {
                     PathBuf::from("/home/test")
                 } else {
-                    PathBuf::from("/target")
+                    env::current_dir().unwrap()
                 }
             );
             assert!(launch.command.is_empty());

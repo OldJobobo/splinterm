@@ -2,9 +2,16 @@ use super::super::{
     App, Arc, Connection, DataDeviceHandler, DataOfferHandler, DataSourceHandler, DndAction,
     DragOffer, PasteTarget, PrimarySelectionDeviceHandler, PrimarySelectionSourceHandler,
     QueueHandle, URI_LIST_MIME, WaylandSurface, WritePipe, ZwpPrimarySelectionDeviceV1,
-    ZwpPrimarySelectionSourceV1, accepted_text_mime, accepted_uri_list_mime, copy_action_supported,
-    spawn_clipboard_read, wl_data_device, wl_data_source, wl_surface, write_selection_payload,
+    ZwpPrimarySelectionSourceV1, accepted_text_mime, accepted_uri_list_mime, clipboard_image,
+    copy_action_supported, spawn_clipboard_read, wl_data_device, wl_data_source, wl_surface,
+    write_selection_payload,
 };
+
+fn clipboard_offer_supported(mimes: &[String]) -> bool {
+    // Retaining an offer does not request its data. Each paste action still
+    // selects its own MIME type and applies its eligibility gates.
+    accepted_text_mime(mimes).is_some() || clipboard_image::png_offered(mimes)
+}
 
 fn reject_dropped_offer(offer: &DragOffer, reason: &'static str) {
     eprintln!("splinterm file drop rejected: {reason}");
@@ -98,7 +105,7 @@ impl DataDeviceHandler for App {
             .as_ref()
             .filter(|device| device.inner() == data_device)
             .and_then(|device| device.data().selection_offer())
-            .filter(|offer| offer.with_mime_types(accepted_text_mime).is_some());
+            .filter(|offer| offer.with_mime_types(clipboard_offer_supported));
     }
 
     fn drop_performed(
@@ -296,5 +303,39 @@ impl PrimarySelectionSourceHandler for App {
         self.clipboard
             .primary_sources
             .retain(|(candidate, _)| candidate.inner() != source);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_selection_retains_png_only_offer_without_enabling_text_paste() {
+        let mimes = vec!["image/png".to_owned()];
+        assert!(clipboard_offer_supported(&mimes));
+        assert!(accepted_text_mime(&mimes).is_none());
+    }
+
+    #[test]
+    fn clipboard_selection_preserves_text_and_mixed_offers() {
+        let text = vec!["text/plain;charset=utf-8".to_owned()];
+        assert!(clipboard_offer_supported(&text));
+        let mut mixed = vec!["image/png".to_owned()];
+        mixed.extend(text.clone());
+        assert!(clipboard_offer_supported(&mixed));
+        assert_eq!(accepted_text_mime(&mixed), accepted_text_mime(&text));
+    }
+
+    #[test]
+    fn clipboard_selection_rejects_unsupported_offers() {
+        for mimes in [
+            vec![],
+            vec!["image/jpeg".to_owned()],
+            vec!["image/png-extra".to_owned()],
+            vec!["text/uri-list".to_owned()],
+        ] {
+            assert!(!clipboard_offer_supported(&mimes), "{mimes:?}");
+        }
     }
 }

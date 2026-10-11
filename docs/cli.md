@@ -73,8 +73,10 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 
 | Command | Purpose |
 | --- | --- |
+| `launch` | Open an ordinary unnamed graphical Lair using `multiplexer.persistent-by-default`. |
+| `launch --name NAME` or `launch -- ARGV...` | Open an explicitly persistent graphical Lair. |
 | `new NAME [--cwd DIR] [-- ARGV...]` | Create a persistent Lair, one Dojo, and one live Splint. |
-| `new-dojo LAIR_ID [--name NAME] [--cwd DIR] [-- ARGV...]` | Add a persistent Dojo with one live Splint. |
+| `new-dojo LAIR_ID [--name NAME] [--cwd DIR] [-- ARGV...]` | Add a Dojo with one live Splint without changing that Lair's lifetime. |
 | `preset run NAME [--cwd DIR] [--param NAME=VALUE]... [--no-open]` | Run a packaged or user preset using one exact invoking/focused context and atomic topology transaction. |
 | `preset shell-init omarchy --shell bash` | Print guarded `s*` Bash functions without writing or sourcing anything. |
 | `preset shell-install omarchy --shell bash` | Create the dedicated integration file without replacing it or editing shell startup files. |
@@ -88,7 +90,10 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 | `dojo-focus-hint DOJO_ID SPLINT_ID` | Persist a presentation hint; it does not focus a client or Window. |
 
 `ARGV` after `--` is executed directly, never through a shell. With no explicit
-argv, creation uses the configured shell. A new Lair starts with `Dojo 1`. When
+argv, creation uses the configured shell. Graphical tab creation or explicit tab
+naming can promote a Window-owned transient Lair when
+`multiplexer.persist-on-tab-organization=yes`; non-graphical CLI mutation does
+not acquire or promote a transient owner lease. A new Lair starts with `Dojo 1`. When
 `new-dojo` omits `--name`, Splinterm uses one greater than that Lair's highest
 existing exact `Dojo N` name; numeric gaps are not reused. Explicit names are
 preserved.

@@ -142,7 +142,7 @@ fn local_file_uri_path(uri: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn quote_posix_path(path: &str) -> String {
+pub(super) fn quote_posix_path(path: &str) -> String {
     let mut quoted = String::with_capacity(path.len() + 2);
     quoted.push('\'');
     for character in path.chars() {

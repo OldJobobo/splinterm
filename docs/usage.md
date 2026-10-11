@@ -5,6 +5,34 @@ detaching, returning to, arranging, and deliberately ending persistent terminal
 work. See [CLI reference](cli.md) for the complete command inventory and
 [Automation](automation.md) for machine contracts.
 
+## First five minutes
+
+This walkthrough assumes Splinterm is installed, the built-in `splinterm`
+keymap is selected without shortcut overrides, and
+`multiplexer.persistent-by-default=yes` (the default). Check your
+[configuration](configuration.md#keymap-configuration) if you use a different
+profile. With persistence disabled, closing an ordinary unnamed terminal's
+Window can end its work.
+
+1. **Open a terminal.** Run `splinterm-xdg-terminal-exec` from another terminal.
+   This creates a workspace (a **Lair**) containing one layout (a **Dojo**)
+   with one terminal pane (a **Splint**).
+2. **Split it.** Press `Ctrl+Shift+Enter` to add a second pane.
+   Use `Ctrl+Shift+Arrow` to move between panes. Both panes belong to the same
+   Dojo; leave their shells running for this walkthrough.
+3. **Detach.** Press `Ctrl+Shift+Q` to close the Dojo's tab. In this fresh
+   one-tab Window, the Window closes too. With persistence enabled, the daemon
+   keeps both shells and their layout running.
+4. **Return.** From another terminal, run `splinterm dojos` and select the
+   running Dojo you just left. Its panes return with their existing work.
+   `splinterm reopen` is a shortcut to the most recently remembered Dojo whose
+   entire layout is still running.
+
+Returning attaches to running work; it does not restart an exited shell.
+Restoring an exited Dojo is a separate, explicit action that starts new
+processes. Persistence here also requires the daemon to keep running; it does
+not preserve processes across a daemon restart or reboot.
+
 ## The four persistent concepts
 
 - **Lair** — a named project or persistent session.
@@ -14,8 +42,10 @@ work. See [CLI reference](cli.md) for the complete command inventory and
   client-local tabs, including Dojos from different Lairs.
 
 `splinterd` owns Lairs, Dojos, Splints, shells, layouts, terminal state, and
-scrollback. `splinterm` displays and controls that state. Closing a Window or tab
-detaches a view; it does not terminate the corresponding daemon resources.
+scrollback. `splinterm` normally displays and controls that durable state. A
+Window may instead own an ordinary unnamed transient Lair when
+`multiplexer.persistent-by-default=no`; closing that Window terminates and
+removes the unpromoted Lair. Closing a tab alone remains a view operation.
 
 ## Start, detach, and return
 
@@ -25,8 +55,17 @@ Open a fresh terminal through the installed desktop entry or XDG launcher:
 splinterm-xdg-terminal-exec
 ```
 
-The normal launch creates a fresh Lair with one Dojo and one live Splint. Closing
-the Window leaves the work running in `splinterd`.
+The normal launch creates a fresh Lair with one Dojo and one live Splint. The
+compatibility default is persistent, so closing the Window leaves the work
+running in `splinterd`. Set `multiplexer.persistent-by-default=no` to make
+ordinary unnamed desktop, bare launch, picker New, and in-Window New Terminal
+Lairs end with their owning Window.
+
+Explicitly named or command-bearing native launches, presets, remote creation,
+restore/relaunch, automation, and MCP stay persistent. With
+`multiplexer.persist-on-tab-organization=yes`, creating another Dojo or
+explicitly naming/renaming a Dojo permanently promotes its transient Lair before
+the tab mutation commits.
 
 Return through the native recent-Dojo workflow:
 
@@ -88,6 +127,90 @@ confirmed Terminate Dojo. Opening the menu does not first activate its tab.
 **Detach and terminate are different operations.** Closing tabs or Windows is
 client-local. Terminating a Dojo is a named, confirmed daemon mutation and ends
 its pane processes.
+
+## Lair Explorer
+
+The optional Explorer shows Lairs, their Dojos, and individual Splints beside
+terminal panes. Open the command palette (`Ctrl+Shift+P` in the built-in keymap)
+and choose **Toggle Lair explorer** to show or hide it, or **Focus Lair explorer**
+to show it and move keyboard focus there. These Explorer actions have no default
+shortcut. **Return focus to terminal** moves focus back without hiding Explorer.
+
+Right-click a row for actions on that exact item, without selecting or opening it.
+With Explorer focused, Menu or Shift+F10 opens the selected row's menu; use
+Up/Down, Enter, and Escape to choose, run, or cancel an action:
+
+- **Lairs:** Rename, New Dojo, Save layout, Pin/Unpin, saved-layout Preview,
+  Restore, and Terminate.
+- **Dojos:** Open/Activate, Rename, Close tab when open, Restore, and Terminate.
+- **Splints:** Focus, Split below/right, Close, and Restore for restorable work.
+
+Only applicable actions appear. Saved and non-open Lairs/Dojos can be renamed or
+managed without switching tabs; Open/Activate and Focus explicitly navigate.
+New Dojo opens the newly created tab. Save layout retains a disposable Lair;
+unpinning leaves it saved. Splitting and closing require an attached running pane
+controlled by this window. Saved-only Lairs and Dojos are restored, not deleted;
+termination requires at least one live pane and a complete captured incarnation
+set, including exited panes. Rename dialogs use current authoritative names, and
+Restore/Terminate require confirmation with Cancel selected initially. Escape
+cancels a menu or dialog.
+Stale targets are rejected rather than redirected to the active item.
+
+Launcher-generated `terminal-<timestamp>-<pid>` names appear as compact **Lair 1**,
+**Lair 2**, etc. Generated or empty Dojo and pane labels similarly fall back to
+**Dojo N** and **Terminal N**. Meaningful custom names are preserved, and aliases
+skip names already used by siblings. These are display labels, not renamed saved
+objects or CLI identifiers; numbering follows the current topology and can change
+when siblings are added or removed. Search, breadcrumbs, and the navigation
+pickers use the same labels. Each Explorer row puts status on a separate line so
+it does not crowd out the name; long text is ellipsized within the panel.
+
+Parent rows summarize runtime state independently of retention and window
+attachment. A saved Lair can still be running. A Dojo marked **Not open here**
+can also be running; it is not attached to this Window. **Current** identifies
+the active Dojo, while **Open here** identifies another attached tab. A stopped
+restorable Dojo opens a restore confirmation rather than reporting a permission
+failure. Detached starting or mixed-state Dojos still cannot be attached;
+Explorer explains this lifecycle restriction instead of calling it a denial.
+
+The header offers **All / Live / Saved**, initially **All**. **Live** keeps
+running or starting Splints and their parent context; a mixed parent containing
+only stopped or unavailable Splints is not live. **Saved** keeps saved and pinned Lairs,
+including any live work inside them. These filters preserve the authoritative
+Lair → Dojo → Splint order; pinning adds a status marker, not refresh-driven
+sorting. Branches begin collapsed, and refreshing preserves disclosure choices.
+Label search operates within the chosen filter. The accessibility status names
+the active filter and announces the keyboard shortcut.
+
+While Explorer has focus:
+
+- Use Up/Down to select a row; PageUp/PageDown move by a page and Home/End select
+  the first/last row. Outside search, `j`/`k` also move the selection.
+- Outside search, use Right to expand a Lair or Dojo, then enter its first child.
+  Left collapses an expanded Lair or Dojo before moving to its parent. Space
+  toggles a Lair or Dojo's disclosure without activating terminal work.
+- Press Enter on a Lair to toggle disclosure, on a Dojo to open it, or on a live
+  Splint to focus its pane. Selecting a row alone does not activate it: the
+  **selected** row is the navigation target, while **current** identifies the
+  terminal work already active in the Window.
+- Outside search, press `f` to cycle All / Live / Saved, or click a header filter.
+  If filtering hides the selected row, selection moves to a visible row without
+  activating it. Hidden rows cannot receive navigation actions.
+- Press `/` or `Ctrl+F` to search navigation labels, not terminal output or
+  scrollback. Matching descendants retain their parent context. Escape clears
+  a nonempty query; Escape with an empty query returns focus to the terminal.
+- Outside search, `r` reveals the current work, resetting to All and clearing
+  the label query, or retries a failed refresh when the Explorer offers retry.
+
+Unavailable targets cannot be activated. Restorable exited work enters the
+existing preview/confirmation flow; it is not silently restarted by selection.
+Restoring starts new processes, not a checkpoint of the old applications. A
+foreground palette or confirmation owns input rather than the Explorer search
+field behind it.
+
+[Navigation accessibility](accessibility.md) describes the bounded native AT-SPI
+interface and its limitations. The guide is included in the 0.1.1 Arch and Nix
+package documentation. This is not whole-terminal screen-reader support.
 
 ## Panes and layouts
 
@@ -176,6 +299,22 @@ explicit collision-safe workflow. See [Presets](presets.md) for exact behavior.
 
 Clipboard and primary-selection contents are terminal data, not authority.
 Pasting requires the graphical client to hold terminal input control.
+
+### Save a clipboard screenshot as a path
+
+Available in the 0.1.1 source (publication pending): configure a private existing
+`[clipboard] image-directory`, then choose **Save clipboard image and insert path**
+from the command palette. The bindable action is `clipboard.save-image`; there is
+no default shortcut. Only bounded static PNG is supported, and normal text paste
+is unchanged. This action works only in a focused, controlled, live local pane—not
+remote sessions, copy mode, or historical scrollback.
+
+The saved PNG is private and persistent. Its shell-escaped path is inserted without
+Enter. A changed pane or busy input channel never redirects or defers the path;
+a PNG already published is retained and its path reported through the temporary
+Window title and stderr. Delete saved files yourself when no longer needed.
+See [Clipboard PNG configuration](configuration.md#clipboard-png-saving)
+for limits, permissions, metadata preservation, cancellation, and filesystem requirements.
 
 ## Scrollback and search
 

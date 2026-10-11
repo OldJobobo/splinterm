@@ -4,6 +4,8 @@
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e` are the behavioral reference.
 //! The client owns these objects; the daemon remains headless.
 
+mod navigation_accessibility;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
@@ -127,18 +129,20 @@ use crate::frontend::{
     AuthorityStatus, BINDING_HELP_PAGE_ITEMS, BindingHelpUi, BoundedTextEditor,
     BuiltInCommandDispatch, BuiltInCommandId, CommandControlAction, CommandHistoryAction,
     CommandPaletteContext, CommandPaletteUi, CommandTabMoveAvailability, CommandZoomAction,
-    DojoPromptUi, FontUpdate, LairDirection, LairPromptKind, PerfTraceCorrelation, SelectorKind,
-    SessionPickerDecision, SessionPickerItem, SessionPickerUi, TabContextMenuUi, TabMenuActionId,
-    TabMenuContext, TabMenuDispatch, TabMenuRightPress, TerminalGridLimits, TerminationDecision,
-    ThemeUpdate, TrustedConsentUi, WindowCommand, WindowDojoIdentity, WindowOptions,
-    WindowPaneOptions, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
-    close_other_tabs_command, command_dispatch, lair_lifecycle_command, tab_menu_dispatch,
-    tab_menu_right_press,
+    DojoPromptUi, FontUpdate, LairDirection, LairExplorerDecision, LairExplorerFilter,
+    LairExplorerUi, LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerCatalog,
+    SessionPickerCreationTarget, SessionPickerDecision, SessionPickerTarget, SessionPickerUi,
+    TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch, TabMenuRightPress,
+    TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, WindowCommand,
+    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, command_dispatch,
+    lair_lifecycle_command, tab_menu_right_press,
 };
 use crate::geometry::{
     OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
     logical_extent_to_buffer,
 };
+use crate::navigation_projection::{NavigationAction, NavigationNodeId};
 #[cfg(test)]
 use crate::pane::PaneDivider;
 use crate::pane::{
@@ -149,17 +153,19 @@ use crate::pane::{
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
     ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
-    DojoPromptLayout, HistoryOverlayStatus, PickerHitTarget, RenderContext,
-    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
-    SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
-    background_bgra, clear_snapshot_caches, command_palette_hit_test, command_palette_layout,
-    dojo_prompt_hit_test, dojo_prompt_layout, fill_rect, history_overlay_layout, paint,
-    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_session_picker_overlay,
-    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
-    paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
-    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
-    session_picker_palette, snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout,
-    write_ppm,
+    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, LairExplorerPresentationMode,
+    PickerHitTarget, RenderContext, SessionPickerOverlayLayout, SessionPickerPurpose,
+    SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame, SnapshotOverlays,
+    TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
+    fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
+    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
+    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_lair_explorer,
+    paint_search_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
+    paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
+    paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
+    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
+    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -169,6 +175,7 @@ use crate::{
 
 mod chrome;
 mod clipboard;
+mod clipboard_image;
 mod damage;
 mod dispatch;
 mod file_drop;
@@ -495,14 +502,6 @@ struct ImeState {
     pending: ImeBatch,
 }
 
-fn ime_batch_blocked(
-    input_modal_open: bool,
-    modal_barrier: bool,
-    owned_target: Option<OwnedFieldTarget>,
-) -> bool {
-    modal_barrier || (input_modal_open && owned_target.is_none())
-}
-
 impl ImeState {
     fn set_preedit(&mut self, text: Option<String>) {
         self.pending.preedit = match text {
@@ -676,7 +675,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         .map_or(Ok((INITIAL_WIDTH, INITIAL_HEIGHT)), |frame| {
             frame.initial_logical_size(options.initial_columns, options.initial_rows, 120)
         })?;
-    if managed_tabs && options.initial_tab_strip_visible {
+    if (managed_tabs && options.initial_tab_strip_visible)
+        || options.remote_display_identity.is_some()
+    {
         initial_height = initial_height
             .checked_add(TAB_STRIP_LOGICAL_HEIGHT)
             .context("initial tab strip height overflow")?;
@@ -816,7 +817,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             text_input_manager,
             shm,
             loop_handle: event_loop.handle(),
-            update_waker,
+            update_waker: update_waker.clone(),
             output_count: 0,
             entered_outputs: Vec::new(),
             seat_count: 0,
@@ -859,6 +860,12 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             zoomed_splint: None,
             capture: options.capture,
             capture_scale: options.capture_scale,
+            initial_columns: options.initial_columns,
+            explorer_layout: None,
+            explorer_text_cache: SessionPickerTextCache::default(),
+            search_text_cache: SessionPickerTextCache::default(),
+            explorer_visible_start: 0,
+            explorer_pressed: None,
             full_redraw: true,
         },
         input: InputState {
@@ -900,6 +907,10 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             drag_target: None,
             clipboard_sources: Vec::new(),
             primary_sources: Vec::new(),
+            image_directory: options.clipboard_image_directory,
+            local_endpoint: options.local_endpoint,
+            image_request: None,
+            palette_image_target: None,
             clipboard_tx,
             clipboard_rx,
         },
@@ -947,11 +958,16 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pending_remote_splits: HashMap::new(),
             dirty_inactive_panes: HashSet::new(),
         },
+        explorer: LairExplorerUi::default(),
+        accessibility: navigation_accessibility::WindowAccessibility::new(update_waker.clone()),
         tab_state: TabsState {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
             managed_tabs,
             tab_strip_visible: options.initial_tab_strip_visible,
+            remote_display_identity: options.remote_display_identity,
+            remote_host_text: None,
+            remote_host_clipped: None,
             tab_strip_layout: None,
             tab_strip_pressed: None,
             tab_label_cache: HashMap::new(),
@@ -973,6 +989,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             command_palette_open_focus: None,
             command_palette_reconcile_pending: false,
             dojo_prompt: None,
+            dojo_prompt_explorer_target: None,
             dojo_prompt_layout: None,
             dojo_prompt_pressed: None,
             dojo_prompt_text_cache: CommandPaletteTextCache::default(),
@@ -985,6 +1002,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             session_picker,
             selector_kind: None,
             session_picker_targets: Vec::new(),
+            session_picker_creation_target: None,
             session_picker_layout: None,
             session_picker_pressed: None,
             session_picker_text_cache: SessionPickerTextCache::default(),
@@ -994,6 +1012,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             session_picker_reconcile_pending: false,
             session_picker_open_focus: None,
             session_picker_requested: false,
+            session_picker_retry_command: None,
             deferred_picker_theme: None,
         },
         scheduling: SchedulingState {
@@ -1013,6 +1032,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let event_loop_result: Result<()> = (|| {
         while !app.scheduling.exit {
             app.apply_updates(&queue_handle)?;
+            app.accessibility_turn(&queue_handle);
             if !app.scheduling.exit {
                 app.flush_pending_terminal_input();
                 app.retry_pending_pane_resizes()?;
@@ -1031,6 +1051,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             }
             app.tick_signoff(&queue_handle)?;
             app.apply_clipboard_reads()?;
+            app.apply_clipboard_image_events();
             app.tick_cursor_blink(&queue_handle)?;
             let Some(dispatch_timeout) = app.event_loop_dispatch_timeout() else {
                 break;
@@ -1099,6 +1120,46 @@ fn buffer_dimensions(
     scale_120: u32,
 ) -> Result<(u32, u32, i32)> {
     SurfaceGeometry::new(logical_width, logical_height, scale_120)?.buffer_layout()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DrawBufferChoice {
+    Reuse(usize),
+    Allocate,
+    Wait,
+}
+
+fn choose_draw_buffer(count: usize, mut available: impl FnMut(usize) -> bool) -> DrawBufferChoice {
+    // Index zero is the last committed buffer. Even after wl_buffer.release,
+    // keep its completed chrome intact while another canvas is cleared and
+    // recomposed; this also avoids exposing intermediate SHM pixels to captures.
+    if let Some(index) = (1..count).find(|&index| available(index)) {
+        DrawBufferChoice::Reuse(index)
+    } else if count < MAX_SHM_BUFFERS {
+        DrawBufferChoice::Allocate
+    } else {
+        DrawBufferChoice::Wait
+    }
+}
+
+fn window_buffer_dimensions(
+    has_pane_layout: bool,
+    managed_tabs: bool,
+    remote: bool,
+    logical_size: (u32, u32),
+    scale_120: u32,
+    geometry: Option<WindowGeometry>,
+) -> Result<(u32, u32, i32)> {
+    // Remote observers also translate content below chrome. Translation moves
+    // the grid, not its source surface extent, so allocate the whole Window.
+    if !has_pane_layout
+        && !managed_tabs
+        && !remote
+        && let Some(geometry) = geometry
+    {
+        return geometry.buffer_layout();
+    }
+    buffer_dimensions(logical_size.0.max(1), logical_size.1.max(1), scale_120)
 }
 
 fn note_output_enter<T: Clone + Eq>(entered: &mut Vec<T>, output: &T) {
@@ -1610,10 +1671,18 @@ impl PaneView {
                 let trace_revision = update.revision;
                 let trace_rows = update.rows.len();
                 let content_changed = terminal_update_changes_visible_content(&update);
-                let frame_dirty = content_changed
+                let mut frame_dirty = content_changed
                     || update.cursor.is_some()
                     || update.input_modes.is_some()
                     || image_sources.is_some();
+                let cursor_only = !content_changed
+                    && image_sources.is_none()
+                    && !self.viewport_dirty
+                    && self
+                        .snapshot_frame
+                        .as_ref()
+                        .zip(self.snapshot.as_ref())
+                        .is_some_and(|(frame, snapshot)| frame.can_refresh_cursor_rows(snapshot));
                 let previous_generation = self
                     .snapshot
                     .as_ref()
@@ -1636,6 +1705,13 @@ impl PaneView {
                 }
                 if let Some(image_sources) = image_sources {
                     self.image_sources = image_sources;
+                }
+                if cursor_only && let Some(display) = self.display_snapshot() {
+                    self.snapshot_frame
+                        .as_mut()
+                        .expect("cursor-only frame exists")
+                        .refresh_cursor(&display)?;
+                    frame_dirty = false;
                 }
                 let trace_pane_role = self.trace_pane_role(pane_role);
                 if frame_dirty {
@@ -1734,11 +1810,33 @@ impl PaneView {
     }
 }
 
+#[derive(Default)]
 struct InactiveUpdateDrain {
     changed: bool,
     theme: Option<ThemeUpdate>,
     dirty_frames: HashSet<SplintId>,
+    repaint_panes: HashSet<SplintId>,
     exited: Vec<SplintId>,
+}
+
+impl InactiveUpdateDrain {
+    fn record(&mut self, splint_id: Option<SplintId>, impact: BackgroundUpdateImpact) {
+        self.changed |= impact.visual_changed;
+        if let Some(splint_id) = splint_id {
+            if impact.frame_dirty {
+                self.dirty_frames.insert(splint_id);
+            }
+            if impact.visual_changed {
+                self.repaint_panes.insert(splint_id);
+            }
+        }
+    }
+
+    fn panes_to_repaint(&self) -> &HashSet<SplintId> {
+        // Cursor-only updates refresh prepared rows in place. They still need
+        // pixels when a peer rebuild selects incremental inactive composition.
+        &self.repaint_panes
+    }
 }
 
 fn apply_inactive_update_batch(
@@ -1875,6 +1973,12 @@ struct PresentationState {
     zoomed_splint: Option<SplintId>,
     capture: Option<PathBuf>,
     capture_scale: Option<u32>,
+    initial_columns: u16,
+    explorer_layout: Option<LairExplorerLayout>,
+    explorer_text_cache: SessionPickerTextCache,
+    search_text_cache: SessionPickerTextCache,
+    explorer_visible_start: usize,
+    explorer_pressed: Option<ExplorerPointerPress>,
     full_redraw: bool,
 }
 
@@ -1921,6 +2025,10 @@ struct InputState {
 }
 
 struct ClipboardState {
+    image_directory: Option<PathBuf>,
+    local_endpoint: bool,
+    image_request: Option<clipboard_image::ImageRequest>,
+    palette_image_target: Option<FileDropTarget>,
     data_device: Option<DataDevice>,
     primary_device: Option<PrimarySelectionDevice>,
     clipboard_offer: Option<SelectionOffer>,
@@ -1957,6 +2065,7 @@ struct ModalState {
     command_palette_open_focus: Option<bool>,
     command_palette_reconcile_pending: bool,
     dojo_prompt: Option<DojoPromptUi>,
+    dojo_prompt_explorer_target: Option<crate::ExplorerContextTarget>,
     dojo_prompt_layout: Option<DojoPromptLayout>,
     dojo_prompt_pressed: Option<TerminationDecision>,
     dojo_prompt_text_cache: CommandPaletteTextCache,
@@ -1964,11 +2073,12 @@ struct ModalState {
     tab_context_menu_anchor: (u32, u32),
     tab_context_menu_layout: Option<TabContextMenuLayout>,
     tab_context_menu_pressed: Option<TabMenuActionId>,
-    tab_context_menu_retarget: Option<DojoId>,
+    tab_context_menu_retarget: Option<TabMenuRightPress>,
     tab_context_menu_text_cache: CommandPaletteTextCache,
     session_picker: Option<SessionPickerUi>,
     selector_kind: Option<SelectorKind>,
-    session_picker_targets: Vec<(LairId, DojoId)>,
+    session_picker_targets: Vec<SessionPickerTarget>,
+    session_picker_creation_target: Option<SessionPickerCreationTarget>,
     session_picker_layout: Option<SessionPickerOverlayLayout>,
     session_picker_pressed: Option<PickerHitTarget>,
     session_picker_text_cache: SessionPickerTextCache,
@@ -1978,6 +2088,7 @@ struct ModalState {
     session_picker_reconcile_pending: bool,
     session_picker_open_focus: Option<bool>,
     session_picker_requested: bool,
+    session_picker_retry_command: Option<WindowTopologyCommand>,
     deferred_picker_theme: Option<ThemeUpdate>,
 }
 
@@ -2042,6 +2153,8 @@ struct App {
     input: InputState,
     clipboard: ClipboardState,
     panes: PanesState,
+    explorer: LairExplorerUi,
+    accessibility: navigation_accessibility::WindowAccessibility,
     tab_state: TabsState,
     modal: ModalState,
     scheduling: SchedulingState,
@@ -2392,6 +2505,96 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
     Some(row)
 }
 
+const fn terminal_ime_allowed(
+    keyboard_focused: bool,
+    modal_open: bool,
+    explorer_focused: bool,
+    owned_target: Option<OwnedFieldTarget>,
+) -> bool {
+    keyboard_focused && ((!modal_open && !explorer_focused) || owned_target.is_some())
+}
+
+const fn ime_batch_blocked(
+    modal_open: bool,
+    explorer_focused: bool,
+    barrier: bool,
+    owned_target: Option<OwnedFieldTarget>,
+) -> bool {
+    barrier || ((modal_open || explorer_focused) && owned_target.is_none())
+}
+
+fn explorer_pointer_returns_to_terminal(
+    explorer_focused: bool,
+    inside_panel: bool,
+    event: &PointerEventKind,
+) -> bool {
+    explorer_focused
+        && !inside_panel
+        && matches!(
+            event,
+            &PointerEventKind::Press {
+                button: BTN_LEFT,
+                ..
+            }
+        )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExplorerPointerPress {
+    Row(NavigationNodeId, bool),
+    Filter(LairExplorerFilter),
+}
+
+fn explorer_released_filter(
+    pressed: Option<ExplorerPointerPress>,
+    target: Option<LairExplorerFilter>,
+) -> Option<LairExplorerFilter> {
+    match pressed {
+        Some(ExplorerPointerPress::Filter(filter)) if Some(filter) == target => Some(filter),
+        _ => None,
+    }
+}
+
+fn explorer_filter_key(key: Keysym, modifiers: Modifiers, searching: bool) -> bool {
+    !searching
+        && !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.logo
+        && matches!(key, Keysym::f | Keysym::F)
+}
+
+fn explorer_context_menu_key(key: Keysym, modifiers: Modifiers) -> bool {
+    !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.logo
+        && ((key == Keysym::Menu && !modifiers.shift) || (key == Keysym::F10 && modifiers.shift))
+}
+
+/// A matching context-menu release belongs to chrome even if its target or
+/// admission state changed. Rejection is not a Wayland dispatch failure, and
+/// the release must not fall through to terminal input.
+fn consume_context_menu_request(open: impl FnOnce() -> Result<()>) -> bool {
+    if let Err(error) = open() {
+        eprintln!("splinterm context menu request ignored: {error:#}");
+    }
+    true
+}
+
+/// Run the local focus operation only for an eligible exact target, and verify
+/// its postcondition. A no-op is successful only when the target is focused.
+fn attempt_exact_splint_focus(
+    splint_id: SplintId,
+    incarnation_matches: bool,
+    pending_remote: bool,
+    attempt: impl FnOnce() -> (bool, Option<SplintId>),
+) -> Option<bool> {
+    if !incarnation_matches || pending_remote {
+        return None;
+    }
+    let (changed, focused) = attempt();
+    (focused == Some(splint_id)).then_some(changed)
+}
+
 const fn presented_cursor_visible(inline_picker_open: bool, blink_phase_visible: bool) -> bool {
     inline_picker_open || blink_phase_visible
 }
@@ -2485,6 +2688,25 @@ fn reduced_motion_requested() -> bool {
         .is_some_and(|value| matches!(value.to_str(), Some("1" | "true" | "yes")))
 }
 
+fn search_paint_rect(content: Rect, explorer: Option<&LairExplorerLayout>) -> Option<Rect> {
+    let Some(explorer) =
+        explorer.filter(|layout| layout.mode == LairExplorerPresentationMode::Drawer)
+    else {
+        return Some(content);
+    };
+    let right = content.x.saturating_add(content.width);
+    let left = explorer
+        .panel
+        .x
+        .saturating_add(explorer.panel.width)
+        .max(content.x);
+    (left < right).then_some(Rect {
+        x: left,
+        width: right.saturating_sub(left),
+        ..content
+    })
+}
+
 fn window_title(
     snapshot_title: Option<&str>,
     controller_active: bool,
@@ -2492,10 +2714,10 @@ fn window_title(
     control_transfer_pending: bool,
     search: Option<&SearchUiState>,
 ) -> String {
-    let base = snapshot_title
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Splinterm");
+    let base = match snapshot_title.map(str::trim) {
+        None | Some("" | "Splinterm") => "Splinterm".to_owned(),
+        Some(title) => format!("Splinterm — {title}"),
+    };
     let controller = controller_active.then_some("local controller");
     let authority_label = if authority.development_bypass {
         Some("DEVELOPMENT BYPASS")
@@ -2508,7 +2730,7 @@ fn window_title(
         (Some(controller), Some(authority)) => format!("{base} — {controller} — {authority}"),
         (Some(controller), None) => format!("{base} — {controller}"),
         (None, Some(authority)) => format!("{base} — {authority}"),
-        (None, None) => base.to_owned(),
+        (None, None) => base,
     };
     let title = if control_transfer_pending {
         format!("{title} — CONTROL REQUEST: Ctrl+Shift+Y accept / Ctrl+Shift+N deny")
@@ -2829,11 +3051,19 @@ fn pending_remote_snapshot(splint_id: SplintId, columns: usize, rows: usize) -> 
     }
 }
 
-fn tab_strip_height(managed_tabs: bool, visible: bool, surface_height: u32) -> u32 {
-    if managed_tabs && visible {
+fn tab_strip_height(managed_tabs: bool, visible: bool, remote: bool, surface_height: u32) -> u32 {
+    if (managed_tabs && visible) || remote {
         TAB_STRIP_LOGICAL_HEIGHT.min(surface_height)
     } else {
         0
+    }
+}
+
+fn session_picker_retry_request(command: &WindowTopologyCommand) -> Option<WindowTopologyCommand> {
+    match command {
+        WindowTopologyCommand::RequestSessionPicker
+        | WindowTopologyCommand::RequestSelector { .. } => Some(command.clone()),
+        _ => None,
     }
 }
 
@@ -2842,6 +3072,17 @@ const fn session_picker_purpose(selector_kind: Option<SelectorKind>) -> SessionP
         Some(SelectorKind::Dojo) => SessionPickerPurpose::Dojos,
         Some(SelectorKind::Lair) => SessionPickerPurpose::Lairs,
         None => SessionPickerPurpose::RecentDojos,
+    }
+}
+
+fn session_picker_status_catalog(message: &'static str) -> SessionPickerCatalog {
+    SessionPickerCatalog {
+        items: Vec::new(),
+        targets: Vec::new(),
+        creation_enabled: false,
+        creation_blocker: Some(message),
+        creation_target: None,
+        initial_row: None,
     }
 }
 
@@ -2856,19 +3097,33 @@ const fn session_picker_title(selector_kind: Option<SelectorKind>) -> &'static s
 fn session_picker_new_command(
     selector_kind: Option<SelectorKind>,
     lair_id: LairId,
-    cwd: PathBuf,
-) -> WindowTopologyCommand {
-    match selector_kind {
-        Some(SelectorKind::Dojo) => WindowTopologyCommand::NewDojo { lair_id, cwd },
-        Some(SelectorKind::Lair) | None => WindowTopologyCommand::NewLair { cwd },
+    source_splint_id: SplintId,
+    target: SessionPickerCreationTarget,
+) -> Result<WindowTopologyCommand> {
+    match (selector_kind, target.action) {
+        (Some(SelectorKind::Dojo), NavigationAction::CreateDojo) => {
+            Ok(WindowTopologyCommand::PickerNewDojo {
+                topology_revision: target.topology_revision,
+                lair_id,
+                source_splint_id,
+            })
+        }
+        (Some(SelectorKind::Lair) | None, NavigationAction::CreateLair) => {
+            Ok(WindowTopologyCommand::PickerNewLair {
+                topology_revision: target.topology_revision,
+                source_splint_id,
+            })
+        }
+        _ => anyhow::bail!("picker creation target disagrees with picker purpose"),
     }
 }
 
 impl App {
-    fn content_rect(&self) -> Rect {
+    fn base_content_rect(&self) -> Rect {
         let y = tab_strip_height(
             self.tab_state.managed_tabs,
             self.tab_state.tab_strip_visible,
+            self.tab_state.remote_display_identity.is_some(),
             self.surface.logical_height,
         );
         Rect {
@@ -2877,6 +3132,36 @@ impl App {
             width: self.surface.logical_width,
             height: self.surface.logical_height.saturating_sub(y),
         }
+    }
+
+    fn current_explorer_layout(&self) -> Option<LairExplorerLayout> {
+        if !self.explorer.visible() {
+            return None;
+        }
+        let cell_width = self
+            .panes
+            .pane
+            .snapshot_frame
+            .as_ref()
+            .and_then(|frame| {
+                buffer_to_logical_ceil(frame.cell_width(), self.surface.scale_120).ok()
+            })
+            .unwrap_or(1);
+        let minimum_terminal_width =
+            cell_width.saturating_mul(u32::from(self.presentation.initial_columns));
+        let rows = self.explorer.rows();
+        lair_explorer_layout(
+            self.base_content_rect(),
+            minimum_terminal_width,
+            &rows,
+            self.explorer.selected(),
+            self.presentation.explorer_visible_start,
+        )
+    }
+
+    fn content_rect(&self) -> Rect {
+        self.current_explorer_layout()
+            .map_or_else(|| self.base_content_rect(), |layout| layout.terminal)
     }
 
     fn request_pane_control_release(pane: &mut PaneView, terminal_input_pending: bool) {
@@ -2963,6 +3248,8 @@ impl App {
     }
 
     fn request_active_pane_control_release(&mut self) {
+        self.cancel_clipboard_image();
+        self.clipboard.palette_image_target = None;
         let input_pending = self.active_terminal_input_pending();
         Self::request_pane_control_release(&mut self.panes.pane, input_pending);
     }
@@ -3252,6 +3539,25 @@ impl App {
         })
     }
 
+    fn focus_splint_at_incarnation(
+        &mut self,
+        splint_id: SplintId,
+        live_incarnation: Option<u64>,
+    ) -> Option<bool> {
+        let pending_remote = is_pending_remote_splint(&self.panes.pending_remote_splits, splint_id);
+        let matches = std::iter::once(&self.panes.pane)
+            .chain(&self.panes.inactive_panes)
+            .filter_map(|pane| pane.snapshot.as_ref())
+            .any(|snapshot| {
+                snapshot.splint_id == splint_id
+                    && live_incarnation.is_none_or(|expected| snapshot.incarnation == expected)
+            });
+        attempt_exact_splint_focus(splint_id, matches, pending_remote, || {
+            let changed = self.focus_splint(splint_id);
+            (changed, self.panes.focused_splint())
+        })
+    }
+
     fn focus_splint(&mut self, splint_id: SplintId) -> bool {
         if is_pending_remote_splint(&self.panes.pending_remote_splits, splint_id) {
             return false;
@@ -3271,13 +3577,17 @@ impl App {
             self.panes.restored_frontend_needs_resize = true;
         }
         std::mem::swap(&mut self.panes.pane, &mut self.panes.inactive_panes[index]);
+        self.focused_pane_changed();
+        true
+    }
+
+    fn focused_pane_changed(&mut self) {
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.clipboard.drag_target = None;
         self.panes.pane.pointer_cell = None;
         self.panes.pane.hovered_url = None;
         self.presentation.full_redraw = true;
         self.sync_graphical_focus();
-        true
     }
 
     fn directional_splint(&self, direction: FocusDirection) -> Option<SplintId> {
@@ -3546,6 +3856,7 @@ impl App {
     }
 
     fn scroll_history(&mut self, action: MouseAction, lines: usize) -> Result<bool> {
+        self.cancel_clipboard_image();
         let snapshot = self
             .panes
             .pane
@@ -4323,6 +4634,14 @@ impl App {
         }
     }
 
+    fn owned_field_modal_open(&self) -> bool {
+        self.modal.input_modal_open()
+            || self.modal.session_picker.is_some()
+            || self.modal.trusted_consent.is_some()
+    }
+
+    /// Returns the Splinterm-owned field that may receive IME composition.
+    /// Explorer focus keeps terminal and Explorer-search composition blocked.
     fn ime_owned_field_target(&self) -> Option<OwnedFieldTarget> {
         if self.modal.binding_help.is_some() {
             return Some(OwnedFieldTarget::BindingHelp);
@@ -4338,7 +4657,7 @@ impl App {
         {
             return Some(OwnedFieldTarget::DojoPrompt);
         }
-        if self.modal.input_modal_open() {
+        if self.owned_field_modal_open() || self.explorer.focused() {
             return None;
         }
         self.panes
@@ -4350,23 +4669,52 @@ impl App {
     }
 
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
-        if let Some(help) = self.modal.binding_help.as_mut() {
-            return Some((OwnedFieldTarget::BindingHelp, help.editor_mut()));
+        if self.modal.binding_help.is_some() {
+            return self
+                .modal
+                .binding_help
+                .as_mut()
+                .map(|help| (OwnedFieldTarget::BindingHelp, help.editor_mut()));
         }
-        if let Some(palette) = self.modal.command_palette.as_mut() {
-            return Some((OwnedFieldTarget::CommandPalette, palette.editor_mut()));
+        let modal_open = self.owned_field_modal_open();
+        let explorer_search = self.explorer.focused() && self.explorer.search_active();
+        Self::select_owned_field(
+            modal_open,
+            self.modal
+                .command_palette
+                .as_mut()
+                .map(CommandPaletteUi::editor_mut),
+            self.modal
+                .dojo_prompt
+                .as_mut()
+                .and_then(DojoPromptUi::editor_mut),
+            explorer_search.then(|| self.explorer.editor_mut()),
+            self.panes.pane.search.input.as_mut(),
+        )
+    }
+
+    fn select_owned_field<'a>(
+        modal_open: bool,
+        palette: Option<&'a mut BoundedTextEditor>,
+        prompt: Option<&'a mut BoundedTextEditor>,
+        explorer: Option<&'a mut BoundedTextEditor>,
+        terminal_search: Option<&'a mut BoundedTextEditor>,
+    ) -> Option<(OwnedFieldTarget, &'a mut BoundedTextEditor)> {
+        // Explorer keeps its focus while a modal is open, but must not keep
+        // ownership of text editing above that modal.
+        if let Some(editor) = palette {
+            return Some((OwnedFieldTarget::CommandPalette, editor));
         }
-        if let Some(prompt) = self.modal.dojo_prompt.as_mut()
-            && let Some(editor) = prompt.editor_mut()
-        {
+        if let Some(editor) = prompt {
             return Some((OwnedFieldTarget::DojoPrompt, editor));
         }
-        self.panes
-            .pane
-            .search
-            .input
-            .as_mut()
-            .map(|editor| (OwnedFieldTarget::Search, editor))
+        if modal_open {
+            return None;
+        }
+        if let Some(editor) = explorer {
+            return Some((OwnedFieldTarget::ExplorerSearch, editor));
+        }
+        terminal_search.map(|editor| (OwnedFieldTarget::Search, editor))
     }
 
     fn owned_field_editor_mut(
@@ -4389,6 +4737,10 @@ impl App {
                 .dojo_prompt
                 .as_mut()
                 .and_then(DojoPromptUi::editor_mut),
+            OwnedFieldTarget::ExplorerSearch => self
+                .explorer
+                .search_active()
+                .then(|| self.explorer.editor_mut()),
             OwnedFieldTarget::Search => self.panes.pane.search.input.as_mut(),
         }
     }
@@ -4408,6 +4760,9 @@ impl App {
                 self.refresh_command_palette();
             }
             OwnedFieldTarget::DojoPrompt => self.refresh_dojo_prompt(),
+            OwnedFieldTarget::ExplorerSearch => {
+                self.presentation.full_redraw = true;
+            }
             OwnedFieldTarget::Search => {
                 self.update_window_title();
                 self.presentation.full_redraw = true;
@@ -4441,7 +4796,9 @@ impl App {
                     | Keysym::KP_Enter
                     | Keysym::Escape
             ),
-            OwnedFieldTarget::DojoPrompt | OwnedFieldTarget::Search => {
+            OwnedFieldTarget::DojoPrompt
+            | OwnedFieldTarget::ExplorerSearch
+            | OwnedFieldTarget::Search => {
                 matches!(keysym, Keysym::Return | Keysym::KP_Enter | Keysym::Escape)
             }
         }
@@ -4825,17 +5182,20 @@ impl App {
             && self.input.divider_drag.is_none()
     }
 
-    fn focused_cwd(&self) -> Result<std::path::PathBuf> {
+    fn focused_cwd_source(&self) -> Result<SplintId> {
         let focused = self
             .panes
             .focused_splint()
-            .context("focused cwd requires a focused Splint")?;
-        self.panes
-            .layout
-            .as_ref()
-            .and_then(|layout| layout.find_splint(focused))
-            .map(|splint| splint.cwd.clone())
-            .context("focused Splint is absent from authoritative topology")
+            .context("cwd inheritance requires a focused Splint")?;
+        anyhow::ensure!(
+            self.panes
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.find_splint(focused))
+                .is_some(),
+            "focused Splint is absent from authoritative topology"
+        );
+        Ok(focused)
     }
 
     fn show_command_palette(&mut self) -> Result<()> {
@@ -4868,10 +5228,10 @@ impl App {
             .iter()
             .position(|tab| tab.dojo_id == active_dojo_id)
             .context("active Dojo is missing from the Window tab set")?;
+        self.clipboard.palette_image_target = self.clipboard_image_target().ok();
         self.modal.command_palette = Some(CommandPaletteUi::new(CommandPaletteContext {
             lair_id: self.tab_state.active_identity.lair_id,
             lair_retention: self.tab_state.active_identity.lair_retention,
-            focused_cwd: self.focused_cwd()?,
             dojo_id: active_dojo_id,
             dojo_name: self.tab_state.active_identity.dojo_name.clone(),
             pane_count: 1_usize.saturating_add(self.panes.inactive_panes.len()),
@@ -4902,6 +5262,13 @@ impl App {
             focus_right: self.directional_splint(FocusDirection::Right),
             focus_up: self.directional_splint(FocusDirection::Up),
             focus_down: self.directional_splint(FocusDirection::Down),
+            clipboard_image_available: self.clipboard.palette_image_target.is_some()
+                && self.clipboard.image_request.is_none()
+                && self
+                    .clipboard
+                    .clipboard_offer
+                    .as_ref()
+                    .is_some_and(|offer| offer.with_mime_types(clipboard_image::png_offered)),
             viewport_detached: !self.panes.pane.scrollback_viewport.is_live(),
             controller_active: self.panes.pane.controller_active,
             forced_control_transfer: self.input.forced_control_transfer,
@@ -4938,6 +5305,8 @@ impl App {
     fn reload_keymap_configuration(&mut self) {
         match crate::config::load_default() {
             Ok(loaded) => {
+                self.cancel_clipboard_image();
+                self.clipboard.image_directory = loaded.config.clipboard_image_directory;
                 self.input.keymap = loaded.config.keymap;
                 self.input.prefix_timeout =
                     std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
@@ -4975,7 +5344,7 @@ impl App {
             self.input.ime.entered,
         ) {
             PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
-            PickerImeReconcile::Enable => self.enable_text_input(),
+            PickerImeReconcile::Enable => self.enable_text_input_if_allowed(),
             PickerImeReconcile::None => {}
         }
         let modal_focus_changed = self
@@ -4984,6 +5353,103 @@ impl App {
             .take()
             .is_some_and(|focused| focused != self.input.keyboard_focused);
         self.reconcile_terminal_focus_report(modal_focus_changed);
+    }
+
+    fn set_explorer_focus(&mut self, focused: bool, queue_handle: &QueueHandle<Self>) {
+        if focused {
+            if !self.explorer.focused() {
+                self.input.input_generation = self.input.input_generation.saturating_add(1);
+                self.input.ime_modal_barrier =
+                    self.input.ime.entered && self.input.text_input.is_some();
+                if self.input.ime_modal_barrier {
+                    if let Some(text_input) = &self.input.text_input {
+                        text_input.disable();
+                    }
+                    self.commit_text_input();
+                }
+                self.clear_ime_preedit();
+            }
+            self.explorer.focus();
+            if self.input.terminal_focus_reported {
+                self.request_active_pane_focus_report(false);
+                self.input.terminal_focus_reported = false;
+            }
+        } else {
+            self.explorer.return_to_terminal();
+            if !self.modal.input_modal_open() {
+                match picker_ime_reconcile(
+                    self.input.ime_modal_barrier,
+                    self.input.keyboard_focused,
+                    self.input.ime.entered,
+                ) {
+                    PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
+                    PickerImeReconcile::Enable => self.enable_text_input_if_allowed(),
+                    PickerImeReconcile::None => {}
+                }
+            }
+            if self.input.keyboard_focused
+                && self.panes.input_modes().focus_reporting
+                && !self.input.terminal_focus_reported
+            {
+                self.request_active_pane_focus_report(true);
+                self.input.terminal_focus_reported = true;
+            }
+        }
+        self.presentation.full_redraw = true;
+    }
+
+    fn refresh_lair_explorer(&mut self) -> Result<()> {
+        self.explorer.begin_refresh();
+        if let Err(error) = self.send_topology_command(WindowTopologyCommand::RequestLairExplorer {
+            focused_splint: self.panes.focused_splint(),
+        }) {
+            self.explorer.mark_disconnected();
+            self.explorer
+                .set_notice(&format!("Navigation unavailable · R retry: {error:#}"));
+            return Err(error);
+        }
+        self.presentation.full_redraw = true;
+        Ok(())
+    }
+
+    fn begin_lair_explorer_action(&mut self, decision: LairExplorerDecision) -> bool {
+        if self.tab_state.session_switch_pending || !self.explorer.set_pending(decision) {
+            return false;
+        }
+        self.tab_state.session_switch_pending = true;
+        true
+    }
+
+    fn execute_lair_explorer_decision(&mut self, decision: LairExplorerDecision) -> bool {
+        let returns_focus = decision.returns_focus_to_terminal();
+        let command = match decision {
+            LairExplorerDecision::Toggle(_) => return true,
+            LairExplorerDecision::OpenDojo(target) => {
+                let target = SessionPickerTarget {
+                    topology_revision: target.topology_revision,
+                    lair_id: target.lair_id,
+                    dojo_id: target.dojo_id,
+                    action: target.capability.action,
+                };
+                WindowTopologyCommand::OpenDojo {
+                    target,
+                    explorer_target: Some(crate::frontend::LairExplorerActivationTarget::Dojo(
+                        target,
+                    )),
+                }
+            }
+            LairExplorerDecision::FocusSplint(target) => {
+                WindowTopologyCommand::FocusSplint { target }
+            }
+        };
+        if !returns_focus || !self.begin_lair_explorer_action(decision) {
+            return false;
+        }
+        if self.send_topology_command(command).is_err() {
+            self.tab_state.session_switch_pending = false;
+            self.explorer.mark_disconnected();
+        }
+        true
     }
 
     #[allow(
@@ -5015,6 +5481,17 @@ impl App {
             BuiltInCommandDispatch::ShowKeybindings => self.show_binding_help(queue_handle),
             BuiltInCommandDispatch::ReloadConfiguration => {
                 self.reload_keymap_configuration();
+                Ok(())
+            }
+            BuiltInCommandDispatch::SaveClipboardImage => {
+                let captured = self.clipboard.palette_image_target.take();
+                if captured.is_some() && self.clipboard_image_target().ok() == captured {
+                    self.begin_clipboard_image();
+                } else {
+                    self.clipboard_image_notice(
+                        "Clipboard image save cancelled: palette target changed",
+                    );
+                }
                 Ok(())
             }
             BuiltInCommandDispatch::EnterCopyMode => {
@@ -5052,13 +5529,27 @@ impl App {
                 Ok(())
             }
             BuiltInCommandDispatch::Topology(mut command) => (|| -> Result<()> {
+                let picker_request =
+                    matches!(&command, WindowTopologyCommand::RequestSelector { .. })
+                        .then(|| command.clone());
                 let requests_picker = matches!(
                     &command,
                     WindowTopologyCommand::RequestSelector { .. }
                         | WindowTopologyCommand::RequestLairPrompt { .. }
                 );
-                if requests_picker {
+                if let Some(request) = picker_request.as_ref() {
+                    let WindowTopologyCommand::RequestSelector { kind, .. } = request else {
+                        unreachable!("picker request classification changed");
+                    };
+                    self.show_embedded_session_picker(
+                        session_picker_status_catalog("Loading navigation…"),
+                        Some(*kind),
+                    )?;
                     self.modal.session_picker_requested = true;
+                    self.modal.session_picker_retry_command = picker_request;
+                } else if requests_picker {
+                    self.modal.session_picker_requested = true;
+                    self.modal.session_picker_retry_command = None;
                 }
                 let pending_started = if self.input.optimistic_remote_splits
                     && let WindowTopologyCommand::Split {
@@ -5112,6 +5603,34 @@ impl App {
                 }
                 Ok(())
             })(),
+            BuiltInCommandDispatch::ToggleLairExplorer => (|| -> Result<()> {
+                let was_focused = self.explorer.focused();
+                let visible = self.explorer.toggle_visibility();
+                if was_focused && !visible {
+                    self.set_explorer_focus(false, queue_handle);
+                }
+                if visible {
+                    self.refresh_lair_explorer()?;
+                }
+                self.presentation.explorer_layout = None;
+                self.presentation.full_redraw = true;
+                if self.surface.configured {
+                    self.emit_resize()?;
+                }
+                Ok(())
+            })(),
+            BuiltInCommandDispatch::FocusLairExplorer => (|| -> Result<()> {
+                let was_visible = self.explorer.visible();
+                self.set_explorer_focus(true, queue_handle);
+                if !was_visible && self.surface.configured {
+                    self.emit_resize()?;
+                }
+                self.refresh_lair_explorer()
+            })(),
+            BuiltInCommandDispatch::ReturnFocusToTerminal => {
+                self.set_explorer_focus(false, queue_handle);
+                Ok(())
+            }
             BuiltInCommandDispatch::History { target, action } => (|| -> Result<()> {
                 anyhow::ensure!(
                     self.panes.focused_splint() == Some(target),
@@ -5123,7 +5642,7 @@ impl App {
                         self.panes.pane.search.input = Some(new_search_editor());
                         self.panes.pane.search.matches.clear();
                         self.panes.pane.search.next_cursor = None;
-                        self.update_window_title();
+                        self.refresh_search_overlay(queue_handle);
                     }
                     CommandHistoryAction::PageUp | CommandHistoryAction::PageDown => {
                         let page = self
@@ -5221,11 +5740,17 @@ impl App {
                 ));
                 Ok(())
             }
-            BuiltInCommandDispatch::RecentSessions => {
+            BuiltInCommandDispatch::RecentSessions => (|| -> Result<()> {
+                self.show_embedded_session_picker(
+                    session_picker_status_catalog("Loading navigation…"),
+                    None,
+                )?;
                 self.modal.session_picker_requested = true;
+                self.modal.session_picker_retry_command =
+                    Some(WindowTopologyCommand::RequestSessionPicker);
                 self.send_topology_command(WindowTopologyCommand::RequestSessionPicker)
                     .inspect_err(|_| self.modal.session_picker_requested = false)
-            }
+            })(),
         };
         if result.is_err() {
             eprintln!("splinterm command palette action failed");
@@ -5237,35 +5762,69 @@ impl App {
         self.presentation.full_redraw = true;
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "finite pointer coordinates are clamped to the logical surface"
-    )]
+    fn explorer_context_menu(&self, node: NavigationNodeId) -> Option<TabContextMenuUi> {
+        if !self.explorer.can_context(node) {
+            return None;
+        }
+        let view = self.explorer.view()?;
+        let pane_controlled = match node {
+            NavigationNodeId::Splint {
+                dojo_id, splint_id, ..
+            } => {
+                let incarnation = view
+                    .lairs
+                    .iter()
+                    .flat_map(|lair| &lair.dojos)
+                    .flat_map(|dojo| &dojo.splints)
+                    .find(|splint| splint.id == node)
+                    .and_then(|splint| splint.target.live_incarnation);
+                let controlled = |pane: &PaneView| {
+                    pane.controller_active
+                        && !pane.control_release_pending
+                        && pane.snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.splint_id == splint_id
+                                && Some(snapshot.incarnation) == incarnation
+                        })
+                };
+                if self.tab_state.active_dojo_id() == dojo_id {
+                    std::iter::once(&self.panes.pane)
+                        .chain(self.panes.inactive_panes.iter())
+                        .any(controlled)
+                } else {
+                    self.tab_state
+                        .tabs
+                        .get(dojo_id)
+                        .and_then(|tab| tab.value.as_ref())
+                        .is_some_and(|view| {
+                            std::iter::once(&view.pane)
+                                .chain(view.inactive_panes.iter())
+                                .any(controlled)
+                        })
+                }
+            }
+            _ => false,
+        };
+        TabContextMenuUi::for_explorer(
+            view,
+            node,
+            self.focused_cwd_source().ok(),
+            pane_controlled,
+            self.tab_state.tabs.len() < crate::tab::MAX_WINDOW_TABS,
+        )
+    }
+
+    fn show_explorer_context_menu(
+        &mut self,
+        node: NavigationNodeId,
+        anchor: (f64, f64),
+    ) -> Result<()> {
+        let menu = self
+            .explorer_context_menu(node)
+            .context("Explorer menu target is unavailable")?;
+        self.show_context_menu(menu, anchor)
+    }
+
     fn show_tab_context_menu(&mut self, dojo_id: DojoId, anchor: (f64, f64)) -> Result<()> {
-        self.input.prefix_state.clear();
-        anyhow::ensure!(
-            self.tab_state.managed_tabs,
-            "tab menu requires managed tabs"
-        );
-        anyhow::ensure!(
-            self.tab_state.topology_commands.is_some(),
-            "tab menu topology commands are unavailable"
-        );
-        anyhow::ensure!(
-            self.modal.command_palette.is_none()
-                && self.modal.dojo_prompt.is_none()
-                && self.modal.session_picker.is_none()
-                && self.modal.trusted_consent.is_none()
-                && !self.modal.session_picker_requested
-                && !self.modal.session_picker_reconcile_pending
-                && !self.modal.command_palette_reconcile_pending
-                && !self.tab_state.session_switch_pending
-                && self.panes.pane.search.input.is_none()
-                && self.panes.pane.pending_control_transfer.is_none()
-                && self.input.divider_drag.is_none(),
-            "tab menu is unavailable"
-        );
         let identity = self
             .tab_state
             .tab_identity(dojo_id)
@@ -5304,6 +5863,50 @@ impl App {
             .iter()
             .filter_map(|tab| (tab.dojo_id != dojo_id).then_some(tab.dojo_id))
             .collect();
+        self.show_context_menu(
+            TabContextMenuUi::new(TabMenuContext {
+                lair_id: identity.lair_id,
+                source_splint_id: self.focused_cwd_source()?,
+                dojo_id,
+                dojo_name: identity.dojo_name,
+                pane_count,
+                splints,
+                active,
+                other_dojo_ids,
+            }),
+            anchor,
+        )
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "finite pointer coordinates are clamped to the logical surface"
+    )]
+    fn show_context_menu(&mut self, menu: TabContextMenuUi, anchor: (f64, f64)) -> Result<()> {
+        self.input.prefix_state.clear();
+        anyhow::ensure!(
+            self.tab_state.managed_tabs,
+            "tab menu requires managed tabs"
+        );
+        anyhow::ensure!(
+            self.tab_state.topology_commands.is_some(),
+            "tab menu topology commands are unavailable"
+        );
+        anyhow::ensure!(
+            self.modal.command_palette.is_none()
+                && self.modal.dojo_prompt.is_none()
+                && self.modal.session_picker.is_none()
+                && self.modal.trusted_consent.is_none()
+                && !self.modal.session_picker_requested
+                && !self.modal.session_picker_reconcile_pending
+                && !self.modal.command_palette_reconcile_pending
+                && !self.tab_state.session_switch_pending
+                && self.panes.pane.search.input.is_none()
+                && self.panes.pane.pending_control_transfer.is_none()
+                && self.input.divider_drag.is_none(),
+            "tab menu is unavailable"
+        );
         self.settle_terminal_presses_for_picker();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         self.input.ime_modal_barrier = self.input.ime.entered && self.input.text_input.is_some();
@@ -5321,16 +5924,9 @@ impl App {
                 0
             }
         };
-        self.modal.tab_context_menu = Some(TabContextMenuUi::new(TabMenuContext {
-            lair_id: identity.lair_id,
-            focused_cwd: self.focused_cwd()?,
-            dojo_id,
-            dojo_name: identity.dojo_name,
-            pane_count,
-            splints,
-            active,
-            other_dojo_ids,
-        }));
+        self.presentation.explorer_pressed = None;
+        self.explorer.cancel_context_press();
+        self.modal.tab_context_menu = Some(menu);
         self.modal.tab_context_menu_anchor = (
             logical(anchor.0, self.surface.logical_width),
             logical(anchor.1, self.surface.logical_height),
@@ -5359,17 +5955,72 @@ impl App {
     }
 
     fn execute_tab_context_menu(&mut self, action: TabMenuActionId) {
+        if let Some(target) = self
+            .modal
+            .tab_context_menu
+            .as_ref()
+            .and_then(TabContextMenuUi::explorer_target)
+            && !self.explorer_context_menu(target.node).is_some_and(|menu| {
+                menu.explorer_target() == Some(target) && menu.action_enabled(action)
+            })
+        {
+            self.close_tab_context_menu();
+            self.explorer
+                .set_notice("Menu target changed; reopen its menu and try again");
+            return;
+        }
         let Some(dispatch) = self
             .modal
             .tab_context_menu
             .as_ref()
-            .and_then(|menu| tab_menu_dispatch(action, &menu.context()))
+            .and_then(|menu| menu.dispatch(action))
         else {
             return;
         };
         self.close_tab_context_menu();
         let result = match dispatch {
-            TabMenuDispatch::Topology(command) => self.send_topology_command(command),
+            TabMenuDispatch::Topology(mut command) => {
+                let mut navigates = false;
+                if let WindowTopologyCommand::ExplorerContext { target, command } = &mut command
+                    && matches!(
+                        command.as_ref(),
+                        WindowTopologyCommand::OpenDojo { .. }
+                            | WindowTopologyCommand::FocusSplint { .. }
+                    )
+                {
+                    let Some(decision) = self.explorer.activation_decision(target.node) else {
+                        return;
+                    };
+                    if !self.begin_lair_explorer_action(decision) {
+                        return;
+                    }
+                    navigates = true;
+                    if let WindowTopologyCommand::OpenDojo {
+                        target,
+                        explorer_target,
+                    } = command.as_mut()
+                    {
+                        *explorer_target = Some(crate::LairExplorerActivationTarget::Dojo(*target));
+                    }
+                }
+                let requests_prompt = matches!(
+                    &command,
+                    WindowTopologyCommand::RequestLairPrompt { .. }
+                ) || matches!(&command, WindowTopologyCommand::ExplorerContext { command, .. } if matches!(command.as_ref(), WindowTopologyCommand::RequestLairPrompt { .. } | WindowTopologyCommand::RequestDojoPrompt { .. }));
+                if requests_prompt {
+                    self.modal.session_picker_requested = true;
+                    self.modal.session_picker_retry_command = None;
+                }
+                self.send_topology_command(command).inspect_err(|_| {
+                    if requests_prompt {
+                        self.modal.session_picker_requested = false;
+                    }
+                    if navigates {
+                        self.tab_state.session_switch_pending = false;
+                        self.explorer.mark_disconnected();
+                    }
+                })
+            }
             TabMenuDispatch::Rename(target) => {
                 self.show_dojo_prompt(DojoPromptUi::rename(
                     target.dojo_id,
@@ -5389,8 +6040,10 @@ impl App {
                 Ok(())
             }
         };
-        if result.is_err() {
-            eprintln!("splinterm tab menu action failed");
+        if let Err(error) = result {
+            self.explorer
+                .set_notice(&format!("Menu action failed: {error:#}"));
+            eprintln!("splinterm tab menu action failed: {error:#}");
         }
     }
 
@@ -5415,6 +6068,7 @@ impl App {
     }
 
     fn show_dojo_prompt(&mut self, prompt: DojoPromptUi) {
+        self.modal.dojo_prompt_explorer_target = None;
         self.input.prefix_state.clear();
         self.input.input_generation = self.input.input_generation.saturating_add(1);
         let title = match &prompt {
@@ -5435,6 +6089,7 @@ impl App {
     }
 
     fn close_dojo_prompt(&mut self) -> bool {
+        self.modal.dojo_prompt_explorer_target = None;
         if self.modal.dojo_prompt.take().is_none() {
             return false;
         }
@@ -5465,6 +6120,11 @@ impl App {
         {
             return;
         }
+        let command = command.map(|command| match self.modal.dojo_prompt_explorer_target {
+            Some(target) => target.command(command),
+            None => command,
+        });
+        self.modal.dojo_prompt_explorer_target = None;
         self.close_dojo_prompt();
         if let Some(command) = command
             && self.send_topology_command(command).is_err()
@@ -5479,16 +6139,26 @@ impl App {
     }
 
     fn refresh_tab_context_menu(&mut self) {
-        self.modal.tab_context_menu_layout = None;
+        // Hover, press, and keyboard selection do not change menu geometry.
+        // Retain the committed hit map until redraw: Wayland can batch motion,
+        // press, and release before another frame is painted. Opening, closing,
+        // retargeting, and resizing invalidate the layout separately.
         self.presentation.full_redraw = true;
     }
 
     fn show_embedded_session_picker(
         &mut self,
-        items: Vec<SessionPickerItem>,
-        targets: Vec<(LairId, DojoId)>,
+        catalog: SessionPickerCatalog,
         selector_kind: Option<SelectorKind>,
     ) -> Result<()> {
+        let SessionPickerCatalog {
+            items,
+            targets,
+            creation_enabled,
+            creation_blocker,
+            creation_target,
+            initial_row,
+        } = catalog;
         self.input.prefix_state.clear();
         anyhow::ensure!(
             self.modal.session_picker.is_none(),
@@ -5506,9 +6176,15 @@ impl App {
             self.commit_text_input();
         }
         self.clear_ime_preedit();
-        self.modal.session_picker = Some(SessionPickerUi::inline(items));
+        self.modal.session_picker = Some(SessionPickerUi::inline(
+            items,
+            creation_enabled,
+            creation_blocker,
+            initial_row,
+        ));
         self.modal.selector_kind = selector_kind;
         self.modal.session_picker_targets = targets;
+        self.modal.session_picker_creation_target = creation_target;
         self.modal.session_picker_layout = None;
         self.modal.session_picker_pressed = None;
         self.modal.session_picker_text_cache.clear();
@@ -5530,6 +6206,7 @@ impl App {
         self.modal.session_picker = None;
         self.modal.selector_kind = None;
         self.modal.session_picker_targets.clear();
+        self.modal.session_picker_creation_target = None;
         self.modal.session_picker_layout = None;
         self.modal.session_picker_pressed = None;
         self.modal.session_picker_text_cache.clear();
@@ -5541,6 +6218,12 @@ impl App {
     }
 
     fn send_topology_command(&mut self, command: WindowTopologyCommand) -> Result<()> {
+        self.cancel_clipboard_image();
+        // Capture all entry points, including keyboard shortcuts, before dispatch so
+        // a failed load can retry the exact picker kind and original Lair scope.
+        if let Some(request) = session_picker_retry_request(&command) {
+            self.modal.session_picker_retry_command = Some(request);
+        }
         let commands = self.tab_state.topology_commands.clone();
         try_topology_command_with_rollback(commands.as_ref(), command, |target, pending| {
             self.rollback_pending_remote_split(target, pending)
@@ -5657,6 +6340,10 @@ impl App {
     }
 
     fn set_ime_focus(&mut self, focused: bool) {
+        if !focused {
+            self.cancel_clipboard_image();
+            self.clipboard.palette_image_target = None;
+        }
         self.input.keyboard_focused = focused;
         self.input.ime.focused = focused;
         self.sync_graphical_focus();
@@ -5666,7 +6353,14 @@ impl App {
             }
             self.commit_text_input();
             self.clear_ime_preedit();
-        } else if focused && self.input.ime.entered && !self.modal.input_modal_open() {
+        } else if self.input.ime.entered
+            && terminal_ime_allowed(
+                focused,
+                self.modal.input_modal_open(),
+                self.explorer.focused(),
+                self.ime_owned_field_target(),
+            )
+        {
             self.enable_text_input();
         }
     }
@@ -5686,6 +6380,25 @@ impl App {
             self.input.text_input =
                 Some(manager.get_text_input(seat, queue_handle, self.input.ime_generation));
         }
+    }
+
+    /// Re-enables IME after a modal closes only when the surviving focus may
+    /// compose; Explorer focus keeps the text input disabled.
+    fn enable_text_input_if_allowed(&mut self) {
+        if terminal_ime_allowed(
+            self.input.keyboard_focused,
+            self.modal.input_modal_open(),
+            self.explorer.focused(),
+            self.ime_owned_field_target(),
+        ) {
+            self.enable_text_input();
+            return;
+        }
+        if let Some(text_input) = &self.input.text_input {
+            text_input.disable();
+        }
+        self.commit_text_input();
+        self.clear_ime_preedit();
     }
 
     fn enable_text_input(&mut self) {
@@ -5841,13 +6554,18 @@ impl App {
             self.presentation.renderer_generation.saturating_add(1);
         self.presentation.frame_titles.clear();
         self.modal.session_picker_text_cache.clear();
+        self.presentation.explorer_text_cache.clear();
+        self.presentation.search_text_cache.clear();
         self.modal.command_palette_text_cache.clear();
         self.modal.dojo_prompt_text_cache.clear();
         self.modal.tab_context_menu_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
+        self.presentation.explorer_layout = None;
         self.modal.command_palette_layout = None;
         self.modal.dojo_prompt_layout = None;
         self.modal.tab_context_menu_layout = None;
@@ -5910,6 +6628,8 @@ impl App {
         self.modal.session_picker_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         if !raster_changed {
@@ -6099,8 +6819,9 @@ impl App {
                 };
                 if Some(pressed_target) == release_target {
                     if let (BTN_RIGHT, TabHitTarget::Activate(dojo_id)) = (button, pressed_target) {
-                        self.show_tab_context_menu(dojo_id, event.position)?;
-                        return Ok(true);
+                        return Ok(consume_context_menu_request(|| {
+                            self.show_tab_context_menu(dojo_id, event.position)
+                        }));
                     }
                     let command = match (button, pressed_target) {
                         (BTN_LEFT, TabHitTarget::Activate(dojo_id)) => {
@@ -6112,7 +6833,7 @@ impl App {
                         }
                         (BTN_LEFT, TabHitTarget::New) => Some(WindowTopologyCommand::NewDojo {
                             lair_id: self.tab_state.active_identity.lair_id,
-                            cwd: self.focused_cwd()?,
+                            source_splint_id: self.focused_cwd_source()?,
                         }),
                         _ => None,
                     };
@@ -6275,18 +6996,41 @@ impl App {
         changed
     }
 
+    fn context_menu_right_target(
+        &self,
+        position: (f64, f64),
+        inside_menu: bool,
+    ) -> TabMenuRightPress {
+        if inside_menu {
+            return TabMenuRightPress::Dismiss;
+        }
+        let tab_target = self
+            .tab_state
+            .tab_strip_layout
+            .as_ref()
+            .and_then(|layout| tab_strip_hit_test(layout, position))
+            .and_then(tab_context_target);
+        let explorer_target = self
+            .presentation
+            .explorer_layout
+            .as_ref()
+            .and_then(|layout| lair_explorer_hit_test(layout, position))
+            .and_then(|node| self.explorer_context_menu(node))
+            .and_then(|menu| menu.explorer_target());
+        tab_menu_right_press(tab_target, explorer_target)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "matching press/release and retarget actions share modal pointer ownership"
+    )]
     fn handle_tab_context_menu_pointer(&mut self, event: &PointerEvent) -> bool {
         let Some(committed_layout) = self.modal.tab_context_menu_layout.as_ref() else {
             return false;
         };
         let target = tab_context_menu_hit_test(committed_layout, event.position);
         let inside_panel = rect_contains(committed_layout.panel, event.position);
-        let tab_target = self
-            .tab_state
-            .tab_strip_layout
-            .as_ref()
-            .and_then(|layout| tab_strip_hit_test(layout, event.position))
-            .and_then(tab_context_target);
+        let right_target = self.context_menu_right_target(event.position, inside_panel);
         let mut changed = false;
         let mut execute = None;
         let mut retarget = None;
@@ -6303,10 +7047,12 @@ impl App {
             }
             PointerEventKind::Press {
                 button: BTN_RIGHT, ..
-            } => match tab_menu_right_press(tab_target) {
-                TabMenuRightPress::Retarget(dojo_id) => {
-                    if self.modal.tab_context_menu_retarget != Some(dojo_id) {
-                        self.modal.tab_context_menu_retarget = Some(dojo_id);
+            } => match right_target {
+                target @ (TabMenuRightPress::Retarget(_)
+                | TabMenuRightPress::RetargetExplorer(_)) => {
+                    self.modal.tab_context_menu_pressed = None;
+                    if self.modal.tab_context_menu_retarget != Some(target) {
+                        self.modal.tab_context_menu_retarget = Some(target);
                         changed = true;
                     }
                 }
@@ -6320,7 +7066,7 @@ impl App {
             } => {
                 let pressed = self.modal.tab_context_menu_retarget.take();
                 changed |= pressed.is_some();
-                if pressed.is_some() && pressed == tab_target {
+                if pressed.is_some() && pressed == Some(right_target) {
                     retarget = pressed;
                 }
             }
@@ -6347,16 +7093,27 @@ impl App {
             } => {
                 let pressed = self.modal.tab_context_menu_pressed.take();
                 changed |= pressed.is_some();
-                if pressed.is_some() && pressed == target {
-                    execute = pressed;
-                }
+                execute = self
+                    .modal
+                    .tab_context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.release_action(pressed, target));
             }
             PointerEventKind::Press { .. }
             | PointerEventKind::Release { .. }
             | PointerEventKind::Axis { .. } => {}
         }
-        if let Some(dojo_id) = retarget {
-            if self.show_tab_context_menu(dojo_id, event.position).is_err() {
+        if let Some(target) = retarget {
+            let result = match target {
+                TabMenuRightPress::Retarget(dojo_id) => {
+                    self.show_tab_context_menu(dojo_id, event.position)
+                }
+                TabMenuRightPress::RetargetExplorer(target) => {
+                    self.show_explorer_context_menu(target.node, event.position)
+                }
+                TabMenuRightPress::Dismiss => unreachable!("dismissal does not retain a press"),
+            };
+            if result.is_err() {
                 eprintln!("splinterm tab menu retarget failed");
             }
             changed = true;
@@ -6366,6 +7123,137 @@ impl App {
         }
         if changed {
             self.refresh_tab_context_menu();
+        }
+        changed
+    }
+
+    fn handle_lair_explorer_pointer(
+        &mut self,
+        event: &PointerEvent,
+        queue_handle: &QueueHandle<Self>,
+    ) -> bool {
+        let Some(inside_panel) = self
+            .presentation
+            .explorer_layout
+            .as_ref()
+            .map(|layout| rect_contains(layout.panel, event.position))
+        else {
+            return false;
+        };
+        if explorer_pointer_returns_to_terminal(self.explorer.focused(), inside_panel, &event.kind)
+        {
+            self.set_explorer_focus(false, queue_handle);
+            if self.surface.configured
+                && let Err(error) = self.schedule_draw(queue_handle)
+            {
+                self.scheduling.fail(error);
+            }
+        }
+        if !inside_panel {
+            let owned = self.presentation.explorer_pressed.is_some()
+                || self.explorer.context_press_pending();
+            if matches!(
+                event.kind,
+                PointerEventKind::Release { .. } | PointerEventKind::Leave { .. }
+            ) {
+                self.presentation.explorer_pressed = None;
+                self.explorer.cancel_context_press();
+            }
+            return owned;
+        }
+        let Some(layout) = self.presentation.explorer_layout.as_ref() else {
+            return false;
+        };
+        let target = lair_explorer_hit_test(layout, event.position);
+        let filter = lair_explorer_filter_hit_test(layout, event.position);
+        let disclosure =
+            lair_explorer_disclosure_hit_test(layout, &self.explorer.rows(), event.position);
+        let mut changed = false;
+        match event.kind {
+            PointerEventKind::Press {
+                button: BTN_RIGHT, ..
+            } => {
+                self.presentation.explorer_pressed = None;
+                self.explorer.context_press(target);
+            }
+            PointerEventKind::Release {
+                button: BTN_RIGHT, ..
+            } => {
+                if let Some(node) = self.explorer.context_release(target) {
+                    if self
+                        .show_explorer_context_menu(node, event.position)
+                        .is_err()
+                    {
+                        eprintln!("splinterm Explorer menu is unavailable");
+                    }
+                    changed = true;
+                }
+            }
+            PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                self.explorer.cancel_context_press();
+                self.set_explorer_focus(true, queue_handle);
+                self.presentation.explorer_pressed =
+                    filter.map(ExplorerPointerPress::Filter).or_else(|| {
+                        target.map(|target| {
+                            ExplorerPointerPress::Row(target, disclosure == Some(target))
+                        })
+                    });
+                if let Some(target) = target {
+                    changed |= self.explorer.select(target);
+                }
+            }
+            PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                changed |= self.release_lair_explorer_pointer(target, disclosure, filter);
+            }
+            PointerEventKind::Axis { vertical, .. } if !vertical.is_none() => {
+                let delta =
+                    if vertical.discrete < 0 || vertical.value120 < 0 || vertical.absolute < 0.0 {
+                        -1
+                    } else {
+                        1
+                    };
+                changed |= self.explorer.move_selection(delta);
+            }
+            PointerEventKind::Leave { .. } => {
+                self.explorer.cancel_context_press();
+                self.presentation.explorer_pressed = None;
+            }
+            _ => {}
+        }
+        if changed {
+            self.presentation.full_redraw = true;
+        }
+        true
+    }
+
+    fn release_lair_explorer_pointer(
+        &mut self,
+        target: Option<NavigationNodeId>,
+        disclosure: Option<NavigationNodeId>,
+        filter: Option<LairExplorerFilter>,
+    ) -> bool {
+        let pressed = self.presentation.explorer_pressed.take();
+        if let Some(filter) = explorer_released_filter(pressed, filter) {
+            let changed = self.explorer.search_active();
+            self.explorer.focus_tree();
+            return self.explorer.set_filter(filter) || changed;
+        }
+        let Some(ExplorerPointerPress::Row(pressed, was_disclosure)) = pressed else {
+            return false;
+        };
+        if Some(pressed) != target {
+            return false;
+        }
+        let mut changed = self.explorer.select(pressed);
+        // Keyboard navigation or a refresh between press and release must not
+        // redirect this gesture to a different selected row.
+        if self.explorer.selected() != Some(pressed) {
+            return changed;
+        }
+        if was_disclosure && disclosure == Some(pressed) {
+            changed |= self.explorer.toggle_selected();
+        } else if let Some(decision) = self.explorer.decision() {
+            changed |= self.execute_lair_explorer_decision(decision);
         }
         changed
     }
@@ -6400,7 +7288,14 @@ impl App {
                 if button == BTN_LEFT {
                     let pressed = self.modal.session_picker_pressed.take();
                     changed |= pressed.is_some();
-                    activate = picker_release_activation(pressed, target);
+                    activate = picker_release_activation(pressed, target).filter(|target| {
+                        !matches!(target, PickerHitTarget::New)
+                            || self
+                                .modal
+                                .session_picker
+                                .as_ref()
+                                .is_some_and(SessionPickerUi::new_enabled)
+                    });
                 }
             }
             PointerEventKind::Axis { vertical, .. } => {
@@ -6427,11 +7322,12 @@ impl App {
                 }
             }
         }
-        if let Some(target) = activate {
-            let decision = match target {
-                PickerHitTarget::New => SessionPickerDecision::New,
-                PickerHitTarget::Open(index) => SessionPickerDecision::Open(index),
-            };
+        if let Some(decision) = activate.and_then(|target| {
+            self.modal
+                .session_picker
+                .as_ref()
+                .and_then(|picker| picker.decision_for_target(target))
+        }) {
             self.decide_session_picker(decision);
             changed = true;
         }
@@ -6442,6 +7338,7 @@ impl App {
     }
 
     fn cancel_session_picker(&mut self) {
+        self.modal.session_picker_retry_command = None;
         if !self.close_inline_session_picker() {
             self.scheduling
                 .request_exit(ExitClass::CleanSessionPickerDecision);
@@ -6453,30 +7350,51 @@ impl App {
             let selector_kind = self.modal.selector_kind;
             let command = match decision {
                 SessionPickerDecision::New => {
-                    let cwd = match self.focused_cwd() {
-                        Ok(cwd) => cwd,
+                    let source_splint_id = match self.focused_cwd_source() {
+                        Ok(source_splint_id) => source_splint_id,
                         Err(error) => {
                             self.scheduling.fail(error);
                             return;
                         }
                     };
-                    session_picker_new_command(
+                    let Some(target) = self.modal.session_picker_creation_target else {
+                        self.scheduling.fail(anyhow::anyhow!(
+                            "Dojo picker selected an unavailable creation target"
+                        ));
+                        return;
+                    };
+                    match session_picker_new_command(
                         selector_kind,
                         self.tab_state.active_identity.lair_id,
-                        cwd,
-                    )
+                        source_splint_id,
+                        target,
+                    ) {
+                        Ok(command) => command,
+                        Err(error) => {
+                            self.scheduling.fail(error);
+                            return;
+                        }
+                    }
                 }
                 SessionPickerDecision::Open(index) => {
-                    let Some((lair_id, dojo_id)) =
-                        self.modal.session_picker_targets.get(index).copied()
-                    else {
+                    let Some(target) = self.modal.session_picker_targets.get(index).copied() else {
                         self.scheduling
                             .fail(anyhow::anyhow!("Dojo picker selected an invalid target"));
                         return;
                     };
-                    WindowTopologyCommand::OpenDojo { lair_id, dojo_id }
+                    WindowTopologyCommand::OpenDojo {
+                        target,
+                        explorer_target: None,
+                    }
                 }
             };
+            self.modal.session_picker_retry_command = Some(match selector_kind {
+                Some(kind) => WindowTopologyCommand::RequestSelector {
+                    kind,
+                    lair_id: self.tab_state.active_identity.lair_id,
+                },
+                None => WindowTopologyCommand::RequestSessionPicker,
+            });
             self.close_inline_session_picker();
             self.tab_state.session_switch_pending = true;
             if self.send_topology_command(command).is_err() {
@@ -6517,6 +7435,18 @@ impl App {
                 self.panes.pane.pending_control_transfer.is_some(),
                 Some(&self.panes.pane.search),
             ));
+        }
+    }
+
+    fn refresh_search_overlay(&mut self, queue_handle: &QueueHandle<Self>) {
+        self.update_window_title();
+        for buffer in &mut self.surface.buffers {
+            buffer.stale.mark_full();
+        }
+        if self.surface.configured
+            && let Err(error) = self.schedule_draw(queue_handle)
+        {
+            self.scheduling.fail(error);
         }
     }
 
@@ -6763,8 +7693,28 @@ impl App {
         }
         if self.modal.session_picker.is_some() {
             match event.keysym {
-                Keysym::Up | Keysym::k | Keysym::K => self.move_session_picker(-1),
-                Keysym::Down | Keysym::j | Keysym::J => self.move_session_picker(1),
+                Keysym::Up => self.move_session_picker(-1),
+                Keysym::Down => self.move_session_picker(1),
+                Keysym::k | Keysym::K
+                    if self
+                        .modal
+                        .session_picker
+                        .as_ref()
+                        .is_some_and(|picker| !picker.search_active()) =>
+                {
+                    self.move_session_picker(-1);
+                }
+                Keysym::j | Keysym::J
+                    if self
+                        .modal
+                        .session_picker
+                        .as_ref()
+                        .is_some_and(|picker| !picker.search_active()) =>
+                {
+                    self.move_session_picker(1);
+                }
+                Keysym::Page_Up => self.move_session_picker(-7),
+                Keysym::Page_Down => self.move_session_picker(7),
                 Keysym::Home => {
                     if let Some(picker) = self.modal.session_picker.as_mut() {
                         picker.select_first();
@@ -6786,15 +7736,97 @@ impl App {
                         .modal
                         .session_picker
                         .as_ref()
-                        .map(SessionPickerUi::selected_decision)
+                        .and_then(SessionPickerUi::selected_decision)
                     {
                         self.decide_session_picker(decision);
                     }
                 }
-                Keysym::n | Keysym::N => {
+                Keysym::n | Keysym::N
+                    if self.input.modifiers.ctrl
+                        && self
+                            .modal
+                            .session_picker
+                            .as_ref()
+                            .is_some_and(SessionPickerUi::new_enabled) =>
+                {
                     self.decide_session_picker(SessionPickerDecision::New);
                 }
-                Keysym::Escape => self.cancel_session_picker(),
+                Keysym::r | Keysym::R
+                    if self.modal.session_picker_retry_command.is_some()
+                        && self
+                            .modal
+                            .session_picker
+                            .as_ref()
+                            .is_some_and(|picker| !picker.search_active()) =>
+                {
+                    let command = self.modal.session_picker_retry_command.clone();
+                    let selector_kind = self.modal.selector_kind;
+                    self.close_inline_session_picker();
+                    if let Err(error) = self.show_embedded_session_picker(
+                        session_picker_status_catalog("Loading navigation…"),
+                        selector_kind,
+                    ) {
+                        self.scheduling.fail(error);
+                        return;
+                    }
+                    self.modal.session_picker_requested = true;
+                    if command.is_none_or(|command| self.send_topology_command(command).is_err()) {
+                        self.modal.session_picker_requested = false;
+                    }
+                }
+                Keysym::slash | Keysym::f | Keysym::F
+                    if matches!(event.keysym, Keysym::slash) || self.input.modifiers.ctrl =>
+                {
+                    let changed = self
+                        .modal
+                        .session_picker
+                        .as_mut()
+                        .is_some_and(SessionPickerUi::begin_search);
+                    if changed {
+                        let _ = self.refresh_session_picker();
+                    }
+                }
+                Keysym::BackSpace => {
+                    let changed = self
+                        .modal
+                        .session_picker
+                        .as_mut()
+                        .is_some_and(SessionPickerUi::backspace_search);
+                    if changed {
+                        let _ = self.refresh_session_picker();
+                    }
+                }
+                Keysym::Escape => {
+                    let cleared = self
+                        .modal
+                        .session_picker
+                        .as_mut()
+                        .is_some_and(SessionPickerUi::clear_search);
+                    if cleared {
+                        let _ = self.refresh_session_picker();
+                    } else {
+                        self.cancel_session_picker();
+                    }
+                }
+                _ if !self.input.modifiers.ctrl
+                    && !self.input.modifiers.alt
+                    && self
+                        .modal
+                        .session_picker
+                        .as_ref()
+                        .is_some_and(SessionPickerUi::search_active) =>
+                {
+                    if let Some(text) = Self::editable_field_text(event.utf8.as_deref()) {
+                        let changed = self
+                            .modal
+                            .session_picker
+                            .as_mut()
+                            .is_some_and(|picker| picker.append_search(text));
+                        if changed {
+                            let _ = self.refresh_session_picker();
+                        }
+                    }
+                }
                 _ => {}
             }
             return;
@@ -6806,6 +7838,108 @@ impl App {
                 }
                 Keysym::d | Keysym::D | Keysym::Escape => self.decide_consent(false),
                 _ => {}
+            }
+            return;
+        }
+        if self.explorer.focused() {
+            let mut changed = false;
+            match event.keysym {
+                key if explorer_context_menu_key(key, self.input.modifiers) => {
+                    if let Some(node) = self.explorer.selected()
+                        && let Some(row) = self
+                            .presentation
+                            .explorer_layout
+                            .as_ref()
+                            .and_then(|layout| layout.rows.iter().find(|row| row.id == node))
+                    {
+                        let anchor = (f64::from(row.rect.x), f64::from(row.rect.y));
+                        if let Err(error) = self.show_explorer_context_menu(node, anchor) {
+                            eprintln!("splinterm Explorer menu is unavailable: {error:#}");
+                        }
+                        changed = true;
+                    }
+                }
+                Keysym::Up => changed = self.explorer.move_selection(-1),
+                Keysym::Down => changed = self.explorer.move_selection(1),
+                Keysym::k | Keysym::K if !self.explorer.search_active() => {
+                    changed = self.explorer.move_selection(-1);
+                }
+                Keysym::j | Keysym::J if !self.explorer.search_active() => {
+                    changed = self.explorer.move_selection(1);
+                }
+                Keysym::Page_Up => {
+                    let page = self
+                        .presentation
+                        .explorer_layout
+                        .as_ref()
+                        .map_or(1, |layout| layout.visible_capacity.max(1));
+                    changed = self
+                        .explorer
+                        .move_selection(-isize::try_from(page).unwrap_or(isize::MAX));
+                }
+                Keysym::Page_Down => {
+                    let page = self
+                        .presentation
+                        .explorer_layout
+                        .as_ref()
+                        .map_or(1, |layout| layout.visible_capacity.max(1));
+                    changed = self
+                        .explorer
+                        .move_selection(isize::try_from(page).unwrap_or(isize::MAX));
+                }
+                Keysym::Home => changed = self.explorer.select_edge(false),
+                Keysym::End => changed = self.explorer.select_edge(true),
+                Keysym::Left => changed = self.explorer.move_left(),
+                Keysym::Right => changed = self.explorer.move_right(),
+                Keysym::space => changed = self.explorer.toggle_selected(),
+                Keysym::Return | Keysym::KP_Enter => {
+                    if let Some(decision) = self.explorer.decision() {
+                        changed |= self.execute_lair_explorer_decision(decision);
+                    }
+                }
+                Keysym::slash | Keysym::f | Keysym::F
+                    if matches!(event.keysym, Keysym::slash) || self.input.modifiers.ctrl =>
+                {
+                    changed = self.explorer.begin_search();
+                }
+                key if explorer_filter_key(
+                    key,
+                    self.input.modifiers,
+                    self.explorer.search_active(),
+                ) =>
+                {
+                    changed = self.explorer.set_filter(self.explorer.filter().next());
+                }
+                Keysym::r | Keysym::R if !self.explorer.search_active() => {
+                    if self.explorer.retryable() {
+                        let _ = self.refresh_lair_explorer();
+                        changed = true;
+                    } else {
+                        changed = self.explorer.reveal_current();
+                    }
+                }
+                Keysym::BackSpace => changed = self.explorer.backspace_search(),
+                Keysym::Escape if self.explorer.query().is_empty() => {
+                    self.set_explorer_focus(false, queue_handle);
+                    changed = true;
+                }
+                Keysym::Escape => changed = self.explorer.escape(),
+                _ if self.explorer.search_active()
+                    && !self.input.modifiers.ctrl
+                    && !self.input.modifiers.alt
+                    && !self.input.modifiers.logo =>
+                {
+                    if let Some(text) = Self::editable_field_text(event.utf8.as_deref()) {
+                        changed = self.explorer.append_search(text);
+                    }
+                }
+                _ => {}
+            }
+            if changed {
+                self.presentation.full_redraw = true;
+                if let Err(error) = self.schedule_draw(queue_handle) {
+                    self.scheduling.fail(error);
+                }
             }
             return;
         }
@@ -6824,7 +7958,7 @@ impl App {
                 } else if let Some(cursor) = self.panes.pane.search.next_cursor.clone() {
                     self.submit_search(Some(cursor));
                 }
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             if self.input.modifiers.ctrl && matches!(event.keysym, Keysym::p | Keysym::P) {
@@ -6837,7 +7971,7 @@ impl App {
                     .get(self.panes.pane.search.selected)
                     .cloned();
                 self.reveal_pending_search_match();
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             match event.keysym {
@@ -6871,7 +8005,7 @@ impl App {
                 }
                 _ => {}
             }
-            self.update_window_title();
+            self.refresh_search_overlay(queue_handle);
             return;
         }
         match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
@@ -6911,7 +8045,7 @@ impl App {
                 self.panes.pane.search.input = Some(new_search_editor());
                 self.panes.pane.search.matches.clear();
                 self.panes.pane.search.next_cursor = None;
-                self.update_window_title();
+                self.refresh_search_overlay(queue_handle);
                 return;
             }
             Some(ActionId::ForceControl) => {
@@ -7291,7 +8425,7 @@ impl App {
             .or_else(|| {
                 self.panes
                     .focused_splint()
-                    .filter(|splint_id| !removed.contains(splint_id))
+                    .filter(|splint_id| identities.contains(splint_id))
             })
             .unwrap_or_else(|| layout.first_splint_id());
         anyhow::ensure!(
@@ -7302,8 +8436,18 @@ impl App {
         self.panes
             .pending_exited_splints
             .retain(|splint_id| !removed.contains(splint_id));
+        let active_replaced = tabs::replace_retired_panes(
+            &mut self.panes.pane,
+            &mut self.panes.inactive_panes,
+            &mut prepared,
+            &removed,
+            |pane| pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+        );
         self.panes.inactive_panes.extend(prepared);
-        let _ = self.focus_splint(next_focus);
+        let focus_changed = self.focus_splint(next_focus);
+        if active_replaced && !focus_changed {
+            self.focused_pane_changed();
+        }
         anyhow::ensure!(
             self.panes.focused_splint() == Some(next_focus),
             "topology update focus could not be applied"
@@ -7311,7 +8455,7 @@ impl App {
         self.panes.inactive_panes.retain(|pane| {
             pane.snapshot
                 .as_ref()
-                .is_none_or(|snapshot| !removed.contains(&snapshot.splint_id))
+                .is_none_or(|snapshot| layout.find_splint(snapshot.splint_id).is_some())
         });
         self.panes
             .pending_remote_splits
@@ -7356,7 +8500,10 @@ impl App {
         clippy::too_many_lines,
         reason = "bounded topology draining, tab reconciliation, and deferred picker updates remain one transaction"
     )]
-    fn apply_topology_updates(&mut self) -> Result<(bool, Option<ThemeUpdate>)> {
+    fn apply_topology_updates(
+        &mut self,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<(bool, Option<ThemeUpdate>)> {
         let mut pending = VecDeque::new();
         if let Some(updates) = &mut self.tab_state.topology_updates {
             let drained = drain_receiver(updates, &self.platform.update_waker);
@@ -7382,6 +8529,7 @@ impl App {
                     WindowTopologyUpdate::Apply { .. }
                         | WindowTopologyUpdate::OpenTab { .. }
                         | WindowTopologyUpdate::ActivateTab { .. }
+                        | WindowTopologyUpdate::ActivateSplint { .. }
                         | WindowTopologyUpdate::RemoveTab { .. }
                         | WindowTopologyUpdate::UpdateIdentity(_)
                 );
@@ -7401,6 +8549,17 @@ impl App {
                 changed = true;
                 continue;
             }
+            let refresh_explorer = self.explorer.visible()
+                && matches!(
+                    &update,
+                    WindowTopologyUpdate::Apply { .. }
+                        | WindowTopologyUpdate::OpenTab { .. }
+                        | WindowTopologyUpdate::ActivateTab { .. }
+                        | WindowTopologyUpdate::ActivateSplint { .. }
+                        | WindowTopologyUpdate::RemoveTab { .. }
+                        | WindowTopologyUpdate::UpdateIdentity(_)
+                        | WindowTopologyUpdate::LairExplorerInvalidated
+                );
             match update {
                 WindowTopologyUpdate::Apply {
                     topology_revision,
@@ -7452,6 +8611,7 @@ impl App {
                     panes,
                     focused,
                     acknowledged,
+                    explorer_target,
                 } => {
                     let topology_revision = identity.topology_revision;
                     let dojo_id = identity.dojo_id;
@@ -7467,7 +8627,9 @@ impl App {
                     ) {
                         Ok(view) => view,
                         Err(error) => {
-                            self.tab_state.session_switch_pending = false;
+                            changed |= self.explorer.fail_activation(explorer_target);
+                            self.tab_state.session_switch_pending =
+                                self.explorer.activation_pending();
                             let message = format!("{error:#}");
                             let _ = acknowledged.send(Err(message));
                             eprintln!("splinterm Dojo tab failed to open");
@@ -7484,15 +8646,56 @@ impl App {
                         "active Dojo tab disappeared while opening another"
                     );
                     self.tab_state.session_switch_pending = false;
+                    self.modal.session_picker_retry_command = None;
                     changed |= self.activate_tab(dojo_id)?;
+                    if explorer_target
+                        .is_some_and(|target| self.explorer.finish_activation(target, true))
+                    {
+                        self.set_explorer_focus(false, queue_handle);
+                    }
                     if let Some(diagnostics) = diagnostics() {
                         diagnostics.update_topology(topology_revision, self.tab_state.tabs.len());
                     }
                     let _ = acknowledged.send(Ok(()));
                 }
-                WindowTopologyUpdate::ActivateTab { dojo_id } => {
+                WindowTopologyUpdate::ActivateTab {
+                    dojo_id,
+                    explorer_target,
+                } => {
+                    self.tab_state.session_switch_pending = false;
+                    self.modal.session_picker_retry_command = None;
+                    changed |= self.activate_tab(dojo_id)?;
+                    if explorer_target
+                        .is_some_and(|target| self.explorer.finish_activation(target, true))
+                    {
+                        self.set_explorer_focus(false, queue_handle);
+                    }
+                }
+                WindowTopologyUpdate::ActivateSplint {
+                    dojo_id,
+                    splint_id,
+                    live_incarnation,
+                    explorer_target,
+                } => {
                     self.tab_state.session_switch_pending = false;
                     changed |= self.activate_tab(dojo_id)?;
+                    if let Some(focus_changed) =
+                        self.focus_splint_at_incarnation(splint_id, live_incarnation)
+                    {
+                        changed |= focus_changed;
+                        if explorer_target
+                            .is_some_and(|target| self.explorer.finish_activation(target, true))
+                        {
+                            self.set_explorer_focus(false, queue_handle);
+                        }
+                    } else {
+                        if let Some(target) = explorer_target {
+                            self.explorer.finish_activation(target, false);
+                        }
+                        self.explorer.mark_stale_target(splint_id);
+                        let _ = self.refresh_lair_explorer();
+                        changed = true;
+                    }
                 }
                 WindowTopologyUpdate::RemoveTab {
                     dojo_id,
@@ -7556,42 +8759,118 @@ impl App {
                     self.presentation.full_redraw = true;
                     changed = true;
                 }
-                WindowTopologyUpdate::TabFailed { dojo_id, message } => {
+                WindowTopologyUpdate::TabFailed {
+                    dojo_id,
+                    message,
+                    explorer_target,
+                } => {
+                    let retryable_picker = self.tab_state.session_switch_pending
+                        && self.modal.session_picker_retry_command.is_some();
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
-                    self.tab_state.session_switch_pending = false;
+                    changed |= self.explorer.fail_activation(explorer_target);
+                    self.tab_state.session_switch_pending = self.explorer.activation_pending();
+                    if retryable_picker {
+                        let selector_kind = match self.modal.session_picker_retry_command.as_ref() {
+                            Some(WindowTopologyCommand::RequestSelector { kind, .. }) => {
+                                Some(*kind)
+                            }
+                            _ => None,
+                        };
+                        self.show_embedded_session_picker(
+                            session_picker_status_catalog(
+                                "Target changed or is unavailable · R to refresh",
+                            ),
+                            selector_kind,
+                        )?;
+                        changed = true;
+                    }
+                    if self.explorer.visible() {
+                        self.explorer
+                            .set_notice(&format!("Action failed: {message}"));
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
                     eprintln!(
                         "splinterm topology action failed{}: {message}",
                         dojo_id.map_or_else(String::new, |id| format!(" for Dojo {id}"))
                     );
                 }
-                WindowTopologyUpdate::ShowSessionPicker { items, targets } => {
+                WindowTopologyUpdate::ShowSessionPicker { catalog } => {
                     if self.modal.session_picker_requested
-                        && self.modal.session_picker.is_none()
                         && !self.tab_state.session_switch_pending
                         && !self.modal.session_picker_reconcile_pending
                         && !self.modal.command_palette_reconcile_pending
                     {
-                        self.show_embedded_session_picker(items, targets, None)?;
+                        self.close_inline_session_picker();
+                        self.show_embedded_session_picker(catalog, None)?;
                         changed = true;
                     }
                 }
-                WindowTopologyUpdate::ShowSelector {
-                    kind,
-                    items,
-                    targets,
-                } => {
+                WindowTopologyUpdate::ShowLairExplorer { view } => {
+                    self.explorer.set_view(view);
+                    self.presentation.full_redraw = true;
+                    changed = true;
+                }
+                WindowTopologyUpdate::LairExplorerInvalidated => {}
+                WindowTopologyUpdate::LairExplorerFailed(message) => {
+                    self.explorer.mark_disconnected();
+                    self.explorer
+                        .set_notice(&format!("Navigation unavailable · R retry: {message}"));
+                    self.presentation.full_redraw = true;
+                    changed = true;
+                }
+                WindowTopologyUpdate::ShowSelector { kind, catalog } => {
                     if self.modal.session_picker_requested
-                        && self.modal.session_picker.is_none()
                         && !self.tab_state.session_switch_pending
                         && !self.modal.session_picker_reconcile_pending
                         && !self.modal.command_palette_reconcile_pending
                     {
-                        self.show_embedded_session_picker(items, targets, Some(kind))?;
+                        self.close_inline_session_picker();
+                        self.show_embedded_session_picker(catalog, Some(kind))?;
                         changed = true;
                     }
+                }
+                WindowTopologyUpdate::ShowExplorerPrompt {
+                    guard,
+                    kind,
+                    target,
+                } => {
+                    self.modal.session_picker_requested = false;
+                    let prompt = if let Some(dojo_id) = target.dojo_id {
+                        let splints = target
+                            .targets
+                            .iter()
+                            .map(|target| (target.splint_id, target.incarnation))
+                            .collect::<Vec<_>>();
+                        match kind {
+                            LairPromptKind::Rename => {
+                                DojoPromptUi::rename(dojo_id, target.name, splints.len(), splints)
+                            }
+                            LairPromptKind::Terminate => DojoPromptUi::terminate(
+                                dojo_id,
+                                target.name,
+                                splints.len(),
+                                splints,
+                            ),
+                            LairPromptKind::Restore => DojoPromptUi::restore_lair(target),
+                            LairPromptKind::Preview => DojoPromptUi::preview_lair(target),
+                        }
+                    } else {
+                        match kind {
+                            LairPromptKind::Rename => DojoPromptUi::rename_lair(target),
+                            LairPromptKind::Terminate => DojoPromptUi::terminate_lair(target),
+                            LairPromptKind::Restore => DojoPromptUi::restore_lair(target),
+                            LairPromptKind::Preview => DojoPromptUi::preview_lair(target),
+                        }
+                    };
+                    self.show_dojo_prompt(prompt);
+                    self.modal.dojo_prompt_explorer_target = Some(guard);
+                    changed = true;
                 }
                 WindowTopologyUpdate::ShowLairPrompt { kind, target } => {
+                    self.tab_state.session_switch_pending = false;
+                    self.explorer.clear_pending();
                     self.modal.session_picker_requested = false;
                     let prompt = match kind {
                         LairPromptKind::Rename => DojoPromptUi::rename_lair(target),
@@ -7606,7 +8885,16 @@ impl App {
                     self.close_inline_session_picker();
                     self.modal.session_picker_requested = false;
                     self.tab_state.session_switch_pending = false;
+                    let selector_kind = match self.modal.session_picker_retry_command.as_ref() {
+                        Some(WindowTopologyCommand::RequestSelector { kind, .. }) => Some(*kind),
+                        _ => None,
+                    };
+                    self.show_embedded_session_picker(
+                        session_picker_status_catalog("Could not load navigation · R to retry"),
+                        selector_kind,
+                    )?;
                     eprintln!("splinterm Dojo picker failed");
+                    changed = true;
                 }
                 WindowTopologyUpdate::Theme(update) => {
                     if self.modal.inline_picker_open() {
@@ -7633,6 +8921,9 @@ impl App {
                         .request_exit(ExitClass::ErrorTopologyManager);
                     anyhow::bail!("topology manager stopped");
                 }
+            }
+            if refresh_explorer {
+                let _ = self.refresh_lair_explorer();
             }
         }
         self.sync_graphical_focus();
@@ -7685,10 +8976,7 @@ impl App {
     }
 
     fn apply_inactive_updates(&mut self) -> Result<InactiveUpdateDrain> {
-        let mut changed = false;
-        let mut next_theme = None;
-        let mut dirty_frames = HashSet::new();
-        let mut exited = Vec::new();
+        let mut drain = InactiveUpdateDrain::default();
         for pane in &mut self.panes.inactive_panes {
             let mut pending = Vec::new();
             let mut disconnected = false;
@@ -7701,13 +8989,13 @@ impl App {
                 pane.controller_active = false;
                 pane.commands = None;
                 pane.updates = None;
-                changed = true;
+                drain.changed = true;
             }
             let mut terminal_updates = Vec::with_capacity(pending.len());
             for update in pending {
                 match update {
                     WindowUpdate::Theme(update) => {
-                        retain_newest_theme(&mut next_theme, update);
+                        retain_newest_theme(&mut drain.theme, update);
                     }
                     WindowUpdate::Exited { splint_id } => {
                         anyhow::ensure!(
@@ -7719,27 +9007,20 @@ impl App {
                         pane.controller_active = false;
                         pane.commands = None;
                         pane.updates = None;
-                        exited.push(splint_id);
-                        changed = true;
+                        drain.exited.push(splint_id);
+                        drain.changed = true;
                     }
                     update => terminal_updates.push(update),
                 }
             }
             let impact =
                 apply_inactive_update_batch(pane, terminal_updates, self.presentation.theme)?;
-            changed |= impact.visual_changed;
-            if impact.frame_dirty
-                && let Some(snapshot) = pane.snapshot.as_ref()
-            {
-                dirty_frames.insert(snapshot.splint_id);
-            }
+            drain.record(
+                pane.snapshot.as_ref().map(|snapshot| snapshot.splint_id),
+                impact,
+            );
         }
-        Ok(InactiveUpdateDrain {
-            changed,
-            theme: next_theme,
-            dirty_frames,
-            exited,
-        })
+        Ok(drain)
     }
 
     #[allow(
@@ -7747,7 +9028,7 @@ impl App {
         reason = "bounded update draining and semantic damage coalescing stay adjacent"
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
-        let (topology_changed, topology_theme) = self.apply_topology_updates()?;
+        let (topology_changed, topology_theme) = self.apply_topology_updates(queue_handle)?;
         if topology_changed {
             self.cancel_copy_mode_for_topology();
         }
@@ -7825,7 +9106,9 @@ impl App {
         }
         let receiver_batch_size = pending.len();
         let inactive = self.apply_inactive_updates()?;
-        self.panes.pending_exited_splints.extend(inactive.exited);
+        self.panes
+            .pending_exited_splints
+            .extend(inactive.exited.iter().copied());
         if let Some(update) = inactive.theme {
             retain_newest_theme(&mut next_theme, update);
         }
@@ -7833,6 +9116,7 @@ impl App {
         let mut focused_visual_changed = topology_changed;
         let mut title_changed = false;
         let mut full_frame_reload = false;
+        let mut history_content_changed = false;
         let mut rebuild_all_inactive = false;
         let mut effect_desired_changed = false;
         let mut font_reconciled = false;
@@ -7920,6 +9204,7 @@ impl App {
                     let full_frame_reasons = terminal_update_full_frame_reasons(&update, current);
                     let mut full = full_frame_reasons != 0;
                     let content_changed = terminal_update_changes_visible_content(&update);
+                    history_content_changed |= content_changed || image_sources.is_some();
                     let cursor_changed = update.cursor.is_some() || update.input_modes.is_some();
                     title_changed |= update.title.is_some();
                     if content_changed {
@@ -8088,6 +9373,7 @@ impl App {
                     }
                 }
                 WindowUpdate::ScrollbackPages(pages) => {
+                    history_content_changed = true;
                     self.panes.pane.history_page_pending = false;
                     let pinned_selection_rows = self
                         .panes
@@ -8169,6 +9455,8 @@ impl App {
                     self.presentation.full_redraw = true;
                 }
                 WindowUpdate::Control(active) => {
+                    self.cancel_clipboard_image();
+                    self.clipboard.palette_image_target = None;
                     self.panes.pane.controller_active = active;
                     title_changed = true;
                     visual_changed = true;
@@ -8298,7 +9586,7 @@ impl App {
         if rebuilt_inactive > 0 {
             self.panes
                 .dirty_inactive_panes
-                .extend(inactive.dirty_frames.iter().copied());
+                .extend(inactive.panes_to_repaint().iter().copied());
         }
         if rebuild_all_inactive {
             self.presentation.full_redraw = true;
@@ -8329,13 +9617,6 @@ impl App {
             &mut self.input.last_cursor_blink,
         ) {
             let prepare_started = perf_trace_enabled().then(Instant::now);
-            let trace_dirty_rows = self
-                .panes
-                .pane
-                .prepare_dirty_rows
-                .iter()
-                .filter(|dirty| **dirty)
-                .count();
             let live_viewport = self.panes.pane.scrollback_viewport.is_live();
             let display_owned = if live_viewport {
                 None
@@ -8350,7 +9631,46 @@ impl App {
                 .as_ref()
                 .or(self.panes.pane.snapshot.as_ref())
                 .context("updated snapshot exists")?;
-            if full_frame_reload || self.panes.pane.snapshot_frame.is_none() || !live_viewport {
+            let cursor_only_history = !live_viewport
+                && !history_content_changed
+                && !self.panes.pane.viewport_dirty
+                && self
+                    .panes
+                    .pane
+                    .snapshot_frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.can_refresh_cursor_rows(display));
+            if cursor_only_history {
+                self.panes.pane.prepare_dirty_rows.fill(false);
+            }
+            if let Some(frame) = &self.panes.pane.snapshot_frame {
+                self.panes
+                    .pane
+                    .prepare_dirty_rows
+                    .resize(display.rows, false);
+                self.panes
+                    .pane
+                    .raster_dirty_rows
+                    .resize(display.rows, false);
+                self.panes
+                    .pane
+                    .surface_dirty_rows
+                    .resize(display.rows, false);
+                frame.mark_cursor_dirty_rows(display, &mut self.panes.pane.prepare_dirty_rows);
+                frame.mark_cursor_dirty_rows(display, &mut self.panes.pane.raster_dirty_rows);
+                frame.mark_cursor_dirty_rows(display, &mut self.panes.pane.surface_dirty_rows);
+            }
+            let trace_dirty_rows = self
+                .panes
+                .pane
+                .prepare_dirty_rows
+                .iter()
+                .filter(|dirty| **dirty)
+                .count();
+            if full_frame_reload
+                || self.panes.pane.snapshot_frame.is_none()
+                || (!live_viewport && !cursor_only_history)
+            {
                 self.panes.pane.snapshot_frame =
                     Some(SnapshotFrame::load_scaled_with_sources_and_context(
                         display,
@@ -8365,7 +9685,6 @@ impl App {
                     &self.presentation.render_context,
                 )?;
                 frame.refresh_images(display, &self.panes.pane.image_sources)?;
-                frame.refresh_cursor(display);
             }
             self.panes.pane.rendered_viewport_offset =
                 self.panes.pane.scrollback_viewport.offset_from_bottom();
@@ -8480,7 +9799,7 @@ impl App {
                 self.input.ime.entered,
             ) {
                 PickerImeReconcile::Renew => self.renew_text_input(queue_handle),
-                PickerImeReconcile::Enable => self.enable_text_input(),
+                PickerImeReconcile::Enable => self.enable_text_input_if_allowed(),
                 PickerImeReconcile::None => {}
             }
             let modal_focus_changed = self
@@ -8512,6 +9831,8 @@ impl App {
         self.modal.session_picker_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         if !raster_changed {
@@ -8575,6 +9896,8 @@ impl App {
         self.modal.session_picker_text_cache.clear();
         self.tab_state.tab_label_cache.clear();
         self.tab_state.tab_close_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
         if self.modal.inline_picker_open() {
@@ -8711,6 +10034,7 @@ impl App {
                 .surface
                 .buffers
                 .iter()
+                .skip(1)
                 .any(|buffer| self.surface.pool.canvas(&buffer.buffer).is_some());
         if terminal_draw_waits_for_frame(self.scheduling.frame_pending, draw_capacity_available) {
             self.scheduling.redraw_pending = true;
@@ -8749,13 +10073,11 @@ impl App {
             self.panes.pane.pending_scrolls.clear();
             let incremental = if display.images.is_none() {
                 if let (Some(frame), Some(delta)) = (&mut self.panes.pane.snapshot_frame, delta) {
-                    let scroll = frame.scroll_viewport_rows_with_context(
+                    frame.scroll_viewport_rows_with_context(
                         &display,
                         delta,
                         &self.presentation.render_context,
-                    )?;
-                    frame.refresh_cursor(&display);
-                    scroll
+                    )?
                 } else {
                     None
                 }
@@ -8805,6 +10127,13 @@ impl App {
                 self.presentation.full_redraw = true;
             }
         }
+        let explorer_layout = self.current_explorer_layout();
+        if let Some(layout) = &explorer_layout {
+            self.presentation.explorer_visible_start = layout.visible_start;
+        }
+        self.presentation
+            .explorer_layout
+            .clone_from(&explorer_layout);
         let pane_layout = self.computed_pane_layout()?;
         let pane_cell_width = self
             .panes
@@ -8850,21 +10179,14 @@ impl App {
                 Err(error)
             }
         })?;
-        let (width, height, stride) = if pane_layout.is_some() || self.tab_state.managed_tabs {
-            buffer_dimensions(
-                self.surface.logical_width.max(1),
-                self.surface.logical_height.max(1),
-                self.surface.scale_120,
-            )?
-        } else if let Some(geometry) = window_geometry {
-            geometry.buffer_layout()?
-        } else {
-            buffer_dimensions(
-                self.surface.logical_width.max(1),
-                self.surface.logical_height.max(1),
-                self.surface.scale_120,
-            )?
-        };
+        let (width, height, stride) = window_buffer_dimensions(
+            pane_layout.is_some(),
+            self.tab_state.managed_tabs,
+            self.tab_state.remote_display_identity.is_some(),
+            (self.surface.logical_width, self.surface.logical_height),
+            self.surface.scale_120,
+            window_geometry,
+        )?;
         let width_i32 = i32::try_from(width).context("buffer width fits i32")?;
         let height_i32 = i32::try_from(height).context("buffer height fits i32")?;
         let resolved_selection = self.panes.pane.selection.and_then(|selection| {
@@ -8924,7 +10246,16 @@ impl App {
             .dojo_prompt
             .as_ref()
             .and_then(|prompt| dojo_prompt_layout(self.content_rect(), prompt));
-        let tab_context_menu_layout = self.modal.tab_context_menu.as_ref().and_then(|_| {
+        let tab_context_menu_layout = if let Some(menu) = self.modal.tab_context_menu.as_ref() {
+            let label_width = self
+                .modal
+                .tab_context_menu_text_cache
+                .tab_menu_label_width(
+                    &self.presentation.render_context,
+                    menu.actions(),
+                    self.surface.scale_120,
+                    self.presentation.renderer_generation,
+                )?;
             tab_context_menu_layout(
                 Rect {
                     x: 0,
@@ -8933,8 +10264,13 @@ impl App {
                     height: self.surface.logical_height,
                 },
                 self.modal.tab_context_menu_anchor,
+                menu.actions(),
+                label_width,
             )
-        });
+        } else {
+            None
+        };
+        self.prepare_remote_host_text()?;
         let tab_layout = self.current_tab_strip_layout();
         let content_rect = self.content_rect();
         let content_buffer_rect = Self::buffer_rect(content_rect, self.surface.scale_120)?;
@@ -8951,18 +10287,18 @@ impl App {
             && !inline_picker_open
             && !command_palette_open
             && !dojo_prompt_open
-            && !tab_context_menu_open;
+            && !tab_context_menu_open
+            && !self.explorer.focused();
         let backing_len = bounded_window_backing_len(width, height)?;
-        let mut buffer_index = None;
-        for (index, buffer) in self.surface.buffers.iter().enumerate() {
-            if self.surface.pool.canvas(&buffer.buffer).is_some() {
-                buffer_index = Some(index);
-                break;
-            }
-        }
-        let buffer_index = if let Some(index) = buffer_index {
+        let choice = choose_draw_buffer(self.surface.buffers.len(), |index| {
+            self.surface
+                .pool
+                .canvas(&self.surface.buffers[index].buffer)
+                .is_some()
+        });
+        let buffer_index = if let DrawBufferChoice::Reuse(index) = choice {
             index
-        } else if self.surface.buffers.len() < MAX_SHM_BUFFERS {
+        } else if choice == DrawBufferChoice::Allocate {
             let buffer = self
                 .surface
                 .pool
@@ -9169,7 +10505,9 @@ impl App {
                 || inline_picker_open
                 || command_palette_open
                 || dojo_prompt_open
-                || tab_context_menu_open;
+                || tab_context_menu_open
+                || explorer_layout.is_some()
+                || self.panes.pane.search.input.is_some();
             let full_backing_sync =
                 self.presentation.full_redraw || capture_image_count > 0 || backing_scroll_changed;
             for buffer in &mut self.surface.buffers {
@@ -9284,7 +10622,56 @@ impl App {
                 &self.tab_state.tab_label_cache,
                 self.tab_state.tab_close_text.as_ref().map(|(_, text)| text),
                 self.tab_state.tab_new_text.as_ref().map(|(_, text)| text),
+                self.tab_state
+                    .remote_host_clipped
+                    .as_ref()
+                    .map(|cached| &cached.text),
             )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        if let Some(layout) = explorer_layout.as_ref() {
+            let rows = self.explorer.rows();
+            let breadcrumb = self.explorer.breadcrumb();
+            let status_message = self.explorer.status_message();
+            paint_lair_explorer(
+                &mut self.presentation.explorer_text_cache,
+                &self.presentation.render_context,
+                canvas,
+                width,
+                height,
+                self.surface.scale_120,
+                self.presentation.renderer_generation,
+                layout,
+                session_picker_palette(self.presentation.theme),
+                &rows,
+                self.explorer.selected(),
+                breadcrumb.as_deref(),
+                self.explorer.query(),
+                status_message,
+                self.explorer.focused(),
+                self.explorer.filter(),
+                self.explorer.search_active(),
+            )?;
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        if let Some(input) = self.panes.pane.search.input.as_ref() {
+            if let Some(terminal) = search_paint_rect(content_rect, explorer_layout.as_ref()) {
+                paint_search_overlay(
+                    &mut self.presentation.search_text_cache,
+                    &self.presentation.render_context,
+                    canvas,
+                    width,
+                    height,
+                    Self::buffer_rect(terminal, self.surface.scale_120)?,
+                    self.surface.scale_120,
+                    self.presentation.renderer_generation,
+                    session_picker_palette(self.presentation.theme),
+                    input.text(),
+                    &self.panes.pane.search.query,
+                    self.panes.pane.search.matches.len(),
+                    self.panes.pane.search.selected,
+                )?;
+            }
             self.surface.buffers[buffer_index].stale.mark_full();
         }
         if let (Some(layout), Some(picker)) =
@@ -9292,9 +10679,9 @@ impl App {
         {
             let items = picker
                 .items()
-                .iter()
                 .map(|item| SessionPickerTextItem {
                     display_title: &item.display_title,
+                    breadcrumb: &item.breadcrumb,
                     working_directory: &item.working_directory,
                     pane_count: item.pane_count,
                     running_pane_count: item.running_pane_count,
@@ -9313,6 +10700,10 @@ impl App {
                 session_picker_palette(self.presentation.theme),
                 session_picker_purpose(self.modal.selector_kind),
                 &items,
+                picker.new_enabled(),
+                picker.new_blocker(),
+                picker.search_active(),
+                picker.query(),
                 picker.selected_target(),
                 picker.hovered(),
                 self.modal.session_picker_pressed,
@@ -9511,6 +10902,9 @@ impl App {
             .attach_to(self.surface.window.wl_surface())
             .context("attach SHM buffer")?;
         self.surface.window.commit();
+        // Move the submitted buffer and its stale-damage state together. The
+        // next draw may use the previous submission, but never this one.
+        self.surface.buffers.swap(0, buffer_index);
         if let Some(diagnostics) = diagnostics() {
             diagnostics.mark_window_mapped();
         }
@@ -9622,6 +11016,105 @@ fn write_selection_payload(write_pipe: WritePipe, payload: Arc<[u8]>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explorer_filter_gestures_require_matching_release_and_tree_key_ownership() {
+        use super::{
+            ExplorerPointerPress, Keysym, LairExplorerFilter, Modifiers, explorer_filter_key,
+            explorer_released_filter,
+        };
+        let pressed = Some(ExplorerPointerPress::Filter(LairExplorerFilter::Live));
+        assert_eq!(
+            explorer_released_filter(pressed, Some(LairExplorerFilter::Live)),
+            Some(LairExplorerFilter::Live)
+        );
+        assert_eq!(
+            explorer_released_filter(pressed, Some(LairExplorerFilter::Saved)),
+            None
+        );
+        assert_eq!(explorer_released_filter(pressed, None), None);
+        assert_eq!(
+            explorer_released_filter(None, Some(LairExplorerFilter::Live)),
+            None
+        );
+        let row = Some(ExplorerPointerPress::Row(
+            crate::navigation_projection::NavigationNodeId::Lair(splinterm_core::LairId::new()),
+            false,
+        ));
+        assert_eq!(
+            explorer_released_filter(row, Some(LairExplorerFilter::Live)),
+            None
+        );
+        assert!(explorer_filter_key(Keysym::f, Modifiers::default(), false));
+        assert!(explorer_filter_key(Keysym::F, Modifiers::default(), false));
+        assert!(!explorer_filter_key(Keysym::f, Modifiers::default(), true));
+        assert!(!explorer_filter_key(Keysym::r, Modifiers::default(), false));
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                logo: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert!(!explorer_filter_key(Keysym::f, modifiers, false));
+        }
+    }
+
+    #[test]
+    fn explorer_keyboard_context_menu_accepts_only_menu_and_shift_f10() {
+        use super::{Keysym, Modifiers, explorer_context_menu_key};
+        let mut modifiers = Modifiers::default();
+        assert!(explorer_context_menu_key(Keysym::Menu, modifiers));
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+        modifiers.shift = true;
+        assert!(explorer_context_menu_key(Keysym::F10, modifiers));
+        assert!(!explorer_context_menu_key(Keysym::Menu, modifiers));
+        modifiers.ctrl = true;
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+        modifiers.ctrl = false;
+        modifiers.alt = true;
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+        modifiers.alt = false;
+        modifiers.logo = true;
+        assert!(!explorer_context_menu_key(Keysym::F10, modifiers));
+    }
+
+    #[test]
+    fn context_menu_release_rejection_is_consumed_not_a_dispatch_failure() {
+        for reason in [
+            "tab menu is unavailable",
+            "tab menu target is unavailable",
+            "tab menu topology commands are unavailable",
+        ] {
+            let mut attempts = 0;
+            let consumed = super::consume_context_menu_request(|| {
+                attempts += 1;
+                anyhow::bail!(reason)
+            });
+            assert!(
+                consumed,
+                "rejected menu release must not reach terminal input"
+            );
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[test]
+    fn context_menu_release_success_opens_once_and_is_consumed() {
+        let mut attempts = 0;
+        assert!(super::consume_context_menu_request(|| {
+            attempts += 1;
+            Ok(())
+        }));
+        assert_eq!(attempts, 1);
+    }
+
     use std::{env, fs, path::PathBuf};
 
     use super::*;
@@ -9640,6 +11133,190 @@ mod tests {
             .insert_source(source, |(), (), wake_count| *wake_count += 1)
             .unwrap();
         (event_loop, Waker::from(Arc::new(UpdateWake(ping))))
+    }
+
+    #[test]
+    fn explorer_focus_blocks_terminal_ime_until_focus_returns() {
+        assert!(terminal_ime_allowed(true, false, false, None));
+        assert!(!terminal_ime_allowed(true, false, true, None));
+        assert!(!terminal_ime_allowed(true, true, false, None));
+        assert!(!terminal_ime_allowed(false, false, false, None));
+        assert!(terminal_ime_allowed(
+            true,
+            true,
+            true,
+            Some(OwnedFieldTarget::CommandPalette)
+        ));
+        assert!(!terminal_ime_allowed(
+            false,
+            true,
+            true,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(ime_batch_blocked(false, true, false, None));
+        assert!(ime_batch_blocked(false, false, true, None));
+        assert!(!ime_batch_blocked(false, false, false, None));
+        assert!(!ime_batch_blocked(
+            true,
+            true,
+            false,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert!(ime_batch_blocked(
+            true,
+            true,
+            true,
+            Some(OwnedFieldTarget::BindingHelp)
+        ));
+        assert_eq!(
+            picker_ime_reconcile(true, true, true),
+            PickerImeReconcile::Renew
+        );
+    }
+
+    #[test]
+    fn exact_splint_activation_distinguishes_local_failure_from_already_focused() {
+        let target = SplintId::new();
+        let other = SplintId::new();
+        // A matching snapshot is not sufficient: the owner operation may fail.
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (false, Some(other))),
+            None
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (false, None)),
+            None
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (false, Some(target))),
+            Some(false)
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, false, || (true, Some(target))),
+            Some(true)
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, true, true, || panic!(
+                "pending remote focus attempted"
+            )),
+            None
+        );
+        assert_eq!(
+            attempt_exact_splint_focus(target, false, false, || panic!(
+                "stale incarnation focus attempted"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn focused_explorer_returns_to_terminal_only_for_an_outside_primary_press() {
+        let outside_press = PointerEventKind::Press {
+            button: BTN_LEFT,
+            serial: 7,
+            time: 11,
+        };
+        assert!(explorer_pointer_returns_to_terminal(
+            true,
+            false,
+            &outside_press
+        ));
+        assert!(!explorer_pointer_returns_to_terminal(
+            false,
+            false,
+            &outside_press
+        ));
+        assert!(!explorer_pointer_returns_to_terminal(
+            true,
+            true,
+            &outside_press
+        ));
+        assert!(!explorer_pointer_returns_to_terminal(
+            true,
+            false,
+            &PointerEventKind::Motion { time: 12 }
+        ));
+    }
+
+    #[test]
+    fn owned_fields_route_palette_typing_above_explorer_search() {
+        let mut palette = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+        let (target, editor) = App::select_owned_field(
+            true,
+            Some(&mut palette),
+            None,
+            Some(&mut explorer),
+            Some(&mut terminal),
+        )
+        .unwrap();
+        assert_eq!(target, OwnedFieldTarget::CommandPalette);
+        assert!(editor.insert("Toggle Lair explorer"));
+        assert_eq!(palette.text(), "Toggle Lair explorer");
+        assert_eq!(explorer.text(), "keep");
+        assert_eq!(terminal.text(), "terminal");
+    }
+
+    #[test]
+    fn owned_fields_route_prompt_typing_above_background_searches() {
+        let mut prompt = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+        let (target, editor) = App::select_owned_field(
+            true,
+            None,
+            Some(&mut prompt),
+            Some(&mut explorer),
+            Some(&mut terminal),
+        )
+        .unwrap();
+        assert_eq!(target, OwnedFieldTarget::DojoPrompt);
+        assert!(editor.insert("New name"));
+        assert_eq!(prompt.text(), "New name");
+        assert_eq!(explorer.text(), "keep");
+        assert_eq!(terminal.text(), "terminal");
+    }
+
+    #[test]
+    fn owned_fields_nonediting_modal_blocks_background_searches() {
+        for explorer_active in [false, true] {
+            for terminal_active in [false, true] {
+                let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+                let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+                assert!(
+                    App::select_owned_field(
+                        true,
+                        None,
+                        None,
+                        explorer_active.then_some(&mut explorer),
+                        terminal_active.then_some(&mut terminal),
+                    )
+                    .is_none()
+                );
+                assert_eq!(explorer.text(), "keep");
+                assert_eq!(terminal.text(), "terminal");
+            }
+        }
+    }
+
+    #[test]
+    fn owned_fields_restore_background_search_priority_without_a_modal() {
+        let mut explorer = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let (target, editor) =
+            App::select_owned_field(false, None, None, Some(&mut explorer), Some(&mut terminal))
+                .unwrap();
+        assert_eq!(target, OwnedFieldTarget::ExplorerSearch);
+        assert!(editor.insert("explorer"));
+        assert_eq!(terminal.text(), "");
+        let (target, editor) =
+            App::select_owned_field(false, None, None, None, Some(&mut terminal)).unwrap();
+        assert_eq!(target, OwnedFieldTarget::Search);
+        assert!(editor.insert("terminal"));
+        assert_eq!(explorer.text(), "explorer");
+        assert_eq!(terminal.text(), "terminal");
+        assert!(App::select_owned_field(false, None, None, None, None).is_none());
     }
 
     #[test]
@@ -9663,7 +11340,11 @@ mod tests {
                 assert!(App::owned_field_defers_to_modal(target, keysym, plain));
             }
         }
-        for target in [OwnedFieldTarget::DojoPrompt, OwnedFieldTarget::Search] {
+        for target in [
+            OwnedFieldTarget::DojoPrompt,
+            OwnedFieldTarget::ExplorerSearch,
+            OwnedFieldTarget::Search,
+        ] {
             for keysym in [Keysym::Return, Keysym::KP_Enter, Keysym::Escape] {
                 assert!(App::owned_field_defers_to_modal(target, keysym, plain));
             }
@@ -9722,21 +11403,56 @@ mod tests {
     #[test]
     fn hidden_tab_strip_reclaims_managed_window_height() {
         assert_eq!(
-            tab_strip_height(true, true, TAB_STRIP_LOGICAL_HEIGHT + 20),
+            tab_strip_height(true, true, false, TAB_STRIP_LOGICAL_HEIGHT + 20),
             TAB_STRIP_LOGICAL_HEIGHT
         );
         assert_eq!(
-            tab_strip_height(true, true, TAB_STRIP_LOGICAL_HEIGHT - 1),
+            tab_strip_height(true, true, false, TAB_STRIP_LOGICAL_HEIGHT - 1),
             TAB_STRIP_LOGICAL_HEIGHT - 1
         );
-        assert_eq!(tab_strip_height(true, false, 200), 0);
-        assert_eq!(tab_strip_height(false, true, 200), 0);
+        for managed in [false, true] {
+            for visible in [false, true] {
+                assert_eq!(
+                    tab_strip_height(managed, visible, true, 200),
+                    TAB_STRIP_LOGICAL_HEIGHT
+                );
+                assert_eq!(tab_strip_height(managed, visible, true, 10), 10);
+                assert_eq!(tab_strip_height(managed, visible, true, 0), 0);
+            }
+        }
+        assert_eq!(tab_strip_height(true, false, false, 200), 0);
+        assert_eq!(tab_strip_height(false, true, false, 200), 0);
+    }
+
+    #[test]
+    fn picker_retry_requests_preserve_kind_and_original_lair_scope() {
+        assert!(matches!(
+            session_picker_retry_request(&WindowTopologyCommand::RequestSessionPicker),
+            Some(WindowTopologyCommand::RequestSessionPicker)
+        ));
+        for kind in [SelectorKind::Dojo, SelectorKind::Lair] {
+            let lair_id = LairId::new();
+            let request = WindowTopologyCommand::RequestSelector { kind, lair_id };
+            assert!(matches!(
+                session_picker_retry_request(&request),
+                Some(WindowTopologyCommand::RequestSelector {
+                    kind: retry_kind,
+                    lair_id: retry_lair,
+                }) if retry_kind == kind && retry_lair == lair_id
+            ));
+        }
+        assert!(
+            session_picker_retry_request(&WindowTopologyCommand::NewLair {
+                source_splint_id: SplintId::new()
+            })
+            .is_none()
+        );
     }
 
     #[test]
     fn picker_hierarchy_routes_copy_and_new_actions_at_the_selected_level() {
         let lair_id = LairId::new();
-        let cwd = PathBuf::from("/work");
+        let source_splint_id = SplintId::new();
         assert_eq!(
             session_picker_purpose(None),
             SessionPickerPurpose::RecentDojos
@@ -9758,17 +11474,40 @@ mod tests {
             session_picker_title(Some(SelectorKind::Lair)),
             "Splinterm — Lairs"
         );
+        let revision = TopologyRevision::new(9);
         assert_eq!(
-            session_picker_new_command(Some(SelectorKind::Dojo), lair_id, cwd.clone()),
-            WindowTopologyCommand::NewDojo {
+            session_picker_new_command(
+                Some(SelectorKind::Dojo),
                 lair_id,
-                cwd: cwd.clone(),
+                source_splint_id,
+                SessionPickerCreationTarget {
+                    topology_revision: revision,
+                    action: NavigationAction::CreateDojo,
+                },
+            )
+            .unwrap(),
+            WindowTopologyCommand::PickerNewDojo {
+                topology_revision: revision,
+                lair_id,
+                source_splint_id,
             }
         );
         for selector_kind in [None, Some(SelectorKind::Lair)] {
             assert_eq!(
-                session_picker_new_command(selector_kind, lair_id, cwd.clone()),
-                WindowTopologyCommand::NewLair { cwd: cwd.clone() }
+                session_picker_new_command(
+                    selector_kind,
+                    lair_id,
+                    source_splint_id,
+                    SessionPickerCreationTarget {
+                        topology_revision: revision,
+                        action: NavigationAction::CreateLair,
+                    },
+                )
+                .unwrap(),
+                WindowTopologyCommand::PickerNewLair {
+                    topology_revision: revision,
+                    source_splint_id,
+                }
             );
         }
     }
@@ -11381,6 +13120,224 @@ mod tests {
     }
 
     #[test]
+    fn live_shaping_cached_pane_cursor_updates_match_full_without_frame_rebuild() {
+        use crate::font_shaping::{FeatureSettings, FontLigatures};
+        let context = RenderContext::new(u16::MAX).with_test_shaping(
+            FontLigatures::Cursor,
+            FeatureSettings::parse("calt=1").unwrap(),
+        );
+        let theme = ResolvedTheme::default();
+        for role in ["visible-inactive", "hidden"] {
+            for history in [false, true] {
+                let mut options = pane_options(SplintId::new());
+                options.snapshot.columns = 2;
+                options.snapshot.rows = 2;
+                let rows: Vec<_> = (1..=3)
+                    .map(|id| {
+                        let mut row = blank_row(2);
+                        row.row_id = Some(id);
+                        row.cells[0].content = "!".into();
+                        row.cells[1].content = "=".into();
+                        row
+                    })
+                    .collect();
+                options.snapshot.visible_rows = rows[1..].to_vec();
+                options.snapshot.scrollback_rows = rows[..1].to_vec();
+                options.snapshot.available_scrollback_rows = 1;
+                options.snapshot.oldest_available_scrollback_row_id = Some(1);
+                options.snapshot.newest_available_scrollback_row_id = Some(1);
+                apply_theme(&mut options.snapshot, theme);
+                let mut pane = PaneView::from_options_with_context(options, 120, &context).unwrap();
+                if history {
+                    pane.scrollback_viewport
+                        .scroll_up(1, pane.snapshot.as_ref().unwrap());
+                    rebuild_pane_scaled_frame_with_context(&mut pane, 120, &context).unwrap();
+                }
+                for (column, row, visible) in [(1, 0, true), (0, 1, true), (0, 1, false)] {
+                    let snapshot = pane.snapshot.as_ref().unwrap();
+                    let mut update = empty_update();
+                    update.base_revision = snapshot.revision;
+                    update.revision = snapshot.revision + 1;
+                    update.cursor = Some(splinterm_protocol::TerminalCursor {
+                        column,
+                        row,
+                        deferred_wrap: false,
+                    });
+                    let mut modes = snapshot.input_modes;
+                    modes.cursor_visible = visible;
+                    update.input_modes = Some(modes);
+                    let impact = pane
+                        .apply_background_update(
+                            WindowUpdate::Update {
+                                update,
+                                image_sources: None,
+                                trace: None,
+                            },
+                            theme,
+                            role,
+                        )
+                        .unwrap();
+                    assert!(impact.visual_changed);
+                    assert!(
+                        !impact.frame_dirty,
+                        "cursor-only {role} update must not request a whole frame rebuild"
+                    );
+                    let display = pane.display_snapshot().unwrap();
+                    let frame = pane.snapshot_frame.as_ref().unwrap();
+                    let full =
+                        SnapshotFrame::load_scaled_with_context(&display, 120, &context).unwrap();
+                    let geometry = frame.window_geometry(160, 100, 120).unwrap();
+                    let mut actual = vec![0; 160 * 100 * 4];
+                    let mut expected = actual.clone();
+                    crate::renderer::paint_snapshot(
+                        &mut actual,
+                        160,
+                        100,
+                        frame,
+                        &geometry,
+                        true,
+                        crate::config::CursorStyle::Block,
+                    );
+                    crate::renderer::paint_snapshot(
+                        &mut expected,
+                        160,
+                        100,
+                        &full,
+                        &geometry,
+                        true,
+                        crate::config::CursorStyle::Block,
+                    );
+                    assert_eq!(actual, expected, "cached {role}, history={history}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "mixed inactive damage keeps the real reducer, rebuild selection, and pixel checks together"
+    )]
+    fn live_shaping_mixed_inactive_updates_repaint_both_changed_panes() {
+        use crate::font_shaping::{FeatureSettings, FontLigatures};
+        let context = RenderContext::new(u16::MAX).with_test_shaping(
+            FontLigatures::Cursor,
+            FeatureSettings::parse("calt=1").unwrap(),
+        );
+        let theme = ResolvedTheme::default();
+        let render = |frame: &SnapshotFrame| {
+            let geometry = frame.window_geometry(160, 100, 120).unwrap();
+            let mut pixels = vec![0; 160 * 100 * 4];
+            crate::renderer::paint_snapshot(
+                &mut pixels,
+                160,
+                100,
+                frame,
+                &geometry,
+                false,
+                crate::config::CursorStyle::Block,
+            );
+            pixels
+        };
+        for order in [[0, 1], [1, 0]] {
+            let ids = [SplintId::new(), SplintId::new(), SplintId::new()];
+            let mut panes: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let mut options = pane_options(*id);
+                    options.snapshot.columns = 2;
+                    options.snapshot.rows = 1;
+                    options.snapshot.input_modes.cursor_visible = false;
+                    let mut row = blank_row(2);
+                    row.row_id = options.snapshot.visible_rows[0].row_id;
+                    row.cells[0].content = "!".into();
+                    row.cells[1].content = "=".into();
+                    options.snapshot.visible_rows = vec![row];
+                    apply_theme(&mut options.snapshot, theme);
+                    PaneView::from_options_with_context(options, 120, &context).unwrap()
+                })
+                .collect();
+            let mut pixels: Vec<_> = panes
+                .iter()
+                .map(|pane| render(pane.snapshot_frame.as_ref().unwrap()))
+                .collect();
+            let before = pixels.clone();
+            let mut drain = InactiveUpdateDrain::default();
+            for index in order {
+                let pane = &mut panes[index];
+                let snapshot = pane.snapshot.as_ref().unwrap();
+                let mut update = empty_update();
+                update.base_revision = snapshot.revision;
+                update.revision = snapshot.revision + 1;
+                if index == 0 {
+                    update.cursor = Some(splinterm_protocol::TerminalCursor {
+                        column: 1,
+                        row: 0,
+                        deferred_wrap: false,
+                    });
+                    let mut modes = snapshot.input_modes;
+                    modes.cursor_visible = true;
+                    update.input_modes = Some(modes);
+                } else {
+                    let mut row = snapshot.visible_rows[0].clone();
+                    row.cells[0].content = "a".into();
+                    row.cells[1].content = "b".into();
+                    update
+                        .rows
+                        .push(splinterm_protocol::TerminalRowPatch { index: 0, row });
+                }
+                let impact = apply_inactive_update_batch(
+                    pane,
+                    [WindowUpdate::Update {
+                        update,
+                        image_sources: None,
+                        trace: None,
+                    }],
+                    theme,
+                )
+                .unwrap();
+                assert!(impact.visual_changed);
+                assert_eq!(impact.frame_dirty, index == 1);
+                drain.record(Some(ids[index]), impact);
+            }
+            assert!(drain.changed);
+            assert_eq!(drain.dirty_frames, HashSet::from([ids[1]]));
+            assert_eq!(
+                rebuild_inactive_frames_with_context(
+                    &mut panes,
+                    &drain.dirty_frames,
+                    false,
+                    120,
+                    &context,
+                )
+                .unwrap(),
+                1,
+                "only the content pane needs a frame rebuild"
+            );
+            assert_eq!(drain.panes_to_repaint(), &HashSet::from([ids[0], ids[1]]));
+            for (index, pane) in panes.iter().enumerate() {
+                if drain.panes_to_repaint().contains(&ids[index]) {
+                    pixels[index] = render(pane.snapshot_frame.as_ref().unwrap());
+                }
+                let display = pane.display_snapshot().unwrap();
+                let full =
+                    SnapshotFrame::load_scaled_with_context(&display, 120, &context).unwrap();
+                assert_eq!(
+                    pixels[index],
+                    render(&full),
+                    "pane {index}, order {order:?}"
+                );
+            }
+            assert_ne!(
+                pixels[0], before[0],
+                "cursor break changes inactive ligature ink"
+            );
+            assert_ne!(pixels[1], before[1], "content update changes peer ink");
+            assert_eq!(pixels[2], before[2], "untouched pane stays unchanged");
+        }
+    }
+
+    #[test]
     fn inactive_pane_reducer_applies_only_contiguous_matching_updates() {
         let splint_id = SplintId::new();
         let mut pane = PaneView::from_options(pane_options(splint_id), SCALE_DENOMINATOR).unwrap();
@@ -12073,6 +14030,174 @@ mod tests {
         ));
     }
 
+    fn reduce_history_merge_case(
+        cached: &[u64],
+        previous_newest: u64,
+        previous_available: usize,
+        transition: HistoryTransition,
+        returned: &[u64],
+        available: usize,
+        oldest: u64,
+    ) -> TerminalSnapshot {
+        let mut current = snapshot(SplintId::new(), 1, 10);
+        current.columns = 1;
+        current.rows = 34;
+        current.visible_rows = vec![blank_row(1); 34];
+        current.scrollback_rows = cached.iter().map(|id| history_row(*id, 0)).collect();
+        current.available_scrollback_rows = previous_available;
+        current.oldest_available_scrollback_row_id = cached.first().copied();
+        current.newest_available_scrollback_row_id = Some(previous_newest);
+        let generation = current.history_generation;
+        apply_scrollback_update(
+            &mut current,
+            splinterm_protocol::TerminalScrollbackUpdate {
+                transition,
+                history_generation: generation,
+                oldest_available_row_id: Some(oldest),
+                newest_available_row_id: returned.last().copied(),
+                rows: returned.iter().map(|id| history_row(*id, 1)).collect(),
+                available_rows: available,
+                omitted_oldest_rows: available - returned.len(),
+            },
+        )
+        .unwrap();
+        current
+    }
+
+    #[test]
+    fn history_merge_truncated_append_drops_disconnected_blank_prefix() {
+        let returned = (74..=89).collect::<Vec<_>>();
+        let current = reduce_history_merge_case(
+            &[1, 2],
+            2,
+            2,
+            HistoryTransition::Append {
+                appended_rows: 87,
+                trimmed_rows: 0,
+            },
+            &returned,
+            89,
+            1,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            returned
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 73);
+        let mut viewport = crate::viewport::ScrollbackViewport::default();
+        viewport.scroll_up(33, &current);
+        assert_eq!(viewport.offset_from_bottom(), 16);
+        assert_eq!(viewport.visible_rows(&current)[0].row_id, Some(74));
+        assert!(
+            !viewport.visible_rows(&current)[0].cells[0]
+                .content
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn history_merge_replace_requires_overlap_not_numeric_adjacency() {
+        let current = reduce_history_merge_case(
+            &[10, 20],
+            20,
+            2,
+            HistoryTransition::Replace,
+            &[21, 30],
+            4,
+            10,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            vec![21, 30]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 2);
+    }
+
+    #[test]
+    fn history_merge_retains_overlap_with_nonconsecutive_ids() {
+        let current = reduce_history_merge_case(
+            &[10, 20, 30, 40],
+            40,
+            4,
+            HistoryTransition::Replace,
+            &[30, 40, 70],
+            5,
+            10,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30, 40, 70]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 0);
+    }
+
+    #[test]
+    fn history_merge_complete_append_retains_nonconsecutive_ids_and_trim() {
+        for (trimmed_rows, oldest, available, expected) in [
+            (0, 10, 6, vec![10, 20, 30, 40, 70, 90]),
+            (2, 30, 4, vec![30, 40, 70, 90]),
+        ] {
+            let current = reduce_history_merge_case(
+                &[10, 20, 30, 40],
+                40,
+                4,
+                HistoryTransition::Append {
+                    appended_rows: 2,
+                    trimmed_rows,
+                },
+                &[70, 90],
+                available,
+                oldest,
+            );
+            assert_eq!(
+                current
+                    .scrollback_rows
+                    .iter()
+                    .filter_map(|r| r.row_id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(current.omitted_oldest_scrollback_rows, 0);
+        }
+    }
+
+    #[test]
+    fn history_merge_complete_append_does_not_bridge_an_older_only_cache() {
+        let current = reduce_history_merge_case(
+            &[10, 20],
+            50,
+            5,
+            HistoryTransition::Append {
+                appended_rows: 1,
+                trimmed_rows: 0,
+            },
+            &[70],
+            6,
+            10,
+        );
+        assert_eq!(
+            current
+                .scrollback_rows
+                .iter()
+                .filter_map(|r| r.row_id)
+                .collect::<Vec<_>>(),
+            vec![70]
+        );
+        assert_eq!(current.omitted_oldest_scrollback_rows, 5);
+    }
+
     #[test]
     fn same_generation_trim_discards_cached_rows_before_daemon_oldest() {
         let mut current = snapshot(SplintId::new(), 1, 10);
@@ -12410,6 +14535,101 @@ mod tests {
     }
 
     #[test]
+    fn window_title_preserves_app_identity_and_shell_title() {
+        let authority = AuthorityStatus::default();
+        for title in [
+            None,
+            Some(""),
+            Some(" \t\n"),
+            Some("Splinterm"),
+            Some(" Splinterm "),
+        ] {
+            assert_eq!(
+                window_title(title, false, &authority, false, None),
+                "Splinterm"
+            );
+        }
+        for (title, expected) in [
+            (
+                "tester@nixos-plasma: ~",
+                "Splinterm — tester@nixos-plasma: ~",
+            ),
+            ("  project — editor  ", "Splinterm — project — editor"),
+            ("作業", "Splinterm — 作業"),
+        ] {
+            assert_eq!(
+                window_title(Some(title), false, &authority, false, None),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn window_title_preserves_app_identity_with_authority_status() {
+        for (authority, label) in [
+            (AuthorityStatus::default(), ""),
+            (
+                AuthorityStatus {
+                    grants: vec![(1, "agent".into())],
+                    development_bypass: false,
+                },
+                " — EXTERNAL ACCESS ACTIVE",
+            ),
+            (
+                AuthorityStatus {
+                    grants: vec![(1, "agent".into())],
+                    development_bypass: true,
+                },
+                " — DEVELOPMENT BYPASS",
+            ),
+        ] {
+            for controller_active in [false, true] {
+                let controller = if controller_active {
+                    " — local controller"
+                } else {
+                    ""
+                };
+                assert_eq!(
+                    window_title(Some("shell"), controller_active, &authority, false, None),
+                    format!("Splinterm — shell{controller}{label}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_paint_rect_excludes_explorer_drawer() {
+        let content = Rect {
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 320,
+        };
+        let drawer = lair_explorer_layout(content, 160, &[], None, 0).unwrap();
+        assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
+        let terminal = search_paint_rect(drawer.terminal, Some(&drawer)).unwrap();
+        assert_eq!(terminal.x, drawer.panel.width);
+        assert_eq!(terminal.width, content.width - drawer.panel.width);
+        let too_narrow = Rect {
+            width: 200,
+            ..content
+        };
+        let drawer = lair_explorer_layout(too_narrow, 160, &[], None, 0).unwrap();
+        assert!(search_paint_rect(drawer.terminal, Some(&drawer)).is_none());
+        let wide = Rect {
+            width: 800,
+            ..content
+        };
+        let docked = lair_explorer_layout(wide, 160, &[], None, 0).unwrap();
+        assert_eq!(docked.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(
+            search_paint_rect(docked.terminal, Some(&docked)),
+            Some(docked.terminal)
+        );
+        assert_eq!(search_paint_rect(wide, None), Some(wide));
+    }
+
+    #[test]
     fn trusted_title_surfaces_control_decision_and_bounded_search_state() {
         let authority = AuthorityStatus::default();
         let mut search = SearchUiState {
@@ -12428,7 +14648,7 @@ mod tests {
             preview: "needle".into(),
         });
         let title = window_title(Some("shell"), true, &authority, true, Some(&search));
-        assert!(title.contains("local controller"));
+        assert!(title.starts_with("Splinterm — shell — local controller"));
         assert!(title.contains("CONTROL REQUEST"));
         assert!(title.contains("SEARCH: needlespoof [1 match(es)"));
         assert!(!title.contains('\n'));
@@ -13124,17 +15344,17 @@ mod tests {
             ControlReleaseOutcome::Disconnected
         );
 
+        let new_lair = WindowTopologyCommand::NewLair {
+            source_splint_id: SplintId::new(),
+        };
         let (topology_sender, mut topology_receiver) = tokio::sync::mpsc::channel(1);
         try_topology_command(
             &topology_sender,
             WindowTopologyCommand::RequestSessionPicker,
         )
         .expect("first topology command");
-        let error = try_topology_command(
-            &topology_sender,
-            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
-        )
-        .expect_err("bounded topology overflow");
+        let error = try_topology_command(&topology_sender, new_lair.clone())
+            .expect_err("bounded topology overflow");
         assert!(error.to_string().contains("full"));
         assert!(topology_receiver.try_recv().is_ok());
         drop(topology_receiver);
@@ -13154,11 +15374,7 @@ mod tests {
             pending: Some(pending),
         };
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        try_topology_command(
-            &sender,
-            WindowTopologyCommand::NewLair { cwd: "/tmp".into() },
-        )
-        .unwrap();
+        try_topology_command(&sender, new_lair).unwrap();
         let mut rolled_back = None;
         let error = try_topology_command_with_rollback(
             Some(&sender),
@@ -13242,6 +15458,110 @@ mod tests {
     }
 
     #[test]
+    fn draw_buffer_selection_preserves_committed_canvas_and_stays_bounded() {
+        for count in 0..=MAX_SHM_BUFFERS {
+            for mask in 0..(1_usize << count) {
+                let choice = choose_draw_buffer(count, |index| mask & (1 << index) != 0);
+                let alternative = (1..count).find(|index| mask & (1 << index) != 0);
+                let expected = alternative.map_or_else(
+                    || {
+                        if count < MAX_SHM_BUFFERS {
+                            DrawBufferChoice::Allocate
+                        } else {
+                            DrawBufferChoice::Wait
+                        }
+                    },
+                    DrawBufferChoice::Reuse,
+                );
+                assert_eq!(choice, expected, "count={count} available={mask:b}");
+            }
+        }
+    }
+
+    #[test]
+    fn composing_next_canvas_does_not_clear_committed_chrome() {
+        let mut canvases = [vec![7_u8; 32], vec![0_u8; 32]];
+        for marker in 8_u8..12 {
+            let displayed = canvases[0].clone();
+            let DrawBufferChoice::Reuse(index) = choose_draw_buffer(canvases.len(), |_| true)
+            else {
+                panic!("the alternate released buffer is reusable");
+            };
+            // Full terminal backing synchronization temporarily clears chrome.
+            canvases[index].fill(0);
+            assert_eq!(canvases[0], displayed);
+            // Chrome is rebuilt before submission; then rotate whole buffers.
+            canvases[index][..8].fill(marker);
+            canvases.swap(0, index);
+            assert_eq!(&canvases[0][..8], &[marker; 8]);
+            assert_eq!(canvases[1], displayed);
+        }
+    }
+
+    #[test]
+    fn remote_observer_buffer_contains_header_and_translated_terminal_at_all_scales() {
+        use crate::geometry::{CellGeometry, TerminalPadding};
+        for scale in [120, 150, 180, 240] {
+            let logical_size = (801, 601);
+            let header = tab_strip_height(false, false, true, logical_size.1);
+            let geometry = WindowGeometry::fit_window(
+                logical_size.0,
+                logical_size.1 - header,
+                CellGeometry::new(8, 16).unwrap(),
+                TerminalPadding::uniform(0),
+                scale,
+                2,
+                65535,
+                2,
+                65535,
+            )
+            .unwrap()
+            .translated(0, logical_extent_to_buffer(header, scale).unwrap())
+            .unwrap();
+            let content_only = geometry.buffer_layout().unwrap();
+            let full = buffer_dimensions(logical_size.0, logical_size.1, scale).unwrap();
+            assert!(content_only.1 < full.1);
+            assert_eq!(
+                window_buffer_dimensions(false, false, true, logical_size, scale, Some(geometry))
+                    .unwrap(),
+                full,
+                "remote observer must allocate the full surface at scale {scale}"
+            );
+            let grid = geometry.visible_grid_rect;
+            assert_eq!(grid.y, logical_extent_to_buffer(header, scale).unwrap());
+            assert!(grid.x + grid.width <= full.0);
+            assert!(grid.y + grid.height <= full.1);
+            assert!(
+                grid.y + grid.height > content_only.1,
+                "old buffer clips bottom rows"
+            );
+            // Retain the existing local geometry path and full-surface pane/tab paths.
+            for (panes, tabs, expected) in [
+                (false, false, content_only),
+                (true, false, full),
+                (false, true, full),
+            ] {
+                assert_eq!(
+                    window_buffer_dimensions(
+                        panes,
+                        tabs,
+                        false,
+                        logical_size,
+                        scale,
+                        Some(geometry)
+                    )
+                    .unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                window_buffer_dimensions(false, false, false, logical_size, scale, None).unwrap(),
+                full
+            );
+        }
+    }
+
+    #[test]
     fn buffer_dimensions_scale_logical_size_and_stride() {
         assert_eq!(
             buffer_dimensions(960, 600, 120).expect("1x"),
@@ -13284,16 +15604,18 @@ mod tests {
     fn owned_modal_ime_batches_cross_only_the_fresh_generation_barrier() {
         assert!(ime_batch_blocked(
             true,
+            false,
             true,
             Some(OwnedFieldTarget::BindingHelp)
         ));
         assert!(!ime_batch_blocked(
             true,
             false,
+            false,
             Some(OwnedFieldTarget::BindingHelp)
         ));
-        assert!(ime_batch_blocked(true, false, None));
-        assert!(!ime_batch_blocked(false, false, None));
+        assert!(ime_batch_blocked(true, false, false, None));
+        assert!(!ime_batch_blocked(false, false, false, None));
     }
 
     #[test]

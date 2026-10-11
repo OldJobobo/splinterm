@@ -202,15 +202,20 @@ port = 22                            # optional
 identity_files = ["~/.ssh/id_ed25519"]
 known_hosts_file = "~/.ssh/known_hosts"
 connect_timeout_seconds = 15
+executable = "/usr/bin/splinterm"      # optional remote path; this is the default
 ```
 
 Unknown fields, unsupported versions, more than 64 profiles, unsafe names,
 ambiguous host/user tokens, zero ports, timeouts outside 1–300 seconds, more
 than eight identity files, documents above 64 KiB, and path values above 4 KiB
-fail closed. Explicit paths must be absolute or begin with `~/`, name readable
-regular files, and contain no whitespace or control characters. Profiles cannot
-supply arbitrary SSH options, commands, forwarding, environment, or shell
-fragments.
+fail closed. Identity and known-hosts paths must be absolute or begin with `~/`,
+name readable local regular files, and contain no whitespace or control characters.
+The optional `executable` is instead an absolute path on the remote host; it is
+not checked locally. For a system-installed NixOS package, use
+`/run/current-system/sw/bin/splinterm`. It accepts only ASCII letters, digits,
+`/`, `.`, `_`, and `-`, with no empty, `.` or `..` components. Relay arguments
+remain fixed. Profiles cannot supply arbitrary SSH options, commands, forwarding,
+environment, or shell fragments. See `docs/nixos.md` for NixOS installation.
 
 `~/.ssh/config` may still select ordinary aliases, identities, certificates, and
 proxy routing. Splinterm's command-line safety options override conflicting
@@ -269,3 +274,29 @@ SSH/relay/channel loss shuts down the affected local views and drops their
 connections, releasing subscriptions and controller leases. It sends no kill,
 close, restore, or other process-lifecycle request, so daemon-owned remote
 Splints continue running.
+
+## Remote window hostname tag
+
+Available in the 0.1.1 source; publication is pending.
+
+Remote graphical windows show a compact `Remote: hostname` tag in the upper-right
+application header. The hostname is the connected daemon's kernel OS nodename,
+not the SSH profile/alias, terminal title, OSC data, or working directory. Local
+windows have no tag and retain their existing geometry. Hiding remote Dojo tabs
+keeps a minimal header for the tag; the tag is noninteractive and does not cover
+terminal cells or tab actions. Narrow windows truncate the label by display cells,
+retaining the `Remote` prefix when it fits.
+
+This is informational connection-time metadata, **not a trusted security or
+connection-health indicator**. Each new Window takes the hostname from its initial
+connection to its fixed endpoint; tab selection does not change it. Renaming the
+host does not update an existing Window. Transport failure continues to use the
+existing shutdown/error lifecycle, not a new reconnection mechanism.
+
+Older daemons that omit the optional handshake field show `Remote`. Empty,
+non-UTF-8 OS names, names over 255 UTF-8 bytes, and metadata containing anything
+other than letters/numbers, dots, hyphens, or underscores also fall back to
+`Remote` (including control, whitespace, and bidi-formatting characters). The
+additive private-protocol field does not change protocol negotiation or public
+CLI schemas; older clients ignore it. No hostname command, shell lookup, or
+`HOSTNAME` environment value is used.

@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use anyhow::Result;
 use unicode_width::UnicodeWidthChar;
 
+#[cfg(test)]
+use crate::frontend::{TAB_MENU_ACTIONS, tab_menu_descriptor};
 use crate::{
     frontend::{
         BindingHelpUi, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandPaletteUi,
-        DojoPromptUi, TAB_MENU_ACTIONS, TabContextMenuUi, TabMenuActionId, TerminationDecision,
-        command_descriptor, tab_menu_descriptor,
+        DojoPromptUi, TabContextMenuUi, TabMenuActionId, TerminationDecision, command_descriptor,
     },
     geometry::Rect,
     keymap::ResolvedKeymap,
@@ -402,6 +403,25 @@ impl CommandPaletteTextCache {
             .entries
             .get(&key)
             .expect("inserted command text remains"))
+    }
+
+    pub(crate) fn tab_menu_label_width(
+        &mut self,
+        context: &RenderContext,
+        actions: &[crate::frontend::TabMenuActionDescriptor],
+        scale_120: u32,
+        renderer_generation: u64,
+    ) -> Result<u32> {
+        let mut width = 0;
+        for action in actions {
+            for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                width = width.max(
+                    self.text(context, action.title, style, scale_120, renderer_generation)?
+                        .pixel_width(),
+                );
+            }
+        }
+        Ok(width.saturating_mul(120).div_ceil(scale_120.max(1)))
     }
 
     #[cfg(test)]
@@ -935,6 +955,7 @@ pub(crate) fn paint_command_palette(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TabMenuRowLayout {
     pub(crate) action: TabMenuActionId,
+    pub(crate) label: &'static str,
     pub(crate) rect: Rect,
     pub(crate) title: Rect,
 }
@@ -949,15 +970,21 @@ pub(crate) struct TabContextMenuLayout {
 pub(crate) fn tab_context_menu_layout(
     bounds: Rect,
     anchor: (u32, u32),
+    actions: &[crate::frontend::TabMenuActionDescriptor],
+    label_width: u32,
 ) -> Option<TabContextMenuLayout> {
-    let rows_height = TAB_MENU_ROW_HEIGHT
-        .saturating_mul(u32::try_from(TAB_MENU_ACTIONS.len()).unwrap_or(u32::MAX));
+    let rows_height =
+        TAB_MENU_ROW_HEIGHT.saturating_mul(u32::try_from(actions.len()).unwrap_or(u32::MAX));
     if bounds.width <= TAB_MENU_SHADOW
         || bounds.height < rows_height.saturating_add(TAB_MENU_SHADOW)
     {
         return None;
     }
-    let panel_width = TAB_MENU_WIDTH.min(bounds.width.saturating_sub(TAB_MENU_SHADOW));
+    let preferred_width = label_width
+        .saturating_add(TAB_MENU_CONTENT_INSET.saturating_mul(2))
+        .saturating_add(TAB_MENU_INDICATOR_WIDTH)
+        .max(TAB_MENU_WIDTH);
+    let panel_width = preferred_width.min(bounds.width.saturating_sub(TAB_MENU_SHADOW));
     let available_height = bounds.height.saturating_sub(TAB_MENU_SHADOW);
     let vertical_padding = TAB_MENU_PADDING.min(available_height.saturating_sub(rows_height) / 2);
     let panel_height = rows_height.saturating_add(vertical_padding.saturating_mul(2));
@@ -989,7 +1016,9 @@ pub(crate) fn tab_context_menu_layout(
         height: panel_height,
     };
     let horizontal_inset = TAB_MENU_CONTENT_INSET.min(panel_width / 6);
-    let rows = TAB_MENU_ACTIONS
+    let indicator_width = TAB_MENU_INDICATOR_WIDTH
+        .min(panel_width.saturating_sub(horizontal_inset.saturating_mul(2)));
+    let rows = actions
         .iter()
         .enumerate()
         .map(|(index, descriptor)| {
@@ -1003,17 +1032,18 @@ pub(crate) fn tab_context_menu_layout(
             };
             TabMenuRowLayout {
                 action: descriptor.id,
+                label: descriptor.title,
                 rect,
                 title: Rect {
                     x: rect
                         .x
                         .saturating_add(horizontal_inset)
-                        .saturating_add(TAB_MENU_INDICATOR_WIDTH),
+                        .saturating_add(indicator_width),
                     y: rect.y,
                     width: rect
                         .width
                         .saturating_sub(horizontal_inset.saturating_mul(2))
-                        .saturating_sub(TAB_MENU_INDICATOR_WIDTH),
+                        .saturating_sub(indicator_width),
                     height: rect.height,
                 },
             }
@@ -1163,14 +1193,17 @@ pub(crate) fn paint_tab_context_menu(
             palette.primary
         };
         if selected {
+            let inset = 3_u32
+                .saturating_mul(scale_120)
+                .div_ceil(120)
+                .min(rect.width);
             let indicator = Rect {
-                x: rect
-                    .x
-                    .saturating_add(3_u32.saturating_mul(scale_120).div_ceil(120)),
+                x: rect.x.saturating_add(inset),
                 y: rect.y,
                 width: TAB_MENU_INDICATOR_WIDTH
                     .saturating_mul(scale_120)
-                    .div_ceil(120),
+                    .div_ceil(120)
+                    .min(rect.width.saturating_sub(inset)),
                 height: rect.height,
             };
             paint_text(
@@ -1194,7 +1227,7 @@ pub(crate) fn paint_tab_context_menu(
             canvas,
             width,
             height,
-            tab_menu_descriptor(row.action).title,
+            row.label,
             if selected {
                 ChromeTextStyle::Bold
             } else {
@@ -1735,6 +1768,153 @@ mod tests {
     }
 
     #[test]
+    fn lair_context_menu_layout_uses_the_available_action_catalog() {
+        let actions = [
+            TabMenuActionId::RenameLair,
+            TabMenuActionId::NewDojo,
+            TabMenuActionId::PinLair,
+            TabMenuActionId::PreviewLair,
+            TabMenuActionId::TerminateLair,
+        ]
+        .map(tab_menu_descriptor);
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 400,
+        };
+        let layout = tab_context_menu_layout(bounds, (639, 399), &actions, 0).unwrap();
+        assert_eq!(layout.rows.len(), actions.len());
+        assert_eq!(layout.rows[0].action, TabMenuActionId::RenameLair);
+        assert_eq!(
+            layout.panel.height,
+            TAB_MENU_ROW_HEIGHT * u32::try_from(actions.len()).unwrap() + TAB_MENU_PADDING * 2
+        );
+        let row = layout.rows[0].rect;
+        assert_eq!(
+            tab_context_menu_hit_test(&layout, (f64::from(row.x), f64::from(row.y))),
+            Some(TabMenuActionId::RenameLair)
+        );
+        assert_eq!(
+            tab_context_menu_hit_test(&layout, (f64::from(row.x), f64::from(row.y + row.height))),
+            Some(actions[1].id)
+        );
+    }
+
+    #[test]
+    fn context_menu_layout_retains_explorer_label_instead_of_tab_label() {
+        let descriptor = crate::frontend::TabMenuActionDescriptor {
+            id: TabMenuActionId::ActivateTab,
+            title: "Open / Activate",
+        };
+        let bounds = Rect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 400,
+        };
+        let layout = tab_context_menu_layout(bounds, (0, 0), &[descriptor], 0).unwrap();
+        assert_eq!(layout.rows[0].label, "Open / Activate");
+        assert_ne!(
+            layout.rows[0].label,
+            tab_menu_descriptor(descriptor.id).title
+        );
+    }
+
+    #[test]
+    fn context_menu_full_action_labels_fit_at_supported_scales() {
+        let context = RenderContext::new(u16::MAX);
+        let mut cache = CommandPaletteTextCache::default();
+        let actions = TAB_MENU_ACTIONS.into_iter().chain(
+            [
+                TabMenuActionId::RenameLair,
+                TabMenuActionId::SaveLayout,
+                TabMenuActionId::PinLair,
+                TabMenuActionId::UnpinLair,
+                TabMenuActionId::PreviewLair,
+                TabMenuActionId::Restore,
+                TabMenuActionId::TerminateLair,
+                TabMenuActionId::FocusSplint,
+                TabMenuActionId::SplitBelow,
+                TabMenuActionId::SplitRight,
+                TabMenuActionId::CloseSplint,
+            ]
+            .map(tab_menu_descriptor),
+        );
+        for action in actions {
+            for width in [320, 640] {
+                let bounds = Rect {
+                    x: 17,
+                    y: 23,
+                    width,
+                    height: 400,
+                };
+                for scale in [120, 150, 180, 240] {
+                    let label_width = cache
+                        .tab_menu_label_width(&context, &[action], scale, 1)
+                        .unwrap();
+                    let layout = tab_context_menu_layout(
+                        bounds,
+                        (bounds.x + width, 400),
+                        &[action],
+                        label_width,
+                    )
+                    .unwrap();
+                    let clip = buffer_rect(layout.rows[0].title, scale);
+                    for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                        let text = cache.text(&context, action.title, style, scale, 1).unwrap();
+                        assert!(
+                            text.pixel_width() <= clip.width,
+                            "{} at width {width}, scale {scale}: {} > {}",
+                            action.title,
+                            text.pixel_width(),
+                            clip.width
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_menu_narrow_viewports_bound_labels_and_action_hits() {
+        for width in [1, 6, 7, 12, 40, 156, 223, 224, 230, 240, 640] {
+            let bounds = Rect {
+                x: 17,
+                y: 23,
+                width,
+                height: 400,
+            };
+            for anchor in [(0, 0), (bounds.x + width, bounds.y + bounds.height)] {
+                let Some(layout) =
+                    tab_context_menu_layout(bounds, anchor, &TAB_MENU_ACTIONS, u32::MAX)
+                else {
+                    assert!(width <= TAB_MENU_SHADOW);
+                    continue;
+                };
+                assert!(layout.panel.x >= bounds.x);
+                assert!(layout.panel.x + layout.panel.width + TAB_MENU_SHADOW <= bounds.x + width);
+                for row in &layout.rows {
+                    assert!(row.title.x >= row.rect.x);
+                    assert!(row.title.x + row.title.width <= row.rect.x + row.rect.width);
+                    let y = f64::from(row.rect.y);
+                    assert_eq!(
+                        tab_context_menu_hit_test(&layout, (f64::from(row.rect.x), y)),
+                        Some(row.action)
+                    );
+                    assert_eq!(
+                        tab_context_menu_hit_test(
+                            &layout,
+                            (f64::from(row.rect.x + row.rect.width), y)
+                        ),
+                        None
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tab_context_menu_clamps_all_edges_and_keeps_half_open_rows() {
         let bounds = Rect {
             x: 0,
@@ -1743,7 +1923,7 @@ mod tests {
             height: 400,
         };
         for anchor in [(0, 0), (639, 0), (0, 399), (639, 399)] {
-            let layout = tab_context_menu_layout(bounds, anchor).unwrap();
+            let layout = tab_context_menu_layout(bounds, anchor, &TAB_MENU_ACTIONS, 0).unwrap();
             assert_eq!(layout.panel.width, TAB_MENU_WIDTH);
             assert_eq!(
                 layout.panel.height,
@@ -1930,6 +2110,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "bounded paint, cache and narrow viewport scenario"
+    )]
     fn tab_context_menu_paints_without_a_window_scrim() {
         let bounds = Rect {
             x: 0,
@@ -1937,10 +2121,10 @@ mod tests {
             width: 640,
             height: 400,
         };
-        let layout = tab_context_menu_layout(bounds, (240, 40)).unwrap();
+        let layout = tab_context_menu_layout(bounds, (240, 40), &TAB_MENU_ACTIONS, 0).unwrap();
         let mut state = TabContextMenuUi::new(crate::frontend::TabMenuContext {
             lair_id: LairId::new(),
-            focused_cwd: "/tmp".into(),
+            source_splint_id: SplintId::new(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
             pane_count: 2,
@@ -1995,6 +2179,34 @@ mod tests {
             );
         }
         assert!(cache.len() <= TAB_MENU_ACTIONS.len() + 1);
+        for viewport_width in [7, 12, 40, 230] {
+            let narrow = Rect {
+                width: viewport_width,
+                ..bounds
+            };
+            let layout = tab_context_menu_layout(narrow, (0, 0), &TAB_MENU_ACTIONS, 260).unwrap();
+            canvas.fill(0);
+            paint_tab_context_menu(
+                &mut cache,
+                &RenderContext::new(u16::MAX),
+                &mut canvas,
+                640,
+                400,
+                120,
+                1,
+                &layout,
+                session_picker_palette(ResolvedTheme::default()),
+                &state,
+                None,
+                true,
+            )
+            .unwrap();
+            for y in 0..400 {
+                let outside = (y * 640 + viewport_width as usize) * 4;
+                let end = (y + 1) * 640 * 4;
+                assert!(canvas[outside..end].iter().all(|byte| *byte == 0));
+            }
+        }
     }
 
     #[test]
@@ -2009,7 +2221,6 @@ mod tests {
         let state = CommandPaletteUi::new(CommandPaletteContext {
             lair_id: LairId::new(),
             lair_retention: splinterm_core::LairRetention::Disposable,
-            focused_cwd: "/tmp".into(),
             dojo_id: DojoId::new(),
             dojo_name: "test".to_owned(),
             pane_count: 1,
@@ -2023,6 +2234,7 @@ mod tests {
             focus_right: None,
             focus_up: None,
             focus_down: None,
+            clipboard_image_available: false,
             viewport_detached: false,
             controller_active: false,
             forced_control_transfer: true,

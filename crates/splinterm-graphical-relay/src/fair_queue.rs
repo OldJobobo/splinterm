@@ -93,6 +93,16 @@ pub struct FairDataChannel {
 }
 
 impl FairDataChannel {
+    /// Closes this producer and discards only its queued frames on full close.
+    /// An in-flight physical frame retains its permits until its write completes.
+    pub fn discard(&self) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            self.channel_bytes.close();
+            state.channels.remove(&self.channel_id);
+            state.ready.retain(|id| *id != self.channel_id);
+        }
+    }
+
     /// Waits until every prior frame for this channel has completed its physical write.
     ///
     /// # Errors
@@ -174,8 +184,8 @@ impl FairDataPermit {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("fair data queue is poisoned"))?;
-        if state.receiver_closed {
-            bail!("fair data receiver is closed");
+        if state.receiver_closed || self.channel_bytes.semaphore().is_closed() {
+            bail!("fair data receiver or channel is closed");
         }
         let queue = state.channels.entry(self.channel_id).or_default();
         let was_empty = queue.is_empty();
@@ -260,6 +270,42 @@ pub fn fair_data_queue() -> (FairDataSender, FairDataReceiver) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discard_reclaims_only_closed_channel_queue_and_rejects_late_permits() {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let (sender, mut receiver) = fair_data_queue();
+            let closed = sender.channel(1);
+            let sibling = sender.channel(2);
+            closed.reserve().await.unwrap().send(vec![1]).unwrap();
+            closed.reserve().await.unwrap().send(vec![2]).unwrap();
+            let late = closed.reserve().await.unwrap();
+            sibling.reserve().await.unwrap().send(vec![3]).unwrap();
+            let in_flight = receiver.recv().await.unwrap();
+            assert_eq!(in_flight.channel_id(), 1);
+            closed.discard();
+            assert!(late.send(vec![4]).is_err());
+            assert!(closed.reserve().await.is_err());
+            // Only the physical in-flight frame and the sibling still own byte permits.
+            assert_eq!(
+                sender.shared.session_bytes.available_permits(),
+                MAX_SESSION_QUEUED_BYTES - 2 * MAX_DATA_BYTES
+            );
+            let preserved = receiver.recv().await.unwrap();
+            assert_eq!(preserved.channel_id(), 2);
+            assert_eq!(preserved.bytes(), &[3]);
+            drop(preserved);
+            drop(in_flight);
+            assert_eq!(
+                sender.shared.session_bytes.available_permits(),
+                MAX_SESSION_QUEUED_BYTES
+            );
+            sibling.reserve().await.unwrap().send(vec![5]).unwrap();
+            assert_eq!(receiver.recv().await.unwrap().bytes(), &[5]);
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn scheduler_round_robins_channels_and_holds_byte_permits_until_receive() {

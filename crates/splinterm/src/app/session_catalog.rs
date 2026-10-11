@@ -12,6 +12,29 @@ use splinterm::{
 use splinterm_core::{DojoId, LairId, TopologyRevision};
 use splinterm_protocol::{AutomationLaunch, LaunchParameters, Request};
 
+pub(in crate::app) async fn source_splint_cwd(
+    connection: &mut splinterm::automation::Connection,
+    source_splint_id: splinterm_core::SplintId,
+) -> Result<PathBuf> {
+    let splinterm_protocol::Response::Splint {
+        runtime,
+        resolved_cwd,
+        ..
+    } = connection
+        .request(Request::InspectSplint {
+            splint_id: source_splint_id,
+        })
+        .await?
+    else {
+        anyhow::bail!("splinterd returned an unexpected Splint response");
+    };
+    anyhow::ensure!(
+        runtime.splint_id == source_splint_id,
+        "splinterd returned another Splint"
+    );
+    resolved_cwd.context("source working directory is unavailable")
+}
+
 pub(in crate::app) fn launch_parameters(
     cwd: PathBuf,
     command: Vec<String>,
@@ -45,6 +68,7 @@ pub(in crate::app) fn new_dojo_request_for(
     name: Option<String>,
     cwd: Option<PathBuf>,
     command: Vec<String>,
+    promote_transient_lair: bool,
     config: &AppConfig,
 ) -> Result<Request> {
     let name = match name {
@@ -61,6 +85,7 @@ pub(in crate::app) fn new_dojo_request_for(
                 command,
                 config,
             ),
+            promote_transient_lair,
         },
         LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
             expected_topology_revision,
@@ -69,6 +94,67 @@ pub(in crate::app) fn new_dojo_request_for(
             launch: automation_launch(cwd, command),
         },
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::app) enum GraphicalLairLifetime {
+    Persistent,
+    ClientBound,
+}
+
+#[must_use]
+pub(in crate::app) fn graphical_lair_lifetime(
+    semantics: LaunchSemantics,
+    explicit_name: bool,
+    command: &[String],
+    config: &AppConfig,
+) -> GraphicalLairLifetime {
+    if semantics == LaunchSemantics::LocalTrusted
+        && !explicit_name
+        && command.is_empty()
+        && !config.multiplexer_lifetime.persistent_by_default
+    {
+        GraphicalLairLifetime::ClientBound
+    } else {
+        GraphicalLairLifetime::Persistent
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the graphical lifetime boundary keeps naming and launch intent explicit"
+)]
+pub(in crate::app) fn graphical_create_request(
+    factory: &ConnectionFactory,
+    expected_topology_revision: TopologyRevision,
+    name: String,
+    explicit_name: bool,
+    cwd: Option<PathBuf>,
+    command: Vec<String>,
+    config: &AppConfig,
+) -> Result<(Request, GraphicalLairLifetime)> {
+    let semantics = factory.capabilities().launch_semantics;
+    let lifetime = graphical_lair_lifetime(semantics, explicit_name, &command, config);
+    let request = match lifetime {
+        GraphicalLairLifetime::Persistent => create_request_for(
+            semantics,
+            expected_topology_revision,
+            name,
+            cwd,
+            command,
+            config,
+        )?,
+        GraphicalLairLifetime::ClientBound => Request::CreateTransientLair {
+            expected_topology_revision,
+            name,
+            launch: launch_parameters(
+                cwd.context("local launch working directory is unavailable")?,
+                command,
+                config,
+            ),
+        },
+    };
+    Ok((request, lifetime))
 }
 
 pub(in crate::app) fn create_request(
@@ -169,30 +255,10 @@ pub(in crate::app) fn remember_dojo(factory: &ConnectionFactory, dojo_id: DojoId
 pub(in crate::app) fn session_picker_item(entry: &SessionEntry) -> SessionPickerItem {
     SessionPickerItem {
         display_title: entry.display_title(),
+        breadcrumb: entry.display_title(),
         working_directory: entry.working_directory(),
         pane_count: entry.pane_count,
         running_pane_count: entry.running_panes,
-    }
-}
-
-pub(in crate::app) fn dojo_picker_item(entry: &SessionEntry) -> SessionPickerItem {
-    SessionPickerItem {
-        display_title: entry.dojo_display_title(),
-        working_directory: entry.working_directory(),
-        pane_count: entry.pane_count,
-        running_pane_count: entry.running_panes,
-    }
-}
-
-pub(in crate::app) fn lair_picker_item(
-    representative: &SessionEntry,
-    entries: &[&SessionEntry],
-) -> SessionPickerItem {
-    SessionPickerItem {
-        display_title: representative.lair_display_title(),
-        working_directory: representative.working_directory(),
-        pane_count: entries.iter().map(|entry| entry.pane_count).sum(),
-        running_pane_count: entries.iter().map(|entry| entry.running_panes).sum(),
     }
 }
 
@@ -200,6 +266,246 @@ pub(in crate::app) fn lair_picker_item(
 mod tests {
     use super::*;
     use splinterm_core::Dojo;
+
+    #[test]
+    fn graphical_lifetime_selection_is_narrow_and_backward_compatible() {
+        let defaults = AppConfig::default();
+        assert_eq!(
+            graphical_lair_lifetime(LaunchSemantics::LocalTrusted, false, &[], &defaults),
+            GraphicalLairLifetime::Persistent
+        );
+
+        let mut transient_defaults = AppConfig::default();
+        transient_defaults
+            .multiplexer_lifetime
+            .persistent_by_default = false;
+        assert_eq!(
+            graphical_lair_lifetime(
+                LaunchSemantics::LocalTrusted,
+                false,
+                &[],
+                &transient_defaults
+            ),
+            GraphicalLairLifetime::ClientBound
+        );
+        assert_eq!(
+            graphical_lair_lifetime(
+                LaunchSemantics::LocalTrusted,
+                true,
+                &[],
+                &transient_defaults
+            ),
+            GraphicalLairLifetime::Persistent
+        );
+        assert_eq!(
+            graphical_lair_lifetime(
+                LaunchSemantics::LocalTrusted,
+                false,
+                &["command".to_owned()],
+                &transient_defaults
+            ),
+            GraphicalLairLifetime::Persistent
+        );
+        assert_eq!(
+            graphical_lair_lifetime(
+                LaunchSemantics::RemoteInteractive,
+                false,
+                &[],
+                &transient_defaults
+            ),
+            GraphicalLairLifetime::Persistent
+        );
+    }
+
+    #[tokio::test]
+    async fn source_splint_cwd_requests_exact_identity_and_rejects_unavailable_responses() {
+        use splinterm::automation::Connection;
+        use splinterm_core::SplintId;
+        use splinterm_protocol::{
+            ClientFrame, PROTOCOL_VERSION, Response, ServerFrame, ServerLimits, SplintLifecycle,
+            SplintRuntimeSummary, encode_frame,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(stream: &mut tokio::io::DuplexStream) -> ClientFrame {
+            let length = stream.read_u32().await.unwrap();
+            let mut body = vec![0; length as usize];
+            stream.read_exact(&mut body).await.unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        let source = SplintId::new();
+        let other = SplintId::new();
+        let (client, mut server) = tokio::io::duplex(8192);
+        let (reader, writer) = tokio::io::split(client);
+        let task = tokio::spawn(async move {
+            assert!(matches!(
+                read_request(&mut server).await,
+                ClientFrame::Hello { .. }
+            ));
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                        daemon_hostname: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            for (returned_id, resolved_cwd) in [
+                (source, Some(PathBuf::from("/owner/live"))),
+                (other, Some(PathBuf::from("/owner/other"))),
+                (source, None),
+            ] {
+                let ClientFrame::Request {
+                    request_id,
+                    request,
+                    ..
+                } = read_request(&mut server).await
+                else {
+                    panic!("expected inspection request")
+                };
+                assert_eq!(request, Request::InspectSplint { splint_id: source });
+                server
+                    .write_all(
+                        &encode_frame(&ServerFrame::Response {
+                            request_id,
+                            result: Response::Splint {
+                                lair_id: LairId::new(),
+                                dojo_id: DojoId::new(),
+                                title: String::new(),
+                                topology_revision: TopologyRevision::default(),
+                                resolved_cwd,
+                                runtime: SplintRuntimeSummary {
+                                    splint_id: returned_id,
+                                    live_incarnation: None,
+                                    last_incarnation: None,
+                                    restorable: false,
+                                    lifecycle: SplintLifecycle::Exited,
+                                    exit_status: None,
+                                },
+                            },
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut connection = Connection::connect_remote_interactive_transport(reader, writer)
+            .await
+            .unwrap();
+        assert_eq!(
+            source_splint_cwd(&mut connection, source).await.unwrap(),
+            PathBuf::from("/owner/live")
+        );
+        assert!(
+            source_splint_cwd(&mut connection, source)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("another Splint")
+        );
+        assert!(
+            source_splint_cwd(&mut connection, source)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn inherited_cwd_preserves_local_launch_configuration_and_remote_argv() {
+        let cwd = PathBuf::from("/owner/live-project");
+        let config = AppConfig {
+            shell: Some("/bin/custom-shell".into()),
+            login_shell: true,
+            scrollback_lines: 1234,
+            ..AppConfig::default()
+        };
+        let launch = launch_parameters(cwd.clone(), vec!["command".into()], &config);
+        assert_eq!(launch.cwd, cwd);
+        assert_eq!(launch.shell, config.shell);
+        assert!(launch.login_shell);
+        assert_eq!(launch.scrollback_lines, 1234);
+        assert_eq!(launch.command, ["command"]);
+        let remote = automation_launch(Some(cwd.clone()), vec!["remote-command".into()]);
+        assert_eq!(remote.cwd, Some(cwd));
+        assert_eq!(remote.argv, ["remote-command"]);
+    }
+
+    #[test]
+    fn graphical_request_selection_preserves_explicit_creation_contracts() {
+        let mut transient_defaults = AppConfig::default();
+        transient_defaults
+            .multiplexer_lifetime
+            .persistent_by_default = false;
+        let revision = TopologyRevision::new(17);
+        let (ordinary, lifetime) = graphical_create_request(
+            &ConnectionFactory::local(),
+            revision,
+            "generated".to_owned(),
+            false,
+            Some(PathBuf::from("/tmp")),
+            Vec::new(),
+            &transient_defaults,
+        )
+        .unwrap();
+        assert_eq!(lifetime, GraphicalLairLifetime::ClientBound);
+        assert!(matches!(
+            ordinary,
+            Request::CreateTransientLair {
+                expected_topology_revision,
+                name,
+                launch,
+            } if expected_topology_revision == revision
+                && name == "generated"
+                && launch.command.is_empty()
+        ));
+
+        let (named, lifetime) = graphical_create_request(
+            &ConnectionFactory::local(),
+            revision,
+            "named".to_owned(),
+            true,
+            Some(PathBuf::from("/tmp")),
+            Vec::new(),
+            &transient_defaults,
+        )
+        .unwrap();
+        assert_eq!(lifetime, GraphicalLairLifetime::Persistent);
+        assert!(matches!(named, Request::CreateLair { name, .. } if name == "named"));
+
+        let (command, lifetime) = graphical_create_request(
+            &ConnectionFactory::local(),
+            revision,
+            "generated".to_owned(),
+            false,
+            Some(PathBuf::from("/tmp")),
+            vec!["printf".to_owned()],
+            &transient_defaults,
+        )
+        .unwrap();
+        assert_eq!(lifetime, GraphicalLairLifetime::Persistent);
+        assert!(
+            matches!(command, Request::CreateLair { launch, .. } if launch.command == ["printf"])
+        );
+
+        let remote = create_request_for(
+            LaunchSemantics::RemoteInteractive,
+            revision,
+            "generated".to_owned(),
+            None,
+            Vec::new(),
+            &transient_defaults,
+        )
+        .unwrap();
+        assert!(matches!(remote, Request::CreateLairAutomation { .. }));
+    }
 
     #[test]
     fn new_dojo_requests_preserve_revision_and_resolve_names_for_both_semantics() {
@@ -218,6 +524,7 @@ mod tests {
             None,
             Some(PathBuf::from("/work")),
             vec!["local".to_owned()],
+            true,
             &config,
         )
         .unwrap();
@@ -228,9 +535,11 @@ mod tests {
                 lair_id: requested_lair,
                 name,
                 launch,
+                promote_transient_lair,
             } if expected_topology_revision == revision
                 && requested_lair == lair_id
                 && name == "Dojo 4"
+                && promote_transient_lair
                 && launch.cwd == std::path::Path::new("/work")
                 && launch.command == ["local"]
         ));
@@ -243,6 +552,7 @@ mod tests {
             Some("logs".to_owned()),
             Some(PathBuf::from("/work")),
             Vec::new(),
+            false,
             &config,
         )
         .unwrap();
@@ -263,6 +573,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            false,
             &config,
         )
         .unwrap();
@@ -283,6 +594,7 @@ mod tests {
             Some("logs".to_owned()),
             None,
             vec!["remote".to_owned()],
+            false,
             &config,
         )
         .unwrap();

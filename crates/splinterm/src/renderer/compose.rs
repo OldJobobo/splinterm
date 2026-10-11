@@ -263,7 +263,10 @@ fn compose_snapshot_rows(
             while glyph_start > 0 && row_glyphs[glyph_start - 1].column == column {
                 glyph_start -= 1;
             }
-            if !has_block_cursor {
+            // Opted-in glyph ink can extend beyond its source cell. Paint it
+            // before the opaque cursor covers only the logical cursor span.
+            if !has_block_cursor || frame.font_ligatures != crate::font_shaping::FontLigatures::Off
+            {
                 for placed in row_glyphs[glyph_start..glyph_end].iter().rev() {
                     paint_placed_glyph(
                         canvas,

@@ -31,6 +31,7 @@ jobs:
       commit: ${{ steps.candidate.outputs.commit }}
       version: ${{ steps.candidate.outputs.version }}
       tag: ${{ steps.candidate.outputs.tag }}
+      prerelease: ${{ steps.candidate.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -103,6 +104,7 @@ jobs:
             --expected-commit "${{ steps.source.outputs.commit }}" \
             --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --require-current-predecessor \
             --output promotion.json
           python - <<'PY'
           import json
@@ -114,11 +116,13 @@ jobs:
           with output.open("a", encoding="utf-8") as stream:
               for key in ("commit", "version", "tag"):
                   stream.write(f"{key}={promotion[key]}\n")
+              stream.write(f"prerelease={str(promotion['release_prerelease']).lower()}\n")
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
           with summary.open("a", encoding="utf-8") as stream:
               stream.write(f"# Verified Splinterm {promotion['version']} candidate\n\n")
               stream.write(f"Commit: `{promotion['commit']}`  \n")
               stream.write(f"Tag to create: `{promotion['tag']}`  \n")
+              stream.write(f"Prerelease: `{promotion['release_prerelease']}`  \n")
               stream.write(f"Candidate run: `{promotion['candidate_run_id']}`  \n")
               stream.write(f"CI run: `{promotion['ci']['run_id']}`  \n")
               stream.write(f"Manifest: `{promotion['candidate_manifest_sha256']}`\n\n")
@@ -196,6 +200,7 @@ jobs:
             --expected-commit "${{ needs.verify.outputs.commit }}" \
             --expected-branch "$GITHUB_REF_NAME" \
             --manifest-sha256 "${CANDIDATE_MANIFEST_SHA256,,}" \
+            --require-current-predecessor \
             --output promotion-reverified.json >/dev/null
           cmp verified/promotion.json promotion-reverified.json
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -224,12 +229,17 @@ jobs:
           python tools/release/promote-release.py require-absent \
             --ref prepublish-ref.json --release prepublish-release.json
 
-      - name: Create versioned tag and prerelease
+      - name: Create versioned tag and release
         env:
           GH_TOKEN: ${{ secrets.SPLINTERM_RELEASE_TOKEN }}
           RELEASE_TAG: ${{ needs.verify.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.verify.outputs.commit }}
+          RELEASE_PRERELEASE: ${{ needs.verify.outputs.prerelease }}
         run: |
+          case "$RELEASE_PRERELEASE" in
+            true|false) ;;
+            *) printf 'invalid verified prerelease state\n' >&2; exit 1 ;;
+          esac
           gh api --method POST "repos/$RELEASE_REPOSITORY/git/refs" \
             -f ref="refs/tags/$RELEASE_TAG" \
             -f sha="$RELEASE_COMMIT"
@@ -237,7 +247,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --repo "$RELEASE_REPOSITORY" \
             --target "$RELEASE_COMMIT" \
-            --prerelease \
+            --prerelease="$RELEASE_PRERELEASE" \
             --title "$release_title" \
             --notes-file verified/candidate/RELEASE-NOTES.md
 

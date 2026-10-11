@@ -9,6 +9,7 @@ use super::{FontGeneration, clear_snapshot_caches, snapshot_font_generation};
 
 use crate::{
     config::{FontAuthority, STARTUP_FONT_FALLBACK},
+    font_shaping::{FeatureSettings, FontLigatures},
     geometry::{
         FontSize, FontSizingPolicy, OutputDpiObservation, TerminalPadding, resolve_font_size,
         resolve_font_size_with_output,
@@ -31,6 +32,8 @@ static COMPATIBILITY_CONTEXT: OnceLock<Mutex<RenderContext>> = OnceLock::new();
 #[derive(Clone, Debug)]
 pub struct RendererOptions {
     pub font: String,
+    pub font_ligatures: FontLigatures,
+    pub font_features: FeatureSettings,
     pub font_authority: FontAuthority,
     pub font_size: FontSize,
     pub font_sizing_policy: FontSizingPolicy,
@@ -43,6 +46,8 @@ impl Default for RendererOptions {
     fn default() -> Self {
         Self {
             font: PRIMARY_FONT.to_owned(),
+            font_ligatures: FontLigatures::Off,
+            font_features: FeatureSettings::default(),
             font_authority: FontAuthority::Explicit,
             font_size: FontSize::Pixels(BASE_FONT_SIZE),
             font_sizing_policy: FontSizingPolicy::OutputScale,
@@ -84,6 +89,19 @@ impl RenderContext {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_shaping(
+        mut self,
+        mode: FontLigatures,
+        features: FeatureSettings,
+    ) -> Self {
+        let mut options = self.resources.options.clone();
+        options.font_ligatures = mode;
+        options.font_features = features;
+        self.resources = Box::leak(Box::new(RendererResources { options }));
+        self
+    }
+
     pub(super) fn font_generation(&self) -> Result<&Arc<FontGeneration>> {
         self.font_generation
             .as_ref()
@@ -114,6 +132,14 @@ impl RenderContext {
     }
 
     #[must_use]
+    pub(super) fn font_ligatures(&self) -> FontLigatures {
+        self.resources.options.font_ligatures
+    }
+
+    pub(super) fn font_features(&self) -> &FeatureSettings {
+        &self.resources.options.font_features
+    }
+
     pub(super) fn padding(&self) -> TerminalPadding {
         self.resources.options.padding
     }
@@ -200,6 +226,8 @@ pub(super) fn compatible_renderer_options(
     next: &RendererOptions,
 ) -> bool {
     current.font == next.font
+        && current.font_ligatures == next.font_ligatures
+        && current.font_features == next.font_features
         && current.font_authority == next.font_authority
         && current.font_size == next.font_size
         && current.font_sizing_policy == next.font_sizing_policy
@@ -319,6 +347,13 @@ mod tests {
         let mut alpha_only = current.clone();
         alpha_only.background_alpha = 32_768;
         assert!(compatible_renderer_options(&current, &alpha_only));
+
+        let mut shaping = current.clone();
+        shaping.font_ligatures = FontLigatures::On;
+        assert!(!compatible_renderer_options(&current, &shaping));
+        shaping.font_ligatures = FontLigatures::Off;
+        shaping.font_features = FeatureSettings::parse("zero=1").unwrap();
+        assert!(!compatible_renderer_options(&current, &shaping));
 
         let mut different_font = current.clone();
         different_font.font = "different font".to_owned();

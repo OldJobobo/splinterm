@@ -15,6 +15,7 @@ use swash::{scale::image::Content, shape::ShapeContext};
 
 use crate::{
     box_drawing,
+    font_shaping::{FeatureSettings, FontLigatures},
     geometry::{CellGeometry, TerminalPadding, WindowGeometry},
 };
 
@@ -30,8 +31,10 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SnapshotGlyph {
     pub(super) key: GlyphKey,
+    /// Source grid column, not the left edge of ink or contextual dependencies.
     pub(super) column: u32,
     pub(super) row: u32,
+    /// Authoritative source span; never used to infer contextual ink bounds.
     pub(super) cells: u32,
     pub(super) cluster_advance: f32,
     pub(super) x_offset: f32,
@@ -42,6 +45,9 @@ pub(super) struct SnapshotGlyph {
 /// One immutable, scale-dependent rendering of an owned daemon snapshot.
 pub(crate) struct SnapshotFrame {
     pub(super) font_generation: Arc<FontGeneration>,
+    pub(super) font_ligatures: FontLigatures,
+    pub(super) font_features: FeatureSettings,
+    pub(super) font_size: f32,
     pub(super) glyphs: Vec<SnapshotGlyph>,
     pub(super) decorations: Vec<DecorationSpan>,
     pub(super) cache: HashMap<GlyphKey, Arc<CachedGlyph>>,
@@ -382,6 +388,8 @@ impl SnapshotFrame {
                 default_foreground,
                 default_background,
                 &primary_metrics,
+                context.font_ligatures(),
+                context.font_features(),
                 &mut shape_context,
                 &mut backgrounds,
                 &mut default_backgrounds,
@@ -397,6 +405,9 @@ impl SnapshotFrame {
         let images = prepare_snapshot_images(snapshot, sources)?;
         let mut frame = Self {
             font_generation,
+            font_ligatures: context.font_ligatures(),
+            font_features: context.font_features().clone(),
+            font_size,
             glyphs,
             decorations,
             cache,
@@ -456,8 +467,37 @@ impl SnapshotFrame {
             self.font_generation.id == context_generation.id,
             "incremental frame font generation changed; a full rebuild is required"
         );
+        anyhow::ensure!(
+            self.font_ligatures == context.font_ligatures()
+                && self.font_features == *context.font_features(),
+            "incremental frame shaping settings changed; a full rebuild is required"
+        );
+        anyhow::ensure!(
+            self.font_size.to_bits()
+                == context
+                    .effective_font_size(u32::from(self.scale_120))?
+                    .to_bits(),
+            "incremental frame font size changed; a full rebuild is required"
+        );
+        self.refresh_prepared_rows(snapshot, dirty_rows)
+    }
+
+    fn refresh_prepared_rows(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        dirty_rows: &[bool],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            snapshot.columns == self.columns as usize
+                && snapshot.rows == self.rows as usize
+                && snapshot.palette.len() == 256,
+            "incremental snapshot geometry or palette is invalid"
+        );
+        let mut dirty_rows = dirty_rows.to_vec();
+        dirty_rows.resize(snapshot.rows, false);
+        self.mark_cursor_dirty_rows(snapshot, &mut dirty_rows);
         let faces = &self.font_generation.faces;
-        let font_size = context.effective_font_size(u32::from(self.scale_120))?;
+        let font_size = self.font_size;
         let default_foreground = packed_rgb(snapshot.default_colors[0]);
         let default_background = packed_rgb(snapshot.default_colors[1]);
         let mut shape_context = ShapeContext::new();
@@ -500,6 +540,8 @@ impl SnapshotFrame {
                 default_foreground,
                 default_background,
                 &self.primary_metrics,
+                self.font_ligatures,
+                &self.font_features,
                 &mut shape_context,
                 &mut self.backgrounds,
                 &mut self.default_backgrounds,
@@ -514,6 +556,7 @@ impl SnapshotFrame {
         self.glyphs.sort_by_key(|glyph| (glyph.row, glyph.column));
         self.decorations.sort_by_key(|span| (span.row, span.column));
         self.enforce_cache_budget();
+        self.cursor = snapshot_cursor(snapshot, self.columns, self.rows);
         Ok(())
     }
 
@@ -544,6 +587,15 @@ impl SnapshotFrame {
         offset_delta: isize,
         context: &RenderContext,
     ) -> Result<Option<TerminalScroll>> {
+        // Pixel scroll-copy cannot erase a cursor-dependent context break moved
+        // into a reused row. History transitions involving a visible cursor use
+        // the caller's existing full-rebuild path; cursor-free history still copies.
+        if self.font_ligatures == FontLigatures::Cursor
+            && (self.cursor.is_some()
+                || snapshot_cursor(snapshot, self.columns, self.rows).is_some())
+        {
+            return Ok(None);
+        }
         if offset_delta == 0 || self.rows == 0 {
             return Ok(None);
         }
@@ -624,9 +676,33 @@ impl SnapshotFrame {
         self.cache.retain(|key, _| referenced.contains(key));
     }
 
-    /// Updates cursor presentation without reshaping any terminal row.
-    pub(crate) fn refresh_cursor(&mut self, snapshot: &TerminalSnapshot) {
-        self.cursor = snapshot_cursor(snapshot, self.columns, self.rows);
+    /// Marks only old/new reported cursor rows, never blink/focus presentation.
+    pub(crate) fn mark_cursor_dirty_rows(&self, snapshot: &TerminalSnapshot, dirty: &mut [bool]) {
+        let next = snapshot_cursor(snapshot, self.columns, self.rows);
+        if self.font_ligatures != FontLigatures::Cursor || self.cursor == next {
+            return;
+        }
+        for (_, row) in self.cursor.into_iter().chain(next) {
+            if let Some(dirty) = dirty.get_mut(row as usize) {
+                *dirty = true;
+            }
+        }
+    }
+
+    pub(crate) fn can_refresh_cursor_rows(&self, snapshot: &TerminalSnapshot) -> bool {
+        self.font_ligatures == FontLigatures::Cursor
+            && self.columns as usize == snapshot.columns
+            && self.rows as usize == snapshot.rows
+    }
+
+    /// Uses the frame's immutable shaping inputs, including for cached panes.
+    pub(crate) fn refresh_cursor(&mut self, snapshot: &TerminalSnapshot) -> Result<()> {
+        if self.font_ligatures == FontLigatures::Cursor {
+            self.refresh_prepared_rows(snapshot, &[])
+        } else {
+            self.cursor = snapshot_cursor(snapshot, self.columns, self.rows);
+            Ok(())
+        }
     }
 }
 
@@ -676,6 +752,8 @@ pub(super) fn prepare_snapshot_row(
     default_foreground: [u8; 3],
     default_background: [u8; 3],
     primary_metrics: &[DecorationMetrics; 4],
+    font_ligatures: FontLigatures,
+    font_features: &FeatureSettings,
     shape_context: &mut ShapeContext,
     backgrounds: &mut [[u8; 3]],
     default_backgrounds: &mut [bool],
@@ -688,6 +766,24 @@ pub(super) fn prepare_snapshot_row(
 ) -> Result<()> {
     let Some(row) = snapshot.visible_rows.get(row_index) else {
         return Ok(());
+    };
+    let row_glyph_start = glyphs.len();
+    let joined = if font_ligatures == FontLigatures::Off {
+        vec![false; snapshot.columns]
+    } else {
+        prepare_ascii_runs(
+            snapshot,
+            row_index,
+            faces,
+            font_size,
+            font_ligatures,
+            font_features,
+            shape_context,
+            glyphs,
+            cache,
+            default_foreground,
+            default_background,
+        )?
     };
     for (column_index, cell) in row.cells.iter().take(snapshot.columns).enumerate() {
         let (foreground, background) = rendition_colors(
@@ -738,7 +834,7 @@ pub(super) fn prepare_snapshot_row(
                 metrics,
             });
         }
-        if !cell_is_renderable(cell) {
+        if joined[column_index] || !cell_is_renderable(cell) {
             continue;
         }
         let mut characters = cell.content.chars();
@@ -792,6 +888,7 @@ pub(super) fn prepare_snapshot_row(
                 .builder(font)
                 .size(font_size)
                 .normalized_coords(coords)
+                .features(font_features.iter())
                 .build();
             shaper.add_str(content);
             shaper.shape_with(|cluster| {
@@ -834,7 +931,148 @@ pub(super) fn prepare_snapshot_row(
             });
         }
     }
+    glyphs[row_glyph_start..].sort_by_key(|glyph| glyph.column);
     Ok(())
+}
+
+/// Source cells select grid pens; advances only place glyphs within a cluster.
+/// Failed run shaping leaves all of that run to the existing per-cell fallback.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one bounded ASCII run transaction retains explicit renderer inputs"
+)]
+fn prepare_ascii_runs(
+    snapshot: &TerminalSnapshot,
+    row_index: usize,
+    faces: &[FontFace],
+    font_size: f32,
+    mode: FontLigatures,
+    features: &FeatureSettings,
+    context: &mut ShapeContext,
+    glyphs: &mut Vec<SnapshotGlyph>,
+    cache: &mut HashMap<GlyphKey, Arc<CachedGlyph>>,
+    default_foreground: [u8; 3],
+    default_background: [u8; 3],
+) -> Result<Vec<bool>> {
+    use super::shaping::{LogicalCell, shape_run};
+    let row = &snapshot.visible_rows[row_index];
+    let cells = &row.cells[..row.cells.len().min(snapshot.columns)];
+    let eligible_faces: Vec<_> = cells
+        .iter()
+        .enumerate()
+        .map(|(column, cell)| {
+            (cell.content.len() == 1
+                && (b' '..=b'~').contains(&cell.content.as_bytes()[0])
+                && cell.spacer_remaining.is_none()
+                && leader_span(cells, column) == 1
+                && !cell.attributes.conceal)
+                .then(|| select_face_for_text(faces, &cell.content, &cell.attributes).ok())
+                .flatten()
+        })
+        .collect();
+    let cursor_column = (mode == FontLigatures::Cursor)
+        .then(|| {
+            snapshot_cursor(
+                snapshot,
+                u32::try_from(snapshot.columns).expect("bounded columns"),
+                u32::try_from(snapshot.rows).expect("bounded rows"),
+            )
+        })
+        .flatten()
+        .filter(|(_, row)| *row as usize == row_index)
+        .map(|(column, _)| column as usize);
+    let mut joined = vec![false; snapshot.columns];
+    let mut start = 0;
+    while start < cells.len() {
+        let Some(face) = eligible_faces[start] else {
+            start += 1;
+            continue;
+        };
+        let mut end = start + 1;
+        while end < cells.len()
+            && eligible_faces[end] == Some(face)
+            && cells[end].attributes == cells[start].attributes
+            && cursor_column != Some(end)
+            && cursor_column != Some(end - 1)
+        {
+            end += 1;
+        }
+        let input: Vec<_> = (start..end)
+            .map(|column| LogicalCell {
+                text: &cells[column].content,
+                column,
+                width: 1,
+            })
+            .collect();
+        let run = with_font_ref(&faces[face], |font, coords| {
+            shape_run(
+                context,
+                font,
+                coords,
+                &input,
+                snapshot.columns,
+                font_size,
+                features,
+            )
+        });
+        if let Ok(run) = run
+            && run
+                .clusters
+                .iter()
+                .flat_map(|cluster| &cluster.glyphs)
+                .all(|glyph| {
+                    glyph.id != 0
+                        && glyph.x.is_finite()
+                        && glyph.y.is_finite()
+                        && glyph.advance.is_finite()
+                })
+        {
+            let foreground = rendition_colors(
+                &cells[start].attributes,
+                &snapshot.palette,
+                default_foreground,
+                default_background,
+            )
+            .0;
+            for cluster in run.clusters {
+                let advance = cluster
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.advance)
+                    .sum::<f32>();
+                let mut pen = 0.0;
+                for glyph in cluster.glyphs {
+                    let key = GlyphKey {
+                        face,
+                        glyph: glyph.id,
+                    };
+                    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+                        entry.insert(snapshot_glyph(faces, face, glyph.id, font_size)?);
+                    }
+                    // Spaces remain shaping context, but empty masks need no placement or repaint.
+                    if cache[&key].width != 0 && cache[&key].height != 0 {
+                        glyphs.push(SnapshotGlyph {
+                            key,
+                            column: u32::try_from(cluster.source.columns.start)
+                                .expect("bounded column"),
+                            row: u32::try_from(row_index).expect("bounded row"),
+                            cells: u32::try_from(cluster.source.columns.len())
+                                .expect("bounded span"),
+                            cluster_advance: advance,
+                            x_offset: pen + glyph.x,
+                            y_offset: glyph.y,
+                            foreground,
+                        });
+                    }
+                    pen += glyph.advance;
+                }
+            }
+            joined[start..end].fill(true);
+        }
+        start = end;
+    }
+    Ok(joined)
 }
 
 pub(super) fn cell_is_renderable(cell: &splinterm_protocol::TerminalCell) -> bool {

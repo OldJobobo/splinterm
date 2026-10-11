@@ -26,7 +26,11 @@ const MAX_IDENTITY_FILES: usize = 8;
 const MIN_CONNECT_TIMEOUT_SECONDS: u16 = 1;
 const MAX_CONNECT_TIMEOUT_SECONDS: u16 = 300;
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u16 = 15;
-const GRAPHICAL_REMOTE_COMMAND: &str = "/usr/bin/splinterm relay --graphical-stdio";
+const DEFAULT_REMOTE_EXECUTABLE: &str = "/usr/bin/splinterm";
+
+fn default_remote_executable() -> String {
+    DEFAULT_REMOTE_EXECUTABLE.to_owned()
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +46,8 @@ struct RawRemoteProfile {
     host: String,
     user: Option<String>,
     port: Option<u16>,
+    #[serde(default = "default_remote_executable")]
+    executable: String,
     #[serde(default)]
     identity_files: Vec<String>,
     known_hosts_file: Option<String>,
@@ -61,6 +67,7 @@ pub struct RemoteProfile {
     user: Option<String>,
     port: Option<u16>,
     identity_files: Vec<PathBuf>,
+    executable: String,
     known_hosts_file: Option<PathBuf>,
     connect_timeout_seconds: u16,
 }
@@ -152,7 +159,12 @@ impl RemoteProfile {
             )));
         }
         arguments.push(OsString::from(&self.host));
-        arguments.push(OsString::from(GRAPHICAL_REMOTE_COMMAND));
+        // OpenSSH sends this string to the remote login shell. The executable
+        // is a strictly validated absolute path, never a command or shell text.
+        arguments.push(OsString::from(format!(
+            "{} relay --graphical-stdio",
+            self.executable
+        )));
         SshLaunchPlan {
             program: OsString::from("ssh"),
             arguments,
@@ -263,6 +275,8 @@ impl RemoteCatalog {
         for (name, raw) in document.remotes {
             validate_profile_name(&name)?;
             validate_host(&raw.host).with_context(|| format!("remote profile {name}"))?;
+            validate_remote_executable(&raw.executable)
+                .with_context(|| format!("remote profile {name}"))?;
             if let Some(user) = &raw.user {
                 validate_user(user).with_context(|| format!("remote profile {name}"))?;
             }
@@ -300,6 +314,7 @@ impl RemoteCatalog {
                 RemoteProfile {
                     name,
                     host: raw.host,
+                    executable: raw.executable,
                     user: raw.user,
                     port: raw.port,
                     identity_files,
@@ -391,6 +406,26 @@ fn validate_user(user: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_remote_executable(value: &str) -> Result<()> {
+    // This is a remote path: do not resolve it on the client or expand HOME.
+    // A conservative ASCII allowlist makes it one literal POSIX-shell word.
+    if !value.starts_with('/')
+        || value.len() > MAX_PATH_BYTES
+        || value
+            .split('/')
+            .skip(1)
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+    {
+        bail!(
+            "remote executable must be an absolute path with only ASCII letters, digits, /, ., _, or - and no empty or dot components"
+        );
+    }
+    Ok(())
+}
+
 fn resolve_readable_file(value: &str, home: Option<&Path>) -> Result<PathBuf> {
     if value.is_empty()
         || value.len() > MAX_PATH_BYTES
@@ -473,7 +508,10 @@ connect_timeout_seconds = 23
             .iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(args.last().unwrap(), GRAPHICAL_REMOTE_COMMAND);
+        assert_eq!(
+            args.last().unwrap(),
+            "/usr/bin/splinterm relay --graphical-stdio"
+        );
         assert_eq!(args[args.len() - 2], "wintermute");
         assert!(args.windows(2).any(|pair| pair == ["-l", "operator"]));
         assert!(args.windows(2).any(|pair| pair == ["-p", "2222"]));
@@ -492,6 +530,66 @@ connect_timeout_seconds = 23
         assert!(args.iter().any(|argument| argument == "RemoteCommand=none"));
         assert!(!args.iter().any(|argument| argument.contains("fixture key")));
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn nixos_remote_executable_is_literal_and_need_not_exist_locally() {
+        for executable in [
+            "/run/current-system/sw/bin/splinterm",
+            "/nix/store/0123456789abcdef-splinterm/bin/splinterm",
+            "/home/operator/.nix-profile/bin/splinterm",
+        ] {
+            let catalog = RemoteCatalog::parse(
+                &format!(
+                    "version = 1\n[remotes.nixos]\nhost = \"nixos\"\nexecutable = {executable:?}\n"
+                ),
+                None,
+            )
+            .unwrap();
+            let plan = catalog.get("nixos").unwrap().ssh_plan();
+            assert_eq!(
+                plan.arguments().last().unwrap(),
+                &OsString::from(format!("{executable} relay --graphical-stdio"))
+            );
+        }
+    }
+
+    #[test]
+    fn remote_executable_rejects_shell_syntax_and_ambiguous_paths() {
+        for executable in [
+            "",
+            "splinterm",
+            "~/bin/splinterm",
+            "/",
+            "/bin/",
+            "//bin/splinterm",
+            "/bin/../splinterm",
+            "/bin/./splinterm",
+            "/bin/splinterm --flag",
+            "/bin/splinterm;id",
+            "/bin/$(id)",
+            "/bin/`id`",
+            "/bin/$HOME",
+            "/bin/'splinterm'",
+            "/bin/\"splinterm\"",
+            "/bin/splinterm\n",
+            "/bin/*",
+            "/bin/splinterm\\x",
+            "/bin/splinterm\u{202e}",
+        ] {
+            assert!(
+                validate_remote_executable(executable).is_err(),
+                "{executable:?}"
+            );
+        }
+        assert!(validate_remote_executable(&format!("/{}", "a".repeat(MAX_PATH_BYTES))).is_err());
+        assert!(
+            RemoteCatalog::parse(
+                "version = 1\n[remotes.bad]\nhost = \"safe\"\nexecutable = \"/bin/splinterm;id\"\n",
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

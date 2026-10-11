@@ -18,7 +18,6 @@ use zbus::{
     zvariant::{OwnedObjectPath, OwnedValue, Str, Value},
 };
 
-const AGGREGATE_TASKS_MAX: u64 = 2_048;
 const AGGREGATE_MEMORY_HIGH_PERCENT: u32 = 75;
 const METHOD_TIMEOUT: Duration = Duration::from_millis(500);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -26,30 +25,23 @@ const VERIFY_INTERVAL: Duration = Duration::from_millis(25);
 static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WorkloadResourcePolicy {
-    pub(crate) dojo_tasks_max: u64,
-    pub(crate) splint_tasks_max: u64,
+pub(crate) struct WorkloadMemoryPolicy {
     pub(crate) dojo_memory_high_percent: u32,
     pub(crate) splint_memory_high_percent: u32,
 }
 
-impl Default for WorkloadResourcePolicy {
+impl Default for WorkloadMemoryPolicy {
     fn default() -> Self {
         Self {
-            dojo_tasks_max: 1_024,
-            splint_tasks_max: 512,
             dojo_memory_high_percent: 50,
             splint_memory_high_percent: 25,
         }
     }
 }
 
-impl WorkloadResourcePolicy {
+impl WorkloadMemoryPolicy {
     fn validate(self) -> Result<Self, WorkloadUnitError> {
-        if self.splint_tasks_max == 0
-            || self.splint_tasks_max >= self.dojo_tasks_max
-            || self.dojo_tasks_max >= AGGREGATE_TASKS_MAX
-            || self.splint_memory_high_percent == 0
+        if self.splint_memory_high_percent == 0
             || self.splint_memory_high_percent >= self.dojo_memory_high_percent
             || self.dojo_memory_high_percent >= AGGREGATE_MEMORY_HIGH_PERCENT
         {
@@ -91,7 +83,7 @@ fn percent_scale(percent: u32) -> u32 {
 
 #[derive(Debug, Error)]
 pub(crate) enum WorkloadUnitError {
-    #[error("workload resource policy is invalid")]
+    #[error("workload memory policy is invalid")]
     InvalidPolicy,
     #[error("systemd user-manager connection failed")]
     Connection(#[source] zbus::Error),
@@ -113,14 +105,14 @@ trait SystemdUnitAdapter: Send + Sync {
     fn start_dojo_slice(
         &self,
         name: &str,
-        policy: WorkloadResourcePolicy,
+        policy: WorkloadMemoryPolicy,
     ) -> Result<(), WorkloadUnitError>;
 
     fn start_splint_scope(
         &self,
         names: &WorkloadUnitNames,
         child_pid: u32,
-        policy: WorkloadResourcePolicy,
+        policy: WorkloadMemoryPolicy,
     ) -> Result<(), WorkloadUnitError>;
 
     fn stop_unit(&self, name: &str) -> Result<(), WorkloadUnitError>;
@@ -176,15 +168,7 @@ impl SystemdUnitAdapter for SystemdUserManager {
     fn probe(&self) -> Result<(), WorkloadUnitError> {
         let probe_id = NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!("app-splinterm-probe{}i{probe_id}.slice", std::process::id());
-        let mut properties = vec![
-            string_property("Description", "Splinterm workload capability probe"),
-            u64_property("TasksMax", 1),
-            u32_property("MemoryHighScale", percent_scale(1)),
-            string_property("CollectMode", "inactive-or-failed"),
-        ];
-        if let Some(owner_unit) = &self.owner_unit {
-            properties.push(vec_string_property("PartOf", vec![owner_unit.clone()])?);
-        }
+        let properties = capability_probe_properties(self.owner_unit.as_deref())?;
         if let Err(error) = self.start_transient_unit(&name, properties) {
             if !is_unit_exists(&error) {
                 let _ = self.stop_unit(&name);
@@ -197,42 +181,23 @@ impl SystemdUnitAdapter for SystemdUserManager {
     fn start_dojo_slice(
         &self,
         name: &str,
-        policy: WorkloadResourcePolicy,
+        policy: WorkloadMemoryPolicy,
     ) -> Result<(), WorkloadUnitError> {
-        let mut properties = vec![
-            string_property("Description", "Splinterm Dojo workload"),
-            u64_property("TasksMax", policy.dojo_tasks_max),
-            u32_property(
-                "MemoryHighScale",
-                percent_scale(policy.dojo_memory_high_percent),
-            ),
-            string_property("CollectMode", "inactive-or-failed"),
-        ];
-        if let Some(owner_unit) = &self.owner_unit {
-            properties.push(vec_string_property("PartOf", vec![owner_unit.clone()])?);
-        }
-        self.start_transient_unit(name, properties)
+        self.start_transient_unit(
+            name,
+            dojo_slice_properties(self.owner_unit.as_deref(), policy)?,
+        )
     }
 
     fn start_splint_scope(
         &self,
         names: &WorkloadUnitNames,
         child_pid: u32,
-        policy: WorkloadResourcePolicy,
+        policy: WorkloadMemoryPolicy,
     ) -> Result<(), WorkloadUnitError> {
         let result = self.start_transient_unit(
             &names.splint_scope,
-            vec![
-                string_property("Description", "Splinterm Splint workload"),
-                string_property("Slice", &names.dojo_slice),
-                vec_u32_property("PIDs", vec![child_pid])?,
-                u64_property("TasksMax", policy.splint_tasks_max),
-                u32_property(
-                    "MemoryHighScale",
-                    percent_scale(policy.splint_memory_high_percent),
-                ),
-                string_property("CollectMode", "inactive-or-failed"),
-            ],
+            splint_scope_properties(names, child_pid, policy)?,
         );
         if let Err(error) = result {
             if !is_unit_exists(&error) {
@@ -296,10 +261,6 @@ fn string_property<'a>(name: &'a str, value: &str) -> (&'a str, OwnedValue) {
     (name, OwnedValue::from(Str::from(value.to_owned())))
 }
 
-fn u64_property(name: &str, value: u64) -> (&str, OwnedValue) {
-    (name, OwnedValue::from(value))
-}
-
 fn u32_property(name: &str, value: u32) -> (&str, OwnedValue) {
     (name, OwnedValue::from(value))
 }
@@ -319,6 +280,57 @@ fn vec_string_property(
         name,
         OwnedValue::try_from(Value::from(value)).map_err(WorkloadUnitError::Property)?,
     ))
+}
+
+type UnitProperty = (&'static str, OwnedValue);
+
+fn capability_probe_properties(
+    owner_unit: Option<&str>,
+) -> Result<Vec<UnitProperty>, WorkloadUnitError> {
+    let mut properties = vec![
+        string_property("Description", "Splinterm workload capability probe"),
+        u32_property("MemoryHighScale", percent_scale(1)),
+        string_property("CollectMode", "inactive-or-failed"),
+    ];
+    if let Some(owner_unit) = owner_unit {
+        properties.push(vec_string_property("PartOf", vec![owner_unit.to_owned()])?);
+    }
+    Ok(properties)
+}
+
+fn dojo_slice_properties(
+    owner_unit: Option<&str>,
+    policy: WorkloadMemoryPolicy,
+) -> Result<Vec<UnitProperty>, WorkloadUnitError> {
+    let mut properties = vec![
+        string_property("Description", "Splinterm Dojo workload"),
+        u32_property(
+            "MemoryHighScale",
+            percent_scale(policy.dojo_memory_high_percent),
+        ),
+        string_property("CollectMode", "inactive-or-failed"),
+    ];
+    if let Some(owner_unit) = owner_unit {
+        properties.push(vec_string_property("PartOf", vec![owner_unit.to_owned()])?);
+    }
+    Ok(properties)
+}
+
+fn splint_scope_properties(
+    names: &WorkloadUnitNames,
+    child_pid: u32,
+    policy: WorkloadMemoryPolicy,
+) -> Result<Vec<UnitProperty>, WorkloadUnitError> {
+    Ok(vec![
+        string_property("Description", "Splinterm Splint workload"),
+        string_property("Slice", &names.dojo_slice),
+        vec_u32_property("PIDs", vec![child_pid])?,
+        u32_property(
+            "MemoryHighScale",
+            percent_scale(policy.splint_memory_high_percent),
+        ),
+        string_property("CollectMode", "inactive-or-failed"),
+    ])
 }
 
 #[zbus::proxy(
@@ -351,13 +363,13 @@ struct WorkloadUnitState {
 #[derive(Clone)]
 pub(crate) struct WorkloadUnitManager {
     adapter: Arc<dyn SystemdUnitAdapter>,
-    policy: WorkloadResourcePolicy,
+    policy: WorkloadMemoryPolicy,
     state: Arc<Mutex<WorkloadUnitState>>,
 }
 
 impl WorkloadUnitManager {
     pub(crate) fn connect(
-        policy: WorkloadResourcePolicy,
+        policy: WorkloadMemoryPolicy,
         owner_unit: Option<&str>,
     ) -> Result<Self, WorkloadUnitError> {
         Self::new(Arc::new(SystemdUserManager::connect(owner_unit)?), policy)
@@ -365,7 +377,7 @@ impl WorkloadUnitManager {
 
     fn new(
         adapter: Arc<dyn SystemdUnitAdapter>,
-        policy: WorkloadResourcePolicy,
+        policy: WorkloadMemoryPolicy,
     ) -> Result<Self, WorkloadUnitError> {
         let policy = policy.validate()?;
         adapter.probe()?;
@@ -558,7 +570,7 @@ mod tests {
         fn start_dojo_slice(
             &self,
             name: &str,
-            _policy: WorkloadResourcePolicy,
+            _policy: WorkloadMemoryPolicy,
         ) -> Result<(), WorkloadUnitError> {
             self.calls
                 .lock()
@@ -571,7 +583,7 @@ mod tests {
             &self,
             names: &WorkloadUnitNames,
             child_pid: u32,
-            _policy: WorkloadResourcePolicy,
+            _policy: WorkloadMemoryPolicy,
         ) -> Result<(), WorkloadUnitError> {
             self.calls.lock().unwrap().push(AdapterCall::StartSplint(
                 names.dojo_slice.clone(),
@@ -624,11 +636,25 @@ mod tests {
         ));
     }
 
+    fn user_manager_property(unit: Option<&str>, property: &str) -> String {
+        let mut command = std::process::Command::new("systemctl");
+        command.args(["--user", "show"]);
+        if let Some(unit) = unit {
+            command.arg(unit);
+        }
+        let output = command
+            .args(["--property", property, "--value"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
     #[test]
     fn manager_creation_requires_a_successful_capability_probe() {
         let adapter = Arc::new(FakeAdapter::default());
         *adapter.fail_probe.lock().unwrap() = true;
-        assert!(WorkloadUnitManager::new(adapter, WorkloadResourcePolicy::default()).is_err());
+        assert!(WorkloadUnitManager::new(adapter, WorkloadMemoryPolicy::default()).is_err());
     }
 
     #[test]
@@ -653,20 +679,44 @@ mod tests {
     }
 
     #[test]
-    fn resource_policy_requires_nested_ordering() {
-        assert!(WorkloadResourcePolicy::default().validate().is_ok());
-        assert!(
-            WorkloadResourcePolicy {
-                splint_tasks_max: 1_024,
-                ..WorkloadResourcePolicy::default()
-            }
-            .validate()
-            .is_err()
+    fn workload_units_inherit_the_user_manager_task_limit() {
+        let property_names = |properties: Vec<UnitProperty>| {
+            let mut names = properties
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+        };
+        let policy = WorkloadMemoryPolicy::default();
+        let names = WorkloadUnitNames::new(DojoId::new(), SplintId::new(), 7);
+        assert_eq!(
+            property_names(capability_probe_properties(Some("splinterd.service")).unwrap()),
+            ["CollectMode", "Description", "MemoryHighScale", "PartOf"]
         );
+        assert_eq!(
+            property_names(dojo_slice_properties(Some("splinterd.service"), policy).unwrap()),
+            ["CollectMode", "Description", "MemoryHighScale", "PartOf"]
+        );
+        assert_eq!(
+            property_names(splint_scope_properties(&names, 123, policy).unwrap()),
+            [
+                "CollectMode",
+                "Description",
+                "MemoryHighScale",
+                "PIDs",
+                "Slice"
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_policy_requires_nested_ordering() {
+        assert!(WorkloadMemoryPolicy::default().validate().is_ok());
         assert!(
-            WorkloadResourcePolicy {
+            WorkloadMemoryPolicy {
                 splint_memory_high_percent: 50,
-                ..WorkloadResourcePolicy::default()
+                ..WorkloadMemoryPolicy::default()
             }
             .validate()
             .is_err()
@@ -679,7 +729,7 @@ mod tests {
     fn scopes_share_one_dojo_reference_and_last_release_stops_slice() {
         let adapter = Arc::new(FakeAdapter::default());
         let manager =
-            WorkloadUnitManager::new(adapter.clone(), WorkloadResourcePolicy::default()).unwrap();
+            WorkloadUnitManager::new(adapter.clone(), WorkloadMemoryPolicy::default()).unwrap();
         let dojo_id = DojoId::new();
         let first_prepared = manager.prepare(dojo_id, SplintId::new(), 1).unwrap();
         let second_prepared = manager.prepare(dojo_id, SplintId::new(), 2).unwrap();
@@ -718,7 +768,7 @@ mod tests {
     fn immediate_reprepare_waits_for_completed_last_slice_stop() {
         let adapter = Arc::new(FakeAdapter::default());
         let manager =
-            WorkloadUnitManager::new(adapter.clone(), WorkloadResourcePolicy::default()).unwrap();
+            WorkloadUnitManager::new(adapter.clone(), WorkloadMemoryPolicy::default()).unwrap();
         let dojo_id = DojoId::new();
         let active = manager
             .prepare(dojo_id, SplintId::new(), 1)
@@ -762,7 +812,7 @@ mod tests {
         let adapter = Arc::new(FakeAdapter::default());
         *adapter.fail_scope.lock().unwrap() = true;
         let manager =
-            WorkloadUnitManager::new(adapter.clone(), WorkloadResourcePolicy::default()).unwrap();
+            WorkloadUnitManager::new(adapter.clone(), WorkloadMemoryPolicy::default()).unwrap();
         let prepared = manager.prepare(DojoId::new(), SplintId::new(), 1).unwrap();
 
         assert!(prepared.place(identity(103)).is_err());
@@ -780,7 +830,7 @@ mod tests {
     #[ignore = "requires a running systemd user manager and creates disposable transient units"]
     fn systemd_adapter_moves_and_cleans_up_a_disposable_child() {
         let manager = WorkloadUnitManager::connect(
-            WorkloadResourcePolicy::default(),
+            WorkloadMemoryPolicy::default(),
             Some("splinterd.service"),
         )
         .unwrap();
@@ -792,6 +842,11 @@ mod tests {
         let prepared = manager.prepare(DojoId::new(), SplintId::new(), 1).unwrap();
         let names = prepared.names.clone();
         let active = prepared.place(identity(pid)).unwrap();
+
+        assert_eq!(
+            user_manager_property(Some(&names.splint_scope), "TasksMax"),
+            user_manager_property(None, "DefaultTasksMax")
+        );
 
         active.release().unwrap();
         child.wait().unwrap();
@@ -815,8 +870,7 @@ mod tests {
             .unwrap()
             .join("splinterm-pty-child");
         assert!(helper.is_file(), "missing PTY helper: {}", helper.display());
-        let manager =
-            WorkloadUnitManager::connect(WorkloadResourcePolicy::default(), None).unwrap();
+        let manager = WorkloadUnitManager::connect(WorkloadMemoryPolicy::default(), None).unwrap();
         let prepared = manager.prepare(DojoId::new(), SplintId::new(), 1).unwrap();
         let names = prepared.names.clone();
         let command = PtyCommand::new("/bin/sh", "/tmp").args([

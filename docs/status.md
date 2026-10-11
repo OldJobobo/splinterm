@@ -1,5 +1,7 @@
 # Current product status
 
+- **Current public version tag:** `v0.1.1`
+
 This document is the repository authority for Splinterm's current maturity,
 validated product scope, availability, and release gates. Retained public
 evidence explains how a capability was accepted; the [product roadmap](product-roadmap.md)
