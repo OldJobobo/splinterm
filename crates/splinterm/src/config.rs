@@ -1076,12 +1076,15 @@ fn parse_color(value: &str) -> Result<u32> {
         .strip_prefix('#')
         .or_else(|| value.strip_prefix("0x"))
         .unwrap_or(value);
-    let hex = if value.starts_with("0x") && hex.len() == 8 && hex.is_char_boundary(2) {
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("color {value:?} must be #RRGGBB or 0xRRGGBB");
+    }
+    let hex = if value.starts_with("0x") && hex.len() == 8 {
         &hex[2..]
     } else {
         hex
     };
-    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hex.len() != 6 {
         bail!("color {value:?} must be #RRGGBB or 0xRRGGBB");
     }
     u32::from_str_radix(hex, 16).with_context(|| format!("invalid color {value:?}"))
@@ -1104,6 +1107,8 @@ mod tests {
         assert_eq!(parse_color("0x1a2b3c").unwrap(), 0x1a_2b3c);
         assert_eq!(parse_color("0xff1a2b3c").unwrap(), 0x1a_2b3c);
         for value in [
+            "0xzz1a2b3c",
+            "0x\u{e9}123456",
             "0xa\u{e9}12345",
             "+1a2b3",
             "-1a2b3",

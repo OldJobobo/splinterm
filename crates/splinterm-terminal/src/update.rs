@@ -268,8 +268,10 @@ impl ResnapshotRequired {
 /// Ordered damage retained across merges before one full snapshot replaces it.
 ///
 /// A held synchronized update merges every committed change, so without a
-/// bound a producer could grow the list for the whole episode.
-const MERGED_DAMAGE_LIMIT: usize = 65_536;
+/// bound a producer could grow the list for the whole episode. The bound
+/// leaves room for several complete redraws of a large grid, which commit
+/// more than one entry per printed cell.
+const MERGED_DAMAGE_LIMIT: usize = 262_144;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ChangeSet {
