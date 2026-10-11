@@ -97,6 +97,7 @@ const TERMINAL_PUBLICATION_SPLINT_BYTES: usize = 64 * 1024 * 1024;
 const TERMINAL_PUBLICATION_DAEMON_BYTES: usize = 256 * 1024 * 1024;
 const CONTROL_QUEUE: usize = 4;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_SUBSCRIPTION_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const CONTROL_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1092,7 +1093,9 @@ async fn run_daemon() -> Result<()> {
                 }
             }
             accepted = image_listener.accept() => {
-                let (stream, _) = accepted.context("failed to accept image content client")?;
+                let Some(stream) = accepted_stream(accepted, "image content").await else {
+                    continue;
+                };
                 let Ok(permit) = Arc::clone(&image_connections).try_acquire_owned() else {
                     warn!("image content connection limit reached");
                     continue;
@@ -1106,7 +1109,9 @@ async fn run_daemon() -> Result<()> {
                 });
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted.context("failed to accept client")?;
+                let Some(stream) = accepted_stream(accepted, "client").await else {
+                    continue;
+                };
                 let Some(permit) = try_admit_connection(&connections) else {
                     warn!("connection limit reached");
                     continue;
@@ -8495,6 +8500,38 @@ fn socket_path() -> Result<PathBuf> {
     Ok(runtime.join("splinterm/splinterd.sock"))
 }
 
+/// Returns the pause before retrying a failed `accept`.
+///
+/// Descriptor or memory exhaustion persists until something is released, so an
+/// immediate retry would spin. A peer that abandoned its own connection needs
+/// no pause.
+fn accept_retry_delay(error: &std::io::Error) -> Duration {
+    match error.kind() {
+        ErrorKind::ConnectionAborted | ErrorKind::Interrupted | ErrorKind::WouldBlock => {
+            Duration::ZERO
+        }
+        _ => ACCEPT_RETRY_DELAY,
+    }
+}
+
+/// Keeps the daemon and its Splints alive when one `accept` fails.
+async fn accepted_stream<A>(
+    accepted: std::io::Result<(UnixStream, A)>,
+    listener: &'static str,
+) -> Option<UnixStream> {
+    match accepted {
+        Ok((stream, _)) => Some(stream),
+        Err(error) => {
+            let delay = accept_retry_delay(&error);
+            warn!(%error, listener, retry_ms = delay.as_millis(), "failed to accept connection");
+            if !delay.is_zero() {
+                time::sleep(delay).await;
+            }
+            None
+        }
+    }
+}
+
 fn try_admit_connection(connections: &Arc<Semaphore>) -> Option<tokio::sync::OwnedSemaphorePermit> {
     Arc::clone(connections).try_acquire_owned().ok()
 }
@@ -8503,6 +8540,32 @@ fn try_admit_connection(connections: &Arc<Semaphore>) -> Option<tokio::sync::Own
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_accepts_pause_instead_of_ending_the_daemon() {
+        const EMFILE: i32 = 24;
+        let exhausted = std::io::Error::from_raw_os_error(EMFILE);
+        assert_eq!(accept_retry_delay(&exhausted), ACCEPT_RETRY_DELAY);
+        let aborted = std::io::Error::from(ErrorKind::ConnectionAborted);
+        assert_eq!(accept_retry_delay(&aborted), Duration::ZERO);
+
+        let started = time::Instant::now();
+        assert!(
+            accepted_stream::<()>(Err(aborted), "client")
+                .await
+                .is_none()
+        );
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(
+            accepted_stream::<()>(Err(exhausted), "client")
+                .await
+                .is_none()
+        );
+        assert_eq!(started.elapsed(), ACCEPT_RETRY_DELAY);
+
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        assert!(accepted_stream(Ok((stream, ())), "client").await.is_some());
+    }
 
     async fn exercise_fragmented_authenticated_read(split: usize, reload: bool) {
         time::timeout(Duration::from_secs(2), async {
