@@ -2378,7 +2378,9 @@ impl Terminal {
     fn tab(&mut self, count: usize, forward: bool) {
         let mut cursor = self.grid().cursor();
         let mut column = usize::try_from(cursor.position().column).unwrap();
-        for _ in 0..count {
+        // Each step moves at least one column until an edge, so more steps than
+        // columns cannot change the result.
+        for _ in 0..count.min(self.tab_stops.len()) {
             if forward {
                 column = ((column + 1)..self.tab_stops.len())
                     .find(|&candidate| self.tab_stops[candidate])
@@ -3934,6 +3936,27 @@ mod tests {
         assert_eq!(wide.matches.len(), 1);
         assert!(wide.matches[0].end_column > wide.matches[0].start_column);
         assert_eq!(first.history_generation, second.history_generation);
+    }
+
+    #[test]
+    fn oversized_tab_counts_stop_at_the_edges_promptly() {
+        let mut terminal = Terminal::new(20, 2, TerminalConfig::default());
+        let started = std::time::Instant::now();
+        terminal.advance(b"\x1b[2147483647I");
+        let column = |terminal: &Terminal| {
+            terminal
+                .snapshot(SnapshotRequest::default())
+                .cursor()
+                .cursor
+                .position()
+                .column
+        };
+        assert_eq!(column(&terminal), 19);
+        terminal.advance(b"\x1b[2147483647Z");
+        assert_eq!(column(&terminal), 0);
+        terminal.advance(b"\x1b[2I");
+        assert_eq!(column(&terminal), 16);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

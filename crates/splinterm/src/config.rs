@@ -1076,6 +1076,9 @@ fn parse_color(value: &str) -> Result<u32> {
         .strip_prefix('#')
         .or_else(|| value.strip_prefix("0x"))
         .unwrap_or(value);
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("color {value:?} must be #RRGGBB or 0xRRGGBB");
+    }
     let hex = if value.starts_with("0x") && hex.len() == 8 {
         &hex[2..]
     } else {
@@ -1097,6 +1100,25 @@ fn blend_rgb(first: u32, second: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_reject_non_hexadecimal_and_multibyte_input_without_panicking() {
+        assert_eq!(parse_color("#1a2B3c").unwrap(), 0x1a_2b3c);
+        assert_eq!(parse_color("0x1a2b3c").unwrap(), 0x1a_2b3c);
+        assert_eq!(parse_color("0xff1a2b3c").unwrap(), 0x1a_2b3c);
+        for value in [
+            "0xzz1a2b3c",
+            "0x\u{e9}123456",
+            "0xa\u{e9}12345",
+            "+1a2b3",
+            "-1a2b3",
+            "#12345",
+            "1a2b3g",
+            "\u{e9}\u{e9}\u{e9}",
+        ] {
+            assert!(parse_color(value).is_err(), "{value:?}");
+        }
+    }
 
     fn complete_foot_palette(
         background: &str,

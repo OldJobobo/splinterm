@@ -159,6 +159,7 @@ pub(crate) struct Parser {
     utf8_value: u32,
     utf8_minimum: u32,
     utf8_remaining: u8,
+    string_utf8_remaining: u8,
 }
 
 impl Parser {
@@ -181,6 +182,7 @@ impl Parser {
             utf8_value: 0,
             utf8_minimum: 0,
             utf8_remaining: 0,
+            string_utf8_remaining: 0,
         }
     }
 
@@ -413,9 +415,20 @@ impl Parser {
                     self.state = State::OscEscape;
                     (None, false)
                 }
-                0x9c => self.finish_string(true, StringTerminator::StringTerminator),
+                // 0x9c is also a UTF-8 continuation byte (for example in U+4F5C);
+                // it is C1 ST only outside a multibyte sequence.
+                0x9c if self.string_utf8_remaining == 0 => {
+                    self.finish_string(true, StringTerminator::StringTerminator)
+                }
                 0x00..=0x1f | 0x7f => (None, false),
                 _ => {
+                    self.string_utf8_remaining = match byte {
+                        0x80..=0xbf => self.string_utf8_remaining.saturating_sub(1),
+                        0xc2..=0xdf => 1,
+                        0xe0..=0xef => 2,
+                        0xf0..=0xf4 => 3,
+                        _ => 0,
+                    };
                     self.push_string(byte);
                     if self.string == b"1337;File=" {
                         self.start_string(State::ItermControl, 1024);
@@ -682,6 +695,7 @@ impl Parser {
         self.string.clear();
         self.string_limit = limit;
         self.string_truncated = false;
+        self.string_utf8_remaining = 0;
     }
 
     fn push_string(&mut self, byte: u8) {
@@ -802,6 +816,39 @@ mod tests {
         assert_eq!(parser.feed(0xe2), (None, false));
         assert_eq!(parser.feed(b'A'), (Some(Action::Print('\u{fffd}')), true));
         assert_eq!(parser.feed(b'A'), (Some(Action::Print('A')), false));
+    }
+
+    #[test]
+    fn osc_c1_terminator_is_not_taken_from_inside_utf8_text() {
+        // U+4F5C is e4 bd 9c and U+271C is e2 9c 9c.
+        for text in ["作業", "\u{271c}"] {
+            let mut parser = Parser::new(64, 16);
+            let mut sequence = b"\x1b]2;".to_vec();
+            sequence.extend_from_slice(text.as_bytes());
+            let mut finished = None;
+            for byte in &sequence {
+                assert_eq!(parser.feed(*byte).0, None);
+            }
+            assert_eq!(parser.state, State::OscString);
+            if let (Some(action), _) = parser.feed(0x9c) {
+                finished = Some(action);
+            }
+            let mut expected = b"2;".to_vec();
+            expected.extend_from_slice(text.as_bytes());
+            assert!(
+                matches!(&finished, Some(Action::Osc(payload, ..)) if *payload == expected),
+                "{finished:?}"
+            );
+            assert_eq!(parser.state, State::Ground);
+        }
+
+        // A truncated sequence does not swallow the terminator indefinitely.
+        let mut parser = Parser::new(64, 16);
+        for byte in b"\x1b]2;a\xe4b" {
+            let _ = parser.feed(*byte);
+        }
+        assert!(parser.feed(0x9c).0.is_some());
+        assert_eq!(parser.state, State::Ground);
     }
 
     #[test]

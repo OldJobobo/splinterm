@@ -265,6 +265,14 @@ impl ResnapshotRequired {
     }
 }
 
+/// Ordered damage retained across merges before one full snapshot replaces it.
+///
+/// A held synchronized update merges every committed change, so without a
+/// bound a producer could grow the list for the whole episode. The bound
+/// leaves room for several complete redraws of a large grid, which commit
+/// more than one entry per printed cell.
+const MERGED_DAMAGE_LIMIT: usize = 262_144;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ChangeSet {
     pub(crate) damage: Vec<TerminalDamage>,
@@ -321,6 +329,9 @@ impl ChangeSet {
             // Preserve parser order, particularly for repeated scroll operations.
             // Wire publication coalesces row/metadata flags against the final snapshot.
             self.damage.append(&mut other.damage);
+            if self.damage.len() > MERGED_DAMAGE_LIMIT {
+                self.full();
+            }
         }
         let available = event_limit.saturating_sub(self.events.len());
         self.events.extend(other.events.into_iter().take(available));
@@ -448,6 +459,22 @@ mod tests {
             ]
         );
         assert!(TerminalUpdate::coalesce_publication_summaries(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn merged_damage_collapses_to_a_full_snapshot_at_its_bound() {
+        let mut accumulated = ChangeSet::default();
+        for _ in 0..=MERGED_DAMAGE_LIMIT {
+            let mut next = ChangeSet::default();
+            next.push(scroll_damage());
+            accumulated.merge(next, 0);
+        }
+        assert_eq!(accumulated.damage, vec![TerminalDamage::FullSnapshot]);
+
+        let mut next = ChangeSet::default();
+        next.push(scroll_damage());
+        accumulated.merge(next, 0);
+        assert_eq!(accumulated.damage, vec![TerminalDamage::FullSnapshot]);
     }
 
     #[test]
