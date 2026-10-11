@@ -1779,6 +1779,7 @@ async fn dispatch_mutation_to(
                     expected_topology_revision: preparation.topology_revision,
                     dojo_id,
                     name: name.to_owned(),
+                    promote_transient_lair: false,
                 })
                 .await?
             {
@@ -1948,6 +1949,7 @@ pub(crate) async fn dispatch(
                     title,
                     topology_revision,
                     runtime,
+                    ..
                 } if runtime.splint_id == splint_id => Ok(success(
                     tool,
                     json!({

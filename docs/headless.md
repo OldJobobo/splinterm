@@ -49,14 +49,17 @@ app-splinterm.slice                all terminal workloads
     └── one transient scope per live Splint
 ```
 
-Both `splinterd.service` and the aggregate workload slice have `TasksMax=2048`
-and `MemoryHigh=75%`. The independent daemon boundary keeps a workload failure
-from consuming the daemon's task or memory-pressure budget. Transient Dojo
-slices use 1024 tasks and 50% memory pressure; Splint scopes use 512 tasks and
-25% memory pressure. These are task ceilings and soft memory-pressure
-thresholds. `MemoryHigh` asks the kernel to reclaim and throttle under sustained
-pressure; Splinterm does not install a `MemoryMax` hard kill boundary in this
-release.
+`splinterd.service` retains `TasksMax=2048` and `MemoryHigh=75%` as an
+independent control-plane guard. Terminal workload units do not set `TasksMax`:
+each Splint scope receives the systemd user manager's normal `DefaultTasksMax`,
+subject to any stricter administrator or ancestor policy. This matches ordinary
+application-scope behavior and avoids rejecting legitimate thread-heavy browser,
+test, editor, build, and agent workloads.
+
+The aggregate workload slice retains `MemoryHigh=75%`; transient Dojo slices use
+50% and Splint scopes use 25% memory pressure. `MemoryHigh` asks the kernel to
+reclaim and throttle under sustained pressure; Splinterm does not install a
+`MemoryMax` hard kill boundary in this release.
 
 A new Splint is rejected if its exact helper PID cannot be verified inside its
 scope while still blocked before target execution. Existing Dojos are not
@@ -68,12 +71,21 @@ bounded warning; only the packaged service passes the strict
 Inspect both boundaries without changing them:
 
 ```bash
+systemctl --user show -p DefaultTasksMax
 systemctl --user show splinterd.service \
-  -p TasksCurrent -p TasksMax -p MemoryCurrent -p MemoryHigh -p MemoryMax
+  -p TasksCurrent -p TasksMax -p EffectiveTasksMax \
+  -p MemoryCurrent -p MemoryHigh -p MemoryMax
+systemctl --user show <splint.scope> \
+  -p TasksCurrent -p TasksMax -p EffectiveTasksMax
 systemctl --user status app-splinterm.slice
 systemd-cgls --user-unit app-splinterm.slice
 systemd-cgtop
 ```
+
+`EffectiveTasksMax` is authoritative because systemd applies the strictest limit
+from the scope and its ancestors. Existing transient scopes created by an older
+daemon retain their old explicit task ceiling until that workload hierarchy is
+recreated; package installation does not restart the daemon automatically.
 
 `MemoryCurrent` includes page cache charged to each cgroup. Inactive file cache
 is normally reclaimable under pressure, but it is neither immediately free nor

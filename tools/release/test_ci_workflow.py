@@ -15,6 +15,8 @@ MANDATORY = (
     "mcp-tests",
     "package-automation",
     "renderer-contracts",
+    "nix",
+    "arch-warning-check",
 )
 
 
@@ -95,9 +97,9 @@ class CiWorkflowTests(unittest.TestCase):
     def test_pkgbuild_check_python_commands_have_exact_ci_equivalents(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         pkgbuild = (ROOT / "packaging/PKGBUILD").read_text(encoding="utf-8")
-        check_body = pkgbuild.split("check() {", 1)[1].split("\n}", 1)[0]
+        check_body = pkgbuild.split("check() (", 1)[1].split("\n)", 1)[0]
         python_targets = re.findall(r"python -m unittest ([^\s]+)", check_body)
-        self.assertEqual(len(python_targets), 8)
+        self.assertEqual(len(python_targets), 9)
         for target in python_targets:
             with self.subTest(target=target):
                 self.assertEqual(workflow.count(target), 1)

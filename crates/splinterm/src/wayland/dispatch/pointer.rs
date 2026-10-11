@@ -20,6 +20,7 @@ impl PointerHandler for App {
     ) {
         let modal_frame = ModalPointerFrame::new(self.modal.input_modal_open());
         let mut picker_changed = false;
+        let mut explorer_changed = false;
         let mut pane_focus_changed = false;
         let mut pane_divider_changed = false;
         for event in events {
@@ -36,6 +37,10 @@ impl PointerHandler for App {
                 } else {
                     self.handle_session_picker_pointer(event)
                 };
+                continue;
+            }
+            if self.handle_lair_explorer_pointer(event, queue_handle) {
+                explorer_changed = true;
                 continue;
             }
             match self.handle_pane_divider_pointer(event) {
@@ -304,6 +309,7 @@ impl PointerHandler for App {
                 || !self.modal.session_picker_reconcile_pending
                     && (pane_focus_changed
                         || pane_divider_changed
+                        || explorer_changed
                         || self.panes.pane.viewport_dirty
                         || self.panes.pane.raster_dirty_rows.iter().any(|dirty| *dirty)
                         || self

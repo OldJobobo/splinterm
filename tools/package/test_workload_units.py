@@ -37,7 +37,6 @@ Description=Splinterm terminal workloads
 StopWhenUnneeded=yes
 
 [Slice]
-TasksMax=2048
 MemoryHigh=75%
 """
 
@@ -70,6 +69,17 @@ class WorkloadUnitPackageTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 AssertionError, "headless safety or resource settings"
+            ):
+                validate_package.validate_systemd_unit(root)
+
+    def test_workload_slice_rejects_explicit_task_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = unit_root(
+                Path(directory),
+                workload_slice=WORKLOAD_SLICE + "TasksMax=2048\n",
+            )
+            with self.assertRaisesRegex(
+                AssertionError, "inherit the user manager task limit"
             ):
                 validate_package.validate_systemd_unit(root)
 

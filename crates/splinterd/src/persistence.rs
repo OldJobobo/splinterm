@@ -79,8 +79,8 @@ impl MetadataStore {
         }
 
         // Schema-v2 installations used lair.json. Decode through the core's
-        // strict legacy DTO, commit canonical schema-v3 state, and retain the
-        // legacy file so a failed migration can never destroy the only copy.
+        // strict legacy DTO, commit canonical current-schema state, and retain
+        // the legacy file so a failed migration can never destroy the only copy.
         for legacy in [&self.legacy_primary, &self.legacy_backup] {
             match Self::read_if_present(legacy) {
                 Ok(Some(document)) => {
@@ -292,6 +292,39 @@ mod tests {
             0o700
         );
         assert_eq!(fs::metadata(&store.primary).unwrap().mode() & 0o777, 0o600);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn schema_v4_primary_normalizes_generated_dojo_names_on_load() {
+        let base = test_base("schema-v4-generated-dojo-name");
+        let store = MetadataStore::from_base(&base);
+        store.prepare_directory().unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 4,
+            "revision": 7,
+            "lairs": [{
+                "id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+                "name": "main",
+                "dojos": [{
+                    "id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+                    "name": "terminal-123456789",
+                    "default_focus": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                    "root": {"Leaf": {
+                        "id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                        "title": "shell",
+                        "cwd": "/tmp",
+                        "command": [],
+                        "state": {"Exited": 0}
+                    }}
+                }]
+            }]
+        });
+        fs::write(&store.primary, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::set_permissions(&store.primary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let topology = store.load().unwrap().unwrap().into_topology().unwrap();
+        assert_eq!(topology.lairs().next().unwrap().dojos[0].name, "Dojo 1");
         fs::remove_dir_all(base).unwrap();
     }
 

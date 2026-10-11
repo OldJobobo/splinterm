@@ -221,7 +221,7 @@ fn sixel_configuration_uses_foot_palette_and_can_disable_graphics() {
         },
     );
     disabled.set_cell_pixel_size(1, 6);
-    disabled.advance(b"\x1bP7;0;0q#1~\x1b\\X");
+    disabled.advance(b"\x1bP7;0;0q#1~\x1b\\X\x1b[c");
     assert_eq!(disabled.image_metrics().content_count, 0);
     assert_eq!(
         disabled
@@ -234,6 +234,12 @@ fn sixel_configuration_uses_foot_palette_and_can_disable_graphics() {
             .unwrap()
             .content(),
         splinterm_terminal::CellSnapshotContent::Scalar('X')
+    );
+    assert_eq!(
+        disabled.drain_events().collect::<Vec<_>>(),
+        vec![splinterm_terminal::TerminalEvent::PtyWrite(
+            b"\x1b[?62;22c".to_vec()
+        )]
     );
 }
 
@@ -363,7 +369,7 @@ fn xtsmgraphics_queries_are_bounded_and_ordered_before_later_replies() {
             splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?1;0;64S".to_vec()),
             splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?2;0;80;64S".to_vec()),
             splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?2;0;4096;4096S".to_vec()),
-            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?62;22c".to_vec()),
+            splinterm_terminal::TerminalEvent::PtyWrite(b"\x1b[?62;4;22c".to_vec()),
         ]
     );
 }

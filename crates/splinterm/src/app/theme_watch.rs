@@ -189,6 +189,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_theme_reload_switches_dark_light_dark() {
+        use std::fmt::Write as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-light-theme-reload-{}",
+            std::process::id()
+        ));
+        let theme = root.join("theme");
+        std::fs::create_dir_all(&theme).unwrap();
+        let source = ThemeSource::Omarchy(theme.clone());
+        let mut current = ResolvedTheme::default();
+        for (generation, mode, background, foreground) in [
+            (0, "dark", 0x10_11_12, 0xe0_e1_e2),
+            (1, "light", 0xf8_f9_fa, 0x20_21_22),
+            (2, "dark", 0x10_11_12, 0xe0_e1_e2),
+        ] {
+            let before = theme_source_fingerprint(&source);
+            std::fs::rename(&theme, root.join(format!("previous-{generation}"))).unwrap();
+            assert!(resolve_live_theme_update(&source, None, None, current).is_err());
+            std::fs::create_dir(&theme).unwrap();
+            std::fs::write(theme.join("colors.toml"), "accent=\"#010203\"\n").unwrap();
+            let mut foot = format!(
+                "[main]\ninitial-color-theme={mode}\n[colors-{mode}]\nbackground={background:06x}\nforeground={foreground:06x}\nalpha=0.85\nblur=yes\n"
+            );
+            for index in 0..8 {
+                write!(
+                    foot,
+                    "regular{index}={index:06x}\nbright{index}={:06x}\n",
+                    index + 8
+                )
+                .unwrap();
+            }
+            std::fs::write(theme.join("foot.ini"), foot).unwrap();
+            assert_ne!(theme_source_fingerprint(&source), before);
+            let next = resolve_live_theme_update(&source, Some(4321), Some(false), current)
+                .unwrap()
+                .expect("theme switch must publish a palette");
+            assert_eq!(next.background, background);
+            assert_eq!(next.foreground, foreground);
+            assert_eq!(next.background_alpha, 4321);
+            assert!(!next.background_blur);
+            assert_eq!(load_theme_source(&source).unwrap().background, background);
+            assert!(
+                resolve_live_theme_update(&source, Some(4321), Some(false), next)
+                    .unwrap()
+                    .is_none()
+            );
+            current = next;
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_theme_fingerprint_tracks_omarchy_atomic_directory_replacement() {
         let root = std::env::temp_dir().join(format!(
             "splinterm-omarchy-theme-fingerprint-{}",

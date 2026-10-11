@@ -187,7 +187,10 @@ impl MachineMutation {
 fn machine_launch(cwd: Option<PathBuf>, command: Vec<String>) -> Result<LaunchParameters> {
     let config = load_default()?.config;
     Ok(launch_parameters(
-        cwd.unwrap_or(env::current_dir().context("failed to read current directory")?),
+        match cwd {
+            Some(cwd) => cwd,
+            None => env::current_dir().context("failed to read current directory")?,
+        },
         command,
         &config,
     ))
@@ -269,6 +272,7 @@ fn machine_new_dojo_request(
         lair_id,
         name,
         launch,
+        promote_transient_lair: false,
     })
 }
 
@@ -279,6 +283,7 @@ fn machine_new_dojo_request(
 fn machine_mutation_request(
     mutation: &MachineMutation,
     topology: &splinterm_protocol::TopologySnapshot,
+    inherited_cwd: Option<PathBuf>,
 ) -> Result<Request> {
     let expected_topology_revision = topology.revision;
     Ok(match mutation {
@@ -304,7 +309,7 @@ fn machine_mutation_request(
                 axis: *axis,
                 side: *side,
                 ratio: *ratio,
-                launch: machine_launch(cwd.clone(), command.clone())?,
+                launch: machine_launch(cwd.clone().or(inherited_cwd), command.clone())?,
             }
         }
         MachineMutation::CloseSplint { splint_id, .. } => {
@@ -355,6 +360,7 @@ fn machine_mutation_request(
                 expected_topology_revision,
                 dojo_id: *dojo_id,
                 name: name.clone(),
+                promote_transient_lair: false,
             }
         }
         MachineMutation::Focus { dojo_id, splint_id } => {
@@ -799,7 +805,37 @@ async fn machine_mutation_envelope(
     topology
         .validate()
         .map_err(|error| anyhow::anyhow!(error.message))?;
-    let request = machine_mutation_request(mutation, &topology)?;
+    let inherited_cwd = if let MachineMutation::Split {
+        target_splint_id,
+        cwd: None,
+        ..
+    } = mutation
+    {
+        let response = connection
+            .request_with_deadline(
+                Request::InspectSplint {
+                    splint_id: *target_splint_id,
+                },
+                deadline.saturating_sub(started.elapsed()),
+            )
+            .await?;
+        let Response::Splint {
+            runtime,
+            resolved_cwd,
+            ..
+        } = response
+        else {
+            bail!("splinterd returned an unexpected Splint response");
+        };
+        anyhow::ensure!(
+            runtime.splint_id == *target_splint_id,
+            "splinterd returned another Splint"
+        );
+        Some(resolved_cwd.context("source working directory is unavailable")?)
+    } else {
+        None
+    };
+    let request = machine_mutation_request(mutation, &topology, inherited_cwd)?;
     let response = connection
         .request_with_deadline(request, deadline.saturating_sub(started.elapsed()))
         .await?;

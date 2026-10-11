@@ -11,10 +11,18 @@ https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
 
 `packaging/PKGBUILD` produces split packages for reviewed local and CI builds.
 Its version comes from the checked-out commit; `main` is development code, not
-the stable release, and may retain older version metadata. Published 0.1
+the stable release, and carries the next development version. Published 0.1
 releases originate from `maint/0.1`. Use the exact `v0.1.1` tag for a stable
 0.1.1 source build, as shown below; do not relabel a development build as stable.
 The local source archive and `SKIP` checksum are valid only in that workflow.
+
+The closed `packaging/release-state.json` record identifies `v0.1.1` as the
+current public release and predecessor for future candidates. It is the machine-readable authority for that
+boundary; candidate construction and promotion both reject a
+different supplied tag even when it exists. `docs/status.md` carries the same
+exact current-version marker, and release tooling rejects disagreement. The
+post-publication release-record PR must update both files atomically before any
+later candidate is prepared.
 
 The source-built AUR authority is `packaging/aur/PKGBUILD`; candidate
 construction replaces its source-archive checksum with the exact immutable
@@ -23,6 +31,11 @@ recommended prebuilt authority is `packaging/aur-bin/PKGBUILD`; it must already
 target the candidate version's immutable `v…` release URL, while candidate
 construction binds its commit and checksums to the exact approved packages so
 users never compile or test them locally.
+
+During release preparation, checked-in AUR checksums and `_commit` still refer
+to the previous artifacts until candidate tooling replaces them. These staged
+recipes are not ready for AUR submission or installation. Never invent hashes
+for unpublished assets; use the reviewed candidate's generated drafts.
 
 ## Versioned AUR installation
 
@@ -154,6 +167,15 @@ pacman -Qlp packaging/splinterm-mcp-0.1.1-1-x86_64.pkg.tar.zst
 namcap packaging/PKGBUILD packaging/*.pkg.tar.zst   # optional
 ```
 
+Renderer checks use the same four checksum-pinned JetBrains Mono fonts as CI.
+`makepkg` fetches these immutable sources alongside the local archive and verifies
+their SHA-256 hashes. During `check()` only, a private Fontconfig file selects
+these fixtures plus installed Noto fallback fonts, with a build-local font cache.
+Ambient user/system Fontconfig settings cannot substitute a newer JetBrains Mono.
+The fixtures are neither installed nor shipped; runtime font dependencies and
+user font selection are unchanged. The fixture generator requires makepkg's
+already-verified sources. Even `--nocheck` builds still fetch the declared sources.
+
 The local archive checksum is intentionally `SKIP`: the archive is generated
 from the reviewed local Git commit, is never downloaded, and the package's
 `.BUILDINFO`/`.PKGINFO` record the actual build. The separate checked-in AUR
@@ -168,14 +190,14 @@ not submit the local-build recipe to the AUR.
 - optional split package `splinterm-mcp`, containing only the independently
   policy-authorized `/usr/bin/splinterm-mcp`, its setup guide, and notices;
 - `/usr/bin/splinterm-xdg-terminal-exec`, which preserves structured XDG argv
-  and selects persistent commandless or transient command-bearing launches, its
+  and selects configured commandless or always-transient command-bearing launches, its
   canonical `splinterm-dojos` and `splinterm-reopen` Dojo UX aliases, the
   compatibility `splinterm-sessions` alias, the public-CLI-only
   `/usr/bin/splinterm-dojo-picker` reference client and compatibility
   `/usr/bin/splinterm-session-picker` alias, and the optional
   `/usr/bin/generate-omarchy-theme.py` JSON exporter;
 - desktop entry, AppStream metadata, scalable icon, and user service;
-- the release README, CLI/usage/configuration guides, built-in Omarchy keymap
+- the release README, CLI/usage/configuration/accessibility guides, built-in Omarchy keymap
   documentation, preset guide and example schema, optional shell-integration
   instructions, headless lifecycle/policy guidance, terminal-image matrix, and
   integration snippets under `/usr/share/doc/splinterm/`; and

@@ -7,7 +7,9 @@ description: Work with Lairs, Dojos, Splints, windows, detach, reopen, restore, 
 
 ## New work and existing work
 
-A commandless desktop/XDG launch creates a fresh persistent Lair with one Dojo and Splint. An XDG launch carrying a command creates a transient client-bound Lair instead; it is removed when its initial command exits or its owning Window disconnects. Transient Lairs are never saved, restored, listed in Recent Dojos, or selected by `reopen`. Native `splinterm launch -- COMMAND...` remains persistent. Reopening is intentionally separate:
+Commandless desktop/SUPER+ENTER, bare `splinterm launch`, picker **New**, and in-Window **New Terminal** use `multiplexer.persistent-by-default` (`yes` by default). With `no`, the Window owns the fresh unnamed Lair and closing it terminates and removes the complete Lair. Explicit names, native command-bearing launches, presets, restore/relaunch, remote creation, automation, and MCP remain persistent.
+
+Creating another Dojo or explicitly naming/renaming a Dojo promotes the complete transient Lair when `multiplexer.persist-on-tab-organization=yes` (the default). Promotion is permanent. Set it to `no` to retain Window ownership even for organized or multi-tab Lairs. An XDG launch carrying a command remains client-bound regardless of configuration. Unpromoted transient Lairs are never saved, restored, listed in Recent Dojos, or selected by `reopen`. Reopening is intentionally separate:
 
 ```bash
 splinterm dojos   # choose New Terminal or a recent running Dojo
@@ -25,6 +27,7 @@ These actions have deliberately different effects:
 | Action | Result |
 | --- | --- |
 | Close a persistent window | Detaches its local tabs and views |
+| Close a Window owning an unpromoted transient Lair | Terminates its processes and removes the Lair |
 | Close a transient XDG command window | Terminates every process and removes its complete Lair |
 | Close a tab | Detaches that Dojo from this window |
 | Close Other Tabs | Detaches every other local tab without ending their Dojos |

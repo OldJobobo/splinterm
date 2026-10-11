@@ -43,6 +43,7 @@ mod images;
 mod overlays;
 mod raster;
 mod settings;
+mod shaping;
 mod text;
 
 pub(crate) use crate::frontend::PickerHitTarget;
@@ -90,14 +91,19 @@ pub(crate) use overlays::actions::{
     unused_imports,
     reason = "preserve the crate-local renderer facade for the inferred layout return type"
 )]
+pub(crate) use overlays::explorer::{
+    LairExplorerLayout, LairExplorerPresentationMode, lair_explorer_disclosure_hit_test,
+    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout,
+    paint_lair_explorer,
+};
 pub(crate) use overlays::history::{
-    HistoryOverlayLayout, HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout,
-    paint_history_overlay, paint_snapshot_overlays,
+    HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout, paint_history_overlay,
+    paint_snapshot_overlays,
 };
 pub(crate) use overlays::picker::{
     SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
-    SessionPickerTextItem, paint_session_picker_overlay, session_picker_hit_test,
-    session_picker_overlay_layout, session_picker_palette,
+    SessionPickerTextItem, paint_search_overlay, paint_session_picker_overlay,
+    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
 };
 #[cfg(test)]
 use raster::pixel_index;

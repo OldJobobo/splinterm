@@ -215,10 +215,10 @@ impl KeyboardHandler for App {
                         .tabs
                         .previous()
                         .map(|dojo_id| WindowTopologyCommand::ActivateTab { dojo_id }),
-                    TabShortcutAction::NewDojo => match self.focused_cwd() {
-                        Ok(cwd) => Some(WindowTopologyCommand::NewDojo {
+                    TabShortcutAction::NewDojo => match self.focused_cwd_source() {
+                        Ok(source_splint_id) => Some(WindowTopologyCommand::NewDojo {
                             lair_id: self.tab_state.active_identity.lair_id,
-                            cwd,
+                            source_splint_id,
                         }),
                         Err(error) => {
                             self.scheduling.fail(error);
@@ -339,8 +339,8 @@ impl KeyboardHandler for App {
                 return;
             }
             let command = match shortcut.expect("matched Lair action") {
-                ActionId::NewSession => match self.focused_cwd() {
-                    Ok(cwd) => WindowTopologyCommand::NewLair { cwd },
+                ActionId::NewSession => match self.focused_cwd_source() {
+                    Ok(source_splint_id) => WindowTopologyCommand::NewLair { source_splint_id },
                     Err(error) => {
                         self.scheduling.fail(error);
                         return;
@@ -527,6 +527,11 @@ impl KeyboardHandler for App {
         }
         if shortcut == Some(ActionId::ClipboardCopy) {
             self.publish_clipboard(queue_handle, serial, false);
+        } else if shortcut == Some(ActionId::ClipboardSaveImage) {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            self.begin_clipboard_image();
         } else if shortcut == Some(ActionId::ClipboardPaste) {
             self.begin_clipboard_read(PasteTarget::Clipboard);
         } else {

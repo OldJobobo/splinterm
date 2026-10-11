@@ -17,6 +17,7 @@ pub(crate) enum PickerHitTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionPickerItem {
     pub display_title: String,
+    pub breadcrumb: String,
     pub working_directory: String,
     pub pane_count: usize,
     pub running_pane_count: usize,
@@ -39,9 +40,14 @@ enum SessionPickerHost {
 
 pub struct SessionPickerUi {
     items: Vec<SessionPickerItem>,
+    filtered_indices: Vec<usize>,
+    query: String,
+    search_active: bool,
     selected: usize,
     visible_start: usize,
     hovered: Option<PickerHitTarget>,
+    new_enabled: bool,
+    new_blocker: Option<&'static str>,
     host: SessionPickerHost,
 }
 
@@ -52,11 +58,18 @@ const SESSION_PICKER_FIRST_ITEM_ROW: usize = 5;
 impl SessionPickerUi {
     #[must_use]
     pub fn new(items: Vec<SessionPickerItem>, decision: StdSender<SessionPickerDecision>) -> Self {
+        let selected = usize::from(!items.is_empty());
+        let filtered_indices = (0..items.len()).collect();
         Self {
             items,
-            selected: 0,
+            filtered_indices,
+            query: String::new(),
+            search_active: false,
+            selected,
             visible_start: 0,
             hovered: None,
+            new_enabled: true,
+            new_blocker: None,
             host: SessionPickerHost::Standalone {
                 revision: 0,
                 synthetic_id: SplintId::new(),
@@ -65,12 +78,26 @@ impl SessionPickerUi {
         }
     }
 
-    pub(crate) fn inline(items: Vec<SessionPickerItem>) -> Self {
+    pub(crate) fn inline(
+        items: Vec<SessionPickerItem>,
+        new_enabled: bool,
+        new_blocker: Option<&'static str>,
+        initial_row: Option<usize>,
+    ) -> Self {
+        let filtered_indices = (0..items.len()).collect::<Vec<_>>();
+        let selected = initial_row
+            .filter(|index| *index < items.len())
+            .map_or_else(|| usize::from(!items.is_empty()), |index| index + 1);
         Self {
+            selected,
             items,
-            selected: 0,
+            filtered_indices,
+            query: String::new(),
+            search_active: false,
             visible_start: 0,
             hovered: None,
+            new_enabled,
+            new_blocker,
             host: SessionPickerHost::Inline,
         }
     }
@@ -87,12 +114,100 @@ impl SessionPickerUi {
         }
     }
 
-    pub(crate) fn items(&self) -> &[SessionPickerItem] {
-        &self.items
+    pub(crate) fn items(&self) -> impl Iterator<Item = &SessionPickerItem> {
+        self.filtered_indices
+            .iter()
+            .filter_map(|index| self.items.get(*index))
+    }
+
+    pub(crate) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(crate) const fn search_active(&self) -> bool {
+        self.search_active
+    }
+
+    pub(crate) fn begin_search(&mut self) -> bool {
+        if self.search_active {
+            return false;
+        }
+        self.search_active = true;
+        true
+    }
+
+    pub(crate) fn clear_search(&mut self) -> bool {
+        if !self.search_active && self.query.is_empty() {
+            return false;
+        }
+        self.search_active = false;
+        self.query.clear();
+        self.apply_search();
+        true
+    }
+
+    pub(crate) fn append_search(&mut self, text: &str) -> bool {
+        let remaining = 64_usize.saturating_sub(self.query.chars().count());
+        let addition = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(remaining)
+            .collect::<String>();
+        if addition.is_empty() {
+            return false;
+        }
+        self.search_active = true;
+        self.query.push_str(&addition);
+        self.apply_search();
+        true
+    }
+
+    pub(crate) fn backspace_search(&mut self) -> bool {
+        if self.query.pop().is_none() {
+            return false;
+        }
+        self.apply_search();
+        true
+    }
+
+    fn apply_search(&mut self) {
+        let needle = self.query.to_lowercase();
+        let tokens = needle.split_whitespace().collect::<Vec<_>>();
+        self.filtered_indices = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let labels = format!(
+                    "{} {}",
+                    item.display_title.to_lowercase(),
+                    item.breadcrumb.to_lowercase()
+                );
+                tokens
+                    .iter()
+                    .all(|token| labels.contains(token))
+                    .then_some(index)
+            })
+            .collect();
+        self.selected = usize::from(!self.filtered_indices.is_empty());
+        self.visible_start = 0;
+        self.hovered = None;
+    }
+
+    pub(crate) const fn new_enabled(&self) -> bool {
+        self.new_enabled
+    }
+
+    pub(crate) const fn new_blocker(&self) -> Option<&'static str> {
+        self.new_blocker
     }
 
     pub(crate) fn layout_state(&self) -> (usize, usize, usize) {
-        (self.items.len(), self.selected, self.visible_start)
+        (
+            self.filtered_indices.len(),
+            self.selected,
+            self.visible_start,
+        )
     }
 
     pub(crate) fn set_visible_start(&mut self, visible_start: usize) {
@@ -122,40 +237,57 @@ impl SessionPickerUi {
         }
     }
 
-    pub(crate) fn selected_decision(&self) -> SessionPickerDecision {
-        if self.selected == 0 {
-            SessionPickerDecision::New
-        } else {
-            SessionPickerDecision::Open(self.selected - 1)
+    pub(crate) fn selected_decision(&self) -> Option<SessionPickerDecision> {
+        self.decision_for_target(self.selected_target())
+    }
+
+    pub(crate) fn decision_for_target(
+        &self,
+        target: PickerHitTarget,
+    ) -> Option<SessionPickerDecision> {
+        match target {
+            PickerHitTarget::New => self.new_enabled.then_some(SessionPickerDecision::New),
+            PickerHitTarget::Open(index) => self
+                .filtered_indices
+                .get(index)
+                .copied()
+                .map(SessionPickerDecision::Open),
         }
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        let count = self.items.len().saturating_add(1);
+        let first = usize::from(!self.new_enabled && !self.filtered_indices.is_empty());
+        let count = self
+            .filtered_indices
+            .len()
+            .saturating_add(1)
+            .saturating_sub(first);
+        if count == 0 {
+            return;
+        }
+        let current = self.selected.saturating_sub(first).min(count - 1);
         let magnitude = delta.unsigned_abs() % count;
-        self.selected = if delta.is_negative() {
-            self.selected
-                .saturating_add(count)
-                .saturating_sub(magnitude)
-                % count
+        let next = if delta.is_negative() {
+            current.saturating_add(count).saturating_sub(magnitude) % count
         } else {
-            self.selected.saturating_add(magnitude) % count
+            current.saturating_add(magnitude) % count
         };
+        self.selected = next.saturating_add(first);
         self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
     }
 
     pub(crate) fn select_first(&mut self) {
-        self.selected = 0;
+        self.selected = usize::from(!self.new_enabled && !self.filtered_indices.is_empty());
         self.visible_start = 0;
     }
 
     pub(crate) fn select_last(&mut self) {
-        self.selected = self.items.len();
+        self.selected = self.filtered_indices.len();
         self.ensure_selected_visible(SESSION_PICKER_PAGE_ITEMS);
     }
 
     fn ensure_selected_visible(&mut self, visible_count: usize) {
-        if self.items.is_empty() || self.selected == 0 || visible_count == 0 {
+        if self.filtered_indices.is_empty() || self.selected == 0 || visible_count == 0 {
             self.visible_start = 0;
             return;
         }
@@ -169,11 +301,14 @@ impl SessionPickerUi {
         }
         self.visible_start = self
             .visible_start
-            .min(self.items.len().saturating_sub(visible_count));
+            .min(self.filtered_indices.len().saturating_sub(visible_count));
     }
 
     pub(crate) fn select_row(&mut self, row: usize) -> Option<SessionPickerDecision> {
         if row == SESSION_PICKER_NEW_ROW || row == SESSION_PICKER_NEW_ROW + 1 {
+            if !self.new_enabled {
+                return None;
+            }
             self.selected = 0;
             return Some(SessionPickerDecision::New);
         }
@@ -183,11 +318,9 @@ impl SessionPickerUi {
             return None;
         }
         let item = self.visible_start.checked_add(slot)?;
-        if item >= self.items.len() {
-            return None;
-        }
+        let original_index = *self.filtered_indices.get(item)?;
         self.selected = item + 1;
-        Some(SessionPickerDecision::Open(item))
+        Some(SessionPickerDecision::Open(original_index))
     }
 
     /// Builds the temporary terminal presentation used only by the standalone
@@ -215,26 +348,31 @@ impl SessionPickerUi {
             format!("{}New Terminal", marker(self.selected == 0)),
             "    Start a fresh shell".to_owned(),
         ];
-        for (index, item) in self
-            .items
+        for (visible_index, original_index) in self
+            .filtered_indices
             .iter()
             .enumerate()
             .skip(self.visible_start)
             .take(SESSION_PICKER_PAGE_ITEMS)
         {
-            lines.push(format!(
-                "{}{}",
-                marker(self.selected == index + 1),
-                item.display_title
-            ));
+            let Some(item) = self.items.get(*original_index) else {
+                continue;
+            };
+            let selected = self.selected == visible_index + 1;
+            lines.push(format!("{}{}", marker(selected), item.display_title));
             let pane_label = if item.pane_count == 1 {
                 "pane"
             } else {
                 "panes"
             };
+            let detail = if selected && !item.working_directory.is_empty() {
+                format!("{} · {}", item.breadcrumb, item.working_directory)
+            } else {
+                item.breadcrumb.clone()
+            };
             lines.push(format!(
-                "    {} · {} {pane_label} · {} running",
-                item.working_directory, item.pane_count, item.running_pane_count
+                "    {detail} · {} {pane_label} · {} running",
+                item.pane_count, item.running_pane_count
             ));
         }
         while lines.len() < SESSION_PICKER_FIRST_ITEM_ROW + SESSION_PICKER_PAGE_ITEMS * 2 {
@@ -242,7 +380,7 @@ impl SessionPickerUi {
         }
         lines.extend([
             String::new(),
-            "↑/↓ or J/K select · Enter open · N new · Escape cancel".to_owned(),
+            "/ search · ↑/↓ or J/K select · Enter open · Ctrl+N new · Escape cancel".to_owned(),
         ]);
         picker_terminal_snapshot(*synthetic_id, *revision, lines)
     }
@@ -346,14 +484,20 @@ mod tests {
 
     #[test]
     fn inline_picker_state_has_no_terminal_snapshot_identity() {
-        let picker = SessionPickerUi::inline(vec![SessionPickerItem {
-            display_title: "work / editor".to_owned(),
-            working_directory: "/work".to_owned(),
-            pane_count: 2,
-            running_pane_count: 2,
-        }]);
+        let picker = SessionPickerUi::inline(
+            vec![SessionPickerItem {
+                display_title: "editor".to_owned(),
+                breadcrumb: "work / editor".to_owned(),
+                working_directory: "/work".to_owned(),
+                pane_count: 2,
+                running_pane_count: 2,
+            }],
+            true,
+            None,
+            Some(0),
+        );
         assert!(picker.is_inline());
-        assert_eq!(picker.selected_target(), PickerHitTarget::New);
+        assert_eq!(picker.selected_target(), PickerHitTarget::Open(0));
         assert!(matches!(picker.host, SessionPickerHost::Inline));
     }
 
@@ -363,21 +507,31 @@ mod tests {
         let items = (0..10)
             .map(|index| SessionPickerItem {
                 display_title: format!("session {index}"),
+                breadcrumb: format!("work / session {index}"),
                 working_directory: format!("/tmp/{index}"),
                 pane_count: 1,
                 running_pane_count: 1,
             })
             .collect();
         let mut picker = SessionPickerUi::new(items, decision);
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
-        picker.move_selection(-1);
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(9));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        picker.move_selection(-2);
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(9))
+        );
         assert_eq!(picker.visible_start, 3);
         assert_eq!(
             picker.select_row(SESSION_PICKER_FIRST_ITEM_ROW),
             Some(SessionPickerDecision::Open(3))
         );
-        assert_eq!(picker.selected_decision(), SessionPickerDecision::Open(3));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(3))
+        );
         let snapshot = picker.snapshot();
         assert!(snapshot.validate().is_ok());
         assert!(
@@ -391,25 +545,100 @@ mod tests {
     }
 
     #[test]
+    fn inline_picker_search_is_stable_bounded_and_excludes_cwd() {
+        let items = vec![
+            SessionPickerItem {
+                display_title: "Éditor".to_owned(),
+                breadcrumb: "work / Éditor".to_owned(),
+                working_directory: "/secret/match".to_owned(),
+                pane_count: 1,
+                running_pane_count: 1,
+            },
+            SessionPickerItem {
+                display_title: "Éditor".to_owned(),
+                breadcrumb: "other / Éditor".to_owned(),
+                working_directory: "/tmp".to_owned(),
+                pane_count: 1,
+                running_pane_count: 1,
+            },
+        ];
+        let mut picker = SessionPickerUi::inline(items, false, Some("Unavailable"), Some(0));
+        assert!(picker.begin_search());
+        assert!(picker.append_search("ÉDITOR"));
+        assert_eq!(picker.items().count(), 2);
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        picker.move_selection(1);
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(1))
+        );
+        assert!(picker.clear_search());
+        assert!(!picker.search_active());
+        assert!(picker.append_search("match"));
+        assert_eq!(picker.items().count(), 0);
+        assert_eq!(picker.selected_decision(), None);
+        assert!(picker.clear_search());
+        assert!(picker.append_search(&"x".repeat(100)));
+        assert_eq!(picker.query().chars().count(), 64);
+    }
+
+    #[test]
+    fn filtered_pointer_targets_resolve_original_catalog_indices() {
+        let items = (0..10)
+            .map(|index| SessionPickerItem {
+                display_title: format!("session {index}"),
+                breadcrumb: "work".to_owned(),
+                working_directory: String::new(),
+                pane_count: 1,
+                running_pane_count: 1,
+            })
+            .collect();
+        let mut picker = SessionPickerUi::inline(items, false, Some("Unavailable"), Some(0));
+        picker.append_search("session 9");
+        assert_eq!(
+            picker.decision_for_target(PickerHitTarget::Open(0)),
+            Some(SessionPickerDecision::Open(9))
+        );
+        assert_eq!(
+            picker.decision_for_target(picker.selected_target()),
+            picker.selected_decision()
+        );
+        assert_eq!(picker.decision_for_target(PickerHitTarget::Open(1)), None);
+        assert_eq!(picker.decision_for_target(PickerHitTarget::New), None);
+        picker.append_search(" missing");
+        assert_eq!(picker.decision_for_target(PickerHitTarget::Open(0)), None);
+        picker.clear_search();
+        assert_eq!(
+            picker.decision_for_target(PickerHitTarget::Open(9)),
+            Some(SessionPickerDecision::Open(9))
+        );
+    }
+
+    #[test]
     fn session_picker_adapts_visibility_for_empty_and_large_catalogs() {
         for count in [0, 1, 7, 8, 64, 256] {
             let (decision, _receiver) = std_mpsc::channel();
             let items = (0..count)
                 .map(|index| SessionPickerItem {
                     display_title: format!("session {index}"),
+                    breadcrumb: format!("work / session {index}"),
                     working_directory: format!("/tmp/{index}"),
                     pane_count: 1,
                     running_pane_count: 1,
                 })
                 .collect();
             let mut picker = SessionPickerUi::new(items, decision);
+            picker.select_first();
             picker.move_selection(-1);
             let expected = if count == 0 {
                 SessionPickerDecision::New
             } else {
                 SessionPickerDecision::Open(count - 1)
             };
-            assert_eq!(picker.selected_decision(), expected);
+            assert_eq!(picker.selected_decision(), Some(expected));
             picker.ensure_selected_visible(3);
             assert!(picker.visible_start <= count.saturating_sub(3));
             if count > 0 {
@@ -418,10 +647,10 @@ mod tests {
                 assert!(selected < picker.visible_start + 3.min(count));
             }
             picker.select_first();
-            assert_eq!(picker.selected_decision(), SessionPickerDecision::New);
+            assert_eq!(picker.selected_decision(), Some(SessionPickerDecision::New));
             assert_eq!(picker.visible_start, 0);
             picker.select_last();
-            assert_eq!(picker.selected_decision(), expected);
+            assert_eq!(picker.selected_decision(), Some(expected));
         }
     }
 }

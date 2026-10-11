@@ -334,6 +334,7 @@ fn main() -> Result<()> {
         physical_dpi: arguments.physical_dpi,
         padding,
         background_alpha: u16::MAX,
+        ..RendererOptions::default()
     })?;
     let style = cursor_style(&arguments.cursor_shape)?;
     let presentation = cursor_presentation(&arguments)?;

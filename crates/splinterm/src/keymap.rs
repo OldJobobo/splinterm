@@ -82,6 +82,7 @@ pub enum ActionId {
     DenyControlTransfer,
     ClipboardCopy,
     ClipboardPaste,
+    ClipboardSaveImage,
 }
 
 impl ActionId {
@@ -152,6 +153,7 @@ impl ActionId {
         Self::DenyControlTransfer,
         Self::ClipboardCopy,
         Self::ClipboardPaste,
+        Self::ClipboardSaveImage,
     ];
 
     #[must_use]
@@ -223,6 +225,7 @@ impl ActionId {
             Self::DenyControlTransfer => "control.deny-transfer",
             Self::ClipboardCopy => "clipboard.copy",
             Self::ClipboardPaste => "clipboard.paste",
+            Self::ClipboardSaveImage => "clipboard.save-image",
         }
     }
 
@@ -1622,6 +1625,27 @@ fn chords_overlap(left: KeyChord, right: KeyChord) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_image_action_is_bindable_without_changing_either_profile() {
+        for profile in [KeymapProfile::Splinterm, KeymapProfile::OmarchyTmux] {
+            let original = built_in_keymap(profile);
+            assert_eq!(original.primary_shortcut(ActionId::ClipboardSaveImage), "");
+            let resolved = resolve_keymap_text(profile,
+                "version = 1\n[[binding]]\nsequence = [\"Ctrl+Alt+I\"]\naction = \"clipboard.save-image\"\n",
+                Path::new("keybindings.toml")).unwrap();
+            assert_eq!(
+                resolved
+                    .keymap
+                    .primary_shortcut(ActionId::ClipboardSaveImage),
+                "Ctrl+Alt+I"
+            );
+            assert_eq!(
+                resolved.keymap.primary_shortcut(ActionId::ClipboardPaste),
+                original.primary_shortcut(ActionId::ClipboardPaste)
+            );
+        }
+    }
 
     #[test]
     fn built_in_chords_resolve_without_semantic_conflicts() {

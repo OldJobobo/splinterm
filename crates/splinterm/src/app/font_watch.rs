@@ -23,9 +23,9 @@ struct FontReloadState<F> {
 }
 
 impl<F: Clone + Eq> FontReloadState<F> {
-    fn new(current: F) -> Self {
+    fn new(source: F, current: F) -> Self {
         Self {
-            observed: None,
+            observed: Some(source),
             current,
         }
     }
@@ -42,8 +42,8 @@ impl<F: Clone + Eq> FontReloadState<F> {
         self.observed = None;
     }
 
-    fn accept(&mut self, fingerprint: F) -> bool {
-        self.observed = Some(fingerprint.clone());
+    fn accept(&mut self, source: F, fingerprint: F) -> bool {
+        self.observed = Some(source);
         if self.current == fingerprint {
             return false;
         }
@@ -112,7 +112,10 @@ pub(in crate::app) async fn watch_font(
     if authority != FontAuthority::NativeOmarchy {
         return;
     }
-    let mut state = FontReloadState::new(current.fingerprint().clone());
+    let mut state = FontReloadState::new(
+        current.source_fingerprint().clone(),
+        current.fingerprint().clone(),
+    );
     let mut diagnostics = FontReloadDiagnostics::default();
     let mut retry_after = None;
     // Startup already staged `current`; defer the first ambient Fontconfig
@@ -141,7 +144,10 @@ pub(in crate::app) async fn watch_font(
         match stage(pattern.clone(), authority).await {
             Ok(generation) => {
                 let generation = Arc::new(generation);
-                if !state.accept(generation.fingerprint().clone()) {
+                if !state.accept(
+                    generation.source_fingerprint().clone(),
+                    generation.fingerprint().clone(),
+                ) {
                     diagnostics.accepted();
                     continue;
                 }
@@ -172,33 +178,65 @@ mod tests {
 
     #[test]
     fn reload_state_coalesces_probes_and_publishes_only_changed_candidates() {
-        let mut state = FontReloadState::new(1_u8);
-        assert!(state.observe(1));
-        assert!(!state.accept(1));
+        let mut state = FontReloadState::new(1_u8, 1);
+        assert!(!state.observe(1));
+        assert!(!state.accept(1, 1));
         assert!(!state.observe(1));
         assert!(state.observe(2));
-        assert!(state.accept(2));
-        assert!(!state.accept(2));
+        assert!(state.accept(2, 2));
+        assert!(!state.accept(2, 2));
         assert!(state.observe(1));
-        assert!(state.accept(1));
+        assert!(state.accept(1, 1));
     }
 
     #[test]
     fn accepted_staging_replaces_a_divergent_probe_fingerprint() {
-        let mut state = FontReloadState::new(1_u8);
+        let mut state = FontReloadState::new(1_u8, 1);
         assert!(state.observe(2));
-        assert!(state.accept(3));
+        assert!(state.accept(3, 3));
         assert!(state.observe(2));
-        assert!(state.accept(2));
+        assert!(state.accept(2, 2));
     }
 
     #[test]
     fn failed_staging_retries_the_same_observed_fingerprint() {
-        let mut state = FontReloadState::new(1_u8);
+        let mut state = FontReloadState::new(1_u8, 1);
         assert!(state.observe(2));
         state.reject_observed();
         assert!(state.observe(2));
-        assert!(state.accept(2));
+        assert!(state.accept(2, 2));
+    }
+
+    #[test]
+    fn substituted_styles_do_not_restage_unchanged_sources() {
+        let mut state = FontReloadState::new(1_u8, 1);
+        assert!(state.observe(2));
+        // Source 2 legitimately resolves to the already accepted regular face.
+        assert!(!state.accept(2, 1));
+        for _ in 0..10 {
+            assert!(!state.observe(2));
+        }
+        assert!(state.observe(3));
+        assert!(state.accept(3, 4));
+        assert!(!state.observe(3));
+    }
+
+    #[test]
+    fn staged_source_wins_over_an_earlier_probe_even_with_style_substitution() {
+        let mut state = FontReloadState::new(1_u8, 1);
+        assert!(state.observe(2));
+        // Resolution raced to 3, whose styles reduce to renderer fingerprint 1.
+        assert!(!state.accept(3, 1));
+        assert!(!state.observe(3));
+        // Returning to 2 must not be lost, even though it triggered the last stage.
+        assert!(state.observe(2));
+        assert!(state.accept(2, 4));
+    }
+
+    #[test]
+    fn startup_with_substituted_styles_skips_unchanged_first_probe() {
+        let mut state = FontReloadState::new(2_u8, 1);
+        assert!(!state.observe(2));
     }
 
     #[test]

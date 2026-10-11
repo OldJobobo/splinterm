@@ -1397,6 +1397,42 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
         module.theme_settings(tmp_path)
 
 
+def test_omarchy_theme_generator_honors_initial_light_presentation(
+    tmp_path: pathlib.Path,
+) -> None:
+    module = load_module(
+        ROOT / "tools/generate-omarchy-theme.py", "generate_omarchy_theme_light"
+    )
+    dark = "[colors-dark]\nalpha=0.3\nblur=no\n"
+    light = "[colors-light]\nalpha=0.85\nblur=yes\n"
+    for palettes in (light, dark + light, light + dark):
+        for main in ("[main]\n", ""):
+            (tmp_path / "foot.ini").write_text(
+                main + "initial-color-theme=light\n" + palettes,
+                encoding="utf-8",
+            )
+            assert module.theme_settings(tmp_path) == (0.85, True)
+    (tmp_path / "foot.ini").write_text(
+        "[main]\ninitial-color-theme=light\n" + dark + "[colors-light]\n",
+        encoding="utf-8",
+    )
+    assert module.theme_settings(tmp_path) == (1.0, False)
+    for assignment, message in (("alpha=1.1", "between"), ("blur=perhaps", "boolean")):
+        (tmp_path / "foot.ini").write_text(
+            "[main]\ninitial-color-theme=light\n" + dark
+            + "[colors-light]\n" + assignment + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=message):
+            module.theme_settings(tmp_path)
+    (tmp_path / "foot.ini").write_text(
+        "[main]\ninitial-color-theme=invalid\n" + dark,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="dark or light"):
+        module.theme_settings(tmp_path)
+
+
 def test_stage_overhead_bootstrap_is_deterministic_and_one_sided() -> None:
     module = load_module(
         ROOT / "tools/performance/run-stage-overhead.py", "stage_overhead"

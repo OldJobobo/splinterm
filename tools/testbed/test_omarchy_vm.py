@@ -20,6 +20,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         *args: str,
         configured: bool = True,
         remote_root: str = "/home/omarchy/Projects/splinterm-testbed-review",
+        root_override: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -55,6 +56,9 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             )
 
         environment = os.environ.copy()
+        environment.pop("SPLINTERM_TESTBED_REMOTE_ROOT", None)
+        if root_override is not None:
+            environment["SPLINTERM_TESTBED_REMOTE_ROOT"] = root_override
         environment.update(
             {
                 "CALL_LOG": str(log),
@@ -102,7 +106,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertIn("/usr/bin/splinterm launch", runner)
         self.assertIn('XDG_STATE_HOME="$state"', runner)
         self.assertIn('XDG_CONFIG_HOME="$config"', runner)
-        self.assertIn("splinterm-package-install-check", runner)
+        self.assertIn('${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-install-check', runner)
         self.assertIn(
             'SPLINTERM_SOCKET="$socket" /usr/bin/splinterm list', runner
         )
@@ -114,8 +118,150 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         )[0]
         self.assertLess(
             package_launch.index(active_guard),
-            package_launch.index('rm -rf "$runtime"'),
+            package_launch.index('mkdir -m 700 "$runtime"'),
         )
+
+    def test_package_runtime_is_checkout_scoped_and_stop_checks_owner(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        install = runner.split("  package-install)", 1)[1].split("  package-launch)", 1)[0]
+        launch = runner.split("  package-launch)", 1)[1].split("  package-stop)", 1)[0]
+        stop = runner.split("  package-stop)", 1)[1].split("  exec)", 1)[0]
+        self.assertIn('SPLINTERM_TESTBED_RUNTIME_LEAF=', runner)
+        for action in (install, launch, stop):
+            self.assertIn('${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-', action)
+            self.assertNotIn('"/run/user/$(id -u)/splinterm-package-', action)
+        self.assertLess(
+            install.index('[[ ! -e $runtime && ! -L $runtime ]]'),
+            install.index('./tools/package/upgrade-local-package.sh --yes'),
+        )
+        self.assertLess(
+            launch.index('[[ ! -e $runtime && ! -L $runtime ]]'),
+            launch.index('mkdir -m 700 "$runtime"'),
+        )
+        self.assertIn('printf \'%s\\n\' "$package_root" >"$runtime/testbed-root"', launch)
+        self.assertLess(stop.index('testbed-root'), stop.index('stop_matching /usr/bin/splinterm'))
+        self.assertLess(stop.index('testbed-root'), stop.index('rm -rf "$runtime"'))
+        result, log = self.run_runner(
+            "package-stop",
+            remote_root="/home/omarchy/Projects/splinterm-testbed-rc3_review",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "SPLINTERM_TESTBED_RUNTIME_LEAF=splinterm-testbed-rc3_review",
+            log.read_text(),
+        )
+
+    def test_package_launch_cleans_only_its_own_state_on_failures(self) -> None:
+        launch = RUNNER.read_text(encoding="utf-8").split("  package-launch)", 1)[
+            1
+        ].split("  package-stop)", 1)[0]
+        section = launch[
+            launch.index("daemon_pid=\nclient_pid=\n") : launch.index(
+                'python "$package_root/source/tools/testbed/guest-window.py" prepare'
+            )
+        ]
+        self.assertLess(
+            section.index("trap cleanup_failed_launch ERR"),
+            section.index('mkdir -m 700 "$runtime"'),
+        )
+        self.assertLess(
+            section.index("trap cleanup_failed_launch ERR"),
+            section.index("instance=$(hyprctl instances -j"),
+        )
+        self.assertLess(
+            section.index('guest-window.py" restore'),
+            section.index('rm -rf -- "$runtime"'),
+        )
+        self.assertLess(
+            section.index("return 1"),
+            section.index('rm -rf -- "$runtime"'),
+        )
+        script = "\n".join(
+            (
+                "set -euo pipefail",
+                'package_root="$TEST_PACKAGE_ROOT"',
+                'runtime="$TEST_RUNTIME"',
+                'state="$TEST_STATE"',
+                'config="$TEST_CONFIG"',
+                'window_state="$runtime/guest-window.json"',
+                section,
+                'if [[ $TEST_FAILURE == late || $TEST_FAILURE == restore ]]; then printf "prepared\\n" >"$window_state"; fi',
+                "false",
+            )
+        )
+        validation = ROOT / ".validation"
+        validation.mkdir(exist_ok=True)
+        for failure in ("early", "late", "partial", "restore"):
+            with self.subTest(failure=failure):
+                with tempfile.TemporaryDirectory(dir=validation) as temporary:
+                    base = Path(temporary)
+                    package_root = base / "package"
+                    package_root.mkdir()
+                    fake_bin = base / "bin"
+                    fake_bin.mkdir()
+                    hyprctl = fake_bin / "hyprctl"
+                    hyprctl.write_text(
+                        "#!/bin/sh\n"
+                        'if [ "$TEST_FAILURE" = early ]; then exit 17; fi\n'
+                        "printf '%s\\n' '[{\"wl_socket\":\"wayland-0\",\"instance\":\"test\"}]'\n"
+                    )
+                    hyprctl.chmod(0o755)
+                    python = fake_bin / "python"
+                    python.write_text(
+                        "#!/bin/sh\n"
+                        'test -f "$TEST_RUNTIME/guest-window.json" || exit 1\n'
+                        'printf "%s\\n" "$@" >"$TEST_RESTORE_LOG"\n'
+                        'if [ "$TEST_FAILURE" = restore ]; then exit 17; fi\n'
+                    )
+                    python.chmod(0o755)
+                    runtime = base / "runtime"
+                    state = package_root / "acceptance-state"
+                    config = package_root / "acceptance-config"
+                    restore_log = base / "restore.log"
+                    if failure == "partial":
+                        state.mkdir()
+                        (state / "existing").write_text("preserve me")
+                    environment = os.environ.copy()
+                    environment.update(
+                        {
+                            "PATH": f"{fake_bin}:{environment['PATH']}",
+                            "TEST_PACKAGE_ROOT": str(package_root),
+                            "TEST_RUNTIME": str(runtime),
+                            "TEST_STATE": str(state),
+                            "TEST_CONFIG": str(config),
+                            "TEST_RESTORE_LOG": str(restore_log),
+                            "TEST_FAILURE": failure,
+                        }
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", script],
+                        cwd=ROOT,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    if failure == "restore":
+                        self.assertIn("private state retained", result.stderr)
+                        self.assertTrue((runtime / "guest-window.json").exists())
+                        self.assertEqual(
+                            (runtime / "testbed-root").read_text().strip(),
+                            str(package_root),
+                        )
+                        self.assertTrue(state.exists())
+                        self.assertTrue(config.exists())
+                    else:
+                        self.assertFalse(runtime.exists(), result.stderr)
+                        self.assertFalse(config.exists(), result.stderr)
+                        if failure == "partial":
+                            self.assertEqual((state / "existing").read_text(), "preserve me")
+                        else:
+                            self.assertFalse(state.exists(), result.stderr)
+                    if failure in ("late", "restore"):
+                        self.assertIn("restore", restore_log.read_text())
+                    else:
+                        self.assertFalse(restore_log.exists())
 
     def test_graphical_launches_use_guarded_guest_window_lifecycle(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
@@ -133,6 +279,18 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertEqual(runner.count('--client-token "$client_token"'), 2)
         self.assertEqual(runner.count('SPLINTERM_TEST_WINDOW_TOKEN="$client_token"'), 2)
         development_launch = runner.split("  launch)", 1)[1].split("  stop)", 1)[0]
+        build = development_launch.index("case ${SPLINTERM_TEST_PROFILE:-release} in")
+        prepare = development_launch.index("guest-window.py prepare")
+        self.assertLess(build, development_launch.index("trap cleanup_failed_launch ERR"))
+        self.assertLess(build, prepare)
+        self.assertIn(
+            "cargo build -q --release -p splinterd -p splinterm -p splinterm-pty",
+            development_launch,
+        )
+        self.assertIn(
+            "cargo build -q -p splinterd -p splinterm -p splinterm-pty",
+            development_launch,
+        )
         self.assertIn('kill "$client_pid"', development_launch)
         self.assertIn('wait "$client_pid"', development_launch)
 
@@ -152,6 +310,15 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         call = log.read_text()
         self.assertIn("cd /home/omarchy/Projects/splinterm-testbed-review", call)
         self.assertIn("exec printf %s two\\ words", call)
+
+    def test_explicit_root_override_wins_over_config_for_package_actions(self) -> None:
+        unique = "/home/omarchy/Projects/splinterm-testbed-rc3_0ba40003"
+        result, log = self.run_runner("package-stop", root_override=unique)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = log.read_text()
+        self.assertIn(f"SPLINTERM_TESTBED_PACKAGE_ROOT={unique}/.testbed-package", call)
+        self.assertIn("SPLINTERM_TESTBED_RUNTIME_LEAF=splinterm-testbed-rc3_0ba40003", call)
+        self.assertNotIn("splinterm-testbed-review", call)
 
     def test_desktop_exec_discovers_guest_wayland_environment(self) -> None:
         result, log = self.run_runner("desktop-exec", "wtype", "--", "two words")

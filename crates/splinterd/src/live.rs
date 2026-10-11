@@ -3,7 +3,8 @@ use std::{
     ffi::OsString,
     io::{self, Read, Write},
     mem::size_of,
-    os::unix::process::ExitStatusExt,
+    os::{fd::OwnedFd, unix::process::ExitStatusExt},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -96,12 +97,21 @@ impl ProcessIncarnation {
     /// Panics if the process has exhausted the `u64` incarnation space.
     #[must_use]
     pub fn allocate() -> Self {
-        let value = NEXT_INCARNATION
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .expect("process incarnation space exhausted");
-        Self(value)
+        let mut current = NEXT_INCARNATION.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(1)
+                .expect("process incarnation space exhausted");
+            match NEXT_INCARNATION.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Self(current),
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     #[must_use]
@@ -799,18 +809,24 @@ fn append_bounded_sparse_rows(
         rows,
         rows.len().saturating_add(source.len()).min(final_rows),
     );
-    while rows.len() > final_rows {
-        rows.remove(0);
-    }
-    for source_row in source {
-        if rows.len() == final_rows {
-            let mut reused = rows.remove(0);
+    // Rotate all evicted rows to the tail once, then reuse their nested cell
+    // allocations for incoming rows. Repeated remove(0) shifts the whole
+    // retained history for every appended row under subscriber backpressure.
+    let evicted = rows
+        .len()
+        .saturating_add(source.len())
+        .saturating_sub(final_rows)
+        .min(rows.len());
+    rows.rotate_left(evicted);
+    let kept = rows.len() - evicted;
+    for (index, source_row) in source.iter().enumerate() {
+        if let Some(reused) = rows.get_mut(kept + index) {
             reused.clone_from(source_row);
-            rows.push(reused);
         } else {
             rows.push(source_row.clone());
         }
     }
+    rows.truncate(kept + source.len());
 }
 
 fn take_sparse_history_rows(history: &mut SparseHistoryDelta) -> Vec<CompactLiveRow> {
@@ -1347,6 +1363,7 @@ struct CompactMailboxState {
 struct CompactSnapshotSlot {
     current: Mutex<CompactMailboxState>,
     producer_batch_active: AtomicBool,
+    producer_batch_completions: AtomicU64,
     producer_batch_done: Notify,
     #[cfg(test)]
     producer_batch_waits: AtomicUsize,
@@ -1378,17 +1395,26 @@ impl CompactSnapshotSlot {
 
     fn end_producer_batch(&self) {
         self.producer_batch_active.store(false, Ordering::Release);
+        self.producer_batch_completions
+            .fetch_add(1, Ordering::Release);
         self.producer_batch_done.notify_one();
     }
 
     async fn wait_for_producer_batch(&self, resnapshot: &mut watch::Receiver<bool>) -> bool {
+        let completions = self.producer_batch_completions.load(Ordering::Acquire);
         loop {
             if *resnapshot.borrow() {
                 return true;
             }
             let completed = self.producer_batch_done.notified();
             tokio::pin!(completed);
-            if !self.producer_batch_active.load(Ordering::Acquire) {
+            // A completed read permits draining the exact, mutex-protected tail
+            // even when the producer has already begun its next read. Requiring
+            // an idle producer here can repeatedly park a ready consumer until
+            // the bounded queue overflows.
+            if !self.producer_batch_active.load(Ordering::Acquire)
+                || self.producer_batch_completions.load(Ordering::Acquire) != completions
+            {
                 return false;
             }
             #[cfg(test)]
@@ -1487,11 +1513,17 @@ impl QueueAccounting {
     }
 
     fn try_reserve_counter(counter: &AtomicU64, amount: u64, limit: u64) -> bool {
-        counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(amount).filter(|next| *next <= limit)
-            })
-            .is_ok()
+        let mut current = counter.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(amount).filter(|next| *next <= limit) else {
+                return false;
+            };
+            match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn try_admit_producer_bytes(&self, amount: u64) -> Option<TerminalPublicationMemoryLease> {
@@ -2685,33 +2717,47 @@ impl RuntimeMetrics {
     }
 
     fn add_usize_saturating(value: &AtomicUsize, amount: usize) -> usize {
-        let previous = value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(amount))
-            })
-            .unwrap_or_else(|current| current);
-        previous.saturating_add(amount)
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_add(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn sub_usize_saturating(value: &AtomicUsize, amount: usize) {
-        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_sub(amount))
-        });
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn add_u64_saturating(value: &AtomicU64, amount: u64) -> u64 {
-        let previous = value
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(amount))
-            })
-            .unwrap_or_else(|current| current);
-        previous.saturating_add(amount)
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_add(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn sub_u64_saturating(value: &AtomicU64, amount: u64) {
-        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_sub(amount))
-        });
+        let mut current = value.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(amount);
+            match value.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn add_saturating(value: &AtomicU64, amount: u64) {
@@ -2969,11 +3015,44 @@ impl RuntimeMetrics {
     }
 }
 
+fn capture_child_pidfd(pid: u32) -> Option<OwnedFd> {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+}
+
+fn root_process_is_live(pidfd: &OwnedFd) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let mut descriptors = [PollFd::new(pidfd, PollFlags::IN)];
+    matches!(
+        poll(
+            &mut descriptors,
+            Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0
+            })
+        ),
+        Ok(0)
+    ) && descriptors[0].revents().is_empty()
+}
+
+async fn read_root_process_cwd(pid: u32, pidfd: &OwnedFd) -> Option<PathBuf> {
+    if !root_process_is_live(pidfd) {
+        return None;
+    }
+    let cwd = tokio::fs::read_link(format!("/proc/{pid}/cwd"))
+        .await
+        .ok()?;
+    // A readable pidfd means the original root exited. Reject even if /proc
+    // successfully resolved a replacement that reused the numeric PID.
+    root_process_is_live(pidfd).then_some(cwd)
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveSplintHandle {
     pub splint_id: SplintId,
     pub incarnation: ProcessIncarnation,
     child_pid: u32,
+    child_pidfd: Option<Arc<OwnedFd>>,
     commands: mpsc::Sender<Command>,
     default_snapshot_rows: usize,
     default_subscriber_capacity: usize,
@@ -2990,6 +3069,12 @@ impl LiveSplintHandle {
     #[must_use]
     pub const fn child_pid(&self) -> u32 {
         self.child_pid
+    }
+
+    /// Observe only this root process's cwd. Missing pidfd support or an exited
+    /// root fails closed, even if its numeric PID now names a different process.
+    pub async fn root_cwd(&self) -> Option<PathBuf> {
+        read_root_process_cwd(self.child_pid, self.child_pidfd.as_deref()?).await
     }
 
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
@@ -3378,10 +3463,14 @@ impl LiveSplintRuntime {
         let (exit_sender, exit) = watch::channel(None);
         let metrics = Arc::new(RuntimeMetrics::default());
         let child_pid = session.child_id();
+        // The session still owns its unreaped std::process::Child here; the
+        // actor that can reap it has not started. Capture identity before spawn.
+        let child_pidfd = capture_child_pidfd(child_pid).map(Arc::new);
         let handle = LiveSplintHandle {
             splint_id,
             incarnation,
             child_pid,
+            child_pidfd,
             commands: sender,
             default_snapshot_rows: config.max_scrollback_snapshot_rows,
             default_subscriber_capacity: config.subscriber_capacity,
@@ -5123,6 +5212,115 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn atomic_accounting_preserves_saturation_and_admission_boundaries() {
+        let count = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(RuntimeMetrics::add_usize_saturating(&count, 2), usize::MAX);
+        assert_eq!(RuntimeMetrics::add_usize_saturating(&count, 0), usize::MAX);
+        RuntimeMetrics::sub_usize_saturating(&count, usize::MAX);
+        RuntimeMetrics::sub_usize_saturating(&count, 1);
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+
+        let bytes = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(RuntimeMetrics::add_u64_saturating(&bytes, 2), u64::MAX);
+        assert_eq!(RuntimeMetrics::add_u64_saturating(&bytes, 0), u64::MAX);
+        RuntimeMetrics::sub_u64_saturating(&bytes, u64::MAX);
+        RuntimeMetrics::sub_u64_saturating(&bytes, 1);
+        assert_eq!(bytes.load(Ordering::Relaxed), 0);
+
+        assert!(QueueAccounting::try_reserve_counter(&bytes, 10, 10));
+        assert!(QueueAccounting::try_reserve_counter(&bytes, 0, 10));
+        assert!(!QueueAccounting::try_reserve_counter(&bytes, 1, 10));
+        assert_eq!(bytes.load(Ordering::Acquire), 10);
+        bytes.store(u64::MAX, Ordering::Release);
+        assert!(!QueueAccounting::try_reserve_counter(&bytes, 1, u64::MAX));
+        assert_eq!(bytes.load(Ordering::Acquire), u64::MAX);
+    }
+
+    #[test]
+    fn atomic_accounting_updates_are_exact_under_contention() {
+        let count = AtomicUsize::new(0);
+        let bytes = AtomicU64::new(0);
+        let admitted = AtomicU64::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..1_000 {
+                        RuntimeMetrics::add_usize_saturating(&count, 1);
+                        RuntimeMetrics::add_u64_saturating(&bytes, 1);
+                        QueueAccounting::try_reserve_counter(&admitted, 1, 17);
+                    }
+                });
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 8_000);
+        assert_eq!(bytes.load(Ordering::Relaxed), 8_000);
+        assert_eq!(admitted.load(Ordering::Acquire), 17);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..1_000 {
+                        RuntimeMetrics::sub_usize_saturating(&count, 1);
+                        RuntimeMetrics::sub_u64_saturating(&bytes, 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        assert_eq!(bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn atomic_incarnation_allocation_is_unique_under_contention() {
+        let barrier = std::sync::Barrier::new(8);
+        let mut values = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        (0..100)
+                            .map(|_| ProcessIncarnation::allocate().value())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("allocation thread"))
+                .collect::<Vec<_>>()
+        });
+        values.sort_unstable();
+        values.dedup();
+        assert_eq!(values.len(), 800);
+    }
+
+    #[tokio::test]
+    async fn root_cwd_pidfd_rejects_reaped_identity_even_when_pid_names_live_process() {
+        let current_pid = std::process::id();
+        let current_identity = capture_child_pidfd(current_pid).unwrap();
+        assert_eq!(
+            read_root_process_cwd(current_pid, &current_identity).await,
+            Some(std::env::current_dir().unwrap())
+        );
+
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        // Capture while the Child is unreaped, just as from_session does.
+        let stale_identity = capture_child_pidfd(child.id());
+        assert!(child.wait().unwrap().success());
+        let stale_identity = stale_identity.unwrap();
+        assert!(!root_process_is_live(&stale_identity));
+        // Deterministically model PID reuse: the lookup PID names a real live
+        // process, but the retained identity belongs to the exited root.
+        assert!(
+            read_root_process_cwd(current_pid, &stale_identity)
+                .await
+                .is_none()
+        );
+    }
+
     fn test_subscriber(
         terminal: &Terminal,
         capacity: usize,
@@ -5767,6 +5965,67 @@ mod tests {
         assert_eq!(metrics.snapshot().queued_snapshot_events_high_water, 0);
         assert_eq!(metrics.snapshot().subscriber_queue_events_current, 0);
         drop(subscriber);
+    }
+
+    #[tokio::test]
+    async fn completed_producer_batch_releases_waiter_when_next_batch_starts() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let slot = CompactSnapshotSlot::default();
+        let (_sender, mut resnapshot) = watch::channel(false);
+        slot.begin_producer_batch();
+        let mut waiter = Box::pin(slot.wait_for_producer_batch(&mut resnapshot));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+
+        // Reproduce a producer winning the scheduling race after notifying its
+        // parked consumer: the completed batch must still permit a drain.
+        slot.end_producer_batch();
+        slot.begin_producer_batch();
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(false));
+        slot.end_producer_batch();
+    }
+
+    #[tokio::test]
+    async fn stale_batch_notification_does_not_release_active_batch_waiter() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let slot = CompactSnapshotSlot::default();
+        let (_sender, mut resnapshot) = watch::channel(false);
+        slot.begin_producer_batch();
+        slot.end_producer_batch(); // Leave an unconsumed Notify permit.
+        slot.begin_producer_batch();
+        let mut waiter = Box::pin(slot.wait_for_producer_batch(&mut resnapshot));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+        slot.end_producer_batch();
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(false));
+    }
+
+    #[tokio::test]
+    async fn resnapshot_wins_over_completed_producer_batch() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let slot = CompactSnapshotSlot::default();
+        let (sender, mut resnapshot) = watch::channel(false);
+        slot.begin_producer_batch();
+        let mut waiter = Box::pin(slot.wait_for_producer_batch(&mut resnapshot));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+        slot.end_producer_batch();
+        slot.begin_producer_batch();
+        sender.send_replace(true);
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(true));
+        slot.end_producer_batch();
     }
 
     #[tokio::test]
@@ -6634,6 +6893,64 @@ mod tests {
         let mut expected = final_state;
         expected.history_policy = CompactHistoryPolicy::FullHistory;
         assert_eq!(sealed.apply_to(&base), Some(expected));
+    }
+
+    #[test]
+    fn bounded_sparse_history_append_matches_tail_for_shrinking_limits() {
+        for retained in 0..=5_u64 {
+            for appended in 0..=7_u64 {
+                for limit in 0..=6_usize {
+                    let make_row = |id| CompactLiveRow {
+                        row_id: Some(id),
+                        linebreak: false,
+                        cells: Vec::new(),
+                    };
+                    let mut rows = (0..retained).map(make_row).collect::<Vec<_>>();
+                    let source = (retained..retained + appended)
+                        .map(make_row)
+                        .collect::<Vec<_>>();
+                    let mut expected = rows.clone();
+                    expected.extend(source.iter().cloned());
+                    let evicted = expected.len().saturating_sub(limit);
+                    expected.drain(..evicted);
+                    append_bounded_sparse_rows(&mut rows, &source, limit);
+                    assert_eq!(
+                        rows, expected,
+                        "retained={retained} appended={appended} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual scrollback-tail performance measurement"]
+    fn benchmark_bounded_sparse_history_append() {
+        let retained = 20_000;
+        let appended = 2_000;
+        let mut rows = (0..retained)
+            .map(|id| CompactLiveRow {
+                row_id: Some(id),
+                linebreak: false,
+                cells: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let source = (retained..retained + appended)
+            .map(|id| CompactLiveRow {
+                row_id: Some(id),
+                linebreak: false,
+                cells: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        append_bounded_sparse_rows(&mut rows, &source, usize::try_from(retained).unwrap());
+        let elapsed = start.elapsed();
+        assert_eq!(rows.first().and_then(|row| row.row_id), Some(appended));
+        assert_eq!(
+            rows.last().and_then(|row| row.row_id),
+            Some(retained + appended - 1)
+        );
+        eprintln!("bounded sparse history: {retained} retained + {appended} appended: {elapsed:?}");
     }
 
     #[test]

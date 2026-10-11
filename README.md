@@ -62,6 +62,11 @@ For limitations and release gates, read [Current status](docs/status.md). Exact 
 
 ## Install
 
+**NixOS:** the repository includes a source-built flake with the full Wayland GUI,
+desktop launcher, headless daemon, and optional MCP variant. See
+[the NixOS installation guide](docs/nixos.md) for declarative desktop and server
+setup. This does not extend the Arch graphical validation claim to NixOS.
+
 The validated installation target is **x86_64 Omarchy/Arch Linux with native Wayland**. The prebuilt AUR packages download verified binaries and do not compile locally. **AUR is prerelease-capable, not stable-only:** these same package names can advance to release candidates. Check the offered version before installing or upgrading. For stable 0.1.1 specifically, use the exact-tag instructions in [Packaging](docs/packaging.md).
 
 ```bash
@@ -72,7 +77,8 @@ yay -S splinterm-mcp-bin
 
 The source-built alternatives are `splinterm` and `splinterm-mcp`. `paru` may be used instead of `yay`. The stable release is scoped to the documented platform; it does not promise a support lifetime. Release candidates remain prereleases even when AUR offers them as upgrades.
 
-For the newest published versioned release package, clone the public repository and run:
+For the newest published versioned release package, use Foot or another terminal
+not owned by `splinterd`, then clone the public repository and run:
 
 ```bash
 git clone https://github.com/OldJobobo/splinterm.git
@@ -82,8 +88,7 @@ cd splinterm
 
 The release installer selects the newest published qualifying SemVer `v…` release, **including prereleases**; it is not a stable-only selector. For stable 0.1.1 specifically, follow the exact-tag instructions in [Packaging](docs/packaging.md). The installer verifies its GitHub-recorded manifest digest and package checksums, preserves an emergency binary snapshot, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback. GitHub CLI authentication is optional, and anonymous public downloads are supported.
 
-To build and package the current committed checkout locally, run the installer
-from Foot or another terminal not owned by `splinterd`:
+To build and package the current committed checkout locally, run:
 
 ```bash
 ./install.sh --source
@@ -103,7 +108,9 @@ Open a fresh terminal from the installed desktop entry or the XDG terminal launc
 splinterm-xdg-terminal-exec
 ```
 
-A commandless desktop/XDG launch creates a persistent Lair with one Dojo and one Splint. Closing its window detaches the graphical client while `splinterd` keeps the session running. When another application asks the XDG terminal to host a command, Splinterm instead creates a transient client-bound Lair: command exit or owner-window disconnect terminates its processes and removes it from topology. Native `splinterm launch -- COMMAND...` remains persistent.
+Ordinary unnamed graphical terminals are persistent by default. Set `multiplexer.persistent-by-default=no` to make commandless desktop/SUPER+ENTER, bare `splinterm launch`, picker **New**, and in-Window **New Terminal** belong to their Window instead; closing it then terminates and removes the unpromoted Lair. Explicit names, command-bearing native launches, presets, remote creation, restore/relaunch, automation, and MCP remain persistent.
+
+`multiplexer.persist-on-tab-organization=yes` is also the default. Creating another Dojo or explicitly naming/renaming a Dojo atomically promotes the complete transient Lair, after which Window close detaches normally. Command-bearing XDG launches retain their existing client-bound behavior regardless of configuration.
 
 Return through the native Dojo picker:
 

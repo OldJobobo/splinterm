@@ -548,7 +548,7 @@ fn classify_failure(text: &str, terminal: bool, askpass_available: bool) -> Remo
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _, time::SystemTime};
+    use std::{fs, os::unix::fs::PermissionsExt, time::SystemTime};
 
     use super::*;
 
@@ -590,7 +590,11 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let executable = directory.join("askpass");
         fs::write(&executable, "fixture").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            &executable,
+            <fs::Permissions as PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
         assert!(validate_askpass_value(false, Some(executable.as_os_str())).unwrap());
         assert!(!validate_askpass_value(true, Some(executable.as_os_str())).unwrap());
         assert!(validate_askpass_value(false, Some(OsStr::new("relative"))).is_err());

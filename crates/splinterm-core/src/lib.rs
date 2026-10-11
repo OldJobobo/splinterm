@@ -12,6 +12,6 @@ pub use model::{
     TopologyRevision,
 };
 pub use persistence::{
-    MAX_PERSISTENT_LAIRS, MAX_TOPOLOGY_DOCUMENT_BYTES, PersistenceError, TOPOLOGY_SCHEMA_VERSION,
-    TopologyDocument,
+    MAX_DOJOS_PER_LAIR, MAX_LAYOUT_DEPTH, MAX_PERSISTENT_LAIRS, MAX_SPLINTS,
+    MAX_TOPOLOGY_DOCUMENT_BYTES, PersistenceError, TOPOLOGY_SCHEMA_VERSION, TopologyDocument,
 };
