@@ -8546,6 +8546,11 @@ mod tests {
         const EMFILE: i32 = 24;
         let exhausted = std::io::Error::from_raw_os_error(EMFILE);
         assert_eq!(accept_retry_delay(&exhausted), ACCEPT_RETRY_DELAY);
+        // Unrecognized failures must pause too, or exhaustion becomes a busy loop.
+        assert_eq!(
+            accept_retry_delay(&std::io::Error::other("unrecognized")),
+            ACCEPT_RETRY_DELAY
+        );
         let aborted = std::io::Error::from(ErrorKind::ConnectionAborted);
         assert_eq!(accept_retry_delay(&aborted), Duration::ZERO);
 
