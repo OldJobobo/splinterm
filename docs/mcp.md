@@ -173,6 +173,11 @@ rename. MCP transport access is not authority.
 
 ## Limits, trust, and lifecycle
 
+Policy and consent bound a cooperating agent and show what it can reach. They
+are not a sandbox: a hostile program running as your account can already read
+your files and run commands, and can reach your terminals without asking
+Splinterm. Run agents you would trust with your account.
+
 The fixed catalog contains 33 tools, one topology resource, and terminal/control
 resource templates. Bounds include a 256 KiB input line, 1 MiB complete tool
 response, four active and 32 admitted requests, 5-second default daemon deadline
