@@ -1018,9 +1018,9 @@ async fn run_daemon() -> Result<()> {
                     bail!("policy reload signal stream closed");
                 }
                 let policy_path = policy::configured_path();
-                let candidate = tokio::task::spawn_blocking(move || policy::prepare(policy_path))
-                    .await
-                    .context("policy reload task failed")?;
+                let candidate = reloaded_policy_candidate(
+                    tokio::task::spawn_blocking(move || policy::prepare(policy_path)).await,
+                );
                 let _transaction = state
                     .topology_transactions
                     .acquire()
@@ -1379,6 +1379,18 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
     drop(control_tx);
     writer_task.join().await;
     result
+}
+
+/// A reload task that crashed yields deny-all, like a rejected policy file:
+/// the daemon keeps serving the user and never keeps a policy it could not
+/// re-validate.
+fn reloaded_policy_candidate(
+    prepared: Result<policy::PolicyCandidate, tokio::task::JoinError>,
+) -> policy::PolicyCandidate {
+    prepared.unwrap_or_else(|error| {
+        error!(%error, "policy reload task failed");
+        policy::PolicyCandidate::rejected("policy reload task failed")
+    })
 }
 
 async fn record_policy_reload(state: &DaemonState, generation: &policy::PolicyGeneration) {
@@ -11908,6 +11920,24 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(controllers.release_grant(77), vec![replacement]);
+    }
+
+    #[tokio::test]
+    async fn crashed_policy_reload_task_installs_deny_all() {
+        let crashed = tokio::task::spawn_blocking(|| -> policy::PolicyCandidate {
+            panic!("simulated policy reload crash")
+        })
+        .await;
+        assert!(crashed.is_err());
+
+        let generation = policy::PolicyStore::default()
+            .publish(reloaded_policy_candidate(crashed), &Topology::default());
+
+        assert_eq!(generation.document.rule_count(), 0);
+        assert_eq!(
+            generation.diagnostic.as_deref(),
+            Some("policy reload task failed")
+        );
     }
 
     #[test]
