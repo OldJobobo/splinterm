@@ -508,6 +508,17 @@ pub struct PolicyCandidate {
     diagnostic: Option<String>,
 }
 
+impl PolicyCandidate {
+    /// A deny-all candidate for a reload that could not produce a policy.
+    #[must_use]
+    pub fn rejected(diagnostic: &str) -> Self {
+        Self {
+            document: PolicyDocument::deny_all(),
+            diagnostic: Some(bounded_diagnostic(diagnostic)),
+        }
+    }
+}
+
 #[must_use]
 pub fn prepare(path: Option<PathBuf>) -> PolicyCandidate {
     let (document, diagnostic) = match path {
@@ -845,6 +856,27 @@ mod tests {
         assert!(denied.id > loaded.id);
         assert!(denied.document.rules.is_empty());
         assert!(denied.diagnostic.is_some());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejected_candidate_replaces_a_loaded_policy_with_deny_all() {
+        let path = test_path("rejected-candidate");
+        write_policy(&path, &valid_policy(), 0o600);
+        let document = inspect_file(&path).unwrap();
+        let ResourceSelector::Splint { splint_id, .. } = document.rules[0].resources[0] else {
+            panic!("expected Splint selector");
+        };
+        let (lair, _, _) = topology_with_splint(splint_id);
+        let mut store = PolicyStore::default();
+        let loaded = store.reload(Some(&path), &lair);
+        assert_eq!(loaded.document.rules.len(), 1);
+
+        let denied = store.publish(PolicyCandidate::rejected("reload crashed"), &lair);
+
+        assert!(denied.id > loaded.id);
+        assert!(denied.document.rules.is_empty());
+        assert_eq!(denied.diagnostic.as_deref(), Some("reload crashed"));
         fs::remove_file(path).unwrap();
     }
 
