@@ -3408,6 +3408,101 @@ async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn termination_waiting_on_a_resistant_process_does_not_block_topology_changes() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let marker = daemon.runtime.join("resistant-terminated-pid");
+        let mut closer = daemon.connect().await;
+        let mut editor = daemon.connect().await;
+        let Response::LairCreated {
+            lair,
+            incarnation,
+            topology_revision,
+        } = closer
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "resistant-terminate".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "trap '' HUP TERM; printf '%s\\n' $$ > {}; exec sleep 75",
+                            marker.display()
+                        ),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("signal-resistant Lair was not created");
+        };
+        let child_pid = wait_for_pid_marker(&marker, "signal-resistant child").await;
+        let target = MutationTarget {
+            lair_id: lair.id,
+            dojo_id: lair.dojos[0].id,
+            splint_id: lair.dojos[0].default_focus,
+            incarnation,
+        };
+        let lair_id = lair.id;
+        let termination = tokio::spawn(async move {
+            closer
+                .request(Request::TerminateLair {
+                    expected_topology_revision: topology_revision,
+                    lair_id,
+                    targets: vec![target],
+                })
+                .await
+        });
+
+        // The termination commits at once and then waits out both shutdown
+        // graces; an unrelated topology change must commit during that wait.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let committed = loop {
+            let current = editor.topology_revision().await;
+            if current != topology_revision {
+                break current;
+            }
+            assert!(Instant::now() < deadline, "termination did not commit");
+            time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(matches!(
+            editor
+                .request(Request::CreateLair {
+                    expected_topology_revision: committed,
+                    name: "created-during-termination".into(),
+                    launch: LaunchParameters {
+                        cwd: std::env::current_dir().unwrap(),
+                        command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+                        shell: None,
+                        login_shell: false,
+                        scrollback_lines: 100,
+                    },
+                })
+                .await,
+            Response::LairCreated { .. }
+        ));
+        assert!(
+            !termination.is_finished(),
+            "the topology change waited for the terminated process"
+        );
+
+        assert!(matches!(
+            termination.await.unwrap(),
+            Response::TopologyCommitted { topology_revision: revision } if revision == committed
+        ));
+        assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+        daemon.shutdown();
+    })
+    .await
+    .expect("resistant termination scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;

@@ -2440,6 +2440,44 @@ async fn publish_topology(
     });
 }
 
+type RuntimeShutdown = tokio::task::JoinHandle<Result<ProcessExit, LiveError>>;
+
+/// Starts shutting down processes whose Splints a topology change removed.
+///
+/// The shutdowns run detached and concurrently, so a request cancelled after
+/// the removal still signals and reaps every process.
+fn begin_runtime_shutdowns(
+    runtimes: impl IntoIterator<Item = LiveSplintRuntime>,
+) -> Vec<RuntimeShutdown> {
+    runtimes
+        .into_iter()
+        .map(|runtime| tokio::spawn(runtime.shutdown()))
+        .collect()
+}
+
+/// Waits for shutdowns started by [`begin_runtime_shutdowns`].
+///
+/// A shell may ignore hangup and termination for the whole shutdown grace, so
+/// callers publish the change and release the topology transaction first; the
+/// wait must not stall unrelated topology changes.
+async fn finish_runtime_shutdowns(shutdowns: Vec<RuntimeShutdown>) -> Result<(), ProtocolError> {
+    let mut result = Ok(());
+    for shutdown in shutdowns {
+        match shutdown.await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                error!(%error, "failed to shut down a closed Splint cleanly");
+                result = Err(internal());
+            }
+            Err(error) => {
+                error!(%error, "closed Splint shutdown task failed");
+                result = Err(internal());
+            }
+        }
+    }
+    result
+}
+
 #[derive(Clone, Copy)]
 struct SplintLaunchContext {
     lair: LairId,
@@ -5706,7 +5744,7 @@ async fn handle_authorized_request(
             expected_topology_revision,
             splint_id,
         } => {
-            let _transaction = state
+            let transaction = state
                 .topology_transactions
                 .acquire()
                 .await
@@ -5715,16 +5753,15 @@ async fn handle_authorized_request(
                 lair.close_splint_at(expected_topology_revision, splint_id)
             })
             .await?;
-            let runtime = {
+            let shutdowns = {
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
                 *lair = candidate;
-                runtimes.remove(splint_id)
+                begin_runtime_shutdowns(runtimes.remove(splint_id))
             };
-            if let Some(runtime) = runtime {
-                runtime.shutdown().await.map_err(|_| internal())?;
-            }
             publish_topology(state, topology_revision, TopologyChangeKind::SplintClosed).await;
+            drop(transaction);
+            finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
         }
         Request::SetSplitRatio {
@@ -5982,7 +6019,7 @@ async fn handle_authorized_request(
             expected_topology_revision,
             dojo_id,
         } => {
-            let _transaction = state
+            let transaction = state
                 .topology_transactions
                 .acquire()
                 .await
@@ -5996,18 +6033,15 @@ async fn handle_authorized_request(
                 Ok((revision, ids))
             })
             .await?;
-            let runtimes = {
+            let shutdowns = {
                 let mut lair = state.topology.write().await;
                 let mut registry = state.runtimes.lock().await;
                 *lair = candidate;
-                ids.into_iter()
-                    .filter_map(|id| registry.remove(id))
-                    .collect::<Vec<_>>()
+                begin_runtime_shutdowns(ids.into_iter().filter_map(|id| registry.remove(id)))
             };
-            for runtime in runtimes {
-                runtime.shutdown().await.map_err(|_| internal())?;
-            }
             publish_topology(state, topology_revision, TopologyChangeKind::DojoClosed).await;
+            drop(transaction);
+            finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
         }
         Request::TerminateLair {
@@ -6015,7 +6049,7 @@ async fn handle_authorized_request(
             lair_id,
             targets,
         } => {
-            let _transaction = state
+            let transaction = state
                 .topology_transactions
                 .acquire()
                 .await
@@ -6055,14 +6089,15 @@ async fn handle_authorized_request(
                 topology.terminate_lair_at(expected_topology_revision, lair_id)
             })
             .await?;
-            let runtimes = {
+            let shutdowns = {
                 let mut topology = state.topology.write().await;
                 let mut registry = state.runtimes.lock().await;
                 *topology = candidate;
-                splint_ids
-                    .iter()
-                    .filter_map(|splint_id| registry.remove(*splint_id))
-                    .collect::<Vec<_>>()
+                begin_runtime_shutdowns(
+                    splint_ids
+                        .iter()
+                        .filter_map(|splint_id| registry.remove(*splint_id)),
+                )
             };
             state.transient_leases.lock().unwrap().remove_lair(lair_id);
             {
@@ -6118,10 +6153,9 @@ async fn handle_authorized_request(
                 revoke_grant_controllers(state, grant_id).await;
                 let _ = state.revocations.send(Revocation { grant_id });
             }
-            for runtime in runtimes {
-                runtime.shutdown().await.map_err(|_| internal())?;
-            }
             publish_topology(state, topology_revision, TopologyChangeKind::LairTerminated).await;
+            drop(transaction);
+            finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
         }
         Request::RenameLair {
