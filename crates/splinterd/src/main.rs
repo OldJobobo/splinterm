@@ -9734,7 +9734,7 @@ mod tests {
             Request::CreateLair {
                 expected_topology_revision: expected,
                 name: "failed-fresh".into(),
-                launch: test_launch(&["/bin/true"]),
+                launch: test_launch(&["/bin/sh", "-c", "true"]),
             },
         )
         .await
@@ -9753,7 +9753,7 @@ mod tests {
             Request::CreateLair {
                 expected_topology_revision: expected,
                 name: "fresh".into(),
-                launch: test_launch(&["/bin/true"]),
+                launch: test_launch(&["/bin/sh", "-c", "true"]),
             },
         )
         .await
@@ -10221,7 +10221,7 @@ mod tests {
                 expected_topology_revision: before.revision(),
                 lair_id: lair.id,
                 name: "unowned".into(),
-                launch: test_launch(&["/bin/true"]),
+                launch: test_launch(&["/bin/sh", "-c", "true"]),
                 promote_transient_lair: true,
             },
         )
@@ -10469,7 +10469,7 @@ mod tests {
                     expected_topology_revision: expected,
                     lair_id: lair.id,
                     name: "secondary".into(),
-                    launch: test_launch(&["/bin/true"]),
+                    launch: test_launch(&["/bin/sh", "-c", "true"]),
                     promote_transient_lair: false,
                 },
             ),
@@ -10520,7 +10520,7 @@ mod tests {
                 Request::CreateTransientLair {
                     expected_topology_revision: TopologyRevision::default(),
                     name: "transient-exit".into(),
-                    launch: test_launch(&["/bin/true"]),
+                    launch: test_launch(&["/bin/sh", "-c", "true"]),
                 },
             ),
         )

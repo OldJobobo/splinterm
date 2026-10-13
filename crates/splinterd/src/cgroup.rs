@@ -834,7 +834,7 @@ mod tests {
             Some("splinterd.service"),
         )
         .unwrap();
-        let mut child = std::process::Command::new("/usr/bin/sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .unwrap();
