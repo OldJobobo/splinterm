@@ -24,8 +24,8 @@ use super::{
         remember_dojo, select_dojo_from, session_picker_item,
     },
     window::{
-        run_live_multipane_window, run_live_multipane_window_with_app_id, run_live_window,
-        run_owned_live_multipane_window_with_app_id,
+        resolved_window_app_id, run_live_multipane_window, run_live_multipane_window_with_app_id,
+        run_live_window, run_owned_live_multipane_window_with_app_id,
     },
 };
 
@@ -147,6 +147,7 @@ fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result
 fn choose_recent_session(
     config: &AppConfig,
     entries: &[SessionEntry],
+    app_id: Option<String>,
 ) -> Result<Option<SessionPickerDecision>> {
     let theme = load_startup_theme(config);
     configure_picker_renderer(config, theme)?;
@@ -157,6 +158,7 @@ fn choose_recent_session(
     run_window(WindowOptions {
         snapshot: Some(snapshot),
         session_picker: Some(picker),
+        app_id: resolved_window_app_id(app_id),
         initial_columns: config.initial_columns,
         initial_rows: config.initial_rows,
         cursor_style: config.cursor_style,
@@ -191,6 +193,18 @@ async fn select_reopenable_dojo(
 }
 
 pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFactory) -> Result<()> {
+    run_dojos_from(None, None, config, factory).await
+}
+
+/// Opens the Recent Dojos picker; **New** creates its terminal in `cwd`, or in
+/// the local current directory when absent, and every Window of the flow keeps
+/// the launcher-supplied `app_id`.
+pub(in crate::app) async fn run_dojos_from(
+    cwd: Option<PathBuf>,
+    app_id: Option<String>,
+    config: AppConfig,
+    factory: ConnectionFactory,
+) -> Result<()> {
     let mut connection = factory
         .connect()
         .await
@@ -205,22 +219,25 @@ pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFact
         .collect::<Vec<_>>();
     let picker_entries = entries.clone();
     let picker_config = config.clone();
-    let decision =
-        tokio::task::spawn_blocking(move || choose_recent_session(&picker_config, &picker_entries))
-            .await
-            .context("Dojo picker task failed")??;
+    let picker_app_id = app_id.clone();
+    let decision = tokio::task::spawn_blocking(move || {
+        choose_recent_session(&picker_config, &picker_entries, picker_app_id)
+    })
+    .await
+    .context("Dojo picker task failed")??;
     match decision {
         None => Ok(()),
         Some(SessionPickerDecision::New) => {
             if let Some(diagnostics) = splinterm::diagnostics::global() {
                 diagnostics.begin_window(None, None);
             }
-            let cwd = if factory.is_local() {
-                Some(env::current_dir().context("failed to read current directory")?)
-            } else {
-                None
+            let cwd = match cwd {
+                None if factory.is_local() => {
+                    Some(env::current_dir().context("failed to read current directory")?)
+                }
+                cwd => cwd,
             };
-            launch(None, cwd, None, true, Vec::new(), config, factory).await
+            launch_with_app_id(None, cwd, None, true, Vec::new(), config, factory, app_id).await
         }
         Some(SessionPickerDecision::Open(index)) => {
             if let Some(diagnostics) = splinterm::diagnostics::global() {
@@ -231,7 +248,7 @@ pub(in crate::app) async fn run_dojos(config: AppConfig, factory: ConnectionFact
                 .context("Dojo picker returned an invalid selection")?;
             let dojo = select_reopenable_dojo(&factory, selected.lair_id, selected.dojo_id).await?;
             remember_dojo(&factory, dojo.id);
-            run_live_multipane_window(config, dojo, factory).await
+            run_live_multipane_window_with_app_id(config, dojo, factory, app_id, true).await
         }
     }
 }

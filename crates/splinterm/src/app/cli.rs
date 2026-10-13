@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use splinterm::{
-    config::{AppConfig, ConfigLoad, load_default},
+    config::{AppConfig, ConfigLoad, StartupMode, load_default},
     diagnostics::{
         DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global as diagnostics_global,
         initialize_graphical, install_termination_signal_task,
@@ -56,7 +56,7 @@ use super::{
     session_catalog::{
         automation_launch, create_request, launch_parameters, new_dojo_request_for, remember_dojo,
     },
-    sessions::{launch, reopen_recent, run_dojos, select_dojo, xdg_launch},
+    sessions::{launch, reopen_recent, run_dojos, run_dojos_from, select_dojo, xdg_launch},
 };
 
 #[allow(
@@ -246,6 +246,17 @@ pub(crate) async fn run() -> Result<()> {
     run_configured_command(command, config, factory).await
 }
 
+/// An explicit `--picker` or `--new` wins; otherwise only a commandless launch
+/// follows `main.startup`, so command-bearing XDG launches stay transient.
+const fn xdg_launch_opens_picker(
+    picker: bool,
+    new: bool,
+    commandless: bool,
+    startup: StartupMode,
+) -> bool {
+    picker || (!new && commandless && matches!(startup, StartupMode::DojoPicker))
+}
+
 fn graphical_command(command: &Command) -> bool {
     matches!(
         command,
@@ -283,6 +294,8 @@ async fn run_configured_command(
         Command::XdgLaunch {
             cwd,
             app_id,
+            picker,
+            new,
             command,
         } => {
             if !factory.is_local() {
@@ -290,13 +303,18 @@ async fn run_configured_command(
             }
             let cwd =
                 cwd.unwrap_or(env::current_dir().context("failed to read current directory")?);
-            xdg_launch(cwd, app_id, command, config, factory).await
+            if xdg_launch_opens_picker(picker, new, command.is_empty(), config.startup) {
+                run_dojos_from(Some(cwd), app_id, config, factory).await
+            } else {
+                xdg_launch(cwd, app_id, command, config, factory).await
+            }
         }
         Command::Launch {
             cwd,
             name,
             splint_id,
             new,
+            picker,
             command,
         } => {
             let cwd = match (cwd, factory.is_local()) {
@@ -306,7 +324,11 @@ async fn run_configured_command(
                 }
                 (None, false) => None,
             };
-            launch(name, cwd, splint_id, new, command, config, factory).await
+            if picker {
+                run_dojos_from(cwd, None, config, factory).await
+            } else {
+                launch(name, cwd, splint_id, new, command, config, factory).await
+            }
         }
         Command::Consent => tokio::task::spawn_blocking(run_consent_client)
             .await
@@ -1037,11 +1059,56 @@ mod tests {
             Some(Command::XdgLaunch {
                 cwd: Some(cwd),
                 app_id: Some(app_id),
+                picker: false,
+                new: false,
                 command,
             }) if cwd == std::path::Path::new("/tmp/a b")
                 && app_id == "org.omarchy.screensaver"
                 && command == ["/usr/bin/printf", "", "$(must-not-run)"]
         ));
+    }
+
+    #[test]
+    fn picker_switch_is_explicit_and_rejects_creation_arguments() {
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "xdg-launch", "--picker"])
+                .unwrap()
+                .command,
+            Some(Command::XdgLaunch { picker: true, .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "launch", "--picker"])
+                .unwrap()
+                .command,
+            Some(Command::Launch { picker: true, .. })
+        ));
+        for rejected in [
+            &["splinterm", "xdg-launch", "--picker", "--new"][..],
+            &["splinterm", "xdg-launch", "--picker", "--", "/usr/bin/true"],
+            &["splinterm", "launch", "--picker", "--new"],
+            &["splinterm", "launch", "--picker", "--name", "work"],
+            &[
+                "splinterm",
+                "launch",
+                "--picker",
+                "--splint-id",
+                "00000000-0000-0000-0000-000000000000",
+            ],
+            &["splinterm", "launch", "--picker", "--", "/usr/bin/true"],
+        ] {
+            assert!(Cli::try_parse_from(rejected).is_err(), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn startup_mode_reaches_only_commandless_xdg_launches() {
+        use splinterm::config::StartupMode::{DojoPicker, NewDojo};
+
+        assert!(!xdg_launch_opens_picker(false, false, true, NewDojo));
+        assert!(xdg_launch_opens_picker(false, false, true, DojoPicker));
+        assert!(!xdg_launch_opens_picker(false, false, false, DojoPicker));
+        assert!(!xdg_launch_opens_picker(false, true, true, DojoPicker));
+        assert!(xdg_launch_opens_picker(true, false, true, NewDojo));
     }
 
     #[test]

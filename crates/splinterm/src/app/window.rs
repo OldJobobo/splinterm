@@ -122,7 +122,7 @@ fn finish_topology_manager(
         .context("topology manager stopped")
 }
 
-fn resolved_window_app_id(app_id: Option<String>) -> String {
+pub(super) fn resolved_window_app_id(app_id: Option<String>) -> String {
     app_id.unwrap_or_else(|| splinterm::config::APP_ID.to_owned())
 }
 

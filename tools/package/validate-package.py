@@ -1019,7 +1019,7 @@ def main() -> int:
         assert desktop_config["Desktop Entry"]["Actions"] == "New;Dojos;Reopen;"
         assert desktop_config["Desktop Entry"]["Icon"] == "com.oldjobobo.splinterm"
         assert desktop_config["Desktop Entry"]["X-TerminalArgAppId"] == "--app-id="
-        assert desktop_config["Desktop Action New"]["Exec"] == "splinterm-xdg-terminal-exec"
+        assert desktop_config["Desktop Action New"]["Exec"] == "splinterm-xdg-terminal-exec --new"
         assert desktop_config["Desktop Action Dojos"]["Name"] == "Recent Dojos"
         assert desktop_config["Desktop Action Dojos"]["Exec"] == "splinterm-dojos"
         assert desktop_config["Desktop Action Reopen"]["Exec"] == "splinterm-reopen"

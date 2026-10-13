@@ -55,6 +55,8 @@ pub struct AppConfig {
     pub scrollback_lines: usize,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
+    /// What a commandless desktop/XDG launch opens (`[main] startup`).
+    pub startup: StartupMode,
     pub resize_delay_ms: u64,
     /// Optional Foot-compatible background-alpha override (`[colors] alpha`).
     /// When absent, the active theme owns background translucency.
@@ -88,6 +90,13 @@ pub enum CursorStyle {
     Block,
     Beam,
     Underline,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StartupMode {
+    #[default]
+    NewDojo,
+    DojoPicker,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -140,6 +149,7 @@ impl Default for AppConfig {
             scrollback_lines: 1_000,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
+            startup: StartupMode::NewDojo,
             resize_delay_ms: 100,
             background_alpha: None,
             background_blur: None,
@@ -458,6 +468,17 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             }
             "multiplexer.persistent-by-default" => {
                 config.multiplexer_lifetime.persistent_by_default = parse_bool(value, index)?;
+                false
+            }
+            "main.startup" => {
+                config.startup = match value.to_ascii_lowercase().as_str() {
+                    "new-dojo" => StartupMode::NewDojo,
+                    "dojo-picker" => StartupMode::DojoPicker,
+                    _ => bail!(
+                        "line {}: startup must be new-dojo or dojo-picker",
+                        index + 1
+                    ),
+                };
                 false
             }
             "multiplexer.persist-on-tab-organization" => {
@@ -1319,6 +1340,20 @@ mod tests {
         assert_eq!(loaded.config.initial_columns, 100);
         assert_eq!(loaded.config.cursor_style, CursorStyle::Beam);
         assert!(!loaded.config.cursor_blink);
+        assert_eq!(loaded.config.startup, StartupMode::NewDojo);
+        assert_eq!(
+            parse("[main]\nstartup=dojo-picker\n")
+                .unwrap()
+                .config
+                .startup,
+            StartupMode::DojoPicker
+        );
+        assert!(
+            parse("[main]\nstartup=picker\n")
+                .unwrap_err()
+                .to_string()
+                .contains("startup must be new-dojo or dojo-picker")
+        );
         assert_eq!(loaded.diagnostics.len(), 3);
         assert!(
             loaded
