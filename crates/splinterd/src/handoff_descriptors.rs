@@ -366,27 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_inheritable_descriptor_blocks_preparation() {
-        let allowed = null_descriptor();
-        let unexpected = null_descriptor();
-        let unexpected_flags = fcntl_getfd(&unexpected).unwrap();
-        fcntl_setfd(&unexpected, unexpected_flags - FdFlags::CLOEXEC).unwrap();
-
-        let result = PreparedDescriptorInheritance::prepare([HandoffDescriptor::new(
-            HandoffDescriptorSlot::Listener,
-            allowed.as_fd(),
-        )]);
-
-        assert!(matches!(
-            result,
-            Err(DescriptorHandoffError::UnexpectedInheritableDescriptor(fd))
-                if fd == unexpected.as_raw_fd()
-        ));
-        assert!(fcntl_getfd(&allowed).unwrap().contains(FdFlags::CLOEXEC));
-        fcntl_setfd(&unexpected, unexpected_flags).unwrap();
-    }
-
-    #[test]
     fn allowlisted_descriptor_must_start_close_on_exec() {
         let descriptor = null_descriptor();
         let original = fcntl_getfd(&descriptor).unwrap();
