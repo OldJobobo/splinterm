@@ -334,7 +334,7 @@ fn failed_recovery_refuses_to_signal_without_child_authority() {
     assert!(matches!(error, PtyError::Io { .. }));
     assert!(Path::new(&format!("/proc/{unrelated_pid}")).exists());
 
-    let _ = Command::new("/bin/kill")
+    let _ = Command::new("kill")
         .args(["-KILL", &unrelated_pid.to_string()])
         .status();
 }

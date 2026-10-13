@@ -1077,7 +1077,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let accepted = tokio::spawn(async move { listener.accept().await.unwrap().0 });
 
-        let error = connect_validated_for(&path, Path::new("/bin/false"))
+        let error = connect_validated_for(&path, Path::new("/bin/sh"))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("adjacent splinterd"));
@@ -1502,7 +1502,7 @@ mod tests {
 
     #[tokio::test]
     async fn validated_daemon_death_fails_the_graphical_session() {
-        let mut child = std::process::Command::new("/usr/bin/sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("0.1")
             .spawn()
             .unwrap();

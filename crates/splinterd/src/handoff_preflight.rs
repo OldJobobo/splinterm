@@ -1056,7 +1056,7 @@ mod tests {
     #[test]
     fn child_deadline_kills_and_reaps_the_direct_process() {
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "exec /bin/sleep 10"])
+            .args(["-c", "exec sleep 10"])
             .spawn()
             .unwrap();
         let started = Instant::now();
