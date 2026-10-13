@@ -5306,7 +5306,7 @@ mod tests {
             Some(std::env::current_dir().unwrap())
         );
 
-        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
         // Capture while the Child is unreaped, just as from_session does.
         let stale_identity = capture_child_pidfd(child.id());
         assert!(child.wait().unwrap().success());
