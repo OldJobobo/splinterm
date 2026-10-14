@@ -251,7 +251,7 @@ fn enable(
     writeln!(output, "  Module    {}", paths.module.display())?;
     writeln!(
         output,
-        "  Log out and back in so the Omarchy idle service uses it"
+        "  Run omarchy-restart-shell, or log in again, so the idle service uses it"
     )?;
     writeln!(
         output,
@@ -491,7 +491,7 @@ fn disable(
     )?;
     writeln!(
         output,
-        "  Log out and back in so the Omarchy idle service stops using it"
+        "  Run omarchy-restart-shell, or log in again, so the idle service stops using it"
     )?;
     Ok(())
 }
