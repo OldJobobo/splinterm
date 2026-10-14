@@ -2,6 +2,8 @@
 
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::Write,
     os::unix::fs::symlink,
     path::{Path, PathBuf},
     process::Command,
@@ -14,15 +16,20 @@ use super::commands::{IntegrationAction, IntegrationCommand};
 const OMARCHY_LAUNCHER: &str = "omarchy-launch-screensaver";
 const PACKAGED_HELPER: &str = "/usr/lib/splinterm/integrations/omarchy-launch-screensaver";
 const CANONICAL_OMARCHY_LAUNCHER: &str = "/usr/share/omarchy/bin/omarchy-launch-screensaver";
+/// Omarchy's Hyprland configuration moves `$OMARCHY_PATH/bin` to the front of
+/// every launched command's `PATH`, so a user-level launcher can only win from
+/// a Hyprland module evaluated after Omarchy's bootstrap. The module puts a
+/// Splinterm-owned directory, holding only the launcher link, ahead of it.
+pub(super) const SCREENSAVER_MODULE: &str = "-- Managed by `splinterm integration omarchy-screensaver`; edit only after disabling it.\nlocal splinterm_bin = os.getenv(\"HOME\") .. \"/.local/share/splinterm/omarchy/bin\"\nlocal omarchy_bin = (os.getenv(\"OMARCHY_PATH\") or \"/usr/share/omarchy\") .. \"/bin\"\nlocal path = { splinterm_bin, omarchy_bin }\nfor entry in (os.getenv(\"PATH\") or \"/usr/local/bin:/usr/bin\"):gmatch(\"[^:]+\") do\n  if entry ~= splinterm_bin and entry ~= omarchy_bin then table.insert(path, entry) end\nend\nhl.env(\"PATH\", table.concat(path, \":\"))\n";
+pub(super) const SCREENSAVER_REQUIRE_BLOCK: &str = "\n-- BEGIN SPLINTERM SCREENSAVER PATH\nrequire(\"hypr.splinterm-screensaver\")\n-- END SPLINTERM SCREENSAVER PATH\n";
 
 pub(super) fn run(command: IntegrationCommand) -> Result<()> {
     match command {
         IntegrationCommand::Omarchy { action } => super::omarchy_integration::run(action),
         IntegrationCommand::OmarchyScreensaver { action } => {
-            let home = env::var_os("HOME")
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute() && !path.as_os_str().is_empty())
-                .context("HOME must name an absolute directory")?;
+            let home = absolute_dir_env("HOME")?.context("HOME must name an absolute directory")?;
+            let config =
+                absolute_dir_env("XDG_CONFIG_HOME")?.unwrap_or_else(|| home.join(".config"));
             if action == IntegrationAction::Enable
                 && !Path::new(CANONICAL_OMARCHY_LAUNCHER).is_file()
             {
@@ -32,30 +39,104 @@ pub(super) fn run(command: IntegrationCommand) -> Result<()> {
             }
             run_omarchy_screensaver(
                 action,
-                &home,
+                &ScreensaverPaths::new(&home, &config),
                 Path::new(PACKAGED_HELPER),
                 &mut std::io::stdout(),
-                || resolve_login_launcher(&home),
+                reload_hyprland,
             )
         }
     }
 }
 
+fn absolute_dir_env(name: &str) -> Result<Option<PathBuf>> {
+    let Some(value) = env::var_os(name) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(value);
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        bail!("{name} must name an absolute directory");
+    }
+    Ok(Some(path))
+}
+
+/// Reload Hyprland so the managed `PATH` module takes effect, or report a
+/// configuration error. Outside a Hyprland session the next login applies it.
+pub(super) fn reload_hyprland() -> Result<()> {
+    if env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        return Ok(());
+    }
+    let reload = Command::new("hyprctl")
+        .arg("reload")
+        .output()
+        .context("reload Hyprland")?;
+    if !reload.status.success() {
+        bail!("Hyprland rejected the integration reload");
+    }
+    let errors = Command::new("hyprctl")
+        .arg("configerrors")
+        .output()
+        .context("read Hyprland configuration errors")?;
+    if !errors.status.success() || !errors.stdout.is_empty() {
+        bail!("Hyprland reported configuration errors after reload");
+    }
+    Ok(())
+}
+
+/// Every user-owned object the screensaver component manages.
+#[derive(Clone, Debug)]
+pub(super) struct ScreensaverPaths {
+    pub(super) launcher: PathBuf,
+    pub(super) module: PathBuf,
+    pub(super) entrypoint: PathBuf,
+    /// Pre-Omarchy-4 link location, which Omarchy 4 always shadows.
+    legacy_launcher: PathBuf,
+    legacy_disabled: PathBuf,
+}
+
+impl ScreensaverPaths {
+    pub(super) fn new(home: &Path, config: &Path) -> Self {
+        Self {
+            launcher: home
+                .join(".local/share/splinterm/omarchy/bin")
+                .join(OMARCHY_LAUNCHER),
+            module: config.join("hypr/splinterm-screensaver.lua"),
+            entrypoint: config.join("hypr/hyprland.lua"),
+            legacy_launcher: home.join(".local/bin").join(OMARCHY_LAUNCHER),
+            legacy_disabled: home
+                .join(".local/share/splinterm/integrations")
+                .join(format!("{OMARCHY_LAUNCHER}.disabled")),
+        }
+    }
+
+    fn module_ready(&self) -> bool {
+        fs::read_to_string(&self.module).is_ok_and(|text| text == SCREENSAVER_MODULE)
+    }
+
+    fn require_count(&self) -> usize {
+        fs::read_to_string(&self.entrypoint)
+            .map_or(0, |text| text.matches(SCREENSAVER_REQUIRE_BLOCK).count())
+    }
+
+    pub(super) fn ready(&self, helper: &Path) -> bool {
+        managed_link(&self.launcher, helper) && self.module_ready() && self.require_count() == 1
+    }
+
+    pub(super) fn legacy_enabled(&self, helper: &Path) -> bool {
+        managed_link(&self.legacy_launcher, helper)
+    }
+}
+
 pub(super) fn run_omarchy_screensaver(
     action: IntegrationAction,
-    home: &Path,
+    paths: &ScreensaverPaths,
     helper: &Path,
-    output: &mut dyn std::io::Write,
-    resolve_launcher: impl Fn() -> Result<PathBuf>,
+    output: &mut dyn Write,
+    reload: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
-    let disabled = home
-        .join(".local/share/splinterm/integrations")
-        .join(format!("{OMARCHY_LAUNCHER}.disabled"));
     match action {
-        IntegrationAction::Enable => enable(&launcher, &disabled, helper, output, resolve_launcher),
-        IntegrationAction::Disable => disable(&launcher, &disabled, helper, output),
-        IntegrationAction::Status => status(&launcher, &disabled, helper, output),
+        IntegrationAction::Enable => enable(paths, helper, output, reload),
+        IntegrationAction::Disable => disable(paths, helper, output, reload),
+        IntegrationAction::Status => status(paths, helper, output),
     }
 }
 
@@ -63,30 +144,11 @@ fn managed_link(path: &Path, helper: &Path) -> bool {
     fs::read_link(path).is_ok_and(|target| target == helper)
 }
 
-fn resolve_login_launcher(home: &Path) -> Result<PathBuf> {
-    let result = Command::new("bash")
-        .args(["-lc", "command -v omarchy-launch-screensaver"])
-        .env("HOME", home)
-        .output()
-        .context("resolve launcher through the login shell")?;
-    if !result.status.success() {
-        bail!("the login shell cannot resolve omarchy-launch-screensaver");
-    }
-    let resolved = String::from_utf8(result.stdout)
-        .context("login shell returned a non-UTF-8 launcher path")?;
-    let resolved = PathBuf::from(resolved.trim());
-    if !resolved.is_absolute() {
-        bail!("the login shell returned an invalid launcher path");
-    }
-    Ok(resolved)
-}
-
 fn enable(
-    path: &Path,
-    disabled: &Path,
+    paths: &ScreensaverPaths,
     helper: &Path,
-    output: &mut dyn std::io::Write,
-    resolve_launcher: impl Fn() -> Result<PathBuf>,
+    output: &mut dyn Write,
+    mut reload: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     if !helper.is_file() {
         bail!(
@@ -94,73 +156,185 @@ fn enable(
             helper.display()
         );
     }
-    if managed_link(path, helper) {
+    if paths.ready(helper) && !paths.legacy_enabled(helper) {
         writeln!(output, "Omarchy screensaver integration is already enabled")?;
         return Ok(());
     }
-    if fs::symlink_metadata(path).is_ok() {
-        bail!(
-            "refusing to replace existing launcher {}; review it explicitly",
-            path.display()
-        );
+    let plan = plan_enable(paths, helper)?;
+    if paths.legacy_enabled(helper) {
+        retire_legacy(paths, helper)?;
+        writeln!(
+            output,
+            "Moved the legacy launcher {} out of PATH",
+            paths.legacy_launcher.display()
+        )?;
     }
-    let parent = path.parent().context("launcher path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("create integration directory {}", parent.display()))?;
-    if managed_link(disabled, helper) {
-        if !move_managed_link(disabled, path, helper, || {})? {
-            bail!("preserved integration link disappeared before activation");
+
+    let EnablePlan {
+        create_link,
+        create_module,
+        add_require,
+    } = plan;
+    let result = (|| {
+        if create_link {
+            let parent = paths.launcher.parent().context("launcher has no parent")?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create launcher directory {}", parent.display()))?;
+            symlink(helper, &paths.launcher).with_context(|| {
+                format!(
+                    "create managed launcher without replacing an existing path: {}",
+                    paths.launcher.display()
+                )
+            })?;
         }
-    } else if fs::symlink_metadata(disabled).is_ok() {
-        bail!(
-            "refusing to replace existing disabled integration path {}",
-            disabled.display()
-        );
-    } else {
-        symlink(helper, path).with_context(|| {
-            format!(
-                "create managed launcher without replacing an existing path: {}",
-                path.display()
-            )
-        })?;
-    }
-    let resolution = resolve_launcher();
-    let resolution_failed = match &resolution {
-        Ok(resolved) => resolved != path,
-        Err(_) => true,
-    };
-    if resolution_failed {
-        let disabled_parent = disabled
-            .parent()
-            .context("disabled integration path has no parent")?;
-        fs::create_dir_all(disabled_parent).with_context(|| {
-            format!(
-                "create integration state directory {}",
-                disabled_parent.display()
-            )
-        })?;
-        if !move_managed_link(path, disabled, helper, || {})? {
-            bail!(
-                "managed launcher changed before login-shell rollback: {}",
-                path.display()
-            );
+        if create_module {
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&paths.module)
+                .and_then(|mut file| file.write_all(SCREENSAVER_MODULE.as_bytes()))
+                .context("write managed screensaver module")?;
         }
-        let resolved = resolution?;
-        bail!(
-            "managed launcher did not win login-shell resolution; resolved {} instead",
-            resolved.display()
-        );
+        if add_require {
+            let mut text = fs::read_to_string(&paths.entrypoint)?;
+            text.push_str(SCREENSAVER_REQUIRE_BLOCK);
+            fs::write(&paths.entrypoint, text).context("append managed screensaver require")?;
+        }
+        reload()
+    })();
+    if let Err(error) = result {
+        let failures = rollback_enable(paths, helper, plan);
+        if failures.is_empty() {
+            return Err(error)
+                .context("enable Omarchy screensaver integration; changes were rolled back");
+        }
+        return Err(error).context(format!(
+            "enable Omarchy screensaver integration; rollback also failed: {}",
+            failures.join("; ")
+        ));
     }
+
     writeln!(
         output,
         "Enabled Splinterm's Omarchy screensaver integration"
     )?;
-    writeln!(output, "  Launcher  {}", path.display())?;
+    writeln!(output, "  Launcher  {}", paths.launcher.display())?;
+    writeln!(output, "  Module    {}", paths.module.display())?;
+    writeln!(
+        output,
+        "  Restart the Omarchy shell (omarchy-restart-shell) or log in again to apply it"
+    )?;
     writeln!(
         output,
         "  Disable   splinterm integration omarchy-screensaver disable"
     )?;
     Ok(())
+}
+
+/// Which managed objects enable must create; existing ones are already exact.
+#[derive(Clone, Copy)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag records one independent object to create and roll back"
+)]
+struct EnablePlan {
+    create_link: bool,
+    create_module: bool,
+    add_require: bool,
+}
+
+fn plan_enable(paths: &ScreensaverPaths, helper: &Path) -> Result<EnablePlan> {
+    let entrypoint = fs::symlink_metadata(&paths.entrypoint)
+        .context("Omarchy Hyprland entrypoint is unavailable")?;
+    if !entrypoint.file_type().is_file() {
+        bail!("Omarchy Hyprland entrypoint must be a regular file");
+    }
+    let create_link = fs::symlink_metadata(&paths.launcher).is_err();
+    if !create_link && !managed_link(&paths.launcher, helper) {
+        bail!(
+            "refusing to replace existing launcher {}; review it explicitly",
+            paths.launcher.display()
+        );
+    }
+    let create_module = fs::symlink_metadata(&paths.module).is_err();
+    if !create_module && !paths.module_ready() {
+        bail!(
+            "refusing to replace edited screensaver module {}",
+            paths.module.display()
+        );
+    }
+    let add_require = match paths.require_count() {
+        0 => true,
+        1 => false,
+        _ => bail!("Hyprland entrypoint contains duplicate Splinterm screensaver markers"),
+    };
+    if add_require && fs::read_to_string(&paths.entrypoint)?.contains("SPLINTERM SCREENSAVER PATH")
+    {
+        bail!("Hyprland entrypoint contains an unowned Splinterm screensaver marker");
+    }
+    if paths.legacy_enabled(helper) && fs::symlink_metadata(&paths.legacy_disabled).is_ok() {
+        bail!(
+            "refusing to replace existing disabled integration path {}",
+            paths.legacy_disabled.display()
+        );
+    }
+    Ok(EnablePlan {
+        create_link,
+        create_module,
+        add_require,
+    })
+}
+
+/// Move the shadowed pre-Omarchy-4 `~/.local/bin` link out of `PATH`. It is
+/// only moved, never unlinked, so a raced user object is preserved.
+fn retire_legacy(paths: &ScreensaverPaths, helper: &Path) -> Result<()> {
+    let parent = paths
+        .legacy_disabled
+        .parent()
+        .context("disabled integration path has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create integration state directory {}", parent.display()))?;
+    move_managed_link(
+        &paths.legacy_launcher,
+        &paths.legacy_disabled,
+        helper,
+        || {},
+    )?;
+    Ok(())
+}
+
+fn rollback_enable(paths: &ScreensaverPaths, helper: &Path, plan: EnablePlan) -> Vec<String> {
+    let mut failures = Vec::new();
+    if plan.add_require
+        && let Err(error) = remove_require(paths)
+    {
+        failures.push(format!("Hyprland entrypoint: {error}"));
+    }
+    if plan.create_module
+        && paths.module_ready()
+        && let Err(error) = fs::remove_file(&paths.module)
+    {
+        failures.push(format!("screensaver module: {error}"));
+    }
+    if plan.create_link
+        && managed_link(&paths.launcher, helper)
+        && let Err(error) = fs::remove_file(&paths.launcher)
+    {
+        failures.push(format!("launcher: {error}"));
+    }
+    failures
+}
+
+fn remove_require(paths: &ScreensaverPaths) -> Result<()> {
+    let text = fs::read_to_string(&paths.entrypoint)?;
+    if text.matches(SCREENSAVER_REQUIRE_BLOCK).count() != 1 {
+        bail!("refusing to alter changed Splinterm screensaver marker");
+    }
+    fs::write(
+        &paths.entrypoint,
+        text.replacen(SCREENSAVER_REQUIRE_BLOCK, "", 1),
+    )
+    .context("remove managed screensaver require")
 }
 
 fn rename_no_replace(source: &Path, destination: &Path) -> rustix::io::Result<()> {
@@ -220,55 +394,82 @@ fn move_managed_link(
 }
 
 fn disable(
-    path: &Path,
-    disabled: &Path,
+    paths: &ScreensaverPaths,
     helper: &Path,
-    output: &mut dyn std::io::Write,
+    output: &mut dyn Write,
+    mut reload: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    if managed_link(disabled, helper) && fs::symlink_metadata(path).is_err() {
+    let require = paths.require_count();
+    let module = fs::symlink_metadata(&paths.module).is_ok();
+    if require > 1 {
+        bail!("refusing to alter duplicate Splinterm screensaver markers");
+    }
+    if module && !paths.module_ready() {
+        bail!(
+            "refusing to remove edited screensaver module {}",
+            paths.module.display()
+        );
+    }
+    let legacy = paths.legacy_enabled(helper);
+    if legacy && fs::symlink_metadata(&paths.legacy_disabled).is_ok() {
+        bail!(
+            "refusing to replace existing disabled integration path {}",
+            paths.legacy_disabled.display()
+        );
+    }
+    if require == 0 && !module && !legacy {
         writeln!(output, "Omarchy screensaver integration is not enabled")?;
         return Ok(());
     }
-    if fs::symlink_metadata(disabled).is_ok() {
-        bail!(
-            "refusing to replace existing disabled integration path {}",
-            disabled.display()
-        );
+
+    if require == 1 {
+        remove_require(paths)?;
+        if let Err(error) = reload() {
+            let mut text = fs::read_to_string(&paths.entrypoint)?;
+            text.push_str(SCREENSAVER_REQUIRE_BLOCK);
+            fs::write(&paths.entrypoint, text)?;
+            return Err(error)
+                .context("disable Omarchy screensaver integration; changes were rolled back");
+        }
     }
-    let parent = disabled
-        .parent()
-        .context("disabled integration path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("create integration state directory {}", parent.display()))?;
-    if move_managed_link(path, disabled, helper, || {})? {
-        writeln!(
-            output,
-            "Disabled Splinterm's Omarchy screensaver integration"
-        )?;
-        writeln!(output, "  Preserved  {}", disabled.display())?;
-    } else {
-        writeln!(output, "Omarchy screensaver integration is not enabled")?;
+    if module {
+        fs::remove_file(&paths.module).context("remove managed screensaver module")?;
     }
+    // The launcher link stays in its Splinterm-owned directory, which is no
+    // longer on PATH once the module is gone.
+    if legacy {
+        retire_legacy(paths, helper)?;
+    }
+    writeln!(
+        output,
+        "Disabled Splinterm's Omarchy screensaver integration"
+    )?;
     Ok(())
 }
 
-fn status(
-    path: &Path,
-    disabled: &Path,
-    helper: &Path,
-    output: &mut dyn std::io::Write,
-) -> Result<()> {
-    if managed_link(path, helper) {
+fn status(paths: &ScreensaverPaths, helper: &Path, output: &mut dyn Write) -> Result<()> {
+    if paths.ready(helper) {
         writeln!(output, "Omarchy screensaver integration: enabled")?;
-    } else if fs::symlink_metadata(path).is_ok() {
+    } else if paths.legacy_enabled(helper) {
         writeln!(
             output,
-            "Omarchy screensaver integration: blocked by existing launcher"
+            "Omarchy screensaver integration: inactive (legacy launcher is shadowed by Omarchy)"
         )?;
-        writeln!(output, "  File  {}", path.display())?;
-    } else if managed_link(disabled, helper) {
-        writeln!(output, "Omarchy screensaver integration: disabled")?;
-        writeln!(output, "  Preserved  {}", disabled.display())?;
+        writeln!(
+            output,
+            "  Migrate  splinterm integration omarchy-screensaver enable"
+        )?;
+    } else if fs::symlink_metadata(&paths.module).is_ok()
+        || paths.require_count() > 0
+        || fs::symlink_metadata(&paths.launcher)
+            .is_ok_and(|_| !managed_link(&paths.launcher, helper))
+    {
+        writeln!(
+            output,
+            "Omarchy screensaver integration: incomplete or changed"
+        )?;
+        writeln!(output, "  Module    {}", paths.module.display())?;
+        writeln!(output, "  Launcher  {}", paths.launcher.display())?;
     } else {
         writeln!(output, "Omarchy screensaver integration: disabled")?;
     }
@@ -296,6 +497,16 @@ mod tests {
             fs::create_dir(&path).unwrap();
             Self(path)
         }
+
+        /// A home with an Omarchy entrypoint and a packaged helper.
+        fn omarchy(&self) -> (ScreensaverPaths, PathBuf) {
+            let paths = ScreensaverPaths::new(&self.0.join("home"), &self.0.join("config"));
+            fs::create_dir_all(paths.entrypoint.parent().unwrap()).unwrap();
+            fs::write(&paths.entrypoint, "-- user config\n").unwrap();
+            let helper = self.0.join("helper");
+            fs::write(&helper, "helper").unwrap();
+            (paths, helper)
+        }
     }
 
     impl Drop for TestRoot {
@@ -304,16 +515,21 @@ mod tests {
         }
     }
 
+    fn run(
+        action: IntegrationAction,
+        paths: &ScreensaverPaths,
+        helper: &Path,
+        output: &mut Cursor<Vec<u8>>,
+    ) -> Result<()> {
+        run_omarchy_screensaver(action, paths, helper, output, || Ok(()))
+    }
+
     #[test]
     fn enable_status_and_disable_are_exact_and_idempotent() {
         let root = TestRoot::new();
-        let home = root.0.join("home");
-        let helper = root.0.join("helper");
-        fs::write(&helper, "helper").unwrap();
+        let (paths, helper) = root.omarchy();
         let mut output = Cursor::new(Vec::new());
 
-        let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
-        let resolve = || Ok(launcher.clone());
         for action in [
             IntegrationAction::Enable,
             IntegrationAction::Enable,
@@ -321,14 +537,22 @@ mod tests {
             IntegrationAction::Disable,
             IntegrationAction::Disable,
             IntegrationAction::Enable,
-            IntegrationAction::Disable,
         ] {
-            run_omarchy_screensaver(action, &home, &helper, &mut output, resolve).unwrap();
+            run(action, &paths, &helper, &mut output).unwrap();
             if action == IntegrationAction::Enable {
-                assert_eq!(fs::read_link(&launcher).unwrap(), helper);
+                assert!(paths.ready(&helper));
             }
         }
-        assert!(fs::symlink_metadata(&launcher).is_err());
+        assert_eq!(
+            fs::read_to_string(&paths.entrypoint).unwrap(),
+            format!("-- user config\n{SCREENSAVER_REQUIRE_BLOCK}")
+        );
+        run(IntegrationAction::Disable, &paths, &helper, &mut output).unwrap();
+        assert_eq!(
+            fs::read_to_string(&paths.entrypoint).unwrap(),
+            "-- user config\n"
+        );
+        assert!(fs::symlink_metadata(&paths.module).is_err());
         let text = String::from_utf8(output.into_inner()).unwrap();
         assert!(text.contains("already enabled"));
         assert!(text.contains("integration: enabled"));
@@ -336,63 +560,105 @@ mod tests {
     }
 
     #[test]
-    fn existing_or_replaced_launchers_are_never_modified() {
+    fn module_puts_the_launcher_directory_ahead_of_omarchy_bin() {
+        assert!(SCREENSAVER_MODULE.contains("\"/.local/share/splinterm/omarchy/bin\""));
+        assert!(SCREENSAVER_MODULE.contains("local path = { splinterm_bin, omarchy_bin }"));
         let root = TestRoot::new();
-        let home = root.0.join("home");
-        let helper = root.0.join("helper");
-        fs::write(&helper, "helper").unwrap();
-        let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
-        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-        fs::write(&launcher, "user launcher").unwrap();
-        let original = fs::read(&launcher).unwrap();
-        let mut output = Cursor::new(Vec::new());
-
+        let (paths, _) = root.omarchy();
         assert!(
-            run_omarchy_screensaver(
-                IntegrationAction::Enable,
-                &home,
-                &helper,
-                &mut output,
-                || unreachable!(),
-            )
-            .is_err()
+            paths
+                .launcher
+                .ends_with(".local/share/splinterm/omarchy/bin/omarchy-launch-screensaver")
         );
-        assert!(
-            run_omarchy_screensaver(
-                IntegrationAction::Disable,
-                &home,
-                &helper,
-                &mut output,
-                || unreachable!(),
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read(&launcher).unwrap(), original);
     }
 
     #[test]
-    fn dangling_managed_link_is_preserved_outside_path_after_package_uninstall() {
+    fn legacy_link_is_migrated_out_of_path() {
         let root = TestRoot::new();
-        let home = root.0.join("home");
-        let helper = root.0.join("missing-helper");
-        let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
-        let disabled = home
-            .join(".local/share/splinterm/integrations")
-            .join(format!("{OMARCHY_LAUNCHER}.disabled"));
-        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-        symlink(&helper, &launcher).unwrap();
+        let (paths, helper) = root.omarchy();
+        fs::create_dir_all(paths.legacy_launcher.parent().unwrap()).unwrap();
+        symlink(&helper, &paths.legacy_launcher).unwrap();
         let mut output = Cursor::new(Vec::new());
+        run(IntegrationAction::Status, &paths, &helper, &mut output).unwrap();
+        assert!(String::from_utf8_lossy(output.get_ref()).contains("shadowed"));
 
-        run_omarchy_screensaver(
-            IntegrationAction::Disable,
-            &home,
+        run(IntegrationAction::Enable, &paths, &helper, &mut output).unwrap();
+        assert!(paths.ready(&helper));
+        assert!(fs::symlink_metadata(&paths.legacy_launcher).is_err());
+        assert_eq!(fs::read_link(&paths.legacy_disabled).unwrap(), helper);
+    }
+
+    #[test]
+    fn unrelated_user_launcher_in_local_bin_is_left_alone() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        fs::create_dir_all(paths.legacy_launcher.parent().unwrap()).unwrap();
+        fs::write(&paths.legacy_launcher, "user launcher").unwrap();
+        let mut output = Cursor::new(Vec::new());
+        run(IntegrationAction::Enable, &paths, &helper, &mut output).unwrap();
+        run(IntegrationAction::Disable, &paths, &helper, &mut output).unwrap();
+        assert_eq!(fs::read(&paths.legacy_launcher).unwrap(), b"user launcher");
+    }
+
+    #[test]
+    fn existing_or_edited_objects_are_never_replaced() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        fs::create_dir_all(paths.launcher.parent().unwrap()).unwrap();
+        fs::write(&paths.launcher, "user launcher").unwrap();
+        let mut output = Cursor::new(Vec::new());
+        assert!(run(IntegrationAction::Enable, &paths, &helper, &mut output).is_err());
+        assert_eq!(fs::read(&paths.launcher).unwrap(), b"user launcher");
+        assert_eq!(
+            fs::read_to_string(&paths.entrypoint).unwrap(),
+            "-- user config\n"
+        );
+        assert!(fs::symlink_metadata(&paths.module).is_err());
+
+        fs::remove_file(&paths.launcher).unwrap();
+        run(IntegrationAction::Enable, &paths, &helper, &mut output).unwrap();
+        fs::write(&paths.module, "-- edited\n").unwrap();
+        assert!(run(IntegrationAction::Disable, &paths, &helper, &mut output).is_err());
+        assert_eq!(fs::read(&paths.module).unwrap(), b"-- edited\n");
+        assert_eq!(paths.require_count(), 1);
+    }
+
+    #[test]
+    fn reload_failure_rolls_enable_back() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        let error = run_omarchy_screensaver(
+            IntegrationAction::Enable,
+            &paths,
             &helper,
-            &mut output,
-            || unreachable!(),
+            &mut Cursor::new(Vec::new()),
+            || bail!("injected reload failure"),
         )
-        .unwrap();
-        assert!(fs::symlink_metadata(&launcher).is_err());
-        assert_eq!(fs::read_link(disabled).unwrap(), helper);
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("rolled back"));
+        assert_eq!(
+            fs::read_to_string(&paths.entrypoint).unwrap(),
+            "-- user config\n"
+        );
+        assert!(fs::symlink_metadata(&paths.module).is_err());
+        assert!(fs::symlink_metadata(&paths.launcher).is_err());
+    }
+
+    #[test]
+    fn missing_entrypoint_refuses_without_changes() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        fs::remove_file(&paths.entrypoint).unwrap();
+        assert!(
+            run(
+                IntegrationAction::Enable,
+                &paths,
+                &helper,
+                &mut Cursor::new(Vec::new())
+            )
+            .is_err()
+        );
+        assert!(fs::symlink_metadata(&paths.launcher).is_err());
     }
 
     #[test]
@@ -426,59 +692,5 @@ mod tests {
         assert!(error.to_string().contains("preserved the displaced"));
         assert_eq!(fs::read(&launcher).unwrap(), b"concurrent user file");
         assert_eq!(fs::read(&destination).unwrap(), b"original user file");
-    }
-
-    #[test]
-    fn failed_login_resolution_moves_the_new_link_out_of_path() {
-        let root = TestRoot::new();
-        let home = root.0.join("home");
-        let helper = root.0.join("helper");
-        fs::write(&helper, "helper").unwrap();
-        let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
-        let mut output = Cursor::new(Vec::new());
-
-        let error = run_omarchy_screensaver(
-            IntegrationAction::Enable,
-            &home,
-            &helper,
-            &mut output,
-            || {
-                Ok(PathBuf::from(
-                    "/usr/share/omarchy/bin/omarchy-launch-screensaver",
-                ))
-            },
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("did not win"));
-        assert!(fs::symlink_metadata(&launcher).is_err());
-        let disabled = home
-            .join(".local/share/splinterm/integrations")
-            .join(format!("{OMARCHY_LAUNCHER}.disabled"));
-        assert_eq!(fs::read_link(disabled).unwrap(), helper);
-    }
-
-    #[test]
-    fn resolver_error_also_moves_the_new_link_out_of_path() {
-        let root = TestRoot::new();
-        let home = root.0.join("home");
-        let helper = root.0.join("helper");
-        fs::write(&helper, "helper").unwrap();
-        let launcher = home.join(".local/bin").join(OMARCHY_LAUNCHER);
-        let mut output = Cursor::new(Vec::new());
-
-        let error = run_omarchy_screensaver(
-            IntegrationAction::Enable,
-            &home,
-            &helper,
-            &mut output,
-            || bail!("resolver unavailable"),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("resolver unavailable"));
-        assert!(fs::symlink_metadata(&launcher).is_err());
-        let disabled = home
-            .join(".local/share/splinterm/integrations")
-            .join(format!("{OMARCHY_LAUNCHER}.disabled"));
-        assert_eq!(fs::read_link(disabled).unwrap(), helper);
     }
 }
