@@ -32,6 +32,70 @@ class InstallerSafetyTest(unittest.TestCase):
         self.assertIsNotNone(validator_version)
         self.assertEqual(validator_version.group(1), rust_version.group(1))
 
+    def test_release_bytes_are_stripped_once_before_provenance_hashing(self) -> None:
+        cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn('strip = "symbols"', cargo)
+        for recipe in (
+            ROOT / "packaging/PKGBUILD",
+            ROOT / "packaging/aur/PKGBUILD",
+            ROOT / "packaging/aur-bin/PKGBUILD",
+        ):
+            source = recipe.read_text(encoding="utf-8")
+            self.assertEqual(source.count("options=("), 1)
+            self.assertIn("'!strip'", source)
+
+    def test_package_build_version_matches_workspace_authority(self) -> None:
+        cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        package = (ROOT / "packaging/PKGBUILD").read_text(encoding="utf-8")
+        cargo_version = re.search(r'^version = "([^"]+)"$', cargo, re.MULTILINE)
+        package_version = re.search(r"^_build_version=([^\n]+)$", package, re.MULTILINE)
+        self.assertIsNotNone(cargo_version)
+        self.assertIsNotNone(package_version)
+        self.assertEqual(cargo_version.group(1), package_version.group(1))
+
+    def test_package_provenance_is_generated_by_both_source_recipes(self) -> None:
+        private = (ROOT / "packaging/PKGBUILD").read_text(encoding="utf-8")
+        aur = (ROOT / "packaging/aur/PKGBUILD").read_text(encoding="utf-8")
+        build = (ROOT / "tools/package/build-local-package.sh").read_text(
+            encoding="utf-8"
+        )
+        workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        for recipe in (private, aur):
+            self.assertIn("generate-package-provenance.py", recipe)
+            self.assertIn("package-provenance-v1.json", recipe)
+        self.assertIn("git -C \"$root\" rev-parse --verify HEAD", build)
+        self.assertIn("SPLINTERM_BUILD_COMMIT=$commit", build)
+        self.assertIn("local-committed-head", build)
+        self.assertIn("SPLINTERM_BUILD_PROVENANCE=release-candidate", workflow)
+
+    def test_provenance_protocol_constants_match_all_authorities(self) -> None:
+        generator = (ROOT / "tools/package/generate-package-provenance.py").read_text(
+            encoding="utf-8"
+        )
+        validator = (ROOT / "tools/package/validate-package.py").read_text(
+            encoding="utf-8"
+        )
+        protocol = (ROOT / "crates/splinterm-protocol/src/lib.rs").read_text(
+            encoding="utf-8"
+        )
+        rust_version = re.search(
+            r"^pub const PROTOCOL_VERSION: u16 = ([0-9]+);$", protocol, re.MULTILINE
+        )
+        self.assertIsNotNone(rust_version)
+        self.assertIn(f"PRIVATE_PROTOCOL = {rust_version.group(1)}", generator)
+        self.assertIn(
+            "for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 1, 1, 1, 1):",
+            validator,
+        )
+        for declaration in (
+            "HANDOFF_PROTOCOL = 1",
+            "TERMINAL_CHECKPOINT = 1",
+            "DESCRIPTOR_MANIFEST = 1",
+        ):
+            self.assertIn(declaration, generator)
+
     def daemon_owned_environment(self, directory: Path) -> dict[str, str]:
         proc = directory / "proc"
         binaries = directory / "bin"
@@ -91,6 +155,45 @@ class InstallerSafetyTest(unittest.TestCase):
         )[1].split("fi", maxsplit=1)[0]
         self.assertIn("was not enabled", unattended)
         self.assertNotIn("omarchy-screensaver enable\n", unattended)
+
+    def test_release_installer_binds_package_provenance_before_pacman(self) -> None:
+        source = (ROOT / "install.sh").read_text(encoding="utf-8")
+        provenance = source.index("inspect-package-provenance")
+        package_query = source.index('pacman -Qp "$download_dir/$main_asset"')
+        installation = source.rindex('sudo pacman "${pacman_args[@]}"')
+        self.assertLess(provenance, package_query)
+        self.assertLess(provenance, installation)
+        self.assertIn("Downloaded package build provenance does not match", source)
+
+    def test_release_installer_requires_provenance_from_0_2_0(self) -> None:
+        source = (ROOT / "install.sh").read_text(encoding="utf-8")
+        function = re.search(
+            r"^release_has_provenance\(\) \{\n.*?^\}\n", source, re.MULTILINE | re.DOTALL
+        )
+        self.assertIsNotNone(function)
+        for version, required in [
+            ("0.1.1", False),
+            ("0.1.0-beta1", False),
+            ("0.2.0", True),
+            ("0.2.0-rc.1", True),
+            ("0.10.0", True),
+            ("1.0.0", True),
+            ("0.08.0", True),
+        ]:
+            with self.subTest(version=version):
+                result = subprocess.run(
+                    ["bash", "-c", function.group(0) + 'release_has_provenance "$1"', "_", version],
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, required)
+        malformed = subprocess.run(
+            ["bash", "-c", function.group(0) + 'release_has_provenance "$1"; echo reached', "_", "x.y"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertNotIn("reached", malformed.stdout)
 
     def test_installer_never_replaces_an_existing_user_launcher(self) -> None:
         source = (ROOT / "install.sh").read_text(encoding="utf-8")

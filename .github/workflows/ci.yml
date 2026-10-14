@@ -196,6 +196,7 @@ jobs:
             tools/testbed/test_qmp_input.py \
             tools/package/test_release_manifest.py \
             tools/package/test_installer_safety.py \
+            tools/package/test_package_provenance.py \
             tools/package/test_omarchy_screensaver_integration.py \
             tools/package/test_systemd_unit.py \
             tools/package/test_validate_mcp_package.py \
@@ -288,9 +289,6 @@ jobs:
       - name: Deny warnings in release sources and test targets
         env:
           RUSTFLAGS: "-D warnings"
-          # The container checkout is not a Git-trusted directory, so the
-          # daemon build script cannot read the commit from Git.
-          SPLINTERM_BUILD_COMMIT: ${{ github.sha }}
         run: |
           cargo check --locked --workspace --all-targets
           cargo check --locked --release --workspace

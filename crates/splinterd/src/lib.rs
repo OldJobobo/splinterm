@@ -7,6 +7,7 @@ pub mod handoff_descriptors;
 pub mod handoff_preflight;
 pub mod image_transport;
 mod live;
+pub mod package_provenance;
 
 pub use live::{
     CompactSubscription, LiveCell, LiveError, LiveEvent, LiveRow, LiveRuntimeMetrics,
@@ -15,3 +16,7 @@ pub use live::{
     Subscription, SubscriptionReceive, TerminalPublicationMemoryLease,
 };
 pub use splinterm_policy::{executable_identity, inspect_policy_file, policy};
+
+/// Source commit for diagnostics: the packaged commit, or a best-effort commit
+/// for unpackaged builds. It is never part of the handoff identity.
+pub const SOURCE_COMMIT: Option<&str> = option_env!("SPLINTERM_SOURCE_COMMIT");

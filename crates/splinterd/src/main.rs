@@ -1631,7 +1631,7 @@ fn trace_diagnostic_lifecycle(
         window_id: correlation.window_id,
         topology_revision,
         build_version: env!("CARGO_PKG_VERSION").to_owned(),
-        build_commit: option_env!("SPLINTERM_BUILD_COMMIT").map(str::to_owned),
+        build_commit: splinterd::SOURCE_COMMIT.map(str::to_owned),
     };
     submit_daemon_diagnostic(&diagnostic);
     info!(

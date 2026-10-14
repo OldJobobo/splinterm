@@ -16,6 +16,8 @@
   xdg-utils,
   src,
   sourceRevision ? null,
+  # A build of an uncommitted tree keeps its commit for diagnostics only.
+  sourceDirty ? false,
   withMcp ? false,
 }:
 
@@ -48,9 +50,15 @@ rustPlatform.buildRustPackage {
     );
   };
   cargoLock.lockFile = ../Cargo.lock;
-  SPLINTERM_BUILD_COMMIT = sourceRevision;
+  # A clean store output is a packaged generation that may take part in upgrade
+  # handoff; a dirty tree build is not.
+  SPLINTERM_BUILD_PROVENANCE = if sourceDirty then "unpackaged" else "nix-store";
+  ${if sourceDirty then "SPLINTERM_SOURCE_COMMIT" else "SPLINTERM_BUILD_COMMIT"} = sourceRevision;
 
-  nativeBuildInputs = [ pkg-config ];
+  nativeBuildInputs = [
+    pkg-config
+    python3
+  ];
   buildInputs = [
     freetype
     pixman
@@ -153,6 +161,17 @@ rustPlatform.buildRustPackage {
       --replace-fail '/usr/share/doc/splinterm' "$out/share/doc/splinterm"
   '';
 
+  # Hash the final binaries, after fixup has stripped and patched them.
+  postFixup = lib.optionalString (!sourceDirty) ''
+    python3 "$NIX_BUILD_TOP/$sourceRoot/tools/package/generate-package-provenance.py" \
+      --commit ${sourceRevision} \
+      --provenance nix-store \
+      --version "$version" \
+      --daemon "$out/bin/splinterd" \
+      --client "$out/bin/splinterm" \
+      --output "$out/share/splinterm/package-provenance-v1.json"
+  '';
+
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
@@ -166,6 +185,21 @@ rustPlatform.buildRustPackage {
     test -s "$out/share/doc/splinterm/accessibility.md"
     "$out/bin/splinterm" --help >/dev/null
     python3 nix/package-smoke.py "$out" '${runtimeShell}'
+    ${
+      if sourceDirty then
+        ''test ! -e "$out/share/splinterm/package-provenance-v1.json"''
+      else
+        ''
+          python3 tools/package/generate-package-provenance.py \
+            --commit ${sourceRevision} --provenance nix-store --version "$version" \
+            --daemon "$out/bin/splinterd" --client "$out/bin/splinterm" \
+            --output "$TMPDIR/expected-provenance.json"
+          cmp "$TMPDIR/expected-provenance.json" "$out/share/splinterm/package-provenance-v1.json"
+          python3 tools/package/check-package-provenance.py \
+            "$out/share/splinterm/package-provenance-v1.json" \
+            --daemon "$out/bin/splinterd" --client "$out/bin/splinterm"
+        ''
+    }
     desktop-file-validate "$out/share/applications/com.oldjobobo.splinterm.desktop"
     runHook postInstallCheck
   '';
