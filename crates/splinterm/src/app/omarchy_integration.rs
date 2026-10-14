@@ -114,7 +114,14 @@ enum Phase {
 
 pub(super) fn run(action: IntegrationAction) -> Result<()> {
     let roots = Roots::from_env()?;
-    let mut runtime = SystemRuntime;
+    // Captured before any change; without Hyprland the later reload fails anyway.
+    let mut runtime = SystemRuntime {
+        config_errors_baseline: if action == IntegrationAction::Status {
+            String::new()
+        } else {
+            super::integrations::config_errors().unwrap_or_default()
+        },
+    };
     let mut output = std::io::stdout().lock();
     if action == IntegrationAction::Status {
         return run_with(action, &roots, &mut runtime, &mut output);
@@ -161,7 +168,10 @@ trait Runtime {
     ) -> Result<()>;
 }
 
-struct SystemRuntime;
+struct SystemRuntime {
+    /// Errors already reported before any change, so they never fail a reload.
+    config_errors_baseline: String,
+}
 
 impl Runtime for SystemRuntime {
     fn terminal_id(&mut self) -> Result<String> {
@@ -182,21 +192,7 @@ impl Runtime for SystemRuntime {
     }
 
     fn reload_hyprland(&mut self) -> Result<()> {
-        let reload = Command::new("hyprctl")
-            .arg("reload")
-            .output()
-            .context("reload Hyprland")?;
-        if !reload.status.success() {
-            bail!("Hyprland rejected the integration reload");
-        }
-        let errors = Command::new("hyprctl")
-            .arg("configerrors")
-            .output()
-            .context("read Hyprland configuration errors")?;
-        if !errors.status.success() || !errors.stdout.is_empty() {
-            bail!("Hyprland reported configuration errors after reload");
-        }
-        Ok(())
+        super::integrations::reload_hyprland(&self.config_errors_baseline)
     }
 
     fn screensaver(

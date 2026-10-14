@@ -74,22 +74,27 @@ pub(super) fn hyprland_reloader() -> Result<impl FnMut() -> Result<()>> {
         if !session {
             return Ok(());
         }
-        let reload = Command::new("hyprctl")
-            .arg("reload")
-            .output()
-            .context("reload Hyprland")?;
-        if !reload.status.success() {
-            bail!("Hyprland rejected the integration reload");
-        }
-        let errors = config_errors()?;
-        if !errors.is_empty() && errors != baseline {
-            bail!("Hyprland reported new configuration errors after reload: {errors}");
-        }
-        Ok(())
+        reload_hyprland(&baseline)
     })
 }
 
-fn config_errors() -> Result<String> {
+/// Reload Hyprland and fail on any configuration error absent from `baseline`.
+pub(super) fn reload_hyprland(baseline: &str) -> Result<()> {
+    let reload = Command::new("hyprctl")
+        .arg("reload")
+        .output()
+        .context("reload Hyprland")?;
+    if !reload.status.success() {
+        bail!("Hyprland rejected the integration reload");
+    }
+    let errors = config_errors()?;
+    if !errors.is_empty() && errors != baseline {
+        bail!("Hyprland reported new configuration errors after reload: {errors}");
+    }
+    Ok(())
+}
+
+pub(super) fn config_errors() -> Result<String> {
     let errors = Command::new("hyprctl")
         .arg("configerrors")
         .output()
@@ -97,7 +102,12 @@ fn config_errors() -> Result<String> {
     if !errors.status.success() {
         bail!("could not read Hyprland configuration errors");
     }
-    Ok(String::from_utf8_lossy(&errors.stdout).trim().to_owned())
+    Ok(normalize_config_errors(&errors.stdout))
+}
+
+/// Omarchy 4's `hyprctl configerrors` prints blank lines when there are none.
+fn normalize_config_errors(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout).trim().to_owned()
 }
 
 /// Every user-owned object the screensaver component manages.
@@ -596,6 +606,15 @@ mod tests {
         assert!(text.contains("already enabled"));
         assert!(text.contains("integration: enabled"));
         assert!(text.contains("not enabled"));
+    }
+
+    #[test]
+    fn blank_config_error_output_means_no_errors() {
+        assert_eq!(normalize_config_errors(b"\n\n"), "");
+        assert_eq!(
+            normalize_config_errors(b"\nbad option\n"),
+            "bad option".to_owned()
+        );
     }
 
     #[test]
