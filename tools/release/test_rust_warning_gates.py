@@ -38,7 +38,13 @@ build
         for recipe in ("packaging/PKGBUILD", "packaging/aur/PKGBUILD"):
             for flags in ("", "-C debuginfo=1"):
                 with self.subTest(recipe=recipe, flags=flags), tempfile.TemporaryDirectory() as tmp:
-                    env = dict(os.environ, RUSTFLAGS=flags)
+                    # build-local-package.sh supplies these for the local recipe.
+                    env = dict(
+                        os.environ,
+                        RUSTFLAGS=flags,
+                        SPLINTERM_BUILD_COMMIT="1" * 40,
+                        SPLINTERM_BUILD_PROVENANCE="local-committed-head",
+                    )
                     result = subprocess.run(
                         ["bash", "-c", script, "bash", str(ROOT / recipe)],
                         cwd=tmp, env=env, text=True, capture_output=True, check=True,
@@ -50,6 +56,27 @@ build
                         "build --frozen --release -p splinterm -p splinterd "
                         "-p splinterm-relay -p splinterm-pty -p splinterm-mcp",
                     )
+
+    def test_local_package_build_requires_declared_provenance(self):
+        script = '''
+set -eu
+source "$1"
+cargo() { :; }
+mkdir -p "splinterm-$pkgver"
+build
+'''
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("SPLINTERM_BUILD_COMMIT", "SPLINTERM_BUILD_PROVENANCE")
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                ["bash", "-c", script, "bash", str(ROOT / "packaging/PKGBUILD")],
+                cwd=tmp, env=env, text=True, capture_output=True, check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("package build requires exact source commit", result.stderr)
 
 
 if __name__ == "__main__":
