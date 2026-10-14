@@ -215,7 +215,7 @@ impl Runtime for SystemRuntime {
             &roots.screensaver(),
             Path::new(SCREENSAVER_HELPER),
             output,
-            super::integrations::reload_hyprland,
+            super::integrations::hyprland_reloader()?,
         )
     }
 }
@@ -456,6 +456,10 @@ fn disable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) ->
     manifest.phase = Phase::PendingDisable;
     write_manifest(roots, &manifest)?;
 
+    let mut screensaver = ScreensaverRollback {
+        reached: false,
+        legacy: screensaver_legacy(roots),
+    };
     let result: Result<()> = (|| {
         if manifest.terminal_owned {
             stage_disable_terminal(roots, manifest.terminal_had_original)?;
@@ -465,6 +469,7 @@ fn disable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) ->
             runtime.reload_hyprland()?;
         }
         if manifest.screensaver_owned {
+            screensaver.reached = true;
             runtime.screensaver(IntegrationAction::Disable, roots, output)?;
         }
         fs::remove_file(roots.manifest()).context("remove Omarchy integration state")?;
@@ -472,7 +477,7 @@ fn disable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) ->
     })();
 
     if let Err(error) = result {
-        let rollback = rollback_disable(roots, runtime, &manifest, output);
+        let rollback = rollback_disable(roots, runtime, &manifest, screensaver, output);
         if rollback.is_ok() {
             manifest.phase = Phase::Committed;
             write_manifest(roots, &manifest)?;
@@ -618,24 +623,29 @@ fn disable_hypr(roots: &Roots) -> Result<()> {
     Ok(())
 }
 
+/// Whether a unified disable reached the screensaver step, and whether that
+/// component was still the shadowed pre-Omarchy-4 link when disable began.
+#[derive(Clone, Copy)]
+struct ScreensaverRollback {
+    reached: bool,
+    legacy: bool,
+}
+
 fn rollback_disable(
     roots: &Roots,
     runtime: &mut impl Runtime,
     manifest: &Manifest,
+    screensaver: ScreensaverRollback,
     output: &mut dyn Write,
 ) -> Result<()> {
     let mut failures = Vec::new();
-    if manifest.screensaver_owned
-        && !screensaver_ready(roots)
-        && let Err(error) = runtime.screensaver(IntegrationAction::Enable, roots, output)
-    {
-        failures.push(format!("screensaver: {error}"));
-    }
+    // Restore the Hyprland files first: the restored entrypoint is the one the
+    // screensaver component must be reconciled against.
+    let mut hypr_restored = false;
     if manifest.hypr_owned && fs::symlink_metadata(roots.hypr_entrypoint_staged()).is_ok() {
-        if let Err(error) = rollback_disable_hypr(roots) {
-            failures.push(format!("Hyprland files: {error}"));
-        } else if let Err(error) = runtime.reload_hyprland() {
-            failures.push(format!("Hyprland reload: {error}"));
+        match rollback_disable_hypr(roots) {
+            Ok(()) => hypr_restored = true,
+            Err(error) => failures.push(format!("Hyprland files: {error}")),
         }
     }
     if manifest.terminal_owned
@@ -643,6 +653,21 @@ fn rollback_disable(
         && let Err(error) = rollback_disable_terminal(roots, manifest.terminal_had_original)
     {
         failures.push(format!("default terminal: {error}"));
+    }
+    if manifest.screensaver_owned && screensaver.reached {
+        let restored = if screensaver.legacy {
+            super::integrations::restore_legacy(&roots.screensaver(), Path::new(SCREENSAVER_HELPER))
+        } else if screensaver_ready(roots) {
+            Ok(())
+        } else {
+            runtime.screensaver(IntegrationAction::Enable, roots, output)
+        };
+        if let Err(error) = restored {
+            failures.push(format!("screensaver: {error}"));
+        }
+    }
+    if hypr_restored && let Err(error) = runtime.reload_hyprland() {
+        failures.push(format!("Hyprland reload: {error}"));
     }
     if failures.is_empty() {
         Ok(())
@@ -839,6 +864,7 @@ mod tests {
         reloads: usize,
         screensaver: bool,
         fail_reload: bool,
+        fail_reloads: usize,
         fail_screensaver_disable: bool,
         terminals: Option<PathBuf>,
     }
@@ -861,25 +887,29 @@ mod tests {
 
         fn reload_hyprland(&mut self) -> Result<()> {
             self.reloads += 1;
-            if self.fail_reload {
+            if self.fail_reload || self.fail_reloads > 0 {
+                self.fail_reloads = self.fail_reloads.saturating_sub(1);
                 bail!("injected reload failure");
             }
             Ok(())
         }
 
+        // Mirrors the real component: the legacy link is moved, never removed.
         fn screensaver(
             &mut self,
             action: IntegrationAction,
             roots: &Roots,
             _output: &mut dyn Write,
         ) -> Result<()> {
+            let paths = roots.screensaver();
             match action {
                 IntegrationAction::Enable => {
-                    if screensaver_legacy(roots) {
-                        fs::remove_file(roots.home.join(".local/bin/omarchy-launch-screensaver"))?;
-                    }
                     if !screensaver_ready(roots) {
                         install_screensaver(roots)?;
+                    }
+                    if screensaver_legacy(roots) {
+                        fs::create_dir_all(paths.legacy_disabled.parent().unwrap())?;
+                        fs::rename(&paths.legacy_launcher, &paths.legacy_disabled)?;
                     }
                     self.screensaver = true;
                 }
@@ -887,7 +917,13 @@ mod tests {
                     if self.fail_screensaver_disable {
                         bail!("injected screensaver disable failure");
                     }
-                    remove_screensaver(roots)?;
+                    if fs::symlink_metadata(&paths.module).is_ok() {
+                        remove_screensaver(roots)?;
+                    }
+                    if screensaver_legacy(roots) {
+                        fs::create_dir_all(paths.legacy_disabled.parent().unwrap())?;
+                        fs::rename(&paths.legacy_launcher, &paths.legacy_disabled)?;
+                    }
                     self.screensaver = false;
                 }
                 IntegrationAction::Status => {}
@@ -944,6 +980,7 @@ mod tests {
             reloads: 0,
             screensaver: true,
             fail_reload: false,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: None,
         };
@@ -969,6 +1006,7 @@ mod tests {
             reloads: 0,
             screensaver: false,
             fail_reload: false,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: Some(roots.terminals()),
         };
@@ -1003,6 +1041,7 @@ mod tests {
             reloads: 0,
             screensaver: false,
             fail_reload: true,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: Some(roots.terminals()),
         };
@@ -1025,12 +1064,77 @@ mod tests {
             reloads: 0,
             screensaver: true,
             fail_reload: true,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: Some(roots.terminals()),
         };
         assert!(enable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).is_err());
         assert!(screensaver_ready(&roots));
         assert!(runtime.screensaver);
+    }
+
+    /// Turn an enabled integration into one recorded before Omarchy 4, whose
+    /// only screensaver object is the `~/.local/bin` link.
+    fn make_legacy(roots: &Roots) {
+        remove_screensaver(roots).unwrap();
+        let paths = roots.screensaver();
+        symlink(SCREENSAVER_HELPER, &paths.legacy_launcher).unwrap();
+        assert!(screensaver_legacy(roots) && !screensaver_ready(roots));
+    }
+
+    fn legacy_runtime(roots: &Roots) -> FakeRuntime {
+        FakeRuntime {
+            terminal: "follow-file".to_owned(),
+            reloads: 0,
+            screensaver: false,
+            fail_reload: false,
+            fail_reloads: 0,
+            fail_screensaver_disable: false,
+            terminals: Some(roots.terminals()),
+        }
+    }
+
+    #[test]
+    fn legacy_disable_reload_failure_restores_exact_prior_state() {
+        let (_root, roots) = TestRoot::new();
+        fs::write(roots.terminals(), "foot.desktop\n").unwrap();
+        let mut runtime = legacy_runtime(&roots);
+        enable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).unwrap();
+        make_legacy(&roots);
+        let entrypoint = fs::read(roots.hypr_entrypoint()).unwrap();
+
+        runtime.fail_reloads = 1;
+        assert!(disable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).is_err());
+        assert_eq!(read_manifest(&roots).unwrap().phase, Phase::Committed);
+        assert!(screensaver_legacy(&roots));
+        assert!(fs::symlink_metadata(roots.screensaver().module).is_err());
+        assert!(fs::symlink_metadata(roots.screensaver().legacy_disabled).is_err());
+        assert_eq!(fs::read(roots.hypr_entrypoint()).unwrap(), entrypoint);
+        assert!(terminal_ready(&mut runtime));
+
+        // The journal is still usable: a later disable succeeds.
+        disable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).unwrap();
+        assert!(fs::symlink_metadata(roots.manifest()).is_err());
+        assert!(!screensaver_legacy(&roots));
+    }
+
+    #[test]
+    fn enabling_again_migrates_a_legacy_screensaver() {
+        let (_root, roots) = TestRoot::new();
+        fs::write(roots.terminals(), "foot.desktop\n").unwrap();
+        let mut runtime = legacy_runtime(&roots);
+        enable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).unwrap();
+        make_legacy(&roots);
+
+        let mut output = Cursor::new(Vec::new());
+        enable(&roots, &mut runtime, &mut output).unwrap();
+        assert!(screensaver_ready(&roots));
+        assert!(!screensaver_legacy(&roots));
+        assert!(
+            String::from_utf8(output.into_inner())
+                .unwrap()
+                .contains("Screensaver       ready")
+        );
     }
 
     #[test]
@@ -1042,6 +1146,7 @@ mod tests {
             reloads: 0,
             screensaver: false,
             fail_reload: false,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: Some(roots.terminals()),
         };
@@ -1089,6 +1194,7 @@ mod tests {
             reloads: 0,
             screensaver: false,
             fail_reload: false,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: None,
         };
@@ -1116,6 +1222,7 @@ mod tests {
             reloads: 0,
             screensaver: true,
             fail_reload: false,
+            fail_reloads: 0,
             fail_screensaver_disable: false,
             terminals: None,
         };

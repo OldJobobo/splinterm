@@ -42,7 +42,7 @@ pub(super) fn run(command: IntegrationCommand) -> Result<()> {
                 &ScreensaverPaths::new(&home, &config),
                 Path::new(PACKAGED_HELPER),
                 &mut std::io::stdout(),
-                reload_hyprland,
+                hyprland_reloader()?,
             )
         }
     }
@@ -59,27 +59,45 @@ fn absolute_dir_env(name: &str) -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-/// Reload Hyprland so the managed `PATH` module takes effect, or report a
-/// configuration error. Outside a Hyprland session the next login applies it.
-pub(super) fn reload_hyprland() -> Result<()> {
-    if env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
-        return Ok(());
-    }
-    let reload = Command::new("hyprctl")
-        .arg("reload")
-        .output()
-        .context("reload Hyprland")?;
-    if !reload.status.success() {
-        bail!("Hyprland rejected the integration reload");
-    }
+/// Return a reload step that applies the managed `PATH` module and fails only on
+/// configuration errors that were not already present before the change, so an
+/// unrelated existing error never blocks enabling or disabling. Outside a
+/// Hyprland session the next login applies the change.
+pub(super) fn hyprland_reloader() -> Result<impl FnMut() -> Result<()>> {
+    let session = env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+    let baseline = if session {
+        config_errors()?
+    } else {
+        String::new()
+    };
+    Ok(move || {
+        if !session {
+            return Ok(());
+        }
+        let reload = Command::new("hyprctl")
+            .arg("reload")
+            .output()
+            .context("reload Hyprland")?;
+        if !reload.status.success() {
+            bail!("Hyprland rejected the integration reload");
+        }
+        let errors = config_errors()?;
+        if !errors.is_empty() && errors != baseline {
+            bail!("Hyprland reported new configuration errors after reload: {errors}");
+        }
+        Ok(())
+    })
+}
+
+fn config_errors() -> Result<String> {
     let errors = Command::new("hyprctl")
         .arg("configerrors")
         .output()
         .context("read Hyprland configuration errors")?;
-    if !errors.status.success() || !errors.stdout.is_empty() {
-        bail!("Hyprland reported configuration errors after reload");
+    if !errors.status.success() {
+        bail!("could not read Hyprland configuration errors");
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&errors.stdout).trim().to_owned())
 }
 
 /// Every user-owned object the screensaver component manages.
@@ -89,8 +107,8 @@ pub(super) struct ScreensaverPaths {
     pub(super) module: PathBuf,
     pub(super) entrypoint: PathBuf,
     /// Pre-Omarchy-4 link location, which Omarchy 4 always shadows.
-    legacy_launcher: PathBuf,
-    legacy_disabled: PathBuf,
+    pub(super) legacy_launcher: PathBuf,
+    pub(super) legacy_disabled: PathBuf,
 }
 
 impl ScreensaverPaths {
@@ -161,15 +179,6 @@ fn enable(
         return Ok(());
     }
     let plan = plan_enable(paths, helper)?;
-    if paths.legacy_enabled(helper) {
-        retire_legacy(paths, helper)?;
-        writeln!(
-            output,
-            "Moved the legacy launcher {} out of PATH",
-            paths.legacy_launcher.display()
-        )?;
-    }
-
     let EnablePlan {
         create_link,
         create_module,
@@ -213,6 +222,16 @@ fn enable(
             failures.join("; ")
         ));
     }
+    // The shadowed legacy link is retired only once the replacement is live,
+    // so a failed enable leaves it untouched.
+    if paths.legacy_enabled(helper) {
+        retire_legacy(paths, helper)?;
+        writeln!(
+            output,
+            "Moved the legacy launcher {} out of PATH",
+            paths.legacy_launcher.display()
+        )?;
+    }
 
     writeln!(
         output,
@@ -222,7 +241,7 @@ fn enable(
     writeln!(output, "  Module    {}", paths.module.display())?;
     writeln!(
         output,
-        "  Restart the Omarchy shell (omarchy-restart-shell) or log in again to apply it"
+        "  Log out and back in so the Omarchy idle service uses it"
     )?;
     writeln!(
         output,
@@ -297,6 +316,20 @@ fn retire_legacy(paths: &ScreensaverPaths, helper: &Path) -> Result<()> {
     move_managed_link(
         &paths.legacy_launcher,
         &paths.legacy_disabled,
+        helper,
+        || {},
+    )?;
+    Ok(())
+}
+
+/// Undo [`retire_legacy`] for a rolled-back disable, without replacing anything.
+pub(super) fn restore_legacy(paths: &ScreensaverPaths, helper: &Path) -> Result<()> {
+    if paths.legacy_enabled(helper) || !managed_link(&paths.legacy_disabled, helper) {
+        return Ok(());
+    }
+    move_managed_link(
+        &paths.legacy_disabled,
+        &paths.legacy_launcher,
         helper,
         || {},
     )?;
@@ -428,6 +461,8 @@ fn disable(
             let mut text = fs::read_to_string(&paths.entrypoint)?;
             text.push_str(SCREENSAVER_REQUIRE_BLOCK);
             fs::write(&paths.entrypoint, text)?;
+            // Best effort: bring the live session back to the restored file.
+            let _ = reload();
             return Err(error)
                 .context("disable Omarchy screensaver integration; changes were rolled back");
         }
@@ -435,14 +470,18 @@ fn disable(
     if module {
         fs::remove_file(&paths.module).context("remove managed screensaver module")?;
     }
-    // The launcher link stays in its Splinterm-owned directory, which is no
-    // longer on PATH once the module is gone.
+    // The launcher link stays in its Splinterm-owned directory, which the next
+    // session no longer puts ahead of Omarchy's bin.
     if legacy {
         retire_legacy(paths, helper)?;
     }
     writeln!(
         output,
         "Disabled Splinterm's Omarchy screensaver integration"
+    )?;
+    writeln!(
+        output,
+        "  Log out and back in so the Omarchy idle service stops using it"
     )?;
     Ok(())
 }
@@ -642,6 +681,27 @@ mod tests {
         );
         assert!(fs::symlink_metadata(&paths.module).is_err());
         assert!(fs::symlink_metadata(&paths.launcher).is_err());
+    }
+
+    #[test]
+    fn failed_enable_keeps_the_legacy_link_in_place() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        fs::create_dir_all(paths.legacy_launcher.parent().unwrap()).unwrap();
+        symlink(&helper, &paths.legacy_launcher).unwrap();
+        assert!(
+            run_omarchy_screensaver(
+                IntegrationAction::Enable,
+                &paths,
+                &helper,
+                &mut Cursor::new(Vec::new()),
+                || bail!("injected reload failure"),
+            )
+            .is_err()
+        );
+        assert!(paths.legacy_enabled(&helper));
+        assert!(fs::symlink_metadata(&paths.legacy_disabled).is_err());
+        assert!(!paths.ready(&helper));
     }
 
     #[test]

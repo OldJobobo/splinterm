@@ -75,9 +75,10 @@ in `~/.local/bin` is never reached. Activation therefore manages three objects:
 The Hyprland module runs after Omarchy's bootstrap and moves only that
 Splinterm-owned directory ahead of Omarchy's `bin`; it holds no other command.
 The command refuses to replace any existing file, different symlink, or edited
-module, and rolls back if Hyprland rejects the reload. Restart the Omarchy shell
-(`omarchy-restart-shell`) or log in again so the idle service picks up the new
-`PATH`. A launcher link left in `~/.local/bin` by an earlier version is shadowed
+module, and rolls back if the reload is rejected or reports configuration errors
+that were not already present. The running Omarchy shell keeps the `PATH` it
+started with, so log out and back in before the idle service uses the new
+launcher. A launcher link left in `~/.local/bin` by an earlier version is shadowed
 on Omarchy 4; status reports it, and enabling again moves it to
 `~/.local/share/splinterm/integrations/omarchy-launch-screensaver.disabled`.
 Inspect or disable the integration with:
@@ -109,8 +110,9 @@ explicit unified user command manages dedicated user-owned integration files.
 The normal installer offers screensaver-only activation interactively with a default of No;
 unattended and direct Pacman/AUR installs print the explicit activation command.
 Disabling removes the unchanged require block and module and reloads Hyprland.
-The launcher link stays in its Splinterm-owned directory, which is no longer on
-`PATH`, so no raced user object is ever unlinked. Package removal never scans
+The launcher link stays in its Splinterm-owned directory, so no raced user object
+is ever unlinked; after the next login that directory is no longer ahead of
+Omarchy's `bin`. Package removal never scans
 user homes. If the integration is still enabled afterward, the link is dangling
 and command lookup falls through to Omarchy's canonical launcher; run the
 documented disable command before uninstalling to remove the module as well.
