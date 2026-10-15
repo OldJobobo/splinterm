@@ -106,6 +106,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
 | `main.padding-left`, `padding-right`, `padding-top`, `padding-bottom` | independent logical padding edges | 0–10000; 12 each |
 | `main.initial-columns`, `initial-rows` | requested initial grid | 2–480, 2–128; 80×24 |
+| `main.startup` | what a commandless `splinterm-xdg-terminal-exec` launch opens: `new-dojo` or `dojo-picker` | new-dojo |
 | `main.shell` | shell executable used for an empty launch | login shell from the account |
 | `main.login-shell` | use login-style argv[0] for the shell | yes |
 | `main.title` | fixed window title; otherwise OSC title | unset |
@@ -543,6 +544,16 @@ splinterm-reopen    → last locally remembered running Dojo
 ```
 
 `splinterm-sessions` and `splinterm sessions` remain compatibility aliases.
+
+Set `main.startup=dojo-picker` to make the commandless desktop/XDG launch open
+the Recent Dojos picker instead of creating a terminal; no shell starts until
+**New** or a Dojo is chosen. The default `new-dojo` keeps the existing behavior.
+For one launch, `splinterm-xdg-terminal-exec --picker` opens the picker and
+`--new` creates a fresh terminal regardless of the setting; `splinterm launch
+--picker` is the direct CLI form. The **New Terminal** desktop action passes
+`--new`, so it always creates a terminal. Picker **New** uses the launch working
+directory. Command-bearing launches (`-- COMMAND...`) never open the picker and
+reject `--picker`.
 
 The in-window Ctrl+Shift+S shortcut paints a trusted modal overlay over dimmed
 live panes without creating another Wayland Window or replacing an existing tab.

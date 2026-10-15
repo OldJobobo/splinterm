@@ -18,7 +18,7 @@ X-TerminalArgAppId=--app-id=
 
 [Desktop Action New]
 Name=New Terminal
-Exec=splinterm-xdg-terminal-exec
+Exec=splinterm-xdg-terminal-exec --new
 
 [Desktop Action Dojos]
 Name=Recent Dojos
