@@ -520,7 +520,7 @@ impl ClientDiagnostics {
             topology_revision: context.topology_revision,
             tab_count: context.tab_count,
             build_version: env!("CARGO_PKG_VERSION").to_owned(),
-            build_commit: option_env!("SPLINTERM_BUILD_COMMIT").map(str::to_owned),
+            build_commit: splinterd::SOURCE_COMMIT.map(str::to_owned),
             exit_class,
             error_code,
         }

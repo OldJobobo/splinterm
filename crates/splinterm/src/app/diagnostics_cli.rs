@@ -144,7 +144,7 @@ fn run_with_adapter(
     println!("Client build: {}", env!("CARGO_PKG_VERSION"));
     println!(
         "Build commit: {}",
-        option_env!("SPLINTERM_BUILD_COMMIT").unwrap_or("unavailable")
+        splinterd::SOURCE_COMMIT.unwrap_or("unavailable")
     );
     println!(
         "splinterd.service: {}",
