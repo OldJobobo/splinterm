@@ -25,7 +25,6 @@ use rustix::{
     rand::{GetRandomFlags, getrandom},
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch, apply_filter};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -37,6 +36,7 @@ use crate::{
         HandoffCapabilities, VersionRange,
     },
     handoff_descriptors::{DescriptorHandoffError, PreparedDescriptorInheritance},
+    package_provenance::compiled_build_provenance,
 };
 
 const LAUNCHER_ARGUMENT: &str = "--splinterm-internal-preflight-launcher-v1";
@@ -442,41 +442,20 @@ fn run_child(expected_role: PreflightRole) -> Result<(), PreflightError> {
 
 fn compiled_contract() -> Result<(BuildIdentity, BuildVersion, HandoffCapabilities), PreflightError>
 {
-    compiled_contract_for_commit(env!("SPLINTERM_BUILD_COMMIT"))
-}
-
-fn compiled_contract_for_commit(
-    build_commit: &str,
-) -> Result<(BuildIdentity, BuildVersion, HandoffCapabilities), PreflightError> {
-    if build_commit.len() != 40
-        || !build_commit
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(PreflightError::InvalidFrame);
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(b"splinterm-handoff-pair-v1\0");
-    hasher.update(build_commit.as_bytes());
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update(splinterm_protocol::PROTOCOL_VERSION.to_be_bytes());
-    hasher.update(HANDOFF_PROTOCOL_VERSION.to_be_bytes());
-    hasher.update(TERMINAL_CHECKPOINT_VERSION.to_be_bytes());
-    hasher.update(DESCRIPTOR_MANIFEST_VERSION.to_be_bytes());
-    let identity =
-        BuildIdentity::new(hasher.finalize().into()).map_err(|_| PreflightError::InvalidFrame)?;
-    let version = parse_build_version(env!("CARGO_PKG_VERSION"))?;
     let exact =
         |version| VersionRange::new(version, version).map_err(|_| PreflightError::InvalidFrame);
+    let capabilities = HandoffCapabilities {
+        private_protocol: exact(splinterm_protocol::PROTOCOL_VERSION)?,
+        handoff_protocol: exact(HANDOFF_PROTOCOL_VERSION)?,
+        terminal_checkpoint: exact(TERMINAL_CHECKPOINT_VERSION)?,
+        descriptor_manifest: exact(DESCRIPTOR_MANIFEST_VERSION)?,
+    };
+    let provenance =
+        compiled_build_provenance(capabilities).map_err(|_| PreflightError::InvalidFrame)?;
     Ok((
-        identity,
-        version,
-        HandoffCapabilities {
-            private_protocol: exact(splinterm_protocol::PROTOCOL_VERSION)?,
-            handoff_protocol: exact(HANDOFF_PROTOCOL_VERSION)?,
-            terminal_checkpoint: exact(TERMINAL_CHECKPOINT_VERSION)?,
-            descriptor_manifest: exact(DESCRIPTOR_MANIFEST_VERSION)?,
-        },
+        provenance.pair_build_identity,
+        parse_build_version(provenance.build_version)?,
+        capabilities,
     ))
 }
 
@@ -1082,19 +1061,6 @@ mod tests {
         ] {
             assert_eq!(range.minimum(), range.maximum());
             assert_ne!(range.minimum(), 0);
-        }
-    }
-
-    #[test]
-    fn compiled_pair_identity_is_bound_to_exact_build_commit() {
-        let first = compiled_contract_for_commit(&"a".repeat(40)).unwrap();
-        let second = compiled_contract_for_commit(&"b".repeat(40)).unwrap();
-        assert_ne!(first.0, second.0);
-        for invalid in ["", &"a".repeat(39), &"A".repeat(40), &"g".repeat(40)] {
-            assert!(matches!(
-                compiled_contract_for_commit(invalid),
-                Err(PreflightError::InvalidFrame)
-            ));
         }
     }
 }

@@ -68,6 +68,7 @@ debug = 0
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = "symbols"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

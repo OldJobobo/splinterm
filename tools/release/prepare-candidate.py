@@ -128,6 +128,13 @@ def replace_checksums(text: str, checksums: list[str]) -> str:
     return replaced
 
 
+def prepare_source_recipe(text: str, commit: str, checksum: str) -> str:
+    return replace_checksums(
+        replace_assignment(text, "_commit", commit),
+        [checksum],
+    )
+
+
 def validate_binary_release_urls(text: str, version: str) -> str:
     expected = f"releases/download/v{version}/"
     if text.count(expected) != 2:
@@ -311,8 +318,11 @@ def assemble(arguments: argparse.Namespace) -> dict[str, Any]:
     copy_recipe(ROOT / "packaging/aur-bin", binary_recipe)
 
     source_pkgbuild = source_recipe / "PKGBUILD"
-    source_text = source_pkgbuild.read_text(encoding="utf-8")
-    source_text = replace_checksums(source_text, [sha256(source_archive)])
+    source_text = prepare_source_recipe(
+        source_pkgbuild.read_text(encoding="utf-8"),
+        commit,
+        sha256(source_archive),
+    )
     source_pkgbuild.write_text(source_text, encoding="utf-8")
 
     binary_pkgbuild = binary_recipe / "PKGBUILD"

@@ -168,6 +168,18 @@ development only and is not a release artifact. `nix/package.nix` also accepts
 an explicit 40-character `sourceRevision` for non-flake source packaging; do not
 invent a revision for a source snapshot.
 
+A clean build installs `share/splinterm/package-provenance-v1.json` in its store
+output, recording the commit, the `nix-store` build kind and the hashes of the
+final `splinterd` and `splinterm` binaries. Upgrade handoff will trust a store
+generation only through that record. A dirty build (`sourceDirty = true`, set by
+the flake for an uncommitted tree) keeps its commit for diagnostics but installs
+no record and cannot take part in handoff.
+
+The record shows that a store output's binaries are the ones it describes; it
+does not prove who built them. Any user the Nix daemon serves can realise a
+store output whose record claims an arbitrary commit, so handoff will only
+consider the generation selected by the system or user profile.
+
 Checks cover remote-profile validation, installed desktop-file validity,
 unwrapped sibling layout, a private non-graphical daemon with trusted human CLI
 access, PTY helper execution and clean shutdown, and desktop/headless/disabled

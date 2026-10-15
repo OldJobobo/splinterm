@@ -89,6 +89,37 @@ class ReleaseManifestTests(unittest.TestCase):
                 [COMMIT, "v1.2.3-alpha4", "1.2.3-alpha4", MAIN, "b" * 64, MCP, "c" * 64],
             )
 
+    def test_inspects_exact_release_package_provenance(self) -> None:
+        provenance = {
+            "schema": 1,
+            "package": "splinterm",
+            "architecture": "x86_64",
+            "provenance": "release-candidate",
+            "source_commit": COMMIT,
+            "build_version": "1.2.3-alpha4",
+            "pair_build_identity": "a" * 64,
+            "daemon_sha256": "b" * 64,
+            "client_sha256": "c" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_json(directory, "provenance.json", provenance)
+            self.assertEqual(
+                MODULE.inspect_package_provenance(COMMIT, "1.2.3-alpha4", path),
+                [COMMIT, "1.2.3-alpha4", "a" * 64],
+            )
+            for field, value in (
+                ("provenance", "local-committed-head"),
+                ("source_commit", "2" * 40),
+                ("build_version", "1.2.3-alpha3"),
+                ("daemon_sha256", "invalid"),
+            ):
+                with self.subTest(field=field):
+                    changed = dict(provenance)
+                    changed[field] = value
+                    path = self.write_json(directory, "changed.json", changed)
+                    with self.assertRaises(ValueError):
+                        MODULE.inspect_package_provenance(COMMIT, "1.2.3-alpha4", path)
+
     def test_rejects_wrong_repository_tag_architecture_and_package_set(self) -> None:
         mutations = (
             ("repository", "Other/project"),

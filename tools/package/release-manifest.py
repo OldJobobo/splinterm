@@ -15,6 +15,10 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 SEMVER_TAG = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+PACKAGE_PROVENANCE_KEYS = {
+    "schema", "package", "architecture", "provenance", "source_commit",
+    "build_version", "pair_build_identity", "daemon_sha256", "client_sha256",
+}
 
 
 def load_json(path: Path) -> Any:
@@ -126,6 +130,28 @@ def inspect_manifest(repository: str, tag: str, path: Path) -> list[str]:
     return [commit, tag, tag_match.group(1), main, expected[main], mcp, expected[mcp]]
 
 
+def inspect_package_provenance(commit: str, version: str, path: Path) -> list[str]:
+    if COMMIT.fullmatch(commit) is None or SEMVER_TAG.fullmatch(f"v{version}") is None:
+        raise ValueError("expected release commit or version is malformed")
+    record = load_json(path)
+    if not isinstance(record, dict) or set(record) != PACKAGE_PROVENANCE_KEYS:
+        raise ValueError("package provenance record shape is invalid")
+    if (
+        record.get("schema") != 1
+        or record.get("package") != "splinterm"
+        or record.get("architecture") != "x86_64"
+        or record.get("provenance") != "release-candidate"
+        or record.get("source_commit") != commit
+        or record.get("build_version") != version
+    ):
+        raise ValueError("package provenance does not match the release candidate")
+    for field in ("pair_build_identity", "daemon_sha256", "client_sha256"):
+        value = record.get(field)
+        if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+            raise ValueError("package provenance digest is malformed")
+    return [record["source_commit"], record["build_version"], record["pair_build_identity"]]
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
@@ -136,6 +162,10 @@ def parser() -> argparse.ArgumentParser:
     inspect.add_argument("--repository", required=True)
     inspect.add_argument("--tag", required=True)
     inspect.add_argument("manifest", type=Path)
+    provenance = commands.add_parser("inspect-package-provenance")
+    provenance.add_argument("--commit", required=True)
+    provenance.add_argument("--version", required=True)
+    provenance.add_argument("record", type=Path)
     return result
 
 
@@ -144,8 +174,12 @@ def main() -> int:
     try:
         if arguments.command == "select":
             output = select_release(arguments.repository, arguments.index)
-        else:
+        elif arguments.command == "inspect":
             output = inspect_manifest(arguments.repository, arguments.tag, arguments.manifest)
+        else:
+            output = inspect_package_provenance(
+                arguments.commit, arguments.version, arguments.record
+            )
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1

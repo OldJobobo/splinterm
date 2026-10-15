@@ -5,14 +5,18 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -37,6 +41,7 @@ REQUIRED = {
     "usr/share/icons/hicolor/scalable/apps/com.oldjobobo.splinterm.svg",
     "usr/share/metainfo/com.oldjobobo.splinterm.metainfo.xml",
     "usr/share/splinterm/omarchy/screensaver.ini",
+    "usr/share/splinterm/package-provenance-v1.json",
     "usr/share/doc/splinterm/README.md",
     "usr/share/doc/splinterm/automation.md",
     "usr/share/doc/splinterm/cli.md",
@@ -64,6 +69,10 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
 PRIVATE_PROTOCOL_VERSION = 37
+PACKAGE_PROVENANCE_KEYS = {
+    "schema", "package", "architecture", "provenance", "source_commit",
+    "build_version", "pair_build_identity", "daemon_sha256", "client_sha256",
+}
 
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
@@ -187,6 +196,97 @@ def validate_launcher(root: Path) -> None:
         assert record.read_text(encoding="utf-8").splitlines() == ["dojos"]
         run([str(root / "usr/bin/splinterm-reopen")], env=environment, timeout=10)
         assert record.read_text(encoding="utf-8").splitlines() == ["reopen"]
+
+
+def sealed_preflight_report(binary: Path, role: int) -> bytes:
+    target = os.memfd_create(
+        "splinterm-package-preflight",
+        os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING | 0x0010,  # MFD_EXEC
+    )
+    try:
+        with binary.open("rb") as source:
+            while block := source.read(64 * 1024):
+                remaining = memoryview(block)
+                while remaining:
+                    remaining = remaining[os.write(target, remaining):]
+        os.fchmod(target, 0o755)
+        fcntl.fcntl(
+            target,
+            fcntl.F_ADD_SEALS,
+            fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL,
+        )
+        parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        process = None
+        try:
+            process = subprocess.Popen(
+                [str(binary), "--splinterm-internal-preflight-launcher-v1"],
+                stdin=child,
+                stdout=subprocess.DEVNULL,
+                stderr=target,
+                env={},
+                close_fds=True,
+            )
+            child.close()
+            nonce = bytes(range(1, 33))
+            parent.settimeout(5)
+            parent.sendall(b"SPLTPF01" + struct.pack(">HBB", 1, role, 1) + nonce)
+            report = parent.recv(99)
+            status = process.wait(timeout=5)
+            assert status == 0
+            assert len(report) == 98
+            assert report[:8] == b"SPLTPF01"
+            assert struct.unpack(">HBB", report[8:12]) == (1, role, 1)
+            assert report[12:44] == nonce
+            assert parent.recv(1) == b""
+            return report
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+            parent.close()
+            child.close()
+    finally:
+        os.close(target)
+
+
+def validate_package_provenance(root: Path) -> None:
+    path = root / "usr/share/splinterm/package-provenance-v1.json"
+    assert path.is_file() and not path.is_symlink()
+    assert path.stat().st_size <= 4096
+    assert path.stat().st_mode & 0o022 == 0
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(record, dict) and set(record) == PACKAGE_PROVENANCE_KEYS
+    assert record["schema"] == 1
+    assert record["package"] == "splinterm"
+    assert record["architecture"] == "x86_64"
+    assert record["provenance"] in {"local-committed-head", "release-candidate"}
+    assert re.fullmatch(r"[0-9a-f]{40}", record["source_commit"])
+    assert record["source_commit"] != "0" * 40
+    assert re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}", record["build_version"])
+    daemon = root / "usr/bin/splinterd"
+    client = root / "usr/bin/splinterm"
+    assert record["daemon_sha256"] == hashlib.sha256(daemon.read_bytes()).hexdigest()
+    assert record["client_sha256"] == hashlib.sha256(client.read_bytes()).hexdigest()
+
+    digest = hashlib.sha256()
+    digest.update(b"splinterm-package-pair-v1\0")
+    digest.update(record["source_commit"].encode("ascii"))
+    digest.update(b"\0")
+    digest.update(record["provenance"].encode("ascii"))
+    digest.update(b"\0")
+    digest.update(record["build_version"].encode("ascii"))
+    for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 1, 1, 1, 1):
+        digest.update(value.to_bytes(2, "big"))
+    assert record["pair_build_identity"] == digest.hexdigest()
+
+    daemon_report = sealed_preflight_report(daemon, 1)
+    client_report = sealed_preflight_report(client, 2)
+    assert daemon_report[44:76] == client_report[44:76]
+    assert daemon_report[44:76].hex() == record["pair_build_identity"]
+    expected_version = tuple(int(part) for part in record["build_version"].split("-", 1)[0].split("."))
+    assert len(expected_version) == 3
+    assert struct.unpack(">HHH", daemon_report[76:82]) == expected_version
+    assert daemon_report[82:] == client_report[82:]
 
 
 def validate_systemd_unit(root: Path) -> None:
@@ -1058,6 +1158,7 @@ def main() -> int:
             for line in mcp_pkginfo.splitlines()
         ), "MCP split package must depend on the exact main package version"
         validate_systemd_unit(root)
+        validate_package_provenance(root)
         validate_headless_runtime(
             root / "usr/bin/splinterd",
             root / "usr/bin/splinterm",

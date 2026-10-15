@@ -2,8 +2,10 @@
 pkgbase=splinterm
 pkgname=('splinterm' 'splinterm-mcp')
 pkgver=0.2.0dev
+_build_version=0.2.0-dev
 pkgrel=1
 arch=('x86_64')
+options=('!strip')
 url='https://github.com/oldjobobo/splinterm'
 license=('MIT')
 makedepends=('cargo' 'pkgconf' 'rust')
@@ -32,6 +34,8 @@ prepare() {
 
 build() {
   cd "$pkgbase-$pkgver"
+  : "${SPLINTERM_BUILD_COMMIT:?package build requires exact source commit}"
+  : "${SPLINTERM_BUILD_PROVENANCE:?package build requires provenance kind}"
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
   # A release must be warning-free on the packaging distribution's compiler.
@@ -88,6 +92,13 @@ package_splinterm() {
   install -Dm755 target/release/splinterd "$pkgdir/usr/bin/splinterd"
   install -Dm755 target/release/splinterm-relay "$pkgdir/usr/bin/splinterm-relay"
   install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
+  python tools/package/generate-package-provenance.py \
+    --commit "$SPLINTERM_BUILD_COMMIT" \
+    --provenance "$SPLINTERM_BUILD_PROVENANCE" \
+    --version "$_build_version" \
+    --daemon target/release/splinterd \
+    --client target/release/splinterm \
+    --output "$pkgdir/usr/share/splinterm/package-provenance-v1.json"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-dojos"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-sessions"
