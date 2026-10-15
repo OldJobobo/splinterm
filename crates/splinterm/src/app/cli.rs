@@ -1082,6 +1082,31 @@ mod tests {
                 .command,
             Some(Command::Launch { picker: true, .. })
         ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "splinterm",
+                "xdg-launch",
+                "--picker",
+                "--app-id=org.example.term",
+                "--working-directory=/tmp",
+            ])
+            .unwrap()
+            .command,
+            Some(Command::XdgLaunch {
+                picker: true,
+                app_id: Some(app_id),
+                cwd: Some(cwd),
+                ..
+            }) if app_id == "org.example.term" && cwd == std::path::Path::new("/tmp")
+        ));
+        // The desktop New action may still be handed a command by xdg-terminal-exec.
+        assert!(matches!(
+            Cli::try_parse_from(["splinterm", "xdg-launch", "--new", "--", "/usr/bin/true"])
+                .unwrap()
+                .command,
+            Some(Command::XdgLaunch { new: true, picker: false, command, .. })
+                if command == ["/usr/bin/true"]
+        ));
         for rejected in [
             &["splinterm", "xdg-launch", "--picker", "--new"][..],
             &["splinterm", "xdg-launch", "--picker", "--", "/usr/bin/true"],
