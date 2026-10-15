@@ -10,11 +10,11 @@ post_upgrade() {
   echo 'From an external terminal, stop splinterd.service, run systemctl --user daemon-reload, then start splinterd.service; stopping ends active Dojos.'
   echo 'This package does not restart user services automatically.'
   echo 'Check Omarchy screensaver integration: splinterm integration omarchy-screensaver status'
-  echo 'On Omarchy 4, re-run splinterm integration omarchy-screensaver enable if status reports a shadowed legacy launcher.'
+  echo 'On Omarchy 4, if status reports a shadowed legacy launcher, re-run splinterm integration omarchy enable (or omarchy-screensaver enable), then run omarchy-restart-shell or log in again.'
 }
 
 post_remove() {
   echo 'User-owned Splinterm configuration and runtime state were preserved.'
   echo 'If the Omarchy screensaver integration was enabled, its launcher link is now dangling and Omarchy uses its own launcher.'
-  echo 'Remove the require block from ~/.config/hypr/hyprland.lua and ~/.config/hypr/splinterm-screensaver.lua, or run splinterm integration omarchy-screensaver disable before uninstalling.'
+  echo 'Remove the Splinterm require block from ~/.config/hypr/hyprland.lua and delete ~/.config/hypr/splinterm-screensaver.lua, or run splinterm integration omarchy-screensaver disable before uninstalling.'
 }

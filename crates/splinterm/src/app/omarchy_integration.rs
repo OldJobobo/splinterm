@@ -316,6 +316,9 @@ fn enable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) -> 
     // one created by the component-only command. Adopt it so the unified
     // lifecycle can reverse all Splinterm-managed Omarchy setup.
     let screensaver_already_managed = screensaver_ready(roots) && !screensaver_legacy(roots);
+    // The component moves a legacy link aside once its own step succeeds; a
+    // later failure must move it back.
+    let screensaver_was_legacy = screensaver_legacy(roots);
     let screensaver_owned = true;
     preflight(roots, terminal_owned, hypr_owned)?;
 
@@ -350,7 +353,7 @@ fn enable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) -> 
     })();
 
     if let Err(error) = result {
-        let rollback = rollback_enable(roots, runtime, &manifest, output);
+        let rollback = rollback_enable(roots, runtime, &manifest, screensaver_was_legacy, output);
         if rollback.is_ok() {
             let _ = fs::remove_file(roots.manifest());
             return Err(error).context("enable Omarchy integration; changes were rolled back");
@@ -435,7 +438,7 @@ fn enable_hypr(roots: &Roots) -> Result<()> {
         .context("write managed Hyprland integration module")?;
     let mut entrypoint = fs::read_to_string(roots.hypr_entrypoint())?;
     entrypoint.push_str(HYPR_REQUIRE_BLOCK);
-    if let Err(error) = fs::write(roots.hypr_entrypoint(), entrypoint) {
+    if let Err(error) = super::integrations::replace_file(&roots.hypr_entrypoint(), &entrypoint) {
         let _ = fs::remove_file(roots.hypr_module());
         return Err(error).context("append managed Hyprland integration require");
     }
@@ -454,6 +457,7 @@ fn disable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) ->
 
     let mut screensaver = ScreensaverRollback {
         reached: false,
+        ready: screensaver_ready(roots),
         legacy: screensaver_legacy(roots),
     };
     let result: Result<()> = (|| {
@@ -611,19 +615,21 @@ fn disable_hypr(roots: &Roots) -> Result<()> {
     if entrypoint.matches(HYPR_REQUIRE_BLOCK).count() != 1 {
         bail!("refusing to alter changed Hyprland integration marker");
     }
-    fs::write(
-        roots.hypr_entrypoint(),
-        entrypoint.replacen(HYPR_REQUIRE_BLOCK, "", 1),
+    super::integrations::replace_file(
+        &roots.hypr_entrypoint(),
+        &entrypoint.replacen(HYPR_REQUIRE_BLOCK, "", 1),
     )?;
     fs::remove_file(roots.hypr_module())?;
     Ok(())
 }
 
-/// Whether a unified disable reached the screensaver step, and whether that
-/// component was still the shadowed pre-Omarchy-4 link when disable began.
+/// Whether a unified disable reached the screensaver step, and which layouts
+/// were present when disable began: the managed module and launcher, the
+/// shadowed pre-Omarchy-4 link, or both after an interrupted migration.
 #[derive(Clone, Copy)]
 struct ScreensaverRollback {
     reached: bool,
+    ready: bool,
     legacy: bool,
 }
 
@@ -651,13 +657,18 @@ fn rollback_disable(
         failures.push(format!("default terminal: {error}"));
     }
     if manifest.screensaver_owned && screensaver.reached {
-        let restored = if screensaver.legacy {
-            super::integrations::restore_legacy(&roots.screensaver(), Path::new(SCREENSAVER_HELPER))
-        } else if screensaver_ready(roots) {
-            Ok(())
-        } else {
-            runtime.screensaver(IntegrationAction::Enable, roots, output)
-        };
+        // Restore the managed layout first: with the legacy link already moved
+        // aside, re-enabling it does not migrate that link again.
+        let mut restored = Ok(());
+        if screensaver.ready && !screensaver_ready(roots) {
+            restored = runtime.screensaver(IntegrationAction::Enable, roots, output);
+        }
+        if restored.is_ok() && screensaver.legacy {
+            restored = super::integrations::restore_legacy(
+                &roots.screensaver(),
+                Path::new(SCREENSAVER_HELPER),
+            );
+        }
         if let Err(error) = restored {
             failures.push(format!("screensaver: {error}"));
         }
@@ -689,6 +700,7 @@ fn rollback_enable(
     roots: &Roots,
     runtime: &mut impl Runtime,
     manifest: &Manifest,
+    screensaver_was_legacy: bool,
     output: &mut dyn Write,
 ) -> Result<()> {
     let mut failures = Vec::new();
@@ -697,6 +709,12 @@ fn rollback_enable(
         && let Err(error) = runtime.screensaver(IntegrationAction::Disable, roots, output)
     {
         failures.push(format!("screensaver: {error}"));
+    }
+    if screensaver_was_legacy
+        && let Err(error) =
+            super::integrations::restore_legacy(&roots.screensaver(), Path::new(SCREENSAVER_HELPER))
+    {
+        failures.push(format!("legacy screensaver launcher: {error}"));
     }
     if manifest.hypr_owned && managed_hypr_ready(roots) {
         if let Err(error) = disable_hypr(roots) {
@@ -1112,6 +1130,26 @@ mod tests {
         disable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).unwrap();
         assert!(fs::symlink_metadata(roots.manifest()).is_err());
         assert!(!screensaver_legacy(&roots));
+    }
+
+    #[test]
+    fn failed_enable_puts_an_adopted_legacy_link_back() {
+        let (_root, roots) = TestRoot::new();
+        let paths = roots.screensaver();
+        fs::create_dir_all(paths.legacy_launcher.parent().unwrap()).unwrap();
+        symlink(SCREENSAVER_HELPER, &paths.legacy_launcher).unwrap();
+        // The terminal never follows the preference, so enable fails after
+        // the screensaver step has moved the legacy link aside.
+        let mut runtime = FakeRuntime {
+            terminal: "foot.desktop".to_owned(),
+            ..legacy_runtime(&roots)
+        };
+        let error = enable(&roots, &mut runtime, &mut Cursor::new(Vec::new())).unwrap_err();
+        assert!(format!("{error:#}").contains("changes were rolled back"));
+        assert!(screensaver_legacy(&roots));
+        assert!(fs::symlink_metadata(&paths.legacy_disabled).is_err());
+        assert!(!screensaver_ready(&roots));
+        assert!(fs::symlink_metadata(roots.manifest()).is_err());
     }
 
     #[test]

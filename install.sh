@@ -134,7 +134,9 @@ offer_omarchy_screensaver_integration() {
     return 0
   fi
   if confirm 'Enable Splinterm for the Omarchy screensaver?'; then
-    /usr/bin/splinterm integration omarchy-screensaver enable
+    /usr/bin/splinterm integration omarchy-screensaver enable || printf '%s\n' \
+      'Omarchy screensaver integration was not enabled; Splinterm itself is installed.' \
+      "  Review: splinterm integration omarchy-screensaver status" >&2
   else
     printf 'Omarchy screensaver integration was not enabled.\n  Enable later: %s\n' "$enable"
   fi

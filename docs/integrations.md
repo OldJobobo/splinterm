@@ -79,8 +79,13 @@ module, and rolls back if the reload is rejected or reports configuration errors
 that were not already present. The running Omarchy shell keeps the `PATH` it
 started with; run `omarchy-restart-shell`, or log in again, before the idle
 service uses the new launcher. A launcher link left in `~/.local/bin` by an earlier version is shadowed
-on Omarchy 4; status reports it, and enabling again moves it to
+on Omarchy 4; status reports it, and enabling again, with either this command or
+`splinterm integration omarchy enable`, moves it to
 `~/.local/share/splinterm/integrations/omarchy-launch-screensaver.disabled`.
+Enabling requires Omarchy 4's `~/.config/hypr/hyprland.lua`. Without it, a link
+left in `~/.local/bin` by an earlier version still runs, and status reports it
+as enabled. When the command runs outside a Hyprland session it cannot reload
+Hyprland and says so; run `hyprctl reload` in the session, or log in again.
 Inspect or disable the integration with:
 
 ```bash

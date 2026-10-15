@@ -1,6 +1,7 @@
 //! Explicit, reversible user-level desktop integrations.
 
 use std::{
+    cell::Cell,
     env, fs,
     fs::OpenOptions,
     io::Write,
@@ -20,7 +21,8 @@ const CANONICAL_OMARCHY_LAUNCHER: &str = "/usr/share/omarchy/bin/omarchy-launch-
 /// every launched command's `PATH`, so a user-level launcher can only win from
 /// a Hyprland module evaluated after Omarchy's bootstrap. The module puts a
 /// Splinterm-owned directory, holding only the launcher link, ahead of it.
-pub(super) const SCREENSAVER_MODULE: &str = "-- Managed by `splinterm integration omarchy-screensaver`; edit only after disabling it.\nlocal splinterm_bin = os.getenv(\"HOME\") .. \"/.local/share/splinterm/omarchy/bin\"\nlocal omarchy_bin = (os.getenv(\"OMARCHY_PATH\") or \"/usr/share/omarchy\") .. \"/bin\"\nlocal path = { splinterm_bin, omarchy_bin }\nfor entry in (os.getenv(\"PATH\") or \"/usr/local/bin:/usr/bin\"):gmatch(\"[^:]+\") do\n  if entry ~= splinterm_bin and entry ~= omarchy_bin then table.insert(path, entry) end\nend\nhl.env(\"PATH\", table.concat(path, \":\"))\n";
+/// Without `HOME` it changes nothing, so it can never break the configuration.
+pub(super) const SCREENSAVER_MODULE: &str = "-- Managed by `splinterm integration omarchy-screensaver`; edit only after disabling it.\nlocal home = os.getenv(\"HOME\")\nif home == nil or home == \"\" then return end\nlocal splinterm_bin = home .. \"/.local/share/splinterm/omarchy/bin\"\nlocal omarchy_bin = (os.getenv(\"OMARCHY_PATH\") or \"/usr/share/omarchy\") .. \"/bin\"\nlocal inherited = os.getenv(\"PATH\")\nif inherited == nil or inherited == \"\" then inherited = \"/usr/local/bin:/usr/bin\" end\nlocal path = { splinterm_bin, omarchy_bin }\nfor entry in inherited:gmatch(\"[^:]+\") do\n  if entry ~= splinterm_bin and entry ~= omarchy_bin then table.insert(path, entry) end\nend\nhl.env(\"PATH\", table.concat(path, \":\"))\n";
 pub(super) const SCREENSAVER_REQUIRE_BLOCK: &str = "\n-- BEGIN SPLINTERM SCREENSAVER PATH\nrequire(\"hypr.splinterm-screensaver\")\n-- END SPLINTERM SCREENSAVER PATH\n";
 
 pub(super) fn run(command: IntegrationCommand) -> Result<()> {
@@ -37,15 +39,32 @@ pub(super) fn run(command: IntegrationCommand) -> Result<()> {
                     "Omarchy's canonical screensaver launcher is unavailable: {CANONICAL_OMARCHY_LAUNCHER}"
                 );
             }
-            run_omarchy_screensaver(
-                action,
-                &ScreensaverPaths::new(&home, &config),
-                Path::new(PACKAGED_HELPER),
-                &mut std::io::stdout(),
-                hyprland_reloader()?,
-            )
+            let paths = ScreensaverPaths::new(&home, &config);
+            let helper = Path::new(PACKAGED_HELPER);
+            let mut output = std::io::stdout();
+            // Status is read-only and never asks Hyprland anything.
+            if action == IntegrationAction::Status {
+                return run_omarchy_screensaver(action, &paths, helper, &mut output, || Ok(()));
+            }
+            let reload_requested = Cell::new(false);
+            let mut reload = hyprland_reloader()?;
+            run_omarchy_screensaver(action, &paths, helper, &mut output, || {
+                reload_requested.set(true);
+                reload()
+            })?;
+            if reload_requested.get() && !hyprland_session() {
+                writeln!(
+                    output,
+                    "  Hyprland was not reloaded: this shell is outside a Hyprland session. Run hyprctl reload in the session, or log in again"
+                )?;
+            }
+            Ok(())
         }
     }
+}
+
+fn hyprland_session() -> bool {
+    env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 
 fn absolute_dir_env(name: &str) -> Result<Option<PathBuf>> {
@@ -64,7 +83,7 @@ fn absolute_dir_env(name: &str) -> Result<Option<PathBuf>> {
 /// unrelated existing error never blocks enabling or disabling. Outside a
 /// Hyprland session the next login applies the change.
 pub(super) fn hyprland_reloader() -> Result<impl FnMut() -> Result<()>> {
-    let session = env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+    let session = hyprland_session();
     let baseline = if session {
         config_errors()?
     } else {
@@ -217,7 +236,7 @@ fn enable(
         if add_require {
             let mut text = fs::read_to_string(&paths.entrypoint)?;
             text.push_str(SCREENSAVER_REQUIRE_BLOCK);
-            fs::write(&paths.entrypoint, text).context("append managed screensaver require")?;
+            replace_file(&paths.entrypoint, &text).context("append managed screensaver require")?;
         }
         reload()
     })();
@@ -368,16 +387,50 @@ fn rollback_enable(paths: &ScreensaverPaths, helper: &Path, plan: EnablePlan) ->
     failures
 }
 
-fn remove_require(paths: &ScreensaverPaths) -> Result<()> {
+/// Remove the managed require block and return the exact prior text, so a
+/// rollback restores the block where it was rather than at the end.
+fn remove_require(paths: &ScreensaverPaths) -> Result<String> {
     let text = fs::read_to_string(&paths.entrypoint)?;
     if text.matches(SCREENSAVER_REQUIRE_BLOCK).count() != 1 {
         bail!("refusing to alter changed Splinterm screensaver marker");
     }
-    fs::write(
+    replace_file(
         &paths.entrypoint,
-        text.replacen(SCREENSAVER_REQUIRE_BLOCK, "", 1),
+        &text.replacen(SCREENSAVER_REQUIRE_BLOCK, "", 1),
     )
-    .context("remove managed screensaver require")
+    .context("remove managed screensaver require")?;
+    Ok(text)
+}
+
+/// Replace a user's regular file through a synced sibling and a rename, so an
+/// interrupted or failed write never leaves it empty or partial.
+pub(super) fn replace_file(path: &Path, contents: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        bail!("refusing to replace non-regular file {}", path.display());
+    }
+    let name = path.file_name().context("file has no name")?;
+    let temporary = path.with_file_name(format!(".{}.splinterm-new", name.to_string_lossy()));
+    // Only this function creates that name, so a leftover is from an
+    // interrupted earlier run.
+    match fs::remove_file(&temporary) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(contents.as_bytes())?;
+        file.set_permissions(metadata.permissions())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.with_context(|| format!("replace {}", path.display()))
 }
 
 fn rename_no_replace(source: &Path, destination: &Path) -> rustix::io::Result<()> {
@@ -465,12 +518,39 @@ fn disable(
         return Ok(());
     }
 
+    // Removing the module while the entrypoint still requires it would break
+    // the next Hyprland load, so a changed marker blocks disable.
+    if require == 0 && module {
+        match fs::read(&paths.entrypoint) {
+            Ok(bytes) => {
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    anyhow::anyhow!(
+                        "refusing to remove the screensaver module: {} is not UTF-8",
+                        paths.entrypoint.display()
+                    )
+                })?;
+                if text.contains("SPLINTERM SCREENSAVER PATH")
+                    || text.contains("hypr.splinterm-screensaver")
+                {
+                    bail!(
+                        "refusing to remove the screensaver module while {} still references it through a changed marker",
+                        paths.entrypoint.display()
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("read Hyprland entrypoint"),
+        }
+    }
+
     if require == 1 {
-        remove_require(paths)?;
+        let original = remove_require(paths)?;
         if let Err(error) = reload() {
-            let mut text = fs::read_to_string(&paths.entrypoint)?;
-            text.push_str(SCREENSAVER_REQUIRE_BLOCK);
-            fs::write(&paths.entrypoint, text)?;
+            if let Err(restore) = replace_file(&paths.entrypoint, &original) {
+                return Err(error).context(format!(
+                    "disable Omarchy screensaver integration; rollback also failed: {restore:#}"
+                ));
+            }
             // Best effort: bring the live session back to the restored file.
             let _ = reload();
             return Err(error)
@@ -499,6 +579,14 @@ fn disable(
 fn status(paths: &ScreensaverPaths, helper: &Path, output: &mut dyn Write) -> Result<()> {
     if paths.ready(helper) {
         writeln!(output, "Omarchy screensaver integration: enabled")?;
+    } else if paths.legacy_enabled(helper) && fs::symlink_metadata(&paths.entrypoint).is_err() {
+        // Without Omarchy 4's Lua entrypoint nothing moves Omarchy's bin ahead
+        // of ~/.local/bin, so the earlier link is still the one that runs.
+        writeln!(
+            output,
+            "Omarchy screensaver integration: enabled (pre-Omarchy-4 launcher {})",
+            paths.legacy_launcher.display()
+        )?;
     } else if paths.legacy_enabled(helper) {
         writeln!(
             output,
@@ -527,7 +615,7 @@ fn status(paths: &ScreensaverPaths, helper: &Path, output: &mut dyn Write) -> Re
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{io::Cursor, os::unix::fs::PermissionsExt};
 
     use super::*;
 
@@ -738,6 +826,109 @@ mod tests {
             .is_err()
         );
         assert!(fs::symlink_metadata(&paths.launcher).is_err());
+    }
+
+    #[test]
+    fn failed_disable_reload_restores_the_exact_entrypoint() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        run(
+            IntegrationAction::Enable,
+            &paths,
+            &helper,
+            &mut Cursor::new(Vec::new()),
+        )
+        .unwrap();
+        // User content after the block must stay after it.
+        let mut text = fs::read_to_string(&paths.entrypoint).unwrap();
+        text.push_str("-- added later\n");
+        fs::write(&paths.entrypoint, &text).unwrap();
+        fs::set_permissions(&paths.entrypoint, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = run_omarchy_screensaver(
+            IntegrationAction::Disable,
+            &paths,
+            &helper,
+            &mut Cursor::new(Vec::new()),
+            || bail!("injected reload failure"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("changes were rolled back"));
+        assert_eq!(fs::read_to_string(&paths.entrypoint).unwrap(), text);
+        assert_eq!(
+            fs::metadata(&paths.entrypoint)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(paths.ready(&helper));
+    }
+
+    #[test]
+    fn disable_keeps_the_module_while_a_changed_marker_still_requires_it() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        run(
+            IntegrationAction::Enable,
+            &paths,
+            &helper,
+            &mut Cursor::new(Vec::new()),
+        )
+        .unwrap();
+        let text = fs::read_to_string(&paths.entrypoint).unwrap();
+        fs::write(
+            &paths.entrypoint,
+            text.replace("-- END SPLINTERM SCREENSAVER PATH", "-- END (edited)"),
+        )
+        .unwrap();
+        assert_eq!(paths.require_count(), 0);
+        assert!(
+            run(
+                IntegrationAction::Disable,
+                &paths,
+                &helper,
+                &mut Cursor::new(Vec::new())
+            )
+            .is_err()
+        );
+        assert!(paths.module_ready());
+    }
+
+    #[test]
+    fn legacy_link_without_a_lua_entrypoint_still_reports_enabled() {
+        let root = TestRoot::new();
+        let (paths, helper) = root.omarchy();
+        fs::remove_file(&paths.entrypoint).unwrap();
+        fs::create_dir_all(paths.legacy_launcher.parent().unwrap()).unwrap();
+        symlink(&helper, &paths.legacy_launcher).unwrap();
+        let mut output = Cursor::new(Vec::new());
+        run(IntegrationAction::Status, &paths, &helper, &mut output).unwrap();
+        let text = String::from_utf8(output.into_inner()).unwrap();
+        assert!(text.contains("integration: enabled (pre-Omarchy-4 launcher"));
+        assert!(!text.contains("shadowed"));
+    }
+
+    #[test]
+    fn replace_file_refuses_links_and_leaves_no_temporary() {
+        let root = TestRoot::new();
+        let file = root.0.join("config.lua");
+        fs::write(&file, "old\n").unwrap();
+        replace_file(&file, "new\n").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
+        assert!(fs::symlink_metadata(root.0.join(".config.lua.splinterm-new")).is_err());
+
+        let link = root.0.join("linked.lua");
+        symlink(&file, &link).unwrap();
+        assert!(replace_file(&link, "other\n").is_err());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
     }
 
     #[test]
