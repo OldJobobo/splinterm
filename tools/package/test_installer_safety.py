@@ -85,16 +85,26 @@ class InstallerSafetyTest(unittest.TestCase):
         )
         self.assertIsNotNone(rust_version)
         self.assertIn(f"PRIVATE_PROTOCOL = {rust_version.group(1)}", generator)
+        preflight = (ROOT / "crates/splinterd/src/handoff_preflight.rs").read_text(
+            encoding="utf-8"
+        )
+        handoff_versions = []
+        for rust_name, python_name in (
+            ("HANDOFF_PROTOCOL_VERSION", "HANDOFF_PROTOCOL"),
+            ("TERMINAL_CHECKPOINT_VERSION", "TERMINAL_CHECKPOINT"),
+            ("DESCRIPTOR_MANIFEST_VERSION", "DESCRIPTOR_MANIFEST"),
+        ):
+            rust_value = re.search(
+                rf"^const {rust_name}: u16 = ([0-9]+);$", preflight, re.MULTILINE
+            )
+            self.assertIsNotNone(rust_value, rust_name)
+            self.assertIn(f"{python_name} = {rust_value.group(1)}", generator)
+            handoff_versions += [rust_value.group(1)] * 2
         self.assertIn(
-            "for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 1, 1, 1, 1):",
+            "for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, "
+            f"{', '.join(handoff_versions)}):",
             validator,
         )
-        for declaration in (
-            "HANDOFF_PROTOCOL = 1",
-            "TERMINAL_CHECKPOINT = 1",
-            "DESCRIPTOR_MANIFEST = 1",
-        ):
-            self.assertIn(declaration, generator)
 
     def daemon_owned_environment(self, directory: Path) -> dict[str, str]:
         proc = directory / "proc"

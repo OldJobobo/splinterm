@@ -95,6 +95,10 @@ impl PackageProvenanceRecord {
     /// Opens and parses one bounded root-trust package record without following
     /// symlinks in any path component.
     ///
+    /// Only Nix store locations are checked here. Callers must pass the path
+    /// from [`package_provenance_path`]; any other root-owned file outside the
+    /// store would otherwise be accepted as a distribution record.
+    ///
     /// # Errors
     ///
     /// Rejects unsafe paths, missing or malformed records, incorrect ownership
@@ -143,6 +147,7 @@ impl PackageProvenanceRecord {
         {
             return Err(PackageProvenanceError::InvalidRecord);
         }
+        parse_build_version(&wire.build_version)?;
         let kind = BuildProvenanceKind::parse(&wire.provenance)?;
         if kind == BuildProvenanceKind::Unpackaged || wire.source_commit == ZERO_COMMIT {
             return Err(PackageProvenanceError::Unpackaged);
@@ -705,6 +710,61 @@ mod tests {
             PackageProvenanceRecord::load(&fixture.record, rustix::process::geteuid().as_raw()),
             Err(PackageProvenanceError::Unpackaged)
         ));
+    }
+
+    #[test]
+    fn rejects_each_malformed_or_mislabelled_record_field() {
+        let path = Path::new("/usr/share/splinterm/package-provenance-v1.json");
+        let valid = serde_json::json!({
+            "schema": 1,
+            "package": "splinterm",
+            "architecture": "x86_64",
+            "provenance": "release-candidate",
+            "source_commit": "a".repeat(40),
+            "build_version": "0.2.0",
+            "pair_build_identity": "11".repeat(32),
+            "daemon_sha256": "22".repeat(32),
+            "client_sha256": "33".repeat(32),
+        });
+        let parse = |value: &serde_json::Value| {
+            serde_json::from_value::<PackageProvenanceWire>(value.clone())
+                .map_err(PackageProvenanceError::Parse)
+                .and_then(|wire| PackageProvenanceRecord::from_wire(path, wire))
+        };
+        parse(&valid).unwrap();
+
+        let mut unknown = valid.clone();
+        unknown["extra"] = serde_json::json!(true);
+        assert!(matches!(
+            parse(&unknown),
+            Err(PackageProvenanceError::Parse(_))
+        ));
+
+        let mut zero_commit = valid.clone();
+        zero_commit["source_commit"] = serde_json::json!(ZERO_COMMIT);
+        assert!(matches!(
+            parse(&zero_commit),
+            Err(PackageProvenanceError::Unpackaged)
+        ));
+
+        for (field, value) in [
+            ("schema", serde_json::json!(2)),
+            ("package", serde_json::json!("splinterm-mcp")),
+            ("architecture", serde_json::json!("aarch64")),
+            ("provenance", serde_json::json!("custom")),
+            ("source_commit", serde_json::json!("A".repeat(40))),
+            ("build_version", serde_json::json!("0.2")),
+            ("pair_build_identity", serde_json::json!("00".repeat(32))),
+            ("daemon_sha256", serde_json::json!("AA".repeat(32))),
+            ("client_sha256", serde_json::json!("33".repeat(31))),
+        ] {
+            let mut record = valid.clone();
+            record[field] = value;
+            assert!(
+                matches!(parse(&record), Err(PackageProvenanceError::InvalidRecord)),
+                "{field}"
+            );
+        }
     }
 
     #[test]

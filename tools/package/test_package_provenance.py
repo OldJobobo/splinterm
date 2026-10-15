@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -107,6 +108,22 @@ class PackageProvenanceTests(unittest.TestCase):
             identity,
             "a4a4cef437c25147d8b10c08fd3d5715b6fcbc53274e81f8d4efa700ad4f7cac",
         )
+
+    def test_aur_srcinfo_keeps_the_recipe_options(self) -> None:
+        # Records hash the installed binaries, so stripping must stay off.
+        # release-doctor checks .SRCINFO only where makepkg exists; this
+        # catches the drift on every CI host.
+        for directory in ("packaging/aur", "packaging/aur-bin"):
+            with self.subTest(directory=directory):
+                recipe = (ROOT / directory / "PKGBUILD").read_text(encoding="utf-8")
+                srcinfo = (ROOT / directory / ".SRCINFO").read_text(encoding="utf-8")
+                declared = re.search(r"^options=\(([^)]*)\)$", recipe, re.MULTILINE)
+                self.assertIsNotNone(declared)
+                options = [value.strip("'\"") for value in declared.group(1).split()]
+                self.assertIn("!strip", options)
+                self.assertEqual(
+                    re.findall(r"^\toptions = (\S+)$", srcinfo, re.MULTILINE), options
+                )
 
 
 if __name__ == "__main__":
