@@ -17,7 +17,7 @@ use serde::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::SharedImageBudget;
+use crate::{SharedImageBudget, grid::MAX_CHECKPOINT_GRID_ROWS, row::MAX_CHECKPOINT_CELLS};
 
 use super::{
     ActiveScreen, Attributes, ChangeSet, ComposedTable, Grid, ImageMetrics, ImagePlane,
@@ -233,6 +233,11 @@ impl TerminalCheckpointV1 {
             || !terminal.kitty_image_ids.normal.is_empty()
             || !terminal.kitty_image_ids.alternate.is_empty()
             || terminal.event_overflowed
+            || terminal
+                .normal
+                .allocated_cells()
+                .checked_add(terminal.alternate.allocated_cells())
+                .is_none_or(|cells| cells > MAX_CHECKPOINT_CELLS)
         {
             return Err(CheckpointError::UnsupportedState);
         }
@@ -465,6 +470,7 @@ impl Terminal {
         if bytes.len() > MAX_TERMINAL_CHECKPOINT_BYTES {
             return Err(CheckpointError::TooLarge);
         }
+        check_declared_cells(bytes)?;
         let envelope: CheckpointEnvelopeV1 =
             serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
         let canonical = encode_json(&envelope)?;
@@ -488,6 +494,103 @@ fn encode_json(value: &impl Serialize) -> Result<Vec<u8>, CheckpointError> {
         Ok(()) => Ok(writer.bytes),
         Err(_) if writer.exceeded => Err(CheckpointError::TooLarge),
         Err(error) => Err(CheckpointError::Encoding(error)),
+    }
+}
+
+/// Sums every allocated row's declared width without decoding any cell.
+///
+/// A packed row stores its trailing run once, so the full decode would expand
+/// a few bytes into a whole row. This pass reads only the grid rows' widths,
+/// so a checkpoint past [`MAX_CHECKPOINT_CELLS`] fails before any expansion.
+fn check_declared_cells(bytes: &[u8]) -> Result<(), CheckpointError> {
+    let shape: CheckpointShape =
+        serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+    shape
+        .body
+        .declared_cells()
+        .filter(|cells| *cells <= MAX_CHECKPOINT_CELLS)
+        .map(|_| ())
+        .ok_or_else(|| CheckpointError::Encoding(cell_budget_error()))
+}
+
+fn cell_budget_error<E: serde::de::Error>() -> E {
+    E::custom("terminal checkpoint rows exceed the aggregate cell budget")
+}
+
+/// The envelope reduced to the fields that size its grids; every other field,
+/// including each row's packed cells, is skipped without allocation.
+#[derive(Deserialize)]
+struct CheckpointShape {
+    body: CheckpointBodyShape,
+}
+
+#[derive(Deserialize)]
+struct CheckpointBodyShape {
+    normal: Option<GridShape>,
+    alternate: Option<GridShape>,
+}
+
+impl CheckpointBodyShape {
+    fn declared_cells(&self) -> Option<usize> {
+        [&self.normal, &self.alternate]
+            .into_iter()
+            .flatten()
+            .try_fold(0_usize, |total, grid| total.checked_add(grid.rows.0))
+    }
+}
+
+#[derive(Deserialize)]
+struct GridShape {
+    rows: DeclaredRowCells,
+}
+
+#[derive(Deserialize)]
+struct RowShape {
+    cells: (usize, serde::de::IgnoredAny),
+}
+
+/// Total declared width of one grid's allocated rows.
+struct DeclaredRowCells(usize);
+
+impl<'de> Deserialize<'de> for DeclaredRowCells {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RowsVisitor;
+
+        impl<'de> Visitor<'de> for RowsVisitor {
+            type Value = DeclaredRowCells;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "at most {MAX_CHECKPOINT_GRID_ROWS} grid rows")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut rows = 0_usize;
+                let mut cells = 0_usize;
+                while let Some(row) = sequence.next_element::<Option<RowShape>>()? {
+                    rows += 1;
+                    if rows > MAX_CHECKPOINT_GRID_ROWS {
+                        return Err(serde::de::Error::custom(
+                            "grid rows exceed checkpoint bound",
+                        ));
+                    }
+                    if let Some(row) = row {
+                        cells = cells
+                            .checked_add(row.cells.0)
+                            .filter(|cells| *cells <= MAX_CHECKPOINT_CELLS)
+                            .ok_or_else(cell_budget_error)?;
+                    }
+                }
+                Ok(DeclaredRowCells(cells))
+            }
+        }
+
+        deserializer.deserialize_seq(RowsVisitor)
     }
 }
 
@@ -639,6 +742,36 @@ mod tests {
         let body_bytes = encode_json(&envelope.body).unwrap();
         envelope.body_sha256 = Sha256::digest(&body_bytes).into();
         encode_json(&envelope).unwrap()
+    }
+
+    #[test]
+    fn declared_cells_sum_both_grids_against_the_aggregate_budget() {
+        let row = |columns: usize| json!({"cells": [columns, "x"], "dirty": false});
+        let shape = |normal: Vec<Value>, alternate: Vec<Value>| {
+            serde_json::to_vec(&json!({
+                "magic": [0],
+                "body": {"normal": {"rows": normal}, "alternate": {"rows": alternate}},
+            }))
+            .unwrap()
+        };
+        let full = MAX_CHECKPOINT_CELLS / crate::row::MAX_CHECKPOINT_COLUMNS;
+        let wide = || vec![row(crate::row::MAX_CHECKPOINT_COLUMNS); full];
+        check_declared_cells(&shape(wide(), Vec::new())).unwrap();
+        check_declared_cells(&shape(Vec::new(), wide())).unwrap();
+        let mut with_null = wide();
+        with_null.push(Value::Null);
+        check_declared_cells(&shape(with_null, Vec::new())).unwrap();
+        // One more cell in either grid crosses the shared budget.
+        for (normal, alternate) in [
+            (wide(), vec![row(1)]),
+            ([wide(), vec![row(1)]].concat(), Vec::new()),
+            (vec![row(usize::MAX)], vec![row(1)]),
+        ] {
+            assert!(matches!(
+                check_declared_cells(&shape(normal, alternate)),
+                Err(CheckpointError::Encoding(_))
+            ));
+        }
     }
 
     #[test]
