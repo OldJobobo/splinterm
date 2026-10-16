@@ -444,6 +444,7 @@ async fn interactive_requests_preserve_exact_controller_and_terminal_identity() 
             splint_id,
             incarnation,
             bytes: b"exact-input".to_vec(),
+            focus_report: false,
         },
         Request::Resize {
             controller_id,
@@ -715,6 +716,7 @@ async fn mismatched_terminal_acknowledgement_cannot_match_the_requested_splint()
             splint_id,
             incarnation: 23,
             bytes: vec![1],
+            focus_report: false,
         })
         .await
         .unwrap();

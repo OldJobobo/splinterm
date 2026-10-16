@@ -2373,8 +2373,7 @@ fn try_queue_focus_report(
     commands: &Sender<WindowCommand>,
     focused: bool,
 ) -> ControlReleaseOutcome {
-    let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
-    match commands.try_send(WindowCommand::Input(report.to_vec())) {
+    match commands.try_send(WindowCommand::FocusReport(focused)) {
         Ok(()) => ControlReleaseOutcome::Queued,
         Err(TrySendError::Full(_)) => ControlReleaseOutcome::Retry,
         Err(TrySendError::Closed(_)) => ControlReleaseOutcome::Disconnected,
@@ -12815,7 +12814,7 @@ mod tests {
         App::retry_pane_focus_report(&mut view.pane, false);
         assert_eq!(
             first_command_receiver.try_recv().unwrap(),
-            WindowCommand::Input(b"\x1b[I".to_vec())
+            WindowCommand::FocusReport(true)
         );
 
         let pending = VecDeque::from([PendingTerminalInput {
@@ -15568,7 +15567,7 @@ mod tests {
         );
         assert_eq!(
             receiver.try_recv().unwrap(),
-            WindowCommand::Input(b"\x1b[O".to_vec())
+            WindowCommand::FocusReport(false)
         );
         assert_eq!(
             try_queue_control_release(&sender),

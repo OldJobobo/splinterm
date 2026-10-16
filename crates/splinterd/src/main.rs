@@ -42,9 +42,9 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES,
-    MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
-    MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    DojoUse, ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES,
+    MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS,
+    MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
     MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch, PresetLayoutLaunch,
     PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError, Request, Response,
@@ -54,7 +54,7 @@ use splinterm_protocol::{
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
     TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
     TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
-    UnderlineStyle as WireUnderlineStyle, encode_server_frame_transaction,
+    UnderlineStyle as WireUnderlineStyle, UnusedDojoCloseOutcome, encode_server_frame_transaction,
     image_content_socket_path,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
@@ -766,6 +766,95 @@ impl Drop for RetiringGuard {
     }
 }
 
+/// Terminal attachments per Splint across every connection. A Window that
+/// shows a Splint holds one, so a count shows whether any Window is attached.
+#[derive(Clone, Default)]
+struct AttachmentRegistry(Arc<StdMutex<HashMap<SplintId, usize>>>);
+
+impl AttachmentRegistry {
+    /// Counts a new attachment, unless an unused close has claimed the Splint.
+    ///
+    /// The check and the count happen under the registry lock, which
+    /// [`Self::claim_unattached`] also holds, so either the attachment is
+    /// counted first and the close finds the Dojo attached, or the claim is
+    /// taken first and the attachment is refused. A Window is never told it
+    /// attached to a Dojo that a close is already removing.
+    fn try_attach(&self, handle: &LiveSplintHandle) -> Option<AttachmentGuard> {
+        let mut counts = self.0.lock().unwrap();
+        if handle.is_claimed_unused() {
+            return None;
+        }
+        *counts.entry(handle.splint_id).or_default() += 1;
+        Some(AttachmentGuard {
+            registry: self.clone(),
+            splint_id: handle.splint_id,
+        })
+    }
+
+    fn is_attached(&self, splint_id: SplintId) -> bool {
+        self.0.lock().unwrap().contains_key(&splint_id)
+    }
+
+    /// Claims an unused runtime only while no Window is attached to it; see
+    /// [`Self::try_attach`].
+    fn claim_unattached(&self, handle: LiveSplintHandle) -> Result<UnusedClaim, DojoUse> {
+        let counts = self.0.lock().unwrap();
+        if counts.contains_key(&handle.splint_id) {
+            return Err(DojoUse::Attached);
+        }
+        UnusedClaim::take(handle).ok_or(DojoUse::Input)
+    }
+}
+
+/// Counts a terminal subscription's attachment before its client learns of
+/// it, or refuses it when an unused close has claimed the Splint.
+fn register_attachment(
+    state: &DaemonState,
+    subscription: &PendingSubscription,
+) -> Result<Option<AttachmentGuard>, ProtocolError> {
+    match subscription {
+        PendingSubscription::Terminal { handle, .. } => state
+            .attachments
+            .try_attach(handle)
+            .map(Some)
+            .ok_or_else(|| ProtocolError::new(ErrorCode::NotFound, "Splint is closing")),
+        _ => Ok(None),
+    }
+}
+
+/// Held with its subscription, so a detach or disconnect releases it at once.
+struct AttachmentGuard {
+    registry: AttachmentRegistry,
+    splint_id: SplintId,
+}
+
+impl Drop for AttachmentGuard {
+    fn drop(&mut self) {
+        let mut counts = self.registry.0.lock().unwrap();
+        if let Some(count) = counts.get_mut(&self.splint_id) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.splint_id);
+            }
+        }
+    }
+}
+
+/// The original Splint of a Dojo created as a plain default-shell terminal,
+/// and the first organizing action (a rename or a split) taken on it since.
+#[derive(Clone, Copy)]
+struct PlainDojo {
+    splint_id: SplintId,
+    incarnation: u64,
+    organized: Option<DojoUse>,
+}
+
+/// One subscription owned by a connection.
+struct ConnectionSubscription {
+    _task: AbortOnDrop,
+    _attachment: Option<AttachmentGuard>,
+}
+
 struct TopologySubscriber {
     owner_connection_id: u64,
     changes: mpsc::Sender<Arc<TopologyChange>>,
@@ -850,6 +939,13 @@ struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
     retiring: RetiringRuntimes,
+    /// Plain default-shell Dojos created by this daemon, with their original
+    /// Splint and incarnation; see `Request::CloseUnusedDojo`.
+    plain_dojos: StdMutex<HashMap<DojoId, PlainDojo>>,
+    /// Lairs created by this daemon under a generated name and not renamed
+    /// since; an unused close removes one with its last Dojo.
+    generated_lairs: StdMutex<HashSet<LairId>>,
+    attachments: AttachmentRegistry,
     transient_leases: Arc<StdMutex<TransientLeaseRegistry>>,
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
@@ -1055,6 +1151,9 @@ async fn run_daemon(
         topology: RwLock::new(lair),
         runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
         retiring,
+        plain_dojos: StdMutex::default(),
+        generated_lairs: StdMutex::default(),
+        attachments: AttachmentRegistry::default(),
         transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
@@ -1696,7 +1795,7 @@ const fn diagnostic_lifecycle_event(
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => Some(Event::DojoCreated),
         Request::MaterializePreset { .. } => Some(Event::PresetMaterialized),
         Request::CloseSplint { .. } => Some(Event::SplintClosed),
-        Request::CloseDojo { .. } => Some(Event::DojoClosed),
+        Request::CloseDojo { .. } | Request::CloseUnusedDojo { .. } => Some(Event::DojoClosed),
         Request::TerminateLair { .. } => Some(Event::LairTerminated),
         Request::RenameLair { .. } => Some(Event::LairRenamed),
         Request::RenameDojo { .. } => Some(Event::DojoRenamed),
@@ -1705,6 +1804,17 @@ const fn diagnostic_lifecycle_event(
         | Request::RestoreLair { .. } => Some(Event::TopologyRestored),
         _ => None,
     }
+}
+
+/// An unused-Dojo close that found the Dojo in use changed nothing.
+const fn dojo_kept_in_use(response: &Response) -> bool {
+    matches!(
+        response,
+        Response::UnusedDojoClose {
+            outcome: UnusedDojoCloseOutcome::Used { .. },
+            ..
+        }
+    )
 }
 
 fn trace_diagnostic_lifecycle(
@@ -1876,7 +1986,7 @@ async fn serve_authenticated(
     )
     .await?;
 
-    let mut subscriptions = HashMap::<u64, AbortOnDrop>::new();
+    let mut subscriptions = HashMap::<u64, ConnectionSubscription>::new();
     let mut policy_reloads = state.policy_reloads.subscribe();
     let mut connection_revocations = state.connection_revocations.subscribe();
     let mut last_request_id = 0_u64;
@@ -2073,6 +2183,7 @@ async fn serve_authenticated(
                     }) => {
                         if let (Some(correlation), Some(event)) =
                             (diagnostic_correlation, diagnostic_event)
+                            && !dojo_kept_in_use(&response)
                         {
                             trace_diagnostic_lifecycle(correlation, event, &response);
                         }
@@ -2090,6 +2201,13 @@ async fn serve_authenticated(
                                 .await?;
                                 continue;
                             }
+                            let attachment = match register_attachment(state, &subscription) {
+                                Ok(attachment) => attachment,
+                                Err(error) => {
+                                    send_response(outbound, state, request_id, Err(error)).await?;
+                                    continue;
+                                }
+                            };
                             send_response(outbound, state, request_id, Ok(response)).await?;
                             let (id, task) = match subscription {
                                 PendingSubscription::Terminal {
@@ -2151,7 +2269,13 @@ async fn serve_authenticated(
                                     ),
                                 ),
                             };
-                            subscriptions.insert(id, AbortOnDrop::new(task));
+                            subscriptions.insert(
+                                id,
+                                ConnectionSubscription {
+                                    _task: AbortOnDrop::new(task),
+                                    _attachment: attachment,
+                                },
+                            );
                         } else {
                             send_response(outbound, state, request_id, Ok(response)).await?;
                         }
@@ -2555,6 +2679,153 @@ async fn durable_topology_candidate<T>(
 
 async fn install_topology(state: &DaemonState, candidate: Topology) {
     *state.topology.write().await = candidate;
+}
+
+/// Records a just-committed Dojo as closable while unused when it runs a
+/// plain default shell; `named` marks a name the user chose. Callers hold the
+/// topology transaction. Entries for Dojos that no longer exist are dropped here.
+async fn record_plain_dojo(
+    state: &DaemonState,
+    dojo_id: DojoId,
+    splint_id: SplintId,
+    incarnation: u64,
+    plain: bool,
+    named: bool,
+) {
+    let topology = state.topology.read().await;
+    state
+        .generated_lairs
+        .lock()
+        .unwrap()
+        .retain(|lair_id| topology.find_lair(*lair_id).is_some());
+    let mut plain_dojos = state.plain_dojos.lock().unwrap();
+    plain_dojos.retain(|dojo_id, _| topology.find_dojo(*dojo_id).is_some());
+    if !plain {
+        return;
+    }
+    plain_dojos.insert(
+        dojo_id,
+        PlainDojo {
+            splint_id,
+            incarnation,
+            organized: named.then_some(DojoUse::Renamed),
+        },
+    );
+}
+
+/// Records a just-committed Lair whose client said Splinterm generated its
+/// name, which an unused close may remove with its last Dojo. The client's
+/// explicit provenance decides, never the name's shape, so a user-chosen name
+/// that happens to look generated is kept. Renaming it removes the mark.
+fn record_generated_lair(state: &DaemonState, lair: &Lair, generated_name: bool) {
+    if generated_name {
+        state.generated_lairs.lock().unwrap().insert(lair.id);
+    }
+}
+
+/// Renaming a Dojo or its Splint, or splitting it, is a user action that keeps
+/// the Dojo even after the split pane closes again.
+fn record_dojo_organized(state: &DaemonState, dojo_id: DojoId, action: DojoUse) {
+    if let Some(plain) = state.plain_dojos.lock().unwrap().get_mut(&dojo_id) {
+        plain.organized.get_or_insert(action);
+    }
+}
+
+/// Decides whether a Dojo is unused and claims its Splint if so.
+///
+/// Callers hold the topology transaction, which orders this against splits,
+/// renames, relaunches, and closes. Client input does not take the
+/// transaction; the claim on the runtime's use latch orders it instead, so
+/// either the input lands and the Dojo counts as used, or the claim wins and
+/// the input fails. Attaches do not take the transaction either; the
+/// attachment registry lock orders them against the claim, so either the
+/// attachment is counted and the Dojo counts as attached, or the claim wins
+/// and the attach is refused. The returned claim releases itself unless
+/// disarmed.
+async fn claim_unused_dojo(
+    state: &DaemonState,
+    topology: &Topology,
+    dojo_id: DojoId,
+) -> Result<Result<UnusedClaim, DojoUse>, ProtocolError> {
+    let dojo = topology.find_dojo(dojo_id).ok_or_else(not_found)?;
+    let LayoutNode::Leaf(splint) = &dojo.root else {
+        return Ok(Err(DojoUse::Split));
+    };
+    let original = state.plain_dojos.lock().unwrap().get(&dojo_id).copied();
+    let Some(original) = original else {
+        return Ok(Err(DojoUse::Launch));
+    };
+    if let Some(action) = original.organized {
+        return Ok(Err(action));
+    }
+    let original_incarnation = original.incarnation;
+    if original.splint_id != splint.id {
+        return Ok(Err(DojoUse::Split));
+    }
+    if !matches!(splint.state, SplintState::Running) {
+        return Ok(Err(DojoUse::NotRunning));
+    }
+    let Some(handle) = state.runtimes.lock().await.handle(splint.id) else {
+        return Ok(Err(DojoUse::NotRunning));
+    };
+    if handle.incarnation.value() != original_incarnation
+        || splint.last_incarnation != Some(original_incarnation)
+    {
+        return Ok(Err(DojoUse::Launch));
+    }
+    if handle.has_received_input() {
+        return Ok(Err(DojoUse::Input));
+    }
+    if state.attachments.is_attached(splint.id) {
+        return Ok(Err(DojoUse::Attached));
+    }
+    if handle.root_holds_foreground().await != Some(true) {
+        return Ok(Err(DojoUse::Foreground));
+    }
+    // An attachment that arrived while the foreground was read keeps the Dojo.
+    // Once the claim is held, new attachments are refused until it is released.
+    Ok(state.attachments.claim_unattached(handle))
+}
+
+/// A held claim on an unused runtime's use latch, during which input fails.
+///
+/// Dropping it before [`Self::disarm`] releases the claim, so an error, or a
+/// request cancelled because its client went away, never leaves the Splint
+/// refusing input.
+struct UnusedClaim {
+    handle: LiveSplintHandle,
+    armed: bool,
+}
+
+impl UnusedClaim {
+    fn take(handle: LiveSplintHandle) -> Option<Self> {
+        // Build the guard only once the claim is held: dropping an armed guard
+        // releases whatever claim the latch carries.
+        if !handle.claim_unused() {
+            return None;
+        }
+        Some(Self {
+            handle,
+            armed: true,
+        })
+    }
+
+    fn identity(&self) -> (SplintId, u64) {
+        (self.handle.splint_id, self.handle.incarnation.value())
+    }
+
+    /// Keeps the claim for good, once the Dojo is gone from the topology.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnusedClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.release_unused_claim();
+        }
+    }
 }
 
 async fn publish_topology(
@@ -3221,6 +3492,23 @@ async fn retire_transient_lair_under_transaction(
             .collect::<Vec<_>>()
     };
     state.transient_leases.lock().unwrap().remove_lair(lair_id);
+    revoke_retired_identities(state, &splint_ids, &identities, "transient Lair retired").await;
+    // Shutdown may wait through the full grace; it must not hold the transaction.
+    for runtime in runtimes {
+        drop(state.retiring.spawn(runtime));
+    }
+    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+    true
+}
+
+/// Releases focus, control, and grants held on Splints whose live runtimes a
+/// topology change just removed.
+async fn revoke_retired_identities(
+    state: &DaemonState,
+    splint_ids: &[SplintId],
+    identities: &[(SplintId, u64)],
+    reason: &'static str,
+) {
     {
         let mut focus = state.graphical_focus.lock().await;
         if focus
@@ -3230,7 +3518,7 @@ async fn retire_transient_lair_under_transaction(
             *focus = None;
         }
     }
-    for (splint_id, incarnation) in identities {
+    for &(splint_id, incarnation) in identities {
         let (controller, transfer) = {
             let mut controllers = state.controller.lock().await;
             (
@@ -3256,21 +3544,15 @@ async fn retire_transient_lair_under_transaction(
             );
         }
         publish_control_status(state, splint_id, incarnation).await;
-        let revoked = state.grants.lock().await.revoke_identity(
-            splint_id,
-            incarnation,
-            "transient Lair retired",
-        );
+        let revoked = state
+            .grants
+            .lock()
+            .await
+            .revoke_identity(splint_id, incarnation, reason);
         for grant_id in revoked {
             let _ = state.revocations.send(Revocation { grant_id });
         }
     }
-    // Shutdown may wait through the full grace; it must not hold the transaction.
-    for runtime in runtimes {
-        drop(state.retiring.spawn(runtime));
-    }
-    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
-    true
 }
 
 async fn retire_transient_lair_for_owner(state: &DaemonState, connection_id: u64) -> bool {
@@ -3507,6 +3789,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::NewDojoAutomation { .. }
             | Request::MaterializePreset { .. }
             | Request::CloseDojo { .. }
+            | Request::CloseUnusedDojo { .. }
             | Request::TerminateLair { .. }
             | Request::RenameLair { .. }
             | Request::RenameDojo { .. }
@@ -4267,9 +4550,9 @@ async fn request_policy_resources(
         | Request::SplitSplintAutomation {
             target_splint_id, ..
         } => vec![splint(*target_splint_id, None)?],
-        Request::RestoreDojo { dojo_id, .. } | Request::CloseDojo { dojo_id, .. } => {
-            dojo(*dojo_id, true)?
-        }
+        Request::RestoreDojo { dojo_id, .. }
+        | Request::CloseDojo { dojo_id, .. }
+        | Request::CloseUnusedDojo { dojo_id } => dojo(*dojo_id, true)?,
         Request::RestoreLair { lair_id, .. } | Request::TerminateLair { lair_id, .. } => {
             lair(*lair_id, true)?
         }
@@ -4675,10 +4958,12 @@ async fn append_request_result_audit(
     } else {
         "trusted_or_owned_authority"
     };
-    let outcome = if result.is_ok() {
-        splinterm_protocol::AuditOutcome::Succeeded
-    } else {
-        splinterm_protocol::AuditOutcome::Failed
+    let outcome = match result {
+        Ok(handled) if dojo_kept_in_use(&handled.response) => {
+            splinterm_protocol::AuditOutcome::Cancelled
+        }
+        Ok(_) => splinterm_protocol::AuditOutcome::Succeeded,
+        Err(_) => splinterm_protocol::AuditOutcome::Failed,
     };
     // A successful scoped preflight establishes no mutation commit. Denials and
     // failed preflights remain auditable; only the final mutation records success.
@@ -4943,9 +5228,11 @@ async fn resolve_automation_mutation(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         } => Request::CreateLair {
             expected_topology_revision,
             name,
+            generated_name,
             launch: resolved_automation_launch(
                 launch,
                 state.owner_home.clone().ok_or_else(|| {
@@ -4998,6 +5285,7 @@ async fn resolve_automation_mutation(
             lair_id,
             name,
             launch,
+            generated_name,
         } => {
             let cwd = match launch.cwd.clone() {
                 Some(cwd) => cwd,
@@ -5009,6 +5297,7 @@ async fn resolve_automation_mutation(
                 name,
                 launch: resolved_automation_launch(launch, cwd)?,
                 promote_transient_lair: false,
+                generated_name,
             }
         }
         request => request,
@@ -5482,6 +5771,7 @@ async fn handle_authorized_request(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5567,6 +5857,16 @@ async fn handle_authorized_request(
                 ));
             }
             reservation.commit();
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                false,
+            )
+            .await;
+            record_generated_lair(state, &lair, generated_name);
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
             Response::LairCreated {
@@ -5579,6 +5879,7 @@ async fn handle_authorized_request(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5665,6 +5966,16 @@ async fn handle_authorized_request(
                     let _ = state.revocations.send(Revocation { grant_id });
                 }
             }
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                false,
+            )
+            .await;
+            record_generated_lair(state, &dojo, generated_name);
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
             Response::LairCreated {
@@ -5768,6 +6079,9 @@ async fn handle_authorized_request(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
+            }
+            if let Some(context) = splint_launch_context(&*state.topology.read().await, splint_id) {
+                record_dojo_organized(state, context.dojo, DojoUse::Split);
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::SplintSplit).await;
@@ -5950,6 +6264,7 @@ async fn handle_authorized_request(
             name,
             launch,
             promote_transient_lair,
+            generated_name,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -6036,6 +6351,17 @@ async fn handle_authorized_request(
                     .remove_lair(lair_id)
                     .expect("authorized transient promotion retains its lease");
             }
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                // A name the user chose counts as use, like a rename, even
+                // when it equals the default label.
+                !generated_name,
+            )
+            .await;
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
             Response::DojoStarted {
@@ -6071,6 +6397,13 @@ async fn handle_authorized_request(
                 .iter()
                 .map(|dojo| dojo.id)
                 .collect::<Vec<_>>();
+            let renamed_lair = match &target {
+                PresetTarget::ExistingLair {
+                    lair_id,
+                    rename: Some(_),
+                } => Some(*lair_id),
+                _ => None,
+            };
             let (candidate, (lair_id, topology_revision)) =
                 durable_topology_candidate(state, |topology| match target {
                     PresetTarget::NewLair { name } => topology.materialize_lair_with_provenance_at(
@@ -6090,6 +6423,9 @@ async fn handle_authorized_request(
                 })
                 .await?;
             install_topology(state, candidate).await;
+            if let Some(renamed_lair) = renamed_lair {
+                state.generated_lairs.lock().unwrap().remove(&renamed_lair);
+            }
             publish_topology(
                 state,
                 topology_revision,
@@ -6204,6 +6540,87 @@ async fn handle_authorized_request(
             drop(transaction);
             finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
+        }
+        Request::CloseUnusedDojo { dojo_id } => {
+            let transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let topology = state.topology.read().await.clone();
+            match claim_unused_dojo(state, &topology, dojo_id).await? {
+                Err(reason) => Response::UnusedDojoClose {
+                    dojo_id,
+                    outcome: UnusedDojoCloseOutcome::Used { reason },
+                },
+                Ok(claim) => {
+                    let (splint_id, incarnation) = claim.identity();
+                    // A Lair the user never named ends with its last Dojo.
+                    let emptied_lair = topology
+                        .lairs()
+                        .find(|lair| lair.dojos.len() == 1 && lair.dojos[0].id == dojo_id)
+                        .map(|lair| lair.id)
+                        .filter(|lair_id| state.generated_lairs.lock().unwrap().contains(lair_id));
+                    // An error or a cancelled request drops the claim, releasing it.
+                    let (candidate, topology_revision) =
+                        durable_topology_candidate(state, |topology| {
+                            topology.terminate_dojo_at(topology.revision(), dojo_id)?;
+                            if let Some(lair_id) = emptied_lair {
+                                topology.remove_lair(lair_id);
+                            }
+                            Ok(topology.revision())
+                        })
+                        .await?;
+                    let runtime = {
+                        let mut topology = state.topology.write().await;
+                        let mut registry = state.runtimes.lock().await;
+                        *topology = candidate;
+                        registry.remove(splint_id)
+                    };
+                    claim.disarm();
+                    // Retire before any further await, so a cancelled request
+                    // cannot leak the runtime. Shutdown runs in the background
+                    // and never holds the transaction; daemon shutdown waits.
+                    if let Some(runtime) = runtime {
+                        drop(state.retiring.spawn(runtime));
+                    }
+                    state.plain_dojos.lock().unwrap().remove(&dojo_id);
+                    if let Some(lair_id) = emptied_lair {
+                        state.generated_lairs.lock().unwrap().remove(&lair_id);
+                        state.transient_leases.lock().unwrap().remove_lair(lair_id);
+                    }
+                    revoke_retired_identities(
+                        state,
+                        &[splint_id],
+                        &[(splint_id, incarnation)],
+                        "unused Dojo closed",
+                    )
+                    .await;
+                    let change = if let Some(lair_id) = emptied_lair {
+                        let lair_grants = state
+                            .grants
+                            .lock()
+                            .await
+                            .revoke_lair(lair_id, "unused Lair closed");
+                        for grant_id in lair_grants {
+                            revoke_grant_controllers(state, grant_id).await;
+                            let _ = state.revocations.send(Revocation { grant_id });
+                        }
+                        TopologyChangeKind::LairTerminated
+                    } else {
+                        TopologyChangeKind::DojoClosed
+                    };
+                    publish_topology(state, topology_revision, change).await;
+                    drop(transaction);
+                    Response::UnusedDojoClose {
+                        dojo_id,
+                        outcome: UnusedDojoCloseOutcome::Closed {
+                            topology_revision,
+                            lair_removed: emptied_lair.is_some(),
+                        },
+                    }
+                }
+            }
         }
         Request::TerminateLair {
             expected_topology_revision,
@@ -6335,6 +6752,7 @@ async fn handle_authorized_request(
             })
             .await?;
             install_topology(state, candidate).await;
+            state.generated_lairs.lock().unwrap().remove(&lair_id);
             publish_topology(state, topology_revision, TopologyChangeKind::LairRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -6376,6 +6794,7 @@ async fn handle_authorized_request(
                 })
                 .await?;
             install_topology(state, candidate).await;
+            record_dojo_organized(state, dojo_id, DojoUse::Renamed);
             if promoted {
                 state
                     .transient_leases
@@ -6425,6 +6844,9 @@ async fn handle_authorized_request(
             })
             .await?;
             install_topology(state, candidate).await;
+            if let Some(context) = splint_launch_context(&*state.topology.read().await, splint_id) {
+                record_dojo_organized(state, context.dojo, DojoUse::Renamed);
+            }
             publish_topology(state, topology_revision, TopologyChangeKind::SplintRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -6889,6 +7311,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
             bytes,
+            focus_report,
         } => {
             if !authorization.policy_authorized() && authorization.authorized_grant_id().is_none() {
                 let _ = authorize_scope(
@@ -6908,10 +7331,14 @@ async fn handle_authorized_request(
             let handle =
                 controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
                     .await?;
-            handle
-                .input(bytes)
-                .await
-                .map_err(|error| input_error(&error))?;
+            // Only input the client marks as its own focus reports can leave
+            // the Dojo unused; the same bytes from anywhere else are input.
+            let written = if focus_report {
+                handle.focus_report(bytes).await
+            } else {
+                handle.input(bytes).await
+            };
+            written.map_err(|error| input_error(&error))?;
             terminal_action_acknowledgement(state, &handle).await?
         }
         Request::Resize {
@@ -8229,6 +8656,7 @@ fn input_error(error: &LiveError) -> ProtocolError {
         LiveError::InputQueueFull => {
             ProtocolError::new(ErrorCode::ResourceLimit, "input queue limit exceeded")
         }
+        LiveError::Retiring => ProtocolError::new(ErrorCode::NotFound, "Splint is closing"),
         _ => internal(),
     }
 }
@@ -9799,6 +10227,9 @@ mod tests {
             topology: RwLock::new(Topology::new()),
             runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
             retiring,
+            plain_dojos: StdMutex::default(),
+            generated_lairs: StdMutex::default(),
+            attachments: AttachmentRegistry::default(),
             transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
@@ -9930,6 +10361,7 @@ mod tests {
                 expected_topology_revision: expected,
                 name: "failed-fresh".into(),
                 launch: test_launch(&["/bin/sh", "-c", "true"]),
+                generated_name: false,
             },
         )
         .await
@@ -9949,6 +10381,7 @@ mod tests {
                 expected_topology_revision: expected,
                 name: "fresh".into(),
                 launch: test_launch(&["/bin/sh", "-c", "true"]),
+                generated_name: false,
             },
         )
         .await
@@ -10072,11 +10505,13 @@ mod tests {
                     expected_topology_revision: revision,
                     name: "rejected".into(),
                     launch: launch.clone(),
+                    generated_name: false,
                 },
                 Request::CreateTransientLair {
                     expected_topology_revision: revision,
                     name: "rejected".into(),
                     launch: launch.clone(),
+                    generated_name: false,
                 },
                 Request::NewDojo {
                     expected_topology_revision: revision,
@@ -10084,6 +10519,7 @@ mod tests {
                     name: "rejected".into(),
                     launch: launch.clone(),
                     promote_transient_lair: false,
+                    generated_name: false,
                 },
                 Request::SplitSplint {
                     expected_topology_revision: revision,
@@ -10466,6 +10902,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "commandless-transient".into(),
                 launch,
+                generated_name: false,
             },
         )
         .await
@@ -10501,6 +10938,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "promoted-by-tab".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
             },
         )
         .await
@@ -10517,6 +10955,7 @@ mod tests {
                 name: "unowned".into(),
                 launch: test_launch(&["/bin/sh", "-c", "true"]),
                 promote_transient_lair: true,
+                generated_name: false,
             },
         )
         .await
@@ -10533,6 +10972,7 @@ mod tests {
                 name: "organized".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
                 promote_transient_lair: true,
+                generated_name: false,
             },
         )
         .await
@@ -10587,6 +11027,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "promoted-by-name".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
             },
         )
         .await
@@ -10683,6 +11124,329 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    fn plain_shell_launch() -> splinterm_protocol::LaunchParameters {
+        splinterm_protocol::LaunchParameters {
+            shell: Some("/bin/sh".into()),
+            ..test_launch(&[])
+        }
+    }
+
+    async fn reap_all(state: &Arc<DaemonState>) {
+        let runtimes = state.runtimes.lock().await.drain();
+        for runtime in runtimes {
+            let _ = runtime.shutdown().await;
+        }
+        time::timeout(Duration::from_secs(5), async {
+            while state.retiring.count() > 0 {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retiring runtimes were not reaped");
+    }
+
+    async fn create_plain_transient_dojo(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+    ) -> (DojoId, SplintId, u64) {
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            state,
+            connection_id,
+            Request::CreateTransientLair {
+                expected_topology_revision,
+                name: format!("attach {connection_id}"),
+                launch: plain_shell_launch(),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("transient create response was not returned");
+        };
+        (lair.dojos[0].id, lair.dojos[0].default_focus, incarnation)
+    }
+
+    /// Handles an Attach without counting its attachment, as the connection
+    /// loop sees it before registering the subscription.
+    async fn handled_attach(
+        state: &Arc<DaemonState>,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> PendingSubscription {
+        handle_authorized_request(
+            Request::Attach {
+                splint_id,
+                incarnation: Some(incarnation),
+                scrollback_rows: 0,
+            },
+            state,
+            &PeerIdentity::for_test(),
+            90,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+        )
+        .await
+        .unwrap()
+        .subscription
+        .expect("Attach returns a terminal subscription")
+    }
+
+    // An Attach and an unused close never both succeed: an attach counted
+    // first keeps the Dojo, and an attach still in flight when the close
+    // claims the Splint is refused instead of being told it attached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attaches_and_unused_closes_exclude_each_other() {
+        let state = test_state_with_backend(true, test_pty_backend());
+
+        let (attached_dojo, attached_splint, attached_incarnation) =
+            create_plain_transient_dojo(&state, 91).await;
+        let subscription = handled_attach(&state, attached_splint, attached_incarnation).await;
+        let attachment = register_attachment(&state, &subscription)
+            .unwrap()
+            .expect("a terminal subscription counts an attachment");
+        let response = trusted_request(
+            &state,
+            91,
+            Request::CloseUnusedDojo {
+                dojo_id: attached_dojo,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                response,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Used {
+                        reason: DojoUse::Attached
+                    },
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        drop(attachment);
+
+        let (closed_dojo, closed_splint, closed_incarnation) =
+            create_plain_transient_dojo(&state, 92).await;
+        let in_flight = handled_attach(&state, closed_splint, closed_incarnation).await;
+        let response = trusted_request(
+            &state,
+            92,
+            Request::CloseUnusedDojo {
+                dojo_id: closed_dojo,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                response,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Closed { .. },
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        let refused = register_attachment(&state, &in_flight)
+            .err()
+            .expect("an attach that lost the race is refused");
+        assert_eq!(refused.code, ErrorCode::NotFound);
+        assert!(!state.attachments.is_attached(closed_splint));
+        drop(in_flight);
+        reap_all(&state).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_held_unused_claim_refuses_attaches_until_released() {
+        let registry = AttachmentRegistry::default();
+        let state = test_state_with_backend(false, test_pty_backend());
+        let (_, splint_id, _) = create_plain_transient_dojo(&state, 93).await;
+        let handle = state.runtimes.lock().await.handle(splint_id).unwrap();
+        let claim = registry.claim_unattached(handle.clone()).unwrap();
+        assert!(registry.try_attach(&handle).is_none());
+        drop(claim);
+        let attachment = registry.try_attach(&handle).expect("released claim");
+        assert!(matches!(
+            registry.claim_unattached(handle.clone()),
+            Err(DojoUse::Attached)
+        ));
+        drop(attachment);
+        assert!(registry.claim_unattached(handle).is_ok());
+        reap_all(&state).await;
+    }
+
+    // Only bytes the client flags as its own focus reports leave a runtime
+    // unused; identical bytes from automation or a paste are input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_flagged_focus_reports_leave_a_runtime_unused() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            51,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "focus".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        handle.focus_report(b"\x1b[I\x1b[O".to_vec()).await.unwrap();
+        assert!(!handle.has_received_input(), "flagged focus reports");
+        handle.focus_report(b"\x1b[Ix".to_vec()).await.unwrap();
+        assert!(
+            handle.has_received_input(),
+            "a flag does not excuse other bytes"
+        );
+
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            52,
+            Request::CreateTransientLair {
+                expected_topology_revision,
+                name: "pasted".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        handle.input(b"\x1b[I\x1b[O".to_vec()).await.unwrap();
+        assert!(
+            handle.has_received_input(),
+            "unflagged focus-shaped bytes are input"
+        );
+        reap_all(&state).await;
+    }
+
+    // A request cancelled between claiming and closing (its client went away,
+    // or the Window's deadline passed) must not leave the Splint refusing input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_unused_close_claim_lets_input_through_again() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            51,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "claim".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        let claim = UnusedClaim::take(handle.clone()).expect("an unused runtime is claimed");
+        assert!(UnusedClaim::take(handle.clone()).is_none(), "one claim");
+        let refused = handle.input(b"x".to_vec()).await;
+        assert!(matches!(refused, Err(LiveError::Retiring)), "{refused:?}");
+        drop(claim);
+        handle.input(b"x".to_vec()).await.unwrap();
+        assert!(UnusedClaim::take(handle).is_none(), "input made it used");
+        reap_all(&state).await;
+    }
+
+    // A transient Lair whose name Splinterm generated goes with its last
+    // unused Dojo, and so does its Window-owned lease. A Lair the user named
+    // stays, even under a name shaped like a generated one: the client's
+    // provenance decides, not the name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unused_close_removes_an_empty_unnamed_transient_lair_and_its_lease() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let lookalike = splinterm_core::generated_lair_name(1_787_899_189_000, 8);
+        for (connection_id, name, generated_name) in [
+            (
+                61,
+                splinterm_core::generated_lair_name(1_787_899_189_000, 7),
+                true,
+            ),
+            (62, "named".to_owned(), false),
+            (63, lookalike, false),
+        ] {
+            let removed = generated_name;
+            let expected_topology_revision = state.topology.read().await.revision();
+            let Response::LairCreated { lair, .. } = trusted_request(
+                &state,
+                connection_id,
+                Request::CreateTransientLair {
+                    expected_topology_revision,
+                    name,
+                    launch: plain_shell_launch(),
+                    generated_name,
+                },
+            )
+            .await
+            .unwrap() else {
+                panic!("transient create response was not returned");
+            };
+            let response = trusted_request(
+                &state,
+                connection_id,
+                Request::CloseUnusedDojo {
+                    dojo_id: lair.dojos[0].id,
+                },
+            )
+            .await
+            .unwrap();
+            let Response::UnusedDojoClose {
+                outcome: UnusedDojoCloseOutcome::Closed { lair_removed, .. },
+                ..
+            } = response
+            else {
+                panic!("an unused Dojo was kept: {response:?}");
+            };
+            assert_eq!(lair_removed, removed);
+            assert_eq!(
+                state.topology.read().await.find_lair(lair.id).is_none(),
+                removed
+            );
+            assert_eq!(
+                state
+                    .transient_leases
+                    .lock()
+                    .unwrap()
+                    .for_connection(connection_id)
+                    .is_none(),
+                removed
+            );
+            assert!(!state.generated_lairs.lock().unwrap().contains(&lair.id));
+        }
+        reap_all(&state).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transient_owner_disconnect_reaps_runtime_and_removes_complete_lair() {
         let state = test_state_with_backend(false, test_pty_backend());
@@ -10694,6 +11458,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "transient".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
             },
         )
         .await
@@ -10752,6 +11517,7 @@ mod tests {
                     expected_topology_revision: TopologyRevision::default(),
                     name: "transient-secondary".into(),
                     launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                    generated_name: false,
                 },
             ),
         )
@@ -10773,6 +11539,7 @@ mod tests {
                     name: "secondary".into(),
                     launch: test_launch(&["/bin/sh", "-c", "true"]),
                     promote_transient_lair: false,
+                    generated_name: false,
                 },
             ),
         )
@@ -10823,6 +11590,7 @@ mod tests {
                     expected_topology_revision: TopologyRevision::default(),
                     name: "transient-exit".into(),
                     launch: test_launch(&["/bin/sh", "-c", "true"]),
+                    generated_name: false,
                 },
             ),
         )
@@ -10897,6 +11665,14 @@ mod tests {
         assert!(interactive_bypass(false, false, true, &terminate_lair));
         assert!(!interactive_bypass(true, false, false, &terminate_lair));
         assert!(!interactive_bypass(false, true, false, &terminate_lair));
+        // Local and remote Windows both close their unused Dojos.
+        let close_unused = Request::CloseUnusedDojo {
+            dojo_id: DojoId::new(),
+        };
+        assert!(interactive_bypass(true, true, false, &close_unused));
+        assert!(interactive_bypass(false, false, true, &close_unused));
+        assert!(!interactive_bypass(true, false, false, &close_unused));
+        assert!(!interactive_bypass(false, true, false, &close_unused));
         assert!(!interactive_bypass(
             false,
             false,
@@ -11106,6 +11882,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "cwd".into(),
                 launch,
+                generated_name: false,
             },
         )
         .await
@@ -11328,6 +12105,7 @@ mod tests {
                     cwd: None,
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
             Request::SplitSplintAutomation {
                 expected_topology_revision: TopologyRevision::default(),
@@ -11483,6 +12261,7 @@ mod tests {
                     cwd: None,
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
             Request::SplitSplintAutomation {
                 expected_topology_revision: snapshot.revision,
@@ -11511,6 +12290,7 @@ mod tests {
                     cwd: None,
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
         ] {
             let resolved = resolve_automation_mutation(request, &state).await.unwrap();
@@ -11570,6 +12350,7 @@ mod tests {
                     cwd: Some(PathBuf::from("/empty-lair-override")),
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
             &state,
         )

@@ -101,6 +101,10 @@ const fn preflight_authorization(
 }
 
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "every request maps to its authorization in one exhaustive, reviewable table"
+)]
 pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
 
@@ -149,6 +153,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
                 base: &[Scope::TopologyLayoutMutate],
                 requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
             }
+        }
+        // It terminates a live process whenever it succeeds.
+        Request::CloseUnusedDojo { .. } => {
+            RequestAuthorization::policy(&[Scope::TopologyLayoutMutate, Scope::ProcessTerminate])
         }
         Request::SetSplitRatio { .. }
         | Request::SetDojoDefaultFocus { .. }
@@ -260,6 +268,7 @@ mod tests {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             }),
             RequestAuthorization::TrustedUi
         );
@@ -286,6 +295,19 @@ mod tests {
         assert_eq!(
             for_request(&Request::ReadGraphicalFocus),
             RequestAuthorization::Authenticated
+        );
+        // A conditional close always terminates the process when it closes.
+        assert_eq!(
+            for_request(&Request::CloseUnusedDojo {
+                dojo_id: splinterm_core::DojoId::new(),
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::TopologyLayoutMutate,
+                    OperationScope::ProcessTerminate,
+                ],
+                any_of: &[],
+            }
         );
         assert_eq!(
             for_request(&Request::PublishGraphicalFocus {
@@ -366,6 +388,7 @@ mod tests {
                 splint_id,
                 incarnation: 1,
                 bytes: vec![],
+                focus_report: false,
             }),
             RequestAuthorization::PolicyAndOwned {
                 required: &[OperationScope::Input],

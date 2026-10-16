@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -478,6 +478,9 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::CreateLair`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplintAutomation {
         expected_topology_revision: TopologyRevision,
@@ -497,16 +500,29 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::NewDojo`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateTransientLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplint {
         expected_topology_revision: TopologyRevision,
@@ -558,6 +574,10 @@ pub enum Request {
         /// Trusted owner request to atomically make a transient Lair durable.
         #[serde(default, skip_serializing_if = "bool_is_false")]
         promote_transient_lair: bool,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; a chosen name keeps the Dojo from an unused close.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     MaterializePreset {
         expected_topology_revision: TopologyRevision,
@@ -567,6 +587,12 @@ pub enum Request {
     },
     CloseDojo {
         expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
+    },
+    /// Terminates the Dojo only when it was never used. The daemon decides and
+    /// applies this atomically against its current state; a used Dojo is left
+    /// unchanged.
+    CloseUnusedDojo {
         dojo_id: DojoId,
     },
     TerminateLair {
@@ -669,6 +695,11 @@ pub enum Request {
         splint_id: SplintId,
         incarnation: u64,
         bytes: Vec<u8>,
+        /// Set only by the graphical client for the focus in and out reports
+        /// it generates under DECSET 1004. Such bytes leave a Dojo unused;
+        /// identical bytes sent without this flag count as use.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        focus_report: bool,
     },
     Resize {
         controller_id: u64,
@@ -846,6 +877,46 @@ pub enum Response {
         incarnation: u64,
         exit_status: ProcessExitStatus,
     },
+    UnusedDojoClose {
+        dojo_id: DojoId,
+        outcome: UnusedDojoCloseOutcome,
+    },
+}
+
+/// Result of [`Request::CloseUnusedDojo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum UnusedDojoCloseOutcome {
+    /// The Dojo was removed and its process is shutting down.
+    Closed {
+        topology_revision: TopologyRevision,
+        /// Its Lair, never named by the user, held no other Dojo and went too.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        lair_removed: bool,
+    },
+    /// The Dojo counts as used and was left unchanged.
+    Used { reason: DojoUse },
+}
+
+/// Why a Dojo counts as used, so it is never closed automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DojoUse {
+    /// It no longer holds only its original Splint.
+    Split,
+    /// It did not start in this daemon as a plain default-shell terminal, or
+    /// its Splint was relaunched or restored since.
+    Launch,
+    /// It or its Splint was renamed.
+    Renamed,
+    /// Its Splint received client input.
+    Input,
+    /// Another Window is attached to it.
+    Attached,
+    /// A program other than the shell holds the terminal foreground.
+    Foreground,
+    /// Its Splint is not running.
+    NotRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3741,7 +3812,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 37);
+        assert_eq!(PROTOCOL_VERSION, 38);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -3967,6 +4038,7 @@ mod tests {
             expected_topology_revision: TopologyRevision::new(7),
             name: "xdg".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let encoded = serde_json::to_vec(&transient).unwrap();
         assert_eq!(
@@ -3987,6 +4059,7 @@ mod tests {
             name: "work".into(),
             launch: launch.clone(),
             promote_transient_lair: true,
+            generated_name: false,
         };
         let mut promotion_value = serde_json::to_value(&promotion).unwrap();
         assert_eq!(promotion_value["promote_transient_lair"], true);
@@ -4428,6 +4501,88 @@ mod tests {
         empty_before_oldest.rows.clear();
         empty_before_oldest.has_older = false;
         assert!(empty_before_oldest.validate().is_ok());
+    }
+
+    #[test]
+    fn unused_dojo_close_has_explicit_wire_shapes() {
+        let dojo_id = DojoId::new();
+        let request = Request::CloseUnusedDojo { dojo_id };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"type": "close_unused_dojo", "dojo_id": dojo_id})
+        );
+        let used = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Used {
+                reason: DojoUse::Foreground,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&used).unwrap(),
+            serde_json::json!({
+                "type": "unused_dojo_close",
+                "dojo_id": dojo_id,
+                "outcome": {"outcome": "used", "reason": "foreground"},
+            })
+        );
+        let closed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: false,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&closed).unwrap()["outcome"],
+            serde_json::json!({"outcome": "closed", "topology_revision": 0})
+        );
+        let lair_removed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&lair_removed).unwrap()["outcome"]["lair_removed"],
+            serde_json::json!(true)
+        );
+        for response in [used, closed, lair_removed] {
+            assert_eq!(
+                serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap())
+                    .unwrap(),
+                response
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<Request>(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn input_marks_focus_reports_only_when_flagged() {
+        let splint_id = SplintId::new();
+        let input = |focus_report| Request::Input {
+            controller_id: 3,
+            splint_id,
+            incarnation: 4,
+            bytes: b"\x1b[I".to_vec(),
+            focus_report,
+        };
+        let ordinary = serde_json::to_value(input(false)).unwrap();
+        // Ordinary input keeps the encoding older peers send and accept.
+        assert!(ordinary.get("focus_report").is_none());
+        assert_eq!(
+            serde_json::from_value::<Request>(ordinary).unwrap(),
+            input(false)
+        );
+        let flagged = serde_json::to_value(input(true)).unwrap();
+        assert_eq!(flagged["focus_report"], true);
+        assert_eq!(
+            serde_json::from_value::<Request>(flagged).unwrap(),
+            input(true)
+        );
     }
 
     #[test]

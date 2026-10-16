@@ -313,7 +313,7 @@ fn fresh_lair_name(now: SystemTime, process_id: u32) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("terminal-{stamp}-{process_id}")
+    splinterm_core::generated_lair_name(stamp, process_id)
 }
 
 pub(in crate::app) async fn xdg_launch(
@@ -350,6 +350,7 @@ pub(in crate::app) async fn xdg_launch(
             expected_topology_revision: expected,
             name,
             launch: launch_parameters(cwd, command, &config),
+            generated_name: true,
         })
         .await?
     else {

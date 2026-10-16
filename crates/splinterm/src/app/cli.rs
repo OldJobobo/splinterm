@@ -712,6 +712,7 @@ async fn run_headless(
                     splint_id,
                     incarnation,
                     bytes: text.into_bytes(),
+                    focus_report: false,
                 })
                 .await?;
             connection.release_control(controller_id).await?;
@@ -1252,6 +1253,7 @@ mod tests {
             LaunchSemantics::RemoteInteractive,
             TopologyRevision::default(),
             "remote".to_owned(),
+            false,
             None,
             Vec::new(),
             &config,

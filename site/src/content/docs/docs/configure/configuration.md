@@ -32,6 +32,7 @@ lines=1000
 [multiplexer]
 persistent-by-default=yes
 persist-on-tab-organization=yes
+close-unused=no
 divider-style=line
 frame-title=splint
 
@@ -68,6 +69,7 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `cursor.style` | `block`, `beam`, or `underline` | `block` |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical Lairs are persistent (`yes`) or Window-owned (`no`) | `yes` |
 | `multiplexer.persist-on-tab-organization` | create/name/rename a tab atomically promotes its transient Lair | `yes` |
+| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used | `no` |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
 | `key-bindings.profile` | `splinterm` or `omarchy-tmux` | `splinterm` |
@@ -81,6 +83,8 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 `persistent-by-default=no` applies to commandless desktop/SUPER+ENTER launches, bare `splinterm launch`, picker **New**, and in-Window **New Terminal**. Closing the owning Window terminates an unpromoted transient Lair. Explicitly named, command-bearing, preset, restore/relaunch, remote, automation, and MCP creation remains persistent.
 
 With `persist-on-tab-organization=yes`, creating another Dojo or explicitly naming/renaming a Dojo atomically promotes the complete Lair. Promotion is permanent, so a later Window close detaches normally. Set it to `no` to keep organized and multi-tab Lairs Window-owned. Generated Lair and `Dojo 1` names do not promote, and unpromoted transient Dojos never enter Recent Dojos.
+
+With `close-unused=yes`, **Close Tab** and closing the Window from the compositor terminate a Dojo that was never used instead of detaching from it. The daemon decides at the moment of the close: the Dojo must still hold only its original pane, never split; that pane must never have received keys, paste, or mouse input (focus reports do not count); it must have started as a plain default-shell terminal in the running daemon, in any Lair, named or not; the Dojo must never have been named, at creation (even a chosen name equal to the default label) or by a rename of it or its pane; no other Window may be attached, and a Window attaching during the close either keeps the Dojo or is refused; and the shell itself must hold the terminal foreground, so a program started from a shell startup file counts as use. Anything else detaches as before, as does **Detach Window**. When the closed Dojo was the last in a Lair the user never named (one created under a name Splinterm generated for a graphical launch, such as `terminal-1787899189123456789-4132`, and never renamed), that Lair goes too; a Lair the user named stays, empty, even when its name looks generated. Remote Windows get the same decision from the remote daemon.
 
 ## Font sizing and Wayland scale
 

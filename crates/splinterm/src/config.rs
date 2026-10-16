@@ -120,6 +120,8 @@ pub struct MultiplexerLifetimeConfig {
     pub persistent_by_default: bool,
     /// Whether creating or explicitly naming a Dojo promotes its transient Lair.
     pub persist_on_tab_organization: bool,
+    /// Whether Close Tab and Window close terminate Dojos that were never used.
+    pub close_unused: bool,
 }
 
 impl Default for MultiplexerLifetimeConfig {
@@ -127,6 +129,7 @@ impl Default for MultiplexerLifetimeConfig {
         Self {
             persistent_by_default: true,
             persist_on_tab_organization: true,
+            close_unused: false,
         }
     }
 }
@@ -483,6 +486,10 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             }
             "multiplexer.persist-on-tab-organization" => {
                 config.multiplexer_lifetime.persist_on_tab_organization = parse_bool(value, index)?;
+                false
+            }
+            "multiplexer.close-unused" => {
+                config.multiplexer_lifetime.close_unused = parse_bool(value, index)?;
                 false
             }
             "cursor.style" => {
@@ -1298,6 +1305,25 @@ mod tests {
         assert!(!defaults.allow_unrestricted_commands);
         assert!(defaults.multiplexer_lifetime.persistent_by_default);
         assert!(defaults.multiplexer_lifetime.persist_on_tab_organization);
+        assert!(!defaults.multiplexer_lifetime.close_unused);
+    }
+
+    #[test]
+    fn close_unused_is_opt_in_and_strict() {
+        assert!(!parse("").unwrap().config.multiplexer_lifetime.close_unused);
+        for enabled in ["yes", "true", "on", "1"] {
+            let loaded = parse(&format!("[multiplexer]\nclose-unused={enabled}\n")).unwrap();
+            assert!(loaded.config.multiplexer_lifetime.close_unused, "{enabled}");
+            assert!(loaded.diagnostics.is_empty());
+        }
+        for disabled in ["no", "false", "off", "0"] {
+            let loaded = parse(&format!("[multiplexer]\nclose-unused={disabled}\n")).unwrap();
+            assert!(
+                !loaded.config.multiplexer_lifetime.close_unused,
+                "{disabled}"
+            );
+        }
+        assert!(parse("[multiplexer]\nclose-unused=sometimes\n").is_err());
     }
 
     #[test]

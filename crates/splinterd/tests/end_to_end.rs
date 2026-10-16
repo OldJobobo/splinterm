@@ -16,12 +16,12 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessScope, ActiveScreen, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
-    ControlTransferDecision, ControlTransferOutcome, ErrorCode, HistoryTransition,
+    ControlTransferDecision, ControlTransferOutcome, DojoUse, ErrorCode, HistoryTransition,
     LaunchParameters, MAX_FRAME_BYTES, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
     MouseTracking, MutationPreflight, MutationTarget, PROTOCOL_VERSION, ProtocolError, Request,
     Response, ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalInputModes,
     TerminalProvenance, TerminalRow, TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate,
-    TopologyChangeKind, encode_frame,
+    TopologyChangeKind, UnusedDojoCloseOutcome, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -405,6 +405,21 @@ impl Connection {
     }
 
     async fn input(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        self.send_input(splint_id, incarnation, bytes, false).await;
+    }
+
+    /// Sends bytes the way the graphical client sends its focus reports.
+    async fn focus_report(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        self.send_input(splint_id, incarnation, bytes, true).await;
+    }
+
+    async fn send_input(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        bytes: &[u8],
+        focus_report: bool,
+    ) {
         let controller_id = self.acquire_control(splint_id, incarnation).await;
         assert!(matches!(
             self.request(Request::Input {
@@ -412,6 +427,7 @@ impl Connection {
                 splint_id,
                 incarnation,
                 bytes: bytes.to_vec(),
+                focus_report,
             })
             .await,
             Response::TerminalActionAcknowledged {
@@ -987,6 +1003,7 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             })
             .await
             .unwrap_err();
@@ -1043,6 +1060,7 @@ async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1260,6 +1278,7 @@ async fn runtime_relaunch_and_restore_preserve_topology_revision() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1364,6 +1383,7 @@ async fn mcp_controller_registry_owns_handled_and_atomic_actions() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1428,6 +1448,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1791,6 +1812,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1828,6 +1850,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2213,6 +2236,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2445,6 +2469,7 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2552,6 +2577,7 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2618,6 +2644,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2655,6 +2682,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2694,6 +2722,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2770,6 +2799,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "context-lifecycle".into(),
                 launch: context_launch(&restored_marker),
+                generated_name: false,
             })
             .await
         else {
@@ -2834,6 +2864,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 name: "context-dojo".into(),
                 launch: context_launch(&dojo_marker),
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -2875,6 +2906,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "durable".into(),
                 launch,
+                generated_name: false,
             })
             .await
         else {
@@ -2974,6 +3006,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "restore-scopes".into(),
                 launch: launch.clone(),
+                generated_name: false,
             })
             .await
         else {
@@ -3014,6 +3047,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 name: "second".into(),
                 launch,
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -3137,11 +3171,13 @@ async fn topology_cas_stream_and_complete_edits() {
             expected_topology_revision: snapshot.revision,
             name: "race-first".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let second_request = Request::CreateLair {
             expected_topology_revision: snapshot.revision,
             name: "race-second".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let (first_result, second_result) = tokio::join!(
             first.request_result(first_request),
@@ -3248,6 +3284,7 @@ async fn topology_cas_stream_and_complete_edits() {
                 name: "extra-dojo".into(),
                 launch,
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -3348,6 +3385,7 @@ async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "terminate-exact".into(),
                 launch,
+                generated_name: false,
             })
             .await
         else {
@@ -3427,6 +3465,7 @@ async fn killed_splint_still_notifies_subscribers_after_its_dojo_closes() {
             .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "terminate-dojo".into(),
+                generated_name: false,
                 launch: LaunchParameters {
                     cwd,
                     command: vec!["/bin/sh".into()],
@@ -3515,6 +3554,7 @@ async fn termination_waiting_on_a_resistant_process_does_not_block_topology_chan
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3561,6 +3601,7 @@ async fn termination_waiting_on_a_resistant_process_does_not_block_topology_chan
                         login_shell: false,
                         scrollback_lines: 100,
                     },
+                    generated_name: false,
                 })
                 .await,
             Response::LairCreated { .. }
@@ -3597,6 +3638,7 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3675,6 +3717,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3780,6 +3823,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                 splint_id,
                 incarnation,
                 bytes: b"stale".to_vec(),
+                focus_report: false,
             })
             .await
             .unwrap_err();
@@ -3791,6 +3835,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     splint_id,
                     incarnation,
                     bytes: b"printf 'transferred-control\\n'\n".to_vec(),
+                    focus_report: false,
                 })
                 .await,
             Response::TerminalActionAcknowledged {
@@ -3833,6 +3878,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "multiplex".into(),
                 launch: shell_launch(),
+                generated_name: false,
             })
             .await
         else {
@@ -4009,6 +4055,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                 splint_id: first_id,
                 incarnation: first_incarnation,
                 bytes: b"stale".to_vec(),
+                focus_report: false,
             })
             .await
             .unwrap_err();
@@ -4175,6 +4222,7 @@ async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resy
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         {
@@ -4298,6 +4346,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     login_shell: true,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             })
             .await
         {
@@ -4803,6 +4852,7 @@ async fn create_resistant_lair(
                 login_shell: false,
                 scrollback_lines: 100,
             },
+            generated_name: false,
         })
         .await
     else {
@@ -4864,6 +4914,7 @@ async fn pending_kill_splint_does_not_block_topology_changes() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await;
         assert!(matches!(response, Response::LairCreated { .. }));
@@ -4937,4 +4988,674 @@ async fn terminate_lair_during_pending_kill_splint_succeeds() {
     })
     .await
     .expect("Lair termination during KillSplint scenario timed out");
+}
+
+/// Writes an executable stand-in for a login shell into the daemon runtime.
+fn shell_script(daemon: &Daemon, name: &str, body: &str) -> PathBuf {
+    let path = daemon.runtime.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn plain_shell_launch(shell: &Path) -> LaunchParameters {
+    LaunchParameters {
+        cwd: std::env::current_dir().unwrap(),
+        command: Vec::new(),
+        shell: Some(shell.display().to_string()),
+        login_shell: false,
+        scrollback_lines: 100,
+    }
+}
+
+async fn create_lair_with(admin: &mut Connection, launch: LaunchParameters) -> MutationTarget {
+    let name = format!("unused {}", admin.topology().await.lairs().count());
+    create_named_lair(admin, name, false, launch).await
+}
+
+async fn create_named_lair(
+    admin: &mut Connection,
+    name: String,
+    generated_name: bool,
+    launch: LaunchParameters,
+) -> MutationTarget {
+    let expected_topology_revision = admin.topology_revision().await;
+    let Response::LairCreated { lair, .. } = admin
+        .request(Request::CreateLair {
+            expected_topology_revision,
+            name,
+            launch,
+            generated_name,
+        })
+        .await
+    else {
+        panic!("daemon did not create the Lair");
+    };
+    let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+        panic!("new Dojo was not a leaf");
+    };
+    let incarnation = admin.live_incarnation(splint.id).await;
+    MutationTarget {
+        lair_id: lair.id,
+        dojo_id: lair.dojos[0].id,
+        splint_id: splint.id,
+        incarnation,
+    }
+}
+
+async fn close_unused(connection: &mut Connection, dojo_id: DojoId) -> UnusedDojoCloseOutcome {
+    match connection
+        .request(Request::CloseUnusedDojo { dojo_id })
+        .await
+    {
+        Response::UnusedDojoClose {
+            dojo_id: closed,
+            outcome,
+        } if closed == dojo_id => outcome,
+        response => panic!("unexpected unused Dojo close response: {response:?}"),
+    }
+}
+
+async fn assert_dojo_used(connection: &mut Connection, dojo_id: DojoId, reason: DojoUse) {
+    assert_eq!(
+        close_unused(connection, dojo_id).await,
+        UnusedDojoCloseOutcome::Used { reason }
+    );
+    assert!(
+        connection.topology().await.find_dojo(dojo_id).is_some(),
+        "a used Dojo must stay"
+    );
+}
+
+async fn wait_for_pid_file(path: &Path) -> u32 {
+    loop {
+        if let Some(pid) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            return pid;
+        }
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn foreground_group(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(5)?
+        .parse()
+        .ok()
+}
+
+async fn wait_for_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(Instant::now() < deadline, "process {pid} was never reaped");
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unused_dojo_closes_and_its_shell_is_reaped() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let pid_file = daemon.runtime.join("shell.pid");
+        let shell = shell_script(
+            &daemon,
+            "pid-shell",
+            &format!("echo $$ > '{}'\nexec /bin/sh\n", pid_file.display()),
+        );
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let pid = wait_for_pid_file(&pid_file).await;
+        // Focus reports the client generates leave it unused.
+        admin
+            .focus_report(target.splint_id, target.incarnation, b"\x1b[I\x1b[O")
+            .await;
+        admin.release_control().await;
+        let UnusedDojoCloseOutcome::Closed {
+            topology_revision,
+            lair_removed,
+        } = close_unused(&mut admin, target.dojo_id).await
+        else {
+            panic!("an unused Dojo was kept");
+        };
+        // The Lair has a name the user chose, so it stays, empty.
+        assert!(!lair_removed);
+        let topology = admin.topology().await;
+        assert_eq!(topology.revision(), topology_revision);
+        assert!(topology.find_dojo(target.dojo_id).is_none());
+        assert!(topology.find_splint(target.splint_id).is_none());
+        let lair = topology.find_lair(target.lair_id).expect("its Lair stays");
+        assert!(lair.dojos.is_empty());
+        wait_for_exit(pid).await;
+        // A second request finds nothing to close.
+        let error = admin
+            .request_result(Request::CloseUnusedDojo {
+                dojo_id: target.dojo_id,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        daemon.shutdown();
+    })
+    .await
+    .expect("unused Dojo close scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_split_dojo_counts_as_used() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+
+        let split = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id: added, ..
+        } = admin
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: split.splint_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: plain_shell_launch(&shell),
+            })
+            .await
+        else {
+            panic!("daemon did not split the Splint");
+        };
+        assert_dojo_used(&mut admin, split.dojo_id, DojoUse::Split).await;
+        // Closing the original leaves a single Splint, but not the original.
+        let killed = admin
+            .request(Request::KillSplint {
+                splint_id: split.splint_id,
+                incarnation: split.incarnation,
+            })
+            .await;
+        assert!(matches!(killed, Response::SplintKilled { .. }));
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::CloseSplint {
+                expected_topology_revision,
+                splint_id: split.splint_id,
+            })
+            .await;
+        assert!(admin.topology().await.find_splint(added).is_some());
+        assert_dojo_used(&mut admin, split.dojo_id, DojoUse::Split).await;
+
+        // A split stays a user action after its extra pane closes again.
+        let reverted = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id: extra,
+            incarnation: extra_incarnation,
+            ..
+        } = admin
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: reverted.splint_id,
+                axis: Axis::Vertical,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: plain_shell_launch(&shell),
+            })
+            .await
+        else {
+            panic!("daemon did not split the Splint");
+        };
+        admin
+            .request(Request::KillSplint {
+                splint_id: extra,
+                incarnation: extra_incarnation,
+            })
+            .await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::CloseSplint {
+                expected_topology_revision,
+                splint_id: extra,
+            })
+            .await;
+        let topology = admin.topology().await;
+        let dojo = topology.find_dojo(reverted.dojo_id).unwrap();
+        assert!(matches!(&dojo.root, LayoutNode::Leaf(splint) if splint.id == reverted.splint_id));
+        assert_dojo_used(&mut admin, reverted.dojo_id, DojoUse::Split).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("split Dojo scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dojos_count_as_used_after_input_or_rename() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let typed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin.input(typed.splint_id, typed.incarnation, b"x").await;
+        admin.release_control().await;
+        assert_dojo_used(&mut admin, typed.dojo_id, DojoUse::Input).await;
+
+        // Focus-shaped bytes the client did not flag, from automation or an
+        // unbracketed paste, reached the shell and count as input.
+        let pasted = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin
+            .input(pasted.splint_id, pasted.incarnation, b"\x1b[I\x1b[O")
+            .await;
+        admin.release_control().await;
+        assert_dojo_used(&mut admin, pasted.dojo_id, DojoUse::Input).await;
+
+        let renamed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameDojo {
+                expected_topology_revision,
+                dojo_id: renamed.dojo_id,
+                name: "kept".into(),
+                promote_transient_lair: false,
+            })
+            .await;
+        assert_dojo_used(&mut admin, renamed.dojo_id, DojoUse::Renamed).await;
+
+        let pane_renamed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameSplint {
+                expected_topology_revision,
+                splint_id: pane_renamed.splint_id,
+                title: "kept".into(),
+            })
+            .await;
+        assert_dojo_used(&mut admin, pane_renamed.dojo_id, DojoUse::Renamed).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("used Dojo scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_plain_default_shell_dojos_can_be_unused() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+
+        let mut command_bearing = plain_shell_launch(&shell);
+        command_bearing.command = vec!["/bin/sh".into()];
+        let command = create_lair_with(&mut admin, command_bearing).await;
+        assert_dojo_used(&mut admin, command.dojo_id, DojoUse::Launch).await;
+
+        // A new Dojo whose name Splinterm generated qualifies; a name the user
+        // chose is use, even one equal to the default label.
+        let host = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        for (name, generated_name, used) in [
+            ("Dojo 2", true, None),
+            ("Dojo 2", false, Some(DojoUse::Renamed)),
+            ("chosen", false, Some(DojoUse::Renamed)),
+        ] {
+            let expected_topology_revision = admin.topology_revision().await;
+            let Response::DojoStarted { dojo_id, .. } = admin
+                .request(Request::NewDojo {
+                    expected_topology_revision,
+                    lair_id: host.lair_id,
+                    name: name.into(),
+                    launch: plain_shell_launch(&shell),
+                    promote_transient_lair: false,
+                    generated_name,
+                })
+                .await
+            else {
+                panic!("daemon did not create the Dojo");
+            };
+            match used {
+                Some(reason) => assert_dojo_used(&mut admin, dojo_id, reason).await,
+                None => assert!(matches!(
+                    close_unused(&mut admin, dojo_id).await,
+                    UnusedDojoCloseOutcome::Closed { .. }
+                )),
+            }
+        }
+
+        // A relaunched Splint is no longer the original incarnation.
+        let relaunched = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin
+            .request(Request::KillSplint {
+                splint_id: relaunched.splint_id,
+                incarnation: relaunched.incarnation,
+            })
+            .await;
+        assert_dojo_used(&mut admin, relaunched.dojo_id, DojoUse::NotRunning).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RelaunchSplint {
+                expected_topology_revision,
+                splint_id: relaunched.splint_id,
+                launch: plain_shell_launch(&shell),
+            })
+            .await;
+        assert_dojo_used(&mut admin, relaunched.dojo_id, DojoUse::Launch).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("plain launch scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attached_window_keeps_the_dojo_until_it_detaches() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(Path::new("/bin/sh"))).await;
+        let mut window = daemon.connect().await;
+        let (subscription_id, _) = window.attach(target.splint_id, target.incarnation).await;
+        assert_dojo_used(&mut admin, target.dojo_id, DojoUse::Attached).await;
+        assert_eq!(
+            window.request(Request::Detach { subscription_id }).await,
+            Response::Acknowledged
+        );
+        // An explicit detach is released before its acknowledgement.
+        assert!(matches!(
+            close_unused(&mut admin, target.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed { .. }
+        ));
+        daemon.shutdown();
+    })
+    .await
+    .expect("attached Window scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_in_the_foreground_counts_as_use() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let pid_file = daemon.runtime.join("startup.pid");
+        // Job control gives the startup program its own foreground group,
+        // as an interactive shell does for a program run from its rc file.
+        let shell = shell_script(
+            &daemon,
+            "startup-shell",
+            &format!(
+                "echo $$ > '{}'\nset -m\nsleep 30\nexec /bin/sh\n",
+                pid_file.display()
+            ),
+        );
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let pid = wait_for_pid_file(&pid_file).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while foreground_group(pid).is_none_or(|group| group == pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the startup program never took the foreground"
+            );
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_dojo_used(&mut admin, target.dojo_id, DojoUse::Foreground).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("foreground program scenario timed out");
+}
+
+enum InputOutcome {
+    Delivered,
+    Rejected,
+    Disconnected,
+}
+
+/// Sends input, tolerating the controller revocation that ends the
+/// connection when the Dojo closes first.
+async fn racing_input(
+    connection: &mut Connection,
+    target: &MutationTarget,
+    controller_id: u64,
+) -> InputOutcome {
+    let request_id = connection.request_id;
+    connection.request_id += 1;
+    let frame = ClientFrame::Request {
+        request_id,
+        diagnostic_correlation: None,
+        request: Request::Input {
+            controller_id,
+            splint_id: target.splint_id,
+            incarnation: target.incarnation,
+            bytes: b"x".to_vec(),
+            focus_report: false,
+        },
+    };
+    if connection
+        .stream
+        .write_all(&encode_frame(&frame).unwrap())
+        .await
+        .is_err()
+    {
+        return InputOutcome::Disconnected;
+    }
+    loop {
+        let mut length = [0_u8; 4];
+        if connection.stream.read_exact(&mut length).await.is_err() {
+            return InputOutcome::Disconnected;
+        }
+        let mut body = vec![0_u8; u32::from_be_bytes(length) as usize];
+        if connection.stream.read_exact(&mut body).await.is_err() {
+            return InputOutcome::Disconnected;
+        }
+        match serde_json::from_slice::<ServerFrame>(&body).unwrap() {
+            ServerFrame::Response {
+                request_id: id,
+                result: Response::TerminalActionAcknowledged { .. },
+            } if id == request_id => return InputOutcome::Delivered,
+            ServerFrame::Error {
+                request_id: Some(id),
+                ..
+            } if id == request_id => return InputOutcome::Rejected,
+            ServerFrame::Error {
+                request_id: None, ..
+            } => return InputOutcome::Disconnected,
+            ServerFrame::Event { .. } => {}
+            frame => panic!("unexpected input frame: {frame:?}"),
+        }
+    }
+}
+
+// Input racing the close either lands, keeping the Dojo, or is refused because
+// the close won. It never reaches a shell that the close then ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_racing_an_unused_close_never_reaches_a_closed_shell() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let (mut kept, mut closed) = (0, 0);
+        for round in 0..12_u64 {
+            let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+            let mut typist = daemon.connect().await;
+            let controller_id = typist
+                .acquire_control(target.splint_id, target.incarnation)
+                .await;
+            // Delay alternate inputs so each order occurs: immediate input lands
+            // first, a delayed one finds the close holding the Splint.
+            let (typed, outcome) = tokio::join!(
+                async {
+                    if round % 2 == 1 {
+                        time::sleep(Duration::from_millis(1)).await;
+                    }
+                    racing_input(&mut typist, &target, controller_id).await
+                },
+                close_unused(&mut admin, target.dojo_id),
+            );
+            let present = admin.topology().await.find_dojo(target.dojo_id).is_some();
+            match (typed, outcome) {
+                (
+                    InputOutcome::Delivered,
+                    UnusedDojoCloseOutcome::Used {
+                        reason: DojoUse::Input,
+                    },
+                ) if present => kept += 1,
+                (
+                    InputOutcome::Rejected | InputOutcome::Disconnected,
+                    UnusedDojoCloseOutcome::Closed { .. },
+                ) if !present => closed += 1,
+                (_, outcome) => panic!("input and close disagreed: {outcome:?}, present={present}"),
+            }
+        }
+        assert_eq!(kept + closed, 12);
+        daemon.shutdown();
+    })
+    .await
+    .expect("input race scenario timed out");
+}
+
+// Ending a shell that ignores hangup takes the whole shutdown grace. The close
+// must answer, and unrelated topology changes proceed, while it retires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unused_close_does_not_wait_for_the_shell_under_the_transaction() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let pid_file = daemon.runtime.join("resistant.pid");
+        let shell = shell_script(
+            &daemon,
+            "resistant-shell",
+            &format!(
+                "echo $$ > '{}'\ntrap '' HUP TERM INT\nwhile :; do sleep 1; done\n",
+                pid_file.display()
+            ),
+        );
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let pid = wait_for_pid_file(&pid_file).await;
+        let group = ProcessGroupGuard::new(pid);
+        time::sleep(Duration::from_millis(200)).await;
+        let started = Instant::now();
+        assert!(matches!(
+            close_unused(&mut admin, target.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed { .. }
+        ));
+        let expected_topology_revision = admin.topology_revision().await;
+        let created = admin
+            .request(Request::CreateLair {
+                expected_topology_revision,
+                name: "unrelated".into(),
+                launch: plain_shell_launch(Path::new("/bin/sh")),
+                generated_name: false,
+            })
+            .await;
+        assert!(matches!(created, Response::LairCreated { .. }));
+        // Hangup then termination each wait one test grace before SIGKILL.
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "the close or the unrelated change waited for the shell"
+        );
+        assert!(
+            Path::new(&format!("/proc/{pid}")).exists(),
+            "the resistant shell should still be retiring"
+        );
+        wait_for_exit(pid).await;
+        group.disarm();
+        daemon.shutdown();
+    })
+    .await
+    .expect("retiring unused Dojo scenario timed out");
+}
+
+// A Lair the user never named goes with its last unused Dojo. A Lair that
+// still holds another Dojo, or that was renamed, stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unused_close_removes_an_empty_unnamed_lair() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let generated =
+            |index: u128| splinterm_core::generated_lair_name(1_787_899_189_000 + index, 42);
+
+        let unnamed =
+            create_named_lair(&mut admin, generated(1), true, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::DojoStarted {
+            dojo_id: second, ..
+        } = admin
+            .request(Request::NewDojo {
+                expected_topology_revision,
+                lair_id: unnamed.lair_id,
+                name: "Dojo 2".into(),
+                launch: plain_shell_launch(&shell),
+                promote_transient_lair: false,
+                generated_name: true,
+            })
+            .await
+        else {
+            panic!("daemon did not create the Dojo");
+        };
+        // With another Dojo left, the Lair stays.
+        assert!(matches!(
+            close_unused(&mut admin, second).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        assert!(admin.topology().await.find_lair(unnamed.lair_id).is_some());
+        // Its last Dojo takes it along, in one topology revision.
+        let before = admin.topology_revision().await;
+        let UnusedDojoCloseOutcome::Closed {
+            topology_revision,
+            lair_removed: true,
+        } = close_unused(&mut admin, unnamed.dojo_id).await
+        else {
+            panic!("the empty unnamed Lair was kept");
+        };
+        let topology = admin.topology().await;
+        assert!(topology.find_lair(unnamed.lair_id).is_none());
+        assert_eq!(topology.revision(), topology_revision);
+        assert!(topology_revision > before);
+
+        // Renaming names it.
+        let renamed =
+            create_named_lair(&mut admin, generated(2), true, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameLair {
+                expected_topology_revision,
+                lair_id: renamed.lair_id,
+                name: "kept".into(),
+            })
+            .await;
+        assert!(matches!(
+            close_unused(&mut admin, renamed.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        let kept = admin.topology().await;
+        assert!(kept.find_lair(renamed.lair_id).unwrap().dojos.is_empty());
+
+        // A name the user chose stays, even one shaped like a generated name.
+        let lookalike =
+            create_named_lair(&mut admin, generated(3), false, plain_shell_launch(&shell)).await;
+        assert!(matches!(
+            close_unused(&mut admin, lookalike.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        assert!(
+            admin
+                .topology()
+                .await
+                .find_lair(lookalike.lair_id)
+                .is_some()
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("unnamed Lair scenario timed out");
 }
