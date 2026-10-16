@@ -18,6 +18,8 @@ TARGET_MONITOR = "Virtual-1"
 TARGET_WORKSPACE = 8
 ADDRESS = re.compile(r"^0x[0-9A-Fa-f]+$")
 LAUNCH_TOKEN = re.compile(r"^[0-9a-f]{32}$")
+# How long restore waits for closing windows to leave the test workspace.
+RESTORE_SETTLE_SECONDS = 10.0
 
 
 def fail(message: str) -> NoReturn:
@@ -266,6 +268,27 @@ def place(path: Path, client_pid: int, client_token: str) -> None:
     )
 
 
+def target_workspace_problem(
+    state: dict[str, Any], current_clients: list[dict[str, Any]]
+) -> str | None:
+    """Why the test workspace is not yet back to its pre-launch state, if it is not."""
+    try:
+        if state.get("owner_address") is None:
+            require_empty_target_workspace(current_clients)
+        else:
+            before = set(state.get("before_addresses", []))
+            unowned = sorted(
+                str(client.get("address"))
+                for client in current_clients
+                if workspace_id(client) == TARGET_WORKSPACE and client.get("address") not in before
+            )
+            if unowned:
+                fail(f"guest workspace {TARGET_WORKSPACE} gained unowned windows: {unowned}")
+    except RuntimeError as error:
+        return str(error)
+    return None
+
+
 def restore(path: Path) -> None:
     state = read_state(path)
     target_address = state.get("target_address")
@@ -277,17 +300,17 @@ def restore(path: Path) -> None:
     current_clients = clients()
     if target_address and any(client.get("address") == target_address for client in current_clients):
         fail(f"guest test window is still mapped: {target_address}")
-    if state.get("owner_address") is None:
-        require_empty_target_workspace(current_clients)
-    else:
-        before = set(state.get("before_addresses", []))
-        unowned = sorted(
-            str(client.get("address"))
-            for client in current_clients
-            if workspace_id(client) == TARGET_WORKSPACE and client.get("address") not in before
-        )
-        if unowned:
-            fail(f"guest workspace {TARGET_WORKSPACE} gained unowned windows: {unowned}")
+    # Other windows of the same session may still be closing (package-stop
+    # stops every client at once), so give the workspace the same bound.
+    deadline = time.monotonic() + RESTORE_SETTLE_SECONDS
+    while True:
+        problem = target_workspace_problem(state, current_clients)
+        if problem is None or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+        current_clients = clients()
+    if problem is not None:
+        fail(problem)
 
     recorded_monitor = state.get("monitor")
     if monitor_record() != recorded_monitor:

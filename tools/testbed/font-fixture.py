@@ -17,7 +17,10 @@ no longer starts with an sfnt tag. That rejects the whole candidate generation
 and keeps the last valid font in every build profile.
 
 The generated `fonts.conf` is a user-level file: install it as
-`$XDG_CONFIG_HOME/fontconfig/fonts.conf` for the process under test. It never
+`$XDG_CONFIG_HOME/fontconfig/fonts.conf` for the process under test. The tool
+verifies it exactly that way, with `FONTCONFIG_FILE` unset and a private
+`XDG_CONFIG_HOME` (`<output>/xdg-config`), so the ambient user configuration
+(for example Omarchy's strong monospace choice) cannot take part. It never
 installs fonts, touches shared caches, or edits the ambient configuration.
 """
 
@@ -42,7 +45,6 @@ FONT_SUFFIXES = (".ttf", ".otf", ".ttc", ".otc")
 # lazily and only fails later, in glyph metrics, where debug builds panic
 # inside the parser instead of rejecting.
 TRUNCATED_BYTES = 8
-SYSTEM_CONFIG = Path("/etc/fonts/fonts.conf")
 CACHE_SUFFIX_MARK = ".cache-"
 
 
@@ -50,7 +52,9 @@ def fail(message: str) -> NoReturn:
     raise RuntimeError(message)
 
 
-def fontconfig_environment(config: Path | None) -> dict[str, str]:
+def fontconfig_environment(
+    config: Path | None = None, xdg_config_home: Path | None = None
+) -> dict[str, str]:
     environment = os.environ.copy()
     # Fontconfig stamps and validates caches with SOURCE_DATE_EPOCH when it is
     # set (as reproducible-build shells do), which would discard the fixture
@@ -60,11 +64,12 @@ def fontconfig_environment(config: Path | None) -> dict[str, str]:
         environment.pop("FONTCONFIG_FILE", None)
     else:
         environment["FONTCONFIG_FILE"] = str(config)
+    if xdg_config_home is not None:
+        environment["XDG_CONFIG_HOME"] = str(xdg_config_home)
     return environment
 
 
-def fc_match(config: Path | None, pattern: str, sorted_: bool = False) -> list[str]:
-    environment = fontconfig_environment(config)
+def fc_match(environment: dict[str, str], pattern: str, sorted_: bool = False) -> list[str]:
     arguments = ["fc-match", "-f", "%{file}\\n", pattern]
     if sorted_:
         arguments.insert(1, "-s")
@@ -124,7 +129,7 @@ def invalid_candidate(output: Path, source: Path | None, family: str) -> dict[st
     if not output.parent.is_dir():
         fail(f"fixture parent directory is missing: {output.parent}")
     if source is None:
-        matches = fc_match(None, "monospace:style=Regular")
+        matches = fc_match(fontconfig_environment(), "monospace:style=Regular")
         if not matches:
             fail("ambient Fontconfig resolved no monospace font to copy")
         source = Path(matches[0])
@@ -170,16 +175,16 @@ def invalid_candidate(output: Path, source: Path | None, family: str) -> dict[st
             strong_monospace(family),
         ],
     )
-    # Model the installed layout: the system configuration followed by this
-    # user-level file, as the system `50-user` include does.
-    verify = output / "verify.conf"
-    includes = []
-    if SYSTEM_CONFIG.is_file():
-        includes.append(text_element("include", str(SYSTEM_CONFIG), ignore_missing="no"))
-    includes.append(text_element("include", str(user_config), ignore_missing="no"))
-    write_config(verify, includes)
+    # Verify the way the packaged session sees it: the system configuration
+    # with this file as the only user configuration, never the ambient one.
+    session_config_home = output / "xdg-config"
+    (session_config_home / "fontconfig").mkdir(mode=0o700, parents=True)
+    session_config_home.chmod(0o700)
+    shutil.copyfile(user_config, session_config_home / "fontconfig" / "fonts.conf")
+    (session_config_home / "fontconfig" / "fonts.conf").chmod(0o600)
+    session = fontconfig_environment(xdg_config_home=session_config_home)
 
-    if fc_match(verify, "monospace:style=Regular")[:1] != [str(font)]:
+    if fc_match(session, "monospace:style=Regular")[:1] != [str(font)]:
         fail("the fixture does not win the monospace alias before truncation")
 
     directory_mtime = fonts.stat().st_mtime_ns
@@ -190,7 +195,7 @@ def invalid_candidate(output: Path, source: Path | None, family: str) -> dict[st
     if fonts.stat().st_mtime_ns != directory_mtime:
         fail("truncation changed the fixture directory and invalidated its cache")
 
-    resolved = fc_match(verify, "monospace:style=Regular")
+    resolved = fc_match(session, "monospace:style=Regular")
     if resolved[:1] != [str(font)]:
         fail(f"the cached fixture no longer resolves after truncation: {resolved[:1]}")
     if font.stat().st_size != TRUNCATED_BYTES:
@@ -213,7 +218,7 @@ def invalid_candidate(output: Path, source: Path | None, family: str) -> dict[st
         "font_bytes": TRUNCATED_BYTES,
         "source": str(source),
         "user_config": str(user_config),
-        "verify_config": str(verify),
+        "session_config_home": str(session_config_home),
         "monospace_first_match": resolved[0],
     }
 

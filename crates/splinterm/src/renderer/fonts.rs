@@ -2267,13 +2267,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual fixture integration; run with FONTCONFIG_FILE set to the verify.conf printed by tools/testbed/font-fixture.py invalid-candidate"]
+    #[ignore = "manual fixture integration; run with FONTCONFIG_FILE unset and XDG_CONFIG_HOME set to the session_config_home printed by tools/testbed/font-fixture.py invalid-candidate"]
     fn live_staging_rejects_the_testbed_invalid_candidate_fixture() {
-        let config = std::env::var_os("FONTCONFIG_FILE")
-            .expect("set FONTCONFIG_FILE to the fixture's verify.conf");
+        // The packaged session's view: only the fixture's user configuration.
         assert!(
-            std::path::Path::new(&config).ends_with("verify.conf"),
-            "FONTCONFIG_FILE must be the fixture's verify.conf"
+            std::env::var_os("FONTCONFIG_FILE").is_none(),
+            "unset FONTCONFIG_FILE so the session's user configuration is used"
+        );
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .expect("set XDG_CONFIG_HOME to the fixture's session_config_home");
+        assert!(
+            std::path::Path::new(&config_home).ends_with("xdg-config"),
+            "XDG_CONFIG_HOME must be the fixture's session_config_home"
         );
         let sources =
             run_fontconfig_sources("primary regular", crate::config::DEFAULT_FONT, false).unwrap();

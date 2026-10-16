@@ -642,6 +642,8 @@ REMOTE
     fi
     (($# == 1)) || fail 'package-config takes RELPATH (content on stdin) or --clear'
     relpath=$1
+    # Match bytes, not locale characters, so non-ASCII names never pass.
+    LC_ALL=C
     [[ ${#relpath} -le 128 \
       && $relpath =~ ^(splinterm|fontconfig)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ \
       && ! $relpath =~ (^|/)\.\.?(/|$) ]] \
@@ -668,7 +670,10 @@ write_into() {
   destination="$root/$relpath"
   mkdir -p -m 700 -- "$(dirname -- "$destination")"
   [[ ! -L $destination ]] || { printf 'refusing symlink: %s\n' "$destination" >&2; exit 1; }
-  install -m 600 -- "$content" "$destination"
+  # Replace atomically: a watcher polling the file never sees it missing.
+  staged=$(mktemp "$(dirname -- "$destination")/.package-config.XXXXXX")
+  install -m 600 -- "$content" "$staged"
+  mv -f -- "$staged" "$destination"
   printf 'wrote %s\n' "$destination"
 }
 mkdir -p -m 700 -- "$seed"
@@ -718,15 +723,7 @@ case $SPLINTERM_TESTBED_EXTRA_PROGRAM in
   xdg) program=(/usr/bin/splinterm-xdg-terminal-exec) ;;
   *) printf 'invalid extra program\n' >&2; exit 2 ;;
 esac
-extra=
-for index in 1 2 3 4; do
-  if mkdir -m 700 "$runtime/extra-$index" 2>/dev/null; then
-    extra="$runtime/extra-$index"
-    break
-  fi
-done
-[[ -n $extra ]] || { printf 'at most four additional windows per session\n' >&2; exit 1; }
-extra_state="$extra/guest-window.json"
+# Locate the compositor before claiming a slot, so a failure here leaks nothing.
 instance=$(hyprctl instances -j | jq -er \
   'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -735,8 +732,11 @@ WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
 export HYPRLAND_INSTANCE_SIGNATURE
 HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+extra=
+extra_state=
 client_pid=
 cleanup_failed_extra() {
+  [[ -n $extra ]] || return 0
   [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
   [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
   if [[ -e $extra_state ]]; then
@@ -748,7 +748,16 @@ cleanup_failed_extra() {
   fi
   rm -rf -- "$extra"
 }
+# Armed before the slot is claimed: any later failure releases the slot.
 trap cleanup_failed_extra ERR
+for index in 1 2 3 4; do
+  if mkdir -m 700 "$runtime/extra-$index" 2>/dev/null; then
+    extra="$runtime/extra-$index"
+    break
+  fi
+done
+[[ -n $extra ]] || { printf 'at most four additional windows per session\n' >&2; exit 1; }
+extra_state="$extra/guest-window.json"
 python "$package_root/source/tools/testbed/guest-window.py" prepare \
   --state "$extra_state" --owner-state "$window_state"
 client_token=$(python -c 'import secrets; print(secrets.token_hex(16))')
@@ -782,15 +791,24 @@ extra="$runtime/extra-$SPLINTERM_TESTBED_EXTRA_ID"
   exit 1
 }
 [[ -d $extra && ! -L $extra ]] || { printf 'no additional window %s\n' "$extra" >&2; exit 1; }
-token=$(<"$extra/client-token")
-# Stop only processes carrying this window's launch token and private socket.
-for process in /proc/[0-9]*; do
-  [[ -r $process/environ ]] || continue
-  environment=$(tr '\0' '\n' <"$process/environ" 2>/dev/null || true)
-  grep -Fqx "SPLINTERM_TEST_WINDOW_TOKEN=$token" <<<"$environment" || continue
-  grep -Fqx "SPLINTERM_SOCKET=$socket" <<<"$environment" || continue
-  kill "${process##*/}" 2>/dev/null || true
-done
+token=
+if [[ -f $extra/client-token && ! -L $extra/client-token ]]; then
+  token=$(<"$extra/client-token")
+fi
+# A launch that failed before writing its token started no process; still
+# restore and release the slot. Stop only processes carrying this window's
+# launch token and private socket.
+if [[ $token =~ ^[0-9a-f]{32}$ ]]; then
+  for process in /proc/[0-9]*; do
+    [[ -r $process/environ ]] || continue
+    environment=$(tr '\0' '\n' <"$process/environ" 2>/dev/null || true)
+    grep -Fqx "SPLINTERM_TEST_WINDOW_TOKEN=$token" <<<"$environment" || continue
+    grep -Fqx "SPLINTERM_SOCKET=$socket" <<<"$environment" || continue
+    kill "${process##*/}" 2>/dev/null || true
+  done
+elif [[ -n $token ]]; then
+  printf 'additional window token is malformed; no process was stopped\n' >&2
+fi
 instance=$(hyprctl instances -j | jq -er \
   'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -839,7 +857,10 @@ if [[ $SPLINTERM_TESTBED_INSTALL_FIXTURE == true ]]; then
   if [[ -e $destination && ! -e $destination.before-fixture ]]; then
     cp -- "$destination" "$destination.before-fixture"
   fi
-  install -m 600 -- "$output/fonts.conf" "$destination"
+  # Replace atomically: the live font watcher never sees fonts.conf missing.
+  staged=$(mktemp "$config/fontconfig/.fonts.conf.XXXXXX")
+  install -m 600 -- "$output/fonts.conf" "$staged"
+  mv -f -- "$staged" "$destination"
   printf 'installed invalid-candidate fonts.conf into %s\n' "$destination"
 fi
 REMOTE

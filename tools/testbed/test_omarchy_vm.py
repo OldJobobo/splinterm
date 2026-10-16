@@ -22,6 +22,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         remote_root: str = "/home/omarchy/Projects/splinterm-testbed-review",
         root_override: str | None = None,
         input_text: str | None = None,
+        locale: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -60,6 +61,8 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         environment.pop("SPLINTERM_TESTBED_REMOTE_ROOT", None)
         if root_override is not None:
             environment["SPLINTERM_TESTBED_REMOTE_ROOT"] = root_override
+        if locale is not None:
+            environment.update({"LANG": locale, "LC_ALL": locale})
         environment.update(
             {
                 "CALL_LOG": str(log),
@@ -401,9 +404,12 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             "splinterm/.hidden",
             "fontconfig/a//b",
             "splinterm/" + "x" * 130,
+            "splinterm/caf\u00e9.ini",
         ):
             with self.subTest(relpath=relpath):
-                result, log = self.run_runner("package-config", relpath, input_text="x")
+                result, log = self.run_runner(
+                    "package-config", relpath, input_text="x", locale="en_US.UTF-8"
+                )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(log.exists())
         result, log = self.run_runner("package-config")
@@ -461,6 +467,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             self.assertEqual(seeded.stat().st_mode & 0o777, 0o600)
             self.assertFalse((package_root / "acceptance-config").exists())
             self.assertEqual(list(package_root.glob(".config-content.*")), [])
+            self.assertEqual(list(seeded.parent.glob(".package-config.*")), [])
 
             result = subprocess.run(
                 ["bash", "-c", script],
@@ -509,7 +516,10 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertLess(allocate, prepare)
         self.assertLess(prepare, launch)
         self.assertLess(launch, place)
-        self.assertLess(extra.index("trap cleanup_failed_extra ERR"), prepare)
+        trap = extra.index("trap cleanup_failed_extra ERR")
+        self.assertLess(extra.index("instance=$(hyprctl instances -j"), trap)
+        self.assertLess(trap, allocate)
+        self.assertIn("[[ -n $extra ]] || return 0", extra)
         self.assertIn('--owner-state "$window_state"', extra)
         self.assertIn('SPLINTERM_SOCKET="$socket"', extra)
         self.assertIn('XDG_CONFIG_HOME="$config"', extra)
@@ -528,6 +538,9 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertIn("SPLINTERM_TESTBED_EXTRA_ID=2", log.read_text())
         close = self.action("package-close-extra")
         self.assertIn('grep -Fqx "SPLINTERM_TEST_WINDOW_TOKEN=$token"', close)
+        token_check = close.index("if [[ $token =~ ^[0-9a-f]{32}$ ]]; then")
+        self.assertLess(token_check, close.index('kill "${process##*/}"'))
+        self.assertIn("[[ -f $extra/client-token && ! -L $extra/client-token ]]", close)
         self.assertIn('grep -Fqx "SPLINTERM_SOCKET=$socket"', close)
         self.assertLess(close.index('kill "${process##*/}"'), close.index('guest-window.py" restore'))
         self.assertLess(close.index('guest-window.py" restore'), close.index('rm -rf -- "$extra"'))
@@ -549,9 +562,10 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertIn("tools/testbed/font-fixture.py\" invalid-candidate", fixture)
         self.assertLess(
             fixture.index('$(<"$owner") == "$package_root"'),
-            fixture.index('install -m 600 -- "$output/fonts.conf" "$destination"'),
+            fixture.index('install -m 600 -- "$output/fonts.conf" "$staged"'),
         )
         self.assertIn('"$destination.before-fixture"', fixture)
+        self.assertIn('mv -f -- "$staged" "$destination"', fixture)
 
 
 if __name__ == "__main__":

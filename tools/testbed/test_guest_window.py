@@ -308,12 +308,28 @@ class GuestWindowTests(unittest.TestCase):
         unowned = {"address": "0xd4", "workspace": {"id": 8}}
         with (
             mock.patch.object(guest_window, "clients", return_value=[main, unowned]),
+            mock.patch.object(guest_window, "RESTORE_SETTLE_SECONDS", 0),
             mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
             mock.patch.object(guest_window, "command"),
             self.assertRaisesRegex(RuntimeError, "unowned windows"),
         ):
             guest_window.restore(path)
         self.assertTrue(path.exists())
+
+        # A window of the same session that is still closing gets the settle bound.
+        path = extra_state()
+        closing = {"address": "0xe5", "workspace": {"id": 8}}
+        snapshots = iter([[main, closing], [main, closing], [main, closing]])
+        with (
+            mock.patch.object(
+                guest_window, "clients", side_effect=lambda: next(snapshots, [main])
+            ),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window.time, "sleep"),
+            mock.patch.object(guest_window, "command"),
+        ):
+            guest_window.restore(path)
+        self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":
