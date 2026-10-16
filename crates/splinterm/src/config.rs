@@ -1950,6 +1950,16 @@ mod tests {
         assert!(contrast >= INACTIVE_TAB_MIN_CONTRAST);
         assert!(contrast < contrast_ratio(foreground, background));
 
+        // A light theme (Omarchy Friendly Wave) mixes its faint muted color
+        // darker until it is readable, without exceeding the foreground.
+        let (background, foreground, muted) = (0xff_fc_f0, 0x10_0f_0f, 0xb7_b5_ac);
+        let light = inactive_tab_foreground_fallback(background, foreground, muted);
+        assert_eq!(light, 0x64_62_5e);
+        let contrast = contrast_ratio(light, background);
+        assert!(contrast >= INACTIVE_TAB_MIN_CONTRAST);
+        assert!(contrast < contrast_ratio(foreground, background));
+        assert!((contrast - 5.92).abs() < 0.01);
+
         // A "muted" color louder than the foreground is never used or mixed in.
         assert_eq!(
             inactive_tab_foreground_fallback(0xff_ff_ff, 0x33_33_33, 0x00_00_00),
