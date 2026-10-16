@@ -145,9 +145,22 @@ def prepare(path: Path, owner_path: Path | None = None) -> None:
     address = active_window.get("address", "") if isinstance(active_window, dict) else ""
     if address and not ADDRESS.fullmatch(address):
         fail(f"active window returned an invalid address: {address}")
+    baseline = {
+        "active_window": address,
+        "active_workspace": active_workspace.get("id"),
+        "cursor": {"x": cursor.get("x"), "y": cursor.get("y")},
+    }
+    if owner_path is not None:
+        # Every extra window of a session restores to the state before the
+        # first one opened, whichever slot closes last.
+        for sibling in sibling_states(path, owner_path.resolve()):
+            if isinstance(sibling.get("baseline"), dict):
+                baseline = sibling["baseline"]
+                break
     write_state(
         path,
         {
+            "baseline": baseline,
             "active_window": address,
             "active_workspace": active_workspace.get("id"),
             "before_addresses": sorted(
@@ -279,18 +292,28 @@ def sibling_window_addresses(path: Path, state: dict[str, Any]) -> set[str]:
     owner_state = state.get("owner_state")
     if not isinstance(owner_state, str):
         return set()
-    addresses = set()
-    for sibling in Path(owner_state).parent.glob("extra-*/guest-window.json"):
+    return {
+        address
+        for sibling in sibling_states(path, Path(owner_state))
+        if isinstance(address := sibling.get("target_address"), str)
+        and ADDRESS.fullmatch(address)
+    }
+
+
+def sibling_states(path: Path, owner_state: Path) -> list[dict[str, Any]]:
+    """States of the owner's other live additional-window slots, oldest slot first."""
+    states = []
+    for sibling in sorted(owner_state.parent.glob("extra-*/guest-window.json")):
         if sibling.resolve() == path.resolve():
             continue
         try:
-            address = json.loads(sibling.read_text(encoding="utf-8")).get("target_address")
-        except (OSError, ValueError, AttributeError):
-            # A sibling slot may be released while this one restores.
+            value = json.loads(sibling.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A sibling slot may be released while this one is read.
             continue
-        if isinstance(address, str) and ADDRESS.fullmatch(address):
-            addresses.add(address)
-    return addresses
+        if isinstance(value, dict):
+            states.append(value)
+    return states
 
 
 def target_workspace_problem(
@@ -345,11 +368,25 @@ def restore(path: Path) -> None:
     recorded_monitor = state.get("monitor")
     if monitor_record() != recorded_monitor:
         fail(f"target monitor state changed during the test: {recorded_monitor!r}")
-    workspace = state.get("active_workspace")
+    owner_state = state.get("owner_state")
+    if (
+        state.get("owner_address") is not None
+        and isinstance(owner_state, str)
+        and sibling_states(path, Path(owner_state))
+    ):
+        # Other extra windows remain: the last one to close restores the
+        # session baseline, so a stale per-slot snapshot is never reapplied.
+        path.unlink()
+        print("additional guest window closed; other additional windows remain")
+        return
+    baseline = state.get("baseline")
+    if not isinstance(baseline, dict):
+        baseline = state
+    workspace = baseline.get("active_workspace")
     if not isinstance(workspace, int) or workspace < 1:
         fail(f"recorded workspace is invalid: {workspace!r}")
     command("hyprctl", "dispatch", f'hl.dsp.focus({{ workspace = "{workspace}" }})')
-    active_window = state.get("active_window")
+    active_window = baseline.get("active_window")
     if active_window:
         if not ADDRESS.fullmatch(active_window):
             fail(f"recorded active window address is invalid: {active_window}")
@@ -359,7 +396,7 @@ def restore(path: Path) -> None:
                 "dispatch",
                 f'hl.dsp.focus({{ window = "address:{active_window}" }})',
             )
-    cursor = state.get("cursor", {})
+    cursor = baseline.get("cursor", {})
     x, y = cursor.get("x"), cursor.get("y")
     if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
         fail(f"recorded cursor is invalid: {cursor!r}")

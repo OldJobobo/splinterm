@@ -320,14 +320,17 @@ tools/testbed/omarchy-vm.sh font-fixture invalid-candidate --install
 `package-config` accepts only ASCII `splinterm/…` and `fontconfig/…` paths of at
 most 64 KiB, and live files are replaced atomically. An additional Window must
 join the guarded session's workspace beside its owner Window, and closing it
-stops only processes carrying its own launch token and private socket before
-restoring focus and cursor. `font-fixture` makes Fontconfig resolve `monospace`
-to a cached face whose bytes are no longer a font
+stops only processes carrying its own launch token and private socket. Extra
+Windows may close in any order; the last one to close restores the focus and
+cursor from before the first one opened. `font-fixture` makes Fontconfig resolve
+`monospace` to a cached face whose bytes are no longer a font
 (`tools/testbed/font-fixture.py`), so the live font watcher must reject the
 candidate and keep the last valid font. The tool verifies this as the packaged
 session sees it: `FONTCONFIG_FILE` unset and a private `XDG_CONFIG_HOME`, so the
 guest user's own Omarchy font choice cannot interfere. Install it only after
 launch: startup instead falls back to the documented JetBrains default.
+Each build goes into a fresh directory, so rebuilding never touches the fixture a
+live `fonts.conf` names, and older unreferenced builds are pruned.
 `package-stop` also removes the fixtures; the config seed is kept until
 `package-config --clear`.
 

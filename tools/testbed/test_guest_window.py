@@ -403,6 +403,79 @@ class GuestWindowTests(unittest.TestCase):
             guest_window.restore(second)
         self.assertFalse(second.exists())
 
+    def test_extra_windows_restore_the_baseline_from_before_the_first_one(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime = Path(temporary.name)
+        owner = runtime / "guest-window.json"
+        guest_window.write_state(owner, {"target_address": "0xa1"})
+        main = {"address": "0xa1", "workspace": {"id": 8}, "initialClass": guest_window.APP_ID}
+        first_window = dict(main, address="0xb2")
+        second_window = dict(main, address="0xc3")
+
+        def launch_extra(index: int, address: str, current: list, focus: dict) -> Path:
+            path = runtime / f"extra-{index}" / "guest-window.json"
+            workspaces = iter((focus["activeworkspace"], {"id": 8, "monitor": "Virtual-1"}))
+
+            def hypr_json(name: str, *_: str) -> object:
+                return next(workspaces) if name == "activeworkspace" else focus[name]
+
+            with (
+                mock.patch.object(guest_window, "clients", return_value=current),
+                mock.patch.object(guest_window, "hypr_json", side_effect=hypr_json),
+                mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+                mock.patch.object(guest_window, "command"),
+            ):
+                guest_window.prepare(path, owner)
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["target_address"] = address
+            guest_window.write_state(path, state)
+            return path
+
+        before = {
+            "activeworkspace": {"id": 3, "monitor": "Virtual-1"},
+            "activewindow": {"address": "0xa1"},
+            "cursorpos": {"x": 5, "y": 6},
+        }
+        first = launch_extra(1, "0xb2", [main], before)
+        # Focus and the cursor moved to the first extra before the second opened.
+        moved = {
+            "activeworkspace": {"id": 8, "monitor": "Virtual-1"},
+            "activewindow": {"address": "0xb2"},
+            "cursorpos": {"x": 50, "y": 60},
+        }
+        second = launch_extra(2, "0xc3", [main, first_window], moved)
+        baseline = {"active_window": "0xa1", "active_workspace": 3, "cursor": {"x": 5, "y": 6}}
+        self.assertEqual(json.loads(second.read_text(encoding="utf-8"))["baseline"], baseline)
+
+        # The earlier slot closes first: the later one remains, so nothing moves.
+        with (
+            mock.patch.object(guest_window, "clients", return_value=[main, second_window]),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command") as command,
+        ):
+            guest_window.restore(first)
+        self.assertFalse(first.exists())
+        self.assertEqual(command.call_args_list, [])
+
+        # The last slot restores the state from before the first extra opened.
+        with (
+            mock.patch.object(guest_window, "clients", return_value=[main]),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command") as command,
+        ):
+            guest_window.restore(second)
+        self.assertFalse(second.exists())
+        calls = [call.args[2] for call in command.call_args_list]
+        self.assertEqual(
+            calls,
+            [
+                'hl.dsp.focus({ workspace = "3" })',
+                'hl.dsp.focus({ window = "address:0xa1" })',
+                "hl.dsp.cursor.move({ x = 5, y = 6 })",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

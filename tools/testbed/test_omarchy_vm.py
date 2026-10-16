@@ -558,7 +558,6 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SPLINTERM_TESTBED_INSTALL_FIXTURE=true", log.read_text())
         fixture = self.action("font-fixture")
-        self.assertIn('output="$fixtures/invalid-candidate"', fixture)
         self.assertIn("tools/testbed/font-fixture.py\" invalid-candidate", fixture)
         self.assertLess(
             fixture.index('$(<"$owner") == "$package_root"'),
@@ -566,6 +565,80 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         )
         self.assertIn('"$destination.before-fixture"', fixture)
         self.assertIn('mv -f -- "$staged" "$destination"', fixture)
+        self.assertIn('generation=$(mktemp -d "$fixtures/invalid-candidate.XXXXXX")', fixture)
+        self.assertNotIn('rm -rf -- "$output"', fixture)
+        self.assertLess(
+            fixture.index("font-fixture.py\" invalid-candidate"), fixture.index("built=true")
+        )
+
+    def test_font_fixture_rebuilds_beside_the_live_generation(self) -> None:
+        fixture = self.action("font-fixture")
+        script = fixture.split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            package_root = base / "package"
+            (package_root / "source/.git").mkdir(parents=True)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            # Stands in for font-fixture.py: a fixture names its own directory.
+            python = fake_bin / "python"
+            python.write_text(
+                "#!/bin/sh\n"
+                '[ -z "$FAKE_FIXTURE_FAIL" ] || exit 1\n'
+                'mkdir -p "$4/fonts"\n'
+                "printf '<dir>%s/fonts</dir>\\n' \"$4\" >\"$4/fonts.conf\"\n"
+            )
+            python.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "SPLINTERM_TESTBED_PACKAGE_ROOT": str(package_root),
+                    "SPLINTERM_TESTBED_RUNTIME_LEAF": "splinterm-testbed-unit-absent",
+                    "SPLINTERM_TESTBED_INSTALL_FIXTURE": "false",
+                }
+            )
+
+            def build(fail: bool = False) -> subprocess.CompletedProcess[str]:
+                env = dict(environment)
+                if fail:
+                    env["FAKE_FIXTURE_FAIL"] = "1"
+                return subprocess.run(
+                    ["bash", "-c", script], env=env, text=True, capture_output=True, check=False
+                )
+
+            fixtures = package_root / "font-fixtures"
+            result = build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            (live,) = fixtures.glob("invalid-candidate.*")
+            # Point the session's fonts.conf at that generation, as --install does.
+            destination = package_root / "acceptance-config/fontconfig/fonts.conf"
+            destination.parent.mkdir(parents=True)
+            destination.write_text((live / "fixture/fonts.conf").read_text())
+
+            # A failed rebuild leaves the live generation and discards its own.
+            result = build(fail=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(fixtures.glob("invalid-candidate.*")), [live])
+            self.assertTrue((live / "fixture/fonts").is_dir())
+
+            # A rebuild never deletes the generation the live config names.
+            result = build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generations = set(fixtures.glob("invalid-candidate.*"))
+            self.assertEqual(len(generations), 2)
+            self.assertIn(live, generations)
+            (fresh,) = generations - {live}
+            self.assertIn(str(fresh / "fixture"), result.stdout)
+
+            # Once the live config moves on, unreferenced generations are pruned.
+            destination.write_text((fresh / "fixture/fonts.conf").read_text())
+            result = build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generations = set(fixtures.glob("invalid-candidate.*"))
+            self.assertEqual(len(generations), 2)
+            self.assertIn(fresh, generations)
+            self.assertNotIn(live, generations)
 
 
 if __name__ == "__main__":

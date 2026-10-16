@@ -836,12 +836,19 @@ set -euo pipefail
 package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
 runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
 fixtures="$package_root/font-fixtures"
-output="$fixtures/invalid-candidate"
 config="$package_root/acceptance-config"
+destination="$config/fontconfig/fonts.conf"
 test -d "$package_root/source/.git" && test ! -L "$package_root"
 [[ ! -L $fixtures ]] || { printf 'font fixture root is a symlink\n' >&2; exit 1; }
 mkdir -p -m 700 -- "$fixtures"
-rm -rf -- "$output"
+# Every build gets a fresh generation directory and is never moved: the
+# fixture's fonts.conf and private cache name their own absolute paths. The
+# generation a live fonts.conf points at is left untouched until a validated
+# replacement is installed, and a failed build discards only its own directory.
+generation=$(mktemp -d "$fixtures/invalid-candidate.XXXXXX")
+output="$generation/fixture"
+built=false
+trap '[[ $built == true ]] || rm -rf -- "$generation"' EXIT
 python "$package_root/source/tools/testbed/font-fixture.py" invalid-candidate \
   --output "$output"
 if [[ $SPLINTERM_TESTBED_INSTALL_FIXTURE == true ]]; then
@@ -852,7 +859,6 @@ if [[ $SPLINTERM_TESTBED_INSTALL_FIXTURE == true ]]; then
     exit 1
   }
   mkdir -p -m 700 -- "$config/fontconfig"
-  destination="$config/fontconfig/fonts.conf"
   [[ ! -L $destination ]] || { printf 'refusing symlink: %s\n' "$destination" >&2; exit 1; }
   if [[ -e $destination && ! -e $destination.before-fixture ]]; then
     cp -- "$destination" "$destination.before-fixture"
@@ -863,6 +869,16 @@ if [[ $SPLINTERM_TESTBED_INSTALL_FIXTURE == true ]]; then
   mv -f -- "$staged" "$destination"
   printf 'installed invalid-candidate fonts.conf into %s\n' "$destination"
 fi
+built=true
+# Prune older generations that no live fonts.conf references.
+for previous in "$fixtures"/invalid-candidate.*; do
+  [[ -d $previous && ! -L $previous && $previous != "$generation" ]] || continue
+  if [[ -f $destination ]] && grep -Fq -- "$previous/" "$destination"; then
+    continue
+  fi
+  rm -rf -- "$previous"
+done
+printf 'invalid-candidate fixture built in %s\n' "$output"
 REMOTE
     ;;
   exec)
