@@ -3597,6 +3597,8 @@ struct SynchronizedPublication {
     timed_out: bool,
     deadline: Option<Instant>,
     next_frame_at: Option<Instant>,
+    /// A completed frame was throttled and has not been published yet.
+    frame_pending: bool,
 }
 
 impl SynchronizedPublication {
@@ -3607,6 +3609,7 @@ impl SynchronizedPublication {
             timed_out: false,
             deadline: None,
             next_frame_at: None,
+            frame_pending: false,
         }
     }
 
@@ -3632,6 +3635,20 @@ impl SynchronizedPublication {
         }
         self.next_frame_at = Some(now + SYNCHRONIZED_FRAME_INTERVAL);
         true
+    }
+
+    /// When a throttled frame must be published if no output arrives first.
+    ///
+    /// An echo is often the last output for a while, so waiting for more output
+    /// can leave the completed frame unpublished indefinitely. While a newer
+    /// frame is open the terminal holds partial state, and that frame publishes
+    /// itself when it completes or times out.
+    fn flush_deadline(&self, synchronized: bool) -> Option<Instant> {
+        if self.frame_pending && !synchronized {
+            self.next_frame_at
+        } else {
+            None
+        }
     }
 }
 
@@ -3860,6 +3877,7 @@ async fn run_actor_body(
             break;
         }
 
+        let flush_at = publication.flush_deadline(terminal.synchronized_updates());
         tokio::select! {
             () = async {
                 pending_handoff
@@ -3998,6 +4016,18 @@ async fn run_actor_body(
                 terminal.expire_synchronized_updates();
                 publication.observe(false, Instant::now());
                 publication.expire();
+                publish_updates(
+                    splint_id,
+                    &terminal,
+                    &mut publication,
+                    incarnation,
+                    child_exit,
+                    &mut subscribers,
+                    metrics,
+                );
+            }
+            () = time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                publication.should_publish_frame(Instant::now());
                 publish_updates(
                     splint_id,
                     &terminal,
@@ -4421,6 +4451,7 @@ fn publish_updates(
         .update_count_since(publication.published_revision)
         .unwrap_or(0);
     publication.published_revision = terminal.revision();
+    publication.frame_pending = false;
     let terminal_metadata = terminal.snapshot(SnapshotRequest {
         max_scrollback_rows: 0,
     });
@@ -4607,7 +4638,9 @@ fn process_output(
             let now = Instant::now();
             publication.observe(terminal.synchronized_updates(), now);
             let publish_now = if completed_frame {
-                publication.should_publish_frame(now)
+                let publish = publication.should_publish_frame(now);
+                publication.frame_pending |= !publish;
+                publish
             } else {
                 !terminal.synchronized_updates() && terminal.revision() != revision_before
             };
@@ -5607,6 +5640,10 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+        assert!(publication.frame_pending);
+        assert_eq!(publication.flush_deadline(false), publication.next_frame_at);
+        // A newer open frame holds partial state, so nothing may flush it.
+        assert_eq!(publication.flush_deadline(true), None);
         let metrics = process_output(
             b"Z",
             SplintId::new(),
@@ -5630,6 +5667,7 @@ mod tests {
         assert_eq!(updates.len(), 2);
         assert_eq!(snapshot.visible_rows[0].cells[0].content, "A");
         assert_eq!(snapshot.visible_rows[0].cells[1].content, "Z");
+        assert!(!publication.frame_pending);
     }
 
     #[tokio::test]
@@ -8868,6 +8906,41 @@ mod tests {
         assert!(snapshot_text(&snapshot).contains("ordered-input"));
         assert!(slow.changed().await);
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    // An echo inside a synchronized frame is often the last output for a while.
+    // A completed frame refused by the frame throttle must still be published.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn throttled_final_synchronized_frame_publishes_without_more_output() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell(
+                "read value; printf '\\033[?2026hA\\033[?2026l\\033[?2026hB\\033[?2026l'; sleep 5",
+            ),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let (_, mut subscription) = handle.attach().await.unwrap();
+        handle.input(b"go\n".to_vec()).await.unwrap();
+        // The script then sleeps, so no later output can carry frame B.
+        let mut latest = None;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.snapshot().await.unwrap();
+            if snapshot_text(&snapshot).contains("AB") && latest == Some(snapshot.revision) {
+                break;
+            }
+            let event = time::timeout_at(deadline, subscription.recv())
+                .await
+                .expect("the completed frame was never published");
+            if let SubscriptionReceive::Event(LiveEvent::Update { updates, .. }) = event {
+                latest = updates.last().map(TerminalUpdate::revision).or(latest);
+            }
+        }
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
