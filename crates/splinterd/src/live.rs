@@ -3130,6 +3130,10 @@ impl UseLatch {
     fn has_received_input(&self) -> bool {
         self.0.load(Ordering::Acquire) == LATCH_USED
     }
+
+    fn is_claimed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LATCH_RETIRING
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3186,6 +3190,12 @@ impl LiveSplintHandle {
     #[must_use]
     pub fn claim_unused(&self) -> bool {
         self.use_latch.claim_unused()
+    }
+
+    /// Whether a conditional close holds a claim on this runtime.
+    #[must_use]
+    pub fn is_claimed_unused(&self) -> bool {
+        self.use_latch.is_claimed()
     }
 
     /// Returns an abandoned [`Self::claim_unused`] claim.

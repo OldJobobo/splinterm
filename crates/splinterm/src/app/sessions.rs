@@ -322,6 +322,7 @@ pub(in crate::app) async fn xdg_launch(
             expected_topology_revision: expected,
             name,
             launch: launch_parameters(cwd, command, &config),
+            generated_name: true,
         })
         .await?
     else {

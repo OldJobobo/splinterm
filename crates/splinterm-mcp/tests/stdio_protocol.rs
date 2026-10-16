@@ -4976,6 +4976,7 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                     expected_topology_revision,
                     name,
                     launch,
+                    generated_name: false,
                 } if expected_topology_revision.get() == 7
                     && name == "lair"
                     && launch.cwd == Some("/tmp".into())

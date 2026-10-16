@@ -268,6 +268,7 @@ mod tests {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             }),
             RequestAuthorization::TrustedUi
         );

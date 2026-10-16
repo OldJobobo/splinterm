@@ -478,6 +478,9 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::CreateLair`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplintAutomation {
         expected_topology_revision: TopologyRevision,
@@ -497,16 +500,29 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::NewDojo`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateTransientLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplint {
         expected_topology_revision: TopologyRevision,
@@ -558,6 +574,10 @@ pub enum Request {
         /// Trusted owner request to atomically make a transient Lair durable.
         #[serde(default, skip_serializing_if = "bool_is_false")]
         promote_transient_lair: bool,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; a chosen name keeps the Dojo from an unused close.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     MaterializePreset {
         expected_topology_revision: TopologyRevision,
@@ -4013,6 +4033,7 @@ mod tests {
             expected_topology_revision: TopologyRevision::new(7),
             name: "xdg".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let encoded = serde_json::to_vec(&transient).unwrap();
         assert_eq!(
@@ -4033,6 +4054,7 @@ mod tests {
             name: "work".into(),
             launch: launch.clone(),
             promote_transient_lair: true,
+            generated_name: false,
         };
         let mut promotion_value = serde_json::to_value(&promotion).unwrap();
         assert_eq!(promotion_value["promote_transient_lair"], true);

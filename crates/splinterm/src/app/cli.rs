@@ -1188,6 +1188,7 @@ mod tests {
             LaunchSemantics::RemoteInteractive,
             TopologyRevision::default(),
             "remote".to_owned(),
+            false,
             None,
             Vec::new(),
             &config,

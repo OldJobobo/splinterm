@@ -9,7 +9,7 @@ pub use layout::{
 };
 pub use model::{
     Dojo, DojoId, Lair, LairId, LairLifetime, LairRetention, Topology, TopologyError,
-    TopologyRevision, generated_lair_name, is_generated_lair_name,
+    TopologyRevision, generated_lair_name,
 };
 pub use persistence::{
     MAX_DOJOS_PER_LAIR, MAX_LAYOUT_DEPTH, MAX_PERSISTENT_LAIRS, MAX_SPLINTS,

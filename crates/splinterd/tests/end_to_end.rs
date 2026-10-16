@@ -987,6 +987,7 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             })
             .await
             .unwrap_err();
@@ -1043,6 +1044,7 @@ async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1260,6 +1262,7 @@ async fn runtime_relaunch_and_restore_preserve_topology_revision() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1364,6 +1367,7 @@ async fn mcp_controller_registry_owns_handled_and_atomic_actions() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1428,6 +1432,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1791,6 +1796,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1828,6 +1834,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2213,6 +2220,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2445,6 +2453,7 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2552,6 +2561,7 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2618,6 +2628,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2655,6 +2666,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2694,6 +2706,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2770,6 +2783,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "context-lifecycle".into(),
                 launch: context_launch(&restored_marker),
+                generated_name: false,
             })
             .await
         else {
@@ -2834,6 +2848,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 name: "context-dojo".into(),
                 launch: context_launch(&dojo_marker),
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -2875,6 +2890,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "durable".into(),
                 launch,
+                generated_name: false,
             })
             .await
         else {
@@ -2974,6 +2990,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "restore-scopes".into(),
                 launch: launch.clone(),
+                generated_name: false,
             })
             .await
         else {
@@ -3014,6 +3031,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 name: "second".into(),
                 launch,
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -3137,11 +3155,13 @@ async fn topology_cas_stream_and_complete_edits() {
             expected_topology_revision: snapshot.revision,
             name: "race-first".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let second_request = Request::CreateLair {
             expected_topology_revision: snapshot.revision,
             name: "race-second".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let (first_result, second_result) = tokio::join!(
             first.request_result(first_request),
@@ -3248,6 +3268,7 @@ async fn topology_cas_stream_and_complete_edits() {
                 name: "extra-dojo".into(),
                 launch,
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -3348,6 +3369,7 @@ async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "terminate-exact".into(),
                 launch,
+                generated_name: false,
             })
             .await
         else {
@@ -3443,6 +3465,7 @@ async fn termination_waiting_on_a_resistant_process_does_not_block_topology_chan
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3489,6 +3512,7 @@ async fn termination_waiting_on_a_resistant_process_does_not_block_topology_chan
                         login_shell: false,
                         scrollback_lines: 100,
                     },
+                    generated_name: false,
                 })
                 .await,
             Response::LairCreated { .. }
@@ -3525,6 +3549,7 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3603,6 +3628,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3761,6 +3787,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "multiplex".into(),
                 launch: shell_launch(),
+                generated_name: false,
             })
             .await
         else {
@@ -4103,6 +4130,7 @@ async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resy
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         {
@@ -4226,6 +4254,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     login_shell: true,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             })
             .await
         {
@@ -4731,6 +4760,7 @@ async fn create_resistant_lair(
                 login_shell: false,
                 scrollback_lines: 100,
             },
+            generated_name: false,
         })
         .await
     else {
@@ -4792,6 +4822,7 @@ async fn pending_kill_splint_does_not_block_topology_changes() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await;
         assert!(matches!(response, Response::LairCreated { .. }));
@@ -4887,12 +4918,13 @@ fn plain_shell_launch(shell: &Path) -> LaunchParameters {
 
 async fn create_lair_with(admin: &mut Connection, launch: LaunchParameters) -> MutationTarget {
     let name = format!("unused {}", admin.topology().await.lairs().count());
-    create_named_lair(admin, name, launch).await
+    create_named_lair(admin, name, false, launch).await
 }
 
 async fn create_named_lair(
     admin: &mut Connection,
     name: String,
+    generated_name: bool,
     launch: LaunchParameters,
 ) -> MutationTarget {
     let expected_topology_revision = admin.topology_revision().await;
@@ -4901,6 +4933,7 @@ async fn create_named_lair(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         })
         .await
     else {
@@ -5157,9 +5190,14 @@ async fn only_plain_default_shell_dojos_can_be_unused() {
         let command = create_lair_with(&mut admin, command_bearing).await;
         assert_dojo_used(&mut admin, command.dojo_id, DojoUse::Launch).await;
 
-        // A new Dojo under its default name qualifies; a chosen name is use.
+        // A new Dojo whose name Splinterm generated qualifies; a name the user
+        // chose is use, even one equal to the default label.
         let host = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
-        for (name, used) in [("Dojo 2", None), ("chosen", Some(DojoUse::Renamed))] {
+        for (name, generated_name, used) in [
+            ("Dojo 2", true, None),
+            ("Dojo 2", false, Some(DojoUse::Renamed)),
+            ("chosen", false, Some(DojoUse::Renamed)),
+        ] {
             let expected_topology_revision = admin.topology_revision().await;
             let Response::DojoStarted { dojo_id, .. } = admin
                 .request(Request::NewDojo {
@@ -5168,6 +5206,7 @@ async fn only_plain_default_shell_dojos_can_be_unused() {
                     name: name.into(),
                     launch: plain_shell_launch(&shell),
                     promote_transient_lair: false,
+                    generated_name,
                 })
                 .await
             else {
@@ -5389,6 +5428,7 @@ async fn unused_close_does_not_wait_for_the_shell_under_the_transaction() {
         let mut admin = daemon.connect().await;
         let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
         let pid = wait_for_pid_file(&pid_file).await;
+        let group = ProcessGroupGuard::new(pid);
         time::sleep(Duration::from_millis(200)).await;
         let started = Instant::now();
         assert!(matches!(
@@ -5401,6 +5441,7 @@ async fn unused_close_does_not_wait_for_the_shell_under_the_transaction() {
                 expected_topology_revision,
                 name: "unrelated".into(),
                 launch: plain_shell_launch(Path::new("/bin/sh")),
+                generated_name: false,
             })
             .await;
         assert!(matches!(created, Response::LairCreated { .. }));
@@ -5414,6 +5455,7 @@ async fn unused_close_does_not_wait_for_the_shell_under_the_transaction() {
             "the resistant shell should still be retiring"
         );
         wait_for_exit(pid).await;
+        group.disarm();
         daemon.shutdown();
     })
     .await
@@ -5431,7 +5473,8 @@ async fn an_unused_close_removes_an_empty_unnamed_lair() {
         let generated =
             |index: u128| splinterm_core::generated_lair_name(1_787_899_189_000 + index, 42);
 
-        let unnamed = create_named_lair(&mut admin, generated(1), plain_shell_launch(&shell)).await;
+        let unnamed =
+            create_named_lair(&mut admin, generated(1), true, plain_shell_launch(&shell)).await;
         let expected_topology_revision = admin.topology_revision().await;
         let Response::DojoStarted {
             dojo_id: second, ..
@@ -5442,6 +5485,7 @@ async fn an_unused_close_removes_an_empty_unnamed_lair() {
                 name: "Dojo 2".into(),
                 launch: plain_shell_launch(&shell),
                 promote_transient_lair: false,
+                generated_name: true,
             })
             .await
         else {
@@ -5471,7 +5515,8 @@ async fn an_unused_close_removes_an_empty_unnamed_lair() {
         assert!(topology_revision > before);
 
         // Renaming names it.
-        let renamed = create_named_lair(&mut admin, generated(2), plain_shell_launch(&shell)).await;
+        let renamed =
+            create_named_lair(&mut admin, generated(2), true, plain_shell_launch(&shell)).await;
         let expected_topology_revision = admin.topology_revision().await;
         admin
             .request(Request::RenameLair {
@@ -5489,6 +5534,24 @@ async fn an_unused_close_removes_an_empty_unnamed_lair() {
         ));
         let kept = admin.topology().await;
         assert!(kept.find_lair(renamed.lair_id).unwrap().dojos.is_empty());
+
+        // A name the user chose stays, even one shaped like a generated name.
+        let lookalike =
+            create_named_lair(&mut admin, generated(3), false, plain_shell_launch(&shell)).await;
+        assert!(matches!(
+            close_unused(&mut admin, lookalike.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        assert!(
+            admin
+                .topology()
+                .await
+                .find_lair(lookalike.lair_id)
+                .is_some()
+        );
         daemon.shutdown();
     })
     .await

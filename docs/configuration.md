@@ -551,23 +551,27 @@ the close. A Dojo counts as unused only while all of these hold:
   Command-bearing launches, presets, restored or relaunched Splints, and Dojos
   from before the daemon last started count as used. The Lair's name does not
   matter: Dojos in explicitly named Lairs qualify too;
-- the Dojo was never named: a name chosen when creating it, or renaming the
-  Dojo or its Splint later, counts as use;
+- the Dojo was never named: a name chosen when creating it (even one equal to
+  the default label), or renaming the Dojo or its Splint later, counts as use.
+  The client tells the daemon whether Splinterm generated the name;
 - no other Window is attached to it;
 - the shell itself holds the terminal foreground, so a program started from a
   shell startup file counts as use.
 
 Input that races the close either reaches the shell, which keeps the Dojo, or
-is refused because the close won. A used Dojo is detached as before, and so is
-every Dojo when the daemon gives no answer. **Detach Window** (`window.detach`)
-always detaches.
+is refused because the close won. Likewise a Window attaching during the close
+either attaches first and keeps the Dojo, or is refused. A used Dojo is
+detached as before, and so is every Dojo when the daemon gives no answer.
+**Detach Window** (`window.detach`) always detaches.
 
 When the closed Dojo was the last one in a Lair the user never named, the Lair
-is removed in the same step. Such a Lair has the generated name a graphical
-launch gives (for example `terminal-1787899189123456789-4132`), was created in
-the running daemon, and was never renamed since. A Lair with a name the user
-chose stays, empty, as it does when its last Dojo is closed explicitly. A
-remote Window gets the same decision from the remote daemon.
+is removed in the same step. Such a Lair was created in the running daemon
+under a name Splinterm generated for a graphical launch (for example
+`terminal-1787899189123456789-4132`), as the client records when it creates the
+Lair, and was never renamed since. The name's shape alone never decides: a
+Lair with a name the user chose stays, even one that looks generated, and stays
+empty, as it does when its last Dojo is closed explicitly. A remote Window gets
+the same decision from the remote daemon.
 
 Dojo reopening is deliberately separate:
 
