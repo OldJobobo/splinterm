@@ -127,25 +127,9 @@ where
     let mut last_failure = None;
     loop {
         tokio::select! {
-            result = async { attempt.as_mut().expect("guarded attempt").await }, if attempt.is_some() => {
-                attempt = None;
-                match result {
-                    Ok(connected) => {
-                        if status.on_attempt(Ok(())) == RemoteStatusEffect::HandOver {
-                            window.close().await;
-                            return Ok(connected);
-                        }
-                    }
-                    Err(error) => {
-                        let failure = RemoteStatusFailure::from_error(&error);
-                        report(&failure);
-                        last_failure = Some(failure.copy().diagnostic_code);
-                        if status.on_attempt(Err(failure)) == RemoteStatusEffect::ShowFailure {
-                            window.show(&status);
-                        }
-                    }
-                }
-            }
+            // A cancellation queued alongside a finished attempt wins, so C,
+            // Escape, or a compositor close is never overtaken by hand-over.
+            biased;
             command = commands.recv() => {
                 let effect = match command {
                     None => status.on_window_closed(),
@@ -168,6 +152,25 @@ where
                     RemoteStatusEffect::None
                     | RemoteStatusEffect::ShowFailure
                     | RemoteStatusEffect::HandOver => {}
+                }
+            }
+            result = async { attempt.as_mut().expect("guarded attempt").await }, if attempt.is_some() => {
+                attempt = None;
+                match result {
+                    Ok(connected) => {
+                        if status.on_attempt(Ok(())) == RemoteStatusEffect::HandOver {
+                            window.close().await;
+                            return Ok(connected);
+                        }
+                    }
+                    Err(error) => {
+                        let failure = RemoteStatusFailure::from_error(&error);
+                        report(&failure);
+                        last_failure = Some(failure.copy().diagnostic_code);
+                        if status.on_attempt(Err(failure)) == RemoteStatusEffect::ShowFailure {
+                            window.show(&status);
+                        }
+                    }
                 }
             }
         }
@@ -501,6 +504,27 @@ mod tests {
             flow.await.unwrap(),
             Err(RemoteNotConnected { last_failure: None })
         );
+        expect_closed(&mut harness).await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_cancel_wins_over_an_attempt_that_is_ready() {
+        let (mut harness, window, commands) = harness();
+        harness
+            .commands
+            .send(WindowCommand::Input(b"\x1b".to_vec()))
+            .await
+            .unwrap();
+        let connected = run_status_flow(
+            RemoteStatus::new("wintermute", "wintermute"),
+            window,
+            commands,
+            || async { Ok("factory") },
+            |_| panic!("a cancelled attempt is not a failure"),
+            fixed_destination,
+        )
+        .await;
+        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
         expect_closed(&mut harness).await;
     }
 
