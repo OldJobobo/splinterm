@@ -10637,6 +10637,16 @@ mod tests {
         assert!(interactive_bypass(true, true, false, &retention));
         assert!(interactive_bypass(false, false, true, &retention));
         assert!(!interactive_bypass(false, true, false, &retention));
+        // Windows resolve launch directories without a policy rule; other
+        // clients need the creation scopes.
+        let resolve = Request::ResolveLaunchDirectory {
+            source_splint_id: SplintId::new(),
+            directory: splinterm_protocol::LaunchDirectory::Home,
+        };
+        assert!(interactive_bypass(true, true, false, &resolve));
+        assert!(interactive_bypass(false, false, true, &resolve));
+        assert!(!interactive_bypass(true, false, false, &resolve));
+        assert!(!interactive_bypass(false, true, false, &resolve));
         let terminate_lair = Request::TerminateLair {
             expected_topology_revision: TopologyRevision::new(7),
             lair_id: LairId::new(),

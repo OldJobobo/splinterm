@@ -113,10 +113,7 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::PublishGraphicalFocus { .. }
         | Request::CreateTransientLair { .. }
         | Request::MaterializePreset { .. } => RequestAuthorization::TrustedUi,
-        Request::ListLairs
-        | Request::InspectTopology
-        | Request::InspectSplint { .. }
-        | Request::ResolveLaunchDirectory { .. } => {
+        Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
         Request::SubscribeTopology => {
@@ -138,7 +135,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         | Request::SplitSplint { .. }
         | Request::SplitSplintAutomation { .. }
         | Request::NewDojo { .. }
-        | Request::NewDojoAutomation { .. } => {
+        | Request::NewDojoAutomation { .. }
+        // Resolving prepares a creation, and its answer reveals whether
+        // daemon-host paths exist and are usable.
+        | Request::ResolveLaunchDirectory { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
         }
         Request::RelaunchSplint { .. } | Request::RelaunchSplintAutomation { .. } => {
@@ -293,6 +293,20 @@ mod tests {
         assert_eq!(
             for_request(&Request::ReadGraphicalFocus),
             RequestAuthorization::Authenticated
+        );
+        // Resolving probes daemon-host paths, so metadata read is not enough.
+        assert_eq!(
+            for_request(&Request::ResolveLaunchDirectory {
+                source_splint_id: splint_id,
+                directory: splinterm_protocol::LaunchDirectory::Home,
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::ProcessSpawn,
+                    OperationScope::TopologyLayoutMutate,
+                ],
+                any_of: &[],
+            }
         );
         assert_eq!(
             for_request(&Request::PublishGraphicalFocus {

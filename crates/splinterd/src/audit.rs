@@ -17,10 +17,8 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::ListLairs => AuditOperation::ListLairs,
         Request::InspectTopology => AuditOperation::InspectTopology,
         Request::SubscribeTopology => AuditOperation::SubscribeTopology,
-        // Resolving a launch directory reads the same Splint metadata.
-        Request::InspectSplint { .. } | Request::ResolveLaunchDirectory { .. } => {
-            AuditOperation::InspectSplint
-        }
+        Request::InspectSplint { .. } => AuditOperation::InspectSplint,
+        Request::ResolveLaunchDirectory { .. } => AuditOperation::ResolveLaunchDirectory,
         Request::ReadGraphicalFocus => AuditOperation::ReadGraphicalFocus,
         Request::PublishGraphicalFocus { .. } => AuditOperation::PublishGraphicalFocus,
         Request::RequestAccess { .. } => AuditOperation::RequestAccess,

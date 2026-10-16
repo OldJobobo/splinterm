@@ -288,7 +288,9 @@ transactional config reload, and current-Lair lifecycle bindings:
 `Prefix Shift+S` saves, `Prefix Shift+F` toggles pinned state,
 `Prefix Shift+V` previews, and `Prefix Shift+O` opens the existing restore
 confirmation path. These are Splinterm additions; the checked stock Omarchy tmux
-profile defines no actions on those four shifted prefix keys. Where a Splint, Dojo, or Lair created within a Window starts is configurable.
+profile defines no actions on those four shifted prefix keys.
+
+Where a Splint, Dojo, or Lair created within a Window starts is configurable.
 `[multiplexer] new-splint-directory` applies to splits inside a Dojo and defaults
 to `inherit`; `new-dojo-directory` applies to new Dojos **and new Lairs** and
 defaults to `home`. Each accepts:
@@ -304,10 +306,12 @@ defaults to `home`. Each accepts:
 
 Every choice is resolved on the daemon that owns the source Splint, so a remote
 Window uses remote paths and the remote owner's home; `~` is never expanded on
-the client. When nothing usable remains, creation reports that the launch
-directory is unavailable. A missing source is rejected rather than replaced by
-another Window's focus. This is a point-in-time default: the shell can change
-directory again before launch. The settings are read when a Window starts.
+the client. When nothing usable remains, creation fails with "source working
+directory is unavailable" for `inherit`, or "configured launch directory and
+home directory are unavailable" for the other choices. A missing source is
+rejected rather than replaced by another Window's focus. This is a point-in-time
+default: the shell can change directory again before launch. The settings are
+read when a Window starts.
 Explicit `--cwd`, fresh desktop and CLI launches, presets, and saved layouts are
 unchanged; shell, login-shell, scrollback, and command settings are unchanged.
 
