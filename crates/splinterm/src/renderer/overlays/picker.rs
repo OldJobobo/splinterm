@@ -1770,7 +1770,7 @@ mod tests {
         ];
         let [_, red, green, blue] = theme.background.to_be_bytes();
         let mut canvas = vec![0_u8; 960 * 600 * 4];
-        for pixel in canvas.chunks_exact_mut(4) {
+        for pixel in canvas.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&[blue, green, red, 0xff]);
         }
         let mut cache = SessionPickerTextCache::default();
