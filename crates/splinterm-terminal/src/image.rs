@@ -596,6 +596,38 @@ impl Default for ImagePlane {
 }
 
 impl ImagePlane {
+    /// Whether a checkpoint of this plane could fit `limit` encoded bytes,
+    /// judged from live state without copying any pixels.
+    ///
+    /// Configured image limits may exceed the fixed checkpoint allowance, so
+    /// capture must refuse before [`Self::capture_checkpoint`] copies every
+    /// pixel buffer. Pixels encode as base64, so their encoded length alone is
+    /// a lower bound on the component's size.
+    pub(crate) fn checkpoint_may_fit(&self, limit: usize) -> bool {
+        if self.metrics.content_count > MAX_IMAGE_CHECKPOINT_CONTENTS
+            || self.metrics.placement_count > MAX_IMAGE_CHECKPOINT_PLACEMENTS
+        {
+            return false;
+        }
+        let mut encoded = 0_usize;
+        for screen in [ActiveScreen::Normal, ActiveScreen::Alternate] {
+            for content in self.catalog(screen).contents.values() {
+                let Some(next) = content
+                    .pixels
+                    .len()
+                    .div_ceil(3)
+                    .checked_mul(4)
+                    .and_then(|bytes| encoded.checked_add(bytes))
+                    .filter(|total| *total <= limit)
+                else {
+                    return false;
+                };
+                encoded = next;
+            }
+        }
+        true
+    }
+
     pub(crate) fn capture_checkpoint(
         &self,
         normal_row_ids: &HashSet<u64>,
@@ -2330,6 +2362,33 @@ mod tests {
             application_placement_id: None,
             erase_policy: ImageErasePolicy::TextOverwrite,
         }
+    }
+
+    #[test]
+    fn checkpoint_preflight_bounds_encoded_pixels_across_screens() {
+        let mut plane = ImagePlane::new(ImageLimits::default());
+        for (screen, pixels) in [
+            (ActiveScreen::Normal, [1, 2, 3, 255]),
+            (ActiveScreen::Alternate, [4, 5, 6, 255]),
+        ] {
+            plane
+                .insert_content(screen, content(&pixels, ImageRetention::ExplicitDelete))
+                .unwrap();
+        }
+        // Each 4-byte buffer encodes as 8 base64 bytes.
+        assert!(plane.checkpoint_may_fit(16));
+        assert!(!plane.checkpoint_may_fit(15));
+        assert!(!plane.checkpoint_may_fit(0));
+        assert!(ImagePlane::new(ImageLimits::default()).checkpoint_may_fit(0));
+
+        // Live counts past the checkpoint collection bounds are refused too.
+        // Admitting that many contents is quadratic, so set the live counts.
+        let mut contents = ImagePlane::new(ImageLimits::default());
+        contents.metrics.content_count = MAX_IMAGE_CHECKPOINT_CONTENTS + 1;
+        assert!(!contents.checkpoint_may_fit(usize::MAX));
+        let mut placements = ImagePlane::new(ImageLimits::default());
+        placements.metrics.placement_count = MAX_IMAGE_CHECKPOINT_PLACEMENTS + 1;
+        assert!(!placements.checkpoint_may_fit(usize::MAX));
     }
 
     #[test]
