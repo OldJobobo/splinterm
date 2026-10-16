@@ -281,26 +281,14 @@ fn paint_inactive_tab_divider(
     Ok(())
 }
 
-fn is_legacy_generated_lair_name(value: &str) -> bool {
-    let Some(suffix) = value.strip_prefix("terminal-") else {
-        return false;
-    };
-    let mut components = suffix.split('-');
-    let Some(stamp) = components.next() else {
-        return false;
-    };
-    let Some(process) = components.next() else {
-        return false;
-    };
-    components.next().is_none()
-        && stamp.len() == 10
-        && stamp.bytes().all(|byte| byte.is_ascii_digit())
-        && (1..=10).contains(&process.len())
-        && process.bytes().all(|byte| byte.is_ascii_digit())
+// Launchers name client-bound Lairs `terminal-<stamp>-<pid>`. Share the
+// picker's rule so a tab never shows a generated name the picker hides.
+fn is_generated_lair_name(value: &str) -> bool {
+    crate::navigation_projection::is_generated_terminal_name(value)
 }
 
 fn uses_legacy_generated_dojo_label(identity: &WindowDojoIdentity) -> bool {
-    identity.dojo_name == "terminal" && is_legacy_generated_lair_name(&identity.lair_name)
+    identity.dojo_name == "terminal" && is_generated_lair_name(&identity.lair_name)
 }
 
 fn tab_dojo_label(identity: &WindowDojoIdentity) -> String {
@@ -316,7 +304,7 @@ fn ambiguous_tab_label(
     dojo_label: &str,
     matching_ordinal: usize,
 ) -> String {
-    if uses_legacy_generated_dojo_label(identity) {
+    if is_generated_lair_name(&identity.lair_name) {
         sanitized_tab_label(
             &format!("{dojo_label} ({})", matching_ordinal.saturating_add(1)),
             128,
@@ -957,7 +945,7 @@ mod tests {
 
     use super::{
         App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, WindowDojoIdentity,
-        ambiguous_tab_label, is_legacy_generated_lair_name, opaque_rgba, tab_context_target,
+        ambiguous_tab_label, is_generated_lair_name, opaque_rgba, tab_context_target,
         tab_dojo_label, tab_foreground, tab_strip_hit_test, tab_strip_layout,
     };
 
@@ -1236,19 +1224,24 @@ mod tests {
 
     #[test]
     fn legacy_generated_initial_dojo_names_have_a_stable_friendly_tab_label() {
-        assert!(is_legacy_generated_lair_name("terminal-1787899189-4132"));
-        for explicit in [
+        for generated in [
+            "terminal-1787899189-4132",
+            "terminal-1791871642236894856-88001",
+            "terminal-17878991890-4132",
+            "terminal-1787899189",
             "terminal",
+        ] {
+            assert!(is_generated_lair_name(generated));
+        }
+        for explicit in [
             "terminal-123",
             "terminal-work",
             "terminal-123-work",
-            "terminal-1787899189",
             "terminal-178789918-4132",
-            "terminal-17878991890-4132",
             "terminal-1787899189-12345678901",
             "terminal-1787899189-4132-extra",
         ] {
-            assert!(!is_legacy_generated_lair_name(explicit));
+            assert!(!is_generated_lair_name(explicit));
         }
 
         let identity = WindowDojoIdentity {
@@ -1280,6 +1273,27 @@ mod tests {
             ..identity
         };
         assert_eq!(tab_dojo_label(&explicitly_named), "terminal-123");
+    }
+
+    #[test]
+    fn duplicate_dojo_names_in_generated_lairs_use_ordinals_not_lair_names() {
+        let generated = WindowDojoIdentity {
+            topology_revision: TopologyRevision::new(1),
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            lair_name: "terminal-1791871642236894856-88001".to_owned(),
+            lair_retention: splinterm_core::LairRetention::Disposable,
+            dojo_name: "Dojo 1".to_owned(),
+        };
+        assert_eq!(tab_dojo_label(&generated), "Dojo 1");
+        assert_eq!(ambiguous_tab_label(&generated, "Dojo 1", 0), "Dojo 1 (1)");
+        assert_eq!(ambiguous_tab_label(&generated, "Dojo 1", 1), "Dojo 1 (2)");
+
+        let named = WindowDojoIdentity {
+            lair_name: "work".to_owned(),
+            ..generated
+        };
+        assert_eq!(ambiguous_tab_label(&named, "Dojo 1", 1), "work / Dojo 1");
     }
 
     #[test]
