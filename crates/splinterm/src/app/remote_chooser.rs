@@ -8,7 +8,7 @@ use splinterm::{
     config::AppConfig,
     diagnostics::{DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global},
     remote::{RemoteCatalog, RemoteProfile},
-    remote_launch::open_remote_window,
+    remote_launch::hand_off_to_remote_window,
 };
 
 use super::sessions::run_standalone_picker;
@@ -111,7 +111,7 @@ pub(in crate::app) async fn run_remotes(config: AppConfig) -> Result<()> {
             let name = names
                 .get(index)
                 .context("remote chooser returned an invalid selection")?;
-            open_remote_window(name)
+            hand_off_to_remote_window(name)
         }
         Some(SessionPickerDecision::New) | None => Ok(()),
     }

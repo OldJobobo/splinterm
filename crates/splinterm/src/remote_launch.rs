@@ -80,6 +80,40 @@ pub fn open_remote_chooser() -> Result<()> {
     spawn_detached(remote_chooser_command(&executable)).context("open the remote chooser")
 }
 
+/// Opens one configured remote in a new Window process as this exiting
+/// process's final act, leaving the shared last-exit record to that child.
+///
+/// The chooser exits cleanly right after the launch, while a child that fails
+/// immediately (no `ssh`, a missing profile) records its failure as the last
+/// client exit; the chooser's clean exit must not overwrite it.
+///
+/// # Errors
+///
+/// Returns an error when the detached process cannot be started.
+pub fn hand_off_to_remote_window(profile: &str) -> Result<()> {
+    open_remote_window(profile)?;
+    mark_detached_handoff();
+    Ok(())
+}
+
+/// Opens the standalone remote chooser as this exiting process's final act; see
+/// [`hand_off_to_remote_window`].
+///
+/// # Errors
+///
+/// Returns an error when the detached process cannot be started.
+pub fn hand_off_to_remote_chooser() -> Result<()> {
+    open_remote_chooser()?;
+    mark_detached_handoff();
+    Ok(())
+}
+
+fn mark_detached_handoff() {
+    if let Some(diagnostics) = crate::diagnostics::global() {
+        diagnostics.mark_detached_handoff();
+    }
+}
+
 /// Starts `command` and reaps it on a background thread, so a long-lived parent
 /// never accumulates zombie children.
 ///
