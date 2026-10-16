@@ -300,6 +300,13 @@ impl Connection {
         snapshot.revision
     }
 
+    async fn topology(&mut self) -> splinterm_core::Topology {
+        let Response::Topology { snapshot } = self.request(Request::InspectTopology).await else {
+            panic!("topology response was not returned");
+        };
+        snapshot.topology
+    }
+
     async fn request_result(&mut self, request: Request) -> Result<Response, ProtocolError> {
         let request_id = self.request_id;
         self.request_id += 1;
@@ -4593,4 +4600,247 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
     })
     .await
     .expect("Phase 8 scenario timed out");
+}
+
+fn process_group_members(process_group: u32) -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            // The comm field may contain spaces, so parse after its closing paren.
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let fields = stat.rsplit_once(')')?.1.split_whitespace().nth(2)?;
+                    fields.parse::<u32>().ok()
+                })
+                == Some(process_group)
+        })
+        .collect()
+}
+
+// A direct command that ignores hangup, termination and interrupt must still
+// be killed with its whole process group, children included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kill_splint_reaps_a_signal_ignoring_process_group() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let cwd = std::env::current_dir().unwrap();
+        let pid_file = std::env::temp_dir().join(format!(
+            "splinterd-resistant-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let script = format!(
+            "echo $$ > '{}'; trap '' HUP TERM INT; while :; do sleep 1; done",
+            pid_file.display()
+        );
+        let mut admin = daemon.connect().await;
+        let Response::LairCreated { lair, .. } = admin
+            .request(Request::CreateLair {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "resistant".into(),
+                launch: LaunchParameters {
+                    cwd,
+                    command: vec!["/bin/sh".into(), "-c".into(), script],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("daemon did not create the Lair");
+        };
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("new Dojo was not a leaf");
+        };
+        let splint_id = splint.id;
+        let incarnation = admin.live_incarnation(splint_id).await;
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+            {
+                break pid;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        };
+        let _ = std::fs::remove_file(&pid_file);
+        // Let the loop start a child so the group has more than its leader.
+        time::sleep(Duration::from_millis(200)).await;
+        assert!(!process_group_members(pid).is_empty());
+
+        let Response::SplintKilled { exit_status, .. } = admin
+            .request(Request::KillSplint {
+                splint_id,
+                incarnation,
+            })
+            .await
+        else {
+            panic!("daemon did not kill the Splint");
+        };
+        assert_eq!(exit_status.signal, Some(9));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !process_group_members(pid).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "process group {pid} survived KillSplint: {:?}",
+                process_group_members(pid)
+            );
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        daemon.shutdown();
+    })
+    .await
+    .expect("resistant KillSplint scenario timed out");
+}
+
+async fn create_resistant_lair(admin: &mut Connection, name: &str) -> MutationTarget {
+    let expected_topology_revision = admin.topology_revision().await;
+    let Response::LairCreated { lair, .. } = admin
+        .request(Request::CreateLair {
+            expected_topology_revision,
+            name: name.into(),
+            launch: LaunchParameters {
+                cwd: std::env::current_dir().unwrap(),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "trap '' HUP TERM INT; while :; do sleep 1; done".into(),
+                ],
+                shell: None,
+                login_shell: false,
+                scrollback_lines: 100,
+            },
+        })
+        .await
+    else {
+        panic!("daemon did not create the Lair");
+    };
+    let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+        panic!("new Dojo was not a leaf");
+    };
+    let incarnation = admin.live_incarnation(splint.id).await;
+    // Give the shell time to install its traps.
+    time::sleep(Duration::from_millis(200)).await;
+    MutationTarget {
+        lair_id: lair.id,
+        dojo_id: lair.dojos[0].id,
+        splint_id: splint.id,
+        incarnation,
+    }
+}
+
+// Killing a process that ignores hangup and termination waits through the
+// whole shutdown grace. That wait must not hold the topology transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_kill_splint_does_not_block_topology_changes() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let MutationTarget {
+            splint_id,
+            incarnation,
+            ..
+        } = create_resistant_lair(&mut admin, "resistant").await;
+        let mut kill_client = daemon.connect().await;
+        let started = Instant::now();
+        let (kill_response, unrelated) = tokio::join!(
+            kill_client.request(Request::KillSplint {
+                splint_id,
+                incarnation,
+            }),
+            async {
+                time::sleep(Duration::from_millis(100)).await;
+                let expected_topology_revision = admin.topology_revision().await;
+                let response = admin
+                    .request(Request::CreateLair {
+                        expected_topology_revision,
+                        name: "unrelated".into(),
+                        launch: LaunchParameters {
+                            cwd: std::env::current_dir().unwrap(),
+                            command: vec!["/bin/sh".into()],
+                            shell: None,
+                            login_shell: false,
+                            scrollback_lines: 100,
+                        },
+                    })
+                    .await;
+                (response, started.elapsed())
+            }
+        );
+        let kill_elapsed = started.elapsed();
+        let (response, unrelated_elapsed) = unrelated;
+        assert!(matches!(response, Response::LairCreated { .. }));
+        let Response::SplintKilled { exit_status, .. } = kill_response else {
+            panic!("daemon did not kill the Splint: {kill_response:?}");
+        };
+        assert_eq!(exit_status.signal, Some(9));
+        // The kill escalates through two test graces before SIGKILL.
+        assert!(
+            unrelated_elapsed < kill_elapsed / 2,
+            "an unrelated change waited for the kill: {unrelated_elapsed:?} of {kill_elapsed:?}"
+        );
+        let splint = admin
+            .topology()
+            .await
+            .find_splint(splint_id)
+            .cloned()
+            .expect("killed Splint remains in the topology");
+        assert_eq!(splint.state, splinterm_core::SplintState::Exited(137));
+        daemon.shutdown();
+    })
+    .await
+    .expect("pending KillSplint scenario timed out");
+}
+
+// A Lair termination can race a pending kill of one of its Splints; both must
+// succeed and the process is reaped once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminate_lair_during_pending_kill_splint_succeeds() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let target = create_resistant_lair(&mut admin, "resistant").await;
+        let mut kill_client = daemon.connect().await;
+        let (kill_response, terminated) = tokio::join!(
+            kill_client.request(Request::KillSplint {
+                splint_id: target.splint_id,
+                incarnation: target.incarnation,
+            }),
+            async {
+                time::sleep(Duration::from_millis(100)).await;
+                let expected_topology_revision = admin.topology_revision().await;
+                admin
+                    .request(Request::TerminateLair {
+                        expected_topology_revision,
+                        lair_id: target.lair_id,
+                        targets: vec![target.clone()],
+                    })
+                    .await
+            }
+        );
+        assert!(
+            matches!(kill_response, Response::SplintKilled { .. }),
+            "kill failed: {kill_response:?}"
+        );
+        assert!(
+            matches!(terminated, Response::TopologyCommitted { .. }),
+            "termination failed: {terminated:?}"
+        );
+        assert!(
+            admin
+                .topology()
+                .await
+                .find_splint(target.splint_id)
+                .is_none()
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("Lair termination during KillSplint scenario timed out");
 }
