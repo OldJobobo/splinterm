@@ -39,7 +39,7 @@ use anyhow::{Context, Result, bail};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 
@@ -633,16 +633,19 @@ impl AskpassBroker {
             prompt,
         } = self;
         let terminator = Arc::new(terminator);
+        let prompt_open = Arc::new(watch::Sender::new(false));
         let task = tokio::spawn(serve_prompts(
             listener,
             token.into_bytes(),
             ancestor,
             terminator.clone(),
             prompt.requests,
+            prompt_open.clone(),
         ));
         AskpassService {
             task,
             terminator,
+            prompt_open,
             armed: true,
             _directory: directory,
         }
@@ -731,11 +734,21 @@ impl Terminator {
 pub struct AskpassService {
     task: JoinHandle<()>,
     terminator: Arc<Terminator>,
+    /// True while a secret or question waits on the user in the status Window.
+    prompt_open: Arc<watch::Sender<bool>>,
     armed: bool,
     _directory: PrivateDirectory,
 }
 
 impl AskpassService {
+    /// Watches whether a secret or question from this attempt is waiting on
+    /// the user, so the negotiation deadline can stop running meanwhile. A
+    /// notice takes no answer and does not count.
+    #[must_use]
+    pub fn prompt_open(&self) -> watch::Receiver<bool> {
+        self.prompt_open.subscribe()
+    }
+
     /// Stops serving after OpenSSH authenticated, without killing it.
     pub fn release(mut self) {
         self.armed = false;
@@ -761,11 +774,20 @@ async fn serve_prompts(
     ancestor: u32,
     terminator: Arc<Terminator>,
     requests: mpsc::Sender<AskpassRequest>,
+    prompt_open: Arc<watch::Sender<bool>>,
 ) {
     // One connection at a time: OpenSSH asks sequentially, and a second
     // helper waits in the backlog until the first prompt is answered.
     while let Ok((stream, _)) = listener.accept().await {
-        let _ = serve_connection(stream, &token, ancestor, &terminator, &requests).await;
+        let _ = serve_connection(
+            stream,
+            &token,
+            ancestor,
+            &terminator,
+            &requests,
+            &prompt_open,
+        )
+        .await;
         terminator.set_peer_parent(None);
     }
 }
@@ -873,12 +895,30 @@ async fn write_reply(writer: &mut (impl AsyncWrite + Unpin), reply: AskpassReply
     Ok(())
 }
 
+/// Marks a secret or question open until dropped, on every exit path
+/// including the serving task being aborted.
+struct PromptOpen<'a>(&'a watch::Sender<bool>);
+
+impl<'a> PromptOpen<'a> {
+    fn new(prompt_open: &'a watch::Sender<bool>) -> Self {
+        prompt_open.send_replace(true);
+        Self(prompt_open)
+    }
+}
+
+impl Drop for PromptOpen<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
+}
+
 async fn serve_connection(
     stream: UnixStream,
     token: &[u8],
     ancestor: u32,
     terminator: &Terminator,
     requests: &mpsc::Sender<AskpassRequest>,
+    prompt_open: &watch::Sender<bool>,
 ) -> Result<()> {
     let peer_parent = verify_peer(&stream, ancestor)?;
     let (mut reader, mut writer) = stream.into_split();
@@ -892,6 +932,8 @@ async fn serve_connection(
     // Classify the whole prompt, not the shortened lines shown on screen.
     let kind = classify_prompt(request.hint, &String::from_utf8_lossy(&request.prompt));
     let prompt = sanitize_prompt(&request.prompt);
+    // From here until this prompt ends, the user, not OpenSSH, is the wait.
+    let _open = (kind != AskpassKind::Notice).then(|| PromptOpen::new(prompt_open));
     let (reply, mut answer) = oneshot::channel();
     // The status Window times prompts out itself and kills the attempt; this
     // later deadline is only a backstop.
@@ -1469,6 +1511,55 @@ mod tests {
         .await;
         assert_eq!(code.unwrap(), 1);
         assert!(broker.requests.try_recv().is_err());
+        assert_eq!(broker.kills(), 0);
+        broker.service.release();
+    }
+
+    #[tokio::test]
+    async fn secrets_and_questions_pause_negotiation_but_notices_do_not() {
+        let mut broker = start_broker(openssh_stand_in());
+        let token = broker.token();
+        let mut open = broker.service.prompt_open();
+        assert!(!*open.borrow_and_update());
+        for (prompt, hint) in [
+            ("password:", AskpassHint::Default),
+            ("Allow key?", AskpassHint::Confirm),
+        ] {
+            let pending = {
+                let environment = broker.environment.clone();
+                let token = token.clone();
+                tokio::spawn(async move { helper(&environment, &token, prompt, hint).await })
+            };
+            let request = broker.requests.recv().await.unwrap();
+            assert!(*open.borrow_and_update(), "{prompt} waits on the user");
+            request.answer(if hint == AskpassHint::Confirm {
+                AskpassReply::Confirm
+            } else {
+                AskpassReply::Submit(Secret::from_bytes(b"hunter2").unwrap())
+            });
+            assert_eq!(pending.await.unwrap().0.unwrap(), 0);
+            tokio::time::timeout(Duration::from_secs(5), open.wait_for(|open| !*open))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        let socket = env_value(&broker.environment, SOCKET_ENV).to_owned();
+        let client = tokio::task::spawn_blocking(move || {
+            let mut stream = StdUnixStream::connect(socket).unwrap();
+            let mut request = Vec::new();
+            request.extend_from_slice(&MAGIC);
+            request.extend_from_slice(&[VERSION, AskpassHint::Notify.wire()]);
+            request.extend_from_slice(token.as_bytes());
+            request.extend_from_slice(&5_u16.to_be_bytes());
+            request.extend_from_slice(b"touch");
+            stream.write_all(&request).unwrap();
+            stream
+        });
+        let request = broker.requests.recv().await.unwrap();
+        assert_eq!(request.kind(), AskpassKind::Notice);
+        assert!(!*open.borrow(), "a notice takes no answer");
+        drop((client.await.unwrap(), request));
         assert_eq!(broker.kills(), 0);
         broker.service.release();
     }

@@ -342,7 +342,11 @@ Splinterm's prompt is a fallback with fixed limits:
 Splinterm never places a password or passphrase in argv, TOML, relay frames,
 diagnostics, or application storage. Post-connect SSH authentication and relay
 negotiation are bounded by the profile timeout plus a 120-second human/hardware
-interaction allowance. Logical-channel admission, private daemon handshake, and
+interaction allowance. Time a password or yes/no prompt in the status Window
+spends waiting on you does not count against that bound, so each of several
+sequential prompts (a key passphrase, then a password or one-time code) gets
+its full 120 seconds; that paused time is capped at 10 minutes per attempt.
+Logical-channel admission, private daemon handshake, and
 each `remote check` probe use the validated profile timeout.
 
 `StrictHostKeyChecking=yes` is always supplied. Unknown and changed host keys

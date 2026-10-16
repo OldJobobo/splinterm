@@ -19,6 +19,7 @@ use splinterm_graphical_relay::{ClientMultiplexer, LogicalChannel};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
     process::{Child, Command},
+    sync::watch,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +31,10 @@ use crate::{
 const MAX_SSH_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const CHILD_GRACE_PERIOD: Duration = Duration::from_millis(250);
 const AUTHENTICATION_GRACE_PERIOD: Duration = Duration::from_secs(120);
+/// The most time negotiation may spend paused on native prompts in total, so
+/// sequential questions each get their full prompt timeout while a helper that
+/// keeps asking still ends.
+const MAX_NATIVE_PROMPT_PAUSE: Duration = Duration::from_secs(10 * 60);
 
 /// Stable high-level classes for remote startup and transport failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -324,14 +329,22 @@ impl RemoteSession {
             drain_stderr(stderr, stderr_diagnostics).await;
         });
 
-        let multiplexer = match tokio::time::timeout(
+        // Time a native prompt waits on the user does not count against the
+        // negotiation deadline: each sequential question gets its own full
+        // prompt timeout from the status Window.
+        let prompt_open = askpass_service
+            .as_ref()
+            .map(askpass::AskpassService::prompt_open);
+        let multiplexer = match timeout_outside_prompts(
             negotiation_timeout,
+            MAX_NATIVE_PROMPT_PAUSE,
+            prompt_open,
             ClientMultiplexer::negotiate(stdout, stdin),
         )
         .await
         {
-            Ok(Ok(multiplexer)) => multiplexer,
-            Ok(Err(error)) => {
+            Some(Ok(multiplexer)) => multiplexer,
+            Some(Err(error)) => {
                 terminate_child(&mut child).await;
                 // Ends a helper still waiting on the socket, so it releases
                 // the inherited stderr pipe. OpenSSH is already dead.
@@ -347,7 +360,7 @@ impl RemoteSession {
                     diagnostic: bounded_failure_message(&format!("{error:#}\n{diagnostic}")),
                 }));
             }
-            Err(_) => {
+            None => {
                 terminate_child(&mut child).await;
                 drop(askpass_service);
                 let _ = stderr_task.await;
@@ -684,6 +697,45 @@ async fn supervise_child(
     }
 }
 
+/// Awaits `future` for at most `budget` of time spent outside open native
+/// prompts. While `prompt_open` reads true the budget stops running, and that
+/// paused time is itself bounded by `max_pause` in total. Returns `None` when
+/// either bound is exhausted first.
+async fn timeout_outside_prompts<T>(
+    budget: Duration,
+    max_pause: Duration,
+    prompt_open: Option<watch::Receiver<bool>>,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    let Some(mut prompt_open) = prompt_open else {
+        return tokio::time::timeout(budget, future).await.ok();
+    };
+    tokio::pin!(future);
+    let mut remaining = budget;
+    let mut pause_left = max_pause;
+    loop {
+        let open = *prompt_open.borrow_and_update();
+        let started = tokio::time::Instant::now();
+        let limit = if open { pause_left } else { remaining };
+        tokio::select! {
+            output = &mut future => return Some(output),
+            () = tokio::time::sleep(limit) => return None,
+            changed = prompt_open.changed() => {
+                let spent = started.elapsed();
+                if open {
+                    pause_left = pause_left.saturating_sub(spent);
+                } else {
+                    remaining = remaining.saturating_sub(spent);
+                }
+                if changed.is_err() {
+                    // No more prompts can open; finish on the plain budget.
+                    return tokio::time::timeout(remaining, future).await.ok();
+                }
+            }
+        }
+    }
+}
+
 async fn terminate_child(child: &mut Child) {
     let _ = child.start_kill();
     let _ = child.wait().await;
@@ -909,6 +961,108 @@ mod tests {
                 true
             ),
             RemoteFailureKind::AuthenticationFailed
+        );
+    }
+
+    /// Drives the prompt watch through `phases` of (prompt open, seconds), then
+    /// completes the negotiation stand-in.
+    fn scripted_negotiation(
+        phases: &'static [(bool, u64)],
+    ) -> (
+        watch::Receiver<bool>,
+        impl std::future::Future<Output = &'static str>,
+    ) {
+        let (sender, receiver) = watch::channel(false);
+        let negotiation = async move {
+            for &(open, seconds) in phases {
+                sender.send_replace(open);
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+            }
+            "negotiated"
+        };
+        (receiver, negotiation)
+    }
+
+    const BUDGET: Duration = Duration::from_secs(10);
+
+    #[tokio::test(start_paused = true)]
+    async fn each_sequential_native_prompt_gets_its_full_timeout() {
+        // A key passphrase and then a password, each answered after 100 s, with
+        // 9 s of OpenSSH work in all: far past a fixed 10 s deadline.
+        let (prompt_open, negotiation) =
+            scripted_negotiation(&[(false, 4), (true, 100), (false, 4), (true, 100), (false, 1)]);
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            timeout_outside_prompts(
+                BUDGET,
+                MAX_NATIVE_PROMPT_PAUSE,
+                Some(prompt_open),
+                negotiation
+            )
+            .await,
+            Some("negotiated")
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(209));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn time_outside_prompts_still_exhausts_the_negotiation_deadline() {
+        let (prompt_open, negotiation) =
+            scripted_negotiation(&[(false, 4), (true, 100), (false, 60)]);
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            timeout_outside_prompts(
+                BUDGET,
+                MAX_NATIVE_PROMPT_PAUSE,
+                Some(prompt_open),
+                negotiation
+            )
+            .await,
+            None
+        );
+        // 4 s before the prompt plus the remaining 6 s after it.
+        assert_eq!(started.elapsed(), Duration::from_secs(110));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paused_prompt_time_has_an_overall_cap() {
+        let (prompt_open, negotiation) =
+            scripted_negotiation(&[(true, 300), (false, 1), (true, 400), (false, 1)]);
+        let started = tokio::time::Instant::now();
+        let cap = Duration::from_secs(600);
+        assert_eq!(
+            timeout_outside_prompts(BUDGET, cap, Some(prompt_open), negotiation).await,
+            None
+        );
+        // 300 s + 1 s + the last 300 s of pause allowance.
+        assert_eq!(started.elapsed(), Duration::from_secs(601));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_native_prompt_the_deadline_is_fixed() {
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            timeout_outside_prompts(
+                BUDGET,
+                MAX_NATIVE_PROMPT_PAUSE,
+                None,
+                tokio::time::sleep(Duration::from_secs(11)),
+            )
+            .await,
+            None
+        );
+        assert_eq!(started.elapsed(), BUDGET);
+
+        // A prompt watch whose broker is gone falls back to the same budget.
+        let (sender, receiver) = watch::channel(false);
+        drop(sender);
+        assert_eq!(
+            timeout_outside_prompts(BUDGET, MAX_NATIVE_PROMPT_PAUSE, Some(receiver), async {
+                tokio::time::sleep(Duration::from_secs(9)).await;
+                "negotiated"
+            },)
+            .await,
+            Some("negotiated")
         );
     }
 }
