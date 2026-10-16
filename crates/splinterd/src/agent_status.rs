@@ -661,8 +661,13 @@ fn rate_limited() -> ProtocolError {
     )
 }
 
-fn unix_millis_after(ttl: Duration) -> u64 {
-    SystemTime::now()
+/// The Unix-millisecond wall time `ttl` after `accepted_at`.
+///
+/// The store schedules expiry from the monotonic instant captured with
+/// `accepted_at`, so deriving the advertised expiry from the same moment keeps
+/// it equal to the timer's deadline however long acceptance then waits.
+fn unix_millis_after(accepted_at: SystemTime, ttl: Duration) -> u64 {
+    accepted_at
         .checked_add(ttl)
         .and_then(|deadline| deadline.duration_since(UNIX_EPOCH).ok())
         .map_or(u64::MAX, |deadline| {
@@ -699,6 +704,7 @@ async fn accept_report(
         return Err(stale_incarnation());
     }
     let now = Instant::now();
+    let accepted_at = SystemTime::now();
     let admission = state
         .agent_status
         .store()
@@ -754,7 +760,7 @@ async fn accept_report(
     }
     Ok(Response::AgentStatusAccepted {
         sequence: accepted.sequence,
-        expires_at_ms: accepted.ttl.map(unix_millis_after),
+        expires_at_ms: accepted.ttl.map(|ttl| unix_millis_after(accepted_at, ttl)),
     })
 }
 
@@ -875,6 +881,17 @@ pub(crate) async fn handle_authorized_report(
             ));
         }
     }
+    // A policy rule matched the incarnation that was current at authorization.
+    // A report naming any other incarnation, including one a concurrent
+    // relaunch has made current since, was not authorized by that match; it
+    // is answered as stale, and accept_report rechecks liveness after applying.
+    if authorization.policy_authorized()
+        && authorization.authorized_grant_id().is_none()
+        && !state.development_terminal_access
+        && authorization.policy_splint_incarnation() != Some(*incarnation)
+    {
+        return Err(stale_incarnation());
+    }
     let target = live_target(state, *splint_id).await?;
     accept_report(state, peer, request, &target, ReportAuthority::Granted).await
 }
@@ -882,6 +899,18 @@ pub(crate) async fn handle_authorized_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The advertised expiry is the acceptance instant plus the TTL, however
+    // long acceptance waits before answering.
+    #[test]
+    fn advertised_expiry_counts_from_the_acceptance_instant() {
+        let accepted_at = UNIX_EPOCH + Duration::from_millis(1_760_000_000_123);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            unix_millis_after(accepted_at, Duration::from_secs(60)),
+            1_760_000_060_123
+        );
+    }
 
     fn report(state: AgentState, detail: Option<&str>, ttl: Option<u32>) -> AgentStatusReport {
         AgentStatusReport {
