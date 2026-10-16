@@ -8799,6 +8799,15 @@ mod tests {
         );
     }
 
+    /// The `tty-index` a PTY master descriptor reports, if it is one.
+    fn pty_tty_index(fd: i32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+            .ok()?
+            .lines()
+            .find(|line| line.starts_with("tty-index:"))
+            .map(str::to_owned)
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prepared_pty_handoff_fences_commands_and_resumes_one_reader() {
         let config = fast_config();
@@ -8828,13 +8837,13 @@ mod tests {
         let mut prepared = handle.prepare_pty_handoff().await.unwrap();
         assert_eq!(prepared.identity().child_pid(), handle.child_pid());
         assert_prepared_checkpoint(&prepared, &handle, captured_size, terminal_config);
-        assert!(PathBuf::from(format!("/proc/self/fd/{}", prepared.master_raw_fd())).exists());
-        assert!(
-            !PathBuf::from(format!(
-                "/proc/self/fd/{}",
-                prepared.retired_reader_raw_fd()
-            ))
-            .exists(),
+        // Sibling tests run in this process and may already reuse the reader's
+        // descriptor number, so check that it no longer names this PTY.
+        let master_tty = pty_tty_index(prepared.master_raw_fd())
+            .expect("the exposed PTY master names its terminal");
+        assert_ne!(
+            pty_tty_index(prepared.retired_reader_raw_fd()),
+            Some(master_tty),
             "the actor reader must be closed before the PTY master is exposed"
         );
 
@@ -9049,13 +9058,14 @@ mod tests {
         let handle = runtime.handle();
         time::sleep(Duration::from_millis(50)).await;
         let prepared = handle.prepare_pty_handoff().await.unwrap();
-        assert!(PathBuf::from(format!("/proc/self/fd/{}", prepared.master_raw_fd())).exists());
-        assert!(
-            !PathBuf::from(format!(
-                "/proc/self/fd/{}",
-                prepared.retired_reader_raw_fd()
-            ))
-            .exists()
+        // Sibling tests run in this process and may already reuse the reader's
+        // descriptor number, so check that it no longer names this PTY.
+        let master_tty = pty_tty_index(prepared.master_raw_fd())
+            .expect("the exposed PTY master names its terminal");
+        assert_ne!(
+            pty_tty_index(prepared.retired_reader_raw_fd()),
+            Some(master_tty),
+            "the actor reader must be closed before the PTY master is exposed"
         );
         drop(prepared);
 
