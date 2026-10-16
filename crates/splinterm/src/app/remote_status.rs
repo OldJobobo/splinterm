@@ -103,8 +103,8 @@ impl StatusWindow {
 /// Drives one status screen until it hands over a connected endpoint, or the
 /// Window closes first. The first attempt starts once the Window has mapped.
 /// `connect` runs one attempt and `report` records each failure. `destination`
-/// re-reads the shown destination before each retry, as `connect` reloads the
-/// profile. Nothing here writes to stdout or stderr.
+/// re-reads the shown destination before each attempt, as `connect` reloads
+/// the profile. Nothing here writes to stdout or stderr.
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
@@ -120,6 +120,12 @@ where
     // A Window that ended unmapped has also closed `commands`, so the loop
     // ends the flow without starting an attempt.
     let mut attempt = if window.wait_mapped().await {
+        // The profile may have changed while the Window mapped.
+        let shown = status.destination().to_owned();
+        status.set_destination(&destination());
+        if status.destination() != shown {
+            window.show(&status);
+        }
         Some(Box::pin(connect()))
     } else {
         None
@@ -374,7 +380,7 @@ mod tests {
         let (mut harness, window, commands) = harness();
         let reports = Cell::new(0);
         let connected = run_status_flow(
-            RemoteStatus::new("wintermute", "wintermute"),
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             || async { Ok("factory") },
@@ -488,7 +494,7 @@ mod tests {
     async fn closing_cancels_the_attempt_and_the_window() {
         let (mut harness, window, commands) = harness();
         let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             std::future::pending,
@@ -516,7 +522,7 @@ mod tests {
             .await
             .unwrap();
         let connected = run_status_flow(
-            RemoteStatus::new("wintermute", "wintermute"),
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             || async { Ok("factory") },
@@ -536,7 +542,7 @@ mod tests {
         } = harness;
         drop(sender);
         let connected = run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             std::future::pending,
@@ -551,7 +557,7 @@ mod tests {
     async fn closing_after_a_profile_failure_reports_it_and_is_not_connected() {
         let (mut harness, window, commands) = harness();
         let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("gone", "gone"),
+            RemoteStatus::new("gone", "case@wintermute"),
             window,
             commands,
             || async {
@@ -587,7 +593,7 @@ mod tests {
     async fn uncategorized_attempt_errors_are_shown_as_transport_failures() {
         let (mut harness, window, commands) = harness();
         let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             || async {
@@ -622,7 +628,7 @@ mod tests {
         let flow = {
             let attempts = attempts.clone();
             tokio::spawn(run_status_flow(
-                RemoteStatus::new("wintermute", "wintermute"),
+                RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
                 move || {
@@ -660,7 +666,7 @@ mod tests {
         } = harness;
         drop((sender, mapped));
         let connected = run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             || -> std::future::Ready<Result<()>> { panic!("an unmapped Window never connects") },
@@ -702,6 +708,28 @@ mod tests {
         let failed_again = text(&next_snapshot(&mut harness).await);
         assert!(failed_again.contains("Could not connect to case@new.example:2222."));
 
+        harness
+            .commands
+            .send(WindowCommand::Input(b"c".to_vec()))
+            .await
+            .unwrap();
+        assert!(flow.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn the_first_attempt_shows_the_destination_reloaded_after_mapping() {
+        let (mut harness, window, commands) = harness();
+        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "old.example"),
+            window,
+            commands,
+            std::future::pending,
+            |_| {},
+            || "case@new.example:2222".to_owned(),
+        ));
+        let connecting = text(&next_snapshot(&mut harness).await);
+        assert!(connecting.contains("Connecting to case@new.example:2222…"));
+        assert!(!connecting.contains("old.example"));
         harness
             .commands
             .send(WindowCommand::Input(b"c".to_vec()))
