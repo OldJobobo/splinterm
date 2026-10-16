@@ -17,7 +17,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -644,18 +644,67 @@ impl Drop for TransientLeaseReservation {
     }
 }
 
-#[derive(Default)]
 struct RuntimeRegistry {
     entries: HashMap<SplintId, LiveSplintRuntime>,
+    retiring: RetiringRuntimes,
+    reserved: Arc<AtomicUsize>,
 }
 
+/// A live-registry slot held from before a process is spawned until the
+/// process is admitted or retired.
+///
+/// Reserving before spawning means a request the registry would reject never
+/// creates a process, so rejected requests cannot grow the process count.
+struct LaunchSlot(Arc<AtomicUsize>);
+
+impl Drop for LaunchSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A runtime the registry refused, returned with its slot. Retire the runtime
+/// before dropping the slot so the process is never left uncounted.
+type RejectedRuntime = (LiveSplintRuntime, LaunchSlot);
+
 impl RuntimeRegistry {
-    fn insert(&mut self, runtime: LiveSplintRuntime) -> Result<(), LiveSplintRuntime> {
+    fn new(retiring: RetiringRuntimes) -> Self {
+        Self {
+            entries: HashMap::new(),
+            retiring,
+            reserved: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Retiring processes still exist and reserved slots are about to spawn
+    /// one, so both count toward the live limit.
+    fn at_capacity(&self) -> bool {
+        self.entries.len() + self.retiring.count() + self.reserved.load(Ordering::Acquire)
+            >= MAX_LIVE_SPLINTS
+    }
+
+    /// Reserves a slot for a process about to be spawned, or `None` at
+    /// capacity. Every launch reserves before spawning.
+    fn reserve(&mut self) -> Option<LaunchSlot> {
+        if self.at_capacity() {
+            return None;
+        }
+        self.reserved.fetch_add(1, Ordering::AcqRel);
+        Some(LaunchSlot(Arc::clone(&self.reserved)))
+    }
+
+    /// Admits a runtime into the slot reserved for it.
+    fn insert(
+        &mut self,
+        runtime: LiveSplintRuntime,
+        slot: LaunchSlot,
+    ) -> Result<(), RejectedRuntime> {
         let id = runtime.handle().splint_id;
-        if self.entries.len() >= MAX_LIVE_SPLINTS || self.entries.contains_key(&id) {
-            return Err(runtime);
+        if self.entries.contains_key(&id) {
+            return Err((runtime, slot));
         }
         self.entries.insert(id, runtime);
+        drop(slot);
         Ok(())
     }
 
@@ -676,6 +725,44 @@ impl RuntimeRegistry {
 
     fn drain(&mut self) -> Vec<LiveSplintRuntime> {
         self.entries.drain().map(|(_, runtime)| runtime).collect()
+    }
+}
+
+/// Runtimes removed from the registry whose processes are still shutting down.
+///
+/// Shutdown may wait through the whole hangup and termination grace, so it
+/// runs in the background, outside any topology transaction. Daemon shutdown
+/// waits for these tasks.
+#[derive(Clone, Default)]
+struct RetiringRuntimes {
+    count: Arc<AtomicUsize>,
+    tasks: TaskTracker,
+}
+
+impl RetiringRuntimes {
+    fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    fn hold(&self) -> RetiringGuard {
+        self.count.fetch_add(1, Ordering::AcqRel);
+        RetiringGuard(Arc::clone(&self.count))
+    }
+
+    fn spawn(&self, runtime: LiveSplintRuntime) -> RuntimeShutdown {
+        let retiring = self.hold();
+        self.tasks.spawn(async move {
+            let _retiring = retiring;
+            runtime.shutdown().await
+        })
+    }
+}
+
+struct RetiringGuard(Arc<AtomicUsize>);
+
+impl Drop for RetiringGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -762,6 +849,7 @@ impl From<ServerFrame> for QueuedServerFrame {
 struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
+    retiring: RetiringRuntimes,
     transient_leases: Arc<StdMutex<TransientLeaseRegistry>>,
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
@@ -773,6 +861,8 @@ struct DaemonState {
     metadata: Option<MetadataStore>,
     #[cfg(test)]
     topology_save_failure_countdown: AtomicU64,
+    #[cfg(test)]
+    spawn_attempts: AtomicUsize,
     policy: Mutex<policy::PolicyStore>,
     audit: Mutex<audit::AuditStore>,
     daemon_audit_peer: splinterm_protocol::AuditPeer,
@@ -954,6 +1044,7 @@ async fn run_daemon(
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let (connection_revocations, _) = broadcast::channel(CONNECTION_LIMIT);
+    let retiring = RetiringRuntimes::default();
     let (policy_reloads, _) = broadcast::channel(1);
     let mut policy = policy::PolicyStore::default();
     let policy_generation = policy.reload(policy::configured_path().as_deref(), &lair);
@@ -962,7 +1053,8 @@ async fn run_daemon(
     }
     let state = Arc::new(DaemonState {
         topology: RwLock::new(lair),
-        runtimes: Mutex::new(RuntimeRegistry::default()),
+        runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
+        retiring,
         transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
@@ -976,6 +1068,8 @@ async fn run_daemon(
         metadata: Some(metadata),
         #[cfg(test)]
         topology_save_failure_countdown: AtomicU64::new(u64::MAX),
+        #[cfg(test)]
+        spawn_attempts: AtomicUsize::new(0),
         policy: Mutex::new(policy),
         audit: Mutex::new(audit::AuditStore::default()),
         daemon_audit_peer,
@@ -1171,6 +1265,9 @@ async fn run_daemon(
                 Err(error) => error!(%error, "live Splint shutdown task failed"),
             }
         }
+        // Splints closed before shutdown may still be in their shutdown grace.
+        state.retiring.tasks.close();
+        state.retiring.tasks.wait().await;
         time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
             .await
             .context("timed out while reconciling process exits during shutdown")?;
@@ -2481,11 +2578,12 @@ type RuntimeShutdown = tokio::task::JoinHandle<Result<ProcessExit, LiveError>>;
 /// The shutdowns run detached and concurrently, so a request cancelled after
 /// the removal still signals and reaps every process.
 fn begin_runtime_shutdowns(
+    retiring: &RetiringRuntimes,
     runtimes: impl IntoIterator<Item = LiveSplintRuntime>,
 ) -> Vec<RuntimeShutdown> {
     runtimes
         .into_iter()
-        .map(|runtime| tokio::spawn(runtime.shutdown()))
+        .map(|runtime| retiring.spawn(runtime))
         .collect()
 }
 
@@ -2536,14 +2634,14 @@ fn splint_launch_context(topology: &Topology, splint_id: SplintId) -> Option<Spl
 
 struct RuntimeCreationGuard {
     runtime: Option<LiveSplintRuntime>,
-    cleanup_tasks: TaskTracker,
+    retiring: RetiringRuntimes,
 }
 
 impl RuntimeCreationGuard {
-    fn new(runtime: LiveSplintRuntime, cleanup_tasks: TaskTracker) -> Self {
+    fn new(runtime: LiveSplintRuntime, retiring: RetiringRuntimes) -> Self {
         Self {
             runtime: Some(runtime),
-            cleanup_tasks,
+            retiring,
         }
     }
 
@@ -2562,28 +2660,46 @@ impl RuntimeCreationGuard {
 impl Drop for RuntimeCreationGuard {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            self.cleanup_tasks.spawn(async move {
-                let _ = runtime.shutdown().await;
-            });
+            drop(self.retiring.spawn(runtime));
         }
     }
 }
 
+/// Reserves a live-registry slot before a launch spawns its process.
+async fn reserve_launch_slot(state: &DaemonState) -> Result<LaunchSlot, ProtocolError> {
+    state
+        .runtimes
+        .lock()
+        .await
+        .reserve()
+        .ok_or_else(registry_full)
+}
+
+fn registry_full() -> ProtocolError {
+    ProtocolError::new(ErrorCode::ResourceLimit, "live Splint registry is full")
+}
+
+/// Spawns a Splint process. The caller's [`LaunchSlot`] proves the registry
+/// had room before the process existed.
 async fn spawn_runtime(
     state: &DaemonState,
+    slot: &LaunchSlot,
     context: SplintLaunchContext,
     launch: &splinterm_protocol::LaunchParameters,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
-    spawn_runtime_with_size(state, context, launch, None).await
+    spawn_runtime_with_size(state, slot, context, launch, None).await
 }
 
 async fn spawn_runtime_with_size(
     state: &DaemonState,
+    _slot: &LaunchSlot,
     context: SplintLaunchContext,
     launch: &splinterm_protocol::LaunchParameters,
     initial_size: Option<(u16, u16)>,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
     launch.validate()?;
+    #[cfg(test)]
+    state.spawn_attempts.fetch_add(1, Ordering::SeqCst);
     let pty_command = if let Some((program, arguments)) = launch.command.split_first() {
         PtyCommand::new(program, launch.cwd.clone())
             .args(arguments.iter())
@@ -2863,7 +2979,8 @@ async fn start_exited_splint(
 
     let context =
         splint_launch_context(&*state.topology.read().await, splint_id).ok_or_else(not_found)?;
-    let runtime = spawn_runtime(state, context, launch).await?;
+    let slot = reserve_launch_slot(state).await?;
+    let runtime = spawn_runtime(state, &slot, context, launch).await?;
     let handle = runtime.handle();
     let incarnation = handle.incarnation.value();
     let previous_topology = state.topology.read().await.clone();
@@ -2880,26 +2997,26 @@ async fn start_exited_splint(
     let (candidate, topology_revision) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
-            let _ = runtime.shutdown().await;
+            drop(state.retiring.spawn(runtime));
             return Err(error);
         }
     };
     let rejected = {
         let mut lair = state.topology.write().await;
         let mut runtimes = state.runtimes.lock().await;
-        match runtimes.insert(runtime) {
+        match runtimes.insert(runtime, slot) {
             Ok(()) => {
                 *lair = candidate;
                 None
             }
-            Err(runtime) => Some(runtime),
+            Err(rejected) => Some(rejected),
         }
     };
-    if let Some(runtime) = rejected {
+    if let Some((runtime, _slot)) = rejected {
         if persist_topology(state, &previous_topology).await.is_err() {
             error!("failed to roll back durable restore after registry rejection");
         }
-        let _ = runtime.shutdown().await;
+        drop(state.retiring.spawn(runtime));
         return Err(ProtocolError::new(
             ErrorCode::ControllerUnavailable,
             "another restore won the Splint runtime race",
@@ -3148,8 +3265,9 @@ async fn retire_transient_lair_under_transaction(
             let _ = state.revocations.send(Revocation { grant_id });
         }
     }
+    // Shutdown may wait through the full grace; it must not hold the transaction.
     for runtime in runtimes {
-        let _ = runtime.shutdown().await;
+        drop(state.retiring.spawn(runtime));
     }
     publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
     true
@@ -5411,8 +5529,9 @@ async fn handle_authorized_request(
                 dojo: dojo_id,
                 splint: splint_id,
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
-            let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+            let slot = reserve_launch_slot(state).await?;
+            let runtime = spawn_runtime(state, &slot, context, &launch).await?;
+            let runtime = RuntimeCreationGuard::new(runtime, state.retiring.clone());
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
@@ -5432,16 +5551,16 @@ async fn handle_authorized_request(
             let rejected = {
                 let mut topology = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
+                match runtimes.insert(runtime, slot) {
                     Ok(()) => {
                         *topology = candidate;
                         None
                     }
-                    Err(runtime) => Some(runtime),
+                    Err(rejected) => Some(rejected),
                 }
             };
-            if let Some(runtime) = rejected {
-                let _ = runtime.shutdown().await;
+            if let Some((runtime, _slot)) = rejected {
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
@@ -5495,13 +5614,15 @@ async fn handle_authorized_request(
                 dojo: dojo_id,
                 splint: splint_id,
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
+            let slot = reserve_launch_slot(state).await?;
+            let runtime = spawn_runtime(state, &slot, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
             splint.state = SplintState::Running;
-            if let Err(runtime) = state.runtimes.lock().await.insert(runtime) {
-                let _ = runtime.shutdown().await;
+            let admitted = state.runtimes.lock().await.insert(runtime, slot);
+            if let Err((runtime, _slot)) = admitted {
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
@@ -5528,7 +5649,7 @@ async fn handle_authorized_request(
                         .await
                         .remove(splint_id)
                         .expect("unpublished persistent runtime remains admitted");
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     return Err(error);
                 }
             };
@@ -5578,12 +5699,7 @@ async fn handle_authorized_request(
                     return Err(not_found());
                 }
             }
-            if state.runtimes.lock().await.entries.len() >= MAX_LIVE_SPLINTS {
-                return Err(ProtocolError::new(
-                    ErrorCode::ResourceLimit,
-                    "live Splint registry is full",
-                ));
-            }
+            let slot = reserve_launch_slot(state).await?;
 
             let mut splint = Splint::shell(launch.cwd.clone());
             splint.command.clone_from(&launch.command);
@@ -5606,7 +5722,8 @@ async fn handle_authorized_request(
             } else {
                 None
             };
-            let runtime = spawn_runtime_with_size(state, context, &launch, initial_size).await?;
+            let runtime =
+                spawn_runtime_with_size(state, &slot, context, &launch, initial_size).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
 
@@ -5627,26 +5744,26 @@ async fn handle_authorized_request(
             let (candidate, topology_revision) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     return Err(error);
                 }
             };
             let rejected = {
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
+                match runtimes.insert(runtime, slot) {
                     Ok(()) => {
                         *lair = candidate;
                         None
                     }
-                    Err(runtime) => Some(runtime),
+                    Err(rejected) => Some(rejected),
                 }
             };
-            if let Some(runtime) = rejected {
+            if let Some((runtime, _slot)) = rejected {
                 if persist_topology(state, &previous).await.is_err() {
                     error!("failed to roll back durable split after runtime registry rejection");
                 }
-                let _ = runtime.shutdown().await;
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
@@ -5791,7 +5908,7 @@ async fn handle_authorized_request(
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
                 *lair = candidate;
-                begin_runtime_shutdowns(runtimes.remove(splint_id))
+                begin_runtime_shutdowns(&state.retiring, runtimes.remove(splint_id))
             };
             publish_topology(state, topology_revision, TopologyChangeKind::SplintClosed).await;
             drop(transaction);
@@ -5867,7 +5984,8 @@ async fn handle_authorized_request(
                 dojo: dojo_id,
                 splint: splint_id,
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
+            let slot = reserve_launch_slot(state).await?;
+            let runtime = spawn_runtime(state, &slot, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
@@ -5885,26 +6003,26 @@ async fn handle_authorized_request(
             let (candidate, (topology_revision, promoted)) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     return Err(error);
                 }
             };
             let rejected = {
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
+                match runtimes.insert(runtime, slot) {
                     Ok(()) => {
                         *lair = candidate;
                         None
                     }
-                    Err(runtime) => Some(runtime),
+                    Err(rejected) => Some(rejected),
                 }
             };
-            if let Some(runtime) = rejected {
+            if let Some((runtime, _slot)) = rejected {
                 if persist_topology(state, &previous).await.is_err() {
                     error!("failed to roll back durable Dojo creation after registry rejection");
                 }
-                let _ = runtime.shutdown().await;
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
@@ -5985,14 +6103,20 @@ async fn handle_authorized_request(
                     dojo: leaf.dojo_id,
                     splint: leaf.splint_id,
                 };
-                let Ok(runtime) = spawn_runtime(state, context, &leaf.launch).await else {
+                // A leaf the registry has no room for fails without spawning.
+                let slot = state.runtimes.lock().await.reserve();
+                let spawned = match &slot {
+                    Some(slot) => spawn_runtime(state, slot, context, &leaf.launch).await.ok(),
+                    None => None,
+                };
+                let (Some(slot), Some(runtime)) = (slot, spawned) else {
                     let revision =
                         mark_materialized_leaf_failed(state, leaf.splint_id, None).await?;
                     publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
                     append_preset_leaf_audit(state, leaf.splint_id, false).await;
                     continue;
                 };
-                let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+                let runtime = RuntimeCreationGuard::new(runtime, state.retiring.clone());
                 let handle = runtime.handle();
                 let incarnation = handle.incarnation.value();
                 let mut running_candidate = state.topology.read().await.clone();
@@ -6008,7 +6132,7 @@ async fn handle_authorized_request(
                         "failed to persist running preset leaf after topology commit"
                     );
                     let runtime = runtime.take();
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     let revision =
                         mark_materialized_leaf_failed(state, leaf.splint_id, Some(incarnation))
                             .await?;
@@ -6020,16 +6144,16 @@ async fn handle_authorized_request(
                 let rejected = {
                     let mut topology = state.topology.write().await;
                     let mut runtimes = state.runtimes.lock().await;
-                    match runtimes.insert(runtime) {
+                    match runtimes.insert(runtime, slot) {
                         Ok(()) => {
                             *topology = running_candidate;
                             None
                         }
-                        Err(runtime) => Some(runtime),
+                        Err(rejected) => Some(rejected),
                     }
                 };
-                if let Some(runtime) = rejected {
-                    let _ = runtime.shutdown().await;
+                if let Some((runtime, _slot)) = rejected {
+                    drop(state.retiring.spawn(runtime));
                     let revision =
                         mark_materialized_leaf_failed(state, leaf.splint_id, Some(incarnation))
                             .await?;
@@ -6071,7 +6195,10 @@ async fn handle_authorized_request(
                 let mut lair = state.topology.write().await;
                 let mut registry = state.runtimes.lock().await;
                 *lair = candidate;
-                begin_runtime_shutdowns(ids.into_iter().filter_map(|id| registry.remove(id)))
+                begin_runtime_shutdowns(
+                    &state.retiring,
+                    ids.into_iter().filter_map(|id| registry.remove(id)),
+                )
             };
             publish_topology(state, topology_revision, TopologyChangeKind::DojoClosed).await;
             drop(transaction);
@@ -6128,6 +6255,7 @@ async fn handle_authorized_request(
                 let mut registry = state.runtimes.lock().await;
                 *topology = candidate;
                 begin_runtime_shutdowns(
+                    &state.retiring,
                     splint_ids
                         .iter()
                         .filter_map(|splint_id| registry.remove(*splint_id)),
@@ -6851,7 +6979,10 @@ async fn handle_authorized_request(
                 )
                 .await?;
             }
-            let _transaction = state
+            // Phase 1: revoke authority under the transaction, then release it.
+            // A resistant process can take the whole shutdown grace to exit, and
+            // unrelated topology changes must not wait behind it.
+            let transaction = state
                 .topology_transactions
                 .acquire()
                 .await
@@ -6882,25 +7013,49 @@ async fn handle_authorized_request(
             for grant_id in revoked {
                 let _ = state.revocations.send(Revocation { grant_id });
             }
-            handle.shutdown().await.map_err(|_| internal())?;
+            drop(transaction);
+
+            // Phase 2: wait for exit. The runtime stays registered, so it still
+            // counts toward the live limit, and the exit observer may finalize it
+            // first if this request is dropped.
+            // The actor stops taking commands once the child exits, so a concurrent
+            // kill or a natural exit can close it first; the exit status decides.
+            let _ = handle.shutdown().await;
             let status = handle.wait_for_exit().await.ok_or_else(internal)?;
             let code = status
                 .code
                 .or_else(|| status.signal.map(|signal| 128 + signal))
                 .unwrap_or(1);
-            if !finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code)
+
+            // Phase 3: finalize unless the exit observer, a close, or transient
+            // retirement got there first. The kill succeeded either way.
+            let transaction = state
+                .topology_transactions
+                .acquire()
                 .await
-            {
-                return Err(internal());
+                .map_err(|_| internal())?;
+            let finalized = state
+                .topology
+                .read()
+                .await
+                .find_splint(splint_id)
+                .is_none_or(|splint| matches!(splint.state, SplintState::Exited(_)));
+            if !finalized {
+                finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code)
+                    .await;
             }
-            let runtime = state
-                .runtimes
-                .lock()
-                .await
-                .remove(splint_id)
-                .ok_or_else(internal)?;
-            let reaped = runtime.wait().await.map_err(|_| internal())?;
-            debug_assert_eq!(reaped, status);
+            let runtime = {
+                let mut runtimes = state.runtimes.lock().await;
+                let current = runtimes
+                    .handle(splint_id)
+                    .is_some_and(|current| current.incarnation.value() == incarnation);
+                current.then(|| runtimes.remove(splint_id)).flatten()
+            };
+            drop(transaction);
+            if let Some(runtime) = runtime {
+                let reaped = runtime.wait().await.map_err(|_| internal())?;
+                debug_assert_eq!(reaped, status);
+            }
             Response::SplintKilled {
                 splint_id,
                 incarnation,
@@ -8609,6 +8764,20 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn retiring_processes_count_toward_the_live_limit_until_reaped() {
+        let retiring = RetiringRuntimes::default();
+        let registry = RuntimeRegistry::new(retiring.clone());
+        assert!(!registry.at_capacity());
+        let mut held: Vec<_> = (0..MAX_LIVE_SPLINTS).map(|_| retiring.hold()).collect();
+        assert!(registry.at_capacity());
+        held.pop();
+        assert_eq!(retiring.count(), MAX_LIVE_SPLINTS - 1);
+        assert!(!registry.at_capacity());
+        drop(held);
+        assert_eq!(retiring.count(), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn failed_accepts_pause_instead_of_ending_the_daemon() {
         const EMFILE: i32 = 24;
@@ -9624,10 +9793,12 @@ mod tests {
         metadata: Option<MetadataStore>,
     ) -> Arc<DaemonState> {
         let (revocations, _) = broadcast::channel(32);
+        let retiring = RetiringRuntimes::default();
         let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
         Arc::new(DaemonState {
             topology: RwLock::new(Topology::new()),
-            runtimes: Mutex::new(RuntimeRegistry::default()),
+            runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
+            retiring,
             transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
@@ -9642,6 +9813,7 @@ mod tests {
             exit_observers: TaskTracker::new(),
             metadata,
             topology_save_failure_countdown: AtomicU64::new(u64::MAX),
+            spawn_attempts: AtomicUsize::new(0),
             policy: Mutex::new(policy::PolicyStore::default()),
             audit: Mutex::new(audit::AuditStore::default()),
             daemon_audit_peer: splinterm_protocol::AuditPeer {
@@ -9863,6 +10035,105 @@ mod tests {
         )
         .await
         .map(|handled| handled.response)
+    }
+
+    #[test]
+    fn launch_slots_count_toward_the_live_limit_until_released() {
+        let retiring = RetiringRuntimes::default();
+        let mut registry = RuntimeRegistry::new(retiring.clone());
+        let _held: Vec<_> = (0..MAX_LIVE_SPLINTS - 1).map(|_| retiring.hold()).collect();
+        let slot = registry.reserve().expect("one slot remains");
+        assert!(registry.at_capacity());
+        assert!(registry.reserve().is_none());
+        drop(slot);
+        assert!(!registry.at_capacity());
+        assert!(registry.reserve().is_some());
+    }
+
+    // Every creation path reserves registry capacity before spawning, so a
+    // rejected request at capacity never creates a process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn creations_at_capacity_are_rejected_without_spawning() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let (lair_id, splint_id) = {
+            let mut topology = state.topology.write().await;
+            let lair = topology.create_lair("main", PathBuf::from("/tmp")).unwrap();
+            let ids = (lair.id, lair.dojos[0].default_focus);
+            assert!(topology.set_splint_state(ids.1, SplintState::Exited(0)));
+            ids
+        };
+        let _held: Vec<_> = (0..MAX_LIVE_SPLINTS)
+            .map(|_| state.retiring.hold())
+            .collect();
+        let launch = test_launch(&["/bin/sh", "-c", "sleep 30"]);
+        let requests = |revision| {
+            vec![
+                Request::CreateLair {
+                    expected_topology_revision: revision,
+                    name: "rejected".into(),
+                    launch: launch.clone(),
+                },
+                Request::CreateTransientLair {
+                    expected_topology_revision: revision,
+                    name: "rejected".into(),
+                    launch: launch.clone(),
+                },
+                Request::NewDojo {
+                    expected_topology_revision: revision,
+                    lair_id,
+                    name: "rejected".into(),
+                    launch: launch.clone(),
+                    promote_transient_lair: false,
+                },
+                Request::SplitSplint {
+                    expected_topology_revision: revision,
+                    target_splint_id: splint_id,
+                    axis: splinterm_core::Axis::Horizontal,
+                    side: splinterm_core::SplitSide::Second,
+                    ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                    launch: launch.clone(),
+                },
+                Request::RelaunchSplint {
+                    expected_topology_revision: revision,
+                    splint_id,
+                    launch: launch.clone(),
+                },
+            ]
+        };
+        let revision = state.topology.read().await.revision();
+        for request in requests(revision) {
+            let label = format!("{request:?}");
+            let error = trusted_request(&state, 81, request)
+                .await
+                .expect_err("creation at capacity succeeded");
+            assert_eq!(error.code, ErrorCode::ResourceLimit, "{label}");
+            assert_eq!(state.spawn_attempts.load(Ordering::SeqCst), 0, "{label}");
+        }
+        let revision = state.topology.read().await.revision();
+        let Response::PresetMaterialized { panes, .. } = trusted_request(
+            &state,
+            81,
+            preset_request(
+                revision,
+                lair_id,
+                Path::new("/tmp"),
+                &["/bin/sh", "-c", "sleep 30"],
+                &["/bin/sh", "-c", "sleep 30"],
+            ),
+        )
+        .await
+        .unwrap() else {
+            panic!("preset materialization response was not returned");
+        };
+        assert_eq!(state.spawn_attempts.load(Ordering::SeqCst), 0);
+        let topology = state.topology.read().await;
+        for pane in panes {
+            assert_eq!(
+                topology.find_splint(pane.splint_id).unwrap().state,
+                SplintState::Exited(127)
+            );
+        }
+        assert!(state.runtimes.lock().await.entries.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10453,6 +10724,14 @@ mod tests {
                 .for_connection(connection_id)
                 .is_none()
         );
+        // Retirement reaps in the background, outside the topology transaction.
+        time::timeout(Duration::from_secs(5), async {
+            while state.retiring.count() > 0 {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retired transient runtime was not reaped");
         assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
     }
 

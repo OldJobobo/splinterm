@@ -300,6 +300,13 @@ impl Connection {
         snapshot.revision
     }
 
+    async fn topology(&mut self) -> splinterm_core::Topology {
+        let Response::Topology { snapshot } = self.request(Request::InspectTopology).await else {
+            panic!("topology response was not returned");
+        };
+        snapshot.topology
+    }
+
     async fn request_result(&mut self, request: Request) -> Result<Response, ProtocolError> {
         let request_id = self.request_id;
         self.request_id += 1;
@@ -4665,4 +4672,269 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
     })
     .await
     .expect("Phase 8 scenario timed out");
+}
+
+fn process_group_members(process_group: u32) -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            // The comm field may contain spaces, so parse after its closing paren.
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let fields = stat.rsplit_once(')')?.1.split_whitespace().nth(2)?;
+                    fields.parse::<u32>().ok()
+                })
+                == Some(process_group)
+        })
+        .collect()
+}
+
+/// SIGKILLs a signal-ignoring test process group when a test exits early.
+///
+/// A timeout or panic drops the test future, and with it this guard; without
+/// it, a resistant shell orphaned by the killed daemon would loop forever.
+/// Tests disarm the guard once they have proven the group is gone.
+struct ProcessGroupGuard {
+    group: u32,
+    armed: bool,
+}
+
+impl ProcessGroupGuard {
+    fn new(group: u32) -> Self {
+        Self { group, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if !self.armed || process_group_members(self.group).is_empty() {
+            return;
+        }
+        if let Some(group) = i32::try_from(self.group)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// Asserts that a killed resistant process group exits promptly, then
+/// disarms its guard.
+async fn wait_for_process_group_exit(group: ProcessGroupGuard) {
+    let pid = group.group;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_group_members(pid).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "process group {pid} survived its kill: {:?}",
+            process_group_members(pid)
+        );
+        time::sleep(Duration::from_millis(20)).await;
+    }
+    group.disarm();
+}
+
+// A direct command that ignores hangup, termination and interrupt must still
+// be killed with its whole process group, children included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kill_splint_reaps_a_signal_ignoring_process_group() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let (
+            MutationTarget {
+                splint_id,
+                incarnation,
+                ..
+            },
+            group,
+        ) = create_resistant_lair(&daemon, &mut admin, "resistant").await;
+        let pid = group.group;
+        assert!(!process_group_members(pid).is_empty());
+
+        let Response::SplintKilled { exit_status, .. } = admin
+            .request(Request::KillSplint {
+                splint_id,
+                incarnation,
+            })
+            .await
+        else {
+            panic!("daemon did not kill the Splint");
+        };
+        assert_eq!(exit_status.signal, Some(9));
+        wait_for_process_group_exit(group).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("resistant KillSplint scenario timed out");
+}
+
+/// Creates a Lair whose shell ignores hangup, termination and interrupt, and
+/// returns a guard that kills its process group if the test exits early.
+async fn create_resistant_lair(
+    daemon: &Daemon,
+    admin: &mut Connection,
+    name: &str,
+) -> (MutationTarget, ProcessGroupGuard) {
+    let marker = daemon.runtime.join(format!("{name}-resistant-pid"));
+    let expected_topology_revision = admin.topology_revision().await;
+    let Response::LairCreated { lair, .. } = admin
+        .request(Request::CreateLair {
+            expected_topology_revision,
+            name: name.into(),
+            launch: LaunchParameters {
+                cwd: std::env::current_dir().unwrap(),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!(
+                        "trap '' HUP TERM INT; echo $$ > '{}'; while :; do sleep 1; done",
+                        marker.display()
+                    ),
+                ],
+                shell: None,
+                login_shell: false,
+                scrollback_lines: 100,
+            },
+        })
+        .await
+    else {
+        panic!("daemon did not create the Lair");
+    };
+    let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+        panic!("new Dojo was not a leaf");
+    };
+    // The shell leads its own process group, so its PID names the group.
+    let group = ProcessGroupGuard::new(wait_for_pid_marker(&marker, "resistant shell").await);
+    let incarnation = admin.live_incarnation(splint.id).await;
+    // Let the loop start a child so the group has more than its leader.
+    time::sleep(Duration::from_millis(200)).await;
+    (
+        MutationTarget {
+            lair_id: lair.id,
+            dojo_id: lair.dojos[0].id,
+            splint_id: splint.id,
+            incarnation,
+        },
+        group,
+    )
+}
+
+// Killing a process that ignores hangup and termination waits through the
+// whole shutdown grace. That wait must not hold the topology transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_kill_splint_does_not_block_topology_changes() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let (
+            MutationTarget {
+                splint_id,
+                incarnation,
+                ..
+            },
+            group,
+        ) = create_resistant_lair(&daemon, &mut admin, "resistant").await;
+        let mut kill_client = daemon.connect().await;
+        let kill = tokio::spawn(async move {
+            kill_client
+                .request(Request::KillSplint {
+                    splint_id,
+                    incarnation,
+                })
+                .await
+        });
+        time::sleep(Duration::from_millis(100)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let response = admin
+            .request(Request::CreateLair {
+                expected_topology_revision,
+                name: "unrelated".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await;
+        assert!(matches!(response, Response::LairCreated { .. }));
+        // The kill escalates through two test graces before SIGKILL.
+        assert!(
+            !kill.is_finished(),
+            "the unrelated change waited for the kill"
+        );
+        let kill_response = kill.await.unwrap();
+        let Response::SplintKilled { exit_status, .. } = kill_response else {
+            panic!("daemon did not kill the Splint: {kill_response:?}");
+        };
+        assert_eq!(exit_status.signal, Some(9));
+        let splint = admin
+            .topology()
+            .await
+            .find_splint(splint_id)
+            .cloned()
+            .expect("killed Splint remains in the topology");
+        assert_eq!(splint.state, splinterm_core::SplintState::Exited(137));
+        wait_for_process_group_exit(group).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("pending KillSplint scenario timed out");
+}
+
+// A Lair termination can race a pending kill of one of its Splints; both must
+// succeed and the process is reaped once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminate_lair_during_pending_kill_splint_succeeds() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let (target, group) = create_resistant_lair(&daemon, &mut admin, "resistant").await;
+        let mut kill_client = daemon.connect().await;
+        let (kill_response, terminated) = tokio::join!(
+            kill_client.request(Request::KillSplint {
+                splint_id: target.splint_id,
+                incarnation: target.incarnation,
+            }),
+            async {
+                time::sleep(Duration::from_millis(100)).await;
+                let expected_topology_revision = admin.topology_revision().await;
+                admin
+                    .request(Request::TerminateLair {
+                        expected_topology_revision,
+                        lair_id: target.lair_id,
+                        targets: vec![target.clone()],
+                    })
+                    .await
+            }
+        );
+        assert!(
+            matches!(kill_response, Response::SplintKilled { .. }),
+            "kill failed: {kill_response:?}"
+        );
+        assert!(
+            matches!(terminated, Response::TopologyCommitted { .. }),
+            "termination failed: {terminated:?}"
+        );
+        assert!(
+            admin
+                .topology()
+                .await
+                .find_splint(target.splint_id)
+                .is_none()
+        );
+        wait_for_process_group_exit(group).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("Lair termination during KillSplint scenario timed out");
 }
