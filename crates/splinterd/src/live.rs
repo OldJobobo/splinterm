@@ -3758,6 +3758,29 @@ enum ShutdownStage {
     Kill,
 }
 
+/// Test-only action run on one Splint's PTY session between sealing its
+/// handoff checkpoint and the final kernel-state re-check.
+#[cfg(test)]
+type CheckpointSealedHook = Box<dyn FnOnce(&mut LinuxPtySession) + Send>;
+
+#[cfg(test)]
+static CHECKPOINT_SEALED_HOOKS: std::sync::Mutex<Vec<(SplintId, CheckpointSealedHook)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn run_checkpoint_sealed_hook(splint_id: SplintId, session: &mut LinuxPtySession) {
+    let hook = {
+        let mut hooks = CHECKPOINT_SEALED_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|(id, _)| *id == splint_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook(session);
+    }
+}
+
 fn restore_actor_io(session: &LinuxPtySession) -> Result<AsyncFd<std::fs::File>, LiveError> {
     Ok(AsyncFd::new(session.try_clone_reader()?)?)
 }
@@ -3902,6 +3925,36 @@ async fn run_actor_body(
                     continue;
                 }
             };
+            #[cfg(test)]
+            run_checkpoint_sealed_hook(
+                splint_id,
+                session
+                    .as_mut()
+                    .expect("active actor owns one canonical PTY session"),
+            );
+            // The child is not frozen, so it may resize the PTY or change its
+            // foreground process group while the checkpoint is encoded, sealed
+            // and hashed. Re-read both last: no await separates this check from
+            // exposing the adoptable master, and drift abandons this attempt
+            // with the reader and session still intact.
+            let active_session = session
+                .as_ref()
+                .expect("active actor owns one canonical PTY session");
+            match (
+                active_session.size(),
+                active_session.foreground_process_group(),
+            ) {
+                (Ok(size), Ok(process_group))
+                    if size == kernel_size && process_group == foreground_process_group => {}
+                (Err(error), _) | (_, Err(error)) => {
+                    let _ = reply.send(Err(error.into()));
+                    continue;
+                }
+                _ => {
+                    let _ = reply.send(Err(LiveError::HandoffStateUnsupported));
+                    continue;
+                }
+            }
             let evidence = ActorHandoffEvidence {
                 splint_id,
                 incarnation,
@@ -8980,6 +9033,48 @@ mod tests {
         time::sleep(SYNCHRONIZED_UPDATE_TIMEOUT + Duration::from_millis(100)).await;
         let prepared = handle.prepare_pty_handoff().await.unwrap();
         assert!(!prepared.evidence().synchronized_publication_active);
+        prepared.resume().await.unwrap();
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn winsize_drift_while_sealing_aborts_capture_without_retiring_the_actor() {
+        let splint_id = SplintId::new();
+        let drifted = PtySize::cells(41, 6);
+        // Stand in for a child TIOCSWINSZ while the checkpoint is being sealed.
+        super::CHECKPOINT_SEALED_HOOKS.lock().unwrap().push((
+            splint_id,
+            Box::new(move |session: &mut LinuxPtySession| {
+                session.resize(drifted).unwrap();
+            }),
+        ));
+        let runtime = LiveSplintRuntime::spawn(
+            splint_id,
+            backend(),
+            shell("printf ready; sleep 2"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::timeout(Duration::from_secs(1), async {
+            while !snapshot_text(&handle.snapshot().await.unwrap()).contains("ready") {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            handle.prepare_pty_handoff().await,
+            Err(LiveError::HandoffStateUnsupported)
+        ));
+        // The reader and session were never torn down, so the actor keeps
+        // serving and a capture at the settled size succeeds.
+        assert!(handle.snapshot().await.is_ok());
+        handle.resize(drifted).await.unwrap();
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        assert_eq!(prepared.evidence().size, drifted);
         prepared.resume().await.unwrap();
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
     }
