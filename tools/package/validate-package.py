@@ -68,7 +68,7 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/LICENSE",
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
-PRIVATE_PROTOCOL_VERSION = 38
+PRIVATE_PROTOCOL_VERSION = 39
 PACKAGE_PROVENANCE_KEYS = {
     "schema", "package", "architecture", "provenance", "source_commit",
     "build_version", "pair_build_identity", "daemon_sha256", "client_sha256",

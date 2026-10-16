@@ -18,6 +18,7 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::InspectTopology => AuditOperation::InspectTopology,
         Request::SubscribeTopology => AuditOperation::SubscribeTopology,
         Request::InspectSplint { .. } => AuditOperation::InspectSplint,
+        Request::ResolveLaunchDirectory { .. } => AuditOperation::ResolveLaunchDirectory,
         Request::ReadGraphicalFocus => AuditOperation::ReadGraphicalFocus,
         Request::PublishGraphicalFocus { .. } => AuditOperation::PublishGraphicalFocus,
         Request::RequestAccess { .. } => AuditOperation::RequestAccess,

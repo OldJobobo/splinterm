@@ -135,7 +135,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         | Request::SplitSplint { .. }
         | Request::SplitSplintAutomation { .. }
         | Request::NewDojo { .. }
-        | Request::NewDojoAutomation { .. } => {
+        | Request::NewDojoAutomation { .. }
+        // Resolving prepares a creation, and its answer reveals whether
+        // daemon-host paths exist and are usable.
+        | Request::ResolveLaunchDirectory { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
         }
         Request::RelaunchSplint { .. } | Request::RelaunchSplintAutomation { .. } => {
@@ -295,6 +298,20 @@ mod tests {
         assert_eq!(
             for_request(&Request::ReadGraphicalFocus),
             RequestAuthorization::Authenticated
+        );
+        // Resolving probes daemon-host paths, so metadata read is not enough.
+        assert_eq!(
+            for_request(&Request::ResolveLaunchDirectory {
+                source_splint_id: splint_id,
+                directory: splinterm_protocol::LaunchDirectory::Home,
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::ProcessSpawn,
+                    OperationScope::TopologyLayoutMutate,
+                ],
+                any_of: &[],
+            }
         );
         // A conditional close always terminates the process when it closes.
         assert_eq!(

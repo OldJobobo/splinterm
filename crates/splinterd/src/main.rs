@@ -3768,6 +3768,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::InspectTopology
             | Request::SubscribeTopology
             | Request::InspectSplint { .. }
+            | Request::ResolveLaunchDirectory { .. }
             | Request::RequestAccess { .. }
             | Request::AuthorizationStatus { .. }
             | Request::RevokeAccess { .. }
@@ -4458,6 +4459,10 @@ async fn request_policy_resources(
             }
         }
         Request::InspectSplint { splint_id }
+        | Request::ResolveLaunchDirectory {
+            source_splint_id: splint_id,
+            ..
+        }
         | Request::RelaunchSplint { splint_id, .. }
         | Request::RelaunchSplintAutomation { splint_id, .. }
         | Request::RestoreSplint { splint_id, .. }
@@ -5483,6 +5488,16 @@ async fn handle_authorized_request(
                 title,
                 topology_revision: snapshot.revision,
                 runtime,
+            }
+        }
+        Request::ResolveLaunchDirectory {
+            source_splint_id,
+            directory,
+        } => {
+            directory.validate()?;
+            Response::LaunchDirectoryResolved {
+                source_splint_id,
+                cwd: resolve_launch_directory(state, source_splint_id, directory).await?,
             }
         }
         Request::RequestAccess {
@@ -7651,6 +7666,42 @@ async fn resolve_splint_cwd(
     // A removed source must not turn into a home-directory launch.
     splint_durable_cwd(&*state.topology.read().await, splint_id)?;
     Ok(cwd)
+}
+
+/// Resolves a Window-creation directory on this daemon. Configured paths fall
+/// back to the owner's home; nothing falls back to another Splint's directory.
+async fn resolve_launch_directory(
+    state: &DaemonState,
+    source_splint_id: SplintId,
+    directory: splinterm_protocol::LaunchDirectory,
+) -> Result<Option<PathBuf>, ProtocolError> {
+    use splinterm_protocol::LaunchDirectory;
+
+    // A missing source is rejected before and after resolution, as for inheritance.
+    splint_durable_cwd(&*state.topology.read().await, source_splint_id)?;
+    let home = state.owner_home.clone();
+    let requested = match directory {
+        LaunchDirectory::Inherit => return resolve_splint_cwd(state, source_splint_id).await,
+        LaunchDirectory::Home => None,
+        LaunchDirectory::Absolute(path) => Some(path),
+        LaunchDirectory::HomeRelative(path) => home.as_ref().map(|home| home.join(path)),
+    };
+    let cwd = match requested {
+        Some(path) => match usable_launch_cwd(path).await {
+            Some(cwd) => Some(cwd),
+            None => usable_owner_home(home).await,
+        },
+        None => usable_owner_home(home).await,
+    };
+    splint_durable_cwd(&*state.topology.read().await, source_splint_id)?;
+    Ok(cwd)
+}
+
+async fn usable_owner_home(home: Option<PathBuf>) -> Option<PathBuf> {
+    match home {
+        Some(home) => usable_launch_cwd(home).await,
+        None => None,
+    }
 }
 
 async fn read_splint_root_cwd(
@@ -11656,6 +11707,16 @@ mod tests {
         assert!(interactive_bypass(true, true, false, &retention));
         assert!(interactive_bypass(false, false, true, &retention));
         assert!(!interactive_bypass(false, true, false, &retention));
+        // Windows resolve launch directories without a policy rule; other
+        // clients need the creation scopes.
+        let resolve = Request::ResolveLaunchDirectory {
+            source_splint_id: SplintId::new(),
+            directory: splinterm_protocol::LaunchDirectory::Home,
+        };
+        assert!(interactive_bypass(true, true, false, &resolve));
+        assert!(interactive_bypass(false, false, true, &resolve));
+        assert!(!interactive_bypass(true, false, false, &resolve));
+        assert!(!interactive_bypass(false, true, false, &resolve));
         let terminate_lair = Request::TerminateLair {
             expected_topology_revision: TopologyRevision::new(7),
             lair_id: LairId::new(),
@@ -11780,6 +11841,78 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert_eq!(error.message, "source working directory is unavailable");
+    }
+
+    async fn resolve_launch_directory_with(
+        state: &Arc<DaemonState>,
+        source: SplintId,
+        directory: splinterm_protocol::LaunchDirectory,
+    ) -> Result<Option<PathBuf>, ProtocolError> {
+        let request = Request::ResolveLaunchDirectory {
+            source_splint_id: source,
+            directory,
+        };
+        match trusted_request(state, 41, request).await? {
+            Response::LaunchDirectoryResolved {
+                source_splint_id,
+                cwd,
+            } if source_splint_id == source => Ok(cwd),
+            response => panic!("unexpected response {response:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_directory_resolves_home_and_paths_on_this_daemon() {
+        use splinterm_protocol::LaunchDirectory::{Absolute, Home, HomeRelative, Inherit};
+
+        let base = temp_dir();
+        let home = base.join("home");
+        std::fs::create_dir_all(base.join("durable")).unwrap();
+        std::fs::create_dir_all(home.join("projects")).unwrap();
+        std::fs::create_dir(base.join("elsewhere")).unwrap();
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().owner_home = Some(home.clone());
+        let source = state
+            .topology
+            .write()
+            .await
+            .create_lair("source", base.join("durable"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        for (directory, expected) in [
+            // Inheritance keeps the existing source chain; here the durable directory.
+            (Inherit, Some(base.join("durable"))),
+            (Home, Some(home.clone())),
+            (
+                Absolute(base.join("elsewhere")),
+                Some(base.join("elsewhere")),
+            ),
+            (HomeRelative("projects".into()), Some(home.join("projects"))),
+            // Unusable configured paths fall back to the owner's home, not the source.
+            (Absolute(base.join("missing")), Some(home.clone())),
+            (HomeRelative("missing".into()), Some(home.clone())),
+        ] {
+            let resolved = resolve_launch_directory_with(&state, source, directory.clone()).await;
+            assert_eq!(resolved.unwrap(), expected, "{directory:?}");
+        }
+        Arc::get_mut(&mut state).unwrap().owner_home = Some(base.join("gone"));
+        for (directory, expected) in [
+            (Home, None),
+            (Absolute(base.join("missing")), None),
+            (
+                Absolute(base.join("elsewhere")),
+                Some(base.join("elsewhere")),
+            ),
+        ] {
+            let resolved = resolve_launch_directory_with(&state, source, directory.clone()).await;
+            assert_eq!(resolved.unwrap(), expected, "{directory:?}");
+        }
+        let escape = HomeRelative("../escape".into());
+        let invalid = resolve_launch_directory_with(&state, source, escape).await;
+        assert_eq!(invalid.unwrap_err().code, ErrorCode::InvalidArgument);
+        let missing = resolve_launch_directory_with(&state, SplintId::new(), Home).await;
+        assert_eq!(missing.unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[tokio::test]
