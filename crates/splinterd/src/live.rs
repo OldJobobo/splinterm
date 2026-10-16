@@ -5640,6 +5640,10 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+        assert!(publication.frame_pending);
+        assert_eq!(publication.flush_deadline(false), publication.next_frame_at);
+        // A newer open frame holds partial state, so nothing may flush it.
+        assert_eq!(publication.flush_deadline(true), None);
         let metrics = process_output(
             b"Z",
             SplintId::new(),
@@ -5663,6 +5667,7 @@ mod tests {
         assert_eq!(updates.len(), 2);
         assert_eq!(snapshot.visible_rows[0].cells[0].content, "A");
         assert_eq!(snapshot.visible_rows[0].cells[1].content, "Z");
+        assert!(!publication.frame_pending);
     }
 
     #[tokio::test]
@@ -8920,16 +8925,21 @@ mod tests {
         let handle = runtime.handle();
         let (_, mut subscription) = handle.attach().await.unwrap();
         handle.input(b"go\n".to_vec()).await.unwrap();
+        // The script then sleeps, so no later output can carry frame B.
         let mut latest = None;
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while let Ok(event) = time::timeout_at(deadline, subscription.recv()).await {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.snapshot().await.unwrap();
+            if snapshot_text(&snapshot).contains("AB") && latest == Some(snapshot.revision) {
+                break;
+            }
+            let event = time::timeout_at(deadline, subscription.recv())
+                .await
+                .expect("the completed frame was never published");
             if let SubscriptionReceive::Event(LiveEvent::Update { updates, .. }) = event {
                 latest = updates.last().map(TerminalUpdate::revision).or(latest);
             }
         }
-        let snapshot = handle.snapshot().await.unwrap();
-        assert!(snapshot_text(&snapshot).contains("AB"));
-        assert_eq!(latest, Some(snapshot.revision));
         runtime.shutdown().await.unwrap();
     }
 
