@@ -564,25 +564,38 @@ impl TabsState {
         let Some(identity) = self.tab_identity(dojo_id) else {
             return "Untitled Dojo".to_owned();
         };
-        let dojo_label = tab_dojo_label(identity);
-        let mut matching_count = 0;
-        let mut matching_ordinal = 0;
-        for tab in self.tabs.iter() {
-            if self
-                .tab_identity(tab.dojo_id)
-                .is_some_and(|candidate| tab_dojo_label(candidate) == dojo_label)
-            {
-                if tab.dojo_id == dojo_id {
-                    matching_ordinal = matching_count;
-                }
-                matching_count += 1;
-            }
+        label_among_tabs(
+            identity,
+            self.tabs
+                .iter()
+                .filter_map(|tab| self.tab_identity(tab.dojo_id)),
+        )
+    }
+}
+
+/// Labels one tab given every tab in strip order, the tab itself included.
+fn label_among_tabs<'a>(
+    identity: &WindowDojoIdentity,
+    tabs: impl Iterator<Item = &'a WindowDojoIdentity>,
+) -> String {
+    let dojo_label = tab_dojo_label(identity);
+    let mut matching_count = 0;
+    // Only generated-Lair tabs show ordinals; named Lairs show their name.
+    let mut generated_count = 0;
+    let mut matching_ordinal = 0;
+    for candidate in tabs.filter(|candidate| tab_dojo_label(candidate) == dojo_label) {
+        if candidate.dojo_id == identity.dojo_id {
+            matching_ordinal = generated_count;
         }
-        if matching_count > 1 {
-            ambiguous_tab_label(identity, &dojo_label, matching_ordinal)
-        } else {
-            dojo_label
+        matching_count += 1;
+        if is_generated_lair_name(&candidate.lair_name) {
+            generated_count += 1;
         }
+    }
+    if matching_count > 1 {
+        ambiguous_tab_label(identity, &dojo_label, matching_ordinal)
+    } else {
+        dojo_label
     }
 }
 
@@ -945,8 +958,8 @@ mod tests {
 
     use super::{
         App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, WindowDojoIdentity,
-        ambiguous_tab_label, is_generated_lair_name, opaque_rgba, tab_context_target,
-        tab_dojo_label, tab_foreground, tab_strip_hit_test, tab_strip_layout,
+        ambiguous_tab_label, is_generated_lair_name, label_among_tabs, opaque_rgba,
+        tab_context_target, tab_dojo_label, tab_foreground, tab_strip_hit_test, tab_strip_layout,
     };
 
     #[test]
@@ -1291,9 +1304,26 @@ mod tests {
 
         let named = WindowDojoIdentity {
             lair_name: "work".to_owned(),
-            ..generated
+            ..generated.clone()
         };
         assert_eq!(ambiguous_tab_label(&named, "Dojo 1", 1), "work / Dojo 1");
+
+        let second = WindowDojoIdentity {
+            dojo_id: DojoId::new(),
+            lair_name: "terminal-1791871642236894857-88002".to_owned(),
+            ..generated.clone()
+        };
+        let strip = [named.clone(), generated.clone(), second.clone()];
+        let labels: Vec<_> = strip
+            .iter()
+            .map(|identity| label_among_tabs(identity, strip.iter()))
+            .collect();
+        assert_eq!(labels, ["work / Dojo 1", "Dojo 1 (1)", "Dojo 1 (2)"]);
+        assert_eq!(
+            label_among_tabs(&second, [named, second.clone()].iter()),
+            "Dojo 1 (1)"
+        );
+        assert_eq!(label_among_tabs(&second, [second.clone()].iter()), "Dojo 1");
     }
 
     #[test]

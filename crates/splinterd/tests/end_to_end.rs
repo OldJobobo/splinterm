@@ -3409,9 +3409,9 @@ async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
 
 // Terminate Dojo kills each Splint, then closes the Dojo. A Window treats a
 // subscription that ends without an exit notice as a broken stream, so every
-// subscriber must see the exit before the topology removes the Splint.
+// subscriber must still receive the exit after the Dojo closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn killed_splint_notifies_subscribers_before_its_dojo_closes() {
+async fn killed_splint_still_notifies_subscribers_after_its_dojo_closes() {
     time::timeout(TEST_TIMEOUT, async {
         let daemon = Daemon::start().await;
         let cwd = std::env::current_dir().unwrap();
