@@ -4748,43 +4748,40 @@ async fn pending_kill_splint_does_not_block_topology_changes() {
             ..
         } = create_resistant_lair(&mut admin, "resistant").await;
         let mut kill_client = daemon.connect().await;
-        let started = Instant::now();
-        let (kill_response, unrelated) = tokio::join!(
-            kill_client.request(Request::KillSplint {
-                splint_id,
-                incarnation,
-            }),
-            async {
-                time::sleep(Duration::from_millis(100)).await;
-                let expected_topology_revision = admin.topology_revision().await;
-                let response = admin
-                    .request(Request::CreateLair {
-                        expected_topology_revision,
-                        name: "unrelated".into(),
-                        launch: LaunchParameters {
-                            cwd: std::env::current_dir().unwrap(),
-                            command: vec!["/bin/sh".into()],
-                            shell: None,
-                            login_shell: false,
-                            scrollback_lines: 100,
-                        },
-                    })
-                    .await;
-                (response, started.elapsed())
-            }
-        );
-        let kill_elapsed = started.elapsed();
-        let (response, unrelated_elapsed) = unrelated;
+        let kill = tokio::spawn(async move {
+            kill_client
+                .request(Request::KillSplint {
+                    splint_id,
+                    incarnation,
+                })
+                .await
+        });
+        time::sleep(Duration::from_millis(100)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let response = admin
+            .request(Request::CreateLair {
+                expected_topology_revision,
+                name: "unrelated".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await;
         assert!(matches!(response, Response::LairCreated { .. }));
+        // The kill escalates through two test graces before SIGKILL.
+        assert!(
+            !kill.is_finished(),
+            "the unrelated change waited for the kill"
+        );
+        let kill_response = kill.await.unwrap();
         let Response::SplintKilled { exit_status, .. } = kill_response else {
             panic!("daemon did not kill the Splint: {kill_response:?}");
         };
         assert_eq!(exit_status.signal, Some(9));
-        // The kill escalates through two test graces before SIGKILL.
-        assert!(
-            unrelated_elapsed < kill_elapsed / 2,
-            "an unrelated change waited for the kill: {unrelated_elapsed:?} of {kill_elapsed:?}"
-        );
         let splint = admin
             .topology()
             .await

@@ -2572,14 +2572,14 @@ fn splint_launch_context(topology: &Topology, splint_id: SplintId) -> Option<Spl
 
 struct RuntimeCreationGuard {
     runtime: Option<LiveSplintRuntime>,
-    cleanup_tasks: TaskTracker,
+    retiring: RetiringRuntimes,
 }
 
 impl RuntimeCreationGuard {
-    fn new(runtime: LiveSplintRuntime, cleanup_tasks: TaskTracker) -> Self {
+    fn new(runtime: LiveSplintRuntime, retiring: RetiringRuntimes) -> Self {
         Self {
             runtime: Some(runtime),
-            cleanup_tasks,
+            retiring,
         }
     }
 
@@ -2598,9 +2598,7 @@ impl RuntimeCreationGuard {
 impl Drop for RuntimeCreationGuard {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            self.cleanup_tasks.spawn(async move {
-                let _ = runtime.shutdown().await;
-            });
+            drop(self.retiring.spawn(runtime));
         }
     }
 }
@@ -5449,7 +5447,7 @@ async fn handle_authorized_request(
                 splint: splint_id,
             };
             let runtime = spawn_runtime(state, context, &launch).await?;
-            let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+            let runtime = RuntimeCreationGuard::new(runtime, state.retiring.clone());
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
@@ -6029,7 +6027,7 @@ async fn handle_authorized_request(
                     append_preset_leaf_audit(state, leaf.splint_id, false).await;
                     continue;
                 };
-                let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+                let runtime = RuntimeCreationGuard::new(runtime, state.retiring.clone());
                 let handle = runtime.handle();
                 let incarnation = handle.incarnation.value();
                 let mut running_candidate = state.topology.read().await.clone();
@@ -6931,7 +6929,9 @@ async fn handle_authorized_request(
             // Phase 2: wait for exit. The runtime stays registered, so it still
             // counts toward the live limit, and the exit observer may finalize it
             // first if this request is dropped.
-            handle.shutdown().await.map_err(|_| internal())?;
+            // The actor stops taking commands once the child exits, so a concurrent
+            // kill or a natural exit can close it first; the exit status decides.
+            let _ = handle.shutdown().await;
             let status = handle.wait_for_exit().await.ok_or_else(internal)?;
             let code = status
                 .code
