@@ -13,6 +13,7 @@ mod machine;
 mod omarchy_integration;
 mod pane_bridge;
 mod presets;
+mod remote_chooser;
 mod remote_cli;
 mod session_catalog;
 mod sessions;

@@ -24,46 +24,57 @@ pub(crate) enum SessionPickerPurpose {
     RecentDojos,
     Dojos,
     Lairs,
+    Remotes,
 }
 
 impl SessionPickerPurpose {
-    const fn heading(self, minimal: bool) -> &'static str {
+    pub(crate) const fn heading(self, minimal: bool) -> &'static str {
         match (self, minimal) {
             (Self::RecentDojos, _) => "RECENT DOJOS",
             (Self::Dojos, _) => "DOJOS",
             (Self::Lairs, _) => "LAIRS",
+            (Self::Remotes, _) => "REMOTES",
         }
     }
 
-    const fn guidance(self) -> &'static str {
+    pub(crate) const fn guidance(self) -> &'static str {
         match self {
             Self::RecentDojos => "Open a recent running Dojo.",
             Self::Dojos => "Switch to a Dojo in this Lair.",
             Self::Lairs => "Switch to a Lair.",
+            Self::Remotes => "Open a remote profile in a new Window.",
         }
     }
 
-    const fn new_title(self) -> &'static str {
+    pub(crate) const fn new_title(self) -> &'static str {
         match self {
             Self::RecentDojos => "+ New terminal",
             Self::Dojos => "+ New Dojo",
             Self::Lairs => "+ New Lair",
+            Self::Remotes => "+ Add a profile",
         }
     }
 
-    const fn new_description(self) -> &'static str {
+    pub(crate) const fn new_description(self) -> &'static str {
         match self {
             Self::RecentDojos => "Start a fresh shell",
             Self::Dojos => "Add a Dojo to this Lair",
             Self::Lairs => "Start a fresh workspace",
+            Self::Remotes => "Edit remotes.toml",
         }
     }
 
-    const fn selection_verb(self) -> &'static str {
+    pub(crate) const fn selection_verb(self) -> &'static str {
         match self {
             Self::RecentDojos => "open",
             Self::Dojos | Self::Lairs => "switch",
+            Self::Remotes => "connect",
         }
+    }
+
+    /// Remote profiles are created by editing `remotes.toml`, not from the picker.
+    pub(crate) const fn offers_creation(self) -> bool {
+        !matches!(self, Self::Remotes)
     }
 }
 
@@ -1183,7 +1194,11 @@ pub(crate) fn paint_session_picker_overlay(
                 let Some(item) = items.get(index) else {
                     continue;
                 };
-                let status = if layout.mode == SessionPickerPresentationMode::Normal {
+                // Rows without panes are navigation rows (remote profiles or the
+                // Recent Dojos remote entry), so they carry no running status.
+                let status = if item.pane_count == 0 {
+                    String::new()
+                } else if layout.mode == SessionPickerPresentationMode::Normal {
                     format!("{}/{} running", item.running_pane_count, item.pane_count)
                 } else {
                     format!("{}/{}", item.running_pane_count, item.pane_count)
@@ -1328,6 +1343,7 @@ pub(crate) fn paint_session_picker_overlay(
                 SessionPickerPurpose::RecentDojos => "No recent Dojos",
                 SessionPickerPurpose::Dojos => "No Dojos",
                 SessionPickerPurpose::Lairs => "No Lairs",
+                SessionPickerPurpose::Remotes => "No remote profiles",
             };
             if new_enabled {
                 format!("{empty}   Ctrl+N new")
@@ -1337,8 +1353,12 @@ pub(crate) fn paint_session_picker_overlay(
         }
     } else {
         match layout.mode {
-            SessionPickerPresentationMode::Normal => format!(
+            SessionPickerPresentationMode::Normal if purpose.offers_creation() => format!(
                 "/ search   ↑↓ / J K navigate   Enter {}   Ctrl+N new   Esc cancel",
+                purpose.selection_verb()
+            ),
+            SessionPickerPresentationMode::Normal => format!(
+                "/ search   ↑↓ / J K navigate   Enter {}   Esc cancel",
                 purpose.selection_verb()
             ),
             SessionPickerPresentationMode::Compact => format!(
@@ -1576,6 +1596,15 @@ mod tests {
                 "Start a fresh workspace",
                 "switch",
             ),
+            (
+                SessionPickerPurpose::Remotes,
+                "REMOTES",
+                "REMOTES",
+                "Open a remote profile in a new Window.",
+                "+ Add a profile",
+                "Edit remotes.toml",
+                "connect",
+            ),
         ];
         for (purpose, normal, minimal, guidance, new_title, new_description, verb) in cases {
             assert_eq!(purpose.heading(false), normal);
@@ -1585,6 +1614,14 @@ mod tests {
             assert_eq!(purpose.new_description(), new_description);
             assert_eq!(purpose.selection_verb(), verb);
         }
+        for purpose in [
+            SessionPickerPurpose::RecentDojos,
+            SessionPickerPurpose::Dojos,
+            SessionPickerPurpose::Lairs,
+        ] {
+            assert!(purpose.offers_creation());
+        }
+        assert!(!SessionPickerPurpose::Remotes.offers_creation());
     }
 
     #[test]
