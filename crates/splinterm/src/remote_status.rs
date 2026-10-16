@@ -369,6 +369,11 @@ impl RemoteStatus {
         self.attempts
     }
 
+    #[must_use]
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
     pub fn set_destination(&mut self, destination: &str) {
         self.destination = display_text(destination);
     }

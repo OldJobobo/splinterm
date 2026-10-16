@@ -227,16 +227,13 @@ fn show_failure(
 
 /// Drives one status screen until it hands over a connected endpoint, or the
 /// Window closes first. The first attempt starts once the Window has mapped.
-/// `connect` runs one attempt; `report` records each failure; `destination`
-/// re-reads the shown destination before each retry, as `connect` reloads the
-/// profile; `prompts` delivers OpenSSH prompts from the current attempt's
-/// private askpass broker, and an unanswered secret or question ends the
-/// attempt after `prompt_timeout`. Nothing here writes to stdout or stderr,
-/// and key input is wiped after use because it may be a password.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the flow's Window, prompt, attempt, report, and destination seams are independent test doubles"
-)]
+/// `connect` starts one attempt and returns the destination it connects to,
+/// so the shown destination and the connection come from one profile load;
+/// `report` records each failure; `prompts` delivers OpenSSH prompts from the
+/// current attempt's private askpass broker, and an unanswered secret or
+/// question ends the attempt after `prompt_timeout`. Nothing here writes to
+/// stdout or stderr, and key input is wiped after use because it may be a
+/// password.
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
@@ -245,16 +242,22 @@ async fn run_status_flow<T, F, Fut>(
     prompt_timeout: Duration,
     mut connect: F,
     mut report: impl FnMut(&RemoteStatusFailure),
-    mut destination: impl FnMut() -> String,
 ) -> Result<T, RemoteNotConnected>
 where
-    F: FnMut() -> Fut,
+    F: FnMut() -> (String, Fut),
     Fut: Future<Output = Result<T>>,
 {
     // A Window that ended unmapped has also closed `commands`, so the loop
     // ends the flow without starting an attempt.
     let mut attempt = if window.wait_mapped().await {
-        Some(Box::pin(connect()))
+        // The profile may have changed while the Window mapped.
+        let (destination, future) = connect();
+        let shown = status.destination().to_owned();
+        status.set_destination(&destination);
+        if status.destination() != shown {
+            window.show(&status);
+        }
+        Some(Box::pin(future))
     } else {
         None
     };
@@ -269,6 +272,53 @@ where
             .filter(|prompt| prompt.request.kind() != AskpassKind::Notice)
             .map(|prompt| prompt.deadline);
         tokio::select! {
+            // A cancellation queued alongside a finished attempt wins, so C,
+            // Escape, or a compositor close is never overtaken by hand-over.
+            biased;
+            command = commands.recv() => {
+                let intercepted = active
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.request.kind() != AskpassKind::Notice);
+                let effect = match command {
+                    None => status.on_window_closed(),
+                    Some(WindowCommand::Input(mut bytes)) if intercepted => {
+                        let input = prompt_input(&mut active, &mut status, &bytes);
+                        askpass::wipe(&mut bytes);
+                        match input {
+                            PromptInput::None => {}
+                            PromptInput::Redraw => window.show(&status),
+                            PromptInput::CancelAttempt => end_attempt = Some(PROMPT_CANCELLED),
+                        }
+                        RemoteStatusEffect::None
+                    }
+                    Some(WindowCommand::Input(mut bytes)) => {
+                        let effect = status_key(&bytes)
+                            .map_or(RemoteStatusEffect::None, |key| status.on_key(key));
+                        askpass::wipe(&mut bytes);
+                        effect
+                    }
+                    Some(_) => RemoteStatusEffect::None,
+                };
+                match effect {
+                    RemoteStatusEffect::StartAttempt => {
+                        let (destination, future) = connect();
+                        status.set_destination(&destination);
+                        attempt = Some(Box::pin(future));
+                        window.show(&status);
+                    }
+                    RemoteStatusEffect::Close => {
+                        // Kill OpenSSH first (dropping the attempt SIGKILLs
+                        // it), then drop the prompt unanswered and wipe it.
+                        drop(attempt.take());
+                        drop(active.take());
+                        window.close().await;
+                        return Err(RemoteNotConnected { last_failure });
+                    }
+                    RemoteStatusEffect::None
+                    | RemoteStatusEffect::ShowFailure
+                    | RemoteStatusEffect::HandOver => {}
+                }
+            }
             () = async { tokio::time::sleep_until(timed.expect("guarded deadline")).await }, if timed.is_some() => {
                 end_attempt = Some(PROMPT_TIMED_OUT);
             }
@@ -305,49 +355,6 @@ where
                 status.clear_prompt();
                 window.show(&status);
             }
-            command = commands.recv() => {
-                let intercepted = active
-                    .as_ref()
-                    .is_some_and(|prompt| prompt.request.kind() != AskpassKind::Notice);
-                let effect = match command {
-                    None => status.on_window_closed(),
-                    Some(WindowCommand::Input(mut bytes)) if intercepted => {
-                        let input = prompt_input(&mut active, &mut status, &bytes);
-                        askpass::wipe(&mut bytes);
-                        match input {
-                            PromptInput::None => {}
-                            PromptInput::Redraw => window.show(&status),
-                            PromptInput::CancelAttempt => end_attempt = Some(PROMPT_CANCELLED),
-                        }
-                        RemoteStatusEffect::None
-                    }
-                    Some(WindowCommand::Input(mut bytes)) => {
-                        let effect = status_key(&bytes)
-                            .map_or(RemoteStatusEffect::None, |key| status.on_key(key));
-                        askpass::wipe(&mut bytes);
-                        effect
-                    }
-                    Some(_) => RemoteStatusEffect::None,
-                };
-                match effect {
-                    RemoteStatusEffect::StartAttempt => {
-                        status.set_destination(&destination());
-                        attempt = Some(Box::pin(connect()));
-                        window.show(&status);
-                    }
-                    RemoteStatusEffect::Close => {
-                        // Kill OpenSSH first (dropping the attempt SIGKILLs
-                        // it), then drop the prompt unanswered and wipe it.
-                        drop(attempt.take());
-                        drop(active.take());
-                        window.close().await;
-                        return Err(RemoteNotConnected { last_failure });
-                    }
-                    RemoteStatusEffect::None
-                    | RemoteStatusEffect::ShowFailure
-                    | RemoteStatusEffect::HandOver => {}
-                }
-            }
         }
         if let Some(detail) = end_attempt {
             // Order matters: dropping the attempt SIGKILLs OpenSSH before the
@@ -360,23 +367,40 @@ where
     }
 }
 
-/// One attempt: reload the profile, authenticate, and prove the remote daemon
-/// answers, so daemon failures are reported here rather than after hand-over.
-/// Only catalog errors are marked as profile errors; every later error keeps
-/// its own category or is reported as a transport failure.
+/// Loads `profile_name` from the current `remotes.toml`.
+fn load_profile(profile_name: &str) -> Result<RemoteProfile> {
+    RemoteCatalog::load_default()?.get(profile_name).cloned()
+}
+
+/// Starts one attempt from a single load of the profile: the destination to
+/// show (the profile label when it cannot be loaded) and the connection.
+fn start_attempt(
+    profile_name: &str,
+    prompt: Option<NativePrompt>,
+) -> (
+    String,
+    impl Future<Output = Result<ConnectionFactory>> + use<>,
+) {
+    let profile = load_profile(profile_name);
+    let shown = profile
+        .as_ref()
+        .map_or_else(|_| profile_label(profile_name).to_owned(), destination);
+    (shown, connect_profile(profile, prompt))
+}
+
+/// One attempt: authenticate with the loaded profile and prove the remote
+/// daemon answers, so daemon failures are reported here rather than after
+/// hand-over. Only catalog errors are marked as profile errors; every later
+/// error keeps its own category or is reported as a transport failure.
 async fn connect_profile(
-    profile_name: String,
+    profile: Result<RemoteProfile>,
     prompt: Option<NativePrompt>,
 ) -> Result<ConnectionFactory> {
-    let catalog =
-        RemoteCatalog::load_default().map_err(|error| RemoteProfileError::wrap(&error))?;
-    let profile = catalog
-        .get(&profile_name)
-        .map_err(|error| RemoteProfileError::wrap(&error))?;
+    let profile = profile.map_err(|error| RemoteProfileError::wrap(&error))?;
     let deadline = Duration::from_secs(u64::from(profile.connect_timeout_seconds()));
     let factory = match &prompt {
-        Some(prompt) => ConnectionFactory::remote_with_prompt(profile, prompt).await?,
-        None => ConnectionFactory::remote(profile).await?,
+        Some(prompt) => ConnectionFactory::remote_with_prompt(&profile, prompt).await?,
+        None => ConnectionFactory::remote(&profile).await?,
     };
     let mut connection = factory.connect().await?;
     if !matches!(
@@ -401,15 +425,6 @@ fn report_failure(failure: &RemoteStatusFailure) {
     }
 }
 
-/// The destination shown for `profile_name` from the current `remotes.toml`,
-/// or the profile label when the profile cannot be loaded.
-fn destination_label(profile_name: &str) -> String {
-    RemoteCatalog::load_default()
-        .ok()
-        .and_then(|catalog| catalog.get(profile_name).ok().map(destination))
-        .unwrap_or_else(|| profile_label(profile_name).to_owned())
-}
-
 /// Maps a status Window, connects to `profile_name`, and returns the connected
 /// endpoint once the Window has closed.
 ///
@@ -421,8 +436,12 @@ pub(in crate::app) async fn connect_with_status(
     profile_name: String,
     config: &AppConfig,
 ) -> Result<ConnectionFactory> {
-    let status = RemoteStatus::new(&profile_name, &destination_label(&profile_name))
-        .with_terminal(std::io::stdin().is_terminal());
+    let initial = load_profile(&profile_name).map_or_else(
+        |_| profile_label(&profile_name).to_owned(),
+        |profile| destination(&profile),
+    );
+    let status =
+        RemoteStatus::new(&profile_name, &initial).with_terminal(std::io::stdin().is_terminal());
     let splint_id = SplintId::new();
     let snapshot = status.snapshot(splint_id, 1);
     let (updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
@@ -466,9 +485,8 @@ pub(in crate::app) async fn connect_with_status(
         commands,
         prompts,
         askpass::PROMPT_TIMEOUT,
-        || connect_profile(profile_name.clone(), native_prompt.clone()),
+        || start_attempt(&profile_name, native_prompt.clone()),
         report_failure,
-        || destination_label(&profile_name),
     )
     .await;
     window_task
@@ -539,6 +557,38 @@ mod tests {
         "case@wintermute".to_owned()
     }
 
+    /// Runs the flow with the destination and the attempt as separate
+    /// closures; each attempt reads the destination just before it starts.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the flow's independent seams plus the split destination"
+    )]
+    async fn split_flow<T, F, Fut>(
+        status: RemoteStatus,
+        window: StatusWindow,
+        commands: mpsc::Receiver<WindowCommand>,
+        prompts: mpsc::Receiver<AskpassRequest>,
+        prompt_timeout: Duration,
+        mut connect: F,
+        report: impl FnMut(&RemoteStatusFailure),
+        mut destination: impl FnMut() -> String,
+    ) -> Result<T, RemoteNotConnected>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        run_status_flow(
+            status,
+            window,
+            commands,
+            prompts,
+            prompt_timeout,
+            move || (destination(), connect()),
+            report,
+        )
+        .await
+    }
+
     fn text(snapshot: &TerminalSnapshot) -> String {
         snapshot
             .visible_rows
@@ -578,8 +628,8 @@ mod tests {
     async fn success_closes_the_status_window_and_hands_over() {
         let (mut harness, window, commands) = harness();
         let reports = Cell::new(0);
-        let connected = run_status_flow(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let connected = split_flow(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             no_prompts(),
@@ -605,7 +655,7 @@ mod tests {
             let attempts = attempts.clone();
             let reports = reports.clone();
             let release = release.clone();
-            tokio::spawn(run_status_flow(
+            tokio::spawn(split_flow(
                 RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
@@ -696,8 +746,8 @@ mod tests {
     #[tokio::test]
     async fn closing_cancels_the_attempt_and_the_window() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             no_prompts(),
@@ -719,14 +769,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_queued_cancel_wins_over_an_attempt_that_is_ready() {
+        let (mut harness, window, commands) = harness();
+        harness
+            .commands
+            .send(WindowCommand::Input(b"\x1b".to_vec()))
+            .await
+            .unwrap();
+        let connected = split_flow(
+            RemoteStatus::new("wintermute", "case@wintermute"),
+            window,
+            commands,
+            no_prompts(),
+            TEST_PROMPT_TIMEOUT,
+            || async { Ok("factory") },
+            |_| panic!("a cancelled attempt is not a failure"),
+            fixed_destination,
+        )
+        .await;
+        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
+        expect_closed(&mut harness).await;
+    }
+
+    #[tokio::test]
     async fn a_window_closed_by_the_compositor_ends_the_flow() {
         let (harness, window, commands) = harness();
         let Harness {
             commands: sender, ..
         } = harness;
         drop(sender);
-        let connected = run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let connected = split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             no_prompts(),
@@ -742,8 +815,8 @@ mod tests {
     #[tokio::test]
     async fn closing_after_a_profile_failure_reports_it_and_is_not_connected() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("gone", "gone"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("gone", "case@wintermute"),
             window,
             commands,
             no_prompts(),
@@ -780,8 +853,8 @@ mod tests {
     #[tokio::test]
     async fn uncategorized_attempt_errors_are_shown_as_transport_failures() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             no_prompts(),
@@ -902,7 +975,7 @@ mod tests {
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
         let release = Arc::new(tokio::sync::Notify::new());
         let attempt_release = release.clone();
-        let flow = tokio::spawn(run_status_flow(
+        let flow = tokio::spawn(split_flow(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -961,8 +1034,8 @@ mod tests {
         let reports = Arc::new(Mutex::new(Vec::new()));
         let flow = {
             let reports = reports.clone();
-            tokio::spawn(run_status_flow(
-                RemoteStatus::new("wintermute", "wintermute"),
+            tokio::spawn(split_flow(
+                RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
                 prompts,
@@ -1022,8 +1095,8 @@ mod tests {
         let reports = Arc::new(Mutex::new(Vec::new()));
         let flow = {
             let reports = reports.clone();
-            tokio::spawn(run_status_flow(
-                RemoteStatus::new("wintermute", "wintermute"),
+            tokio::spawn(split_flow(
+                RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
                 prompts,
@@ -1057,8 +1130,8 @@ mod tests {
     async fn a_notice_does_not_time_out() {
         let (mut harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             prompts,
@@ -1082,8 +1155,8 @@ mod tests {
     async fn confirmations_need_an_explicit_yes_or_no() {
         let (mut harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             prompts,
@@ -1129,8 +1202,8 @@ mod tests {
     async fn an_abandoned_prompt_is_withdrawn_and_status_keys_return() {
         let (mut harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             prompts,
@@ -1166,8 +1239,8 @@ mod tests {
     async fn prompts_without_a_running_attempt_are_refused() {
         let (mut harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             prompts,
@@ -1189,8 +1262,8 @@ mod tests {
     async fn notices_keep_status_keys_and_closing_drops_an_open_prompt() {
         let (mut harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             prompts,
@@ -1203,7 +1276,7 @@ mod tests {
             AskpassRequest::for_test(AskpassKind::Notice, b"Confirm user presence for key");
         prompt_sender.send(request).await.unwrap();
         let shown = text(&next_snapshot(&mut harness).await);
-        assert!(shown.contains("OpenSSH says, for wintermute:"));
+        assert!(shown.contains("OpenSSH says, for case@wintermute:"));
         input(&harness, b"c").await;
         assert_eq!(
             flow.await.unwrap(),
@@ -1226,8 +1299,8 @@ mod tests {
         } = harness;
         let reply = SharedReply::default();
         let seen = Seen::default();
-        let flow = tokio::spawn(run_status_flow(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let flow = tokio::spawn(split_flow(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             prompts,
@@ -1252,8 +1325,8 @@ mod tests {
         let attempts = Arc::new(Mutex::new(0_u32));
         let flow = {
             let attempts = attempts.clone();
-            tokio::spawn(run_status_flow(
-                RemoteStatus::new("wintermute", "wintermute"),
+            tokio::spawn(split_flow(
+                RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
                 no_prompts(),
@@ -1292,8 +1365,8 @@ mod tests {
             ..
         } = harness;
         drop((sender, mapped));
-        let connected = run_status_flow::<(), _, _>(
-            RemoteStatus::new("wintermute", "wintermute"),
+        let connected = split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
             no_prompts(),
@@ -1312,7 +1385,7 @@ mod tests {
         let configured = Arc::new(Mutex::new("old.example".to_owned()));
         let flow = {
             let configured = configured.clone();
-            tokio::spawn(run_status_flow::<(), _, _>(
+            tokio::spawn(split_flow::<(), _, _>(
                 RemoteStatus::new("wintermute", "old.example"),
                 window,
                 commands,
@@ -1339,6 +1412,30 @@ mod tests {
         let failed_again = text(&next_snapshot(&mut harness).await);
         assert!(failed_again.contains("Could not connect to case@new.example:2222."));
 
+        harness
+            .commands
+            .send(WindowCommand::Input(b"c".to_vec()))
+            .await
+            .unwrap();
+        assert!(flow.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn the_first_attempt_shows_the_destination_reloaded_after_mapping() {
+        let (mut harness, window, commands) = harness();
+        let flow = tokio::spawn(split_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "old.example"),
+            window,
+            commands,
+            no_prompts(),
+            TEST_PROMPT_TIMEOUT,
+            std::future::pending,
+            |_| {},
+            || "case@new.example:2222".to_owned(),
+        ));
+        let connecting = text(&next_snapshot(&mut harness).await);
+        assert!(connecting.contains("Connecting to case@new.example:2222…"));
+        assert!(!connecting.contains("old.example"));
         harness
             .commands
             .send(WindowCommand::Input(b"c".to_vec()))
