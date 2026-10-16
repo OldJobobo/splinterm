@@ -46,6 +46,8 @@ fn every_supported_byte_split_continues_identically() {
         "plain-\u{00e9}-e\u{301}-\u{754c}".as_bytes(),
         b"\x1b[1;3;4:3;38:2::12:34:56mstyled\x1b[0m",
         b"\x1b]2;split-title\x1b\\after",
+        // C1 ST (0x9c) is also a UTF-8 continuation byte: U+4F5C is e4 bd 9c.
+        b"\x1b]2;\xe4\xbd\x9c\xe6\xa5\xad\x9cafter",
         b"\x1b]4;7;rgb:12/34/56\x07palette",
         b"\x1bP1;2;3zignored-dcs\x1b\\done",
         b"\x1b_ignored-apc\x1b\\done",

@@ -222,6 +222,7 @@ impl Parser {
             || self.string_limit > osc_limit.max(dcs_limit).max(1024)
             || self.sixel_streaming
             || self.utf8_remaining > 3
+            || self.string_utf8_remaining > 3
             || (self.state == State::Utf8 && self.utf8_remaining == 0)
         {
             return false;
