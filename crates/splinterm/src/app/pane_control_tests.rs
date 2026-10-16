@@ -417,17 +417,6 @@ async fn unexpected_control_errors_and_responses_are_still_fatal() {
     }
 }
 
-fn acknowledged(id: SplintId) -> Result<Response, ErrorCode> {
-    Ok(Response::TerminalActionAcknowledged {
-        lair_id: LairId::new(),
-        dojo_id: DojoId::new(),
-        splint_id: id,
-        incarnation: 7,
-        terminal_revision: 10,
-        history_generation: 0,
-    })
-}
-
 fn controlled_input(id: SplintId, bytes: &[u8], focus_report: bool) -> Request {
     Request::Input {
         controller_id: 1,
@@ -451,9 +440,18 @@ async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
             WindowCommand::FocusReport(false),
         ],
         vec![
-            (controlled_input(id, b"\x1b[I", true), acknowledged(id)),
-            (controlled_input(id, b"\x1b[I", false), acknowledged(id)),
-            (controlled_input(id, b"\x1b[O", true), acknowledged(id)),
+            (
+                controlled_input(id, b"\x1b[I", true),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"\x1b[I", false),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"\x1b[O", true),
+                Ok(input_acknowledged(id)),
+            ),
             (
                 Request::ReleaseControl { controller_id: 1 },
                 Ok(Response::Acknowledged),
@@ -488,7 +486,10 @@ async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
             WindowCommand::Input(b"g".to_vec()),
         ],
         vec![
-            (controlled_input(id, b"abcd", false), acknowledged(id)),
+            (
+                controlled_input(id, b"abcd", false),
+                Ok(input_acknowledged(id)),
+            ),
             (
                 Request::Resize {
                     controller_id: 1,
@@ -499,11 +500,20 @@ async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
                     pixel_width: 900,
                     pixel_height: 600,
                 },
-                acknowledged(id),
+                Ok(input_acknowledged(id)),
             ),
-            (controlled_input(id, b"ef", false), acknowledged(id)),
-            (controlled_input(id, b"\x1b[I", true), acknowledged(id)),
-            (controlled_input(id, b"g", false), acknowledged(id)),
+            (
+                controlled_input(id, b"ef", false),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"\x1b[I", true),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"g", false),
+                Ok(input_acknowledged(id)),
+            ),
             (
                 Request::ReleaseControl { controller_id: 1 },
                 Ok(Response::Acknowledged),
