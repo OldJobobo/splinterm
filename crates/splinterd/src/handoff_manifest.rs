@@ -865,7 +865,7 @@ mod tests {
             target_generation: target,
             topology_revision: 4,
             durable_state_generation: 4,
-            private_protocol: 35,
+            private_protocol: 37,
             handoff_protocol: 1,
             terminal_checkpoint_schema: 1,
             descriptor_manifest_schema: 1,
