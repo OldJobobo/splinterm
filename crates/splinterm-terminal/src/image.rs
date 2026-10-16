@@ -1285,7 +1285,8 @@ impl ImagePlane {
                 );
             }
         }
-        let alpha_mode = if pixels.chunks_exact(4).all(|pixel| pixel[3] == u8::MAX) {
+        let (bgra, _) = pixels.as_chunks::<4>();
+        let alpha_mode = if bgra.iter().all(|pixel| pixel[3] == u8::MAX) {
             ImageAlphaMode::Opaque
         } else {
             ImageAlphaMode::Premultiplied
