@@ -221,6 +221,6 @@ mod tests {
             },
             0x12_34_56,
         );
-        assert!(canvas.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert!(canvas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
     }
 }
