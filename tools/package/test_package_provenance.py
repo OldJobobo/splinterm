@@ -16,6 +16,9 @@ SPEC = importlib.util.spec_from_file_location("package_provenance_generator", SO
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+PROTOCOL_SOURCE = ROOT / "crates/splinterm-protocol/src/lib.rs"
+PREFLIGHT_SOURCE = ROOT / "crates/splinterd/src/handoff_preflight.rs"
+CHECKPOINT_SOURCE = ROOT / "crates/splinterm-terminal/src/terminal/checkpoint.rs"
 
 COMMIT = "1234567890abcdef1234567890abcdef12345678"
 
@@ -78,6 +81,30 @@ class PackageProvenanceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     MODULE.pair_identity(commit, provenance, version)
 
+    def test_capability_identity_matches_compiled_contract(self) -> None:
+        def rust_u16(path: Path, name: str, *, public: bool = False) -> int:
+            visibility = "pub " if public else ""
+            matches = re.findall(
+                rf"^{visibility}const {re.escape(name)}: u16 = (\d+);$",
+                path.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            )
+            self.assertEqual(len(matches), 1, f"missing or duplicate Rust authority {name}")
+            return int(matches[0])
+
+        private_protocol = rust_u16(PROTOCOL_SOURCE, "PROTOCOL_VERSION", public=True)
+        handoff_protocol = rust_u16(PREFLIGHT_SOURCE, "HANDOFF_PROTOCOL_VERSION")
+        checkpoint_schema = rust_u16(
+            CHECKPOINT_SOURCE,
+            "TERMINAL_CHECKPOINT_SCHEMA_V2",
+            public=True,
+        )
+        descriptor_manifest = rust_u16(PREFLIGHT_SOURCE, "DESCRIPTOR_MANIFEST_VERSION")
+        self.assertEqual(MODULE.PRIVATE_PROTOCOL, private_protocol)
+        self.assertEqual(MODULE.HANDOFF_PROTOCOL, handoff_protocol)
+        self.assertEqual(MODULE.TERMINAL_CHECKPOINT, checkpoint_schema)
+        self.assertEqual(MODULE.DESCRIPTOR_MANIFEST, descriptor_manifest)
+
     def test_same_version_different_commit_or_kind_has_distinct_identity(self) -> None:
         baseline = MODULE.pair_identity(COMMIT, "local-committed-head", "0.1.0")
         self.assertNotEqual(
@@ -95,15 +122,16 @@ class PackageProvenanceTests(unittest.TestCase):
 
     def test_identity_matches_the_daemon_canonical_fixture(self) -> None:
         # Same inputs as the daemon test's canonical identity fixture, which
-        # pins private protocol 35.
-        original = MODULE.PRIVATE_PROTOCOL
+        # pins private protocol 35 and terminal checkpoint schema 1.
+        original = (MODULE.PRIVATE_PROTOCOL, MODULE.TERMINAL_CHECKPOINT)
         MODULE.PRIVATE_PROTOCOL = 35
+        MODULE.TERMINAL_CHECKPOINT = 1
         try:
             identity = MODULE.pair_identity(
                 COMMIT, "local-committed-head", "0.2.3-beta1"
             )
         finally:
-            MODULE.PRIVATE_PROTOCOL = original
+            MODULE.PRIVATE_PROTOCOL, MODULE.TERMINAL_CHECKPOINT = original
         self.assertEqual(
             identity,
             "a4a4cef437c25147d8b10c08fd3d5715b6fcbc53274e81f8d4efa700ad4f7cac",

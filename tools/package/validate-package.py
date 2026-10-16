@@ -275,7 +275,7 @@ def validate_package_provenance(root: Path) -> None:
     digest.update(record["provenance"].encode("ascii"))
     digest.update(b"\0")
     digest.update(record["build_version"].encode("ascii"))
-    for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 1, 1, 1, 1):
+    for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 2, 2, 1, 1):
         digest.update(value.to_bytes(2, "big"))
     assert record["pair_build_identity"] == digest.hexdigest()
 

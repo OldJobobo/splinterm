@@ -3838,8 +3838,11 @@ async fn run_actor_body(
             let reply = pending_handoff
                 .take()
                 .expect("pending PTY handoff checked as present");
+            // A shutdown in progress owns escalation and waiting replies that a
+            // checkpoint cannot carry.
             if child_exit.is_some()
                 || eof
+                || shutdown.is_some()
                 || publication.active
                 || publication.deadline.is_some()
                 || publication.published_revision != terminal.revision()
@@ -8921,7 +8924,14 @@ mod tests {
         .await
         .unwrap();
         let handle = runtime.handle();
-        time::sleep(Duration::from_millis(50)).await;
+        // Wait until the open synchronized update has been parsed.
+        time::timeout(Duration::from_secs(1), async {
+            while !snapshot_text(&handle.snapshot().await.unwrap()).contains("active") {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
 
         assert!(matches!(
             handle.prepare_pty_handoff().await,
@@ -8934,6 +8944,35 @@ mod tests {
         assert!(!prepared.evidence().synchronized_publication_active);
         prepared.resume().await.unwrap();
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    // Escalation and waiting shutdown replies cannot travel in a checkpoint.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_in_progress_rejects_capture() {
+        let mut config = fast_config();
+        config.hangup_grace = Duration::from_secs(5);
+        config.terminate_grace = Duration::from_secs(5);
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("trap '' HUP TERM; printf ready; while :; do sleep 1; done"),
+            config,
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::sleep(Duration::from_millis(50)).await;
+        let shutdown = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.shutdown().await }
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(
+            handle.prepare_pty_handoff().await,
+            Err(LiveError::HandoffStateUnsupported)
+        ));
+        shutdown.abort();
+        drop(runtime);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
