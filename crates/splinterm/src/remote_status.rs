@@ -13,6 +13,7 @@ use crate::{
     diagnostics::DiagnosticErrorCode,
     frontend::synthetic_text_snapshot,
     remote::is_valid_profile_name,
+    remote_askpass::AskpassKind,
     remote_session::{
         LocalSshFailure, LocalSshProblem, RemoteFailure, RemoteFailureKind, is_bidi_control,
     },
@@ -76,6 +77,13 @@ pub const AGENT_GUIDANCE: [&str; 2] = [
     "Without a terminal, load your key into ssh-agent (ssh-add) or set",
     "SSH_ASKPASS to a graphical prompt. This is the preferred setup.",
 ];
+
+/// Shown while connecting without a terminal (Plan 0055 Milestone 4).
+pub const NATIVE_PROMPT_NOTE: &str = "Otherwise, if OpenSSH needs a password, it asks here.";
+
+/// Shown under a masked field.
+pub const SECRET_HANDLING_NOTE: &str =
+    "Splinterm hands this only to OpenSSH and never shows or stores it.";
 
 /// A key the status screen acts on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -293,6 +301,29 @@ pub enum RemoteStatusEffect {
     Close,
 }
 
+/// An open OpenSSH prompt as the screen shows it. It never holds the answer,
+/// only whether the masked field has any input, so neither the screen text,
+/// the Window title, nor accessibility text can contain the secret.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromptDisplay {
+    kind: AskpassKind,
+    lines: Vec<String>,
+    has_input: bool,
+}
+
+impl PromptDisplay {
+    #[must_use]
+    pub const fn kind(&self) -> AskpassKind {
+        self.kind
+    }
+
+    /// Whether the masked field has any input; never its length or contents.
+    #[must_use]
+    pub const fn has_input(&self) -> bool {
+        self.has_input
+    }
+}
+
 /// The status screen's state machine. The first attempt starts with the screen.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteStatus {
@@ -301,6 +332,7 @@ pub struct RemoteStatus {
     phase: RemoteStatusPhase,
     attempts: u32,
     terminal: bool,
+    prompt: Option<PromptDisplay>,
 }
 
 impl RemoteStatus {
@@ -315,6 +347,7 @@ impl RemoteStatus {
             phase: RemoteStatusPhase::Connecting,
             attempts: 1,
             terminal: false,
+            prompt: None,
         }
     }
 
@@ -340,9 +373,43 @@ impl RemoteStatus {
         self.destination = display_text(destination);
     }
 
+    /// Shows an OpenSSH prompt while connecting. Returns false, showing
+    /// nothing, in any other phase. Lines are cleaned again here.
+    pub fn show_prompt(&mut self, kind: AskpassKind, lines: &[String]) -> bool {
+        if self.phase != RemoteStatusPhase::Connecting {
+            return false;
+        }
+        self.prompt = Some(PromptDisplay {
+            kind,
+            lines: lines.iter().map(|line| display_text(line)).collect(),
+            has_input: false,
+        });
+        true
+    }
+
+    /// Records whether the masked field is empty; never its contents.
+    pub fn set_prompt_input(&mut self, has_input: bool) {
+        if let Some(prompt) = &mut self.prompt {
+            prompt.has_input = has_input;
+        }
+    }
+
+    /// Removes the prompt (answered, cancelled, or abandoned by OpenSSH).
+    pub fn clear_prompt(&mut self) {
+        self.prompt = None;
+    }
+
+    #[must_use]
+    pub const fn prompt(&self) -> Option<&PromptDisplay> {
+        self.prompt.as_ref()
+    }
+
     /// Handles one key. Retry acts only on a shown failure, so repeated
     /// presses while connecting never start a second attempt.
     pub fn on_key(&mut self, key: RemoteStatusKey) -> RemoteStatusEffect {
+        if key == RemoteStatusKey::Close {
+            self.prompt = None;
+        }
         match (&self.phase, key) {
             (RemoteStatusPhase::Failed(_), RemoteStatusKey::Retry) => {
                 self.phase = RemoteStatusPhase::Connecting;
@@ -365,6 +432,7 @@ impl RemoteStatus {
         if self.phase != RemoteStatusPhase::Connecting {
             return RemoteStatusEffect::None;
         }
+        self.prompt = None;
         match result {
             Ok(()) => {
                 self.phase = RemoteStatusPhase::Connected;
@@ -385,6 +453,7 @@ impl RemoteStatus {
         ) {
             return RemoteStatusEffect::None;
         }
+        self.prompt = None;
         self.phase = RemoteStatusPhase::Closed;
         RemoteStatusEffect::Close
     }
@@ -395,6 +464,9 @@ impl RemoteStatus {
         match &self.phase {
             RemoteStatusPhase::Failed(_) => format!("Could not connect to {}", self.profile),
             RemoteStatusPhase::Connected => format!("Connected to {}", self.profile),
+            RemoteStatusPhase::Connecting if self.prompt.is_some() => {
+                format!("Authenticating to {}", self.profile)
+            }
             RemoteStatusPhase::Connecting | RemoteStatusPhase::Closed => {
                 format!("Connecting to {}", self.profile)
             }
@@ -425,6 +497,13 @@ impl RemoteStatus {
             RemoteStatusPhase::Connected => {
                 lines.push(format!("Connected to {}.", self.destination));
             }
+            RemoteStatusPhase::Connecting if self.prompt.is_some() => {
+                lines.push(format!("Connecting to {}…", self.destination));
+                lines.push(String::new());
+                if let Some(prompt) = &self.prompt {
+                    self.prompt_lines(prompt, &mut lines);
+                }
+            }
             RemoteStatusPhase::Connecting | RemoteStatusPhase::Closed => {
                 lines.push(format!("Connecting to {}…", self.destination));
                 lines.push(String::new());
@@ -434,6 +513,8 @@ impl RemoteStatus {
                     lines.push(
                         "OpenSSH may prompt on the terminal that started Splinterm.".to_owned(),
                     );
+                } else {
+                    lines.push(NATIVE_PROMPT_NOTE.to_owned());
                 }
                 if self.attempts > 1 {
                     lines.push(format!("Attempt {}.", self.attempts));
@@ -443,6 +524,44 @@ impl RemoteStatus {
             }
         }
         lines
+    }
+
+    fn prompt_lines(&self, prompt: &PromptDisplay, lines: &mut Vec<String>) {
+        let quoted = prompt.lines.iter().map(|line| format!("  │ {line}"));
+        match prompt.kind {
+            AskpassKind::Secret => {
+                lines.push(format!(
+                    "OpenSSH is asking for a credential for {}.",
+                    self.destination
+                ));
+                lines.push("OpenSSH's prompt:".to_owned());
+                lines.extend(quoted);
+                lines.push(String::new());
+                lines.push(if prompt.has_input {
+                    "Password field: entered (hidden)".to_owned()
+                } else {
+                    "Password field: empty".to_owned()
+                });
+                lines.push(SECRET_HANDLING_NOTE.to_owned());
+                lines.push(String::new());
+                lines.push("Enter: submit          Esc: cancel".to_owned());
+            }
+            AskpassKind::Confirm => {
+                lines.push(format!(
+                    "OpenSSH asks you to confirm, for {}:",
+                    self.destination
+                ));
+                lines.extend(quoted);
+                lines.push(String::new());
+                lines.push("Y: yes          N / Esc: no".to_owned());
+            }
+            AskpassKind::Notice => {
+                lines.push(format!("OpenSSH says, for {}:", self.destination));
+                lines.extend(quoted);
+                lines.push(String::new());
+                lines.push("C / Esc: cancel".to_owned());
+            }
+        }
     }
 
     /// Renders the current phase as a snapshot of the status Window.
@@ -783,5 +902,105 @@ mod tests {
         assert!(first.validate().is_ok() && second.validate().is_ok());
         assert_eq!(first.title, "Connecting to wintermute");
         assert_eq!((first.splint_id, second.revision), (id, 2));
+    }
+
+    fn prompt_lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_secret_prompt_shows_openssh_text_and_a_field_without_its_contents() {
+        let mut status = RemoteStatus::new("wintermute", "case@wintermute");
+        let connecting = status.lines();
+        assert!(connecting.contains(&NATIVE_PROMPT_NOTE.to_owned()));
+        assert!(status.show_prompt(
+            AskpassKind::Secret,
+            &prompt_lines(&["case@wintermute's password:"])
+        ));
+        assert_eq!(status.title(), "Authenticating to wintermute");
+        let screen = status.lines();
+        assert!(
+            screen.contains(&"OpenSSH is asking for a credential for case@wintermute.".to_owned())
+        );
+        assert!(screen.contains(&"  │ case@wintermute's password:".to_owned()));
+        assert!(screen.contains(&"Password field: empty".to_owned()));
+        assert!(screen.contains(&SECRET_HANDLING_NOTE.to_owned()));
+        assert!(screen.contains(&"Enter: submit          Esc: cancel".to_owned()));
+        status.set_prompt_input(true);
+        let typed = status.lines();
+        assert!(typed.contains(&"Password field: entered (hidden)".to_owned()));
+        assert!(status.prompt().unwrap().has_input());
+        // The field line is fixed text: no length, no mask per character.
+        assert!(
+            typed
+                .iter()
+                .all(|line| !line.contains('•') && !line.contains('*'))
+        );
+        let snapshot = status.snapshot(SplintId::new(), 3);
+        assert!(snapshot.validate().is_ok());
+        assert_eq!(snapshot.title, "Authenticating to wintermute");
+
+        status.clear_prompt();
+        assert_eq!(status.title(), "Connecting to wintermute");
+        assert!(status.prompt().is_none());
+    }
+
+    #[test]
+    fn confirm_and_notice_prompts_are_distinct_from_secrets() {
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        status.show_prompt(
+            AskpassKind::Confirm,
+            &prompt_lines(&[
+                "Are you sure you want to continue connecting (yes/no/[fingerprint])?",
+            ]),
+        );
+        let screen = status.lines();
+        assert!(screen.contains(&"Y: yes          N / Esc: no".to_owned()));
+        assert!(!screen.iter().any(|line| line.starts_with("Password field")));
+        status.show_prompt(
+            AskpassKind::Notice,
+            &prompt_lines(&["Confirm user presence for key ED25519-SK"]),
+        );
+        let screen = status.lines();
+        assert!(screen.contains(&"C / Esc: cancel".to_owned()));
+        assert!(!screen.iter().any(|line| line.starts_with("Password field")));
+    }
+
+    #[test]
+    fn prompts_appear_only_while_connecting_and_end_with_the_attempt() {
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        status.show_prompt(AskpassKind::Secret, &prompt_lines(&["password:"]));
+        status.on_attempt(Err(failure(RemoteFailureKind::AuthenticationFailed)));
+        assert!(
+            status.prompt().is_none(),
+            "a finished attempt drops its prompt"
+        );
+        assert!(
+            !status.show_prompt(AskpassKind::Secret, &prompt_lines(&["password:"])),
+            "no prompt over a failure screen"
+        );
+        status.on_key(RemoteStatusKey::Retry);
+        assert!(status.show_prompt(AskpassKind::Secret, &prompt_lines(&["password:"])));
+        status.on_window_closed();
+        assert!(status.prompt().is_none());
+
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        status.show_prompt(AskpassKind::Secret, &prompt_lines(&["password:"]));
+        status.on_key(RemoteStatusKey::Close);
+        assert!(status.prompt().is_none());
+    }
+
+    #[test]
+    fn prompt_text_is_cleaned_again_before_display() {
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        status.show_prompt(
+            AskpassKind::Secret,
+            &prompt_lines(&["pass\u{202e}word\u{1b}[2J:"]),
+        );
+        assert!(status.lines().iter().all(|line| {
+            !line
+                .chars()
+                .any(|character| character.is_control() || is_bidi_control(character))
+        }));
     }
 }

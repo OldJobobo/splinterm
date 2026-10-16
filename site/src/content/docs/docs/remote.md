@@ -50,13 +50,15 @@ splinterm --remote wintermute window --lair-id LAIR_ID --dojo-id DOJO_ID
 
 Omitting the command opens the remote Recent Dojos picker. A Window stays bound to one endpoint and can discover, attach, split, control, search, and restore remote Dojos through one OpenSSH child. New remote panes briefly show a client-local `Opening remote pane…` placeholder while bounded protocol round trips complete.
 
-OpenSSH may use the controlling terminal for passwords, key passphrases, PINs, or hardware tokens. Unknown or changed host keys fail closed. Splinterm does not run `ssh-keyscan`, accept unknown keys, or store credentials.
+OpenSSH may use the controlling terminal for passwords, key passphrases, PINs, or hardware tokens. Without a terminal it uses an ssh-agent key first, then your own `SSH_ASKPASS`, and only then Splinterm's own prompt in the connection status Window. Unknown or changed host keys fail closed. Splinterm does not run `ssh-keyscan`, accept unknown keys, or store credentials.
 
 ## Open a remote without a terminal
 
-`splinterm remotes`, the **Remote Dojos** desktop action, **Open Remote…** in the command palette, and the **Remote Dojos…** row of the local Recent Dojos picker open one chooser of the profiles in `remotes.toml`. Choosing a profile starts a separate `splinterm --remote PROFILE` Window process with no inherited stdio and no controlling terminal, so OpenSSH cannot prompt on a terminal: use an agent key or your own `SSH_ASKPASS`.
+`splinterm remotes`, the **Remote Dojos** desktop action, **Open Remote…** in the command palette, and the **Remote Dojos…** row of the local Recent Dojos picker open one chooser of the profiles in `remotes.toml`. Choosing a profile starts a separate `splinterm --remote PROFILE` Window process with no inherited stdio and no controlling terminal, so OpenSSH cannot prompt on a terminal. An agent key or your own `SSH_ASKPASS` is preferred; when neither can answer, Splinterm asks in the status Window.
 
 Every graphical remote launch first shows a status Window ("Connecting to …") while OpenSSH authenticates. On success it closes and the remote's picker opens; on failure it shows the categorized cause, a one-line remedy, the newest sanitized OpenSSH lines, and the agent or `SSH_ASKPASS` setup, with R or Enter to retry and C, Q, or Escape to close. OpenSSH's error output stays in that Window. Started from a terminal, OpenSSH may still prompt on that terminal, because Splinterm forces `SSH_ASKPASS` only when stdin is not a terminal. If the Window closes before connecting, `splinterm` exits with status 1. The client diagnostics log under `~/.local/state/splinterm/logs/` records only the failure category.
+
+When OpenSSH needs a password, passphrase, or PIN and nothing else can answer, the status Window shows OpenSSH's prompt text and a masked password field: Enter submits, and Escape cancels the attempt. The field never echoes; the screen and accessibility text say only whether it is empty. Yes/no questions take Y or N. Splinterm's own executable answers OpenSSH as `SSH_ASKPASS` through a private per-attempt socket and token, accepts prompts only from that attempt's OpenSSH, wipes answers after use, and never logs them. Pasting into the field is allowed for password managers. Non-graphical commands such as `remote check` never show this prompt.
 
 ## Authority and boundaries
 

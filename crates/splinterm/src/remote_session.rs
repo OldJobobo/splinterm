@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     io::IsTerminal as _,
     os::unix::fs::PermissionsExt as _,
     path::Path,
@@ -22,7 +22,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::remote::RemoteProfile;
+use crate::{
+    remote::RemoteProfile,
+    remote_askpass::{self as askpass, AskpassBroker, NativePrompt},
+};
 
 const MAX_SSH_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const CHILD_GRACE_PERIOD: Duration = Duration::from_millis(250);
@@ -231,39 +234,73 @@ impl RemoteSession {
         Self::connect_with_program_and_timeout(profile, program, negotiation_timeout).await
     }
 
+    /// Like [`Self::connect`], but when OpenSSH needs a password, passphrase,
+    /// or confirmation and neither a terminal nor the user's `SSH_ASKPASS` is
+    /// available, it asks through `prompt` (the status Window).
+    ///
+    /// # Errors
+    ///
+    /// Returns a categorized failure as [`Self::connect`] does.
+    pub async fn connect_with_prompt(
+        profile: &RemoteProfile,
+        prompt: &NativePrompt,
+    ) -> Result<Self> {
+        let negotiation_timeout = Duration::from_secs(u64::from(profile.connect_timeout_seconds()))
+            .saturating_add(AUTHENTICATION_GRACE_PERIOD);
+        Self::connect_with_options(
+            profile,
+            OsStr::new("ssh"),
+            negotiation_timeout,
+            &AuthEnvironment::current(),
+            Some(prompt),
+        )
+        .await
+    }
+
     #[doc(hidden)]
     pub async fn connect_with_program_and_timeout(
         profile: &RemoteProfile,
         program: &OsStr,
         negotiation_timeout: Duration,
     ) -> Result<Self> {
+        Self::connect_with_options(
+            profile,
+            program,
+            negotiation_timeout,
+            &AuthEnvironment::current(),
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn connect_with_options(
+        profile: &RemoteProfile,
+        program: &OsStr,
+        negotiation_timeout: Duration,
+        environment: &AuthEnvironment,
+        native_prompt: Option<&NativePrompt>,
+    ) -> Result<Self> {
         if negotiation_timeout.is_zero() {
             bail!("remote relay negotiation timeout must be nonzero");
         }
-        let terminal = std::io::stdin().is_terminal();
-        let askpass_available = validate_askpass(terminal).map_err(|error| {
-            LocalSshFailure::new(LocalSshProblem::InvalidAskpass, &format!("{error:#}"))
-        })?;
-        let plan = profile.ssh_plan();
-        let mut command = Command::new(program);
-        command
-            .args(plan.arguments())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if !terminal && askpass_available {
-            command.env("SSH_ASKPASS_REQUIRE", "force");
-        }
-        let mut child = command.spawn().map_err(|error| {
-            LocalSshFailure::new(
-                LocalSshProblem::OpenSshUnavailable,
-                &format!(
-                    "cannot launch OpenSSH executable {}: {error}",
-                    program.to_string_lossy()
-                ),
-            )
-        })?;
+        let terminal = environment.terminal;
+        let (provider, broker) = prepare_prompt(environment, native_prompt)?;
+        let askpass_available = matches!(
+            provider,
+            PromptProvider::UserAskpass | PromptProvider::NativePrompt
+        );
+        let mut child = ssh_command(profile, program, provider, environment, broker.as_ref())
+            .spawn()
+            .map_err(|error| {
+                LocalSshFailure::new(
+                    LocalSshProblem::OpenSshUnavailable,
+                    &format!(
+                        "cannot launch OpenSSH executable {}: {error}",
+                        program.to_string_lossy()
+                    ),
+                )
+            })?;
         let stdin = child
             .stdin
             .take()
@@ -276,6 +313,10 @@ impl RemoteSession {
             .stderr
             .take()
             .context("OpenSSH child stderr pipe is unavailable")?;
+        // Serves prompts only from this OpenSSH child's descendants, and only
+        // until negotiation ends: dropping it removes the socket and abandons
+        // any open prompt.
+        let askpass_service = broker.and_then(|broker| child.id().map(|pid| broker.serve(pid)));
         let diagnostics = Arc::new(Mutex::new(DiagnosticRing::default()));
         let stderr_diagnostics = diagnostics.clone();
         let stderr_task = tokio::spawn(async move {
@@ -291,6 +332,9 @@ impl RemoteSession {
             Ok(Ok(multiplexer)) => multiplexer,
             Ok(Err(error)) => {
                 terminate_child(&mut child).await;
+                // Ends a helper still waiting on the socket, so it releases
+                // the inherited stderr pipe.
+                drop(askpass_service);
                 let _ = stderr_task.await;
                 let diagnostic = rendered_diagnostics(&diagnostics);
                 return Err(anyhow::Error::new(RemoteFailure {
@@ -304,6 +348,7 @@ impl RemoteSession {
             }
             Err(_) => {
                 terminate_child(&mut child).await;
+                drop(askpass_service);
                 let _ = stderr_task.await;
                 return Err(anyhow::Error::new(RemoteFailure {
                     kind: RemoteFailureKind::TransportFailed,
@@ -313,6 +358,7 @@ impl RemoteSession {
             }
         };
 
+        drop(askpass_service);
         let cancellation = CancellationToken::new();
         let lifetime = Arc::new(RemoteLifetime {
             cancellation: cancellation.clone(),
@@ -457,9 +503,118 @@ impl AsyncWrite for SessionChannel {
     }
 }
 
-fn validate_askpass(terminal: bool) -> Result<bool> {
-    let value = std::env::var_os("SSH_ASKPASS");
-    validate_askpass_value(terminal, value.as_deref())
+/// Selects the prompt provider and, for the native prompt, binds this
+/// attempt's private broker.
+fn prepare_prompt(
+    environment: &AuthEnvironment,
+    native_prompt: Option<&NativePrompt>,
+) -> Result<(PromptProvider, Option<AskpassBroker>)> {
+    let provider =
+        select_prompt_provider(environment, native_prompt.is_some()).map_err(|error| {
+            LocalSshFailure::new(LocalSshProblem::InvalidAskpass, &format!("{error:#}"))
+        })?;
+    let broker = match (provider, native_prompt) {
+        // Without a private socket nothing can prompt; agent keys may still
+        // authenticate, and a needed prompt is then reported as unavailable.
+        (PromptProvider::NativePrompt, Some(prompt)) => AskpassBroker::bind(prompt).ok(),
+        _ => None,
+    };
+    if provider == PromptProvider::NativePrompt && broker.is_none() {
+        return Ok((PromptProvider::Unavailable, None));
+    }
+    Ok((provider, broker))
+}
+
+/// Builds the OpenSSH command with piped protocol stdio and only the askpass
+/// environment the selected provider needs.
+fn ssh_command(
+    profile: &RemoteProfile,
+    program: &OsStr,
+    provider: PromptProvider,
+    environment: &AuthEnvironment,
+    broker: Option<&AskpassBroker>,
+) -> Command {
+    let plan = profile.ssh_plan();
+    let mut command = Command::new(program);
+    command
+        .args(plan.arguments())
+        .env_remove(askpass::SOCKET_ENV)
+        .env_remove(askpass::TOKEN_ENV)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if provider == PromptProvider::UserAskpass
+        && let Some(user_askpass) = &environment.user_askpass
+    {
+        // Exactly the program that was validated.
+        command
+            .env("SSH_ASKPASS", user_askpass)
+            .env("SSH_ASKPASS_REQUIRE", "force");
+    }
+    if let Some(broker) = broker {
+        command.envs(broker.environment());
+    }
+    command
+}
+
+/// Who answers OpenSSH when it needs a password, passphrase, or confirmation.
+/// OpenSSH always tries ssh-agent keys first and asks only when they fail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptProvider {
+    /// Stdin is a terminal; OpenSSH may prompt on it and nothing is forced.
+    Terminal,
+    /// The user's own `SSH_ASKPASS`, forced with `SSH_ASKPASS_REQUIRE=force`.
+    UserAskpass,
+    /// Splinterm's prompt in the status Window, used only when neither of the
+    /// above is available.
+    NativePrompt,
+    /// Nothing can ask; only agent or other non-interactive methods can work.
+    Unavailable,
+}
+
+/// The process facts that select a [`PromptProvider`].
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AuthEnvironment {
+    pub terminal: bool,
+    pub user_askpass: Option<OsString>,
+}
+
+impl AuthEnvironment {
+    /// Reads whether stdin is a terminal and the inherited `SSH_ASKPASS`.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            terminal: std::io::stdin().is_terminal(),
+            user_askpass: std::env::var_os("SSH_ASKPASS"),
+        }
+    }
+}
+
+/// Chooses the prompt provider: a terminal, then the user's `SSH_ASKPASS`,
+/// then the native prompt when the caller offers one.
+///
+/// # Errors
+///
+/// Returns an error when, without a terminal, `SSH_ASKPASS` is set but does
+/// not name an absolute executable file. That explicit setting is reported,
+/// never silently replaced by the native prompt.
+pub fn select_prompt_provider(
+    environment: &AuthEnvironment,
+    native_prompt_offered: bool,
+) -> Result<PromptProvider> {
+    if environment.terminal {
+        return Ok(PromptProvider::Terminal);
+    }
+    if validate_askpass_value(false, environment.user_askpass.as_deref())? {
+        return Ok(PromptProvider::UserAskpass);
+    }
+    Ok(if native_prompt_offered {
+        PromptProvider::NativePrompt
+    } else {
+        PromptProvider::Unavailable
+    })
 }
 
 fn validate_askpass_value(terminal: bool, value: Option<&OsStr>) -> Result<bool> {
@@ -666,5 +821,90 @@ mod tests {
         assert!(!validate_askpass_value(true, Some(executable.as_os_str())).unwrap());
         assert!(validate_askpass_value(false, Some(OsStr::new("relative"))).is_err());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn prompt_provider_prefers_terminal_then_user_askpass_then_native() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("splinterm-provider-{nonce}"));
+        fs::create_dir(&directory).unwrap();
+        let executable = directory.join("askpass");
+        fs::write(&executable, "fixture").unwrap();
+        fs::set_permissions(
+            &executable,
+            <fs::Permissions as PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let environment = |terminal, askpass: Option<&std::path::Path>| AuthEnvironment {
+            terminal,
+            user_askpass: askpass.map(|path| path.as_os_str().to_owned()),
+        };
+        let select = |environment: &AuthEnvironment, native| {
+            select_prompt_provider(environment, native).unwrap()
+        };
+
+        // A terminal wins: OpenSSH prompts there and nothing is forced, even
+        // with a user askpass or a native prompt on offer.
+        for native in [false, true] {
+            assert_eq!(
+                select(&environment(true, Some(&executable)), native),
+                PromptProvider::Terminal
+            );
+            assert_eq!(
+                select(&environment(true, None), native),
+                PromptProvider::Terminal
+            );
+        }
+        // The user's own SSH_ASKPASS is preferred over the native prompt.
+        for native in [false, true] {
+            assert_eq!(
+                select(&environment(false, Some(&executable)), native),
+                PromptProvider::UserAskpass
+            );
+        }
+        // Otherwise the native prompt, only when the caller offers one.
+        assert_eq!(
+            select(&environment(false, None), true),
+            PromptProvider::NativePrompt
+        );
+        assert_eq!(
+            select(&environment(false, None), false),
+            PromptProvider::Unavailable
+        );
+        let empty = AuthEnvironment {
+            terminal: false,
+            user_askpass: Some(OsString::new()),
+        };
+        assert_eq!(select(&empty, true), PromptProvider::NativePrompt);
+        // An explicit but broken SSH_ASKPASS is reported, never replaced.
+        let broken = AuthEnvironment {
+            terminal: false,
+            user_askpass: Some(OsString::from("relative-askpass")),
+        };
+        assert!(select_prompt_provider(&broken, true).is_err());
+        let missing = environment(false, Some(&directory.join("missing")));
+        assert!(select_prompt_provider(&missing, true).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn native_prompt_failures_classify_as_authentication_not_unavailable() {
+        // With a native or user prompt available, a refused prompt surfaces as
+        // OpenSSH's own authentication failure.
+        assert_eq!(
+            classify_failure("Permission denied (publickey,password).", false, true),
+            RemoteFailureKind::AuthenticationFailed
+        );
+        assert_eq!(
+            classify_failure(
+                "splinterm askpass: the Splinterm prompt is unavailable\nPermission denied (password).",
+                false,
+                true
+            ),
+            RemoteFailureKind::AuthenticationFailed
+        );
     }
 }

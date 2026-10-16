@@ -194,9 +194,11 @@ picker all open one chooser listing the profiles in `remotes.toml` by name and
 OpenSSH destination. Choosing a profile starts a separate
 `splinterm --remote PROFILE` process for the new Window, so every Window stays
 bound to one endpoint. That process inherits no stdin, stdout, or stderr and
-starts a new session without a controlling terminal: OpenSSH cannot prompt on
-the terminal that started Splinterm, so use an agent key or your own
-`SSH_ASKPASS`. The Recent Dojos row appears only when profiles exist or
+starts a new session without a controlling terminal, so OpenSSH cannot prompt on
+the terminal that started Splinterm. OpenSSH uses an ssh-agent key or your own
+`SSH_ASKPASS` first; when neither can answer, Splinterm asks in the connection
+status Window (see [Authentication and host keys](#authentication-and-host-keys)).
+The Recent Dojos row appears only when profiles exist or
 `remotes.toml` is invalid, and a picker already bound to a remote omits it. An
 absent, empty, or invalid `remotes.toml` leaves the chooser empty with a
 one-line explanation; `splinterm remote list` reports the parse error.
@@ -213,6 +215,12 @@ authenticate without a terminal. Press R or Enter to retry once, or C, Q, or
 Escape to close; Escape also cancels a connection in progress. Each retry
 reloads the profile from `remotes.toml`. A `--remote` argument that breaks the
 profile-name rules is shown as "remote" rather than echoed.
+
+When OpenSSH needs a password, passphrase, or PIN and has no terminal, agent
+key, or `SSH_ASKPASS` that can answer, the status Window shows OpenSSH's prompt
+text and a masked password field: Enter submits and Escape cancels the
+attempt. A yes/no question from OpenSSH takes Y or N instead, and a notice
+such as "confirm user presence" stays until OpenSSH continues.
 
 OpenSSH's error output appears only in that Window, never on a terminal. When
 `splinterm --remote` is started from a terminal, stdin is a terminal, so
@@ -279,14 +287,52 @@ stdin/stdout and separate bounded stderr. It does not force batch mode. When a
 controlling terminal exists, OpenSSH may use `/dev/tty` for password, key
 passphrase, PIN, or hardware-token interaction.
 
-Without a controlling terminal, an existing `SSH_ASKPASS` provider remains
-OpenSSH's authority. Splinterm requires that value to name an absolute executable
-local file before setting `SSH_ASKPASS_REQUIRE=force`. It never places a password
-or passphrase in argv, TOML, relay frames, diagnostics, or application storage.
-Agent-backed authentication can still succeed without a prompt provider;
-interactive authentication failures are reported, in the connection status
-Window for graphical launches, rather than replaced with an application password
-field. Post-connect SSH authentication and relay
+Without a terminal, OpenSSH chooses who answers in this order:
+
+1. **ssh-agent.** OpenSSH always tries agent keys first and asks for nothing
+   when one is accepted. This is the preferred setup.
+2. **Your own `SSH_ASKPASS`.** Splinterm requires the value to name an absolute
+   executable local file, then runs OpenSSH with exactly that program and
+   `SSH_ASKPASS_REQUIRE=force`. A set but unusable `SSH_ASKPASS` is reported as
+   a local setup failure, not replaced by Splinterm's prompt.
+3. **Splinterm's prompt.** For graphical `--remote` launches only, when
+   neither of the above is available, Splinterm sets `SSH_ASKPASS` to its own
+   client executable with `SSH_ASKPASS_REQUIRE=force`. OpenSSH runs it only if
+   it actually needs input, passing the prompt text as the only argument. That
+   helper connects back to the status Window of the same launch through a Unix
+   socket in a fresh `0700` directory under `XDG_RUNTIME_DIR` (or the temporary
+   directory), presents a random 256-bit token unique to that connection
+   attempt, prints the answer on stdout for OpenSSH, and exits.
+
+Non-graphical commands such as `remote check` never use Splinterm's prompt;
+without a terminal or `SSH_ASKPASS`, an interactive prompt is reported as
+unavailable.
+
+Splinterm's prompt is a fallback with fixed limits:
+
+- The status Window accepts a prompt only while that launch is connecting, and
+  only from a process with the same user ID that descends from that attempt's
+  OpenSSH child and presents that attempt's token. It shows one prompt at a
+  time. The socket and its directory are removed when negotiation ends, and a
+  retry gets a new socket and token.
+- OpenSSH's prompt text is shown as quoted text under "OpenSSH's prompt", with
+  control, bidirectional, and zero-width characters removed and at most 8
+  lines of 100 characters, because keyboard-interactive servers can choose it.
+- The field never echoes: the screen, Window title, and accessibility text say
+  only "Password field: empty" or "Password field: entered (hidden)", never
+  the text or its length. Pasting into the field is allowed, for password
+  managers; the field has no history, scrollback, or copy source, and
+  Splinterm never puts the answer on the clipboard.
+- Answers are limited to 1023 bytes, kept in buffers that never reallocate,
+  wiped after they are handed to OpenSSH or abandoned, and never logged or
+  written to diagnostics. The helper process disables core dumps for itself.
+- Escape on a password field refuses the prompt and ends the attempt, which
+  is reported as an authentication failure with Retry, so OpenSSH cannot send
+  an empty password or ask again. A yes/no question needs an explicit Y or N.
+  A prompt left unanswered for 120 seconds is refused.
+
+Splinterm never places a password or passphrase in argv, TOML, relay frames,
+diagnostics, or application storage. Post-connect SSH authentication and relay
 negotiation are bounded by the profile timeout plus a 120-second human/hardware
 interaction allowance. Logical-channel admission, private daemon handshake, and
 each `remote check` probe use the validated profile timeout.
@@ -295,6 +341,9 @@ each `remote check` probe use the validated profile timeout.
 fail closed. Establish trust explicitly with normal OpenSSH tooling; Splinterm
 does not run `ssh-keyscan`, append known-hosts files, or offer accept-anything
 behavior.
+
+Because `StrictHostKeyChecking=yes` is always supplied, OpenSSH never asks to
+accept an unknown host key through Splinterm's prompt.
 
 Bounded errors distinguish host-key changes/unknown keys, routing or timeout,
 authentication failure, unavailable terminal/askpass interaction, missing remote

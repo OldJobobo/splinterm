@@ -5,6 +5,12 @@ use splinterm::diagnostics::{
 };
 
 fn main() {
+    // OpenSSH runs this executable as its askpass program, with the prompt as
+    // the only argument, when a graphical remote launch needs a credential.
+    // Checked first so prompt text is never parsed as a client argument.
+    if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+        std::process::exit(code);
+    }
     match splinterd::handoff_preflight::dispatch_internal_preflight(
         splinterd::handoff_preflight::PreflightRole::Client,
     ) {
