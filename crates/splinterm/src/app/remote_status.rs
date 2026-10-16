@@ -18,7 +18,7 @@ use splinterm::{
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::SplintId;
 use splinterm_protocol::{Request, Response};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
     sessions::configure_picker_renderer, theme_watch::load_startup_theme,
@@ -66,9 +66,19 @@ struct StatusWindow {
     splint_id: SplintId,
     revision: u64,
     updates: mpsc::Sender<WindowUpdate>,
+    /// Fires once the Window has mapped; see [`WindowOptions::mapped`].
+    mapped: oneshot::Receiver<()>,
 }
 
 impl StatusWindow {
+    /// Waits until the Window maps. Until then the Wayland thread may drain
+    /// queued updates before its first dispatch, so an early close could end
+    /// the Window before it was ever shown. False when the Window ended
+    /// without mapping.
+    async fn wait_mapped(&mut self) -> bool {
+        (&mut self.mapped).await.is_ok()
+    }
+
     fn show(&mut self, status: &RemoteStatus) {
         self.revision = self.revision.saturating_add(1);
         // A full queue or a closed Window only loses an intermediate frame.
@@ -91,20 +101,29 @@ impl StatusWindow {
 }
 
 /// Drives one status screen until it hands over a connected endpoint, or the
-/// Window closes first. `connect` runs one attempt; `report` records each
-/// failure. Nothing here writes to stdout or stderr.
+/// Window closes first. The first attempt starts once the Window has mapped.
+/// `connect` runs one attempt and `report` records each failure. `destination`
+/// re-reads the shown destination before each retry, as `connect` reloads the
+/// profile. Nothing here writes to stdout or stderr.
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
     mut commands: mpsc::Receiver<WindowCommand>,
     mut connect: F,
     mut report: impl FnMut(&RemoteStatusFailure),
+    mut destination: impl FnMut() -> String,
 ) -> Result<T, RemoteNotConnected>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    let mut attempt = Some(Box::pin(connect()));
+    // A Window that ended unmapped has also closed `commands`, so the loop
+    // ends the flow without starting an attempt.
+    let mut attempt = if window.wait_mapped().await {
+        Some(Box::pin(connect()))
+    } else {
+        None
+    };
     let mut last_failure = None;
     loop {
         tokio::select! {
@@ -136,6 +155,7 @@ where
                 };
                 match effect {
                     RemoteStatusEffect::StartAttempt => {
+                        status.set_destination(&destination());
                         attempt = Some(Box::pin(connect()));
                         window.show(&status);
                     }
@@ -189,6 +209,15 @@ fn report_failure(failure: &RemoteStatusFailure) {
     }
 }
 
+/// The destination shown for `profile_name` from the current `remotes.toml`,
+/// or the profile label when the profile cannot be loaded.
+fn destination_label(profile_name: &str) -> String {
+    RemoteCatalog::load_default()
+        .ok()
+        .and_then(|catalog| catalog.get(profile_name).ok().map(destination))
+        .unwrap_or_else(|| profile_label(profile_name).to_owned())
+}
+
 /// Maps a status Window, connects to `profile_name`, and returns the connected
 /// endpoint once the Window has closed.
 ///
@@ -200,16 +229,13 @@ pub(in crate::app) async fn connect_with_status(
     profile_name: String,
     config: &AppConfig,
 ) -> Result<ConnectionFactory> {
-    let destination_label = RemoteCatalog::load_default()
-        .ok()
-        .and_then(|catalog| catalog.get(&profile_name).ok().map(destination))
-        .unwrap_or_else(|| profile_label(&profile_name).to_owned());
-    let status = RemoteStatus::new(&profile_name, &destination_label)
+    let status = RemoteStatus::new(&profile_name, &destination_label(&profile_name))
         .with_terminal(std::io::stdin().is_terminal());
     let splint_id = SplintId::new();
     let snapshot = status.snapshot(splint_id, 1);
     let (updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
     let (command_sender, commands) = mpsc::channel(STATUS_COMMAND_CAPACITY);
+    let (mapped_sender, mapped) = oneshot::channel();
     let window_config = config.clone();
     let window_task = tokio::task::spawn_blocking(move || {
         let theme = load_startup_theme(&window_config);
@@ -226,6 +252,7 @@ pub(in crate::app) async fn connect_with_status(
             theme,
             keymap: window_config.keymap.clone(),
             prefix_timeout_ms: window_config.prefix_timeout_ms,
+            mapped: Some(mapped_sender),
             ..WindowOptions::default()
         })
     });
@@ -233,6 +260,7 @@ pub(in crate::app) async fn connect_with_status(
         splint_id,
         revision: 1,
         updates,
+        mapped,
     };
     let connected = run_status_flow(
         status,
@@ -240,6 +268,7 @@ pub(in crate::app) async fn connect_with_status(
         commands,
         || connect_profile(profile_name.clone()),
         report_failure,
+        || destination_label(&profile_name),
     )
     .await;
     window_task
@@ -264,25 +293,42 @@ mod tests {
         updates: mpsc::Receiver<WindowUpdate>,
         commands: mpsc::Sender<WindowCommand>,
         splint_id: SplintId,
+        /// The fake Window's map signal, until a test sends or drops it.
+        mapped: Option<oneshot::Sender<()>>,
     }
 
-    fn harness() -> (Harness, StatusWindow, mpsc::Receiver<WindowCommand>) {
+    /// A fake status Window that has not mapped yet.
+    fn unmapped_harness() -> (Harness, StatusWindow, mpsc::Receiver<WindowCommand>) {
         let (updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
         let (command_sender, commands) = mpsc::channel(STATUS_COMMAND_CAPACITY);
+        let (mapped_sender, mapped) = oneshot::channel();
         let splint_id = SplintId::new();
         (
             Harness {
                 updates: update_receiver,
                 commands: command_sender,
                 splint_id,
+                mapped: Some(mapped_sender),
             },
             StatusWindow {
                 splint_id,
                 revision: 1,
                 updates,
+                mapped,
             },
             commands,
         )
+    }
+
+    /// A fake status Window that has already mapped.
+    fn harness() -> (Harness, StatusWindow, mpsc::Receiver<WindowCommand>) {
+        let (mut harness, window, commands) = unmapped_harness();
+        harness.mapped.take().unwrap().send(()).unwrap();
+        (harness, window, commands)
+    }
+
+    fn fixed_destination() -> String {
+        "case@wintermute".to_owned()
     }
 
     fn text(snapshot: &TerminalSnapshot) -> String {
@@ -330,6 +376,7 @@ mod tests {
             commands,
             || async { Ok("factory") },
             |_| reports.set(reports.get() + 1),
+            fixed_destination,
         )
         .await;
         assert_eq!(connected, Ok("factory"));
@@ -373,6 +420,7 @@ mod tests {
                 move |failure: &RemoteStatusFailure| {
                     reports.lock().unwrap().push(failure.copy().diagnostic_code);
                 },
+                fixed_destination,
             ))
         };
 
@@ -442,6 +490,7 @@ mod tests {
             commands,
             std::future::pending,
             |_| panic!("a cancelled attempt is not a failure"),
+            fixed_destination,
         ));
         harness
             .commands
@@ -468,6 +517,7 @@ mod tests {
             commands,
             std::future::pending,
             |_| {},
+            fixed_destination,
         )
         .await;
         assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
@@ -486,6 +536,7 @@ mod tests {
                 )))
             },
             |_| {},
+            fixed_destination,
         ));
         let screen = text(&next_snapshot(&mut harness).await);
         assert!(screen.contains("The remote profile could not be loaded."));
@@ -521,6 +572,7 @@ mod tests {
                 ))
             },
             |_| {},
+            fixed_destination,
         ));
         let screen = text(&next_snapshot(&mut harness).await);
         assert!(screen.contains("The SSH connection failed."));
@@ -537,6 +589,101 @@ mod tests {
                 last_failure: Some(DiagnosticErrorCode::RemoteTransport)
             })
         );
+    }
+
+    #[tokio::test]
+    async fn the_first_attempt_waits_for_the_status_window_to_map() {
+        let (mut harness, window, commands) = unmapped_harness();
+        let attempts = Arc::new(Mutex::new(0_u32));
+        let flow = {
+            let attempts = attempts.clone();
+            tokio::spawn(run_status_flow(
+                RemoteStatus::new("wintermute", "wintermute"),
+                window,
+                commands,
+                move || {
+                    *attempts.lock().unwrap() += 1;
+                    async { Ok("factory") }
+                },
+                |_| {},
+                fixed_destination,
+            ))
+        };
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        // A fast success must not queue the close before the Window can show.
+        assert_eq!(*attempts.lock().unwrap(), 0);
+        assert!(matches!(
+            harness.updates.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!flow.is_finished());
+
+        harness.mapped.take().unwrap().send(()).unwrap();
+        assert_eq!(flow.await.unwrap(), Ok("factory"));
+        expect_closed(&mut harness).await;
+        assert_eq!(*attempts.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_window_that_ends_unmapped_never_connects() {
+        let (harness, window, commands) = unmapped_harness();
+        let Harness {
+            commands: sender,
+            mapped,
+            ..
+        } = harness;
+        drop((sender, mapped));
+        let connected = run_status_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "wintermute"),
+            window,
+            commands,
+            || -> std::future::Ready<Result<()>> { panic!("an unmapped Window never connects") },
+            |_| {},
+            fixed_destination,
+        )
+        .await;
+        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
+    }
+
+    #[tokio::test]
+    async fn retry_shows_the_destination_reloaded_from_the_profile() {
+        let (mut harness, window, commands) = harness();
+        let configured = Arc::new(Mutex::new("old.example".to_owned()));
+        let flow = {
+            let configured = configured.clone();
+            tokio::spawn(run_status_flow::<(), _, _>(
+                RemoteStatus::new("wintermute", "old.example"),
+                window,
+                commands,
+                || async { Err(denied()) },
+                |_| {},
+                move || configured.lock().unwrap().clone(),
+            ))
+        };
+        let failed = text(&next_snapshot(&mut harness).await);
+        assert!(failed.contains("Could not connect to old.example."));
+
+        // remotes.toml is edited between the failure and the retry.
+        *configured.lock().unwrap() = "case@new.example:2222".to_owned();
+        harness
+            .commands
+            .send(WindowCommand::Input(b"r".to_vec()))
+            .await
+            .unwrap();
+        let retrying = text(&next_snapshot(&mut harness).await);
+        assert!(retrying.contains("Connecting to case@new.example:2222…"));
+        assert!(!retrying.contains("old.example"));
+        let failed_again = text(&next_snapshot(&mut harness).await);
+        assert!(failed_again.contains("Could not connect to case@new.example:2222."));
+
+        harness
+            .commands
+            .send(WindowCommand::Input(b"c".to_vec()))
+            .await
+            .unwrap();
+        assert!(flow.await.unwrap().is_err());
     }
 
     #[test]
