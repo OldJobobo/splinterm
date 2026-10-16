@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::{
     executable_snapshot::{
         ExecutableSnapshotError, ExecutableSnapshotPolicy, ExecutableSourcePair,
-        RetainedRollbackExecutables, SealedExecutablePair,
+        PACKAGED_OWNER_UID, RetainedRollbackExecutables, SealedExecutablePair,
     },
     handoff_compatibility::{ExecutablePairPreflight, RunningHandoffGeneration},
     handoff_preflight::{PreflightError, PreflightGeneration, preflight_sealed_pair},
@@ -23,8 +23,6 @@ use crate::{
         package_provenance_path,
     },
 };
-
-const PACKAGED_OWNER_UID: u32 = 0;
 
 /// Complete rollback authority retained before package paths can be replaced.
 #[derive(Debug)]

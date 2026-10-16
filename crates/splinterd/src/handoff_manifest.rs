@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use crate::{
     executable_snapshot::{
-        HandoffExecutableSnapshots, MAX_EXECUTABLE_SNAPSHOT_BYTES, REQUIRED_EXECUTABLE_SEALS,
-        SealedExecutablePair,
+        HandoffExecutableSnapshots, MAX_EXECUTABLE_SNAPSHOT_BYTES, PACKAGED_OWNER_UID,
+        REQUIRED_EXECUTABLE_SEALS, SealedExecutablePair,
     },
     handoff_compatibility::{
         BuildIdentity, BuildVersion, CompatibilityError, ExecutablePairBinding,
@@ -26,11 +26,12 @@ use crate::{
 
 pub const HANDOFF_MANIFEST_SCHEMA_V1: u16 = 1;
 pub const MAX_HANDOFF_MANIFEST_BYTES: usize = 256 * 1024;
-pub const MAX_MANIFEST_SPLINTS: usize = 256;
-pub const MAX_MANIFEST_LAIRS: usize = 64;
-pub const MAX_MANIFEST_DOJOS: usize = 64 * 64;
+pub const MAX_MANIFEST_SPLINTS: usize = splinterm_core::MAX_SPLINTS;
+// Every Lair and Dojo in a manifest holds a live Splint. Transient Lairs are not
+// capped like persistent ones, so only the Splint bound limits either count.
+pub const MAX_MANIFEST_LAIRS: usize = MAX_MANIFEST_SPLINTS;
+pub const MAX_MANIFEST_DOJOS: usize = MAX_MANIFEST_SPLINTS;
 const MAX_INHERITED_FD: u32 = i32::MAX as u32;
-const PACKAGED_OWNER_UID: u32 = 0;
 const UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
 const UNIX_REGULAR_FILE: u32 = 0o100_000;
 
@@ -865,7 +866,7 @@ mod tests {
             target_generation: target,
             topology_revision: 4,
             durable_state_generation: 4,
-            private_protocol: 37,
+            private_protocol: splinterm_protocol::PROTOCOL_VERSION,
             handoff_protocol: 1,
             terminal_checkpoint_schema: 1,
             descriptor_manifest_schema: 1,
@@ -900,6 +901,52 @@ mod tests {
             &mut rollback.target_generation,
         );
         (forward, rollback)
+    }
+
+    #[test]
+    fn descriptor_slot_wire_names_and_order_are_stable() {
+        use HandoffDescriptorSlot::{
+            CheckpointManifest, ClientProcess, Continuation, ForwardClient, ImageListener,
+            ImageState, Listener, PtyMaster, RollbackClient, RollbackDaemon, RollbackManifest,
+            TerminalCheckpoint,
+        };
+        // Another daemon generation reads these bytes, so names and order are ABI.
+        let slots = [
+            PtyMaster(1),
+            Listener,
+            ImageListener,
+            CheckpointManifest,
+            RollbackManifest,
+            TerminalCheckpoint(2),
+            ImageState(3),
+            ForwardClient,
+            RollbackDaemon,
+            RollbackClient,
+            ClientProcess(4),
+            Continuation(5),
+        ];
+        let encoded = slots
+            .iter()
+            .map(|slot| serde_json::to_string(slot).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encoded,
+            [
+                r#"{"role":"pty_master","index":1}"#,
+                r#"{"role":"listener"}"#,
+                r#"{"role":"image_listener"}"#,
+                r#"{"role":"checkpoint_manifest"}"#,
+                r#"{"role":"rollback_manifest"}"#,
+                r#"{"role":"terminal_checkpoint","index":2}"#,
+                r#"{"role":"image_state","index":3}"#,
+                r#"{"role":"forward_client"}"#,
+                r#"{"role":"rollback_daemon"}"#,
+                r#"{"role":"rollback_client"}"#,
+                r#"{"role":"client_process","index":4}"#,
+                r#"{"role":"continuation","index":5}"#,
+            ]
+        );
+        assert!(slots.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     fn with_splint_count(count: usize) -> HandoffManifestV1 {
@@ -1116,15 +1163,14 @@ mod tests {
             Err(ManifestError::InvalidBounds)
         ));
 
-        let mut excessive_lairs = with_splint_count(MAX_MANIFEST_LAIRS + 1);
-        for splint in &mut excessive_lairs.splints {
+        // 64 persistent Lairs plus transient ones is a legal session, so only the
+        // Splint bound may limit Lairs and Dojos.
+        let mut many_lairs = with_splint_count(splinterm_core::MAX_PERSISTENT_LAIRS + 1);
+        for splint in &mut many_lairs.splints {
             splint.lair_id = LairId::new();
             splint.dojo_id = DojoId::new();
         }
-        assert!(matches!(
-            validate_manifest(&excessive_lairs),
-            Err(ManifestError::InvalidBounds)
-        ));
+        validate_manifest(&many_lairs).unwrap();
     }
 
     #[test]

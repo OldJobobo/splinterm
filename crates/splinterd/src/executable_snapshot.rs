@@ -24,6 +24,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const MAX_EXECUTABLE_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
+/// Owner of installed package executables and records, in `/usr` and `/nix/store`.
+pub const PACKAGED_OWNER_UID: u32 = 0;
 const RUNNING_EXECUTABLE_PATH: &str = "/proc/self/exe";
 const MAX_EXECUTABLE_PATH_BYTES: usize = 4096;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
