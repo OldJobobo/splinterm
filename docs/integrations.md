@@ -61,17 +61,32 @@ component-only lifecycle remains available for compatibility:
 splinterm integration omarchy-screensaver enable
 ```
 
-Activation creates only this exact managed link:
+Omarchy 4 puts its own `bin` directory first on `PATH` for everything Hyprland
+starts, including the idle service that launches the screensaver, so a launcher
+in `~/.local/bin` is never reached. Activation therefore manages three objects:
 
 ```text
-~/.local/bin/omarchy-launch-screensaver
+~/.local/share/splinterm/omarchy/bin/omarchy-launch-screensaver
   -> /usr/lib/splinterm/integrations/omarchy-launch-screensaver
+~/.config/hypr/splinterm-screensaver.lua
+~/.config/hypr/hyprland.lua   (one marked require block appended)
 ```
 
-The command refuses to replace any existing file or different symlink, verifies
-that the link wins login-shell command resolution, and moves it to a dedicated
-non-PATH disabled location if precedence is unsuitable. Inspect or disable it
-with:
+The Hyprland module runs after Omarchy's bootstrap and moves only that
+Splinterm-owned directory ahead of Omarchy's `bin`; it holds no other command.
+The command refuses to replace any existing file, different symlink, or edited
+module, and rolls back if the reload is rejected or reports configuration errors
+that were not already present. The running Omarchy shell keeps the `PATH` it
+started with; run `omarchy-restart-shell`, or log in again, before the idle
+service uses the new launcher. A launcher link left in `~/.local/bin` by an earlier version is shadowed
+on Omarchy 4; status reports it, and enabling again, with either this command or
+`splinterm integration omarchy enable`, moves it to
+`~/.local/share/splinterm/integrations/omarchy-launch-screensaver.disabled`.
+Enabling requires Omarchy 4's `~/.config/hypr/hyprland.lua`. Without it, a link
+left in `~/.local/bin` by an earlier version still runs, and status reports it
+as enabled. When the command runs outside a Hyprland session it cannot reload
+Hyprland and says so; run `hyprctl reload` in the session, or log in again.
+Inspect or disable the integration with:
 
 ```bash
 splinterm integration omarchy-screensaver status
@@ -99,13 +114,13 @@ changes no Omarchy/Hyprland configuration or preferred terminal. Only the
 explicit unified user command manages dedicated user-owned integration files.
 The normal installer offers screensaver-only activation interactively with a default of No;
 unattended and direct Pacman/AUR installs print the explicit activation command.
-Disabling moves the managed link without deleting it to
-`~/.local/share/splinterm/integrations/omarchy-launch-screensaver.disabled`, so
-re-enabling is reversible and no raced user object is ever unlinked. Package
-removal never scans user homes. If an enabled link remains afterward, it is
-dangling and command lookup falls through to Omarchy's canonical launcher; the
-user may move it out of `~/.local/bin` with the documented disable command before
-uninstalling.
+Disabling removes the unchanged require block and module and reloads Hyprland.
+The launcher link stays in its Splinterm-owned directory, so no raced user object
+is ever unlinked. After `omarchy-restart-shell` that directory is no longer ahead
+of Omarchy's `bin`, and the next login drops it from `PATH`. Package removal never scans
+user homes. If the integration is still enabled afterward, the link is dangling
+and command lookup falls through to Omarchy's canonical launcher; run the
+documented disable command before uninstalling to remove the module as well.
 
 ## Client-author checklist
 
