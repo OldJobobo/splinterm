@@ -193,11 +193,11 @@ pub(in crate::wayland) fn picker_release_activation(
 }
 
 pub(in crate::wayland) const fn clipboard_read_is_current(
-    inline_picker_open: bool,
+    input_blocked: bool,
     current_generation: u64,
     read_generation: u64,
 ) -> bool {
-    !inline_picker_open && current_generation == read_generation
+    !input_blocked && current_generation == read_generation
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

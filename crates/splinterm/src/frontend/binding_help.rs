@@ -583,4 +583,24 @@ mod tests {
         assert!(match_fields(&fields, "STRASSE").is_some());
         assert!(match_fields(&fields, "ΣΊΣΥΦΟΣ").is_some());
     }
+
+    #[test]
+    fn default_help_lists_and_finds_the_numbered_dojo_chords() {
+        let keymap = built_in_keymap(KeymapProfile::Splinterm);
+        for digit in 1..=9 {
+            let shortcut = format!("Ctrl+Shift+{digit}");
+            let action = format!("dojo.select-{digit}");
+            let mut help = BindingHelpUi::new(&keymap);
+            assert!(
+                help.rows()
+                    .iter()
+                    .any(|row| row.shortcut == shortcut && row.action == action)
+            );
+            assert!(help.append_text(&shortcut));
+            assert!(
+                help.rows().iter().any(|row| row.action == action),
+                "query {shortcut:?} did not find {action}"
+            );
+        }
+    }
 }

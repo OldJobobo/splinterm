@@ -116,9 +116,9 @@ fn decode_hex(value: &str) -> Result<String> {
     {
         bail!("fixture text hex is malformed or exceeds bounds");
     }
-    let bytes = value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, _) = value.as_bytes().as_chunks::<2>();
+    let bytes = pairs
+        .iter()
         .map(|pair| {
             let text = std::str::from_utf8(pair).context("fixture hex is ASCII")?;
             u8::from_str_radix(text, 16).context("fixture text contains non-hex bytes")
