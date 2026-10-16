@@ -10,9 +10,24 @@
 //!
 //! The broker accepts only peers with this user's uid whose process descends
 //! from this attempt's OpenSSH child, handles one prompt at a time, and drops
-//! the socket and its directory when the attempt ends. Answers are held in
-//! [`Secret`] buffers that never reallocate, are wiped on drop, have redacted
-//! `Debug` output, and are never logged, rendered, or put in diagnostics.
+//! the socket and its directory when the attempt ends.
+//!
+//! A secret prompt fails closed. OpenSSH turns any askpass failure into an
+//! empty answer and sends it, so a secret prompt that ends unanswered
+//! (cancelled, timed out, or with its attempt torn down) must never let the
+//! OpenSSH that asked see the helper fail. The broker first SIGKILLs the
+//! attempt's OpenSSH, and the helper's parent when that is a nested
+//! `ProxyJump` OpenSSH it holds a pidfd for. It then sends the helper an
+//! abort, on which the helper SIGKILLs its own parent through a pidfd and
+//! exits without printing anything. The helper is a fresh process that needs
+//! only that one descriptor, so this also covers a nested OpenSSH whose pidfd
+//! the broker could not open (for example under descriptor exhaustion). Such
+//! a peer is still served, not refused, because refusing it would itself end
+//! its askpass in failure and hand that OpenSSH an empty answer at once.
+//!
+//! Answers are held in [`Secret`] buffers that never reallocate, are wiped on
+//! drop, have redacted `Debug` output, and are never logged, rendered, or put
+//! in diagnostics.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -38,7 +53,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
+    net::{UnixListener, UnixStream, unix::OwnedWriteHalf},
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
@@ -72,6 +87,8 @@ const BROKER_BACKSTOP_SLACK: Duration = Duration::from_secs(15);
 const MAX_ANCESTOR_HOPS: usize = 4;
 const REPLY_ANSWER: u8 = 0;
 const REPLY_REFUSED: u8 = 1;
+/// The prompt ended unanswered: the helper kills its parent and exits silently.
+const REPLY_ABORTED: u8 = 2;
 /// Socket paths are limited to `sun_path` (108 bytes including the NUL).
 const MAX_SOCKET_PATH_BYTES: usize = 107;
 
@@ -674,37 +691,95 @@ enum TerminatorTarget {
 /// OpenSSH turns any askpass failure into an empty answer and, for password
 /// and keyboard-interactive authentication, sends it and asks again. So a
 /// secret prompt is never refused: OpenSSH, and the helper's direct parent
-/// when that is a nested OpenSSH (`ProxyJump`), are SIGKILLed first, and the
-/// helper is then closed without a reply.
+/// when that is a nested OpenSSH (`ProxyJump`) with a pidfd, are SIGKILLed
+/// first, and the helper is then sent an abort, on which it SIGKILLs its own
+/// parent before exiting. See [`HelperParent`].
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct Terminator {
     target: TerminatorTarget,
+    /// False only in tests, to serve a nested peer as if its parent's pidfd
+    /// could not be opened.
+    track_peer_parents: bool,
     peer_parent: Mutex<Option<OwnedFd>>,
+    /// The write half of the verified helper connection being served. Taking
+    /// it is the right to send that helper its one reply, so a reply and an
+    /// abort can never both be written.
+    helper: Mutex<Option<OwnedWriteHalf>>,
 }
 
 impl Terminator {
-    fn for_process(pid: u32) -> Self {
+    fn new(target: TerminatorTarget, track_peer_parents: bool) -> Self {
         Self {
-            target: TerminatorTarget::Process(open_pidfd(pid)),
+            target,
+            track_peer_parents,
             peer_parent: Mutex::new(None),
+            helper: Mutex::new(None),
         }
+    }
+
+    fn for_process(pid: u32) -> Self {
+        Self::new(TerminatorTarget::Process(open_pidfd(pid)), true)
     }
 
     /// Counts terminations instead of killing anything.
     #[doc(hidden)]
     #[must_use]
     pub fn recording(count: Arc<AtomicUsize>) -> Self {
-        Self {
-            target: TerminatorTarget::Record(count),
-            peer_parent: Mutex::new(None),
+        Self::new(TerminatorTarget::Record(count), true)
+    }
+
+    /// Like [`Self::recording`], and never holds a pidfd for a helper's
+    /// parent, as when opening one fails.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn recording_without_peer_pidfds(count: Arc<AtomicUsize>) -> Self {
+        Self::new(TerminatorTarget::Record(count), false)
+    }
+
+    fn open_peer_parent(&self, pid: u32) -> Option<OwnedFd> {
+        if self.track_peer_parents {
+            open_pidfd(pid)
+        } else {
+            None
         }
     }
 
-    fn set_peer_parent(&self, pidfd: Option<OwnedFd>) {
+    fn hold_peer(&self, parent: Option<OwnedFd>, helper: OwnedWriteHalf) {
         if let Ok(mut peer_parent) = self.peer_parent.lock() {
-            *peer_parent = pidfd;
+            *peer_parent = parent;
         }
+        if let Ok(mut held) = self.helper.lock() {
+            *held = Some(helper);
+        }
+    }
+
+    fn release_peer(&self) {
+        if let Ok(mut peer_parent) = self.peer_parent.lock() {
+            *peer_parent = None;
+        }
+        drop(self.take_helper());
+    }
+
+    /// Takes the right to reply to the helper being served; `None` once an
+    /// abort was sent or no verified helper is connected.
+    fn take_helper(&self) -> Option<OwnedWriteHalf> {
+        self.helper.lock().ok().and_then(|mut held| held.take())
+    }
+
+    /// Tells the helper being served to SIGKILL its parent and exit without
+    /// an answer. Synchronous, so a dropped service can send it before the
+    /// connection closes; the header fits an idle socket buffer, so the
+    /// nonblocking write completes at once.
+    fn abort_helper(&self) {
+        let Some(helper) = self.take_helper() else {
+            return;
+        };
+        let mut header = [0_u8; REPLY_HEADER_BYTES];
+        header[..4].copy_from_slice(&MAGIC);
+        header[4] = VERSION;
+        header[5] = REPLY_ABORTED;
+        let _ = rustix::io::write(helper.as_ref(), &header);
     }
 
     fn terminate(&self) {
@@ -759,8 +834,11 @@ impl Drop for AskpassService {
     fn drop(&mut self) {
         // Kill first: aborting closes any open helper connection, and the
         // helper's exit would otherwise reach OpenSSH as an empty answer.
+        // The abort makes the helper kill its own parent, which covers a
+        // nested OpenSSH this broker holds no pidfd for.
         if self.armed {
             self.terminator.terminate();
+            self.terminator.abort_helper();
         }
         // Aborting drops any open prompt's reply channel, so the status Window
         // sees it abandoned and wipes its field.
@@ -788,7 +866,7 @@ async fn serve_prompts(
             &prompt_open,
         )
         .await;
-        terminator.set_peer_parent(None);
+        terminator.release_peer();
     }
 }
 
@@ -820,7 +898,16 @@ fn descends_from(pid: u32, ancestor: u32) -> bool {
 /// Accepts a same-user peer descending from `ancestor`. Returns a pidfd for
 /// the peer's direct parent, the OpenSSH that will read the answer, when that
 /// is not `ancestor` itself (a nested `ProxyJump` OpenSSH).
-fn verify_peer(stream: &UnixStream, ancestor: u32) -> Result<Option<OwnedFd>> {
+///
+/// A nested peer whose parent pidfd cannot be opened is still accepted:
+/// refusing it would end its askpass in failure, which that OpenSSH sends as
+/// an empty answer. If its prompt ends unanswered, the helper's abort kills
+/// that OpenSSH instead.
+fn verify_peer(
+    stream: &UnixStream,
+    ancestor: u32,
+    open_parent: impl FnOnce(u32) -> Option<OwnedFd>,
+) -> Result<Option<OwnedFd>> {
     let credentials = stream
         .peer_cred()
         .context("read askpass peer credentials")?;
@@ -838,7 +925,7 @@ fn verify_peer(stream: &UnixStream, ancestor: u32) -> Result<Option<OwnedFd>> {
     if parent == ancestor {
         return Ok(None);
     }
-    let pidfd = open_pidfd(parent);
+    let pidfd = open_parent(parent);
     // Still the parent after opening, so the pidfd names that live process.
     Ok(pidfd.filter(|_| parent_pid(pid) == Some(parent)))
 }
@@ -920,15 +1007,15 @@ async fn serve_connection(
     requests: &mpsc::Sender<AskpassRequest>,
     prompt_open: &watch::Sender<bool>,
 ) -> Result<()> {
-    let peer_parent = verify_peer(&stream, ancestor)?;
-    let (mut reader, mut writer) = stream.into_split();
+    let peer_parent = verify_peer(&stream, ancestor, |pid| terminator.open_peer_parent(pid))?;
+    let (mut reader, writer) = stream.into_split();
     let request = tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut reader))
         .await
         .context("askpass request timed out")??;
     if !constant_time_eq(&request.token, token) {
         bail!("askpass token was rejected");
     }
-    terminator.set_peer_parent(peer_parent);
+    terminator.hold_peer(peer_parent, writer);
     // Classify the whole prompt, not the shortened lines shown on screen.
     let kind = classify_prompt(request.hint, &String::from_utf8_lossy(&request.prompt));
     let prompt = sanitize_prompt(&request.prompt);
@@ -963,20 +1050,25 @@ async fn serve_connection(
         None
     };
     drop(answer);
-    match (kind, outcome) {
-        (_, Some(reply @ (AskpassReply::Submit(_) | AskpassReply::Confirm))) => {
-            write_reply(&mut writer, reply).await
-        }
+    let reply = match (kind, outcome) {
+        (_, Some(reply @ (AskpassReply::Submit(_) | AskpassReply::Confirm))) => reply,
         // OpenSSH reads a refused question as "no", which is safe.
-        (AskpassKind::Confirm, _) => write_reply(&mut writer, AskpassReply::Cancel).await,
+        (AskpassKind::Confirm, _) => AskpassReply::Cancel,
         // A notice expects no answer; OpenSSH ignores how its helper ends.
-        (AskpassKind::Notice, _) => Ok(()),
-        // Never refuse a secret: kill OpenSSH first, then close silently.
+        (AskpassKind::Notice, _) => return Ok(()),
+        // Never refuse a secret: kill OpenSSH first, then abort the helper,
+        // which kills its own parent before exiting without an answer.
         (AskpassKind::Secret, _) => {
             terminator.terminate();
-            Ok(())
+            terminator.abort_helper();
+            return Ok(());
         }
-    }
+    };
+    // A dropped service already aborted this helper; send nothing more.
+    let Some(mut writer) = terminator.take_helper() else {
+        return Ok(());
+    };
+    write_reply(&mut writer, reply).await
 }
 
 /// Runs the internal askpass helper when OpenSSH started this executable with
@@ -986,13 +1078,22 @@ async fn serve_connection(
 pub fn dispatch_internal_askpass() -> Option<i32> {
     let socket = std::env::var_os(SOCKET_ENV).filter(|value| !value.is_empty())?;
     let token = std::env::var_os(TOKEN_ENV).filter(|value| !value.is_empty())?;
+    // Record the OpenSSH that started this helper before anything can delay.
+    let parent = HelperParent::current();
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let hint = AskpassHint::from_env_value(std::env::var_os("SSH_ASKPASS_PROMPT").as_deref());
     // Keep the answer out of core dumps and away from same-user ptrace. Only
     // the short-lived helper process does this; the status Window does not.
     let _ = rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable);
     let stdout = std::io::stdout();
-    let code = match run_helper(&socket, &token, &arguments, hint, &mut stdout.lock()) {
+    let code = match run_helper(
+        &socket,
+        &token,
+        &arguments,
+        hint,
+        &mut stdout.lock(),
+        parent,
+    ) {
         Ok(code) => code,
         Err(error) => {
             // Fixed text only: never the prompt or an answer.
@@ -1003,8 +1104,59 @@ pub fn dispatch_internal_askpass() -> Option<i32> {
     Some(code)
 }
 
+/// The OpenSSH that started this helper, which an abort kills.
+///
+/// When a secret prompt ends unanswered, the broker sends the helper an
+/// abort. The helper then SIGKILLs its parent before exiting, so that OpenSSH
+/// can never read the helper's failure, which it would send as an empty
+/// answer. This covers a nested `ProxyJump` OpenSSH the broker could not open
+/// a pidfd for. The parent is recorded when the helper starts and is killed
+/// only while it is still the helper's parent, checked again after its pidfd
+/// is open, so a parent that already exited is never confused with a process
+/// that reused its pid or with the process that adopted the helper.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct HelperParent(Option<rustix::process::Pid>);
+
+impl HelperParent {
+    /// This process's parent now.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn current() -> Self {
+        Self(rustix::process::getppid().filter(|pid| !pid.is_init()))
+    }
+
+    /// No parent to kill, for a helper run inside another process in tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(None)
+    }
+
+    /// SIGKILLs the recorded parent; false when it is no longer this
+    /// process's parent or cannot be signalled.
+    fn kill(self) -> bool {
+        let Some(parent) = self.0 else {
+            return false;
+        };
+        if rustix::process::getppid() != Some(parent) {
+            return false;
+        }
+        let Ok(pidfd) = rustix::process::pidfd_open(parent, rustix::process::PidfdFlags::empty())
+        else {
+            return false;
+        };
+        // Still the parent after opening, so the pidfd names that process.
+        if rustix::process::getppid() != Some(parent) {
+            return false;
+        }
+        rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL).is_ok()
+    }
+}
+
 /// The helper side of one prompt. Writes the answer and a newline to `output`
-/// and returns 0, or returns 1 when the prompt was refused.
+/// and returns 0, or returns 1 when the prompt was refused. On an abort it
+/// kills `parent` first, then returns 1 without writing anything.
 ///
 /// # Errors
 ///
@@ -1017,6 +1169,7 @@ pub fn run_helper(
     arguments: &[OsString],
     hint: AskpassHint,
     output: &mut impl Write,
+    parent: HelperParent,
 ) -> Result<i32> {
     let [prompt] = arguments else {
         bail!("expected exactly one prompt argument");
@@ -1072,6 +1225,10 @@ pub fn run_helper(
             Ok(0)
         }
         REPLY_REFUSED => Ok(1),
+        REPLY_ABORTED => {
+            parent.kill();
+            Ok(1)
+        }
         _ => bail!("the Splinterm prompt reply is invalid"),
     }
 }
@@ -1301,6 +1458,10 @@ mod tests {
     /// The test process's parent stands in for OpenSSH, so terminations are
     /// recorded, never delivered.
     fn start_broker(ancestor: u32) -> Broker {
+        start_broker_with(ancestor, Terminator::recording)
+    }
+
+    fn start_broker_with(ancestor: u32, terminator: fn(Arc<AtomicUsize>) -> Terminator) -> Broker {
         let (requests, receiver) = mpsc::channel(4);
         let prompt = NativePrompt::new(PathBuf::from("/nonexistent/splinterm"), requests);
         let broker = AskpassBroker::bind_in(&std::env::temp_dir(), &prompt).unwrap();
@@ -1312,7 +1473,7 @@ mod tests {
         assert_eq!(socket.permissions().mode() & 0o777, 0o600);
         let kills = Arc::new(AtomicUsize::new(0));
         Broker {
-            service: broker.serve_with(ancestor, Terminator::recording(kills.clone())),
+            service: broker.serve_with(ancestor, terminator(kills.clone())),
             environment,
             requests: receiver,
             directory,
@@ -1341,7 +1502,15 @@ mod tests {
         let prompt = OsString::from(prompt);
         tokio::task::spawn_blocking(move || {
             let mut output = Vec::new();
-            let result = run_helper(&socket, &token, &[prompt], hint, &mut output);
+            // Never the test runner: an abort here must not kill anything.
+            let result = run_helper(
+                &socket,
+                &token,
+                &[prompt],
+                hint,
+                &mut output,
+                HelperParent::none(),
+            );
             (result, output)
         })
         .await
@@ -1626,5 +1795,146 @@ mod tests {
             classify_prompt(AskpassHint::Default, &prompt),
             AskpassKind::Confirm
         );
+    }
+
+    /// Selects the part a re-executed copy of this test binary plays.
+    const PROCESS_ROLE_ENV: &str = "SPLINTERM_TEST_ASKPASS_ROLE";
+    /// Where the helper process records its exit code and output length.
+    const HELPER_RESULT_ENV: &str = "SPLINTERM_TEST_ASKPASS_RESULT";
+
+    /// Runs this test binary again as only [`askpass_test_process`].
+    fn reexec(role: &str) -> std::process::Command {
+        let module = module_path!().split_once("::").unwrap().1;
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &format!("{module}::askpass_test_process")])
+            .args(["--nocapture", "--test-threads=1", "-q"])
+            .env(PROCESS_ROLE_ENV, role)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    }
+
+    /// Entry point of the re-executed processes; does nothing in an ordinary
+    /// run. The parent stands in for a nested OpenSSH: it starts the helper
+    /// as its own child and waits for it. The helper runs the real helper with
+    /// its real parent and records how it ended.
+    #[test]
+    fn askpass_test_process() {
+        match std::env::var(PROCESS_ROLE_ENV).as_deref() {
+            Ok("parent") => {
+                let _ = reexec("helper").status();
+                std::process::exit(0);
+            }
+            Ok("helper") => {
+                let parent = HelperParent::current();
+                let socket = std::env::var_os(SOCKET_ENV).unwrap();
+                let token = std::env::var_os(TOKEN_ENV).unwrap();
+                let mut output = Vec::new();
+                let code = run_helper(
+                    &socket,
+                    &token,
+                    &[OsString::from("password:")],
+                    AskpassHint::Default,
+                    &mut output,
+                    parent,
+                )
+                .map_or_else(|_| "error".to_owned(), |code| code.to_string());
+                let result = std::env::var_os(HELPER_RESULT_ENV).unwrap();
+                fs::write(result, format!("{code} {}", output.len())).unwrap();
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts a stand-in nested OpenSSH, a child of this test process, whose
+    /// own child is the real helper.
+    fn spawn_nested_helper(broker: &Broker, result: &Path) -> tokio::process::Child {
+        let mut command = tokio::process::Command::from(reexec("parent"));
+        command
+            .env(SOCKET_ENV, env_value(&broker.environment, SOCKET_ENV))
+            .env(TOKEN_ENV, broker.token())
+            .env(HELPER_RESULT_ENV, result)
+            .kill_on_drop(true);
+        command.spawn().unwrap()
+    }
+
+    async fn assert_helper_killed_its_parent(mut parent: tokio::process::Child, result: &Path) {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = tokio::time::timeout(Duration::from_secs(10), parent.wait())
+            .await
+            .expect("the stand-in OpenSSH ended")
+            .unwrap();
+        assert_eq!(status.signal(), Some(9), "the helper SIGKILLed its parent");
+        // The orphaned helper then records that it failed without output.
+        let recorded = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(recorded) = fs::read_to_string(result)
+                    && !recorded.is_empty()
+                {
+                    return recorded;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the helper recorded its result");
+        assert_eq!(recorded, "1 0", "exit 1 and nothing written for OpenSSH");
+    }
+
+    fn result_path(broker: &Broker) -> PathBuf {
+        // Outside the broker's directory, which goes when the service drops.
+        std::env::temp_dir().join(format!(
+            "{}-helper-result",
+            broker.directory.file_name().unwrap().to_string_lossy()
+        ))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_secret_aborts_a_nested_helper_which_kills_its_parent() {
+        // With and without a pidfd for the nested parent: the broker's own
+        // kill is only recorded here, so the helper alone kills it.
+        for terminator in [
+            Terminator::recording as fn(Arc<AtomicUsize>) -> Terminator,
+            Terminator::recording_without_peer_pidfds,
+        ] {
+            let mut broker = start_broker_with(std::process::id(), terminator);
+            let result = result_path(&broker);
+            let parent = spawn_nested_helper(&broker, &result);
+            let request = tokio::time::timeout(Duration::from_secs(10), broker.requests.recv())
+                .await
+                .expect("the nested helper's prompt arrived")
+                .unwrap();
+            assert_eq!(request.kind(), AskpassKind::Secret);
+            request.answer(AskpassReply::Cancel);
+            assert_helper_killed_its_parent(parent, &result).await;
+            assert_eq!(broker.kills(), 1, "the broker killed OpenSSH first");
+            broker.service.release();
+            let _ = fs::remove_file(&result);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ending_the_attempt_aborts_a_nested_helper_without_a_parent_pidfd() {
+        let mut broker = start_broker_with(
+            std::process::id(),
+            Terminator::recording_without_peer_pidfds,
+        );
+        let result = result_path(&broker);
+        let parent = spawn_nested_helper(&broker, &result);
+        let mut request = tokio::time::timeout(Duration::from_secs(10), broker.requests.recv())
+            .await
+            .expect("the nested helper's prompt arrived")
+            .unwrap();
+        let kills = broker.kills.clone();
+        drop(broker.service);
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        assert_helper_killed_its_parent(parent, &result).await;
+        tokio::time::timeout(Duration::from_secs(5), request.abandoned())
+            .await
+            .unwrap();
+        let _ = fs::remove_file(&result);
     }
 }
