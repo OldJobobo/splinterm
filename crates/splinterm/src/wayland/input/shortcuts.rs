@@ -223,6 +223,19 @@ pub(in crate::wayland) fn tab_shortcut_action(
     })
 }
 
+/// Whether a resolved keymap press owns its raw key until release, so the
+/// repeat handler drops its auto-repeats. Font zoom keeps repeating, and tab
+/// and command-palette actions outside a managed-tab window decline and fall
+/// through to the terminal, so their repeats must reach the terminal too.
+pub(in crate::wayland) fn keymap_press_consumes_key(action: ActionId, managed_tabs: bool) -> bool {
+    if matches!(action, ActionId::ZoomIn | ActionId::ZoomOut) {
+        return false;
+    }
+    managed_tabs
+        || (tab_shortcut_action(Some(action), false, true).is_none()
+            && command_palette_shortcut_action(Some(action), false, true, false).is_none())
+}
+
 pub(in crate::wayland) const fn tab_action_dispatch_allowed(blocking_states: [bool; 5]) -> bool {
     !(blocking_states[0]
         || blocking_states[1]
@@ -1211,5 +1224,52 @@ action = "app.command-palette"
             KeymapPress::Consumed(Some(ActionId::TerminateCurrentDojo)),
             "US Prefix & keeps its shifted-symbol binding"
         );
+    }
+
+    #[test]
+    fn tab_chords_outside_managed_tabs_leave_their_repeats_to_the_terminal() {
+        let keymap = ResolvedKeymap::default();
+        let mut state = PrefixState::Idle;
+        let KeymapPress::Consumed(Some(action)) = keymap_press_for(
+            &keymap,
+            &mut state,
+            Keysym::exclam,
+            ctrl_shift(),
+            KEY_1,
+            Instant::now(),
+            Duration::from_secs(1),
+        ) else {
+            panic!("Ctrl+Shift+1 resolves through the keymap");
+        };
+        assert_eq!(action, ActionId::SelectDojo1);
+        assert!(
+            keymap_press_consumes_key(action, true),
+            "a managed-tab window owns the chord and drops its repeats"
+        );
+        assert!(
+            !keymap_press_consumes_key(action, false),
+            "a direct single-Splint window forwards the chord, so it keeps repeating"
+        );
+        assert_eq!(tab_shortcut_action(Some(action), true, false), None);
+        for action in [
+            ActionId::NextDojo,
+            ActionId::NewDojo,
+            ActionId::DojoChooser,
+            ActionId::CommandPalette,
+        ] {
+            assert!(keymap_press_consumes_key(action, true), "{action:?}");
+            assert!(!keymap_press_consumes_key(action, false), "{action:?}");
+        }
+        for action in [ActionId::ZoomIn, ActionId::ZoomOut] {
+            assert!(!keymap_press_consumes_key(action, true), "{action:?}");
+            assert!(!keymap_press_consumes_key(action, false), "{action:?}");
+        }
+        for action in [
+            ActionId::BindingHelp,
+            ActionId::NextLair,
+            ActionId::SplitHorizontal,
+        ] {
+            assert!(keymap_press_consumes_key(action, false), "{action:?}");
+        }
     }
 }
