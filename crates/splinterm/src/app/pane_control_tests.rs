@@ -45,11 +45,58 @@ async fn send_frame(writer: &mut (impl AsyncWrite + Unpin), frame: ServerFrame) 
         .unwrap();
 }
 
+const fn server_hello(limits: ServerLimits) -> ServerFrame {
+    ServerFrame::Hello {
+        version: PROTOCOL_VERSION,
+        limits,
+        development_terminal_access: false,
+        daemon_hostname: None,
+    }
+}
+
+const fn control_subscribed(splint_id: SplintId, owned: bool) -> Response {
+    Response::ControlSubscribed {
+        subscription_id: 9,
+        status: ControlStatus {
+            splint_id,
+            incarnation: 7,
+            controlled: owned,
+            locally_owned: owned,
+        },
+    }
+}
+
+fn input_acknowledged(splint_id: SplintId) -> Response {
+    Response::TerminalActionAcknowledged {
+        lair_id: LairId::new(),
+        dojo_id: DojoId::new(),
+        splint_id,
+        incarnation: 7,
+        terminal_revision: 10,
+        history_generation: 0,
+    }
+}
+
 async fn run_case(
     splint_id: SplintId,
     owned: bool,
     commands: Vec<WindowCommand>,
     steps: Vec<(Request, Reply)>,
+) -> (Result<()>, Vec<WindowUpdate>, usize) {
+    let steps = steps
+        .into_iter()
+        .map(|(request, reply)| (request, reply, Vec::new()))
+        .collect();
+    run_case_with(splint_id, owned, ServerLimits::default(), commands, steps).await
+}
+
+/// Like `run_case`, with negotiated limits and event frames sent before each reply.
+async fn run_case_with(
+    splint_id: SplintId,
+    owned: bool,
+    limits: ServerLimits,
+    commands: Vec<WindowCommand>,
+    steps: Vec<(Request, Reply, Vec<ServerFrame>)>,
 ) -> (Result<()>, Vec<WindowUpdate>, usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let (client, server) = tokio::io::duplex(65536);
@@ -64,32 +111,16 @@ async fn run_case(
                     ..
                 }
             ));
-            send_frame(
-                &mut writer,
-                ServerFrame::Hello {
-                    version: PROTOCOL_VERSION,
-                    limits: ServerLimits::default(),
-                    development_terminal_access: false,
-                    daemon_hostname: None,
-                },
-            )
-            .await;
+            send_frame(&mut writer, server_hello(limits)).await;
             let initial = (
                 Request::SubscribeControl {
                     splint_id,
                     incarnation: 7,
                 },
-                Ok(Response::ControlSubscribed {
-                    subscription_id: 9,
-                    status: ControlStatus {
-                        splint_id,
-                        incarnation: 7,
-                        controlled: owned,
-                        locally_owned: owned,
-                    },
-                }),
+                Ok(control_subscribed(splint_id, owned)),
+                Vec::new(),
             );
-            for (expected, reply) in std::iter::once(initial).chain(steps) {
+            for (expected, reply, events) in std::iter::once(initial).chain(steps) {
                 let frame = read_client(&mut reader).await;
                 let ClientFrame::Request {
                     request_id,
@@ -100,6 +131,9 @@ async fn run_case(
                     panic!("expected request");
                 };
                 assert_eq!(request, expected);
+                for event in events {
+                    send_frame(&mut writer, event).await;
+                }
                 let response = match reply {
                     Ok(result) => ServerFrame::Response { request_id, result },
                     Err(code) => ServerFrame::Error {
@@ -383,26 +417,30 @@ async fn unexpected_control_errors_and_responses_are_still_fatal() {
     }
 }
 
-#[tokio::test]
-async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
-    let id = SplintId::new();
-    let ack = || {
-        Ok(Response::TerminalActionAcknowledged {
-            lair_id: LairId::new(),
-            dojo_id: DojoId::new(),
-            splint_id: id,
-            incarnation: 7,
-            terminal_revision: 10,
-            history_generation: 0,
-        })
-    };
-    let input = |bytes: &[u8], focus_report| Request::Input {
+fn acknowledged(id: SplintId) -> Result<Response, ErrorCode> {
+    Ok(Response::TerminalActionAcknowledged {
+        lair_id: LairId::new(),
+        dojo_id: DojoId::new(),
+        splint_id: id,
+        incarnation: 7,
+        terminal_revision: 10,
+        history_generation: 0,
+    })
+}
+
+fn controlled_input(id: SplintId, bytes: &[u8], focus_report: bool) -> Request {
+    Request::Input {
         controller_id: 1,
         splint_id: id,
         incarnation: 7,
         bytes: bytes.to_vec(),
         focus_report,
-    };
+    }
+}
+
+#[tokio::test]
+async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
+    let id = SplintId::new();
     let (result, _, _) = run_case(
         id,
         true,
@@ -413,9 +451,9 @@ async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
             WindowCommand::FocusReport(false),
         ],
         vec![
-            (input(b"\x1b[I", true), ack()),
-            (input(b"\x1b[I", false), ack()),
-            (input(b"\x1b[O", true), ack()),
+            (controlled_input(id, b"\x1b[I", true), acknowledged(id)),
+            (controlled_input(id, b"\x1b[I", false), acknowledged(id)),
+            (controlled_input(id, b"\x1b[O", true), acknowledged(id)),
             (
                 Request::ReleaseControl { controller_id: 1 },
                 Ok(Response::Acknowledged),
@@ -424,4 +462,201 @@ async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
     )
     .await;
     result.unwrap();
+}
+
+#[tokio::test]
+async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
+    let id = SplintId::new();
+    let (result, _, _) = run_case(
+        id,
+        true,
+        vec![
+            WindowCommand::Input(b"ab".to_vec()),
+            WindowCommand::Input(b"c".to_vec()),
+            WindowCommand::Input(b"d".to_vec()),
+            WindowCommand::Resize {
+                columns: 90,
+                rows: 30,
+                pixel_width: 900,
+                pixel_height: 600,
+            },
+            WindowCommand::Input(b"e".to_vec()),
+            WindowCommand::Input(Vec::new()),
+            WindowCommand::Input(b"f".to_vec()),
+            // A generated focus report is a barrier and keeps its flag.
+            WindowCommand::FocusReport(true),
+            WindowCommand::Input(b"g".to_vec()),
+        ],
+        vec![
+            (controlled_input(id, b"abcd", false), acknowledged(id)),
+            (
+                Request::Resize {
+                    controller_id: 1,
+                    splint_id: id,
+                    incarnation: 7,
+                    columns: 90,
+                    rows: 30,
+                    pixel_width: 900,
+                    pixel_height: 600,
+                },
+                acknowledged(id),
+            ),
+            (controlled_input(id, b"ef", false), acknowledged(id)),
+            (controlled_input(id, b"\x1b[I", true), acknowledged(id)),
+            (controlled_input(id, b"g", false), acknowledged(id)),
+            (
+                Request::ReleaseControl { controller_id: 1 },
+                Ok(Response::Acknowledged),
+            ),
+        ],
+    )
+    .await;
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn control_loss_between_coalesced_input_batches_is_observed_before_the_next_batch() {
+    let id = SplintId::new();
+    let limits = ServerLimits {
+        maximum_input_bytes: 8,
+        ..ServerLimits::default()
+    };
+    let lost = ServerFrame::Event {
+        subscription_id: 9,
+        sequence: 1,
+        event: SubscriptionEvent::ControlStatusChanged {
+            status: ControlStatus {
+                splint_id: id,
+                incarnation: 7,
+                controlled: true,
+                locally_owned: false,
+            },
+        },
+    };
+    // Each input exceeds half the bound, so the second is a coalescing barrier.
+    // Control is lost while the first round trip is in flight. The barrier must
+    // wait for that event and reacquire, never reuse the stale controller 1.
+    let (result, updates, _) = run_case_with(
+        id,
+        true,
+        limits,
+        vec![
+            WindowCommand::Input(b"abcde".to_vec()),
+            WindowCommand::Input(b"fghij".to_vec()),
+        ],
+        vec![
+            (
+                Request::Input {
+                    controller_id: 1,
+                    splint_id: id,
+                    incarnation: 7,
+                    bytes: b"abcde".to_vec(),
+                    focus_report: false,
+                },
+                Ok(input_acknowledged(id)),
+                vec![lost],
+            ),
+            (
+                acquire(id),
+                Err(ErrorCode::ControllerUnavailable),
+                Vec::new(),
+            ),
+        ],
+    )
+    .await;
+    result.unwrap();
+    let control: Vec<_> = updates
+        .into_iter()
+        .filter_map(|update| match update {
+            WindowUpdate::Control(active) => Some(active),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(control, vec![true, false, false]);
+}
+
+#[tokio::test]
+async fn cancellation_stops_a_chain_of_coalescing_barriers() {
+    let id = SplintId::new();
+    let limits = ServerLimits {
+        maximum_input_bytes: 8,
+        ..ServerLimits::default()
+    };
+    let (client, server) = tokio::io::duplex(65536);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let server_cancellation = cancellation.clone();
+    let server = tokio::spawn(async move {
+        let (mut reader, mut writer) = tokio::io::split(server);
+        read_client(&mut reader).await;
+        send_frame(&mut writer, server_hello(limits)).await;
+        let mut inputs = 0;
+        loop {
+            let ClientFrame::Request {
+                request_id,
+                request,
+                ..
+            } = read_client(&mut reader).await
+            else {
+                panic!("expected request");
+            };
+            let result = match request {
+                Request::SubscribeControl { .. } => control_subscribed(id, true),
+                Request::Input { .. } => {
+                    inputs += 1;
+                    // The pane closes while the first batch is in flight.
+                    server_cancellation.cancel();
+                    input_acknowledged(id)
+                }
+                Request::ReleaseControl { .. } => {
+                    send_frame(
+                        &mut writer,
+                        ServerFrame::Response {
+                            request_id,
+                            result: Response::Acknowledged,
+                        },
+                    )
+                    .await;
+                    return inputs;
+                }
+                other => panic!("unexpected request {other:?}"),
+            };
+            send_frame(&mut writer, ServerFrame::Response { request_id, result }).await;
+        }
+    });
+    let (reader, writer) = tokio::io::split(client);
+    let connection = Connection::connect_remote_interactive_transport(reader, writer)
+        .await
+        .unwrap();
+    let (sender, receiver) = mpsc::channel(32);
+    for bytes in [b"abcde", b"fghij", b"klmno"] {
+        sender
+            .send(WindowCommand::Input(bytes.to_vec()))
+            .await
+            .unwrap();
+    }
+    let (updates, _update_receiver) = mpsc::channel(32);
+    let (resyncs, _resync_receiver) = mpsc::channel(32);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_controller(
+            connection,
+            receiver,
+            ControllerOutputs { updates, resyncs },
+            Some(1),
+            id,
+            7,
+            ForcedControlTransfer::Disabled,
+            0,
+            cancellation,
+        ),
+    )
+    .await
+    .expect("cancelled controller must not keep draining queued input");
+    result.unwrap();
+    drop(sender);
+    assert_eq!(
+        server.await.unwrap(),
+        1,
+        "only the in-flight batch was sent"
+    );
 }

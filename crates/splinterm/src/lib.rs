@@ -24,7 +24,9 @@ pub mod navigation_projection;
 pub mod pane;
 pub mod preset;
 pub mod remote;
+pub mod remote_launch;
 pub mod remote_session;
+pub mod remote_status;
 pub mod renderer;
 pub mod session_picker;
 #[doc(hidden)]

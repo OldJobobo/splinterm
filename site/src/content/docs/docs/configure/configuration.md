@@ -94,7 +94,7 @@ The default `main.font-sizing-policy=output-scale` follows Wayland compositor ou
 
 ## Omarchy theme integration
 
-With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies standard Omarchy accent and background-ramp roles. The active-tab body uses `lighter_bg`, then Foot `bright0`, rather than terminal selection color.
+With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies standard Omarchy accent and background-ramp roles. The active-tab body uses `lighter_bg`, then Foot `bright0`, rather than terminal selection color. Inactive tab labels use the theme's `muted` role (or Foot `bright0`) when it reaches 4.5:1 contrast against the tab strip without being louder than the foreground; otherwise they use the first qualifying 25/50/75 % mix with the foreground, or the plain foreground. JSON themes may set `inactive_tab_foreground` explicitly.
 
 Active tab text is independent from terminal selection text. Splinterm chooses whichever effective terminal background or foreground has higher WCAG contrast against the resolved active-tab body, preferring foreground on a tie. Native Omarchy themes need no Splinterm-specific roles. Explicit JSON themes may override the active-tab roles and use the same fallback rule against their own background and foreground roles.
 
@@ -123,6 +123,8 @@ splinterm keymap conflicts
 
 The default `splinterm` profile provides the controls in the [quickstart](/docs/quickstart/). The `omarchy-tmux` profile adds familiar `Ctrl+Space` and `Ctrl+B` prefixes, pane and tab workflows, local pane zoom, stable-ID choosers, `Prefix+B` tab-strip toggling, trusted searchable `Prefix+?` key help, transactional configuration reload, `Prefix+[` vi copy mode, and `Prefix Shift+S/F/V/O` for Save, pin toggle, Preview, and Restore of the current Lair. The closed `lair.save`, `lair.pin-toggle`, `lair.preview`, and `lair.restore` actions remain available to strict overlays when another chord layout is preferred. `dojo.close-other-tabs` is likewise available even though neither profile claims a default chord.
 
+`Ctrl+Shift+1` through `Ctrl+Shift+9` activate the first nine Dojo tabs in both profiles; `omarchy-tmux` also keeps `Alt+1`–`9` and lists them first. Keys match the symbol the layout produces, but with Shift held a number-row 1–9 key that matches nothing as a symbol is retried as its digit, so these chords work where Shift+1 produces `!` while symbol bindings such as `Prefix &` keep priority. A symbol binding also wins where a layout's Shift+digit produces it: zoom-in (`Ctrl++`, which also matches `=`) takes Swiss `Ctrl+Shift+1`, Turkish Q `Ctrl+Shift+4`, and Hungarian `Ctrl+Shift+3`/`7` instead of selecting a tab. With managed tabs, `Ctrl+Shift+2` and `Ctrl+Shift+6` no longer send `Ctrl+@` (NUL) and `Ctrl+^` to the terminal on US layouts; `Ctrl+2` or `Ctrl+Space` and `Ctrl+6` still do. Legacy direct single-Splint attachments still forward them.
+
 Inside keybinding help, type to search the effective action labels, configuration names, shortcuts, sources, and closed keywords. Use Up/Down or PageUp/PageDown to navigate, `Ctrl+U` to clear, and Escape once to clear a non-empty query or again to close. Query input and paste remain client-owned and never reach the terminal.
 
 The command palette is a curated trusted subset of this closed registry. It projects shortcut labels from the effective resolved keymap and exposes binding help, reload, copy mode, pane zoom, Dojo/Lair workflows, and Window detach without allowing configuration, plugins, or terminal output to register commands.
@@ -145,7 +147,7 @@ sequence = ["Ctrl+Alt+P"]
 action = "app.command-palette"
 ```
 
-Unknown actions, malformed chords, duplicate bindings, and semantic conflicts fail startup with source context rather than partially applying.
+Unknown actions, malformed chords, duplicate bindings, and semantic conflicts fail startup with source context rather than partially applying. A conflict with a built-in binding also names the `[[unbind]]` sequence that frees the chord.
 
 ## Dojo presets
 
