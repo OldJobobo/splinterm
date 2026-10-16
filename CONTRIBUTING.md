@@ -303,6 +303,37 @@ Pacman-owned `/usr/bin/splinterm` and adjacent `/usr/bin/splinterd` with private
 guest socket, state, and config paths; `package-stop` removes only that isolated
 runtime. This is the trusted-UI path for packaged graphical acceptance.
 
+Packaged sessions have a few bounded helpers:
+
+```bash
+# Seed a private config file (read from stdin) for later launches; a live
+# session owned by this checkout also receives it immediately.
+tools/testbed/omarchy-vm.sh package-config splinterm/config.ini <config.ini
+tools/testbed/omarchy-vm.sh package-config --clear
+# After graphical approval: add or close one more guarded Window (ids 1-4).
+tools/testbed/omarchy-vm.sh package-launch-extra launch --picker
+tools/testbed/omarchy-vm.sh package-close-extra 1
+# Build the invalid live-font candidate; --install points the live session at it.
+tools/testbed/omarchy-vm.sh font-fixture invalid-candidate --install
+```
+
+`package-config` accepts only ASCII `splinterm/…` and `fontconfig/…` paths of at
+most 64 KiB, and live files are replaced atomically. An additional Window must
+join the guarded session's workspace beside its owner Window, and closing it
+stops only processes carrying its own launch token and private socket. Extra
+Windows may close in any order; the last one to close restores the focus and
+cursor from before the first one opened. `font-fixture` makes Fontconfig resolve
+`monospace` to a cached face whose bytes are no longer a font
+(`tools/testbed/font-fixture.py`), so the live font watcher must reject the
+candidate and keep the last valid font. The tool verifies this as the packaged
+session sees it: `FONTCONFIG_FILE` unset and a private `XDG_CONFIG_HOME`, so the
+guest user's own Omarchy font choice cannot interfere. Install it only after
+launch: startup instead falls back to the documented JetBrains default.
+Each build goes into a fresh directory, so rebuilding never touches the fixture a
+live `fonts.conf` names, and older unreferenced builds are pruned.
+`package-stop` also removes the fixtures; the config seed is kept until
+`package-config --clear`.
+
 `bootstrap` installs Rust and the guest-only ydotool user service. Development
 launches never install a Splinterm binary or change Omarchy, Hyprland, terminal,
 or default-terminal configuration.

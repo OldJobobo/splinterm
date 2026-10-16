@@ -68,7 +68,7 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/LICENSE",
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
-PRIVATE_PROTOCOL_VERSION = 38
+PRIVATE_PROTOCOL_VERSION = 39
 PACKAGE_PROVENANCE_KEYS = {
     "schema", "package", "architecture", "provenance", "source_commit",
     "build_version", "pair_build_identity", "daemon_sha256", "client_sha256",
@@ -1116,13 +1116,15 @@ def main() -> int:
         with desktop.open(encoding="utf-8") as desktop_file:
             desktop_config.read_file(desktop_file)
         assert desktop_config["Desktop Entry"]["Exec"] == "splinterm-xdg-terminal-exec"
-        assert desktop_config["Desktop Entry"]["Actions"] == "New;Dojos;Reopen;"
+        assert desktop_config["Desktop Entry"]["Actions"] == "New;Dojos;Reopen;Remotes;"
         assert desktop_config["Desktop Entry"]["Icon"] == "com.oldjobobo.splinterm"
         assert desktop_config["Desktop Entry"]["X-TerminalArgAppId"] == "--app-id="
         assert desktop_config["Desktop Action New"]["Exec"] == "splinterm-xdg-terminal-exec --new"
         assert desktop_config["Desktop Action Dojos"]["Name"] == "Recent Dojos"
         assert desktop_config["Desktop Action Dojos"]["Exec"] == "splinterm-dojos"
         assert desktop_config["Desktop Action Reopen"]["Exec"] == "splinterm-reopen"
+        assert desktop_config["Desktop Action Remotes"]["Name"] == "Remote Dojos"
+        assert desktop_config["Desktop Action Remotes"]["Exec"] == "splinterm remotes"
 
         screensaver_profile = root / "usr/share/splinterm/omarchy/screensaver.ini"
         profile = configparser.ConfigParser(interpolation=None, strict=True)

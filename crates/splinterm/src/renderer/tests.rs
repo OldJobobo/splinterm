@@ -108,7 +108,8 @@ fn deterministic_row_paints_identical_opaque_canvases() {
     paint(&mut second, width, height, &row);
 
     assert_eq!(first, second);
-    assert!(first.chunks_exact(4).all(|pixel| pixel[3] == 0xff));
+    let (pixels, _) = first.as_chunks::<4>();
+    assert!(pixels.iter().all(|pixel| pixel[3] == 0xff));
     assert_eq!(row.cache.len(), 1, "repeated glyphs share one cached image");
 }
 
@@ -534,7 +535,8 @@ fn cursor_geometry_matches_foot_at_required_scales() {
                 [255, 255, 255, 255],
                 shape,
             );
-            let painted = canvas.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+            let (pixels, _) = canvas.as_chunks::<4>();
+            let painted = pixels.iter().filter(|pixel| pixel[3] != 0).count();
             assert!(painted > 0);
         }
         let expected_beam = (2 * scale + 60) / 120;
@@ -574,7 +576,7 @@ fn focused_and_unfocused_full_dirty_composition_share_one_path() {
                 presentation,
             );
             let mut rows = vec![0; full.len()];
-            for pixel in rows.chunks_exact_mut(4) {
+            for pixel in rows.as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&[
                     frame.canvas_background[2],
                     frame.canvas_background[1],
@@ -653,7 +655,7 @@ fn overlapping_glyphs_compose_in_foot_right_to_left_order() {
     let width = geometry.buffer_width();
     let height = geometry.buffer_height();
     let mut canvas = vec![0; usize::try_from(width * height * 4).unwrap()];
-    for pixel in canvas.chunks_exact_mut(4) {
+    for pixel in canvas.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[22, 18, 14, 255]);
     }
     paint_glyphs(&mut canvas, width, height, &frame, &geometry, None);
@@ -743,7 +745,7 @@ fn snapshot_decorations_use_foot_baseline_metrics_in_full_and_row_paints() {
     assert_eq!(pixel(strike_x, strike_y), &[0xeb, 0xeb, 0xeb, 0xff]);
 
     let mut rows = vec![0; full.len()];
-    for pixel in rows.chunks_exact_mut(4) {
+    for pixel in rows.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[0x16, 0x12, 0x0e, 0xff]);
     }
     paint_snapshot_rows(
@@ -1015,7 +1017,7 @@ fn full_and_all_row_damage_paints_are_byte_identical() {
         0xff,
     ];
     let mut incremental = vec![0; bytes];
-    for pixel in incremental.chunks_exact_mut(4) {
+    for pixel in incremental.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&background);
     }
     paint_snapshot_rows(

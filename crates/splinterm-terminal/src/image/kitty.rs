@@ -379,12 +379,12 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Result<DecodedImage, Error> {
     let mut pixels = Vec::with_capacity(output_len);
     match info.color_type {
         png::ColorType::Rgb => {
-            for pixel in bytes.chunks_exact(3) {
+            for pixel in bytes.as_chunks::<3>().0 {
                 pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
             }
         }
         png::ColorType::Rgba => {
-            for pixel in bytes.chunks_exact(4) {
+            for pixel in bytes.as_chunks::<4>().0 {
                 let alpha = pixel[3];
                 pixels.extend_from_slice(&[
                     premultiply(pixel[2], alpha),
@@ -400,7 +400,7 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Result<DecodedImage, Error> {
             }
         }
         png::ColorType::GrayscaleAlpha => {
-            for pixel in bytes.chunks_exact(2) {
+            for pixel in bytes.as_chunks::<2>().0 {
                 let alpha = pixel[1];
                 let value = premultiply(pixel[0], alpha);
                 pixels.extend_from_slice(&[value, value, value, alpha]);

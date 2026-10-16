@@ -11,7 +11,7 @@ StartupNotify=true
 StartupWMClass=com.oldjobobo.splinterm
 Categories=System;TerminalEmulator;
 Keywords=shell;prompt;command;commandline;terminal;
-Actions=New;Dojos;Reopen;
+Actions=New;Dojos;Reopen;Remotes;
 X-TerminalArgExec=--
 X-TerminalArgDir=--working-directory=
 X-TerminalArgAppId=--app-id=
@@ -27,3 +27,7 @@ Exec=splinterm-dojos
 [Desktop Action Reopen]
 Name=Reopen Last Dojo
 Exec=splinterm-reopen
+
+[Desktop Action Remotes]
+Name=Remote Dojos
+Exec=splinterm remotes

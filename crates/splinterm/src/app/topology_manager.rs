@@ -27,7 +27,8 @@ use splinterm_core::{
     TopologyRevision,
 };
 use splinterm_protocol::{
-    ErrorCode, LaunchDirectory, MutationTarget, Request, Response, validate_preset_materialized,
+    ErrorCode, LaunchDirectory, MutationTarget, Request, Response, UnusedDojoCloseOutcome,
+    validate_preset_materialized,
 };
 use tokio::sync::mpsc;
 
@@ -487,7 +488,8 @@ async fn apply_topology_command(
             }
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
-        WindowTopologyCommand::ExplorerContext { .. }
+        WindowTopologyCommand::CloseWindow
+        | WindowTopologyCommand::ExplorerContext { .. }
         | WindowTopologyCommand::RequestDojoPrompt { .. }
         | WindowTopologyCommand::RequestSessionPicker
         | WindowTopologyCommand::RequestLairExplorer { .. }
@@ -1052,7 +1054,7 @@ async fn create_daily_dojo(
     let (request, lifetime) = graphical_create_request(
         factory,
         expected,
-        format!("terminal-{stamp}-{}", std::process::id()),
+        splinterm_core::generated_lair_name(stamp, std::process::id()),
         false,
         Some(cwd),
         Vec::new(),
@@ -1415,6 +1417,124 @@ fn retire_pane_tasks(pane_tasks: HashMap<SplintId, PaneTask>) {
         return;
     }
     tokio::spawn(cancel_pane_tasks(pane_tasks));
+}
+
+/// Bounds the unused-Dojo requests a closing Window makes before it exits.
+const CLOSE_UNUSED_ON_EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bounds how long Close Tab waits for its pane to detach.
+const CLOSE_TAB_DETACH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Detaches panes explicitly and waits, so the daemon no longer counts this
+/// Window as attached when it decides whether their Dojo is unused.
+async fn detach_pane_tasks(pane_tasks: HashMap<SplintId, PaneTask>) {
+    for task in pane_tasks.values() {
+        task.detach_on_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    cancel_pane_tasks(pane_tasks).await;
+}
+
+/// Whether closing this tab should ask the daemon to end its Dojo. Only a Dojo
+/// with a single pane can be unused; the daemon decides the rest.
+fn may_close_unused(config: &AppConfig, pane_tasks: &HashMap<SplintId, PaneTask>) -> bool {
+    config.multiplexer_lifetime.close_unused && pane_tasks.len() <= 1
+}
+
+/// Asks the daemon to end a Dojo that was never used. A used Dojo, an error,
+/// or a daemon without the request all leave the Dojo running, which is the
+/// detach a closed tab always performed.
+///
+/// Returns whether the daemon removed the Dojo's Lair along with it.
+async fn close_if_unused(connection: &mut Connection, dojo_id: DojoId) -> bool {
+    let response = connection
+        .request(Request::CloseUnusedDojo { dojo_id })
+        .await;
+    unused_dojo_closed(dojo_id, &response) == Some(true)
+}
+
+/// Whether the daemon confirmed closing this Dojo, and if so whether its Lair
+/// went with it.
+fn unused_dojo_closed(dojo_id: DojoId, response: &Result<Response>) -> Option<bool> {
+    match response {
+        Ok(Response::UnusedDojoClose {
+            dojo_id: closed,
+            outcome: UnusedDojoCloseOutcome::Closed { lair_removed, .. },
+        }) if *closed == dojo_id => Some(*lair_removed),
+        _ => None,
+    }
+}
+
+/// Releases a tab the Window just removed: detach, or end the Dojo when the
+/// configuration allows it and the daemon finds it unused.
+///
+/// Returns whether the daemon removed the tab's Lair too.
+async fn release_closed_tab(
+    connection: &mut Connection,
+    config: &AppConfig,
+    dojo_id: DojoId,
+    pane_tasks: HashMap<SplintId, PaneTask>,
+) -> bool {
+    if !may_close_unused(config, &pane_tasks) {
+        retire_pane_tasks(pane_tasks);
+        return false;
+    }
+    // A pane that cannot finish detaching leaves the Dojo attached, so the
+    // tab just detaches; its task finishes in the background.
+    tokio::time::timeout(CLOSE_TAB_DETACH_DEADLINE, detach_pane_tasks(pane_tasks))
+        .await
+        .is_ok()
+        && close_if_unused(connection, dojo_id).await
+}
+
+/// Releases a tab this Window closed. A Lair the daemon removed with its
+/// Dojo no longer needs the transient owner connection this Window held for
+/// it; keeping it would leave an idle daemon connection open for the rest of
+/// the Window's life.
+async fn release_managed_tab(
+    connection: &mut Connection,
+    config: &AppConfig,
+    state: &mut TopologyManagerState,
+    removed: DojoTab<ManagedDojo>,
+) {
+    let lair_id = removed.lair_id;
+    if release_closed_tab(
+        connection,
+        config,
+        removed.dojo_id,
+        removed.value.pane_tasks,
+    )
+    .await
+    {
+        state.transient_owners.remove(&lair_id);
+    }
+}
+
+/// On Window close, ends every remaining tab's Dojo that is unused, within a
+/// bounded time so a stalled daemon cannot hold the Window open.
+async fn close_unused_tabs_on_exit(
+    connection: &mut Connection,
+    config: &AppConfig,
+    state: &mut TopologyManagerState,
+) {
+    let mut candidates = Vec::new();
+    let mut pane_tasks = HashMap::new();
+    for tab in state.tabs.iter_mut() {
+        if may_close_unused(config, &tab.value.pane_tasks) {
+            candidates.push(tab.dojo_id);
+            pane_tasks.extend(tab.value.pane_tasks.drain());
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    let _ = tokio::time::timeout(CLOSE_UNUSED_ON_EXIT_DEADLINE, async {
+        detach_pane_tasks(pane_tasks).await;
+        for dojo_id in candidates {
+            close_if_unused(connection, dojo_id).await;
+        }
+    })
+    .await;
 }
 
 struct PreparedManagedDojo {
@@ -2899,7 +3019,7 @@ async fn handle_session_manager_command(
         WindowTopologyCommand::CloseTab { dojo_id } => {
             if let Some(removed) = state.tabs.close(dojo_id) {
                 let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                retire_pane_tasks(removed.value.pane_tasks);
+                release_managed_tab(connection, config, state, removed).await;
                 if !acknowledged {
                     return TopologyManagerCommandOutcome::Stop;
                 }
@@ -2924,7 +3044,7 @@ async fn handle_session_manager_command(
             for dojo_id in dojo_ids {
                 if let Some(removed) = state.tabs.close(dojo_id) {
                     let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                    retire_pane_tasks(removed.value.pane_tasks);
+                    release_managed_tab(connection, config, state, removed).await;
                     if !acknowledged {
                         return TopologyManagerCommandOutcome::Stop;
                     }
@@ -3078,6 +3198,16 @@ enum TopologyManagerWake {
     Shutdown,
 }
 
+/// Drains commands left after the Window dropped its sender, reporting
+/// whether a close notice was among them. Nothing else can apply now.
+fn close_notice_queued(commands: &mut mpsc::Receiver<WindowTopologyCommand>) -> bool {
+    let mut queued = false;
+    while let Ok(command) = commands.try_recv() {
+        queued |= matches!(command, WindowTopologyCommand::CloseWindow);
+    }
+    queued
+}
+
 async fn next_topology_manager_wake(
     commands: &mut mpsc::Receiver<WindowTopologyCommand>,
     poll: &mut tokio::time::Interval,
@@ -3152,12 +3282,21 @@ pub(in crate::app) async fn run_topology_manager(
         )),
         transient_owners,
     };
+    let mut window_closing = false;
     loop {
         let command =
             match next_topology_manager_wake(&mut commands, &mut poll, &mut poll_priority).await {
+                TopologyManagerWake::Command(WindowTopologyCommand::CloseWindow) => {
+                    window_closing = true;
+                    break;
+                }
                 TopologyManagerWake::Command(command) => Some(command),
                 TopologyManagerWake::Poll => None,
-                TopologyManagerWake::Shutdown => break,
+                TopologyManagerWake::Shutdown => {
+                    // The Window exits right after sending its close notice.
+                    window_closing |= close_notice_queued(&mut commands);
+                    break;
+                }
             };
         let command = if let Some(command) = command {
             match handle_session_manager_command(
@@ -3299,6 +3438,9 @@ pub(in crate::app) async fn run_topology_manager(
                 eprintln!("splinterm topology edit rejected");
             }
         }
+    }
+    if window_closing {
+        close_unused_tabs_on_exit(&mut connection, &config, &mut state).await;
     }
     let mut remaining_tasks = Vec::new();
     for tab in state.tabs.iter_mut() {
@@ -3892,6 +4034,7 @@ mod tests {
                         task_completed.fetch_add(1, Ordering::SeqCst);
                         Ok(())
                     }),
+                    detach_on_cancel: Arc::default(),
                 },
             );
         }
@@ -3911,7 +4054,14 @@ mod tests {
             Ok(())
         });
         let abort = task.abort_handle();
-        let tasks = HashMap::from([(SplintId::new(), PaneTask { cancellation, task })]);
+        let tasks = HashMap::from([(
+            SplintId::new(),
+            PaneTask {
+                cancellation,
+                task,
+                detach_on_cancel: Arc::default(),
+            },
+        )]);
 
         super::retire_pane_tasks(tasks);
         tokio::task::yield_now().await;
@@ -4281,6 +4431,10 @@ mod tests {
 #[cfg(test)]
 #[path = "explorer_context_tests.rs"]
 mod explorer_context_tests;
+
+#[cfg(test)]
+#[path = "close_unused_tests.rs"]
+mod close_unused_tests;
 
 #[cfg(test)]
 #[path = "creation_directory_tests.rs"]

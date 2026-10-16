@@ -126,6 +126,8 @@ pub struct MultiplexerLifetimeConfig {
     pub persistent_by_default: bool,
     /// Whether creating or explicitly naming a Dojo promotes its transient Lair.
     pub persist_on_tab_organization: bool,
+    /// Whether Close Tab and Window close terminate Dojos that were never used.
+    pub close_unused: bool,
 }
 
 impl Default for MultiplexerLifetimeConfig {
@@ -133,6 +135,7 @@ impl Default for MultiplexerLifetimeConfig {
         Self {
             persistent_by_default: true,
             persist_on_tab_organization: true,
+            close_unused: false,
         }
     }
 }
@@ -501,6 +504,10 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 config.new_splint_directory = parse_launch_directory(value, index)?;
                 false
             }
+            "multiplexer.close-unused" => {
+                config.multiplexer_lifetime.close_unused = parse_bool(value, index)?;
+                false
+            }
             "cursor.style" => {
                 config.cursor_style = match value.to_ascii_lowercase().as_str() {
                     "block" => CursorStyle::Block,
@@ -663,6 +670,8 @@ pub struct ThemePalette {
     pub active_tab_background: Option<String>,
     #[serde(default)]
     pub active_tab_foreground: Option<String>,
+    #[serde(default)]
+    pub inactive_tab_foreground: Option<String>,
     pub url: String,
     pub ui_accent: String,
     #[serde(default = "opaque_alpha")]
@@ -685,6 +694,7 @@ pub struct ResolvedTheme {
     pub selection_foreground: u32,
     pub active_tab_background: u32,
     pub active_tab_foreground: u32,
+    pub inactive_tab_foreground: u32,
     pub url: u32,
     pub ui_accent: u32,
     pub pane_border: u32,
@@ -704,6 +714,8 @@ impl Default for ResolvedTheme {
             selection_foreground: 0xebebeb,
             active_tab_background: 0x928374,
             active_tab_foreground: 0x0e1216,
+            // ANSI 8 already meets the inactive-tab floor on the default background.
+            inactive_tab_foreground: 0x928374,
             url: 0x78beff,
             ui_accent: 0x78d2ff,
             pane_border: 0x7c7e80,
@@ -757,6 +769,38 @@ fn active_tab_foreground_fallback(background: u32, foreground: u32, active_tab: 
     }
 }
 
+/// WCAG AA contrast for normal-size text, against the opaque tab-strip background.
+const INACTIVE_TAB_MIN_CONTRAST: f64 = 4.5;
+
+/// Mixes `second` into `first` in quarters: 0 keeps `first`, 4 gives `second`.
+fn mix_rgb_quarters(first: u32, second: u32, second_quarters: u32) -> u32 {
+    let channel = |shift: u32| {
+        let first = first >> shift & 0xff;
+        let second = second >> shift & 0xff;
+        (first * (4 - second_quarters) + second * second_quarters + 2) / 4
+    };
+    channel(16) << 16 | channel(8) << 8 | channel(0)
+}
+
+/// Picks muted inactive-tab label text. Tries the theme's muted color, then
+/// mixes of it with 25, 50, and 75 % foreground, and takes the first that is
+/// readable on the strip background and not louder than the foreground itself.
+/// Otherwise, including when the foreground is below the floor, it keeps the
+/// plain foreground.
+fn inactive_tab_foreground_fallback(background: u32, foreground: u32, muted: u32) -> u32 {
+    let foreground_contrast = contrast_ratio(foreground, background);
+    if foreground_contrast < INACTIVE_TAB_MIN_CONTRAST {
+        return foreground;
+    }
+    (0..4)
+        .map(|quarters| mix_rgb_quarters(muted, foreground, quarters))
+        .find(|candidate| {
+            let contrast = contrast_ratio(*candidate, background);
+            (INACTIVE_TAB_MIN_CONTRAST..=foreground_contrast).contains(&contrast)
+        })
+        .unwrap_or(foreground)
+}
+
 impl ResolvedTheme {
     #[must_use]
     pub fn with_color_overrides(mut self, alpha: Option<u16>, blur: Option<bool>) -> Self {
@@ -800,6 +844,12 @@ impl ThemePalette {
             .unwrap_or_else(|| {
                 active_tab_foreground_fallback(background, foreground, active_tab_background)
             });
+        let inactive_tab_foreground = self
+            .inactive_tab_foreground
+            .as_deref()
+            .map(parse_json_color)
+            .transpose()?
+            .unwrap_or_else(|| inactive_tab_foreground_fallback(background, foreground, ansi[8]));
         let ui_accent = parse_color(&self.ui_accent)?;
         Ok(ResolvedTheme {
             background,
@@ -814,6 +864,7 @@ impl ThemePalette {
                 .unwrap_or(foreground),
             active_tab_background,
             active_tab_foreground,
+            inactive_tab_foreground,
             url: parse_color(&self.url)?,
             ui_accent,
             pane_border: self
@@ -958,6 +1009,13 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         .unwrap_or(ansi[8]);
     let active_tab_foreground =
         active_tab_foreground_fallback(background, foreground, active_tab_background);
+    let muted = colors
+        .get("muted")
+        .map(|value| parse_color(value))
+        .transpose()
+        .context("active Omarchy colors.toml has invalid muted")?
+        .unwrap_or(ansi[8]);
+    let inactive_tab_foreground = inactive_tab_foreground_fallback(background, foreground, muted);
     let ui_accent = ["accent", "cursor", "color4", "blue"]
         .iter()
         .find_map(|key| colors.get(*key))
@@ -989,6 +1047,7 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         selection_foreground,
         active_tab_background,
         active_tab_foreground,
+        inactive_tab_foreground,
         url: ansi[4],
         ui_accent,
         pane_border: ansi[8],
@@ -1284,6 +1343,25 @@ mod tests {
         assert!(!defaults.allow_unrestricted_commands);
         assert!(defaults.multiplexer_lifetime.persistent_by_default);
         assert!(defaults.multiplexer_lifetime.persist_on_tab_organization);
+        assert!(!defaults.multiplexer_lifetime.close_unused);
+    }
+
+    #[test]
+    fn close_unused_is_opt_in_and_strict() {
+        assert!(!parse("").unwrap().config.multiplexer_lifetime.close_unused);
+        for enabled in ["yes", "true", "on", "1"] {
+            let loaded = parse(&format!("[multiplexer]\nclose-unused={enabled}\n")).unwrap();
+            assert!(loaded.config.multiplexer_lifetime.close_unused, "{enabled}");
+            assert!(loaded.diagnostics.is_empty());
+        }
+        for disabled in ["no", "false", "off", "0"] {
+            let loaded = parse(&format!("[multiplexer]\nclose-unused={disabled}\n")).unwrap();
+            assert!(
+                !loaded.config.multiplexer_lifetime.close_unused,
+                "{disabled}"
+            );
+        }
+        assert!(parse("[multiplexer]\nclose-unused=sometimes\n").is_err());
     }
 
     #[test]
@@ -1955,5 +2033,124 @@ mod tests {
                 "accepted malformed JSON active_tab_foreground {invalid:?}"
             );
         }
+    }
+
+    fn inactive_contrast(theme: &ResolvedTheme) -> f64 {
+        contrast_ratio(theme.inactive_tab_foreground, theme.background)
+    }
+
+    #[test]
+    fn default_inactive_tab_foreground_is_its_resolved_ansi_8() {
+        let theme = ResolvedTheme::default();
+        assert_eq!(theme.inactive_tab_foreground, 0x92_83_74);
+        assert_eq!(
+            inactive_tab_foreground_fallback(theme.background, theme.foreground, theme.ansi[8]),
+            theme.inactive_tab_foreground
+        );
+        assert!((inactive_contrast(&theme) - 5.13).abs() < 0.01);
+    }
+
+    #[test]
+    fn inactive_tab_foreground_keeps_a_readable_muted_color_or_mixes_toward_foreground() {
+        // A muted color that meets the floor is used as is.
+        let readable = inactive_tab_foreground_fallback(0x0e1216, 0xeb_eb_eb, 0x92_83_74);
+        assert_eq!(readable, 0x92_83_74);
+
+        // A faint muted color steps to the first fixed mix that meets the floor.
+        let (background, foreground, muted) = (0x1e_1e_2e, 0xcd_d6_f4, 0x58_5b_70);
+        assert!(contrast_ratio(muted, background) < INACTIVE_TAB_MIN_CONTRAST);
+        let mixed = inactive_tab_foreground_fallback(background, foreground, muted);
+        let first_passing = (1..4)
+            .map(|quarters| mix_rgb_quarters(muted, foreground, quarters))
+            .find(|candidate| contrast_ratio(*candidate, background) >= INACTIVE_TAB_MIN_CONTRAST)
+            .unwrap();
+        assert_eq!(mixed, first_passing);
+        assert_ne!(mixed, foreground);
+        let contrast = contrast_ratio(mixed, background);
+        assert!(contrast >= INACTIVE_TAB_MIN_CONTRAST);
+        assert!(contrast < contrast_ratio(foreground, background));
+
+        // A light theme (Omarchy Friendly Wave) mixes its faint muted color
+        // darker until it is readable, without exceeding the foreground.
+        let (background, foreground, muted) = (0xff_fc_f0, 0x10_0f_0f, 0xb7_b5_ac);
+        let light = inactive_tab_foreground_fallback(background, foreground, muted);
+        assert_eq!(light, 0x64_62_5e);
+        let contrast = contrast_ratio(light, background);
+        assert!(contrast >= INACTIVE_TAB_MIN_CONTRAST);
+        assert!(contrast < contrast_ratio(foreground, background));
+        assert!((contrast - 5.92).abs() < 0.01);
+
+        // A "muted" color louder than the foreground is never used or mixed in.
+        assert_eq!(
+            inactive_tab_foreground_fallback(0xff_ff_ff, 0x33_33_33, 0x00_00_00),
+            0x33_33_33
+        );
+        // A foreground below the floor stays the foreground.
+        assert_eq!(
+            inactive_tab_foreground_fallback(0x00_00_00, 0x40_40_40, 0x30_30_30),
+            0x40_40_40
+        );
+        // Mixes are exact quarters with rounding.
+        assert_eq!(mix_rgb_quarters(0x00_00_00, 0xff_ff_ff, 0), 0x00_00_00);
+        assert_eq!(mix_rgb_quarters(0x00_00_00, 0xff_ff_ff, 2), 0x80_80_80);
+        assert_eq!(mix_rgb_quarters(0x00_00_00, 0xff_ff_ff, 4), 0xff_ff_ff);
+    }
+
+    #[test]
+    fn json_inactive_tab_foreground_is_explicit_or_derived_from_ansi_8() {
+        let json = r##"{"background":"#0e1216","foreground":"#ebebeb","cursor":"#ebebeb","selection":"#354a60","url":"#0000ff","ui_accent":"#00ffff","ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007","#928374","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]}"##;
+        let derived = serde_json::from_str::<ThemePalette>(json)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(derived.inactive_tab_foreground, 0x92_83_74);
+
+        // An explicit role is used verbatim, even below the floor.
+        let explicit = json.replace(
+            r#""url":"#,
+            r##""inactive_tab_foreground":"#1a1e22","url":"##,
+        );
+        let explicit = serde_json::from_str::<ThemePalette>(&explicit)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(explicit.inactive_tab_foreground, 0x1a_1e_22);
+        assert!(inactive_contrast(&explicit) < INACTIVE_TAB_MIN_CONTRAST);
+
+        for invalid in ["invalid", "1a1e22", "0x1a1e22"] {
+            let invalid_json = json.replace(
+                r#""url":"#,
+                &format!(r#""inactive_tab_foreground":"{invalid}","url":"#),
+            );
+            assert!(
+                serde_json::from_str::<ThemePalette>(&invalid_json)
+                    .unwrap()
+                    .resolve()
+                    .is_err(),
+                "accepted malformed JSON inactive_tab_foreground {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_inactive_tab_foreground_prefers_omarchy_muted_then_foot_bright0() {
+        let foot = complete_foot_palette("0e1216", "ebebeb", "354a60", "ebebeb")
+            .replace("bright0=000008", "bright0=7c7e80");
+        let muted = resolve_omarchy_theme("muted=\"#928374\"\n", &foot).unwrap();
+        assert_eq!(muted.inactive_tab_foreground, 0x92_83_74);
+
+        let bright0 = resolve_omarchy_theme("accent=\"#00aaff\"\n", &foot).unwrap();
+        assert_eq!(bright0.ansi[8], 0x7c_7e_80);
+        assert_eq!(bright0.inactive_tab_foreground, 0x7c_7e_80);
+        assert!(inactive_contrast(&bright0) >= INACTIVE_TAB_MIN_CONTRAST);
+
+        // The near-black helper bright0 fails the floor and is mixed toward the
+        // foreground rather than used.
+        let faint = complete_foot_palette("0e1216", "ebebeb", "354a60", "ebebeb");
+        let faint = resolve_omarchy_theme("", &faint).unwrap();
+        assert_ne!(faint.inactive_tab_foreground, faint.ansi[8]);
+        assert!(inactive_contrast(&faint) >= INACTIVE_TAB_MIN_CONTRAST);
+
+        assert!(resolve_omarchy_theme("muted=\"nope\"\n", &foot).is_err());
     }
 }

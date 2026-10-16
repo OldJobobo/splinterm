@@ -1,5 +1,9 @@
 //! Daemon-to-frontend pane protocol bridge.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -372,11 +376,27 @@ pub(in crate::app) async fn wait_for_resize_deadline(deadline: Option<tokio::tim
     }
 }
 
+/// The bytes of a focus report this Window generated under DECSET 1004.
+const fn focus_report_bytes(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
+/// Terminal input to send for a command, and whether it is a focus report
+/// this Window generated rather than input from the user.
+fn terminal_input(command: WindowCommand) -> Option<(Vec<u8>, bool)> {
+    match command {
+        WindowCommand::Input(bytes) => Some((bytes, false)),
+        WindowCommand::FocusReport(focused) => Some((focus_report_bytes(focused).to_vec(), true)),
+        _ => None,
+    }
+}
+
 fn input_requests(
     controller_id: u64,
     splint_id: SplintId,
     incarnation: u64,
     bytes: &[u8],
+    focus_report: bool,
     maximum_input_bytes: usize,
 ) -> Result<Vec<Request>> {
     if maximum_input_bytes == 0 {
@@ -389,8 +409,35 @@ fn input_requests(
             splint_id,
             incarnation,
             bytes: chunk.to_vec(),
+            focus_report,
         })
         .collect())
+}
+
+/// Appends the Input commands queued directly behind `first`, so they cost one
+/// daemon round trip instead of one each.
+///
+/// Coalescing stops at the first queued command that is not Input, or at an
+/// Input that would push the total past `limit`, the daemon's per-request
+/// input bound. That command is returned unchanged for the caller to handle
+/// next, so byte order and order relative to every other command are kept.
+/// `first` alone may still exceed `limit`; `input_requests` splits it.
+fn coalesce_input(
+    first: Vec<u8>,
+    limit: usize,
+    mut next_queued: impl FnMut() -> Option<WindowCommand>,
+) -> (Vec<u8>, Option<WindowCommand>) {
+    let mut bytes = first;
+    while bytes.len() < limit {
+        match next_queued() {
+            None => break,
+            Some(WindowCommand::Input(more)) if more.len() <= limit - bytes.len() => {
+                bytes.extend(more);
+            }
+            Some(barrier) => return (bytes, Some(barrier)),
+        }
+    }
+    (bytes, None)
 }
 
 fn recoverable_input_error(error: &anyhow::Error) -> bool {
@@ -637,6 +684,7 @@ pub(in crate::app) async fn run_controller(
     let mut pending_resize = None;
     let mut resize_deadline = None;
     let mut deferred_command = None;
+    let mut coalescing_barrier = None;
     let resize_delay = Duration::from_millis(resize_delay_ms);
     let Response::ControlSubscribed {
         subscription_id: control_subscription,
@@ -681,6 +729,14 @@ pub(in crate::app) async fn run_controller(
                             ).await?;
                         }
                         continue;
+                    }
+                    // A command taken from the queue while coalescing input is
+                    // handled as if `recv` had just returned it, but only after
+                    // cancellation and control changes, so a chain of oversized
+                    // inputs cannot outrun a lost controller or a closing pane.
+                    // The async block takes the barrier only when this branch wins.
+                    command = async { coalescing_barrier.take() }, if coalescing_barrier.is_some() => {
+                        (command, true)
                     }
                     command = commands.recv() => (command, true),
                     () = wait_for_resize_deadline(resize_deadline) => {
@@ -729,7 +785,25 @@ pub(in crate::app) async fn run_controller(
                 command
             };
             let request = match command {
-                WindowCommand::Input(bytes) => {
+                WindowCommand::Input(_) | WindowCommand::FocusReport(_) => {
+                    let Some((bytes, focus_report)) = terminal_input(command) else {
+                        unreachable!("matched terminal input");
+                    };
+                    // One daemon round trip per queued keystroke makes remote
+                    // input lag behind typing; send what is already queued at
+                    // once. A generated focus report keeps its own flagged
+                    // request, and the coalescer stops at one as a barrier.
+                    let bytes = if focus_report {
+                        bytes
+                    } else {
+                        let (bytes, barrier) = coalesce_input(
+                            bytes,
+                            control.limits().maximum_input_bytes,
+                            || commands.try_recv().ok(),
+                        );
+                        coalescing_barrier = barrier;
+                        bytes
+                    };
                     let Some(controller_id) = ensure_pane_control(
                         &mut control,
                         &mut active_controller,
@@ -749,6 +823,7 @@ pub(in crate::app) async fn run_controller(
                         splint_id,
                         incarnation,
                         &bytes,
+                        focus_report,
                         maximum_input_bytes,
                     )? {
                         match control.request(request).await {
@@ -988,9 +1063,29 @@ fn forced_control_request(
     })
 }
 
+/// Bounds the explicit detach a closing tab waits for.
+const PANE_DETACH_DEADLINE: Duration = Duration::from_secs(2);
+
 pub(in crate::app) struct PaneTask {
     pub(in crate::app) cancellation: tokio_util::sync::CancellationToken,
     pub(in crate::app) task: tokio::task::JoinHandle<Result<()>>,
+    /// Set before cancelling to detach explicitly, so the daemon has released
+    /// the attachment by the time the task ends.
+    pub(in crate::app) detach_on_cancel: Arc<AtomicBool>,
+}
+
+impl PaneTask {
+    fn new(
+        cancellation: tokio_util::sync::CancellationToken,
+        task: tokio::task::JoinHandle<Result<()>>,
+        detach_on_cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            cancellation,
+            task,
+            detach_on_cancel,
+        }
+    }
 }
 
 pub(in crate::app) struct PreparedPane {
@@ -1133,6 +1228,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         cancellation.clone(),
     ));
     let task_updates = updates.clone();
+    let detach_on_cancel = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(run_pane_subscription(
         connection,
         attachment,
@@ -1144,6 +1240,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         factory.capabilities().image_transport,
         image_cache.clone(),
         cancellation.clone(),
+        Arc::clone(&detach_on_cancel),
     ));
     Ok(PreparedPane {
         options: WindowPaneOptions {
@@ -1155,7 +1252,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
             controlled: controller_id.is_some(),
             image_sources,
         },
-        task: PaneTask { cancellation, task },
+        task: PaneTask::new(cancellation, task, detach_on_cancel),
     })
 }
 
@@ -1272,6 +1369,7 @@ pub(in crate::app) async fn run_pane_subscription(
     image_transport: ImageTransport,
     image_cache: SharedImageContentCache,
     cancellation: tokio_util::sync::CancellationToken,
+    detach_on_cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut last_revision = attachment.snapshot.revision;
     let mut last_sequence = 0_u64;
@@ -1279,6 +1377,16 @@ pub(in crate::app) async fn run_pane_subscription(
     loop {
         tokio::select! {
             () = cancellation.cancelled() => {
+                if detach_on_cancel.load(Ordering::Acquire) {
+                    let _ = connection
+                        .request_with_deadline(
+                            Request::Detach {
+                                subscription_id: attachment.subscription_id,
+                            },
+                            PANE_DETACH_DEADLINE,
+                        )
+                        .await;
+                }
                 return finish_pane_controller(&mut controller, controller_completed).await;
             }
             result = &mut controller, if !controller_completed => {
@@ -1471,7 +1579,7 @@ mod tests {
     fn terminal_input_is_chunked_to_the_negotiated_server_limit() {
         let splint_id = SplintId::new();
         let bytes = vec![7; 17];
-        let requests = input_requests(3, splint_id, 9, &bytes, 8).unwrap();
+        let requests = input_requests(3, splint_id, 9, &bytes, false, 8).unwrap();
 
         assert_eq!(requests.len(), 3);
         let chunks = requests
@@ -1482,10 +1590,12 @@ mod tests {
                     splint_id: request_splint_id,
                     incarnation,
                     bytes,
+                    focus_report,
                 } => {
                     assert_eq!(controller_id, 3);
                     assert_eq!(request_splint_id, splint_id);
                     assert_eq!(incarnation, 9);
+                    assert!(!focus_report);
                     bytes
                 }
                 _ => panic!("expected an input request"),
@@ -1493,7 +1603,137 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [8, 8, 1]);
         assert_eq!(chunks.concat(), bytes);
-        assert!(input_requests(3, splint_id, 9, &bytes, 0).is_err());
+        assert!(input_requests(3, splint_id, 9, &bytes, false, 0).is_err());
+    }
+
+    #[test]
+    fn only_generated_focus_reports_are_flagged() {
+        assert_eq!(
+            terminal_input(WindowCommand::FocusReport(true)),
+            Some((b"\x1b[I".to_vec(), true))
+        );
+        assert_eq!(
+            terminal_input(WindowCommand::FocusReport(false)),
+            Some((b"\x1b[O".to_vec(), true))
+        );
+        assert_eq!(
+            terminal_input(WindowCommand::Input(b"\x1b[I".to_vec())),
+            Some((b"\x1b[I".to_vec(), false))
+        );
+        assert_eq!(terminal_input(WindowCommand::Resynchronize), None);
+    }
+
+    fn coalesce_from(
+        first: &[u8],
+        limit: usize,
+        queued: Vec<WindowCommand>,
+    ) -> (Vec<u8>, Option<WindowCommand>, Vec<WindowCommand>) {
+        let mut queue = std::collections::VecDeque::from(queued);
+        let (bytes, barrier) = coalesce_input(first.to_vec(), limit, || queue.pop_front());
+        (bytes, barrier, queue.into())
+    }
+
+    #[test]
+    fn single_input_passes_through_unchanged() {
+        assert_eq!(
+            coalesce_from(b"x", 8, Vec::new()),
+            (b"x".to_vec(), None, Vec::new())
+        );
+    }
+
+    #[test]
+    fn consecutive_input_is_coalesced_in_order_and_stops_at_a_barrier() {
+        let resize = WindowCommand::Resize {
+            columns: 80,
+            rows: 24,
+            pixel_width: 800,
+            pixel_height: 480,
+        };
+        let (bytes, barrier, rest) = coalesce_from(
+            b"a",
+            64,
+            vec![
+                WindowCommand::Input(b"bc".to_vec()),
+                WindowCommand::Input(Vec::new()),
+                WindowCommand::Input(b"d".to_vec()),
+                resize.clone(),
+                WindowCommand::Input(b"e".to_vec()),
+            ],
+        );
+        assert_eq!(bytes, b"abcd");
+        assert_eq!(barrier, Some(resize));
+        assert_eq!(rest, vec![WindowCommand::Input(b"e".to_vec())]);
+
+        for barrier_command in [
+            WindowCommand::Resynchronize,
+            WindowCommand::ReleaseControl,
+            WindowCommand::RequestControlTransfer,
+        ] {
+            let (bytes, barrier, rest) = coalesce_from(
+                b"a",
+                64,
+                vec![barrier_command.clone(), WindowCommand::Input(b"b".to_vec())],
+            );
+            assert_eq!(bytes, b"a");
+            assert_eq!(barrier, Some(barrier_command));
+            assert_eq!(rest, vec![WindowCommand::Input(b"b".to_vec())]);
+        }
+    }
+
+    #[test]
+    fn coalescing_fills_exactly_to_the_input_bound_and_never_past_it() {
+        // Exactly reaching the bound is allowed and stops further reads.
+        let (bytes, barrier, rest) = coalesce_from(
+            b"abc",
+            8,
+            vec![
+                WindowCommand::Input(b"defgh".to_vec()),
+                WindowCommand::Input(b"i".to_vec()),
+            ],
+        );
+        assert_eq!(bytes, b"abcdefgh");
+        assert_eq!(barrier, None);
+        assert_eq!(rest, vec![WindowCommand::Input(b"i".to_vec())]);
+
+        // One byte over the bound is handed back intact for its own request.
+        let (bytes, barrier, rest) = coalesce_from(
+            b"abc",
+            8,
+            vec![
+                WindowCommand::Input(b"defghi".to_vec()),
+                WindowCommand::Input(b"j".to_vec()),
+            ],
+        );
+        assert_eq!(bytes, b"abc");
+        assert_eq!(barrier, Some(WindowCommand::Input(b"defghi".to_vec())));
+        assert_eq!(rest, vec![WindowCommand::Input(b"j".to_vec())]);
+
+        // An oversized first command is not merged; input_requests splits it.
+        let (bytes, barrier, rest) =
+            coalesce_from(&[7; 9], 8, vec![WindowCommand::Input(b"z".to_vec())]);
+        assert_eq!(bytes, vec![7; 9]);
+        assert_eq!(barrier, None);
+        assert_eq!(rest, vec![WindowCommand::Input(b"z".to_vec())]);
+        let requests = input_requests(1, SplintId::new(), 1, &bytes, false, 8).unwrap();
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn empty_input_coalesces_without_sending_bytes() {
+        let (bytes, barrier, rest) = coalesce_from(b"", 8, vec![WindowCommand::Input(Vec::new())]);
+        assert!(bytes.is_empty());
+        assert_eq!(barrier, None);
+        assert!(rest.is_empty());
+        assert!(
+            input_requests(1, SplintId::new(), 1, &bytes, false, 8)
+                .unwrap()
+                .is_empty()
+        );
+        // A zero bound reads nothing; input_requests still rejects the bound.
+        let (bytes, barrier, rest) =
+            coalesce_from(b"a", 0, vec![WindowCommand::Input(b"b".to_vec())]);
+        assert_eq!((bytes, barrier), (b"a".to_vec(), None));
+        assert_eq!(rest.len(), 1);
     }
 
     #[test]
