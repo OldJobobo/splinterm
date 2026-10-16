@@ -458,6 +458,11 @@ splinterm --remote PROFILE dojos
 splinterm --remote PROFILE reopen
 ```
 
+Without a terminal, use `splinterm remotes`, the **Remote Dojos** desktop
+action, **Open Remote…** in the command palette, or the **Remote Dojos…** row in
+Recent Dojos; each opens a profile chooser and starts the chosen remote in its
+own Window.
+
 OpenSSH authenticates the human account. The graphical relay does not create a
 public daemon listener, and machine automation remains separately policy-scoped.
 Remote images and trusted-only forced takeover are intentionally unavailable.

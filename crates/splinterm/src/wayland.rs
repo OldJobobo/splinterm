@@ -735,8 +735,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let session_picker = options.session_picker;
     let title = if trusted_consent.is_some() {
         "Splinterm — Trusted Access Request".to_owned()
-    } else if session_picker.is_some() {
-        "Splinterm — Recent Dojos".to_owned()
+    } else if let Some(picker) = &session_picker {
+        picker.standalone_title().to_owned()
     } else {
         window_title(
             options.title.as_deref().or_else(|| {
@@ -5820,6 +5820,9 @@ impl App {
                 ));
                 Ok(())
             }
+            BuiltInCommandDispatch::OpenRemoteChooser => {
+                crate::remote_launch::open_remote_chooser()
+            }
             BuiltInCommandDispatch::RecentSessions => (|| -> Result<()> {
                 self.show_embedded_session_picker(
                     session_picker_status_catalog("Loading navigation…"),
@@ -10769,7 +10772,9 @@ impl App {
                 self.presentation.renderer_generation,
                 layout,
                 session_picker_palette(self.presentation.theme),
-                session_picker_purpose(self.modal.selector_kind),
+                picker
+                    .purpose()
+                    .unwrap_or(session_picker_purpose(self.modal.selector_kind)),
                 &items,
                 picker.new_enabled(),
                 picker.new_blocker(),

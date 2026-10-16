@@ -186,6 +186,24 @@ channel, sends `Ping` and `ListLairs`, and exits without mapping a Window or
 mutating topology. A successful check proves SSH, relay, daemon, and human-role
 reachability.
 
+### Open a remote without a terminal
+
+`splinterm remotes`, the **Remote Dojos** desktop action, the command palette's
+**Open Remote…**, and the **Remote Dojos…** row of the local Recent Dojos
+picker all open one chooser listing the profiles in `remotes.toml` by name and
+OpenSSH destination. Choosing a profile starts a separate
+`splinterm --remote PROFILE` process for the new Window, so every Window stays
+bound to one endpoint. That process inherits no stdin, stdout, or stderr and
+starts a new session without a controlling terminal: OpenSSH cannot prompt on
+the terminal that started Splinterm, so use an agent key or your own
+`SSH_ASKPASS`. The Recent Dojos row appears only when profiles exist or
+`remotes.toml` is invalid, and a picker already bound to a remote omits it. An
+absent, empty, or invalid `remotes.toml` leaves the chooser empty with a
+one-line explanation; `splinterm remote list` reports the parse error.
+
+There is no connection-status Window yet. If the connection fails, no Window
+appears; `splinterm remote check PROFILE` shows the categorized failure.
+
 ## Remote profiles
 
 Profiles live at `${XDG_CONFIG_HOME:-~/.config}/splinterm/remotes.toml`.
