@@ -32,6 +32,25 @@ class InstallerSafetyTest(unittest.TestCase):
         self.assertIsNotNone(validator_version)
         self.assertEqual(validator_version.group(1), rust_version.group(1))
 
+    def test_fake_ssh_fixture_hello_matches_rust_protocol_authority(self) -> None:
+        # The remote-session tests' fake daemon must greet with the current
+        # private protocol, or every remote test fails the handshake.
+        protocol = (ROOT / "crates/splinterm-protocol/src/lib.rs").read_text(
+            encoding="utf-8"
+        )
+        fixture = (ROOT / "crates/splinterm/tests/fixtures/fake_ssh.py").read_text(
+            encoding="utf-8"
+        )
+        rust_version = re.search(
+            r"^pub const PROTOCOL_VERSION: u16 = ([0-9]+);$", protocol, re.MULTILINE
+        )
+        self.assertIsNotNone(rust_version)
+        hello_versions = re.findall(
+            r"'type': 'hello',\s*'version': ([0-9]+),", fixture
+        )
+        self.assertTrue(hello_versions)
+        self.assertEqual(set(hello_versions), {rust_version.group(1)})
+
     def test_release_bytes_are_stripped_once_before_provenance_hashing(self) -> None:
         cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         self.assertIn('strip = "symbols"', cargo)
