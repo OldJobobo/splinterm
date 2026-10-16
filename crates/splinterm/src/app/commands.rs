@@ -184,6 +184,12 @@ pub(in crate::app) enum Command {
         /// Client-local Wayland identity supplied only by the XDG adapter.
         #[arg(long, value_parser = parse_xdg_app_id)]
         app_id: Option<String>,
+        /// Open the Recent Dojos picker instead of creating a terminal.
+        #[arg(long, conflicts_with_all = ["new", "command"])]
+        picker: bool,
+        /// Create a fresh terminal even when `main.startup=dojo-picker`.
+        #[arg(long)]
+        new: bool,
         /// Executable and arguments passed directly, never through a shell.
         #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -201,6 +207,9 @@ pub(in crate::app) enum Command {
         /// Compatibility flag; fresh creation is already the default.
         #[arg(long, conflicts_with = "splint_id")]
         new: bool,
+        /// Open the Recent Dojos picker instead of creating a terminal.
+        #[arg(long, conflicts_with_all = ["name", "splint_id", "new", "command"])]
+        picker: bool,
         /// Executable and arguments passed directly, never through a shell.
         #[arg(last = true, allow_hyphen_values = true)]
         command: Vec<String>,

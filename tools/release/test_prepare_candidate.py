@@ -62,6 +62,16 @@ class PrepareCandidateTests(unittest.TestCase):
         self.assertEqual(replaced.count("b" * 64), 1)
         self.assertEqual(replaced.count("c" * 64), 1)
 
+    def test_source_candidate_rewrites_stale_commit_and_archive_checksum(self) -> None:
+        original = (ROOT / "packaging/aur/PKGBUILD").read_text(encoding="utf-8")
+        stale = MODULE.assignment(ROOT / "packaging/aur/PKGBUILD", "_commit")
+        candidate = "a" * 40
+        self.assertNotEqual(stale, candidate)
+        generated = MODULE.prepare_source_recipe(original, candidate, "b" * 64)
+        self.assertIn(f"_commit={candidate}\n", generated)
+        self.assertEqual(generated.count("b" * 64), 1)
+        self.assertNotIn(f"_commit={stale}", generated)
+
     def test_binary_draft_urls_target_the_versioned_release(self) -> None:
         original = (
             'source=(\n  "https://example/releases/download/v1.2.3-alpha4/a"\n'

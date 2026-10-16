@@ -18,6 +18,7 @@
             src = ./.;
             sourceRevision =
               self.rev or (if self ? dirtyRev then nixpkgs.lib.removeSuffix "-dirty" self.dirtyRev else null);
+            sourceDirty = !(self ? rev);
           };
         in
         {
@@ -30,6 +31,18 @@
             inherit self pkgs;
             smokeOnly = true;
           };
+        }
+      );
+
+      # Without this, `nix develop` reuses the package build environment and
+      # every development build would claim the package's provenance.
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          default = pkgs.mkShell { inputsFrom = [ self.packages.${system}.default ]; };
         }
       );
 

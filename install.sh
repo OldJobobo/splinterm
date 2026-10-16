@@ -200,6 +200,19 @@ download_asset() {
     --output "$destination/$asset" "$(release_url "$release" "$asset")"
 }
 
+# Releases before 0.2.0 predate build provenance records. Gate on the release
+# version, not on the record's presence, so a package stripped of its record
+# cannot skip the check.
+release_has_provenance() {
+  local major minor
+  IFS=. read -r major minor _ <<<"${1%%-*}"
+  [[ $major =~ ^[0-9]+$ && $minor =~ ^[0-9]+$ ]] || {
+    printf 'The release manifest version is malformed: %s\n' "$1" >&2
+    exit 1
+  }
+  ((10#$major > 0 || 10#$minor >= 2))
+}
+
 prebuilt_install() {
   install_dependencies curl desktop-file-utils fontconfig freetype2 gcc-libs glibc \
     hicolor-icon-theme libarchive libxkbcommon noto-fonts-cjk noto-fonts-emoji \
@@ -284,6 +297,26 @@ prebuilt_install() {
       printf 'Downloaded MCP package checksum does not match the release manifest.\n' >&2
       exit 1
     }
+  fi
+
+  if release_has_provenance "$version"; then
+    local provenance_file="$download_dir/package-provenance-v1.json"
+    if ! bsdtar -xOf "$download_dir/$main_asset" \
+      usr/share/splinterm/package-provenance-v1.json >"$provenance_file"; then
+      printf 'Downloaded package omits build provenance.\n' >&2
+      exit 1
+    fi
+    local -a package_provenance
+    mapfile -t package_provenance < <(
+      python "$root/tools/package/release-manifest.py" inspect-package-provenance \
+        --commit "$commit" --version "$version" "$provenance_file"
+    )
+    if ((${#package_provenance[@]} != 3)); then
+      printf 'Downloaded package build provenance does not match the release.\n' >&2
+      exit 1
+    fi
+  else
+    printf 'Release %s predates package build provenance; upgrade handoff will not be available.\n' "$version"
   fi
 
   local candidate mcp_candidate=not-installed

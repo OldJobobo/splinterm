@@ -75,6 +75,7 @@ paths. With no focused Splinterm Window, its two projection fields are null.
 | --- | --- |
 | `launch` | Open an ordinary unnamed graphical Lair using `multiplexer.persistent-by-default`. |
 | `launch --name NAME` or `launch -- ARGV...` | Open an explicitly persistent graphical Lair. |
+| `launch --picker` | Open the Recent Dojos picker without creating a terminal; **New** uses the launch working directory. |
 | `new NAME [--cwd DIR] [-- ARGV...]` | Create a persistent Lair, one Dojo, and one live Splint. |
 | `new-dojo LAIR_ID [--name NAME] [--cwd DIR] [-- ARGV...]` | Add a Dojo with one live Splint without changing that Lair's lifetime. |
 | `preset run NAME [--cwd DIR] [--param NAME=VALUE]... [--no-open]` | Run a packaged or user preset using one exact invoking/focused context and atomic topology transaction. |

@@ -110,7 +110,7 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          su builder -c "cd '$GITHUB_WORKSPACE' && tools/package/build-local-package.sh --no-check --skip-system-dependency-check"
+          su builder -c "cd '$GITHUB_WORKSPACE' && SPLINTERM_BUILD_PROVENANCE=release-candidate tools/package/build-local-package.sh --no-check --skip-system-dependency-check"
 
       - name: Assemble closed candidate artifact
         env:

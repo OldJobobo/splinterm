@@ -59,6 +59,7 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `main.font-pixelsize` | pixel font size | 6–96; 14 |
 | `main.font-point-size` | alternative point size | 6–96; unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` | `output-scale` |
+| `main.startup` | `new-dojo` or `dojo-picker`: what a commandless desktop launch opens | `new-dojo` |
 | `main.padding-*` | four independent logical edges | 0–10000; 12 |
 | `main.initial-columns` | initial grid columns | 2–480; 80 |
 | `main.initial-rows` | initial grid rows | 2–128; 24 |

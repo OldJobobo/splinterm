@@ -30,6 +30,17 @@ done
 
 pkgver=$(bash -c "source '$package_dir/PKGBUILD'; printf '%s' \"\$pkgver\"")
 archive="$package_dir/splinterm-$pkgver.tar.gz"
+commit=$(git -C "$root" rev-parse --verify HEAD)
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || {
+  printf 'package source commit is not one full lowercase Git object ID\n' >&2
+  exit 1
+}
+export SPLINTERM_BUILD_COMMIT=$commit
+export SPLINTERM_BUILD_PROVENANCE=${SPLINTERM_BUILD_PROVENANCE:-local-committed-head}
+case $SPLINTERM_BUILD_PROVENANCE in
+  local-committed-head|release-candidate) ;;
+  *) printf 'unsupported package build provenance: %s\n' "$SPLINTERM_BUILD_PROVENANCE" >&2; exit 1 ;;
+esac
 
 if [[ -n $(git -C "$root" status --porcelain --untracked-files=no -- . ':(exclude)AGENTS.md') ]]; then
   printf 'package inputs contain uncommitted tracked changes\n' >&2

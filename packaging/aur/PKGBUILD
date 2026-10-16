@@ -3,10 +3,12 @@ pkgbase=splinterm
 pkgname=('splinterm' 'splinterm-mcp')
 pkgver=0.2.0dev
 _upstream_ver=0.2.0-dev
+_commit=0000000000000000000000000000000000000000
 # Candidate template only; publish after verified GitHub release publication.
-# Candidate tooling must bind the new archive checksum.
+# Candidate tooling must bind the new archive checksum and source commit.
 pkgrel=1
 arch=('x86_64')
+options=('!strip')
 url='https://github.com/oldjobobo/splinterm'
 license=('MIT')
 makedepends=(
@@ -41,6 +43,8 @@ prepare() {
 
 build() {
   cd "$pkgbase-$_upstream_ver"
+  export SPLINTERM_BUILD_COMMIT=$_commit
+  export SPLINTERM_BUILD_PROVENANCE=release-candidate
   export CARGO_TARGET_DIR=target
   export RUSTUP_TOOLCHAIN=stable
   # Keep source installs warning-free without discarding user compiler flags.
@@ -77,6 +81,13 @@ package_splinterm() {
   install -Dm755 target/release/splinterd "$pkgdir/usr/bin/splinterd"
   install -Dm755 target/release/splinterm-relay "$pkgdir/usr/bin/splinterm-relay"
   install -Dm755 target/release/splinterm-pty-child "$pkgdir/usr/bin/splinterm-pty-child"
+  python tools/package/generate-package-provenance.py \
+    --commit "$_commit" \
+    --provenance release-candidate \
+    --version "$_upstream_ver" \
+    --daemon target/release/splinterd \
+    --client target/release/splinterm \
+    --output "$pkgdir/usr/share/splinterm/package-provenance-v1.json"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-dojos"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-sessions"
