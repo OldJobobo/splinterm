@@ -33,7 +33,15 @@ use super::{
 
 pub const TERMINAL_CHECKPOINT_SCHEMA_V1: u16 = 1;
 pub const TERMINAL_CHECKPOINT_SCHEMA_V2: u16 = 2;
-pub const MAX_TERMINAL_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+/// Bound for the terminal component: grids, parser and pending events.
+pub const MAX_TERMINAL_STATE_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
+/// Bound for the image component. Pixels are base64, so this covers the
+/// default 32 MiB per-terminal image budget plus catalog metadata. Images get
+/// their own allowance so they never consume the terminal's.
+pub const MAX_IMAGE_STATE_CHECKPOINT_BYTES: usize = 48 * 1024 * 1024;
+/// Aggregate bound: both components plus the envelope.
+pub const MAX_TERMINAL_CHECKPOINT_BYTES: usize =
+    MAX_TERMINAL_STATE_CHECKPOINT_BYTES + MAX_IMAGE_STATE_CHECKPOINT_BYTES + 64 * 1024;
 const CHECKPOINT_MAGIC_V1: [u8; 8] = *b"SPLTCP01";
 const CHECKPOINT_MAGIC_V2: [u8; 8] = *b"SPLTCP02";
 const MAX_CHECKPOINT_TITLE_BYTES: usize = 64 * 1024;
@@ -345,7 +353,8 @@ impl TerminalCheckpointV2 {
                 .map_err(|_| CheckpointError::InvalidState)?,
             kitty_image_ids: KittyImageIdsCheckpointV1::capture(&terminal.kitty_image_ids),
         };
-        let image_sha256 = Sha256::digest(encode_json(&images)?).into();
+        digest_json(&terminal_body, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?;
+        let image_sha256 = digest_json(&images, MAX_IMAGE_STATE_CHECKPOINT_BYTES)?;
         Ok(Self {
             terminal: terminal_body,
             image_sha256,
@@ -354,7 +363,8 @@ impl TerminalCheckpointV2 {
     }
 
     fn restore(self, config: TerminalConfig) -> Result<Terminal, CheckpointError> {
-        if <[u8; 32]>::from(Sha256::digest(encode_json(&self.images)?)) != self.image_sha256 {
+        digest_json(&self.terminal, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?;
+        if digest_json(&self.images, MAX_IMAGE_STATE_CHECKPOINT_BYTES)? != self.image_sha256 {
             return Err(CheckpointError::InvalidState);
         }
         self.terminal.restore(config, Some(self.images))
@@ -601,11 +611,10 @@ impl Terminal {
     /// invalid state, or an aggregate larger than the hard byte bound.
     pub fn encode_checkpoint(&self) -> Result<Vec<u8>, CheckpointError> {
         let body = TerminalCheckpointV2::capture(self)?;
-        let body_bytes = encode_json(&body)?;
         let envelope = CheckpointEnvelopeV2 {
             magic: CHECKPOINT_MAGIC_V2,
             schema: TERMINAL_CHECKPOINT_SCHEMA_V2,
-            body_sha256: Sha256::digest(&body_bytes).into(),
+            body_sha256: digest_json(&body, MAX_TERMINAL_CHECKPOINT_BYTES)?,
             body,
         };
         encode_json(&envelope)
@@ -632,8 +641,9 @@ impl Terminal {
                 if encode_json(&envelope)? != bytes {
                     return Err(CheckpointError::NonCanonical);
                 }
-                let body_bytes = encode_json(&envelope.body)?;
-                if <[u8; 32]>::from(Sha256::digest(&body_bytes)) != envelope.body_sha256 {
+                if digest_json(&envelope.body, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?
+                    != envelope.body_sha256
+                {
                     return Err(CheckpointError::InvalidState);
                 }
                 envelope.body.restore(config, None)
@@ -644,14 +654,56 @@ impl Terminal {
                 if encode_json(&envelope)? != bytes {
                     return Err(CheckpointError::NonCanonical);
                 }
-                let body_bytes = encode_json(&envelope.body)?;
-                if <[u8; 32]>::from(Sha256::digest(&body_bytes)) != envelope.body_sha256 {
+                if digest_json(&envelope.body, MAX_TERMINAL_CHECKPOINT_BYTES)?
+                    != envelope.body_sha256
+                {
                     return Err(CheckpointError::InvalidState);
                 }
                 envelope.body.restore(config)
             }
             _ => Err(CheckpointError::InvalidState),
         }
+    }
+}
+
+/// Hashes a value's canonical encoding without materializing it, failing past
+/// `limit` bytes.
+fn digest_json(value: &impl Serialize, limit: usize) -> Result<[u8; 32], CheckpointError> {
+    let mut writer = DigestWriter {
+        hasher: Sha256::new(),
+        length: 0,
+        limit,
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(writer.hasher.finalize().into()),
+        Err(_) if writer.exceeded => Err(CheckpointError::TooLarge),
+        Err(error) => Err(CheckpointError::Encoding(error)),
+    }
+}
+
+struct DigestWriter {
+    hasher: Sha256,
+    length: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for DigestWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.length.checked_add(bytes.len()) {
+            Some(next) if next <= self.limit => self.length = next,
+            _ => {
+                self.exceeded = true;
+                return Err(io::Error::other("checkpoint component exceeds its bound"));
+            }
+        }
+        self.hasher.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -913,6 +965,13 @@ mod tests {
             }),
             mutate_image(|images| {
                 images["plane"]["contents"][0]["metadata"]["retention"] = json!("while_placed");
+            }),
+            // Unplaced WhilePlaced content cannot exist live; it is reclaimed at once.
+            mutate_image(|images| {
+                images["plane"]["contents"][0]["metadata"]["retention"] = json!("while_placed");
+                images["plane"]["placements"] = json!([]);
+                images["kitty_image_ids"]["normal"] = json!([]);
+                images["kitty_image_ids"]["alternate"] = json!([]);
             }),
             mutate_image(|images| {
                 let mut out_of_order = images["kitty_image_ids"]["normal"][0].clone();

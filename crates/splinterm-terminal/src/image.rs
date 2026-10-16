@@ -778,6 +778,19 @@ impl ImagePlane {
             maximum_placement_id = maximum_placement_id.max(placement.id.value());
             maximum_creation_order = maximum_creation_order.max(placement.creation_order);
         }
+        // Live state reclaims unplaced WhilePlaced content as soon as its last
+        // placement goes, so an orphan would only hold budget after restore.
+        let placed: HashSet<_> = checkpoint
+            .placements
+            .iter()
+            .map(|placement| placement.content_id)
+            .collect();
+        if checkpoint.contents.iter().any(|record| {
+            record.metadata.retention == ImageRetention::WhilePlaced
+                && !placed.contains(&record.metadata.id)
+        }) {
+            return Err(ImageError::UnknownContent);
+        }
         if checkpoint.next_content_id == 0
             || checkpoint.next_content_id <= maximum_content_id
             || checkpoint.next_placement_id == 0

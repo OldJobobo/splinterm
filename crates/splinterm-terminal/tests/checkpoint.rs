@@ -1,7 +1,8 @@
 use splinterm_terminal::{
     CheckpointError, ImageAlphaMode, ImageRetention, ImageSourceFormat,
-    MAX_TERMINAL_CHECKPOINT_BYTES, NewImageContent, SharedImageBudget, SharedKittyUploadBudget,
-    SnapshotRequest, Terminal, TerminalConfig, TerminalEvent,
+    MAX_TERMINAL_CHECKPOINT_BYTES, MAX_TERMINAL_STATE_CHECKPOINT_BYTES, NewImageContent,
+    SharedImageBudget, SharedKittyUploadBudget, SnapshotRequest, Terminal, TerminalConfig,
+    TerminalEvent,
 };
 
 fn terminal() -> (Terminal, TerminalConfig) {
@@ -387,7 +388,7 @@ fn checkpoints_fit_full_terminals_with_deep_scrollback() {
     }
     let bytes = terminal.encode_checkpoint().unwrap();
     assert!(
-        bytes.len() < MAX_TERMINAL_CHECKPOINT_BYTES * 3 / 4,
+        bytes.len() < MAX_TERMINAL_STATE_CHECKPOINT_BYTES * 3 / 4,
         "{} bytes",
         bytes.len()
     );
@@ -404,4 +405,36 @@ fn checkpoints_fit_full_terminals_with_deep_scrollback() {
     terminal.advance(b"short history\r\n");
     let bytes = terminal.encode_checkpoint().unwrap();
     Terminal::restore_checkpoint(&bytes, config).unwrap();
+}
+
+#[test]
+fn full_image_budget_and_deep_scrollback_checkpoint_together() {
+    // Images have their own allowance, so a terminal at its default image
+    // budget still checkpoints with a full-width 10,000-line history.
+    let config = TerminalConfig {
+        scrollback_lines: 10_000,
+        ..TerminalConfig::default()
+    };
+    let mut terminal = Terminal::new(200, 50, config.clone());
+    let line = format!("{}\r\n", "y".repeat(200));
+    for _ in 0..10_050 {
+        terminal.advance(line.as_bytes());
+    }
+    let pixels = vec![7_u8; 2048 * 2048 * 4];
+    for _ in 0..2 {
+        terminal
+            .insert_image_content(NewImageContent {
+                width: 2048,
+                height: 2048,
+                source_format: ImageSourceFormat::KittyRgba,
+                alpha_mode: ImageAlphaMode::Premultiplied,
+                pixels: &pixels,
+                retention: ImageRetention::ExplicitDelete,
+            })
+            .unwrap();
+    }
+    let bytes = terminal.encode_checkpoint().unwrap();
+    assert!(bytes.len() <= MAX_TERMINAL_CHECKPOINT_BYTES);
+    let restored = Terminal::restore_checkpoint(&bytes, config).unwrap();
+    assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
 }

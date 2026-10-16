@@ -46,7 +46,8 @@ pub use snapshot::{
     TerminalSnapshot,
 };
 pub use terminal::{
-    CheckpointError, MAX_TERMINAL_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1,
+    CheckpointError, MAX_IMAGE_STATE_CHECKPOINT_BYTES, MAX_TERMINAL_CHECKPOINT_BYTES,
+    MAX_TERMINAL_STATE_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1,
     TERMINAL_CHECKPOINT_SCHEMA_V2, Terminal,
 };
 pub(crate) use update::ChangeSet;
