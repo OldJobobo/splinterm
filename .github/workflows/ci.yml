@@ -109,7 +109,7 @@ jobs:
               --test linux_pty --test pty_adoption_exec -- --test-threads=1
             cargo test --frozen -p splinterm-relay --test stdio -- --test-threads=1
             cargo test --frozen -p splinterm-terminal \
-              --test images --test iterm --test kitty --test memory_layout \
+              --test checkpoint --test images --test iterm --test kitty --test memory_layout \
               --test oracle_fixtures --test snapshot -- --test-threads=1
             cargo test --frozen -p splinterm \
               --test automation_cli --test diagnostics_subprocess --test keymap_cli \
