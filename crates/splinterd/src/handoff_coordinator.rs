@@ -19,8 +19,8 @@ use crate::{
     handoff_compatibility::{ExecutablePairPreflight, RunningHandoffGeneration},
     handoff_preflight::{PreflightError, PreflightGeneration, preflight_sealed_pair},
     package_provenance::{
-        PACKAGE_PROVENANCE_PATH, PackageProvenanceError, PackageProvenanceRecord,
-        ValidatedPackageProvenance,
+        PackageProvenanceError, PackageProvenanceRecord, ValidatedPackageProvenance,
+        package_provenance_path,
     },
 };
 
@@ -49,6 +49,11 @@ impl RollbackHandoffAuthority {
         let daemon = std::env::current_exe().map_err(HandoffCoordinatorError::CurrentExecutable)?;
         let daemon =
             std::fs::canonicalize(daemon).map_err(HandoffCoordinatorError::CurrentExecutable)?;
+        // Locating the record first rejects development and test daemons before
+        // either executable is copied.
+        let record_path =
+            package_provenance_path(&daemon).map_err(|_| HandoffCoordinatorError::NotPackaged)?;
+        let record = PackageProvenanceRecord::load(&record_path, PACKAGED_OWNER_UID)?;
         let source = installed_source_pair(&daemon)?;
         let executables = RetainedRollbackExecutables::capture(
             &source,
@@ -56,8 +61,6 @@ impl RollbackHandoffAuthority {
                 expected_owner_uid: PACKAGED_OWNER_UID,
             },
         )?;
-        let record =
-            PackageProvenanceRecord::load(Path::new(PACKAGE_PROVENANCE_PATH), PACKAGED_OWNER_UID)?;
         prepare_with_preflight(executables, &record, |pair| {
             preflight_sealed_pair(pair, PreflightGeneration::Rollback)
         })
@@ -92,6 +95,8 @@ impl RollbackHandoffAuthority {
 pub enum HandoffCoordinatorError {
     #[error("cannot resolve the running daemon executable: {0}")]
     CurrentExecutable(#[source] io::Error),
+    #[error("the running daemon is not installed from a package")]
+    NotPackaged,
     #[error("the running daemon is not an installed splinterd executable")]
     InvalidInstalledPair,
     #[error(transparent)]
@@ -249,7 +254,7 @@ mod tests {
     fn capabilities() -> HandoffCapabilities {
         let exact = |value| VersionRange::new(value, value).unwrap();
         HandoffCapabilities {
-            private_protocol: exact(35),
+            private_protocol: exact(37),
             handoff_protocol: exact(1),
             terminal_checkpoint: exact(1),
             descriptor_manifest: exact(1),
@@ -321,5 +326,14 @@ mod tests {
         let pair = installed_source_pair(Path::new("/usr/bin/splinterd")).unwrap();
         assert_eq!(pair.daemon(), Path::new("/usr/bin/splinterd"));
         assert_eq!(pair.client(), Path::new("/usr/bin/splinterm"));
+    }
+
+    #[test]
+    fn development_daemon_has_no_packaged_authority() {
+        // Test binaries run from the build tree, outside every packaged prefix.
+        assert!(matches!(
+            RollbackHandoffAuthority::prepare_installed(),
+            Err(HandoffCoordinatorError::NotPackaged)
+        ));
     }
 }

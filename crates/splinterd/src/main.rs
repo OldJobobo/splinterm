@@ -836,9 +836,11 @@ fn main() -> Result<()> {
     )? {
         return Ok(());
     }
+    // Reject invalid invocations before sealed preflight executes both images.
+    let require_workload_cgroups = require_workload_cgroups()?;
     let rollback_handoff =
         splinterd::handoff_coordinator::RollbackHandoffAuthority::prepare_installed();
-    run_daemon(rollback_handoff)
+    run_daemon(require_workload_cgroups, rollback_handoff)
 }
 
 #[allow(
@@ -847,17 +849,21 @@ fn main() -> Result<()> {
 )]
 #[tokio::main(worker_threads = 2)]
 async fn run_daemon(
+    require_workload_cgroups: bool,
     rollback_handoff: Result<
         splinterd::handoff_coordinator::RollbackHandoffAuthority,
         splinterd::handoff_coordinator::HandoffCoordinatorError,
     >,
 ) -> Result<()> {
-    let require_workload_cgroups = require_workload_cgroups()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     let rollback_handoff = match rollback_handoff {
         Ok(authority) => Some(authority),
+        Err(splinterd::handoff_coordinator::HandoffCoordinatorError::NotPackaged) => {
+            debug!("development daemon has no packaged rollback handoff authority");
+            None
+        }
         Err(error) => {
             warn!(%error, "packaged rollback handoff authority is unavailable");
             None
