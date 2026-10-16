@@ -134,6 +134,8 @@ No policy, a different digest, missing scope, wrong resource or incarnation, sta
 
 ## Fixed capabilities and limits
 
+Policy and consent bound a cooperating agent and show what it can reach. They are not a sandbox: a hostile program running as your account can already read your files and run commands, and can reach your terminals without asking Splinterm. Run agents you would trust with your account.
+
 The adapter exposes:
 
 - 34 fixed tools, including `splinterm.report_agent_status`;
