@@ -52,11 +52,17 @@ Omitting the command opens the remote Recent Dojos picker. A Window stays bound 
 
 OpenSSH may use the controlling terminal for passwords, key passphrases, PINs, or hardware tokens. Unknown or changed host keys fail closed. Splinterm does not run `ssh-keyscan`, accept unknown keys, or store credentials.
 
+## Open a remote without a terminal
+
+`splinterm remotes`, the **Remote Dojos** desktop action, **Open Remote…** in the command palette, and the **Remote Dojos…** row of the local Recent Dojos picker open one chooser of the profiles in `remotes.toml`. Choosing a profile starts a separate `splinterm --remote PROFILE` Window process with no inherited stdio and no controlling terminal, so OpenSSH cannot prompt on a terminal: use an agent key or your own `SSH_ASKPASS`. There is no connection-status Window yet; if a connection fails, no Window appears and `splinterm remote check PROFILE` shows why.
+
 ## Authority and boundaries
 
 A native remote Window receives ordinary human multiplexer authority after SSH authenticates the remote account. It can request normal controller ownership but cannot use trusted-local forced takeover. It also does not publish local compositor focus or receive remote terminal image bodies.
 
 SSH or relay loss closes the affected local views and releases connection-owned controllers. It sends no kill or close request, so daemon-owned remote Splints continue running.
+
+The human role is not a boundary against software already running as the account. `splinterd` recognizes the graphical relay by its installed executable and `--graphical-stdio` mode, and the relay forwards whatever its caller sends, so any process running as the account can start it and receive the same authority without a prompt. Policy and consent keep cooperating tools within what was granted and make their access visible; they do not contain a hostile process, which can already read the account's files and run its commands.
 
 :::note[Remote images]
 Remote graphical sessions intentionally omit terminal image transfer. Unexpected remote image metadata fails the affected pane closed rather than opening a content channel.

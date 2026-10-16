@@ -104,6 +104,7 @@ A Window holds an ordered, client-local set of distinct Dojo tabs:
 
 - `Ctrl+Shift+D` creates a Dojo in the active tab's Lair and opens it;
 - `Ctrl+Tab` and `Ctrl+Shift+Tab` move through tabs;
+- `Ctrl+Shift+1` … `Ctrl+Shift+9` jump to the first nine tabs;
 - `Ctrl+Shift+Q` detaches the active tab and closes the Window if it was last;
 - `Ctrl+Shift+B` toggles the Dojo tab strip without changing the tab set;
 - `Ctrl+Shift+S` opens Recent Dojos inside the same Window;
@@ -456,6 +457,11 @@ splinterm --remote PROFILE
 splinterm --remote PROFILE dojos
 splinterm --remote PROFILE reopen
 ```
+
+Without a terminal, use `splinterm remotes`, the **Remote Dojos** desktop
+action, **Open Remote…** in the command palette, or the **Remote Dojos…** row in
+Recent Dojos; each opens a profile chooser and starts the chosen remote in its
+own Window.
 
 OpenSSH authenticates the human account. The graphical relay does not create a
 public daemon listener, and machine automation remains separately policy-scoped.

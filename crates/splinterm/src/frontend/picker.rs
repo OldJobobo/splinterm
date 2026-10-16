@@ -8,6 +8,8 @@ use splinterm_protocol::{
     TerminalRow, TerminalSnapshot, UnderlineStyle,
 };
 
+use crate::renderer::SessionPickerPurpose;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PickerHitTarget {
     New,
@@ -48,6 +50,9 @@ pub struct SessionPickerUi {
     hovered: Option<PickerHitTarget>,
     new_enabled: bool,
     new_blocker: Option<&'static str>,
+    /// Standalone pickers fix their purpose; inline pickers derive it from the
+    /// requesting selector.
+    purpose: Option<SessionPickerPurpose>,
     host: SessionPickerHost,
 }
 
@@ -70,11 +75,48 @@ impl SessionPickerUi {
             hovered: None,
             new_enabled: true,
             new_blocker: None,
+            purpose: Some(SessionPickerPurpose::RecentDojos),
             host: SessionPickerHost::Standalone {
                 revision: 0,
                 synthetic_id: SplintId::new(),
                 decision,
             },
+        }
+    }
+
+    /// Builds the standalone remote-profile chooser. It offers no creation row:
+    /// `blocker` explains where profiles come from, or why none are listed.
+    #[must_use]
+    pub fn remote_profiles(
+        items: Vec<SessionPickerItem>,
+        blocker: &'static str,
+        decision: StdSender<SessionPickerDecision>,
+    ) -> Self {
+        Self {
+            new_enabled: false,
+            new_blocker: Some(blocker),
+            purpose: Some(SessionPickerPurpose::Remotes),
+            ..Self::new(items, decision)
+        }
+    }
+
+    /// Selects the creation row, for a picker whose only items are navigation rows.
+    pub fn select_new_row(&mut self) {
+        if self.new_enabled {
+            self.selected = 0;
+            self.visible_start = 0;
+        }
+    }
+
+    pub(crate) const fn purpose(&self) -> Option<SessionPickerPurpose> {
+        self.purpose
+    }
+
+    /// Returns the Window title of a standalone picker.
+    pub(crate) const fn standalone_title(&self) -> &'static str {
+        match self.purpose {
+            Some(SessionPickerPurpose::Remotes) => "Splinterm — Remotes",
+            _ => "Splinterm — Recent Dojos",
         }
     }
 
@@ -98,6 +140,7 @@ impl SessionPickerUi {
             hovered: None,
             new_enabled,
             new_blocker,
+            purpose: None,
             host: SessionPickerHost::Inline,
         }
     }
@@ -341,13 +384,24 @@ impl SessionPickerUi {
         };
         *revision = revision.saturating_add(1).max(1);
         let marker = |selected| if selected { "› " } else { "  " };
-        let mut lines = vec![
-            "RECENT DOJOS".to_owned(),
-            "Open a running Dojo without restoring or relaunching.".to_owned(),
-            String::new(),
-            format!("{}New Terminal", marker(self.selected == 0)),
-            "    Start a fresh shell".to_owned(),
-        ];
+        let remotes = self.purpose == Some(SessionPickerPurpose::Remotes);
+        let mut lines = if remotes {
+            vec![
+                "REMOTES".to_owned(),
+                "Open a remote profile in a new Window.".to_owned(),
+                String::new(),
+                format!("{}+ Add a profile", marker(self.selected == 0)),
+                format!("    {}", self.new_blocker.unwrap_or("Edit remotes.toml")),
+            ]
+        } else {
+            vec![
+                "RECENT DOJOS".to_owned(),
+                "Open a running Dojo without restoring or relaunching.".to_owned(),
+                String::new(),
+                format!("{}New Terminal", marker(self.selected == 0)),
+                "    Start a fresh shell".to_owned(),
+            ]
+        };
         for (visible_index, original_index) in self
             .filtered_indices
             .iter()
@@ -370,6 +424,11 @@ impl SessionPickerUi {
             } else {
                 item.breadcrumb.clone()
             };
+            // Navigation rows (remote profiles, the remote entry) have no panes.
+            if item.pane_count == 0 {
+                lines.push(format!("    {detail}"));
+                continue;
+            }
             lines.push(format!(
                 "    {detail} · {} {pane_label} · {} running",
                 item.pane_count, item.running_pane_count
@@ -380,7 +439,11 @@ impl SessionPickerUi {
         }
         lines.extend([
             String::new(),
-            "/ search · ↑/↓ or J/K select · Enter open · Ctrl+N new · Escape cancel".to_owned(),
+            if remotes {
+                "/ search · ↑/↓ or J/K select · Enter connect · Escape cancel".to_owned()
+            } else {
+                "/ search · ↑/↓ or J/K select · Enter open · Ctrl+N new · Escape cancel".to_owned()
+            },
         ]);
         picker_terminal_snapshot(*synthetic_id, *revision, lines)
     }
@@ -652,5 +715,112 @@ mod tests {
             picker.select_last();
             assert_eq!(picker.selected_decision(), Some(expected));
         }
+    }
+
+    fn row_text(snapshot: &TerminalSnapshot, row: usize) -> String {
+        snapshot.visible_rows[row]
+            .cells
+            .iter()
+            .map(|cell| cell.content.as_str())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    fn navigation_item(title: &str, breadcrumb: &str) -> SessionPickerItem {
+        SessionPickerItem {
+            display_title: title.to_owned(),
+            breadcrumb: breadcrumb.to_owned(),
+            working_directory: String::new(),
+            pane_count: 0,
+            running_pane_count: 0,
+        }
+    }
+
+    #[test]
+    fn remote_profile_chooser_offers_no_creation_and_opens_profiles() {
+        let (decision, _receiver) = std_mpsc::channel();
+        let mut picker = SessionPickerUi::remote_profiles(
+            vec![
+                navigation_item("straylight", "straylight"),
+                navigation_item("wintermute", "case@wintermute.example:2222"),
+            ],
+            "Add profiles in remotes.toml",
+            decision,
+        );
+        assert_eq!(picker.purpose(), Some(SessionPickerPurpose::Remotes));
+        assert_eq!(picker.standalone_title(), "Splinterm — Remotes");
+        assert!(!picker.new_enabled());
+        assert_eq!(picker.new_blocker(), Some("Add profiles in remotes.toml"));
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        assert_eq!(picker.decision_for_target(PickerHitTarget::New), None);
+        picker.select_first();
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        assert_eq!(picker.select_row(SESSION_PICKER_NEW_ROW), None);
+        picker.move_selection(1);
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(1))
+        );
+
+        let snapshot = picker.snapshot();
+        assert!(snapshot.validate().is_ok());
+        assert_eq!(row_text(&snapshot, 0), "REMOTES");
+        assert_eq!(
+            row_text(&snapshot, SESSION_PICKER_NEW_ROW),
+            "  + Add a profile"
+        );
+        assert_eq!(
+            row_text(&snapshot, SESSION_PICKER_NEW_ROW + 1),
+            "    Add profiles in remotes.toml"
+        );
+        assert_eq!(
+            row_text(&snapshot, SESSION_PICKER_FIRST_ITEM_ROW + 3),
+            "    case@wintermute.example:2222",
+            "navigation rows show no pane counts"
+        );
+        let footer = (0..snapshot.visible_rows.len())
+            .map(|row| row_text(&snapshot, row))
+            .find(|text| text.starts_with("/ search"))
+            .unwrap();
+        assert!(footer.contains("Enter connect") && !footer.contains("Ctrl+N"));
+
+        let (decision, _receiver) = std_mpsc::channel();
+        let empty = SessionPickerUi::remote_profiles(Vec::new(), "No remote profiles", decision);
+        assert_eq!(empty.selected_decision(), None);
+    }
+
+    #[test]
+    fn recent_dojos_keeps_new_default_when_only_the_remote_row_is_listed() {
+        let (decision, _receiver) = std_mpsc::channel();
+        let mut picker = SessionPickerUi::new(
+            vec![navigation_item("Remote Dojos…", "2 remote profiles")],
+            decision,
+        );
+        assert_eq!(picker.purpose(), Some(SessionPickerPurpose::RecentDojos));
+        assert_eq!(picker.standalone_title(), "Splinterm — Recent Dojos");
+        picker.select_new_row();
+        assert_eq!(picker.selected_decision(), Some(SessionPickerDecision::New));
+        picker.move_selection(1);
+        assert_eq!(
+            picker.selected_decision(),
+            Some(SessionPickerDecision::Open(0))
+        );
+        let snapshot = picker.snapshot();
+        assert_eq!(row_text(&snapshot, 0), "RECENT DOJOS");
+        assert_eq!(
+            row_text(&snapshot, SESSION_PICKER_FIRST_ITEM_ROW),
+            "› Remote Dojos…"
+        );
+        assert_eq!(
+            row_text(&snapshot, SESSION_PICKER_FIRST_ITEM_ROW + 1),
+            "    2 remote profiles"
+        );
     }
 }
