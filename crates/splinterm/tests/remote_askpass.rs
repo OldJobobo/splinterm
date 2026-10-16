@@ -7,6 +7,10 @@ use std::{
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +18,7 @@ use splinterm::{
     remote::RemoteCatalog,
     remote_askpass::{
         AskpassBroker, AskpassKind, AskpassReply, NativePrompt, SOCKET_ENV, Secret, TOKEN_ENV,
+        Terminator,
     },
     remote_session::{AuthEnvironment, RemoteFailure, RemoteFailureKind, RemoteSession},
 };
@@ -52,8 +57,13 @@ with open(os.path.join(base, 'env.json'), 'w', encoding='utf-8') as handle:
     json.dump({{name: os.environ.get(name) for name in names}}, handle)
 askpass = os.environ.get('SSH_ASKPASS')
 if askpass and os.environ.get('SSH_ASKPASS_REQUIRE') == 'force':
+    with open(os.path.join(base, 'ssh-pid'), 'w', encoding='utf-8') as handle:
+        handle.write(str(os.getpid()))
     result = subprocess.run([askpass, "case@example.invalid's password: "],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+    # Only reached if OpenSSH is still alive when its askpass ends.
+    with open(os.path.join(base, 'askpass-returned'), 'w', encoding='utf-8') as handle:
+        handle.write(str(result.returncode))
     if result.returncode != 0 or result.stdout != b'{SECRET}\n':
         sys.stderr.write('case@example.invalid: Permission denied (publickey,password).\n')
         sys.exit(255)
@@ -151,22 +161,57 @@ async fn the_native_prompt_answers_openssh_through_the_client_binary() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+fn assert_openssh_never_read_a_refusal(directory: &Path) {
+    assert!(
+        !directory.join("askpass-returned").exists(),
+        "OpenSSH outlived its askpass and could have sent an empty password"
+    );
+    let pid = fs::read_to_string(directory.join("ssh-pid")).unwrap();
+    let stat = fs::read_to_string(Path::new("/proc").join(pid.trim()).join("stat"));
+    assert!(
+        stat.map_or(true, |stat| stat.contains(") Z ")),
+        "OpenSSH is gone"
+    );
+}
+
 #[tokio::test]
-async fn a_cancelled_native_prompt_is_an_authentication_failure() {
-    let directory = test_directory("cancel");
+async fn a_refused_secret_kills_openssh_before_the_helper_exits() {
+    let directory = test_directory("refuse");
     let ssh = fake_ssh(&directory);
     let (prompt, mut prompts) = native_prompt();
     let answering = tokio::spawn(async move {
         let request = prompts.recv().await.unwrap();
+        // Even an explicit refusal of a secret never reaches OpenSSH.
         request.answer(AskpassReply::Cancel);
     });
     let error = connect(&ssh, &no_terminal(), Some(&prompt))
         .await
         .unwrap_err();
     answering.await.unwrap();
-    let failure = error.downcast_ref::<RemoteFailure>().unwrap();
-    assert_eq!(failure.kind(), RemoteFailureKind::AuthenticationFailed);
-    assert!(failure.diagnostic().contains("Permission denied"));
+    assert!(error.downcast_ref::<RemoteFailure>().is_some());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_openssh_never_read_a_refusal(&directory);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn dropping_the_attempt_during_a_prompt_kills_openssh_first() {
+    let directory = test_directory("drop-attempt");
+    let ssh = fake_ssh(&directory);
+    let (prompt, mut prompts) = native_prompt();
+    let attempt = {
+        let ssh = ssh.clone();
+        tokio::spawn(async move {
+            let _ = connect(&ssh, &no_terminal(), Some(&prompt)).await;
+        })
+    };
+    let request = prompts.recv().await.unwrap();
+    // The status Window's Escape, Close, or timeout: the attempt goes first.
+    attempt.abort();
+    assert!(attempt.await.unwrap_err().is_cancelled());
+    drop(request);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_openssh_never_read_a_refusal(&directory);
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -239,8 +284,10 @@ async fn the_client_binary_helper_prints_only_the_answer_and_refuses_bad_tokens(
     let (prompt, mut prompts) = native_prompt();
     let broker = AskpassBroker::bind(&prompt).unwrap();
     let environment = broker.environment().to_vec();
-    // This test process stands in for OpenSSH: it starts the helper directly.
-    let service = broker.serve(std::process::id());
+    // This test process stands in for OpenSSH: it starts the helper directly,
+    // so terminations are recorded, never delivered to it.
+    let kills = Arc::new(AtomicUsize::new(0));
+    let service = broker.serve_with(std::process::id(), Terminator::recording(kills.clone()));
 
     let answering = tokio::spawn(async move {
         let request = prompts.recv().await.unwrap();
@@ -272,5 +319,6 @@ async fn the_client_binary_helper_prints_only_the_answer_and_refuses_bad_tokens(
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(prompts.try_recv().is_err());
-    drop(service);
+    assert_eq!(kills.load(Ordering::SeqCst), 0, "no prompt was refused");
+    service.release();
 }

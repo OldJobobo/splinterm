@@ -36,6 +36,8 @@ const STATUS_COMMAND_CAPACITY: usize = 64;
 const PROMPT_CAPACITY: usize = 1;
 /// Detail shown when the user cancels a password prompt.
 pub(in crate::app) const PROMPT_CANCELLED: &str = "The Splinterm password prompt was cancelled.";
+/// Detail shown when a prompt was left unanswered.
+pub(in crate::app) const PROMPT_TIMED_OUT: &str = "The Splinterm prompt was not answered in time.";
 
 /// The status Window closed before a connection was made: after a shown
 /// failure, by cancelling an attempt, or by the compositor. The process exits
@@ -103,21 +105,24 @@ impl StatusWindow {
 struct ActivePrompt {
     request: AskpassRequest,
     field: Secret,
+    /// When an unanswered secret or question ends the attempt.
+    deadline: tokio::time::Instant,
 }
 
 /// What a key press on an open prompt asks the flow to do.
 enum PromptInput {
     None,
     Redraw,
-    /// Escape on a masked field: refuse the prompt and end the attempt, so
-    /// OpenSSH cannot re-ask or send an empty password.
+    /// Escape on a masked field: end the attempt, and only then drop the
+    /// prompt unanswered. OpenSSH turns a refused prompt into an empty
+    /// password and asks again, so it must be dead before the helper exits.
     CancelAttempt,
 }
 
-fn cancelled_prompt_failure() -> RemoteStatusFailure {
+fn prompt_failure(detail: &str) -> RemoteStatusFailure {
     RemoteStatusFailure {
         category: RemoteFailureCategory::Remote(RemoteFailureKind::AuthenticationFailed),
-        details: vec![PROMPT_CANCELLED.to_owned()],
+        details: vec![detail.to_owned()],
     }
 }
 
@@ -146,18 +151,13 @@ fn prompt_input(
                 }
             }
             FieldOutcome::Submit => {
-                let ActivePrompt { request, field } = active.take().expect("guarded prompt");
+                let ActivePrompt { request, field, .. } = active.take().expect("guarded prompt");
                 request.answer(AskpassReply::Submit(field));
                 status.clear_prompt();
                 PromptInput::Redraw
             }
-            FieldOutcome::Cancel => {
-                if let Some(prompt) = active.take() {
-                    prompt.request.answer(AskpassReply::Cancel);
-                }
-                status.clear_prompt();
-                PromptInput::CancelAttempt
-            }
+            // Not answered here: the flow kills the attempt first.
+            FieldOutcome::Cancel => PromptInput::CancelAttempt,
         },
         AskpassKind::Confirm => match confirm_key(bytes) {
             Some(yes) => {
@@ -177,16 +177,56 @@ fn prompt_input(
     }
 }
 
+/// Shows a prompt from the running attempt. A prompt that arrives with no
+/// attempt running is refused; one already abandoned is skipped.
+fn open_prompt(
+    request: AskpassRequest,
+    attempt_running: bool,
+    status: &mut RemoteStatus,
+    prompt_timeout: Duration,
+) -> Option<ActivePrompt> {
+    if request.is_abandoned() {
+        return None;
+    }
+    if attempt_running && status.show_prompt(request.kind(), request.prompt_lines()) {
+        Some(ActivePrompt {
+            request,
+            field: Secret::new(),
+            deadline: tokio::time::Instant::now() + prompt_timeout,
+        })
+    } else {
+        request.answer(AskpassReply::Cancel);
+        None
+    }
+}
+
+/// Reports a failed attempt, shows it, and returns its diagnostic code.
+fn show_failure(
+    status: &mut RemoteStatus,
+    window: &mut StatusWindow,
+    report: &mut impl FnMut(&RemoteStatusFailure),
+    failure: RemoteStatusFailure,
+) -> DiagnosticErrorCode {
+    report(&failure);
+    let code = failure.copy().diagnostic_code;
+    if status.on_attempt(Err(failure)) == RemoteStatusEffect::ShowFailure {
+        window.show(status);
+    }
+    code
+}
+
 /// Drives one status screen until it hands over a connected endpoint, or the
 /// Window closes first. `connect` runs one attempt; `report` records each
 /// failure; `prompts` delivers OpenSSH prompts from the current attempt's
-/// private askpass broker. Nothing here writes to stdout or stderr, and key
-/// input is wiped after use because it may be a password.
+/// private askpass broker, and an unanswered secret or question ends the
+/// attempt after `prompt_timeout`. Nothing here writes to stdout or stderr,
+/// and key input is wiped after use because it may be a password.
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
     mut commands: mpsc::Receiver<WindowCommand>,
     mut prompts: mpsc::Receiver<AskpassRequest>,
+    prompt_timeout: Duration,
     mut connect: F,
     mut report: impl FnMut(&RemoteStatusFailure),
 ) -> Result<T, RemoteNotConnected>
@@ -199,7 +239,16 @@ where
     let mut prompts_open = true;
     let mut active: Option<ActivePrompt> = None;
     loop {
+        // Set by an arm that must end the attempt because of its prompt.
+        let mut end_attempt: Option<&str> = None;
+        let timed = active
+            .as_ref()
+            .filter(|prompt| prompt.request.kind() != AskpassKind::Notice)
+            .map(|prompt| prompt.deadline);
         tokio::select! {
+            () = async { tokio::time::sleep_until(timed.expect("guarded deadline")).await }, if timed.is_some() => {
+                end_attempt = Some(PROMPT_TIMED_OUT);
+            }
             result = async { attempt.as_mut().expect("guarded attempt").await }, if attempt.is_some() => {
                 attempt = None;
                 // The attempt's broker is gone; wipe any unanswered field.
@@ -213,28 +262,18 @@ where
                     }
                     Err(error) => {
                         let failure = RemoteStatusFailure::from_error(&error);
-                        report(&failure);
-                        last_failure = Some(failure.copy().diagnostic_code);
-                        if status.on_attempt(Err(failure)) == RemoteStatusEffect::ShowFailure {
-                            window.show(&status);
-                        }
+                        last_failure = Some(show_failure(&mut status, &mut window, &mut report, failure));
                     }
                 }
             }
             request = prompts.recv(), if prompts_open && active.is_none() => {
-                match request {
-                    None => prompts_open = false,
-                    Some(request) if request.is_abandoned() => {}
-                    Some(request) => {
-                        if attempt.is_some()
-                            && status.show_prompt(request.kind(), request.prompt_lines())
-                        {
-                            active = Some(ActivePrompt { request, field: Secret::new() });
-                            window.show(&status);
-                        } else {
-                            request.answer(AskpassReply::Cancel);
-                        }
+                if let Some(request) = request {
+                    active = open_prompt(request, attempt.is_some(), &mut status, prompt_timeout);
+                    if active.is_some() {
+                        window.show(&status);
                     }
+                } else {
+                    prompts_open = false;
                 }
             }
             () = async { active.as_mut().expect("guarded prompt").request.abandoned().await }, if active.is_some() => {
@@ -255,16 +294,7 @@ where
                         match input {
                             PromptInput::None => {}
                             PromptInput::Redraw => window.show(&status),
-                            PromptInput::CancelAttempt => {
-                                // Dropping the attempt kills OpenSSH and its helper.
-                                drop(attempt.take());
-                                let failure = cancelled_prompt_failure();
-                                report(&failure);
-                                last_failure = Some(failure.copy().diagnostic_code);
-                                if status.on_attempt(Err(failure)) == RemoteStatusEffect::ShowFailure {
-                                    window.show(&status);
-                                }
-                            }
+                            PromptInput::CancelAttempt => end_attempt = Some(PROMPT_CANCELLED),
                         }
                         RemoteStatusEffect::None
                     }
@@ -282,10 +312,10 @@ where
                         window.show(&status);
                     }
                     RemoteStatusEffect::Close => {
-                        // Dropping the attempt kills its OpenSSH child, and
-                        // dropping the prompt refuses it and wipes the field.
-                        drop(active.take());
+                        // Kill OpenSSH first (dropping the attempt SIGKILLs
+                        // it), then drop the prompt unanswered and wipe it.
                         drop(attempt.take());
+                        drop(active.take());
                         window.close().await;
                         return Err(RemoteNotConnected { last_failure });
                     }
@@ -294,6 +324,14 @@ where
                     | RemoteStatusEffect::HandOver => {}
                 }
             }
+        }
+        if let Some(detail) = end_attempt {
+            // Order matters: dropping the attempt SIGKILLs OpenSSH before the
+            // prompt is dropped, so OpenSSH never reads a refusal.
+            drop(attempt.take());
+            drop(active.take());
+            let failure = prompt_failure(detail);
+            last_failure = Some(show_failure(&mut status, &mut window, &mut report, failure));
         }
     }
 }
@@ -376,6 +414,8 @@ pub(in crate::app) async fn connect_with_status(
             theme,
             keymap: window_config.keymap.clone(),
             prefix_timeout_ms: window_config.prefix_timeout_ms,
+            // The status Window may hold a password field: no IME composition.
+            input_method: false,
             ..WindowOptions::default()
         })
     });
@@ -393,6 +433,7 @@ pub(in crate::app) async fn connect_with_status(
         window,
         commands,
         prompts,
+        askpass::PROMPT_TIMEOUT,
         || connect_profile(profile_name.clone(), native_prompt.clone()),
         report_failure,
     )
@@ -439,6 +480,9 @@ mod tests {
             commands,
         )
     }
+
+    /// Long enough that no prompt test times out unless it means to.
+    const TEST_PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
     /// A prompt channel whose sender is gone, for flows that never prompt.
     fn no_prompts() -> mpsc::Receiver<AskpassRequest> {
@@ -489,6 +533,7 @@ mod tests {
             window,
             commands,
             no_prompts(),
+            TEST_PROMPT_TIMEOUT,
             || async { Ok("factory") },
             |_| reports.set(reports.get() + 1),
         )
@@ -514,6 +559,7 @@ mod tests {
                 window,
                 commands,
                 no_prompts(),
+                TEST_PROMPT_TIMEOUT,
                 move || {
                     let attempt = {
                         let mut attempts = attempts.lock().unwrap();
@@ -603,6 +649,7 @@ mod tests {
             window,
             commands,
             no_prompts(),
+            TEST_PROMPT_TIMEOUT,
             std::future::pending,
             |_| panic!("a cancelled attempt is not a failure"),
         ));
@@ -630,6 +677,7 @@ mod tests {
             window,
             commands,
             no_prompts(),
+            TEST_PROMPT_TIMEOUT,
             std::future::pending,
             |_| {},
         )
@@ -645,6 +693,7 @@ mod tests {
             window,
             commands,
             no_prompts(),
+            TEST_PROMPT_TIMEOUT,
             || async {
                 Err(RemoteProfileError::wrap(&anyhow::anyhow!(
                     "remote profile \"gone\" is not configured"
@@ -681,6 +730,7 @@ mod tests {
             window,
             commands,
             no_prompts(),
+            TEST_PROMPT_TIMEOUT,
             || async {
                 Err(anyhow::anyhow!(
                     "remote splinterd returned an invalid ping response"
@@ -727,13 +777,67 @@ mod tests {
         assert!(!text(snapshot).contains(TYPED_SECRET), "{}", text(snapshot));
     }
 
-    /// Sets a flag when the attempt future is dropped (OpenSSH killed).
-    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    type SharedReply = Arc<Mutex<Option<tokio::sync::oneshot::Receiver<AskpassReply>>>>;
+    type Seen = Arc<Mutex<Option<&'static str>>>;
 
-    impl Drop for DropFlag {
+    /// Stands in for OpenSSH inside an attempt. When the attempt is dropped
+    /// (OpenSSH killed), it records the prompt's state at that moment, so
+    /// a test can prove OpenSSH died before any refusal could reach it.
+    struct KillProbe {
+        reply: SharedReply,
+        seen: Seen,
+    }
+
+    impl Drop for KillProbe {
         fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            use tokio::sync::oneshot::error::TryRecvError;
+            let state = match self
+                .reply
+                .lock()
+                .unwrap()
+                .as_mut()
+                .map(tokio::sync::oneshot::Receiver::try_recv)
+            {
+                None => "no prompt",
+                Some(Err(TryRecvError::Empty)) => "prompt still open",
+                Some(Err(TryRecvError::Closed)) => "prompt already dropped",
+                Some(Ok(_)) => "prompt already answered",
+            };
+            *self.seen.lock().unwrap() = Some(state);
         }
+    }
+
+    /// A never-finishing attempt that carries a [`KillProbe`].
+    fn probed_attempt(
+        reply: &SharedReply,
+        seen: &Seen,
+    ) -> impl FnMut() -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>> + use<> {
+        let reply = reply.clone();
+        let seen = seen.clone();
+        move || {
+            let probe = KillProbe {
+                reply: reply.clone(),
+                seen: seen.clone(),
+            };
+            Box::pin(async move {
+                let _probe = probe;
+                std::future::pending().await
+            })
+        }
+    }
+
+    /// Sends a secret prompt and parks its reply where the probe can see it.
+    async fn open_secret_prompt(prompt_sender: &mpsc::Sender<AskpassRequest>, reply: &SharedReply) {
+        let (request, receiver) = AskpassRequest::for_test(AskpassKind::Secret, b"password:");
+        *reply.lock().unwrap() = Some(receiver);
+        prompt_sender.send(request).await.unwrap();
+    }
+
+    /// OpenSSH died first, and the prompt was then dropped without a refusal.
+    async fn assert_killed_before_refusal(reply: &SharedReply, seen: &Seen) {
+        assert_eq!(*seen.lock().unwrap(), Some("prompt still open"));
+        let receiver = reply.lock().unwrap().take().unwrap();
+        assert!(receiver.await.is_err(), "no refusal was sent");
     }
 
     #[tokio::test]
@@ -747,6 +851,7 @@ mod tests {
             window,
             commands,
             prompts,
+            TEST_PROMPT_TIMEOUT,
             move || {
                 let release = attempt_release.clone();
                 async move {
@@ -790,34 +895,28 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn escape_refuses_the_prompt_and_fails_the_attempt_as_authentication() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn escape_kills_openssh_before_dropping_the_prompt_unanswered() {
         let (mut harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
-        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reply = SharedReply::default();
+        let seen = Seen::default();
         let reports = Arc::new(Mutex::new(Vec::new()));
         let flow = {
-            let dropped = dropped.clone();
             let reports = reports.clone();
-            tokio::spawn(run_status_flow::<(), _, _>(
+            tokio::spawn(run_status_flow(
                 RemoteStatus::new("wintermute", "wintermute"),
                 window,
                 commands,
                 prompts,
-                move || {
-                    let guard = DropFlag(dropped.clone());
-                    async move {
-                        let _guard = guard;
-                        std::future::pending().await
-                    }
-                },
+                TEST_PROMPT_TIMEOUT,
+                probed_attempt(&reply, &seen),
                 move |failure: &RemoteStatusFailure| {
                     reports.lock().unwrap().push(failure.clone());
                 },
             ))
         };
-        let (request, reply) = AskpassRequest::for_test(AskpassKind::Secret, b"password:");
-        prompt_sender.send(request).await.unwrap();
+        open_secret_prompt(&prompt_sender, &reply).await;
         let _shown = next_snapshot(&mut harness).await;
         input(&harness, TYPED_SECRET.as_bytes()).await;
         let _typed = next_snapshot(&mut harness).await;
@@ -832,11 +931,7 @@ mod tests {
             "the agent path stays preferred"
         );
         assert_no_secret(&failed);
-        assert!(matches!(reply.await.unwrap(), AskpassReply::Cancel));
-        assert!(
-            dropped.load(std::sync::atomic::Ordering::SeqCst),
-            "cancelling ends the attempt so OpenSSH cannot re-ask"
-        );
+        assert_killed_before_refusal(&reply, &seen).await;
         {
             let reports = reports.lock().unwrap();
             assert_eq!(reports.len(), 1);
@@ -860,6 +955,69 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unanswered_prompt_times_out_by_killing_the_attempt_first() {
+        let (mut harness, window, commands) = harness();
+        let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
+        let reply = SharedReply::default();
+        let seen = Seen::default();
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let flow = {
+            let reports = reports.clone();
+            tokio::spawn(run_status_flow(
+                RemoteStatus::new("wintermute", "wintermute"),
+                window,
+                commands,
+                prompts,
+                Duration::from_millis(100),
+                probed_attempt(&reply, &seen),
+                move |failure: &RemoteStatusFailure| {
+                    reports.lock().unwrap().push(failure.copy().diagnostic_code);
+                },
+            ))
+        };
+        open_secret_prompt(&prompt_sender, &reply).await;
+        let _shown = next_snapshot(&mut harness).await;
+        input(&harness, b"partial").await;
+        let _typed = next_snapshot(&mut harness).await;
+        let failed = tokio::time::timeout(Duration::from_secs(10), next_snapshot(&mut harness))
+            .await
+            .unwrap();
+        assert_eq!(failed.title, "Could not connect to wintermute");
+        assert!(text(&failed).contains(PROMPT_TIMED_OUT));
+        assert_killed_before_refusal(&reply, &seen).await;
+        assert_eq!(
+            *reports.lock().unwrap(),
+            [DiagnosticErrorCode::RemoteAuthentication]
+        );
+        input(&harness, b"q").await;
+        assert!(flow.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_notice_does_not_time_out() {
+        let (mut harness, window, commands) = harness();
+        let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
+        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "wintermute"),
+            window,
+            commands,
+            prompts,
+            Duration::from_millis(20),
+            std::future::pending,
+            |_| panic!("a notice never fails the attempt"),
+        ));
+        let (request, reply) =
+            AskpassRequest::for_test(AskpassKind::Notice, b"Confirm user presence for key");
+        prompt_sender.send(request).await.unwrap();
+        let _shown = next_snapshot(&mut harness).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(harness.updates.try_recv().is_err());
+        input(&harness, b"\x1b").await;
+        assert!(flow.await.unwrap().is_err());
+        assert!(reply.await.is_err());
+    }
+
     #[tokio::test]
     async fn confirmations_need_an_explicit_yes_or_no() {
         let (mut harness, window, commands) = harness();
@@ -869,6 +1027,7 @@ mod tests {
             window,
             commands,
             prompts,
+            TEST_PROMPT_TIMEOUT,
             std::future::pending,
             |_| {},
         ));
@@ -914,6 +1073,7 @@ mod tests {
             window,
             commands,
             prompts,
+            TEST_PROMPT_TIMEOUT,
             std::future::pending,
             |_| {},
         ));
@@ -949,6 +1109,7 @@ mod tests {
             window,
             commands,
             prompts,
+            TEST_PROMPT_TIMEOUT,
             || async { Err(denied()) },
             |_| {},
         ));
@@ -970,6 +1131,7 @@ mod tests {
             window,
             commands,
             prompts,
+            TEST_PROMPT_TIMEOUT,
             std::future::pending,
             |_| {},
         ));
@@ -989,8 +1151,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_compositor_close_drops_an_open_secret_prompt() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_compositor_close_kills_openssh_before_dropping_the_prompt() {
         let (harness, window, commands) = harness();
         let (prompt_sender, prompts) = mpsc::channel(PROMPT_CAPACITY);
         let Harness {
@@ -998,23 +1160,25 @@ mod tests {
             mut updates,
             ..
         } = harness;
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+        let reply = SharedReply::default();
+        let seen = Seen::default();
+        let flow = tokio::spawn(run_status_flow(
             RemoteStatus::new("wintermute", "wintermute"),
             window,
             commands,
             prompts,
-            std::future::pending,
+            TEST_PROMPT_TIMEOUT,
+            probed_attempt(&reply, &seen),
             |_| {},
         ));
-        let (request, reply) = AskpassRequest::for_test(AskpassKind::Secret, b"password:");
-        prompt_sender.send(request).await.unwrap();
+        open_secret_prompt(&prompt_sender, &reply).await;
         assert!(matches!(
             updates.recv().await,
             Some(WindowUpdate::Snapshot { .. })
         ));
         drop(sender);
         assert!(flow.await.unwrap().is_err());
-        assert!(reply.await.is_err());
+        assert_killed_before_refusal(&reply, &seen).await;
     }
 
     #[test]

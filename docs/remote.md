@@ -302,7 +302,9 @@ Without a terminal, OpenSSH chooses who answers in this order:
    helper connects back to the status Window of the same launch through a Unix
    socket in a fresh `0700` directory under `XDG_RUNTIME_DIR` (or the temporary
    directory), presents a random 256-bit token unique to that connection
-   attempt, prints the answer on stdout for OpenSSH, and exits.
+   attempt, prints the answer on stdout for OpenSSH, and exits. It needs Linux
+   pidfds (5.3 or later) so OpenSSH can be stopped safely; without them the
+   native prompt is unavailable.
 
 Non-graphical commands such as `remote check` never use Splinterm's prompt;
 without a terminal or `SSH_ASKPASS`, an interactive prompt is reported as
@@ -320,16 +322,22 @@ Splinterm's prompt is a fallback with fixed limits:
   lines of 100 characters, because keyboard-interactive servers can choose it.
 - The field never echoes: the screen, Window title, and accessibility text say
   only "Password field: empty" or "Password field: entered (hidden)", never
-  the text or its length. Pasting into the field is allowed, for password
-  managers; the field has no history, scrollback, or copy source, and
-  Splinterm never puts the answer on the clipboard.
+  the text or its length. The status Window does not use an input method
+  (IME), so composing text never shows or teaches one a password. Pasting
+  into the field is allowed, for password managers; a line break inside
+  pasted text ends the input there without submitting. The field has no
+  history, scrollback, or copy source, and Splinterm never puts the answer on
+  the clipboard.
 - Answers are limited to 1023 bytes, kept in buffers that never reallocate,
   wiped after they are handed to OpenSSH or abandoned, and never logged or
   written to diagnostics. The helper process disables core dumps for itself.
-- Escape on a password field refuses the prompt and ends the attempt, which
-  is reported as an authentication failure with Retry, so OpenSSH cannot send
-  an empty password or ask again. A yes/no question needs an explicit Y or N.
-  A prompt left unanswered for 120 seconds is refused.
+- OpenSSH turns any refused prompt into an empty password and asks again, so
+  Splinterm never refuses a password prompt. Escape, closing the Window, or
+  leaving a password or yes/no prompt unanswered for 120 seconds ends the
+  attempt: Splinterm kills OpenSSH (and a nested `ProxyJump` OpenSSH that
+  asked) before the prompt closes. This is reported as an authentication
+  failure with Retry. A yes/no question needs an explicit Y or N, and N is
+  passed to OpenSSH as "no".
 
 Splinterm never places a password or passphrase in argv, TOML, relay frames,
 diagnostics, or application storage. Post-connect SSH authentication and relay

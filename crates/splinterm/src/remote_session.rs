@@ -314,8 +314,9 @@ impl RemoteSession {
             .take()
             .context("OpenSSH child stderr pipe is unavailable")?;
         // Serves prompts only from this OpenSSH child's descendants, and only
-        // until negotiation ends: dropping it removes the socket and abandons
-        // any open prompt.
+        // until negotiation ends. Dropping it unreleased (a failure, or the
+        // status Window dropping this attempt) SIGKILLs OpenSSH before closing
+        // any open prompt, so OpenSSH never reads a refusal as an empty password.
         let askpass_service = broker.and_then(|broker| child.id().map(|pid| broker.serve(pid)));
         let diagnostics = Arc::new(Mutex::new(DiagnosticRing::default()));
         let stderr_diagnostics = diagnostics.clone();
@@ -333,7 +334,7 @@ impl RemoteSession {
             Ok(Err(error)) => {
                 terminate_child(&mut child).await;
                 // Ends a helper still waiting on the socket, so it releases
-                // the inherited stderr pipe.
+                // the inherited stderr pipe. OpenSSH is already dead.
                 drop(askpass_service);
                 let _ = stderr_task.await;
                 let diagnostic = rendered_diagnostics(&diagnostics);
@@ -358,7 +359,10 @@ impl RemoteSession {
             }
         };
 
-        drop(askpass_service);
+        // Authenticated: stop serving prompts without killing OpenSSH.
+        if let Some(service) = askpass_service {
+            service.release();
+        }
         let cancellation = CancellationToken::new();
         let lifetime = Arc::new(RemoteLifetime {
             cancellation: cancellation.clone(),

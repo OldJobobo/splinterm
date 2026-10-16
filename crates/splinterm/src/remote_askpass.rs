@@ -19,12 +19,19 @@ use std::{
     fs::{self, DirBuilder},
     io::{Read, Write},
     mem::MaybeUninit,
-    os::unix::{
-        ffi::OsStrExt as _,
-        fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _},
-        net::UnixStream as StdUnixStream,
+    os::{
+        fd::OwnedFd,
+        unix::{
+            ffi::OsStrExt as _,
+            fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _},
+            net::UnixStream as StdUnixStream,
+        },
     },
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -44,7 +51,8 @@ pub const TOKEN_ENV: &str = "SPLINTERM_ASKPASS_TOKEN";
 pub const MAX_PROMPT_BYTES: usize = 4096;
 /// Longest answer accepted. OpenSSH reads at most 1023 bytes plus a newline.
 pub const MAX_SECRET_BYTES: usize = 1023;
-/// How long one prompt may stay open before it is refused.
+/// How long one prompt may stay open. The status Window then ends the
+/// attempt; a secret prompt is never refused while OpenSSH runs.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Prompt lines shown at most.
 pub const MAX_PROMPT_LINES: usize = 8;
@@ -59,6 +67,8 @@ const REQUEST_HEADER_BYTES: usize = MAGIC.len() + 2 + TOKEN_HEX_BYTES + 2;
 const REPLY_HEADER_BYTES: usize = MAGIC.len() + 2 + 2;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const HELPER_SLACK: Duration = Duration::from_secs(30);
+/// How long after [`PROMPT_TIMEOUT`] the broker itself gives up on a prompt.
+const BROKER_BACKSTOP_SLACK: Duration = Duration::from_secs(15);
 const MAX_ANCESTOR_HOPS: usize = 4;
 const REPLY_ANSWER: u8 = 0;
 const REPLY_REFUSED: u8 = 1;
@@ -312,13 +322,22 @@ pub enum FieldOutcome {
 /// pasted text, is appended up to [`MAX_SECRET_BYTES`]; Backspace removes a
 /// character, Ctrl+U clears, Enter submits, and Escape or Ctrl+C cancels.
 /// Other control bytes and escape sequences (arrows, Alt+key) are ignored.
-/// Bytes after Enter or a cancel are discarded.
+/// Bytes after a cancel are discarded. A line break submits only when it
+/// ends the input; a line break inside pasted text ends the field's input
+/// there without submitting, and the rest of the paste is discarded.
 pub fn apply_secret_input(field: &mut Secret, input: &[u8]) -> FieldOutcome {
     let mut index = 0;
     while index < input.len() {
         let byte = input[index];
         match byte {
-            b'\r' | b'\n' => return FieldOutcome::Submit,
+            b'\r' | b'\n' => {
+                let rest = &input[index + 1..];
+                return if rest.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
+                    FieldOutcome::Submit
+                } else {
+                    FieldOutcome::Editing
+                };
+            }
             0x03 => return FieldOutcome::Cancel,
             0x1b => {
                 let Some(&next) = input.get(index + 1) else {
@@ -384,8 +403,9 @@ pub enum AskpassReply {
     Submit(Secret),
     /// Yes to a confirmation.
     Confirm,
-    /// Escape, No, timeout, or the Window closed. OpenSSH treats it as a
-    /// failed prompt: no answer, or "no" for a question.
+    /// No to a confirmation, which OpenSSH reads as "no". A secret prompt is
+    /// never refused this way: the broker kills OpenSSH first instead, because
+    /// OpenSSH would send an empty password and ask again.
     Cancel,
 }
 
@@ -553,6 +573,8 @@ impl AskpassBroker {
 
     #[doc(hidden)]
     pub fn bind_in(base: &Path, prompt: &NativePrompt) -> Result<Self> {
+        // Killing OpenSSH safely before a secret prompt ends needs pidfds.
+        open_pidfd(std::process::id()).context("pidfds are unavailable")?;
         let name = format!("splinterm-askpass-{}", hex(&random_bytes::<12>()?));
         let path = base.join(name);
         DirBuilder::new()
@@ -590,26 +612,116 @@ impl AskpassBroker {
         ]
     }
 
-    /// Starts serving prompts from descendants of `ancestor`, the OpenSSH
-    /// child of this attempt. Dropping the service stops it and removes the
-    /// socket.
+    /// Starts serving prompts from descendants of `ssh_pid`, the OpenSSH
+    /// child of this attempt. Dropping the service before
+    /// [`AskpassService::release`] SIGKILLs that OpenSSH first.
     #[must_use]
-    pub fn serve(self, ancestor: u32) -> AskpassService {
+    pub fn serve(self, ssh_pid: u32) -> AskpassService {
+        let terminator = Terminator::for_process(ssh_pid);
+        self.serve_with(ssh_pid, terminator)
+    }
+
+    /// Like [`Self::serve`] with an explicit terminator, so tests whose stand-in
+    /// for OpenSSH is the test process itself can record instead of kill.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn serve_with(self, ancestor: u32, terminator: Terminator) -> AskpassService {
         let Self {
             directory,
             token,
             listener,
             prompt,
         } = self;
+        let terminator = Arc::new(terminator);
         let task = tokio::spawn(serve_prompts(
             listener,
             token.into_bytes(),
             ancestor,
+            terminator.clone(),
             prompt.requests,
         ));
         AskpassService {
             task,
+            terminator,
+            armed: true,
             _directory: directory,
+        }
+    }
+}
+
+fn open_pidfd(pid: u32) -> Option<OwnedFd> {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+}
+
+fn kill_pidfd(pidfd: &OwnedFd) {
+    // A pidfd names one process, so a reaped OpenSSH can never be confused
+    // with a later process reusing its pid; signalling it then fails harmlessly.
+    let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+}
+
+#[derive(Debug)]
+enum TerminatorTarget {
+    Process(Option<OwnedFd>),
+    Record(Arc<AtomicUsize>),
+}
+
+/// Ends OpenSSH before a secret prompt can end without an answer.
+///
+/// OpenSSH turns any askpass failure into an empty answer and, for password
+/// and keyboard-interactive authentication, sends it and asks again. So a
+/// secret prompt is never refused: OpenSSH, and the helper's direct parent
+/// when that is a nested OpenSSH (`ProxyJump`), are SIGKILLed first, and the
+/// helper is then closed without a reply.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct Terminator {
+    target: TerminatorTarget,
+    peer_parent: Mutex<Option<OwnedFd>>,
+}
+
+impl Terminator {
+    fn for_process(pid: u32) -> Self {
+        Self {
+            target: TerminatorTarget::Process(open_pidfd(pid)),
+            peer_parent: Mutex::new(None),
+        }
+    }
+
+    /// Counts terminations instead of killing anything.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn recording(count: Arc<AtomicUsize>) -> Self {
+        Self {
+            target: TerminatorTarget::Record(count),
+            peer_parent: Mutex::new(None),
+        }
+    }
+
+    fn set_peer_parent(&self, pidfd: Option<OwnedFd>) {
+        if let Ok(mut peer_parent) = self.peer_parent.lock() {
+            *peer_parent = pidfd;
+        }
+    }
+
+    fn terminate(&self) {
+        let peer_parent = self
+            .peer_parent
+            .lock()
+            .ok()
+            .and_then(|mut peer_parent| peer_parent.take());
+        match &self.target {
+            TerminatorTarget::Process(ssh) => {
+                if let Some(parent) = &peer_parent {
+                    kill_pidfd(parent);
+                }
+                if let Some(ssh) = ssh {
+                    kill_pidfd(ssh);
+                }
+            }
+            TerminatorTarget::Record(count) => {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -618,11 +730,25 @@ impl AskpassBroker {
 #[derive(Debug)]
 pub struct AskpassService {
     task: JoinHandle<()>,
+    terminator: Arc<Terminator>,
+    armed: bool,
     _directory: PrivateDirectory,
+}
+
+impl AskpassService {
+    /// Stops serving after OpenSSH authenticated, without killing it.
+    pub fn release(mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for AskpassService {
     fn drop(&mut self) {
+        // Kill first: aborting closes any open helper connection, and the
+        // helper's exit would otherwise reach OpenSSH as an empty answer.
+        if self.armed {
+            self.terminator.terminate();
+        }
         // Aborting drops any open prompt's reply channel, so the status Window
         // sees it abandoned and wipes its field.
         self.task.abort();
@@ -633,12 +759,14 @@ async fn serve_prompts(
     listener: UnixListener,
     token: Vec<u8>,
     ancestor: u32,
+    terminator: Arc<Terminator>,
     requests: mpsc::Sender<AskpassRequest>,
 ) {
     // One connection at a time: OpenSSH asks sequentially, and a second
     // helper waits in the backlog until the first prompt is answered.
     while let Ok((stream, _)) = listener.accept().await {
-        let _ = serve_connection(stream, &token, ancestor, &requests).await;
+        let _ = serve_connection(stream, &token, ancestor, &terminator, &requests).await;
+        terminator.set_peer_parent(None);
     }
 }
 
@@ -667,7 +795,10 @@ fn descends_from(pid: u32, ancestor: u32) -> bool {
     false
 }
 
-fn verify_peer(stream: &UnixStream, ancestor: u32) -> Result<()> {
+/// Accepts a same-user peer descending from `ancestor`. Returns a pidfd for
+/// the peer's direct parent, the OpenSSH that will read the answer, when that
+/// is not `ancestor` itself (a nested `ProxyJump` OpenSSH).
+fn verify_peer(stream: &UnixStream, ancestor: u32) -> Result<Option<OwnedFd>> {
     let credentials = stream
         .peer_cred()
         .context("read askpass peer credentials")?;
@@ -681,7 +812,13 @@ fn verify_peer(stream: &UnixStream, ancestor: u32) -> Result<()> {
     if !descends_from(pid, ancestor) {
         bail!("askpass peer was not started by this attempt's OpenSSH");
     }
-    Ok(())
+    let parent = parent_pid(pid).context("askpass peer parent is unavailable")?;
+    if parent == ancestor {
+        return Ok(None);
+    }
+    let pidfd = open_pidfd(parent);
+    // Still the parent after opening, so the pidfd names that live process.
+    Ok(pidfd.filter(|_| parent_pid(pid) == Some(parent)))
 }
 
 struct WireRequest {
@@ -740,9 +877,10 @@ async fn serve_connection(
     stream: UnixStream,
     token: &[u8],
     ancestor: u32,
+    terminator: &Terminator,
     requests: &mpsc::Sender<AskpassRequest>,
 ) -> Result<()> {
-    verify_peer(&stream, ancestor)?;
+    let peer_parent = verify_peer(&stream, ancestor)?;
     let (mut reader, mut writer) = stream.into_split();
     let request = tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut reader))
         .await
@@ -750,31 +888,53 @@ async fn serve_connection(
     if !constant_time_eq(&request.token, token) {
         bail!("askpass token was rejected");
     }
+    terminator.set_peer_parent(peer_parent);
+    // Classify the whole prompt, not the shortened lines shown on screen.
+    let kind = classify_prompt(request.hint, &String::from_utf8_lossy(&request.prompt));
     let prompt = sanitize_prompt(&request.prompt);
-    let kind = classify_prompt(request.hint, &prompt.join("\n"));
     let (reply, mut answer) = oneshot::channel();
-    let deadline = tokio::time::Instant::now() + PROMPT_TIMEOUT;
-    tokio::time::timeout_at(
-        deadline,
-        requests.send(AskpassRequest {
-            kind,
-            prompt,
-            reply,
-        }),
-    )
-    .await
-    .context("status Window did not take the prompt")?
-    .context("status Window is gone")?;
-    let mut probe = [0_u8; 1];
-    let reply = tokio::select! {
-        answer = &mut answer => answer.unwrap_or(AskpassReply::Cancel),
-        // Any byte, EOF, or error means the helper is gone; dropping `answer`
-        // tells the status Window to remove the prompt.
-        _ = reader.read(&mut probe) => return Ok(()),
-        () = tokio::time::sleep_until(deadline) => AskpassReply::Cancel,
+    // The status Window times prompts out itself and kills the attempt; this
+    // later deadline is only a backstop.
+    let backstop = tokio::time::Instant::now() + PROMPT_TIMEOUT + BROKER_BACKSTOP_SLACK;
+    let delivered = matches!(
+        tokio::time::timeout_at(
+            backstop,
+            requests.send(AskpassRequest {
+                kind,
+                prompt,
+                reply,
+            }),
+        )
+        .await,
+        Ok(Ok(()))
+    );
+    let outcome = if delivered {
+        let mut probe = [0_u8; 1];
+        tokio::select! {
+            answer = &mut answer => answer.ok(),
+            // Any byte, EOF, or error means the helper is gone; dropping
+            // `answer` tells the status Window to remove the prompt.
+            _ = reader.read(&mut probe) => return Ok(()),
+            () = tokio::time::sleep_until(backstop) => None,
+        }
+    } else {
+        None
     };
     drop(answer);
-    write_reply(&mut writer, reply).await
+    match (kind, outcome) {
+        (_, Some(reply @ (AskpassReply::Submit(_) | AskpassReply::Confirm))) => {
+            write_reply(&mut writer, reply).await
+        }
+        // OpenSSH reads a refused question as "no", which is safe.
+        (AskpassKind::Confirm, _) => write_reply(&mut writer, AskpassReply::Cancel).await,
+        // A notice expects no answer; OpenSSH ignores how its helper ends.
+        (AskpassKind::Notice, _) => Ok(()),
+        // Never refuse a secret: kill OpenSSH first, then close silently.
+        (AskpassKind::Secret, _) => {
+            terminator.terminate();
+            Ok(())
+        }
+    }
 }
 
 /// Runs the internal askpass helper when OpenSSH started this executable with
@@ -997,8 +1157,14 @@ mod tests {
         );
         assert_eq!(field(b"abc\x1b").1, FieldOutcome::Cancel);
         assert_eq!(field(b"abc\x03def").1, FieldOutcome::Cancel);
-        // Pasted text after Enter is discarded, not submitted later.
+        // A line break inside a paste stops input there without submitting;
+        // the rest is discarded. A trailing line break submits.
         let (secret, outcome) = field(b"first\nsecond");
+        assert_eq!(
+            (secret.expose(), outcome),
+            (&b"first"[..], FieldOutcome::Editing)
+        );
+        let (secret, outcome) = field(b"first\r\n");
         assert_eq!(
             (secret.expose(), outcome),
             (&b"first"[..], FieldOutcome::Submit)
@@ -1071,14 +1237,28 @@ mod tests {
         assert!(!descends_from(u32::MAX, parent));
     }
 
-    fn broker(
-        ancestor: u32,
-    ) -> (
-        AskpassService,
-        [(&'static str, OsString); 4],
-        mpsc::Receiver<AskpassRequest>,
-        PathBuf,
-    ) {
+    struct Broker {
+        service: AskpassService,
+        environment: [(&'static str, OsString); 4],
+        requests: mpsc::Receiver<AskpassRequest>,
+        directory: PathBuf,
+        /// Times the broker would have killed OpenSSH.
+        kills: Arc<AtomicUsize>,
+    }
+
+    impl Broker {
+        fn token(&self) -> OsString {
+            env_value(&self.environment, TOKEN_ENV).to_owned()
+        }
+
+        fn kills(&self) -> usize {
+            self.kills.load(Ordering::SeqCst)
+        }
+    }
+
+    /// The test process's parent stands in for OpenSSH, so terminations are
+    /// recorded, never delivered.
+    fn start_broker(ancestor: u32) -> Broker {
         let (requests, receiver) = mpsc::channel(4);
         let prompt = NativePrompt::new(PathBuf::from("/nonexistent/splinterm"), requests);
         let broker = AskpassBroker::bind_in(&std::env::temp_dir(), &prompt).unwrap();
@@ -1088,7 +1268,18 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
         let socket = fs::metadata(&broker.directory.socket).unwrap();
         assert_eq!(socket.permissions().mode() & 0o777, 0o600);
-        (broker.serve(ancestor), environment, receiver, directory)
+        let kills = Arc::new(AtomicUsize::new(0));
+        Broker {
+            service: broker.serve_with(ancestor, Terminator::recording(kills.clone())),
+            environment,
+            requests: receiver,
+            directory,
+            kills,
+        }
+    }
+
+    fn openssh_stand_in() -> u32 {
+        parent_pid(std::process::id()).unwrap()
     }
 
     fn env_value<'a>(environment: &'a [(&'static str, OsString); 4], key: &str) -> &'a OsStr {
@@ -1117,17 +1308,17 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_answers_and_cleanup_remove_the_socket() {
-        let ancestor = parent_pid(std::process::id()).unwrap();
-        let (service, environment, mut requests, directory) = broker(ancestor);
+        let mut broker = start_broker(openssh_stand_in());
         assert_eq!(
-            env_value(&environment, "SSH_ASKPASS_REQUIRE"),
+            env_value(&broker.environment, "SSH_ASKPASS_REQUIRE"),
             OsStr::new("force")
         );
         assert_eq!(
-            env_value(&environment, "SSH_ASKPASS"),
+            env_value(&broker.environment, "SSH_ASKPASS"),
             OsStr::new("/nonexistent/splinterm")
         );
-        let token = env_value(&environment, TOKEN_ENV).to_owned();
+        let token = broker.token();
+        let mut requests = std::mem::replace(&mut broker.requests, mpsc::channel(1).1);
         let answering = tokio::spawn(async move {
             let request = requests.recv().await.unwrap();
             assert_eq!(request.kind(), AskpassKind::Secret);
@@ -1139,58 +1330,154 @@ mod tests {
             assert_eq!(request.kind(), AskpassKind::Confirm);
             request.answer(AskpassReply::Confirm);
             let request = requests.recv().await.unwrap();
+            assert_eq!(request.kind(), AskpassKind::Confirm);
             request.answer(AskpassReply::Cancel);
         });
+        let environment = &broker.environment;
         let (code, output) = helper(
-            &environment,
+            environment,
             &token,
             "case@host's password: ",
             AskpassHint::Default,
         )
         .await;
         assert_eq!((code.unwrap(), output.as_slice()), (0, &b"hunter2\n"[..]));
-        let (code, output) = helper(&environment, &token, "Allow key?", AskpassHint::Confirm).await;
+        let (code, output) = helper(environment, &token, "Allow key?", AskpassHint::Confirm).await;
         assert_eq!((code.unwrap(), output.as_slice()), (0, &b"yes\n"[..]));
-        let (code, output) = helper(&environment, &token, "password:", AskpassHint::Default).await;
+        // "No" to a question is a refusal, which OpenSSH reads as "no".
+        let (code, output) = helper(
+            environment,
+            &token,
+            "Accept updated hostkeys? (yes/no):",
+            AskpassHint::Default,
+        )
+        .await;
         assert_eq!((code.unwrap(), output.as_slice()), (1, &b""[..]));
         answering.await.unwrap();
-        drop(service);
+        assert_eq!(
+            broker.kills(),
+            0,
+            "answers and questions never kill OpenSSH"
+        );
+        let Broker {
+            service,
+            directory,
+            kills,
+            ..
+        } = broker;
+        service.release();
+        assert_eq!(kills.load(Ordering::SeqCst), 0, "release does not kill");
         assert!(!directory.exists(), "the private directory is removed");
     }
 
     #[tokio::test]
+    async fn a_secret_prompt_without_an_answer_kills_openssh_before_closing() {
+        // The status Window drops the prompt without answering.
+        let mut broker = start_broker(openssh_stand_in());
+        let token = broker.token();
+        let mut requests = std::mem::replace(&mut broker.requests, mpsc::channel(1).1);
+        let dropping = tokio::spawn(async move {
+            let request = requests.recv().await.unwrap();
+            assert_eq!(request.kind(), AskpassKind::Secret);
+            drop(request);
+            requests
+        });
+        let (code, output) = helper(
+            &broker.environment,
+            &token,
+            "password:",
+            AskpassHint::Default,
+        )
+        .await;
+        assert_eq!((code.unwrap(), output.as_slice()), (1, &b""[..]));
+        assert_eq!(
+            broker.kills(),
+            1,
+            "OpenSSH was killed before the helper exited"
+        );
+        let mut requests = dropping.await.unwrap();
+
+        // An explicit Cancel on a secret is treated the same way.
+        let answering = tokio::spawn(async move {
+            requests.recv().await.unwrap().answer(AskpassReply::Cancel);
+            requests
+        });
+        let (code, _) = helper(
+            &broker.environment,
+            &token,
+            "password:",
+            AskpassHint::Default,
+        )
+        .await;
+        assert_eq!(code.unwrap(), 1);
+        assert_eq!(broker.kills(), 2);
+        drop(answering.await.unwrap());
+
+        // With the status Window gone, the prompt cannot even be delivered.
+        let (code, _) = helper(
+            &broker.environment,
+            &token,
+            "password:",
+            AskpassHint::Default,
+        )
+        .await;
+        assert_eq!(code.unwrap(), 1);
+        assert_eq!(broker.kills(), 3);
+        broker.service.release();
+    }
+
+    #[tokio::test]
     async fn wrong_tokens_and_foreign_processes_are_refused_without_a_prompt() {
-        let ancestor = parent_pid(std::process::id()).unwrap();
-        let (service, environment, mut requests, _directory) = broker(ancestor);
+        let mut broker = start_broker(openssh_stand_in());
         let wrong = OsString::from("0".repeat(TOKEN_HEX_BYTES));
-        let (code, output) = helper(&environment, &wrong, "password:", AskpassHint::Default).await;
+        let (code, output) = helper(
+            &broker.environment,
+            &wrong,
+            "password:",
+            AskpassHint::Default,
+        )
+        .await;
         assert_eq!((code.unwrap(), output.as_slice()), (1, &b""[..]));
         let (code, _) = helper(
-            &environment,
+            &broker.environment,
             OsStr::new("not-a-token"),
             "password:",
             AskpassHint::Default,
         )
         .await;
         assert!(code.is_err());
-        assert!(requests.try_recv().is_err(), "no prompt reached the Window");
-        drop(service);
+        assert!(
+            broker.requests.try_recv().is_err(),
+            "no prompt reached the Window"
+        );
+        assert_eq!(
+            broker.kills(),
+            0,
+            "an impostor cannot make Splinterm kill OpenSSH"
+        );
+        broker.service.release();
 
         // A correct token from a process outside the attempt's OpenSSH tree.
-        let (service, environment, mut requests, _directory) = broker(u32::MAX);
-        let token = env_value(&environment, TOKEN_ENV).to_owned();
-        let (code, _) = helper(&environment, &token, "password:", AskpassHint::Default).await;
+        let mut broker = start_broker(u32::MAX);
+        let token = broker.token();
+        let (code, _) = helper(
+            &broker.environment,
+            &token,
+            "password:",
+            AskpassHint::Default,
+        )
+        .await;
         assert_eq!(code.unwrap(), 1);
-        assert!(requests.try_recv().is_err());
-        drop(service);
+        assert!(broker.requests.try_recv().is_err());
+        assert_eq!(broker.kills(), 0);
+        broker.service.release();
     }
 
     #[tokio::test]
     async fn an_abandoned_helper_withdraws_its_prompt() {
-        let ancestor = parent_pid(std::process::id()).unwrap();
-        let (service, environment, mut requests, _directory) = broker(ancestor);
-        let socket = env_value(&environment, SOCKET_ENV).to_owned();
-        let token = env_value(&environment, TOKEN_ENV).to_owned();
+        let mut broker = start_broker(openssh_stand_in());
+        let socket = env_value(&broker.environment, SOCKET_ENV).to_owned();
+        let token = broker.token();
         // A raw client that sends a request and then disconnects.
         let client = tokio::task::spawn_blocking(move || {
             let mut stream = StdUnixStream::connect(socket).unwrap();
@@ -1203,7 +1490,7 @@ mod tests {
             stream.write_all(&request).unwrap();
             stream
         });
-        let mut request = requests.recv().await.unwrap();
+        let mut request = broker.requests.recv().await.unwrap();
         assert_eq!(request.kind(), AskpassKind::Notice);
         assert!(!request.is_abandoned());
         drop(client.await.unwrap());
@@ -1211,26 +1498,42 @@ mod tests {
             .await
             .unwrap();
         assert!(request.is_abandoned());
-        drop(service);
+        assert_eq!(broker.kills(), 0);
+        broker.service.release();
     }
 
     #[tokio::test]
-    async fn stopping_the_service_abandons_an_open_prompt() {
-        let ancestor = parent_pid(std::process::id()).unwrap();
-        let (service, environment, mut requests, _directory) = broker(ancestor);
-        let token = env_value(&environment, TOKEN_ENV).to_owned();
+    async fn dropping_an_armed_service_kills_openssh_then_abandons_the_prompt() {
+        let mut broker = start_broker(openssh_stand_in());
+        let token = broker.token();
         let pending = {
-            let environment = environment.clone();
+            let environment = broker.environment.clone();
             tokio::spawn(async move {
                 helper(&environment, &token, "password:", AskpassHint::Default).await
             })
         };
-        let mut request = requests.recv().await.unwrap();
-        drop(service);
+        let mut request = broker.requests.recv().await.unwrap();
+        let kills = broker.kills.clone();
+        drop(broker.service);
+        assert_eq!(kills.load(Ordering::SeqCst), 1, "killed before the abort");
         tokio::time::timeout(Duration::from_secs(5), request.abandoned())
             .await
             .unwrap();
         let (code, output) = pending.await.unwrap();
         assert_eq!((code.unwrap(), output.as_slice()), (1, &b""[..]));
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn yes_no_questions_are_classified_on_the_full_prompt() {
+        // The question is past the shown lines and line-length limits.
+        let mut prompt = "x".repeat(MAX_PROMPT_LINE_CHARS * 2);
+        prompt.push_str(" Continue (yes/no)?");
+        let lines = sanitize_prompt(prompt.as_bytes());
+        assert!(!lines.join("\n").contains("(yes/no"));
+        assert_eq!(
+            classify_prompt(AskpassHint::Default, &prompt),
+            AskpassKind::Confirm
+        );
     }
 }
