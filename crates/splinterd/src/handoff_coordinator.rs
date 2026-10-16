@@ -53,7 +53,15 @@ impl RollbackHandoffAuthority {
         // either executable is copied.
         let record_path =
             package_provenance_path(&daemon).map_err(|_| HandoffCoordinatorError::NotPackaged)?;
-        let record = PackageProvenanceRecord::load(&record_path, PACKAGED_OWNER_UID)?;
+        // Dirty-tree builds install the pair without a record on purpose.
+        let record = match PackageProvenanceRecord::load(&record_path, PACKAGED_OWNER_UID) {
+            Err(PackageProvenanceError::Open { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                return Err(HandoffCoordinatorError::NotPackaged);
+            }
+            record => record?,
+        };
         let source = installed_source_pair(&daemon)?;
         let executables = RetainedRollbackExecutables::capture(
             &source,
