@@ -62,6 +62,8 @@ A native remote Window receives ordinary human multiplexer authority after SSH a
 
 SSH or relay loss closes the affected local views and releases connection-owned controllers. It sends no kill or close request, so daemon-owned remote Splints continue running.
 
+The human role is not a boundary against software already running as the account. `splinterd` recognizes the graphical relay by its installed executable and `--graphical-stdio` mode, and the relay forwards whatever its caller sends, so any process running as the account can start it and receive the same authority without a prompt. Policy and consent keep cooperating tools within what was granted and make their access visible; they do not contain a hostile process, which can already read the account's files and run its commands.
+
 :::note[Remote images]
 Remote graphical sessions intentionally omit terminal image transfer. Unexpected remote image metadata fails the affected pane closed rather than opening a content channel.
 :::

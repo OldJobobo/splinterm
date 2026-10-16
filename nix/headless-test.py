@@ -44,6 +44,10 @@ def wait_for_daemon(machine: Machine, package: str = PACKAGE) -> str:
     assert "DISPLAY=" not in environment
     assert "WAYLAND_DISPLAY=" not in environment
     assert "SPLINTERM_ENABLE_DEV_ATTACH=" not in environment
+    # A packaged daemon retains its own sealed pair as rollback authority.
+    descriptors = machine.succeed(f"ls -l /proc/{pid}/fd")
+    assert "memfd:splinterd-daemon" in descriptors, descriptors
+    assert "memfd:splinterd-client" in descriptors, descriptors
     return pid
 
 

@@ -148,6 +148,11 @@ pub struct RetainedRollbackExecutables {
 }
 
 impl RetainedRollbackExecutables {
+    #[must_use]
+    pub const fn pair(&self) -> &SealedExecutablePair {
+        &self.pair
+    }
+
     /// Captures the installed pair while the caller excludes package replacement.
     ///
     /// The daemon is opened through `/proc/self/exe` and must still identify the
