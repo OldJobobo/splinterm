@@ -102,31 +102,31 @@ impl StatusWindow {
 
 /// Drives one status screen until it hands over a connected endpoint, or the
 /// Window closes first. The first attempt starts once the Window has mapped.
-/// `connect` runs one attempt and `report` records each failure. `destination`
-/// re-reads the shown destination before each attempt, as `connect` reloads
-/// the profile. Nothing here writes to stdout or stderr.
+/// `connect` starts one attempt and returns the destination it connects to,
+/// so the shown destination and the connection come from one profile load.
+/// `report` records each failure. Nothing here writes to stdout or stderr.
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
     mut commands: mpsc::Receiver<WindowCommand>,
     mut connect: F,
     mut report: impl FnMut(&RemoteStatusFailure),
-    mut destination: impl FnMut() -> String,
 ) -> Result<T, RemoteNotConnected>
 where
-    F: FnMut() -> Fut,
+    F: FnMut() -> (String, Fut),
     Fut: Future<Output = Result<T>>,
 {
     // A Window that ended unmapped has also closed `commands`, so the loop
     // ends the flow without starting an attempt.
     let mut attempt = if window.wait_mapped().await {
         // The profile may have changed while the Window mapped.
+        let (destination, future) = connect();
         let shown = status.destination().to_owned();
-        status.set_destination(&destination());
+        status.set_destination(&destination);
         if status.destination() != shown {
             window.show(&status);
         }
-        Some(Box::pin(connect()))
+        Some(Box::pin(future))
     } else {
         None
     };
@@ -145,8 +145,9 @@ where
                 };
                 match effect {
                     RemoteStatusEffect::StartAttempt => {
-                        status.set_destination(&destination());
-                        attempt = Some(Box::pin(connect()));
+                        let (destination, future) = connect();
+                        status.set_destination(&destination);
+                        attempt = Some(Box::pin(future));
                         window.show(&status);
                     }
                     RemoteStatusEffect::Close => {
@@ -183,18 +184,34 @@ where
     }
 }
 
-/// One attempt: reload the profile, authenticate, and prove the remote daemon
-/// answers, so daemon failures are reported here rather than after hand-over.
-/// Only catalog errors are marked as profile errors; every later error keeps
-/// its own category or is reported as a transport failure.
-async fn connect_profile(profile_name: String) -> Result<ConnectionFactory> {
-    let catalog =
-        RemoteCatalog::load_default().map_err(|error| RemoteProfileError::wrap(&error))?;
-    let profile = catalog
-        .get(&profile_name)
-        .map_err(|error| RemoteProfileError::wrap(&error))?;
+/// Loads `profile_name` from the current `remotes.toml`.
+fn load_profile(profile_name: &str) -> Result<RemoteProfile> {
+    RemoteCatalog::load_default()?.get(profile_name).cloned()
+}
+
+/// Starts one attempt from a single load of the profile: the destination to
+/// show (the profile label when it cannot be loaded) and the connection.
+fn start_attempt(
+    profile_name: &str,
+) -> (
+    String,
+    impl Future<Output = Result<ConnectionFactory>> + use<>,
+) {
+    let profile = load_profile(profile_name);
+    let shown = profile
+        .as_ref()
+        .map_or_else(|_| profile_label(profile_name).to_owned(), destination);
+    (shown, connect_profile(profile))
+}
+
+/// One attempt: authenticate with the loaded profile and prove the remote
+/// daemon answers, so daemon failures are reported here rather than after
+/// hand-over. Only catalog errors are marked as profile errors; every later
+/// error keeps its own category or is reported as a transport failure.
+async fn connect_profile(profile: Result<RemoteProfile>) -> Result<ConnectionFactory> {
+    let profile = profile.map_err(|error| RemoteProfileError::wrap(&error))?;
     let deadline = Duration::from_secs(u64::from(profile.connect_timeout_seconds()));
-    let factory = ConnectionFactory::remote(profile).await?;
+    let factory = ConnectionFactory::remote(&profile).await?;
     let mut connection = factory.connect().await?;
     if !matches!(
         connection
@@ -218,15 +235,6 @@ fn report_failure(failure: &RemoteStatusFailure) {
     }
 }
 
-/// The destination shown for `profile_name` from the current `remotes.toml`,
-/// or the profile label when the profile cannot be loaded.
-fn destination_label(profile_name: &str) -> String {
-    RemoteCatalog::load_default()
-        .ok()
-        .and_then(|catalog| catalog.get(profile_name).ok().map(destination))
-        .unwrap_or_else(|| profile_label(profile_name).to_owned())
-}
-
 /// Maps a status Window, connects to `profile_name`, and returns the connected
 /// endpoint once the Window has closed.
 ///
@@ -238,8 +246,12 @@ pub(in crate::app) async fn connect_with_status(
     profile_name: String,
     config: &AppConfig,
 ) -> Result<ConnectionFactory> {
-    let status = RemoteStatus::new(&profile_name, &destination_label(&profile_name))
-        .with_terminal(std::io::stdin().is_terminal());
+    let initial = load_profile(&profile_name).map_or_else(
+        |_| profile_label(&profile_name).to_owned(),
+        |profile| destination(&profile),
+    );
+    let status =
+        RemoteStatus::new(&profile_name, &initial).with_terminal(std::io::stdin().is_terminal());
     let splint_id = SplintId::new();
     let snapshot = status.snapshot(splint_id, 1);
     let (updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
@@ -275,9 +287,8 @@ pub(in crate::app) async fn connect_with_status(
         status,
         window,
         commands,
-        || connect_profile(profile_name.clone()),
+        || start_attempt(&profile_name),
         report_failure,
-        || destination_label(&profile_name),
     )
     .await;
     window_task
@@ -340,6 +351,30 @@ mod tests {
         "case@wintermute".to_owned()
     }
 
+    /// Runs the flow with the destination and the attempt as separate
+    /// closures; each attempt reads the destination just before it starts.
+    async fn split_flow<T, F, Fut>(
+        status: RemoteStatus,
+        window: StatusWindow,
+        commands: mpsc::Receiver<WindowCommand>,
+        mut connect: F,
+        report: impl FnMut(&RemoteStatusFailure),
+        mut destination: impl FnMut() -> String,
+    ) -> Result<T, RemoteNotConnected>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        run_status_flow(
+            status,
+            window,
+            commands,
+            move || (destination(), connect()),
+            report,
+        )
+        .await
+    }
+
     fn text(snapshot: &TerminalSnapshot) -> String {
         snapshot
             .visible_rows
@@ -379,7 +414,7 @@ mod tests {
     async fn success_closes_the_status_window_and_hands_over() {
         let (mut harness, window, commands) = harness();
         let reports = Cell::new(0);
-        let connected = run_status_flow(
+        let connected = split_flow(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -404,7 +439,7 @@ mod tests {
             let attempts = attempts.clone();
             let reports = reports.clone();
             let release = release.clone();
-            tokio::spawn(run_status_flow(
+            tokio::spawn(split_flow(
                 RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
@@ -493,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn closing_cancels_the_attempt_and_the_window() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+        let flow = tokio::spawn(split_flow::<(), _, _>(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -521,7 +556,7 @@ mod tests {
             .send(WindowCommand::Input(b"\x1b".to_vec()))
             .await
             .unwrap();
-        let connected = run_status_flow(
+        let connected = split_flow(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -541,7 +576,7 @@ mod tests {
             commands: sender, ..
         } = harness;
         drop(sender);
-        let connected = run_status_flow::<(), _, _>(
+        let connected = split_flow::<(), _, _>(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -556,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn closing_after_a_profile_failure_reports_it_and_is_not_connected() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+        let flow = tokio::spawn(split_flow::<(), _, _>(
             RemoteStatus::new("gone", "case@wintermute"),
             window,
             commands,
@@ -592,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn uncategorized_attempt_errors_are_shown_as_transport_failures() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+        let flow = tokio::spawn(split_flow::<(), _, _>(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -627,7 +662,7 @@ mod tests {
         let attempts = Arc::new(Mutex::new(0_u32));
         let flow = {
             let attempts = attempts.clone();
-            tokio::spawn(run_status_flow(
+            tokio::spawn(split_flow(
                 RemoteStatus::new("wintermute", "case@wintermute"),
                 window,
                 commands,
@@ -665,7 +700,7 @@ mod tests {
             ..
         } = harness;
         drop((sender, mapped));
-        let connected = run_status_flow::<(), _, _>(
+        let connected = split_flow::<(), _, _>(
             RemoteStatus::new("wintermute", "case@wintermute"),
             window,
             commands,
@@ -683,7 +718,7 @@ mod tests {
         let configured = Arc::new(Mutex::new("old.example".to_owned()));
         let flow = {
             let configured = configured.clone();
-            tokio::spawn(run_status_flow::<(), _, _>(
+            tokio::spawn(split_flow::<(), _, _>(
                 RemoteStatus::new("wintermute", "old.example"),
                 window,
                 commands,
@@ -719,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn the_first_attempt_shows_the_destination_reloaded_after_mapping() {
         let (mut harness, window, commands) = harness();
-        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+        let flow = tokio::spawn(split_flow::<(), _, _>(
             RemoteStatus::new("wintermute", "old.example"),
             window,
             commands,
