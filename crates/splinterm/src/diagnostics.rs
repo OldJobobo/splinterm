@@ -301,6 +301,7 @@ pub struct ClientDiagnostics {
     context: Mutex<CorrelationContext>,
     state: Mutex<DiagnosticState>,
     terminal_committed: AtomicBool,
+    handed_off: AtomicBool,
     filter: DiagnosticFilter,
 }
 
@@ -327,6 +328,7 @@ impl ClientDiagnostics {
                 pending_exit: None,
             }),
             terminal_committed: AtomicBool::new(false),
+            handed_off: AtomicBool::new(false),
             filter: configured_filter(),
         })
     }
@@ -391,6 +393,14 @@ impl ClientDiagnostics {
         }
     }
 
+    /// Records that this process handed its work to a detached Splinterm child
+    /// and is about to exit. A clean exit after a handoff leaves
+    /// `last-client-exit.json` to that child, which may already have recorded an
+    /// immediate failure; an abnormal exit is still recorded.
+    pub fn mark_detached_handoff(&self) {
+        self.handed_off.store(true, Ordering::Release);
+    }
+
     pub fn request_exit(&self, exit_class: ExitClass) {
         if self.terminal_committed.load(Ordering::Acquire) {
             return;
@@ -441,7 +451,9 @@ impl ClientDiagnostics {
             .unwrap_or(fallback);
         let (level, event) = terminal_kind(exit_class);
         let record = self.event(level, event, Some(exit_class), error_code);
-        let _ = self.write_last_exit(&record);
+        if !(exit_class.is_clean() && self.handed_off.load(Ordering::Acquire)) {
+            let _ = self.write_last_exit(&record);
+        }
 
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -1028,6 +1040,51 @@ mod tests {
                 & 0o777,
             0o600
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clean_exit_after_a_detached_handoff_keeps_the_child_failure_as_last_exit() {
+        let root = test_directory("handoff");
+        let summary = || {
+            read_single_event(&root.join("splinterm/last-client-exit.json"))
+                .unwrap()
+                .unwrap()
+        };
+        let chooser = ClientDiagnostics::new(root.clone()).unwrap();
+        chooser.begin_window(None, None);
+        chooser.mark_window_mapped();
+        chooser.request_exit(ExitClass::CleanSessionPickerDecision);
+        chooser.mark_detached_handoff();
+
+        // The detached remote child fails before the chooser finishes.
+        let child = ClientDiagnostics::new(root.clone()).unwrap();
+        child.begin_window(None, None);
+        child.finish(ExitClass::Unknown, Some(DiagnosticErrorCode::InternalError));
+        chooser.finish(ExitClass::Unknown, None);
+
+        let last = summary();
+        assert_eq!(last.client_instance_id, child.client_instance_id());
+        assert_eq!(last.exit_class, Some(ExitClass::Unknown));
+        assert_eq!(last.error_code, Some(DiagnosticErrorCode::InternalError));
+        assert!(retained_logs(&root).iter().all(|path| {
+            !path
+                .to_string_lossy()
+                .contains(&chooser.client_instance_id().to_string())
+        }));
+
+        // Without a handoff a clean exit is recorded as before.
+        let plain = ClientDiagnostics::new(root.clone()).unwrap();
+        plain.finish(ExitClass::CleanUserClose, None);
+        assert_eq!(summary().client_instance_id, plain.client_instance_id());
+
+        // A handed-off process that then exits abnormally is still recorded.
+        let failed = ClientDiagnostics::new(root.clone()).unwrap();
+        failed.mark_detached_handoff();
+        failed.finish(ExitClass::ErrorWaylandDispatch, None);
+        let last = summary();
+        assert_eq!(last.client_instance_id, failed.client_instance_id());
+        assert_eq!(last.exit_class, Some(ExitClass::ErrorWaylandDispatch));
         fs::remove_dir_all(root).unwrap();
     }
 
