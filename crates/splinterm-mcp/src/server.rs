@@ -151,6 +151,12 @@ fn admission_error(error: AdmissionError) -> ErrorData {
 }
 
 impl ServerHandler for SplintermServer {
+    // `unknown_lints` keeps the CI toolchain, whose clippy predates this lint, quiet.
+    #[allow(
+        unknown_lints,
+        clippy::unused_async_trait_impl,
+        reason = "async defers the one-shot initialize gate to the first poll; std::future::ready would run it eagerly"
+    )]
     async fn initialize(
         &self,
         request: InitializeRequestParams,
