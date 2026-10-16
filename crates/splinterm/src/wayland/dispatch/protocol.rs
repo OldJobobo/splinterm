@@ -3,8 +3,7 @@ use super::super::{
     Dispatch, ExtBackgroundEffectManagerV1, ExtBackgroundEffectSurfaceV1, Proxy, QueueHandle,
     WaylandSurface, WindowCommand, WpFractionalScaleManagerV1, WpFractionalScaleV1, WpViewport,
     WpViewporter, ZwpTextInputManagerV3, ZwpTextInputV3, background_effect_capability_bits,
-    ext_background_effect_surface_v1, ime_batch_blocked, terminal_ime_allowed,
-    wp_fractional_scale_v1, zwp_text_input_v3,
+    ext_background_effect_surface_v1, wp_fractional_scale_v1, zwp_text_input_v3,
 };
 
 impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
@@ -139,15 +138,9 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                 | zwp_text_input_v3::Event::CommitString { .. }
                 | zwp_text_input_v3::Event::Done { .. }
         );
-        let owned_target = state.ime_owned_field_target();
-        if ime_batch_event
-            && ime_batch_blocked(
-                state.owned_field_modal_open(),
-                state.explorer.focused(),
-                state.input.ime_modal_barrier,
-                owned_target,
-            )
-        {
+        let gate = state.ime_gate();
+        let owned_target = gate.target;
+        if ime_batch_event && gate.batch_blocked(state.input.ime_modal_barrier) {
             state.input.ime.clear_composition();
             return;
         }
@@ -155,12 +148,7 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
             zwp_text_input_v3::Event::Enter { surface } => {
                 if surface == *state.surface.window.wl_surface() {
                     state.input.ime.entered = true;
-                    if terminal_ime_allowed(
-                        state.input.keyboard_focused,
-                        state.owned_field_modal_open(),
-                        state.explorer.focused(),
-                        state.ime_owned_field_target(),
-                    ) {
+                    if state.ime_gate().allowed(state.input.keyboard_focused) {
                         state.enable_text_input();
                     }
                 }

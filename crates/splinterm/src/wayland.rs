@@ -2526,6 +2526,77 @@ const fn ime_batch_blocked(
     barrier || ((modal_open || explorer_focused) && owned_target.is_none())
 }
 
+/// Window facts that decide where IME text may go.
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent modal layer or owned field in the IME routing table"
+)]
+struct ImeContext {
+    input_modal_open: bool,
+    /// A trusted consent prompt or a non-inline session picker.
+    consent_or_picker_open: bool,
+    explorer_focused: bool,
+    binding_help: bool,
+    command_palette: bool,
+    dojo_prompt_input: bool,
+    terminal_search: bool,
+}
+
+/// The single IME routing decision used by every IME gate in the Window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ImeGate {
+    target: Option<OwnedFieldTarget>,
+    modal_open: bool,
+    explorer_focused: bool,
+}
+
+impl ImeGate {
+    /// Whether the text input may be enabled for this keyboard focus.
+    const fn allowed(self, keyboard_focused: bool) -> bool {
+        terminal_ime_allowed(
+            keyboard_focused,
+            self.modal_open,
+            self.explorer_focused,
+            self.target,
+        )
+    }
+
+    /// Whether an IME batch must be dropped before it reaches any field or
+    /// the PTY.
+    const fn batch_blocked(self, barrier: bool) -> bool {
+        ime_batch_blocked(self.modal_open, self.explorer_focused, barrier, self.target)
+    }
+}
+
+/// Owned-field ownership follows typed text, except that Explorer focus keeps
+/// terminal and Explorer-search composition blocked. A consent prompt or a
+/// non-inline picker counts as modal, so without an owned field IME stays
+/// disabled and no batch reaches the PTY beneath it.
+fn ime_gate(context: ImeContext) -> ImeGate {
+    let target = App::select_owned_field(
+        context.input_modal_open,
+        context.consent_or_picker_open,
+        context.binding_help.then_some(()),
+        context.command_palette.then_some(()),
+        context.dojo_prompt_input.then_some(()),
+        None,
+        (!context.explorer_focused && context.terminal_search).then_some(()),
+    )
+    .map(|(target, ())| target);
+    ImeGate {
+        target,
+        modal_open: context.input_modal_open || context.consent_or_picker_open,
+        explorer_focused: context.explorer_focused,
+    }
+}
+
+/// Typed, pasted, dropped, and composed bytes never reach the PTY behind an
+/// input modal or a pending trusted consent prompt.
+const fn terminal_input_blocked(input_modal_open: bool, consent_pending: bool) -> bool {
+    input_modal_open || consent_pending
+}
+
 fn explorer_pointer_returns_to_terminal(
     explorer_focused: bool,
     inside_panel: bool,
@@ -4212,7 +4283,7 @@ impl App {
     }
 
     fn send_input(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if self.modal.input_modal_open() {
+        if self.pty_input_blocked() {
             return Ok(());
         }
         self.queue_terminal_input(bytes)
@@ -4637,35 +4708,35 @@ impl App {
         }
     }
 
-    fn owned_field_modal_open(&self) -> bool {
-        self.modal.input_modal_open() || self.consent_or_picker_open()
-    }
-
     /// A trusted consent prompt or a non-inline session picker. Each blocks
     /// terminal input and Explorer search, but not an open terminal search.
     fn consent_or_picker_open(&self) -> bool {
         self.modal.session_picker.is_some() || self.modal.trusted_consent.is_some()
     }
 
-    /// Returns the Splinterm-owned field that may receive IME composition.
-    /// It follows typed-text ownership, except that Explorer focus keeps
-    /// terminal and Explorer-search composition blocked.
-    fn ime_owned_field_target(&self) -> Option<OwnedFieldTarget> {
-        let terminal_search = !self.explorer.focused() && self.panes.pane.search.input.is_some();
-        Self::select_owned_field(
+    /// Whether bytes bound for the PTY must be dropped now.
+    fn pty_input_blocked(&self) -> bool {
+        terminal_input_blocked(
             self.modal.input_modal_open(),
-            self.consent_or_picker_open(),
-            self.modal.binding_help.as_ref().map(|_| ()),
-            self.modal.command_palette.as_ref().map(|_| ()),
-            self.modal
+            self.modal.trusted_consent.is_some(),
+        )
+    }
+
+    /// The IME routing decision for the current Window state; see `ime_gate`.
+    fn ime_gate(&self) -> ImeGate {
+        ime_gate(ImeContext {
+            input_modal_open: self.modal.input_modal_open(),
+            consent_or_picker_open: self.consent_or_picker_open(),
+            explorer_focused: self.explorer.focused(),
+            binding_help: self.modal.binding_help.is_some(),
+            command_palette: self.modal.command_palette.is_some(),
+            dojo_prompt_input: self
+                .modal
                 .dojo_prompt
                 .as_ref()
-                .and_then(DojoPromptUi::input)
-                .map(|_| ()),
-            None,
-            terminal_search.then_some(()),
-        )
-        .map(|(target, ())| target)
+                .is_some_and(|prompt| prompt.input().is_some()),
+            terminal_search: self.panes.pane.search.input.is_some(),
+        })
     }
 
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
@@ -4961,7 +5032,7 @@ impl App {
     }
 
     fn begin_clipboard_read(&mut self, target: PasteTarget) {
-        if self.modal.input_modal_open() && !matches!(target, PasteTarget::OwnedField(_)) {
+        if self.pty_input_blocked() && !matches!(target, PasteTarget::OwnedField(_)) {
             return;
         }
         let tx = self.clipboard.clipboard_tx.clone();
@@ -5019,7 +5090,7 @@ impl App {
             match read.target {
                 PasteTarget::Clipboard | PasteTarget::Primary => {
                     if !clipboard_read_is_current(
-                        self.modal.input_modal_open(),
+                        self.pty_input_blocked(),
                         self.input.input_generation,
                         read.input_generation,
                     ) {
@@ -5062,7 +5133,7 @@ impl App {
                     if !file_drop_target_is_current(
                         target,
                         current,
-                        self.modal.input_modal_open(),
+                        self.pty_input_blocked(),
                         pane.controller_active,
                         pane.commands.is_some(),
                     ) {
@@ -6241,10 +6312,10 @@ impl App {
 
     fn send_command(&mut self, command: WindowCommand) {
         if let WindowCommand::Input(bytes) = command {
-            // Nothing typed, pasted, or composed reaches the PTY behind an
-            // input modal or a pending trusted consent prompt.
-            if !self.modal.input_modal_open()
-                && self.modal.trusted_consent.is_none()
+            // Keys and IME commits reach the PTY through here; pastes go
+            // through `send_input` and file drops through the drop target
+            // check. All three share `pty_input_blocked`.
+            if !self.pty_input_blocked()
                 && let Err(error) = self.queue_terminal_input(bytes)
             {
                 self.scheduling.fail(error);
@@ -6365,14 +6436,7 @@ impl App {
             }
             self.commit_text_input();
             self.clear_ime_preedit();
-        } else if self.input.ime.entered
-            && terminal_ime_allowed(
-                focused,
-                self.owned_field_modal_open(),
-                self.explorer.focused(),
-                self.ime_owned_field_target(),
-            )
-        {
+        } else if self.input.ime.entered && self.ime_gate().allowed(focused) {
             self.enable_text_input();
         }
     }
@@ -6397,12 +6461,7 @@ impl App {
     /// Re-enables IME after a modal closes only when the surviving focus may
     /// compose; Explorer focus keeps the text input disabled.
     fn enable_text_input_if_allowed(&mut self) {
-        if terminal_ime_allowed(
-            self.input.keyboard_focused,
-            self.owned_field_modal_open(),
-            self.explorer.focused(),
-            self.ime_owned_field_target(),
-        ) {
+        if self.ime_gate().allowed(self.input.keyboard_focused) {
             self.enable_text_input();
             return;
         }
@@ -11378,57 +11437,47 @@ mod tests {
         );
     }
 
-    /// Mirrors the App wiring: `ime_owned_field_target`, then the IME enable
-    /// gate and the batch gate with `owned_field_modal_open`. Returns the IME
-    /// target, whether IME is enabled, and whether a committed batch is
-    /// dropped. A dropped batch never reaches `WindowCommand::Input`; an
-    /// allowed batch with no target is the only path that writes to the PTY.
-    #[allow(
-        clippy::fn_params_excessive_bools,
-        reason = "each flag is one independent modal layer in the routing table"
-    )]
-    fn ime_route(
-        input_modal_open: bool,
-        consent_or_picker_open: bool,
-        explorer_focused: bool,
-        binding_help: bool,
-        palette: bool,
-        prompt_input: bool,
-        terminal_search: bool,
-    ) -> (Option<OwnedFieldTarget>, bool, bool) {
-        let target = App::select_owned_field(
-            input_modal_open,
-            consent_or_picker_open,
-            binding_help.then_some(()),
-            palette.then_some(()),
-            prompt_input.then_some(()),
-            None,
-            (!explorer_focused && terminal_search).then_some(()),
-        )
-        .map(|(target, ())| target);
-        let modal_open = input_modal_open || consent_or_picker_open;
-        (
-            target,
-            terminal_ime_allowed(true, modal_open, explorer_focused, target),
-            ime_batch_blocked(modal_open, explorer_focused, false, target),
-        )
+    /// Runs the production `ime_gate` and returns the IME target, whether IME
+    /// may be enabled with keyboard focus, and whether a batch without the
+    /// fresh-generation barrier is dropped. A dropped batch never reaches
+    /// `WindowCommand::Input`; an undropped batch with no target is the only
+    /// IME path that writes to the PTY.
+    fn ime_route(context: ImeContext) -> (Option<OwnedFieldTarget>, bool, bool) {
+        let gate = ime_gate(context);
+        (gate.target, gate.allowed(true), gate.batch_blocked(false))
     }
 
     #[test]
     fn ime_composes_into_terminal_search_under_consent_or_non_inline_picker() {
         // Trusted consent and a non-inline picker are the same modal layer.
+        let search_under_prompt = ImeContext {
+            consent_or_picker_open: true,
+            terminal_search: true,
+            ..ImeContext::default()
+        };
         assert_eq!(
-            ime_route(false, true, false, false, false, false, true),
+            ime_route(search_under_prompt),
             (Some(OwnedFieldTarget::Search), true, false)
         );
+        // The fresh-generation barrier still drops the first batch.
+        assert!(ime_gate(search_under_prompt).batch_blocked(true));
+        // Keyboard focus is still required.
+        assert!(!ime_gate(search_under_prompt).allowed(false));
         // Explorer focus still blocks composition beneath them.
         assert_eq!(
-            ime_route(false, true, true, false, false, false, true),
+            ime_route(ImeContext {
+                explorer_focused: true,
+                ..search_under_prompt
+            }),
             (None, false, true)
         );
         // An inline picker is an input modal and keeps search composition blocked.
         assert_eq!(
-            ime_route(true, false, false, false, false, false, true),
+            ime_route(ImeContext {
+                input_modal_open: true,
+                terminal_search: true,
+                ..ImeContext::default()
+            }),
             (None, false, true)
         );
     }
@@ -11436,49 +11485,71 @@ mod tests {
     #[test]
     fn ime_never_reaches_the_pty_beneath_a_consent_prompt() {
         for explorer_focused in [false, true] {
-            let (target, allowed, blocked) =
-                ime_route(false, true, explorer_focused, false, false, false, false);
-            assert_eq!(target, None);
-            assert!(!allowed);
-            assert!(blocked);
-            assert!(ime_batch_blocked(true, explorer_focused, true, target));
+            let gate = ime_gate(ImeContext {
+                consent_or_picker_open: true,
+                explorer_focused,
+                ..ImeContext::default()
+            });
+            assert_eq!(gate.target, None);
+            assert!(!gate.allowed(true));
+            assert!(gate.batch_blocked(false));
         }
         // Without a modal the PTY remains the IME destination.
-        assert_eq!(
-            ime_route(false, false, false, false, false, false, false),
-            (None, true, false)
-        );
+        assert_eq!(ime_route(ImeContext::default()), (None, true, false));
+        assert!(terminal_input_blocked(false, true));
     }
 
     #[test]
     fn ime_keeps_explicit_field_priority_over_terminal_search() {
         for consent_or_picker_open in [false, true] {
             for explorer_focused in [false, true] {
-                let route = |help, palette, prompt| {
-                    ime_route(
-                        true,
-                        consent_or_picker_open,
-                        explorer_focused,
-                        help,
-                        palette,
-                        prompt,
-                        true,
-                    )
+                let base = ImeContext {
+                    input_modal_open: true,
+                    consent_or_picker_open,
+                    explorer_focused,
+                    terminal_search: true,
+                    ..ImeContext::default()
                 };
                 assert_eq!(
-                    route(true, true, true),
+                    ime_route(ImeContext {
+                        binding_help: true,
+                        command_palette: true,
+                        dojo_prompt_input: true,
+                        ..base
+                    }),
                     (Some(OwnedFieldTarget::BindingHelp), true, false)
                 );
                 assert_eq!(
-                    route(false, true, true),
+                    ime_route(ImeContext {
+                        command_palette: true,
+                        dojo_prompt_input: true,
+                        ..base
+                    }),
                     (Some(OwnedFieldTarget::CommandPalette), true, false)
                 );
                 assert_eq!(
-                    route(false, false, true),
+                    ime_route(ImeContext {
+                        dojo_prompt_input: true,
+                        ..base
+                    }),
                     (Some(OwnedFieldTarget::DojoPrompt), true, false)
                 );
             }
         }
+    }
+
+    #[test]
+    fn terminal_input_blocked_behind_input_modals_and_pending_consent() {
+        assert!(!terminal_input_blocked(false, false));
+        assert!(terminal_input_blocked(true, false));
+        assert!(terminal_input_blocked(false, true));
+        assert!(terminal_input_blocked(true, true));
+        // A clipboard read finishing under a pending consent prompt is stale.
+        assert!(!clipboard_read_is_current(
+            terminal_input_blocked(false, true),
+            7,
+            7
+        ));
     }
 
     #[test]
