@@ -334,7 +334,43 @@ fn validate_package_binding(
     {
         return Err(PackageProvenanceError::BuildMismatch);
     }
+    // The pair identity hashes every capability range, so a later report that
+    // keeps the identity but changes a range is not the report validated here.
+    let derived = derive_pair_build_identity(
+        &provenance.source_commit,
+        provenance.kind,
+        &provenance.build_version,
+        preflight.capabilities,
+    )?;
+    if derived != provenance.pair_build_identity {
+        return Err(PackageProvenanceError::BuildMismatch);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+const TEST_SOURCE_COMMIT: &str = "1234567890abcdef1234567890abcdef12345678";
+
+/// Derives the identity that
+/// [`ValidatedHandoffPackageProvenance::from_verified_for_test`] binds to one
+/// test preflight report.
+#[cfg(test)]
+pub(crate) fn test_pair_build_identity(
+    version: BuildVersion,
+    capabilities: HandoffCapabilities,
+) -> BuildIdentity {
+    derive_pair_build_identity(
+        TEST_SOURCE_COMMIT,
+        BuildProvenanceKind::LocalCommittedHead,
+        &test_build_version(version),
+        capabilities,
+    )
+    .expect("test build metadata is canonical")
+}
+
+#[cfg(test)]
+fn test_build_version(version: BuildVersion) -> String {
+    format!("{}.{}.{}", version.major, version.minor, version.patch)
 }
 
 #[cfg(test)]
@@ -344,14 +380,9 @@ fn validated_for_test(
 ) -> ValidatedPackageProvenance {
     ValidatedPackageProvenance {
         source_path: PathBuf::from("/test/package-provenance-v1.json"),
-        source_commit: "1234567890abcdef1234567890abcdef12345678".to_owned(),
+        source_commit: TEST_SOURCE_COMMIT.to_owned(),
         kind: BuildProvenanceKind::LocalCommittedHead,
-        build_version: format!(
-            "{}.{}.{}",
-            preflight.pair_build_version.major,
-            preflight.pair_build_version.minor,
-            preflight.pair_build_version.patch
-        ),
+        build_version: test_build_version(preflight.pair_build_version),
         pair_build_identity: preflight.pair_build_identity,
         daemon_sha256: pair.daemon().source().sha256,
         client_sha256: pair.client().source().sha256,
@@ -757,6 +788,52 @@ mod tests {
             ),
             Err(PackageProvenanceError::ExecutableMismatch)
         ));
+    }
+
+    #[test]
+    fn rebinding_rejects_capability_ranges_outside_the_package_identity() {
+        fn exact(value: u16) -> VersionRange {
+            VersionRange::new(value, value).unwrap()
+        }
+
+        let fixture = Fixture::new();
+        let record =
+            PackageProvenanceRecord::load(&fixture.record, rustix::process::geteuid().as_raw())
+                .unwrap();
+        let validated = validate_handoff_package_provenance(
+            &record,
+            &record,
+            &fixture.snapshots,
+            fixture.preflight(fixture.snapshots.forward()),
+            fixture.preflight(fixture.snapshots.rollback()),
+        )
+        .unwrap();
+        for mutate in [
+            (|capabilities: &mut HandoffCapabilities| capabilities.private_protocol = exact(36))
+                as fn(&mut HandoffCapabilities),
+            |capabilities| capabilities.handoff_protocol = VersionRange::new(1, 2).unwrap(),
+            |capabilities| capabilities.terminal_checkpoint = exact(2),
+            |capabilities| capabilities.descriptor_manifest = exact(2),
+        ] {
+            for forward in [true, false] {
+                let mut forward_preflight = fixture.preflight(fixture.snapshots.forward());
+                let mut rollback_preflight = fixture.preflight(fixture.snapshots.rollback());
+                // Snapshots, version, and identity stay exactly as validated.
+                mutate(if forward {
+                    &mut forward_preflight.capabilities
+                } else {
+                    &mut rollback_preflight.capabilities
+                });
+                assert!(matches!(
+                    validated.validate_against(
+                        &fixture.snapshots,
+                        forward_preflight,
+                        rollback_preflight,
+                    ),
+                    Err(PackageProvenanceError::BuildMismatch)
+                ));
+            }
+        }
     }
 
     #[test]
