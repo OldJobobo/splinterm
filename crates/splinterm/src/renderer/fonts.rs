@@ -2396,6 +2396,61 @@ mod tests {
         assert_eq!(sources[0].index.named_instance_index(), Some(3));
     }
 
+    /// A truncated face that Fontconfig still resolves from its cache is the
+    /// testbed's invalid live-font candidate (`tools/testbed/font-fixture.py`).
+    /// It must pass resolution and then fail staging, so the live watcher
+    /// rejects the generation instead of skipping the face.
+    #[test]
+    fn truncated_resolved_regular_face_fails_staging_instead_of_resolution() {
+        let path = std::env::temp_dir().join(format!(
+            "splinterm-truncated-face-fixture-{}",
+            std::process::id()
+        ));
+        // What the fixture leaves behind: eight zero bytes with no sfnt tag.
+        std::fs::write(&path, [0_u8; 8]).unwrap();
+        let output = format!(
+            "{}\n0\nSplinterm Invalid Candidate\nRegular\n80\n0\n14\nTrue\n20-7e\n--record--\n",
+            path.display()
+        );
+        let source = parse_fontconfig_sources("primary regular", output.as_bytes())
+            .unwrap()
+            .remove(0);
+        let error = stage_face(source).unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            format!("{error:#}").contains("parse resolved primary regular font"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual fixture integration; run with FONTCONFIG_FILE unset and XDG_CONFIG_HOME set to the session_config_home printed by tools/testbed/font-fixture.py invalid-candidate"]
+    fn live_staging_rejects_the_testbed_invalid_candidate_fixture() {
+        // The packaged session's view: only the fixture's user configuration.
+        assert!(
+            std::env::var_os("FONTCONFIG_FILE").is_none(),
+            "unset FONTCONFIG_FILE so the session's user configuration is used"
+        );
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .expect("set XDG_CONFIG_HOME to the fixture's session_config_home");
+        assert!(
+            std::path::Path::new(&config_home).ends_with("xdg-config"),
+            "XDG_CONFIG_HOME must be the fixture's session_config_home"
+        );
+        let sources =
+            run_fontconfig_sources("primary regular", crate::config::DEFAULT_FONT, false).unwrap();
+        assert_eq!(sources[0].family, "Splinterm Invalid Candidate");
+        let Err(error) =
+            stage_live_font_generation(crate::config::DEFAULT_FONT, FontAuthority::NativeOmarchy)
+        else {
+            panic!("the invalid candidate fixture staged a font generation");
+        };
+        assert!(
+            format!("{error:#}").contains("parse resolved primary regular font"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     #[ignore = "manual variable-font integration; requires SPLINTERM_VARIABLE_FONT_FIXTURE and SPLINTERM_VARIABLE_FONT_INDEX"]
     fn variable_font_named_instance_shapes_and_rasterizes_with_freetype_identity() {
