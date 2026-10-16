@@ -6,10 +6,13 @@ use std::{
 };
 
 use crate::{
-    keymap::{ActionId, ActiveModifiers, KeyIdentity, KeymapPress, PrefixState, ResolvedKeymap},
+    keymap::{
+        ActionId, ActiveModifiers, KeyIdentity, KeymapPress, PrefixState, PressedKey,
+        ResolvedKeymap,
+    },
     pane::FocusDirection,
 };
-use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
+use smithay_client_toolkit::seat::keyboard::{KeyEvent, Keysym, Modifiers};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::wayland) enum PaneTopologyAction {
@@ -76,10 +79,13 @@ fn active_modifiers(modifiers: Modifiers) -> ActiveModifiers {
 
 pub(in crate::wayland) fn shortcut_action_for(
     keymap: &ResolvedKeymap,
-    keysym: Keysym,
+    event: &KeyEvent,
     modifiers: Modifiers,
 ) -> Option<ActionId> {
-    keymap.action(key_identity(keysym)?, active_modifiers(modifiers))
+    keymap.pressed_action(
+        pressed_key(event.keysym, event.raw_code, modifiers)?,
+        active_modifiers(modifiers),
+    )
 }
 
 pub(in crate::wayland) fn binding_help_repeat_consumed(
@@ -94,7 +100,8 @@ pub(in crate::wayland) fn owned_field_clipboard_action(
     keysym: Keysym,
     modifiers: Modifiers,
 ) -> Option<ActionId> {
-    shortcut_action_for(keymap, keysym, modifiers)
+    keymap
+        .action(key_identity(keysym)?, active_modifiers(modifiers))
         .filter(|action| matches!(action, ActionId::ClipboardCopy | ActionId::ClipboardPaste))
 }
 
@@ -107,7 +114,7 @@ pub(in crate::wayland) fn keymap_press_for(
     now: Instant,
     timeout: Duration,
 ) -> KeymapPress {
-    let Some(key) = key_identity(keysym) else {
+    let Some(key) = pressed_key(keysym, raw_code, modifiers) else {
         if prefix_state.is_armed() {
             if is_modifier_key(keysym) {
                 return KeymapPress::PrefixModifier;
@@ -216,6 +223,19 @@ pub(in crate::wayland) fn tab_shortcut_action(
     })
 }
 
+/// Whether a resolved keymap press owns its raw key until release, so the
+/// repeat handler drops its auto-repeats. Font zoom keeps repeating, and tab
+/// and command-palette actions outside a managed-tab window decline and fall
+/// through to the terminal, so their repeats must reach the terminal too.
+pub(in crate::wayland) fn keymap_press_consumes_key(action: ActionId, managed_tabs: bool) -> bool {
+    if matches!(action, ActionId::ZoomIn | ActionId::ZoomOut) {
+        return false;
+    }
+    managed_tabs
+        || (tab_shortcut_action(Some(action), false, true).is_none()
+            && command_palette_shortcut_action(Some(action), false, true, false).is_none())
+}
+
 pub(in crate::wayland) const fn tab_action_dispatch_allowed(blocking_states: [bool; 5]) -> bool {
     !(blocking_states[0]
         || blocking_states[1]
@@ -303,6 +323,41 @@ fn is_modifier_key(keysym: Keysym) -> bool {
     )
 }
 
+/// Maps evdev `KEY_1`..`KEY_9` on the main number row to their digits.
+const fn number_row_digit(raw_code: u32) -> Option<KeyIdentity> {
+    Some(match raw_code {
+        2 => KeyIdentity::One,
+        3 => KeyIdentity::Two,
+        4 => KeyIdentity::Three,
+        5 => KeyIdentity::Four,
+        6 => KeyIdentity::Five,
+        7 => KeyIdentity::Six,
+        8 => KeyIdentity::Seven,
+        9 => KeyIdentity::Eight,
+        10 => KeyIdentity::Nine,
+        _ => return None,
+    })
+}
+
+/// Identifies one press by its produced symbol. With Shift held, the physical
+/// number-row digit follows as a fallback, so `Ctrl+Shift+1` matches on layouts
+/// where Shift+1 produces `!` while symbol bindings such as `Prefix &` keep
+/// priority. `0` is excluded so `Ctrl+Shift+0` never reaches the zoom reset.
+fn pressed_key(keysym: Keysym, raw_code: u32, modifiers: Modifiers) -> Option<PressedKey> {
+    let fallback = if modifiers.shift {
+        number_row_digit(raw_code)
+    } else {
+        None
+    };
+    match key_identity(keysym) {
+        Some(key) => Some(PressedKey {
+            key,
+            fallback: fallback.filter(|digit| *digit != key),
+        }),
+        None => fallback.map(PressedKey::from),
+    }
+}
+
 fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
     let key = match keysym {
         Keysym::a | Keysym::A => KeyIdentity::Character('a'),
@@ -370,8 +425,23 @@ fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
 mod tests {
     use super::*;
 
+    fn action_for_key(
+        keymap: &ResolvedKeymap,
+        keysym: Keysym,
+        raw_code: u32,
+        modifiers: Modifiers,
+    ) -> Option<ActionId> {
+        let event = KeyEvent {
+            time: 0,
+            raw_code,
+            keysym,
+            utf8: None,
+        };
+        shortcut_action_for(keymap, &event, modifiers)
+    }
+
     fn shortcut_action(keysym: Keysym, modifiers: Modifiers) -> Option<ActionId> {
-        shortcut_action_for(&ResolvedKeymap::default(), keysym, modifiers)
+        action_for_key(&ResolvedKeymap::default(), keysym, 0, modifiers)
     }
 
     fn ctrl_shift() -> Modifiers {
@@ -472,9 +542,10 @@ mod tests {
             let keymap = crate::keymap::built_in_keymap(profile);
             for logo in [false, true] {
                 assert_eq!(
-                    shortcut_action_for(
+                    action_for_key(
                         &keymap,
                         Keysym::Insert,
+                        0,
                         Modifiers {
                             ctrl: true,
                             logo,
@@ -485,9 +556,10 @@ mod tests {
                 );
             }
             assert_eq!(
-                shortcut_action_for(
+                action_for_key(
                     &keymap,
                     Keysym::Insert,
+                    0,
                     Modifiers {
                         shift: true,
                         ..Modifiers::default()
@@ -642,19 +714,19 @@ mod tests {
             ..Modifiers::default()
         };
         assert_eq!(
-            tab_shortcut_action(shortcut_action_for(&keymap, Keysym::_1, alt), false, true,),
+            tab_shortcut_action(action_for_key(&keymap, Keysym::_1, 0, alt), false, true,),
             Some(TabShortcutAction::Select(0))
         );
         assert_eq!(
             tab_shortcut_action(
-                shortcut_action_for(&keymap, Keysym::Right, alt_shift),
+                action_for_key(&keymap, Keysym::Right, 0, alt_shift),
                 false,
                 true,
             ),
             Some(TabShortcutAction::Move(1))
         );
         assert_eq!(
-            shortcut_action_for(&keymap, Keysym::Down, alt),
+            action_for_key(&keymap, Keysym::Down, 0, alt),
             Some(ActionId::NextLair)
         );
     }
@@ -828,9 +900,10 @@ action = "app.command-palette"
         )
         .unwrap();
         assert_eq!(
-            shortcut_action_for(
+            action_for_key(
                 &resolved.keymap,
                 Keysym::p,
+                0,
                 Modifiers {
                     ctrl: true,
                     alt: true,
@@ -840,7 +913,7 @@ action = "app.command-palette"
             Some(ActionId::CommandPalette)
         );
         assert_eq!(
-            shortcut_action_for(&resolved.keymap, Keysym::p, ctrl_shift()),
+            action_for_key(&resolved.keymap, Keysym::p, 0, ctrl_shift()),
             None
         );
     }
@@ -992,5 +1065,211 @@ action = "dojo.close-other-tabs"
             Some(ActionId::PageUp)
         );
         assert_eq!(shortcut_action(Keysym::p, ctrl_shift_alt), None);
+    }
+
+    // Evdev codes for the physical number-row keys used below.
+    const KEY_1: u32 = 2;
+    const KEY_6: u32 = 7;
+    const KEY_7: u32 = 8;
+    const KEY_9: u32 = 10;
+    const KEY_0: u32 = 11;
+
+    #[test]
+    fn ctrl_shift_number_row_selects_dojos_whatever_symbol_shift_produces() {
+        let keymap = ResolvedKeymap::default();
+        for (keysym, raw_code, expected) in [
+            // US: Shift+1 produces `!`.
+            (Keysym::exclam, KEY_1, ActionId::SelectDojo1),
+            // AZERTY: Shift on the number row produces the digit itself.
+            (Keysym::_1, KEY_1, ActionId::SelectDojo1),
+            // German: Shift+6 produces `&` and Shift+7 produces `/`.
+            (Keysym::ampersand, KEY_6, ActionId::SelectDojo6),
+            (Keysym::slash, KEY_7, ActionId::SelectDojo7),
+            (Keysym::parenleft, KEY_9, ActionId::SelectDojo9),
+        ] {
+            let action = action_for_key(&keymap, keysym, raw_code, ctrl_shift());
+            assert_eq!(action, Some(expected), "{keysym:?} on raw code {raw_code}");
+            let mut state = PrefixState::Idle;
+            assert_eq!(
+                keymap_press_for(
+                    &keymap,
+                    &mut state,
+                    keysym,
+                    ctrl_shift(),
+                    raw_code,
+                    Instant::now(),
+                    Duration::from_secs(1),
+                ),
+                KeymapPress::Consumed(Some(expected)),
+                "press and repeat resolve {keysym:?} the same way"
+            );
+        }
+        assert_eq!(
+            tab_shortcut_action(
+                action_for_key(&keymap, Keysym::exclam, KEY_1, ctrl_shift()),
+                false,
+                true,
+            ),
+            Some(TabShortcutAction::Select(0))
+        );
+    }
+
+    #[test]
+    fn number_row_fallback_needs_shift_and_a_digit_key_from_one_to_nine() {
+        let keymap = ResolvedKeymap::default();
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(action_for_key(&keymap, Keysym::exclam, KEY_1, ctrl), None);
+        assert_eq!(action_for_key(&keymap, Keysym::_1, KEY_1, ctrl), None);
+        assert_eq!(
+            action_for_key(&keymap, Keysym::parenright, KEY_0, ctrl_shift()),
+            None,
+            "Ctrl+Shift+0 does not reach the zoom reset"
+        );
+        for raw_code in [0, 1, KEY_0, 12, 30] {
+            assert_eq!(
+                action_for_key(&keymap, Keysym::exclam, raw_code, ctrl_shift()),
+                None,
+                "raw code {raw_code} is not a 1-9 number-row key"
+            );
+        }
+        let mut state = PrefixState::Idle;
+        assert_eq!(
+            keymap_press_for(
+                &keymap,
+                &mut state,
+                Keysym::exclam,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                KEY_1,
+                Instant::now(),
+                Duration::from_secs(1),
+            ),
+            KeymapPress::PassThrough,
+            "Shift+1 alone still types"
+        );
+    }
+
+    #[test]
+    fn built_in_symbol_bindings_win_over_the_number_row_fallback() {
+        let keymap = ResolvedKeymap::default();
+        // Swiss Shift+1 produces `+`, which the any-Shift zoom-in binding owns.
+        assert_eq!(
+            action_for_key(&keymap, Keysym::plus, KEY_1, ctrl_shift()),
+            Some(ActionId::ZoomIn)
+        );
+        // Hungarian Shift+7 produces `=`, the other zoom-in key.
+        assert_eq!(
+            action_for_key(&keymap, Keysym::equal, KEY_7, ctrl_shift()),
+            Some(ActionId::ZoomIn)
+        );
+    }
+
+    #[test]
+    fn shifted_symbol_bindings_win_over_the_number_row_fallback() {
+        let resolved = crate::keymap::resolve_keymap_text(
+            crate::keymap::KeymapProfile::Splinterm,
+            r#"
+version = 1
+inherits = "splinterm"
+[[binding]]
+sequence = ["Ctrl+Shift+&"]
+action = "app.command-palette"
+"#,
+            std::path::Path::new("keybindings.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            action_for_key(&resolved.keymap, Keysym::ampersand, KEY_7, ctrl_shift()),
+            Some(ActionId::CommandPalette)
+        );
+        assert_eq!(
+            action_for_key(&resolved.keymap, Keysym::exclam, KEY_1, ctrl_shift()),
+            Some(ActionId::SelectDojo1)
+        );
+
+        let keymap = crate::keymap::built_in_keymap(crate::keymap::KeymapProfile::OmarchyTmux);
+        let mut state = PrefixState::Idle;
+        let now = Instant::now();
+        let _ = keymap_press_for(
+            &keymap,
+            &mut state,
+            Keysym::space,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            57,
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(state.is_armed());
+        assert_eq!(
+            keymap_press_for(
+                &keymap,
+                &mut state,
+                Keysym::ampersand,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                KEY_7,
+                now,
+                Duration::from_secs(1),
+            ),
+            KeymapPress::Consumed(Some(ActionId::TerminateCurrentDojo)),
+            "US Prefix & keeps its shifted-symbol binding"
+        );
+    }
+
+    #[test]
+    fn tab_chords_outside_managed_tabs_leave_their_repeats_to_the_terminal() {
+        let keymap = ResolvedKeymap::default();
+        let mut state = PrefixState::Idle;
+        let KeymapPress::Consumed(Some(action)) = keymap_press_for(
+            &keymap,
+            &mut state,
+            Keysym::exclam,
+            ctrl_shift(),
+            KEY_1,
+            Instant::now(),
+            Duration::from_secs(1),
+        ) else {
+            panic!("Ctrl+Shift+1 resolves through the keymap");
+        };
+        assert_eq!(action, ActionId::SelectDojo1);
+        assert!(
+            keymap_press_consumes_key(action, true),
+            "a managed-tab window owns the chord and drops its repeats"
+        );
+        assert!(
+            !keymap_press_consumes_key(action, false),
+            "a direct single-Splint window forwards the chord, so it keeps repeating"
+        );
+        assert_eq!(tab_shortcut_action(Some(action), true, false), None);
+        for action in [
+            ActionId::NextDojo,
+            ActionId::NewDojo,
+            ActionId::DojoChooser,
+            ActionId::CommandPalette,
+        ] {
+            assert!(keymap_press_consumes_key(action, true), "{action:?}");
+            assert!(!keymap_press_consumes_key(action, false), "{action:?}");
+        }
+        for action in [ActionId::ZoomIn, ActionId::ZoomOut] {
+            assert!(!keymap_press_consumes_key(action, true), "{action:?}");
+            assert!(!keymap_press_consumes_key(action, false), "{action:?}");
+        }
+        for action in [
+            ActionId::BindingHelp,
+            ActionId::NextLair,
+            ActionId::SplitHorizontal,
+        ] {
+            assert!(keymap_press_consumes_key(action, false), "{action:?}");
+        }
     }
 }
