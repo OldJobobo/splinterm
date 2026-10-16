@@ -197,6 +197,11 @@ impl Grid {
         (0..self.screen_rows).all(|row| self.rows[(self.offset + row) & mask].is_some())
     }
 
+    /// Cells held by allocated rows, the amount a checkpoint restore expands.
+    pub(crate) fn allocated_cells(&self) -> usize {
+        self.rows.iter().flatten().map(Row::len).sum()
+    }
+
     pub(crate) fn continue_history_namespace(&mut self, namespace: (u64, u64)) {
         self.next_row_id = namespace.0;
         self.history_generation = namespace

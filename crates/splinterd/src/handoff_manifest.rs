@@ -665,7 +665,7 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
             BodyDisposition::Unsupported => return Err(ManifestError::InvalidRuntime),
         }
         if splint.incarnation == 0
-            || splint.pty.child_pid == 0
+            || !is_linux_pid(splint.pty.child_pid)
             || splint.pty.child_pid != splint.pty.process_group
             || splint.pty.child_pid != splint.pty.session_id
             || splint.size.columns == 0
@@ -674,7 +674,7 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
             || splint.exit != ExitDisposition::Running
             || splint
                 .foreground_process_group
-                .is_some_and(|group| group == 0)
+                .is_some_and(|group| !is_linux_pid(group))
         {
             return Err(ManifestError::InvalidRuntime);
         }
@@ -683,6 +683,12 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
         return Err(ManifestError::InvalidBounds);
     }
     Ok(())
+}
+
+/// Whether a decoded identifier names a positive Linux PID, the only values a
+/// restored PTY identity can carry.
+fn is_linux_pid(raw: u32) -> bool {
+    i32::try_from(raw).is_ok_and(|pid| pid > 0)
 }
 
 fn splint_sort_key(splint: &ManifestSplint) -> (String, String, String) {
@@ -779,23 +785,36 @@ mod tests {
         VersionRange::new(minimum, maximum).unwrap()
     }
 
-    fn preflight(pair: &SealedExecutablePair, byte: u8) -> ExecutablePairPreflight {
+    fn test_capabilities() -> HandoffCapabilities {
+        HandoffCapabilities {
+            private_protocol: range(),
+            handoff_protocol: range(),
+            terminal_checkpoint: range(),
+            descriptor_manifest: range(),
+        }
+    }
+
+    /// The package-derived identity of test build `0.2.<patch>`, so test
+    /// provenance binds the exact capability ranges of [`preflight`].
+    fn test_identity(patch: u16) -> BuildIdentity {
+        crate::package_provenance::test_pair_build_identity(
+            BuildVersion::new(0, 2, patch),
+            test_capabilities(),
+        )
+    }
+
+    fn preflight(pair: &SealedExecutablePair, patch: u16) -> ExecutablePairPreflight {
         ExecutablePairPreflight {
-            pair_build_identity: BuildIdentity::new([byte; 32]).unwrap(),
-            pair_build_version: BuildVersion::new(0, 2, u16::from(byte)),
-            capabilities: HandoffCapabilities {
-                private_protocol: range(),
-                handoff_protocol: range(),
-                terminal_checkpoint: range(),
-                descriptor_manifest: range(),
-            },
+            pair_build_identity: test_identity(patch),
+            pair_build_version: BuildVersion::new(0, 2, patch),
+            capabilities: test_capabilities(),
             snapshots: ExecutablePairBinding::from_snapshots(pair),
         }
     }
 
-    fn generation(byte: u8, patch: u16) -> GenerationEvidence {
+    fn generation(patch: u16) -> GenerationEvidence {
         GenerationEvidence {
-            build_identity: [byte; 32],
+            build_identity: test_identity(patch).as_bytes(),
             build_version: ManifestBuildVersion {
                 major: 0,
                 minor: 2,
@@ -821,8 +840,8 @@ mod tests {
     }
 
     fn manifest(kind: ManifestKind) -> HandoffManifestV1 {
-        let source = generation(1, 1);
-        let target = generation(2, 2);
+        let source = generation(1);
+        let target = generation(2);
         let splint = ManifestSplint {
             lair_id: LairId::new(),
             dojo_id: DojoId::new(),
@@ -1480,6 +1499,39 @@ mod tests {
             let mut invalid = baseline.clone();
             mutate(&mut invalid.splints[0]);
             assert!(validate_manifest(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn pty_identifiers_are_bounded_to_the_linux_pid_range() {
+        let set_pty = |manifest: &mut HandoffManifestV1, pid: u32| {
+            let pty = &mut manifest.splints[0].pty;
+            pty.child_pid = pid;
+            pty.process_group = pid;
+            pty.session_id = pid;
+        };
+        let largest = u32::try_from(i32::MAX).unwrap();
+        let mut accepted = manifest(ManifestKind::Forward);
+        set_pty(&mut accepted, largest);
+        accepted.splints[0].foreground_process_group = Some(largest);
+        validate_manifest(&accepted).unwrap();
+        // Every accepted identity must also reconstruct as a live PTY identity.
+        splinterm_pty::LinuxPtyIdentity::from_raw(largest, largest, largest).unwrap();
+
+        for pid in [largest + 1, u32::MAX] {
+            assert!(splinterm_pty::LinuxPtyIdentity::from_raw(pid, pid, pid).is_err());
+            let mut invalid = manifest(ManifestKind::Forward);
+            set_pty(&mut invalid, pid);
+            assert!(matches!(
+                validate_manifest(&invalid),
+                Err(ManifestError::InvalidRuntime)
+            ));
+            let mut invalid_foreground = manifest(ManifestKind::Forward);
+            invalid_foreground.splints[0].foreground_process_group = Some(pid);
+            assert!(matches!(
+                validate_manifest(&invalid_foreground),
+                Err(ManifestError::InvalidRuntime)
+            ));
         }
     }
 }
