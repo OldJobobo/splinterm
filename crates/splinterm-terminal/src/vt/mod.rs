@@ -213,7 +213,7 @@ impl Parser {
             || self.current_param >= PARAM_LIMIT
             || self
                 .current_subparam
-                .is_some_and(|index| index >= SUBPARAM_LIMIT)
+                .is_some_and(|index| index > SUBPARAM_LIMIT)
             || self
                 .private
                 .is_some_and(|byte| !(0x3c..=0x3f).contains(&byte))
@@ -850,7 +850,9 @@ impl Parser {
         let param = &mut self.params.values[self.current_param];
         let next = self
             .current_subparam
-            .map_or(0, |index| index.saturating_add(1));
+            // One past the limit marks an overflowed subparameter whose digits are
+            // ignored; staying there keeps the parser state bounded and checkpointable.
+            .map_or(0, |index| index.saturating_add(1).min(SUBPARAM_LIMIT));
         self.current_subparam = Some(next);
         param.subparam_count = param.subparam_count.max((next + 1).min(SUBPARAM_LIMIT));
     }

@@ -53,6 +53,8 @@ fn every_supported_byte_split_continues_identically() {
         b"\x1b_ignored-apc\x1b\\done",
         b"\x1b[?1049halt\x1b[?1049lback",
         b"\x1b[3;8H\x1b[6nquery",
+        // More colon subparameters than the parser keeps.
+        b"\x1b[4:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1mover",
     ];
 
     for fixture in fixtures {
@@ -109,9 +111,9 @@ fn malformed_noncanonical_corrupt_and_oversized_inputs_fail_closed() {
         .position(|window| window == marker)
         .unwrap()
         + marker.len();
-    let mut excessive_rows = Vec::with_capacity(bytes.len() + 1_500_005);
+    let mut excessive_rows = Vec::with_capacity(bytes.len() + 5_500_005);
     excessive_rows.extend_from_slice(&bytes[..start]);
-    excessive_rows.extend_from_slice("null,".repeat(300_000).as_bytes());
+    excessive_rows.extend_from_slice("null,".repeat(1_100_000).as_bytes());
     excessive_rows.extend_from_slice(&bytes[start..]);
     assert!(matches!(
         Terminal::restore_checkpoint(&excessive_rows, config.clone()),
@@ -237,4 +239,38 @@ fn restored_pending_query_reply_remains_in_parser_order() {
         |event| matches!(event, TerminalEvent::PtyWrite(bytes) if bytes.starts_with(b"\x1b["))
     ));
     assert_eq!(events, original.drain_events().collect::<Vec<_>>());
+}
+
+#[test]
+fn checkpoints_fit_full_terminals_with_deep_scrollback() {
+    // A full 200x50 screen with 10,000 lines of history must stay well inside
+    // the checkpoint budget, or every handoff would be refused.
+    let config = TerminalConfig {
+        scrollback_lines: 10_000,
+        ..TerminalConfig::default()
+    };
+    let mut terminal = Terminal::new(200, 50, config.clone());
+    let line = format!("{}\r\n", "x".repeat(200));
+    for _ in 0..10_050 {
+        terminal.advance(line.as_bytes());
+    }
+    let bytes = terminal.encode_checkpoint().unwrap();
+    assert!(
+        bytes.len() < MAX_TERMINAL_CHECKPOINT_BYTES * 3 / 4,
+        "{} bytes",
+        bytes.len()
+    );
+    let restored = Terminal::restore_checkpoint(&bytes, config).unwrap();
+    assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
+
+    // The protocol allows 1,000,000 scrollback lines; a mostly empty history
+    // of that capacity must still checkpoint.
+    let config = TerminalConfig {
+        scrollback_lines: 1_000_000,
+        ..TerminalConfig::default()
+    };
+    let mut terminal = Terminal::new(80, 24, config.clone());
+    terminal.advance(b"short history\r\n");
+    let bytes = terminal.encode_checkpoint().unwrap();
+    Terminal::restore_checkpoint(&bytes, config).unwrap();
 }

@@ -20,7 +20,12 @@ use serde::{
 
 use crate::{Color, Coordinate, Cursor, Row, ScrollRegion, row::MAX_CHECKPOINT_COLUMNS};
 
-pub(crate) const MAX_CHECKPOINT_GRID_ROWS: usize = 1 << 18;
+/// Covers the protocol maximum of 1,000,000 scrollback lines plus the screen,
+/// rounded up to the power-of-two ring capacity.
+pub(crate) const MAX_CHECKPOINT_GRID_ROWS: usize = 1 << 20;
+/// Restored monotonic counters must leave room to keep counting; an exhausted
+/// counter would panic on the next mutation.
+pub(crate) const CHECKPOINT_COUNTER_HEADROOM: u64 = u64::MAX / 2;
 
 /// Direction of a grid scroll operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +156,9 @@ impl Grid {
             || self.view >= capacity
             || self.history_generation == 0
             || self.next_row_id == 0
+            || self.generation > CHECKPOINT_COUNTER_HEADROOM
+            || self.history_generation > CHECKPOINT_COUNTER_HEADROOM
+            || self.next_row_id > CHECKPOINT_COUNTER_HEADROOM
         {
             return false;
         }

@@ -368,7 +368,61 @@ impl Cell {
         };
         content_is_valid && self.attributes.checkpoint_is_valid()
     }
+
+    /// Appends this cell's fixed-width checkpoint encoding.
+    pub(crate) fn write_checkpoint(self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.content.to_le_bytes());
+        output.extend_from_slice(&self.attributes.style_and_foreground.to_le_bytes());
+        output.extend_from_slice(&self.attributes.state_and_background.to_le_bytes());
+        output.push(self.attributes.underline_style as u8);
+        output.push(self.attributes.underline_color.source as u8);
+        output.extend_from_slice(&self.attributes.underline_color.value.to_le_bytes());
+    }
+
+    /// Reads one fixed-width checkpoint cell; semantic validation is separate.
+    pub(crate) fn read_checkpoint(bytes: &[u8; CHECKPOINT_CELL_BYTES]) -> Option<Self> {
+        let word = |offset: usize| {
+            u32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        };
+        let underline_style = match bytes[12] {
+            0 => UnderlineStyle::None,
+            1 => UnderlineStyle::Single,
+            2 => UnderlineStyle::Double,
+            3 => UnderlineStyle::Curly,
+            4 => UnderlineStyle::Dotted,
+            5 => UnderlineStyle::Dashed,
+            _ => return None,
+        };
+        let source = match bytes[13] {
+            0 => ColorSource::Default,
+            1 => ColorSource::Base16,
+            2 => ColorSource::Base256,
+            3 => ColorSource::Rgb,
+            _ => return None,
+        };
+        Some(Self {
+            content: word(0),
+            attributes: Attributes {
+                style_and_foreground: word(4),
+                state_and_background: word(8),
+                underline_style,
+                underline_color: Color {
+                    source,
+                    value: word(14),
+                },
+            },
+        })
+    }
 }
+
+/// Bytes one cell occupies in a packed checkpoint row: content, both attribute
+/// words, underline style, underline color source and value.
+pub(crate) const CHECKPOINT_CELL_BYTES: usize = 18;
 
 #[cfg(test)]
 mod tests {

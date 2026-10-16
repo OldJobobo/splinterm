@@ -118,31 +118,55 @@ struct ConfigEvidence {
 
 impl ConfigEvidence {
     fn from_config(config: &TerminalConfig) -> Self {
+        // Exhaustive destructuring: a new configuration field must be added
+        // here, or drift in it would restore silently.
+        let TerminalConfig {
+            scrollback_lines,
+            tab_width,
+            osc_limit,
+            dcs_limit,
+            composed_limit,
+            event_limit,
+            update_history_limit,
+            image_limits:
+                crate::ImageLimits {
+                    bytes_per_content,
+                    bytes_per_terminal,
+                    contents_per_terminal,
+                    placements_per_terminal,
+                    maximum_dimension,
+                    maximum_pixels,
+                },
+            shared_image_budget,
+            shared_kitty_upload_budget,
+            sixel:
+                crate::SixelConfig {
+                    enabled: sixel_enabled,
+                    private_palette: sixel_private_palette,
+                    palette: sixel_palette,
+                },
+        } = config;
         Self {
-            scrollback_lines: config.scrollback_lines,
-            tab_width: config.tab_width,
-            osc_limit: config.osc_limit,
-            dcs_limit: config.dcs_limit,
-            composed_limit: config.composed_limit,
-            event_limit: config.event_limit,
-            update_history_limit: config.update_history_limit,
-            image_bytes_per_content: config.image_limits.bytes_per_content,
-            image_bytes_per_terminal: config.image_limits.bytes_per_terminal,
-            image_contents_per_terminal: config.image_limits.contents_per_terminal,
-            image_placements_per_terminal: config.image_limits.placements_per_terminal,
-            image_maximum_dimension: config.image_limits.maximum_dimension,
-            image_maximum_pixels: config.image_limits.maximum_pixels,
-            shared_image_budget_limit: config
-                .shared_image_budget
-                .as_ref()
-                .map(SharedImageBudget::limit),
-            shared_kitty_upload_budget_limit: config
-                .shared_kitty_upload_budget
+            scrollback_lines: *scrollback_lines,
+            tab_width: *tab_width,
+            osc_limit: *osc_limit,
+            dcs_limit: *dcs_limit,
+            composed_limit: *composed_limit,
+            event_limit: *event_limit,
+            update_history_limit: *update_history_limit,
+            image_bytes_per_content: *bytes_per_content,
+            image_bytes_per_terminal: *bytes_per_terminal,
+            image_contents_per_terminal: *contents_per_terminal,
+            image_placements_per_terminal: *placements_per_terminal,
+            image_maximum_dimension: *maximum_dimension,
+            image_maximum_pixels: *maximum_pixels,
+            shared_image_budget_limit: shared_image_budget.as_ref().map(SharedImageBudget::limit),
+            shared_kitty_upload_budget_limit: shared_kitty_upload_budget
                 .as_ref()
                 .map(SharedKittyUploadBudget::limit),
-            sixel_enabled: config.sixel.enabled,
-            sixel_private_palette: config.sixel.private_palette,
-            sixel_palette: config.sixel.palette,
+            sixel_enabled: *sixel_enabled,
+            sixel_private_palette: *sixel_private_palette,
+            sixel_palette: *sixel_palette,
         }
     }
 
@@ -336,6 +360,7 @@ impl TerminalCheckpointV1 {
             || !(2..=MAX_SIXEL_COLORS).contains(&self.sixel_palette_size)
             || self.sixel_maximum_width > config.image_limits.maximum_dimension
             || self.sixel_maximum_height > config.image_limits.maximum_dimension
+            || self.revision > crate::grid::CHECKPOINT_COUNTER_HEADROOM
         {
             return Err(CheckpointError::InvalidState);
         }
@@ -596,6 +621,7 @@ impl Write for BoundedWriter {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use serde_json::{Value, json};
 
     use super::*;
@@ -627,9 +653,18 @@ mod tests {
                     .iter_mut()
                     .find(|row| !row.is_null())
                     .unwrap();
-                row["cells"][1]["content"] = json!(u32::from(b'A'));
-                row["cells"][2]["content"] = json!(u32::MAX);
+                let mut packed = Vec::new();
+                for content in [0, u32::from(b'A'), u32::MAX] {
+                    let mut cell = [0_u8; crate::cell::CHECKPOINT_CELL_BYTES];
+                    cell[..4].copy_from_slice(&content.to_le_bytes());
+                    packed.extend_from_slice(&cell);
+                }
+                row["cells"] = json!([4, BASE64_STANDARD.encode(packed)]);
             }),
+            mutate_body(|body| body["normal"]["generation"] = json!(u64::MAX)),
+            mutate_body(|body| body["normal"]["history_generation"] = json!(u64::MAX)),
+            mutate_body(|body| body["normal"]["next_row_id"] = json!(u64::MAX)),
+            mutate_body(|body| body["revision"] = json!(u64::MAX)),
             mutate_body(|body| body["parser"]["osc_limit"] = json!(1)),
             mutate_body(|body| body["tab_stops"] = json!([])),
             mutate_body(|body| body["scroll_region"]["end"] = json!(99)),
