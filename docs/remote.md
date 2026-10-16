@@ -186,6 +186,55 @@ channel, sends `Ping` and `ListLairs`, and exits without mapping a Window or
 mutating topology. A successful check proves SSH, relay, daemon, and human-role
 reachability.
 
+### Open a remote without a terminal
+
+`splinterm remotes`, the **Remote Dojos** desktop action, the command palette's
+**Open Remote…**, and the **Remote Dojos…** row of the local Recent Dojos
+picker all open one chooser listing the profiles in `remotes.toml` by name and
+OpenSSH destination. Choosing a profile starts a separate
+`splinterm --remote PROFILE` process for the new Window, so every Window stays
+bound to one endpoint. That process inherits no stdin, stdout, or stderr and
+starts a new session without a controlling terminal: OpenSSH cannot prompt on
+the terminal that started Splinterm, so use an agent key or your own
+`SSH_ASKPASS`. The Recent Dojos row appears only when profiles exist or
+`remotes.toml` is invalid, and a picker already bound to a remote omits it. An
+absent, empty, or invalid `remotes.toml` leaves the chooser empty with a
+one-line explanation; `splinterm remote list` reports the parse error.
+
+### Connection status
+
+Every graphical `--remote` launch, including those started from the app, first
+maps a status Window reading "Connecting to DESTINATION…" while OpenSSH
+authenticates and the remote daemon answers a ping. On success that Window
+closes and the remote's own picker or Window opens. On failure it shows the
+categorized cause, a one-line remedy, the newest sanitized OpenSSH lines, and a
+reminder that an ssh-agent key or `SSH_ASKPASS` is the preferred way to
+authenticate without a terminal. Press R or Enter to retry once, or C, Q, or
+Escape to close; Escape also cancels a connection in progress. Each retry
+reloads the profile from `remotes.toml`. A `--remote` argument that breaks the
+profile-name rules is shown as "remote" rather than echoed.
+
+OpenSSH's error output appears only in that Window, never on a terminal. When
+`splinterm --remote` is started from a terminal, stdin is a terminal, so
+Splinterm does not set `SSH_ASKPASS_REQUIRE=force` and OpenSSH may still prompt
+for a password or passphrase on that terminal; the Connecting screen says so.
+Launches from the app have no terminal and never prompt there.
+
+If the status Window closes before a connection is made, whether after a
+failure, by cancelling with Escape, or by the compositor, `splinterm` exits
+with status 1, so a terminal caller can tell that no remote Window opened.
+
+Each failure is also recorded in the client diagnostics log
+(`${XDG_STATE_HOME:-~/.local/state}/splinterm/logs/`) as a
+`remote_connect_failure` event whose error code names only the category:
+`remote_host_key`, `remote_authentication`, `remote_unreachable`,
+`remote_installation`, `remote_daemon`, `remote_incompatible`,
+`remote_transport`, `remote_profile` (`remotes.toml` could not be loaded or
+lacks the profile), or `remote_local_setup` (`SSH_ASKPASS` does not name an
+absolute executable, or the local `ssh` could not be started). Errors without a
+more specific category are reported as `remote_transport`. Non-graphical
+commands such as `remote check PROFILE` still report on the terminal.
+
 ## Remote profiles
 
 Profiles live at `${XDG_CONFIG_HOME:-~/.config}/splinterm/remotes.toml`.
@@ -235,8 +284,9 @@ OpenSSH's authority. Splinterm requires that value to name an absolute executabl
 local file before setting `SSH_ASKPASS_REQUIRE=force`. It never places a password
 or passphrase in argv, TOML, relay frames, diagnostics, or application storage.
 Agent-backed authentication can still succeed without a prompt provider;
-interactive authentication failures are reported rather than replaced with an
-application password field. Post-connect SSH authentication and relay
+interactive authentication failures are reported, in the connection status
+Window for graphical launches, rather than replaced with an application password
+field. Post-connect SSH authentication and relay
 negotiation are bounded by the profile timeout plus a 120-second human/hardware
 interaction allowance. Logical-channel admission, private daemon handshake, and
 each `remote check` probe use the validated profile timeout.

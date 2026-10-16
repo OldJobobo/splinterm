@@ -3414,6 +3414,78 @@ async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
     .expect("atomic Lair termination scenario timed out");
 }
 
+// Terminate Dojo kills each Splint, then closes the Dojo. A Window treats a
+// subscription that ends without an exit notice as a broken stream, so every
+// subscriber must still receive the exit after the Dojo closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn killed_splint_still_notifies_subscribers_after_its_dojo_closes() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let cwd = std::env::current_dir().unwrap();
+        let mut admin = daemon.connect().await;
+        let Response::LairCreated { lair, .. } = admin
+            .request(Request::CreateLair {
+                expected_topology_revision: splinterm_core::TopologyRevision::default(),
+                name: "terminate-dojo".into(),
+                launch: LaunchParameters {
+                    cwd,
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("daemon did not create the Lair");
+        };
+        let dojo_id = lair.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("new Dojo was not a leaf");
+        };
+        let splint_id = splint.id;
+        let incarnation = admin.live_incarnation(splint_id).await;
+        let mut subscriber = daemon.connect().await;
+        let (subscription_id, _) = subscriber.attach(splint_id, incarnation).await;
+
+        assert!(matches!(
+            admin
+                .request(Request::KillSplint {
+                    splint_id,
+                    incarnation,
+                })
+                .await,
+            Response::SplintKilled { .. }
+        ));
+        let expected_topology_revision = admin.topology_revision().await;
+        assert!(matches!(
+            admin
+                .request(Request::CloseDojo {
+                    expected_topology_revision,
+                    dojo_id,
+                })
+                .await,
+            Response::TopologyCommitted { .. }
+        ));
+
+        loop {
+            match read_frame_or_eof(&mut subscriber.stream).await {
+                Some(ServerFrame::Event {
+                    subscription_id: event_subscription,
+                    event: SubscriptionEvent::Exited { .. },
+                    ..
+                }) if event_subscription == subscription_id => break,
+                Some(ServerFrame::Event { .. }) => {}
+                Some(frame) => panic!("unexpected subscription frame: {frame:?}"),
+                None => panic!("subscription ended without an exit notice"),
+            }
+        }
+        daemon.shutdown();
+    })
+    .await
+    .expect("terminated Splint subscription scenario timed out");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn termination_waiting_on_a_resistant_process_does_not_block_topology_changes() {
     time::timeout(TEST_TIMEOUT, async {
