@@ -208,7 +208,7 @@ class InstallerSafetyTest(unittest.TestCase):
     def test_installer_never_replaces_an_existing_user_launcher(self) -> None:
         source = (ROOT / "install.sh").read_text(encoding="utf-8")
         collision = source.split(
-            "if [[ -e $launcher || -L $launcher ]]; then", maxsplit=1
+            "*'incomplete or changed'*)", maxsplit=1
         )[1].split("if [[ $assume_yes", maxsplit=1)[0]
         self.assertIn("Splinterm did not modify or replace it", collision)
         self.assertIn("return 0", collision)
