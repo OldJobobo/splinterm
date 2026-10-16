@@ -61,17 +61,12 @@ impl WorkloadUnitNames {
     fn new(dojo_id: DojoId, splint_id: SplintId, incarnation: u64) -> Self {
         Self {
             dojo_slice: format!("app-splinterm-dojo{}.slice", compact_id(&dojo_id)),
-            splint_scope: splint_scope_unit_name(splint_id, incarnation),
+            splint_scope: format!(
+                "splinterm-splint{}-i{incarnation}.scope",
+                compact_id(&splint_id)
+            ),
         }
     }
-}
-
-/// The transient scope unit that contains exactly one Splint incarnation.
-pub(crate) fn splint_scope_unit_name(splint_id: SplintId, incarnation: u64) -> String {
-    format!(
-        "splinterm-splint{}-i{incarnation}.scope",
-        compact_id(&splint_id)
-    )
 }
 
 fn compact_id(id: &impl ToString) -> String {

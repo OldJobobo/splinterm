@@ -198,7 +198,7 @@ checked in addition to every listed scope.
 | `Detach` | own subscription; no additional scope |
 | `KillSplint` | `process_terminate` for exact Splint/incarnation |
 | `AuditInspect` | `audit_inspect` for daemon-lifetime bounded metadata |
-| `ReportAgentStatus` (protocol 38) | a process inside the target Splint's live incarnation, with no grant; otherwise `agent_status_report` for the Splint from policy or a grant; the trusted UI may only clear |
+| `ReportAgentStatus` (protocol 38) | a process in the target Splint's live session or descended from its root process, with no grant; otherwise `agent_status_report` for the Splint from policy or a grant; the trusted UI may only clear |
 
 Audit inspection is paginated and requires `audit_inspect`.
 Cancellation is connection-local and needs no separate scope, but can cancel
@@ -242,12 +242,17 @@ topology.
 Authority, evaluated in this order:
 
 1. **Self-report.** The peer is accepted without a grant when its connection has
-   a pidfd-monitored persistent identity and its `SO_PEERCRED` process is in the
-   incarnation's live PTY session (the session leader is the Splint's live root
-   process), else a parent walk of at most 64 `/proc/<pid>/stat` steps reaches
-   that root process, else, when workload units are active, its cgroup path
-   contains the incarnation's `splinterm-splint…-i<incarnation>.scope`. A
-   self-reporter can only report for the Splint it runs in.
+   a pidfd-monitored persistent identity, its `SO_PEERCRED` PID still has the
+   start time recorded when the connection was verified, and that process is
+   in the incarnation's live PTY session (the session leader is the Splint's
+   live root process), else a parent walk of at most 64 `/proc/<pid>/stat`
+   steps reaches that root process. Each ancestor must have started no later
+   than its child, so a PID reused during the walk ends it. A self-reporter can
+   only report for the Splint it runs in. Cgroup membership is never evidence:
+   any process of the same user can join the Splint's scope or create one with
+   the same name. A fully detached agent, one that called `setsid` and was
+   reparented to init or `systemd --user` (for example a tmux server started
+   inside the Splint), is outside by this rule and needs a grant.
 2. **Granted report.** Any other peer needs `agent_status_report` for the Splint
    from an exact persistent policy rule, a Lair grant, or a Splint grant. A
    Splint selector resolves to the current incarnation; a report naming another
@@ -259,10 +264,12 @@ A report for an incarnation other than the live one fails with
 excess reports fail with the retryable private `rate_limited` error, which the
 CLI and MCP surfaces report as their retryable `resource_limit`.
 
-Granted and refused reports are audited as operation `agent_status_report` with
-decision and outcome only. Self-reports are not audited per update, so
-heartbeats cannot flood bounded audit; a self-report rate refusal is audited
-once per incarnation. The detail text is never audited, logged, or traced.
+Granted reports, and reports refused by authorization, are audited as operation
+`agent_status_report` with decision and outcome only. Self-reports are not
+audited per update, so heartbeats cannot flood bounded audit. Nor are a
+self-reporter's refusals for a stale incarnation or invalid detail; its rate
+refusals are audited once per incarnation, and later ones are not. The detail
+text is never audited, logged, or traced.
 
 The status lives only in daemon memory, keyed by Splint and bound to one
 incarnation. It is never persisted, never carried through handoff, and never

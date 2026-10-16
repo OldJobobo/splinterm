@@ -8534,6 +8534,11 @@ async fn verify_peer(stream: &UnixStream) -> Result<(PeerIdentity, Option<consen
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
+    // The start time tells this peer from a later process reusing its PID;
+    // agent status self-reports require it to still match.
+    if let Some(start_time) = agent_status::process_start_time(identity.pid) {
+        identity.install_start_time(start_time);
+    }
     let monitor = match consent::PeerMonitor::initialize(stream, identity.pid).await {
         Ok((monitor, executable)) => {
             identity.install_persistent_executable(executable);

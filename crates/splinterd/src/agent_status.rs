@@ -24,7 +24,7 @@ use tracing::warn;
 
 use crate::{
     DaemonState, MAX_LIVE_SPLINTS, PeerIdentity, RequestAuditDisposition,
-    RequestAuthorizationContext, append_request_audit, audit_resource, cgroup, internal, not_found,
+    RequestAuthorizationContext, append_request_audit, audit_resource, internal, not_found,
     request_policy_resources,
 };
 
@@ -506,66 +506,95 @@ async fn publish_due(state: &DaemonState) {
 pub(crate) enum SelfReportPath {
     Session,
     Ancestry,
-    WorkloadScope,
 }
 
-/// Parses `(ppid, session)` from `/proc/<pid>/stat`, tolerating any command
-/// name by splitting after its final closing parenthesis.
-fn parse_proc_stat(contents: &str) -> Option<(u32, u32)> {
-    let rest = &contents[contents.rfind(')')? + 1..];
+/// The `/proc/<pid>/stat` fields that peer location reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcStat {
+    parent: u32,
+    session: u32,
+    /// Clock ticks since boot; tells a process from a later one reusing its PID.
+    start_time: u64,
+}
+
+/// Parses `/proc/<pid>/stat`. The command name may hold any bytes, including
+/// `)` and invalid UTF-8, so the fields are read after its final `)`.
+fn parse_proc_stat(contents: &[u8]) -> Option<ProcStat> {
+    let close = contents.iter().rposition(|&byte| byte == b')')?;
+    let rest = std::str::from_utf8(&contents[close + 1..]).ok()?;
     let mut fields = rest.split_ascii_whitespace();
     let _state = fields.next()?;
     let parent = fields.next()?.parse().ok()?;
     let _process_group = fields.next()?;
     let session = fields.next()?.parse().ok()?;
-    Some((parent, session))
+    // Skip tty_nr through itrealvalue to reach starttime, field 22.
+    let start_time = fields.nth(15)?.parse().ok()?;
+    Some(ProcStat {
+        parent,
+        session,
+        start_time,
+    })
 }
 
-fn read_proc_stat(pid: u32) -> Option<(u32, u32)> {
-    parse_proc_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+fn read_proc_stat(pid: u32) -> Option<ProcStat> {
+    parse_proc_stat(&fs::read(format!("/proc/{pid}/stat")).ok()?)
 }
 
-fn cgroup_contains_scope(contents: &str, scope: &str) -> bool {
-    contents
-        .lines()
-        .filter_map(|line| line.strip_prefix("0::"))
-        .any(|path| path.split('/').any(|component| component == scope))
+/// The start time of `pid`, recorded when a connection is verified.
+pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
+    read_proc_stat(pid).map(|stat| stat.start_time)
 }
 
 /// Locates the peer inside the Splint whose live session leader is
 /// `child_pid`. The validated PTY identity requires child, process group, and
-/// session to be one PID, so the recorded session ID is `child_pid`. Checks:
-/// same session, else a bounded parent walk reaching the child,
-/// else (when workload units are active) the incarnation's cgroup scope.
+/// session to be one PID, so the recorded session ID is `child_pid`. The peer
+/// must be in that session, or a bounded parent walk must reach the child.
+/// Anything else, including a process detached with `setsid` and reparented
+/// to init or `systemd --user`, is outside and needs a grant. Sharing the
+/// Splint's cgroup proves nothing: any same-user process can join it.
 pub(crate) fn locate_peer(
     peer_pid: u32,
+    peer_start_time: u64,
     child_pid: u32,
-    workload_scope: Option<&str>,
+) -> Option<SelfReportPath> {
+    locate_peer_with(peer_pid, peer_start_time, child_pid, read_proc_stat)
+}
+
+fn locate_peer_with(
+    peer_pid: u32,
+    peer_start_time: u64,
+    child_pid: u32,
+    read: impl Fn(u32) -> Option<ProcStat>,
 ) -> Option<SelfReportPath> {
     if peer_pid <= 1 || child_pid <= 1 {
         return None;
     }
-    let (mut parent, session) = read_proc_stat(peer_pid)?;
-    if session == child_pid {
+    let peer = read(peer_pid)?;
+    // The PID must still name the process that opened the connection.
+    if peer.start_time != peer_start_time {
+        return None;
+    }
+    if peer.session == child_pid {
         return Some(SelfReportPath::Session);
     }
+    let (mut parent, mut child_start) = (peer.parent, peer.start_time);
     for _ in 0..MAX_ANCESTRY_STEPS {
         if parent == child_pid {
             return Some(SelfReportPath::Ancestry);
         }
         if parent <= 1 {
-            break;
+            return None;
         }
-        let Some((next, _)) = read_proc_stat(parent) else {
-            break;
-        };
-        parent = next;
+        let ancestor = read(parent)?;
+        // A parent starts no later than its child. A later start means the
+        // parent exited during the walk and its PID now names another process.
+        if ancestor.start_time > child_start {
+            return None;
+        }
+        parent = ancestor.parent;
+        child_start = ancestor.start_time;
     }
-    let scope = workload_scope?;
-    fs::read_to_string(format!("/proc/{peer_pid}/cgroup"))
-        .ok()
-        .filter(|contents| cgroup_contains_scope(contents, scope))
-        .map(|_| SelfReportPath::WorkloadScope)
+    None
 }
 
 struct LiveTarget {
@@ -721,9 +750,10 @@ pub(crate) async fn handle_self_report(
     let Request::ReportAgentStatus { splint_id, .. } = request else {
         return None;
     };
-    // Only pidfd-monitored connections: the numeric peer PID cannot be reused
-    // while the connection lives, because peer exit closes it.
+    // Only pidfd-monitored connections with a recorded start time: peer exit
+    // closes the connection, and the start time rejects a reused PID.
     peer.persistent_executable()?;
+    let peer_start_time = peer.start_time()?;
     let target = if let Ok(target) = live_target(state, *splint_id).await {
         target
     } else {
@@ -732,19 +762,14 @@ pub(crate) async fn handle_self_report(
         drop(state.topology_transactions.acquire().await.ok()?);
         live_target(state, *splint_id).await.ok()?
     };
-    let workload_scope = state
-        .workload_units
-        .is_some()
-        .then(|| cgroup::splint_scope_unit_name(*splint_id, target.incarnation));
     let (peer_pid, child_pid) = (peer.pid, target.handle.child_pid());
-    let located = tokio::task::spawn_blocking(move || {
-        locate_peer(peer_pid, child_pid, workload_scope.as_deref())
-    })
-    .await
-    .unwrap_or_else(|error| {
-        warn!(%error, "agent status peer lookup task failed");
-        None
-    })?;
+    let located =
+        tokio::task::spawn_blocking(move || locate_peer(peer_pid, peer_start_time, child_pid))
+            .await
+            .unwrap_or_else(|error| {
+                warn!(%error, "agent status peer lookup task failed");
+                None
+            })?;
     // The session leader is still the live child, so its PID and session ID
     // could not have been reused during the walk.
     if !target.handle.root_process_is_live() {
@@ -1100,35 +1125,93 @@ mod tests {
 
     #[test]
     fn proc_stat_parsing_tolerates_hostile_command_names() {
+        let stat = |name: &[u8], parent: u32, session: u32, start: u64| {
+            let mut record = b"4242 (".to_vec();
+            record.extend_from_slice(name);
+            record.extend_from_slice(
+                format!(
+                    ") R {parent} 4242 {session} 34816 4242 0 0 0 0 0 1 2 0 0 20 0 1 0 {start} 0 0\n"
+                )
+                .as_bytes(),
+            );
+            record
+        };
+        let parsed = |parent, session, start_time| {
+            Some(ProcStat {
+                parent,
+                session,
+                start_time,
+            })
+        };
         assert_eq!(
-            parse_proc_stat("4242 (a) b (c) R 17 4242 99 34816 4242 0"),
-            Some((17, 99))
+            parse_proc_stat(&stat(b"a) b (c", 17, 99, 555)),
+            parsed(17, 99, 555)
         );
-        assert_eq!(parse_proc_stat("1 (init) S 0 1 1 0"), Some((0, 1)));
-        assert_eq!(parse_proc_stat("garbage"), None);
-        assert_eq!(parse_proc_stat("1 (x) S notanumber 1 1"), None);
+        // A legitimate peer may have a command name that is not UTF-8.
+        assert_eq!(
+            parse_proc_stat(&stat(b"\xff\xfe)x", 3, 4, 6)),
+            parsed(3, 4, 6)
+        );
+        assert_eq!(parse_proc_stat(b"garbage"), None);
+        assert_eq!(parse_proc_stat(b"1 (x) S notanumber 1 1"), None);
+        assert_eq!(parse_proc_stat(b"1 (x) S 0 1 1 0"), None, "no start time");
+    }
+
+    fn table(entries: &[(u32, u32, u32, u64)]) -> impl Fn(u32) -> Option<ProcStat> {
+        let entries = entries.to_vec();
+        move |pid| {
+            entries
+                .iter()
+                .find(|entry| entry.0 == pid)
+                .map(|&(_, parent, session, start_time)| ProcStat {
+                    parent,
+                    session,
+                    start_time,
+                })
+        }
     }
 
     #[test]
-    fn cgroup_scope_match_requires_an_exact_path_component() {
-        let scope = "splinterm-splintabc-i3.scope";
-        assert!(cgroup_contains_scope(
-            "0::/user.slice/app-splinterm-dojox.slice/splinterm-splintabc-i3.scope\n",
-            scope
-        ));
-        assert!(!cgroup_contains_scope(
-            "0::/user.slice/splinterm-splintabc-i30.scope\n",
-            scope
-        ));
-        assert!(!cgroup_contains_scope(
-            "1:name=systemd:/splinterm-splintabc-i3.scope\n",
-            scope
-        ));
+    fn peer_location_accepts_only_the_session_or_ancestry() {
+        // Splint leader 100 (session 100). 110 runs in its session; 120 left
+        // the session but descends from 100 through 115.
+        let processes = table(&[
+            (100, 1, 100, 10),
+            (110, 100, 100, 20),
+            (115, 100, 115, 30),
+            (120, 115, 115, 40),
+            // Started inside, then setsid'd and reparented to init.
+            (130, 1, 130, 50),
+            // A same-user sibling that may share the Splint's cgroup.
+            (140, 2000, 2000, 60),
+            (2000, 1, 2000, 5),
+        ]);
+        let locate = |pid, start| locate_peer_with(pid, start, 100, &processes);
+        assert_eq!(locate(110, 20), Some(SelfReportPath::Session));
+        assert_eq!(locate(120, 40), Some(SelfReportPath::Ancestry));
+        assert_eq!(locate(130, 50), None, "detached agents need a grant");
+        assert_eq!(locate(140, 60), None, "a shared cgroup is not inside");
+        assert_eq!(locate(110, 21), None, "a reused peer PID is refused");
+        assert_eq!(locate_peer_with(110, 20, 1, &processes), None);
     }
 
     #[test]
-    fn peer_location_uses_session_then_bounded_ancestry() {
+    fn ancestry_refuses_an_ancestor_younger_than_its_child() {
+        // 215 exited and its PID was reused by a process started after 220,
+        // whose parent chain happens to reach the leader.
+        let processes = table(&[(200, 1, 200, 10), (215, 200, 215, 90), (220, 215, 220, 40)]);
+        assert_eq!(locate_peer_with(220, 40, 200, &processes), None);
+        let processes = table(&[(200, 1, 200, 10), (215, 200, 215, 30), (220, 215, 220, 40)]);
+        assert_eq!(
+            locate_peer_with(220, 40, 200, &processes),
+            Some(SelfReportPath::Ancestry)
+        );
+    }
+
+    #[test]
+    fn peer_location_uses_the_live_process_table() {
         let own = std::process::id();
+        let own_start = process_start_time(own).expect("own start time");
         let session = rustix::process::getsid(None)
             .unwrap()
             .as_raw_nonzero()
@@ -1136,15 +1219,21 @@ mod tests {
         let session = u32::try_from(session).unwrap();
         if session > 1 {
             assert_eq!(
-                locate_peer(own, session, None),
+                locate_peer(own, own_start, session),
                 Some(SelfReportPath::Session)
             );
         }
-        let mut child = std::process::Command::new("sleep")
+        let mut leader = std::process::Command::new("sleep")
             .arg("5")
             .spawn()
             .expect("spawn sleep");
-        let child_pid = child.id();
+        let mut sibling = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        let (leader_pid, sibling_pid) = (leader.id(), sibling.id());
+        let leader_start = process_start_time(leader_pid).unwrap();
+        let sibling_start = process_start_time(sibling_pid).unwrap();
         // Treat the test process as a Splint leader: its child is inside
         // through the shared session when it leads one, else by ancestry.
         let expected = if session == own {
@@ -1152,11 +1241,16 @@ mod tests {
         } else {
             SelfReportPath::Ancestry
         };
-        assert_eq!(locate_peer(child_pid, own, None), Some(expected));
+        assert_eq!(locate_peer(leader_pid, leader_start, own), Some(expected));
+        // A sibling shares the cgroup and session but not ancestry, and the
+        // leader leads no session, so the sibling is outside.
+        assert_eq!(locate_peer(sibling_pid, sibling_start, leader_pid), None);
         // A process is never inside a Splint led by its own descendant.
-        assert_eq!(locate_peer(own, child_pid, None), None);
-        assert_eq!(locate_peer(own, 1, None), None);
-        let _ = child.kill();
-        let _ = child.wait();
+        assert_eq!(locate_peer(own, own_start, leader_pid), None);
+        assert_eq!(locate_peer(leader_pid, leader_start + 1, own), None);
+        for child in [&mut leader, &mut sibling] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
