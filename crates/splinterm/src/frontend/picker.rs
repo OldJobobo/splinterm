@@ -454,6 +454,16 @@ fn picker_terminal_snapshot(
     revision: u64,
     lines: Vec<String>,
 ) -> TerminalSnapshot {
+    synthetic_text_snapshot(splint_id, revision, "Recent Dojos", lines)
+}
+
+/// Builds a read-only, cursorless text snapshot for a standalone client Window.
+pub(crate) fn synthetic_text_snapshot(
+    splint_id: SplintId,
+    revision: u64,
+    title: &str,
+    lines: Vec<String>,
+) -> TerminalSnapshot {
     let columns = lines
         .iter()
         .map(|line| line.chars().count())
@@ -525,7 +535,7 @@ fn picker_terminal_snapshot(
         },
         palette: vec![0; 256],
         default_colors: [0x00f4_f0e8, 0x0014_1820, 0x00e0_a030],
-        title: "Recent Dojos".to_owned(),
+        title: title.to_owned(),
         visible_rows,
         history_generation: 1,
         oldest_available_scrollback_row_id: None,

@@ -42,6 +42,8 @@ pub fn remote_chooser_command(executable: &Path) -> Command {
     )
 }
 
+/// Do not add `process_group(0)` here: it would make the child a process-group
+/// leader, and the `setsid` behind [`DETACH_TERMINAL_FLAG`] would then fail.
 fn detached_command(executable: &Path, arguments: impl IntoIterator<Item = OsString>) -> Command {
     let mut command = Command::new(executable);
     command
@@ -54,10 +56,9 @@ fn detached_command(executable: &Path, arguments: impl IntoIterator<Item = OsStr
 
 /// Opens one configured remote in a new Window process.
 ///
-/// This is the Milestone 2 seam for Plan 0055: Milestone 3 replaces it with a
-/// connection-status Window that maps immediately and reports categorized
-/// failures. Until then, connection failures surface only through the
-/// launched client's graphical diagnostics (`splinterm diagnostics --last-exit`).
+/// The launched client maps a connection-status Window at once, shows
+/// categorized failures with Retry / Close, and hands over to the remote's
+/// Window when connected; this call returns as soon as the process starts.
 ///
 /// # Errors
 ///

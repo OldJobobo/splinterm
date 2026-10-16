@@ -132,7 +132,10 @@ pub(in crate::app) async fn select_dojo(
     }
 }
 
-fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result<()> {
+pub(in crate::app) fn configure_picker_renderer(
+    config: &AppConfig,
+    theme: ResolvedTheme,
+) -> Result<()> {
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_ligatures: config.font_ligatures,

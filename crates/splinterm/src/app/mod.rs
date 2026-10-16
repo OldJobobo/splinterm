@@ -15,6 +15,7 @@ mod pane_bridge;
 mod presets;
 mod remote_chooser;
 mod remote_cli;
+mod remote_status;
 mod session_catalog;
 mod sessions;
 mod shell_integration;
@@ -23,3 +24,4 @@ mod topology_manager;
 mod window;
 
 pub(crate) use cli::run;
+pub(crate) use remote_status::RemoteNotConnected;
