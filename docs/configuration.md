@@ -122,6 +122,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
 | `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically | yes |
+| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it | no |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
@@ -535,8 +536,33 @@ explicitly naming/renaming a Dojo atomically promotes the complete transient
 Lair before the tab mutation commits. Promotion is permanent: closing the
 Window afterward detaches instead of terminating it. With `no`, organized and
 multi-tab Lairs remain Window-owned and are removed together when that Window
-closes. Unpromoted transient Dojos never enter Recent Dojos. Dojo reopening is
-deliberately separate:
+closes. Unpromoted transient Dojos never enter Recent Dojos.
+
+With `multiplexer.close-unused=yes`, **Close Tab** (including closing the other
+tabs) and closing the Window from the compositor terminate a Dojo that was
+never used, instead of detaching from it. The daemon decides at the moment of
+the close. A Dojo counts as unused only while all of these hold:
+
+- it still holds only the Splint it was created with; a split counts as use,
+  even after the extra pane is closed again;
+- that Splint never received client input: keys, paste, or mouse. Focus
+  reports and other replies the terminal generates do not count;
+- it started as a plain default-shell terminal under its default name, in the
+  running daemon. Command-bearing launches, presets, restored or relaunched
+  Splints, and Dojos from before the daemon last started count as used;
+- neither the Dojo nor its Splint was renamed;
+- no other Window is attached to it;
+- the shell itself holds the terminal foreground, so a program started from a
+  shell startup file counts as use.
+
+Input that races the close either reaches the shell, which keeps the Dojo, or
+is refused because the close won. A used Dojo is detached as before, and so is
+every Dojo when the daemon gives no answer. **Detach Window** (`window.detach`)
+always detaches. Ending a Lair's last Dojo leaves the Lair in place, as closing
+that Dojo explicitly does. A remote Window gets the same decision from the
+remote daemon.
+
+Dojo reopening is deliberately separate:
 
 ```text
 splinterm-dojos     → native Recent Dojos picker

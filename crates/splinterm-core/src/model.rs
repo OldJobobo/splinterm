@@ -539,6 +539,25 @@ impl Topology {
         expected: TopologyRevision,
         dojo_id: DojoId,
     ) -> Result<TopologyRevision, TopologyError> {
+        self.remove_dojo_at(expected, dojo_id, false)
+    }
+
+    /// Removes a Dojo whose live processes the caller is terminating, as
+    /// [`Self::terminate_lair_at`] does for a whole Lair.
+    pub fn terminate_dojo_at(
+        &mut self,
+        expected: TopologyRevision,
+        dojo_id: DojoId,
+    ) -> Result<TopologyRevision, TopologyError> {
+        self.remove_dojo_at(expected, dojo_id, true)
+    }
+
+    fn remove_dojo_at(
+        &mut self,
+        expected: TopologyRevision,
+        dojo_id: DojoId,
+        allow_live: bool,
+    ) -> Result<TopologyRevision, TopologyError> {
         self.check_revision(expected)?;
         let lair = self
             .lairs
@@ -550,7 +569,7 @@ impl Topology {
             .iter()
             .position(|dojo| dojo.id == dojo_id)
             .ok_or(TopologyError::DojoNotFound(dojo_id))?;
-        if !lair.dojos[index].root.all_exited() {
+        if !allow_live && !lair.dojos[index].root.all_exited() {
             return Err(TopologyError::DojoStillLive(dojo_id));
         }
         lair.dojos.remove(index);
@@ -1336,6 +1355,27 @@ mod tests {
             .close_dojo_at(topology.revision(), extra_id)
             .unwrap();
         assert!(topology.find_dojo(extra_id).is_none());
+        assert_unique_valid_tree(&topology);
+
+        // Termination removes a live Dojo, still at the expected revision only.
+        let live = Dojo::with_shell("live", PathBuf::from("/var/tmp"));
+        let live_id = live.id;
+        topology
+            .new_dojo_at(topology.revision(), lair_id, live)
+            .unwrap();
+        let stale = TopologyRevision::default();
+        assert!(matches!(
+            topology.terminate_dojo_at(stale, live_id),
+            Err(TopologyError::StaleTopology { .. })
+        ));
+        let revision = topology.revision();
+        let terminated = topology.terminate_dojo_at(revision, live_id).unwrap();
+        assert!(terminated > revision);
+        assert!(topology.find_dojo(live_id).is_none());
+        assert_eq!(
+            topology.terminate_dojo_at(terminated, live_id),
+            Err(TopologyError::DojoNotFound(live_id))
+        );
         assert_unique_valid_tree(&topology);
     }
 

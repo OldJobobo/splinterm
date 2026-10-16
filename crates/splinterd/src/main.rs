@@ -42,9 +42,9 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES,
-    MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
-    MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    DojoUse, ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES,
+    MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS,
+    MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
     MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch, PresetLayoutLaunch,
     PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError, Request, Response,
@@ -54,7 +54,7 @@ use splinterm_protocol::{
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
     TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
     TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
-    UnderlineStyle as WireUnderlineStyle, encode_server_frame_transaction,
+    UnderlineStyle as WireUnderlineStyle, UnusedDojoCloseOutcome, encode_server_frame_transaction,
     image_content_socket_path,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
@@ -730,6 +730,58 @@ impl Drop for RetiringGuard {
     }
 }
 
+/// Terminal attachments per Splint across every connection. A Window that
+/// shows a Splint holds one, so a count shows whether any Window is attached.
+#[derive(Clone, Default)]
+struct AttachmentRegistry(Arc<StdMutex<HashMap<SplintId, usize>>>);
+
+impl AttachmentRegistry {
+    fn attach(&self, splint_id: SplintId) -> AttachmentGuard {
+        *self.0.lock().unwrap().entry(splint_id).or_default() += 1;
+        AttachmentGuard {
+            registry: self.clone(),
+            splint_id,
+        }
+    }
+
+    fn is_attached(&self, splint_id: SplintId) -> bool {
+        self.0.lock().unwrap().contains_key(&splint_id)
+    }
+}
+
+/// Held with its subscription, so a detach or disconnect releases it at once.
+struct AttachmentGuard {
+    registry: AttachmentRegistry,
+    splint_id: SplintId,
+}
+
+impl Drop for AttachmentGuard {
+    fn drop(&mut self) {
+        let mut counts = self.registry.0.lock().unwrap();
+        if let Some(count) = counts.get_mut(&self.splint_id) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.splint_id);
+            }
+        }
+    }
+}
+
+/// The original Splint of a Dojo created as a plain default-shell terminal,
+/// and the first organizing action (a rename or a split) taken on it since.
+#[derive(Clone, Copy)]
+struct PlainDojo {
+    splint_id: SplintId,
+    incarnation: u64,
+    organized: Option<DojoUse>,
+}
+
+/// One subscription owned by a connection.
+struct ConnectionSubscription {
+    _task: AbortOnDrop,
+    _attachment: Option<AttachmentGuard>,
+}
+
 struct TopologySubscriber {
     owner_connection_id: u64,
     changes: mpsc::Sender<Arc<TopologyChange>>,
@@ -814,6 +866,10 @@ struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
     retiring: RetiringRuntimes,
+    /// Plain default-shell Dojos created by this daemon, with their original
+    /// Splint and incarnation; see `Request::CloseUnusedDojo`.
+    plain_dojos: StdMutex<HashMap<DojoId, PlainDojo>>,
+    attachments: AttachmentRegistry,
     transient_leases: Arc<StdMutex<TransientLeaseRegistry>>,
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
@@ -996,6 +1052,8 @@ async fn run_daemon() -> Result<()> {
         topology: RwLock::new(lair),
         runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
         retiring,
+        plain_dojos: StdMutex::default(),
+        attachments: AttachmentRegistry::default(),
         transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
@@ -1634,7 +1692,7 @@ const fn diagnostic_lifecycle_event(
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => Some(Event::DojoCreated),
         Request::MaterializePreset { .. } => Some(Event::PresetMaterialized),
         Request::CloseSplint { .. } => Some(Event::SplintClosed),
-        Request::CloseDojo { .. } => Some(Event::DojoClosed),
+        Request::CloseDojo { .. } | Request::CloseUnusedDojo { .. } => Some(Event::DojoClosed),
         Request::TerminateLair { .. } => Some(Event::LairTerminated),
         Request::RenameLair { .. } => Some(Event::LairRenamed),
         Request::RenameDojo { .. } => Some(Event::DojoRenamed),
@@ -1814,7 +1872,7 @@ async fn serve_authenticated(
     )
     .await?;
 
-    let mut subscriptions = HashMap::<u64, AbortOnDrop>::new();
+    let mut subscriptions = HashMap::<u64, ConnectionSubscription>::new();
     let mut policy_reloads = state.policy_reloads.subscribe();
     let mut connection_revocations = state.connection_revocations.subscribe();
     let mut last_request_id = 0_u64;
@@ -2028,6 +2086,13 @@ async fn serve_authenticated(
                                 .await?;
                                 continue;
                             }
+                            // Count the attachment before the client learns of it.
+                            let attachment = match &subscription {
+                                PendingSubscription::Terminal { handle, .. } => {
+                                    Some(state.attachments.attach(handle.splint_id))
+                                }
+                                _ => None,
+                            };
                             send_response(outbound, state, request_id, Ok(response)).await?;
                             let (id, task) = match subscription {
                                 PendingSubscription::Terminal {
@@ -2089,7 +2154,13 @@ async fn serve_authenticated(
                                     ),
                                 ),
                             };
-                            subscriptions.insert(id, AbortOnDrop::new(task));
+                            subscriptions.insert(
+                                id,
+                                ConnectionSubscription {
+                                    _task: AbortOnDrop::new(task),
+                                    _attachment: attachment,
+                                },
+                            );
                         } else {
                             send_response(outbound, state, request_id, Ok(response)).await?;
                         }
@@ -2493,6 +2564,100 @@ async fn durable_topology_candidate<T>(
 
 async fn install_topology(state: &DaemonState, candidate: Topology) {
     *state.topology.write().await = candidate;
+}
+
+/// Records a just-committed Dojo as closable while unused when it runs a
+/// plain default shell; `named` marks a name the user chose. Callers hold the
+/// topology transaction. Entries for Dojos that no longer exist are dropped here.
+async fn record_plain_dojo(
+    state: &DaemonState,
+    dojo_id: DojoId,
+    splint_id: SplintId,
+    incarnation: u64,
+    plain: bool,
+    named: bool,
+) {
+    if !plain {
+        return;
+    }
+    let topology = state.topology.read().await;
+    let mut plain_dojos = state.plain_dojos.lock().unwrap();
+    plain_dojos.retain(|dojo_id, _| topology.find_dojo(*dojo_id).is_some());
+    plain_dojos.insert(
+        dojo_id,
+        PlainDojo {
+            splint_id,
+            incarnation,
+            organized: named.then_some(DojoUse::Renamed),
+        },
+    );
+}
+
+/// Renaming a Dojo or its Splint, or splitting it, is a user action that keeps
+/// the Dojo even after the split pane closes again.
+fn record_dojo_organized(state: &DaemonState, dojo_id: DojoId, action: DojoUse) {
+    if let Some(plain) = state.plain_dojos.lock().unwrap().get_mut(&dojo_id) {
+        plain.organized.get_or_insert(action);
+    }
+}
+
+/// Decides whether a Dojo is unused and claims its Splint if so.
+///
+/// Callers hold the topology transaction, which orders this against splits,
+/// renames, relaunches, and closes. Client input does not take the
+/// transaction; the claim on the runtime's use latch orders it instead, so
+/// either the input lands and the Dojo counts as used, or the claim wins and
+/// the input fails. A returned handle holds the claim, which the caller must
+/// release if it does not go on to close the Dojo.
+async fn claim_unused_dojo(
+    state: &DaemonState,
+    topology: &Topology,
+    dojo_id: DojoId,
+) -> Result<Result<LiveSplintHandle, DojoUse>, ProtocolError> {
+    let dojo = topology.find_dojo(dojo_id).ok_or_else(not_found)?;
+    let LayoutNode::Leaf(splint) = &dojo.root else {
+        return Ok(Err(DojoUse::Split));
+    };
+    let original = state.plain_dojos.lock().unwrap().get(&dojo_id).copied();
+    let Some(original) = original else {
+        return Ok(Err(DojoUse::Launch));
+    };
+    if let Some(action) = original.organized {
+        return Ok(Err(action));
+    }
+    let original_incarnation = original.incarnation;
+    if original.splint_id != splint.id {
+        return Ok(Err(DojoUse::Split));
+    }
+    if !matches!(splint.state, SplintState::Running) {
+        return Ok(Err(DojoUse::NotRunning));
+    }
+    let Some(handle) = state.runtimes.lock().await.handle(splint.id) else {
+        return Ok(Err(DojoUse::NotRunning));
+    };
+    if handle.incarnation.value() != original_incarnation
+        || splint.last_incarnation != Some(original_incarnation)
+    {
+        return Ok(Err(DojoUse::Launch));
+    }
+    if handle.has_received_input() {
+        return Ok(Err(DojoUse::Input));
+    }
+    if state.attachments.is_attached(splint.id) {
+        return Ok(Err(DojoUse::Attached));
+    }
+    if handle.root_holds_foreground().await != Some(true) {
+        return Ok(Err(DojoUse::Foreground));
+    }
+    if !handle.claim_unused() {
+        return Ok(Err(DojoUse::Input));
+    }
+    // An attachment that arrived while the foreground was read keeps the Dojo.
+    if state.attachments.is_attached(splint.id) {
+        handle.release_unused_claim();
+        return Ok(Err(DojoUse::Attached));
+    }
+    Ok(Ok(handle))
 }
 
 async fn publish_topology(
@@ -3138,6 +3303,23 @@ async fn retire_transient_lair_under_transaction(
             .collect::<Vec<_>>()
     };
     state.transient_leases.lock().unwrap().remove_lair(lair_id);
+    revoke_retired_identities(state, &splint_ids, &identities, "transient Lair retired").await;
+    // Shutdown may wait through the full grace; it must not hold the transaction.
+    for runtime in runtimes {
+        drop(state.retiring.spawn(runtime));
+    }
+    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+    true
+}
+
+/// Releases focus, control, and grants held on Splints whose live runtimes a
+/// topology change just removed.
+async fn revoke_retired_identities(
+    state: &DaemonState,
+    splint_ids: &[SplintId],
+    identities: &[(SplintId, u64)],
+    reason: &'static str,
+) {
     {
         let mut focus = state.graphical_focus.lock().await;
         if focus
@@ -3147,7 +3329,7 @@ async fn retire_transient_lair_under_transaction(
             *focus = None;
         }
     }
-    for (splint_id, incarnation) in identities {
+    for &(splint_id, incarnation) in identities {
         let (controller, transfer) = {
             let mut controllers = state.controller.lock().await;
             (
@@ -3173,21 +3355,15 @@ async fn retire_transient_lair_under_transaction(
             );
         }
         publish_control_status(state, splint_id, incarnation).await;
-        let revoked = state.grants.lock().await.revoke_identity(
-            splint_id,
-            incarnation,
-            "transient Lair retired",
-        );
+        let revoked = state
+            .grants
+            .lock()
+            .await
+            .revoke_identity(splint_id, incarnation, reason);
         for grant_id in revoked {
             let _ = state.revocations.send(Revocation { grant_id });
         }
     }
-    // Shutdown may wait through the full grace; it must not hold the transaction.
-    for runtime in runtimes {
-        drop(state.retiring.spawn(runtime));
-    }
-    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
-    true
 }
 
 async fn retire_transient_lair_for_owner(state: &DaemonState, connection_id: u64) -> bool {
@@ -3424,6 +3600,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::NewDojoAutomation { .. }
             | Request::MaterializePreset { .. }
             | Request::CloseDojo { .. }
+            | Request::CloseUnusedDojo { .. }
             | Request::TerminateLair { .. }
             | Request::RenameLair { .. }
             | Request::RenameDojo { .. }
@@ -4184,9 +4361,9 @@ async fn request_policy_resources(
         | Request::SplitSplintAutomation {
             target_splint_id, ..
         } => vec![splint(*target_splint_id, None)?],
-        Request::RestoreDojo { dojo_id, .. } | Request::CloseDojo { dojo_id, .. } => {
-            dojo(*dojo_id, true)?
-        }
+        Request::RestoreDojo { dojo_id, .. }
+        | Request::CloseDojo { dojo_id, .. }
+        | Request::CloseUnusedDojo { dojo_id } => dojo(*dojo_id, true)?,
         Request::RestoreLair { lair_id, .. } | Request::TerminateLair { lair_id, .. } => {
             lair(*lair_id, true)?
         }
@@ -5483,6 +5660,15 @@ async fn handle_authorized_request(
                 ));
             }
             reservation.commit();
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                false,
+            )
+            .await;
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
             Response::LairCreated {
@@ -5579,6 +5765,15 @@ async fn handle_authorized_request(
                     let _ = state.revocations.send(Revocation { grant_id });
                 }
             }
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                false,
+            )
+            .await;
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
             Response::LairCreated {
@@ -5686,6 +5881,9 @@ async fn handle_authorized_request(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
+            }
+            if let Some(context) = splint_launch_context(&*state.topology.read().await, splint_id) {
+                record_dojo_organized(state, context.dojo, DojoUse::Split);
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::SplintSplit).await;
@@ -5889,6 +6087,14 @@ async fn handle_authorized_request(
                 lair_id,
                 promote_transient_lair,
             )?;
+            // A name the user chose counts as use, like a rename.
+            let default_name = state
+                .topology
+                .read()
+                .await
+                .find_lair(lair_id)
+                .and_then(|lair| lair.next_default_dojo_name().ok())
+                .is_some_and(|default| default == name);
             let mut dojo = Dojo::with_shell(name, launch.cwd.clone());
             let LayoutNode::Leaf(splint) = &mut dojo.root else {
                 unreachable!()
@@ -5953,6 +6159,15 @@ async fn handle_authorized_request(
                     .remove_lair(lair_id)
                     .expect("authorized transient promotion retains its lease");
             }
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                !default_name,
+            )
+            .await;
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
             Response::DojoStarted {
@@ -6115,6 +6330,61 @@ async fn handle_authorized_request(
             drop(transaction);
             finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
+        }
+        Request::CloseUnusedDojo { dojo_id } => {
+            let transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let topology = state.topology.read().await.clone();
+            match claim_unused_dojo(state, &topology, dojo_id).await? {
+                Err(reason) => Response::UnusedDojoClose {
+                    dojo_id,
+                    outcome: UnusedDojoCloseOutcome::Used { reason },
+                },
+                Ok(handle) => {
+                    let splint_id = handle.splint_id;
+                    let incarnation = handle.incarnation.value();
+                    let prepared = durable_topology_candidate(state, |topology| {
+                        topology.terminate_dojo_at(topology.revision(), dojo_id)
+                    })
+                    .await;
+                    let (candidate, topology_revision) = match prepared {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            handle.release_unused_claim();
+                            return Err(error);
+                        }
+                    };
+                    let runtime = {
+                        let mut topology = state.topology.write().await;
+                        let mut registry = state.runtimes.lock().await;
+                        *topology = candidate;
+                        registry.remove(splint_id)
+                    };
+                    state.plain_dojos.lock().unwrap().remove(&dojo_id);
+                    revoke_retired_identities(
+                        state,
+                        &[splint_id],
+                        &[(splint_id, incarnation)],
+                        "unused Dojo closed",
+                    )
+                    .await;
+                    // Shutdown runs in the background and never holds the
+                    // transaction; daemon shutdown still waits for it.
+                    if let Some(runtime) = runtime {
+                        drop(state.retiring.spawn(runtime));
+                    }
+                    publish_topology(state, topology_revision, TopologyChangeKind::DojoClosed)
+                        .await;
+                    drop(transaction);
+                    Response::UnusedDojoClose {
+                        dojo_id,
+                        outcome: UnusedDojoCloseOutcome::Closed { topology_revision },
+                    }
+                }
+            }
         }
         Request::TerminateLair {
             expected_topology_revision,
@@ -6287,6 +6557,7 @@ async fn handle_authorized_request(
                 })
                 .await?;
             install_topology(state, candidate).await;
+            record_dojo_organized(state, dojo_id, DojoUse::Renamed);
             if promoted {
                 state
                     .transient_leases
@@ -6336,6 +6607,9 @@ async fn handle_authorized_request(
             })
             .await?;
             install_topology(state, candidate).await;
+            if let Some(context) = splint_launch_context(&*state.topology.read().await, splint_id) {
+                record_dojo_organized(state, context.dojo, DojoUse::Renamed);
+            }
             publish_topology(state, topology_revision, TopologyChangeKind::SplintRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -8140,6 +8414,7 @@ fn input_error(error: &LiveError) -> ProtocolError {
         LiveError::InputQueueFull => {
             ProtocolError::new(ErrorCode::ResourceLimit, "input queue limit exceeded")
         }
+        LiveError::Retiring => ProtocolError::new(ErrorCode::NotFound, "Splint is closing"),
         _ => internal(),
     }
 }
@@ -9710,6 +9985,8 @@ mod tests {
             topology: RwLock::new(Topology::new()),
             runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
             retiring,
+            plain_dojos: StdMutex::default(),
+            attachments: AttachmentRegistry::default(),
             transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
@@ -10707,6 +10984,14 @@ mod tests {
         assert!(interactive_bypass(false, false, true, &terminate_lair));
         assert!(!interactive_bypass(true, false, false, &terminate_lair));
         assert!(!interactive_bypass(false, true, false, &terminate_lair));
+        // Local and remote Windows both close their unused Dojos.
+        let close_unused = Request::CloseUnusedDojo {
+            dojo_id: DojoId::new(),
+        };
+        assert!(interactive_bypass(true, true, false, &close_unused));
+        assert!(interactive_bypass(false, false, true, &close_unused));
+        assert!(!interactive_bypass(true, false, false, &close_unused));
+        assert!(!interactive_bypass(false, true, false, &close_unused));
         assert!(!interactive_bypass(
             false,
             false,

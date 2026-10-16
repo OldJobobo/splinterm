@@ -1,5 +1,9 @@
 //! Daemon-to-frontend pane protocol bridge.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -988,9 +992,29 @@ fn forced_control_request(
     })
 }
 
+/// Bounds the explicit detach a closing tab waits for.
+const PANE_DETACH_DEADLINE: Duration = Duration::from_secs(2);
+
 pub(in crate::app) struct PaneTask {
     pub(in crate::app) cancellation: tokio_util::sync::CancellationToken,
     pub(in crate::app) task: tokio::task::JoinHandle<Result<()>>,
+    /// Set before cancelling to detach explicitly, so the daemon has released
+    /// the attachment by the time the task ends.
+    pub(in crate::app) detach_on_cancel: Arc<AtomicBool>,
+}
+
+impl PaneTask {
+    fn new(
+        cancellation: tokio_util::sync::CancellationToken,
+        task: tokio::task::JoinHandle<Result<()>>,
+        detach_on_cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            cancellation,
+            task,
+            detach_on_cancel,
+        }
+    }
 }
 
 pub(in crate::app) struct PreparedPane {
@@ -1133,6 +1157,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         cancellation.clone(),
     ));
     let task_updates = updates.clone();
+    let detach_on_cancel = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(run_pane_subscription(
         connection,
         attachment,
@@ -1144,6 +1169,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         factory.capabilities().image_transport,
         image_cache.clone(),
         cancellation.clone(),
+        Arc::clone(&detach_on_cancel),
     ));
     Ok(PreparedPane {
         options: WindowPaneOptions {
@@ -1155,7 +1181,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
             controlled: controller_id.is_some(),
             image_sources,
         },
-        task: PaneTask { cancellation, task },
+        task: PaneTask::new(cancellation, task, detach_on_cancel),
     })
 }
 
@@ -1272,6 +1298,7 @@ pub(in crate::app) async fn run_pane_subscription(
     image_transport: ImageTransport,
     image_cache: SharedImageContentCache,
     cancellation: tokio_util::sync::CancellationToken,
+    detach_on_cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut last_revision = attachment.snapshot.revision;
     let mut last_sequence = 0_u64;
@@ -1279,6 +1306,16 @@ pub(in crate::app) async fn run_pane_subscription(
     loop {
         tokio::select! {
             () = cancellation.cancelled() => {
+                if detach_on_cancel.load(Ordering::Acquire) {
+                    let _ = connection
+                        .request_with_deadline(
+                            Request::Detach {
+                                subscription_id: attachment.subscription_id,
+                            },
+                            PANE_DETACH_DEADLINE,
+                        )
+                        .await;
+                }
                 return finish_pane_controller(&mut controller, controller_completed).await;
             }
             result = &mut controller, if !controller_completed => {

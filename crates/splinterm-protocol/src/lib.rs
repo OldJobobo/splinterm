@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -569,6 +569,12 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         dojo_id: DojoId,
     },
+    /// Terminates the Dojo only when it was never used. The daemon decides and
+    /// applies this atomically against its current state; a used Dojo is left
+    /// unchanged.
+    CloseUnusedDojo {
+        dojo_id: DojoId,
+    },
     TerminateLair {
         expected_topology_revision: TopologyRevision,
         lair_id: LairId,
@@ -846,6 +852,41 @@ pub enum Response {
         incarnation: u64,
         exit_status: ProcessExitStatus,
     },
+    UnusedDojoClose {
+        dojo_id: DojoId,
+        outcome: UnusedDojoCloseOutcome,
+    },
+}
+
+/// Result of [`Request::CloseUnusedDojo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum UnusedDojoCloseOutcome {
+    /// The Dojo was removed and its process is shutting down.
+    Closed { topology_revision: TopologyRevision },
+    /// The Dojo counts as used and was left unchanged.
+    Used { reason: DojoUse },
+}
+
+/// Why a Dojo counts as used, so it is never closed automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DojoUse {
+    /// It no longer holds only its original Splint.
+    Split,
+    /// It did not start in this daemon as a plain default-shell terminal, or
+    /// its Splint was relaunched or restored since.
+    Launch,
+    /// It or its Splint was renamed.
+    Renamed,
+    /// Its Splint received client input.
+    Input,
+    /// Another Window is attached to it.
+    Attached,
+    /// A program other than the shell holds the terminal foreground.
+    Foreground,
+    /// Its Splint is not running.
+    NotRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3741,7 +3782,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 37);
+        assert_eq!(PROTOCOL_VERSION, 38);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -4428,6 +4469,47 @@ mod tests {
         empty_before_oldest.rows.clear();
         empty_before_oldest.has_older = false;
         assert!(empty_before_oldest.validate().is_ok());
+    }
+
+    #[test]
+    fn unused_dojo_close_has_explicit_wire_shapes() {
+        let dojo_id = DojoId::new();
+        let request = Request::CloseUnusedDojo { dojo_id };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"type": "close_unused_dojo", "dojo_id": dojo_id})
+        );
+        let used = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Used {
+                reason: DojoUse::Foreground,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&used).unwrap(),
+            serde_json::json!({
+                "type": "unused_dojo_close",
+                "dojo_id": dojo_id,
+                "outcome": {"outcome": "used", "reason": "foreground"},
+            })
+        );
+        let closed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+            },
+        };
+        for response in [used, closed] {
+            assert_eq!(
+                serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap())
+                    .unwrap(),
+                response
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<Request>(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
     }
 
     #[test]
