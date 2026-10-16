@@ -847,6 +847,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             configured: false,
             scale_120: SCALE_DENOMINATOR,
             integer_fallback_scale: 1,
+            mapped_notify: options.mapped.take(),
         },
         presentation: PresentationState {
             render_context,
@@ -1959,6 +1960,8 @@ struct SurfaceState {
     configured: bool,
     scale_120: u32,
     integer_fallback_scale: u32,
+    /// Signals the Window's owner once the first buffer commit maps it.
+    mapped_notify: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 struct PresentationState {
@@ -10918,6 +10921,9 @@ impl App {
         self.surface.buffers.swap(0, buffer_index);
         if let Some(diagnostics) = diagnostics() {
             diagnostics.mark_window_mapped();
+        }
+        if let Some(mapped) = self.surface.mapped_notify.take() {
+            let _ = mapped.send(());
         }
         let draw_duration_ns = u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let committed_monotonic_raw_ns = commit_sequence.map(|_| monotonic_raw_ns());

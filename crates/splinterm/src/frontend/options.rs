@@ -4,6 +4,7 @@ use std::{path::PathBuf, sync::mpsc::Sender as StdSender};
 
 use tokio::sync::{
     mpsc::{Receiver, Sender},
+    oneshot,
     watch::Sender as WatchSender,
 };
 
@@ -123,6 +124,9 @@ pub struct WindowOptions {
     /// connection status Window turns it off so an input method never sees or
     /// draws a typed password as composing text.
     pub input_method: bool,
+    /// Fired once, after the first buffer commit maps the Window. Dropped unfired
+    /// when the Window ends without mapping.
+    pub mapped: Option<oneshot::Sender<()>>,
 }
 
 impl Default for WindowOptions {
@@ -165,6 +169,7 @@ impl Default for WindowOptions {
             initial_tab_strip_visible: true,
             remote_display_identity: None,
             input_method: true,
+            mapped: None,
         }
     }
 }

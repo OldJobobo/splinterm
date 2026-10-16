@@ -11,7 +11,7 @@ use splinterm::{
     SessionPickerDecision, SessionPickerItem, SessionPickerUi, WindowOptions,
     config::{AppConfig, ResolvedTheme},
     endpoint::ConnectionFactory,
-    remote_launch::open_remote_chooser,
+    remote_launch::hand_off_to_remote_chooser,
     renderer::{self, RendererOptions},
     run_window,
     session_picker::{SessionEntry, collect_sessions},
@@ -253,7 +253,7 @@ pub(in crate::app) async fn run_dojos_from(
     match decision {
         None => Ok(()),
         Some(SessionPickerDecision::Open(index)) if Some(index) == remote_row_index => {
-            open_remote_chooser()
+            hand_off_to_remote_chooser()
         }
         Some(SessionPickerDecision::New) => {
             if let Some(diagnostics) = splinterm::diagnostics::global() {
