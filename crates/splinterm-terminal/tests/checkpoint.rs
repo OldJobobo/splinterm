@@ -131,6 +131,49 @@ fn malformed_noncanonical_corrupt_and_oversized_inputs_fail_closed() {
 }
 
 #[test]
+fn compressed_wide_rows_fail_before_expanding_past_the_cell_budget() {
+    let (terminal, config) = terminal();
+    let bytes = terminal.encode_checkpoint().unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    // A blank row packs one cell; widening its declared length to the
+    // 65,536-column row maximum keeps it a few dozen bytes on the wire.
+    let row_start = text.find("{\"cells\":[12,").unwrap();
+    let row_end = row_start + text[row_start..].find('}').unwrap() + 1;
+    let wide_row = text[row_start..row_end].replacen("[12,", "[65536,", 1);
+    // 1,100 such rows would expand to about 1.7 GiB of cells, past the
+    // aggregate budget, while the whole input stays near 80 KiB. Decoding
+    // precedes the canonical and digest checks, so neither is needed to reach it.
+    let marker = "\"rows\":[";
+    let insert = text.find(marker).unwrap() + marker.len();
+    let mut crafted = String::with_capacity(text.len() + 1_100 * (wide_row.len() + 1));
+    crafted.push_str(&text[..insert]);
+    for _ in 0..1_100 {
+        crafted.push_str(&wide_row);
+        crafted.push(',');
+    }
+    crafted.push_str(&text[insert..]);
+    assert!(crafted.len() < 128 * 1024);
+
+    let started = std::time::Instant::now();
+    let result = Terminal::restore_checkpoint(crafted.as_bytes(), config);
+    let elapsed = started.elapsed();
+    match result {
+        Err(CheckpointError::Encoding(error)) => {
+            assert!(
+                error.to_string().contains("aggregate cell budget"),
+                "{error}"
+            );
+        }
+        Err(other) => panic!("expected a cell-budget decode error, got {other:?}"),
+        Ok(_) => panic!("a checkpoint past the cell budget restored"),
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "rejection took {elapsed:?}"
+    );
+}
+
+#[test]
 fn configuration_drift_and_unsupported_runtime_state_are_rejected() {
     let (baseline, mut changed_config) = terminal();
     let bytes = baseline.encode_checkpoint().unwrap();

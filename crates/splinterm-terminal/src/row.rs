@@ -15,6 +15,16 @@ use crate::{Attributes, Cell, CellContent, Color, cell::CHECKPOINT_CELL_BYTES};
 
 pub(crate) const MAX_CHECKPOINT_COLUMNS: usize = 1 << 16;
 
+/// Cells one checkpoint may expand across every row of both grids.
+///
+/// A packed row stores a trailing run once, so a few bytes can name a full
+/// row. Restore sums the declared row widths before decoding any cell, so this
+/// aggregate bound keeps allocation independent of that compression. 64 Mi
+/// cells covers 100,000 history rows at 480 columns or the 1,000,000-row
+/// protocol maximum at 60 columns. Capture refuses larger terminals so encode
+/// never emits a checkpoint restore would refuse.
+pub(crate) const MAX_CHECKPOINT_CELLS: usize = 1 << 26;
+
 /// A terminal row and the metadata needed to distinguish hard line endings
 /// from soft wrapping.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -21,7 +21,9 @@ use thiserror::Error;
 
 use crate::{
     ImageContentId, SharedImageBudget,
+    grid::MAX_CHECKPOINT_GRID_ROWS,
     image::{ImageCheckpointV1, MAX_IMAGE_CHECKPOINT_CONTENTS},
+    row::MAX_CHECKPOINT_CELLS,
 };
 
 use super::{
@@ -68,6 +70,7 @@ pub enum CheckpointError {
 struct CheckpointHeader {
     magic: [u8; 8],
     schema: u16,
+    body: CheckpointBodyShape,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -282,20 +285,26 @@ impl CheckpointEvent {
 }
 
 impl KittyImageIdsCheckpointV1 {
-    fn capture(ids: &KittyImageIds) -> Self {
-        let capture = |entries: &std::collections::BTreeMap<u32, ImageContentId>| {
-            entries
+    /// Captures both screens' mappings after proving they satisfy the same
+    /// invariants restore enforces against the captured image plane.
+    fn capture(ids: &KittyImageIds, images: &ImagePlane) -> Result<Self, CheckpointError> {
+        let capture = |screen: ActiveScreen,
+                       entries: &std::collections::BTreeMap<u32, ImageContentId>|
+         -> Result<Vec<KittyImageIdCheckpoint>, CheckpointError> {
+            let entries = entries
                 .iter()
                 .map(|(application_id, content_id)| KittyImageIdCheckpoint {
                     application_id: *application_id,
                     content_id: *content_id,
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            validate_kitty_image_ids(images, screen, &entries)?;
+            Ok(entries)
         };
-        Self {
-            normal: capture(&ids.normal),
-            alternate: capture(&ids.alternate),
-        }
+        Ok(Self {
+            normal: capture(ActiveScreen::Normal, &ids.normal)?,
+            alternate: capture(ActiveScreen::Alternate, &ids.alternate)?,
+        })
     }
 
     fn restore(self, images: &ImagePlane) -> Result<KittyImageIds, CheckpointError> {
@@ -305,40 +314,52 @@ impl KittyImageIdsCheckpointV1 {
             std::collections::BTreeMap<u32, ImageContentId>,
             CheckpointError,
         > {
-            let mut restored = std::collections::BTreeMap::new();
-            let mut previous_application_id = None;
-            for entry in entries {
-                let is_kitty_content =
-                    images
-                        .content(screen, entry.content_id)
-                        .is_some_and(|content| {
-                            content.metadata().retention == ImageRetention::ExplicitDelete
-                                && matches!(
-                                    content.metadata().source_format,
-                                    ImageSourceFormat::KittyRgb
-                                        | ImageSourceFormat::KittyRgba
-                                        | ImageSourceFormat::KittyPng
-                                )
-                        });
-                if entry.application_id == 0
-                    || previous_application_id
-                        .is_some_and(|previous| previous >= entry.application_id)
-                    || !is_kitty_content
-                    || restored
-                        .insert(entry.application_id, entry.content_id)
-                        .is_some()
-                {
-                    return Err(CheckpointError::InvalidState);
-                }
-                previous_application_id = Some(entry.application_id);
-            }
-            Ok(restored)
+            validate_kitty_image_ids(images, screen, &entries)?;
+            Ok(entries
+                .into_iter()
+                .map(|entry| (entry.application_id, entry.content_id))
+                .collect())
         };
         Ok(KittyImageIds {
             normal: restore(ActiveScreen::Normal, self.normal)?,
             alternate: restore(ActiveScreen::Alternate, self.alternate)?,
         })
     }
+}
+
+/// One screen's Kitty mappings must use strictly increasing non-zero
+/// application ids, each naming distinct explicitly retained Kitty content on
+/// that screen. An alias would survive deletion of the image through its other
+/// id, and a mapping to absent content names nothing.
+fn validate_kitty_image_ids(
+    images: &ImagePlane,
+    screen: ActiveScreen,
+    entries: &[KittyImageIdCheckpoint],
+) -> Result<(), CheckpointError> {
+    let mut contents = std::collections::BTreeSet::new();
+    let mut previous_application_id = None;
+    for entry in entries {
+        let is_kitty_content = images
+            .content(screen, entry.content_id)
+            .is_some_and(|content| {
+                content.metadata().retention == ImageRetention::ExplicitDelete
+                    && matches!(
+                        content.metadata().source_format,
+                        ImageSourceFormat::KittyRgb
+                            | ImageSourceFormat::KittyRgba
+                            | ImageSourceFormat::KittyPng
+                    )
+            });
+        if entry.application_id == 0
+            || previous_application_id.is_some_and(|previous| previous >= entry.application_id)
+            || !is_kitty_content
+            || !contents.insert(entry.content_id)
+        {
+            return Err(CheckpointError::InvalidState);
+        }
+        previous_application_id = Some(entry.application_id);
+    }
+    Ok(())
 }
 
 impl TerminalCheckpointV2 {
@@ -351,7 +372,10 @@ impl TerminalCheckpointV2 {
                 .images
                 .capture_checkpoint(&normal_row_ids, &alternate_row_ids)
                 .map_err(|_| CheckpointError::InvalidState)?,
-            kitty_image_ids: KittyImageIdsCheckpointV1::capture(&terminal.kitty_image_ids),
+            kitty_image_ids: KittyImageIdsCheckpointV1::capture(
+                &terminal.kitty_image_ids,
+                &terminal.images,
+            )?,
         };
         digest_json(&terminal_body, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?;
         let image_sha256 = digest_json(&images, MAX_IMAGE_STATE_CHECKPOINT_BYTES)?;
@@ -377,6 +401,11 @@ impl TerminalCheckpointV1 {
             || terminal.kitty_upload.is_some()
             || terminal.iterm_transfer.is_some()
             || terminal.event_overflowed
+            || terminal
+                .normal
+                .allocated_cells()
+                .checked_add(terminal.alternate.allocated_cells())
+                .is_none_or(|cells| cells > MAX_CHECKPOINT_CELLS)
         {
             return Err(CheckpointError::UnsupportedState);
         }
@@ -665,8 +694,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Result<DecodedCheckpoint, CheckpointError>
     if bytes.len() > MAX_TERMINAL_CHECKPOINT_BYTES {
         return Err(CheckpointError::TooLarge);
     }
-    let header: CheckpointHeader =
-        serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+    let header = decode_header(bytes)?;
     match (header.magic, header.schema) {
         (CHECKPOINT_MAGIC_V1, TERMINAL_CHECKPOINT_SCHEMA_V1) => {
             let envelope: CheckpointEnvelopeV1 =
@@ -763,6 +791,105 @@ where
         MAX_IMAGE_CHECKPOINT_CONTENTS,
         "Kitty application image mappings",
     )
+}
+
+/// Reads the envelope schema and sums every allocated row's declared width
+/// without decoding any cell.
+///
+/// A packed row stores its trailing run once, so the full decode would expand
+/// a few bytes into a whole row. This pass reads only the grid rows' widths,
+/// so a checkpoint past [`MAX_CHECKPOINT_CELLS`] fails before any expansion.
+fn decode_header(bytes: &[u8]) -> Result<CheckpointHeader, CheckpointError> {
+    let header: CheckpointHeader =
+        serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+    header
+        .body
+        .declared_cells()
+        .filter(|cells| *cells <= MAX_CHECKPOINT_CELLS)
+        .ok_or_else(|| CheckpointError::Encoding(cell_budget_error()))?;
+    Ok(header)
+}
+
+fn cell_budget_error<E: serde::de::Error>() -> E {
+    E::custom("terminal checkpoint rows exceed the aggregate cell budget")
+}
+
+/// The body fields of either schema that size its grids; every other field,
+/// including each row's packed cells, is skipped without allocation.
+#[derive(Deserialize)]
+struct CheckpointBodyShape {
+    normal: Option<GridShape>,
+    alternate: Option<GridShape>,
+    /// Schema v2 nests the v1 body, and so its grids, under `terminal`.
+    terminal: Option<Box<CheckpointBodyShape>>,
+}
+
+impl CheckpointBodyShape {
+    fn declared_cells(&self) -> Option<usize> {
+        let nested = self
+            .terminal
+            .as_ref()
+            .map_or(Some(0), |terminal| terminal.declared_cells())?;
+        [&self.normal, &self.alternate]
+            .into_iter()
+            .flatten()
+            .try_fold(nested, |total, grid| total.checked_add(grid.rows.0))
+    }
+}
+
+#[derive(Deserialize)]
+struct GridShape {
+    rows: DeclaredRowCells,
+}
+
+#[derive(Deserialize)]
+struct RowShape {
+    cells: (usize, serde::de::IgnoredAny),
+}
+
+/// Total declared width of one grid's allocated rows.
+struct DeclaredRowCells(usize);
+
+impl<'de> Deserialize<'de> for DeclaredRowCells {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RowsVisitor;
+
+        impl<'de> Visitor<'de> for RowsVisitor {
+            type Value = DeclaredRowCells;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "at most {MAX_CHECKPOINT_GRID_ROWS} grid rows")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut rows = 0_usize;
+                let mut cells = 0_usize;
+                while let Some(row) = sequence.next_element::<Option<RowShape>>()? {
+                    rows += 1;
+                    if rows > MAX_CHECKPOINT_GRID_ROWS {
+                        return Err(serde::de::Error::custom(
+                            "grid rows exceed checkpoint bound",
+                        ));
+                    }
+                    if let Some(row) = row {
+                        cells = cells
+                            .checked_add(row.cells.0)
+                            .filter(|cells| *cells <= MAX_CHECKPOINT_CELLS)
+                            .ok_or_else(cell_budget_error)?;
+                    }
+                }
+                Ok(DeclaredRowCells(cells))
+            }
+        }
+
+        deserializer.deserialize_seq(RowsVisitor)
+    }
 }
 
 fn deserialize_tab_stops<'de, D>(deserializer: D) -> Result<Vec<bool>, D::Error>
@@ -933,6 +1060,42 @@ mod tests {
     }
 
     #[test]
+    fn declared_cells_sum_both_grids_against_the_aggregate_budget() {
+        let row = |columns: usize| json!({"cells": [columns, "x"], "dirty": false});
+        let full = MAX_CHECKPOINT_CELLS / crate::row::MAX_CHECKPOINT_COLUMNS;
+        let wide = || vec![row(crate::row::MAX_CHECKPOINT_COLUMNS); full];
+        // Schema v1 keeps the grids in the body; v2 nests them under `terminal`.
+        for nested in [false, true] {
+            let header = |normal: Vec<Value>, alternate: Vec<Value>| {
+                let grids = json!({"normal": {"rows": normal}, "alternate": {"rows": alternate}});
+                let body = if nested {
+                    json!({"terminal": grids, "images": {}})
+                } else {
+                    grids
+                };
+                serde_json::to_vec(&json!({"magic": vec![0_u8; 8], "schema": 1, "body": body}))
+                    .unwrap()
+            };
+            decode_header(&header(wide(), Vec::new())).unwrap();
+            decode_header(&header(Vec::new(), wide())).unwrap();
+            let mut with_null = wide();
+            with_null.push(Value::Null);
+            decode_header(&header(with_null, Vec::new())).unwrap();
+            // One more cell in either grid crosses the shared budget.
+            for (normal, alternate) in [
+                (wide(), vec![row(1)]),
+                ([wide(), vec![row(1)]].concat(), Vec::new()),
+                (vec![row(usize::MAX)], vec![row(1)]),
+            ] {
+                assert!(matches!(
+                    decode_header(&header(normal, alternate)),
+                    Err(CheckpointError::Encoding(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn digest_consistent_but_invalid_internal_states_fail_without_panicking() {
         let corruptions = [
             mutate_body(|body| body["normal"]["row_ids"][0] = json!(0)),
@@ -1024,6 +1187,77 @@ mod tests {
                 Err(CheckpointError::InvalidState)
             ));
         }
+    }
+
+    #[test]
+    fn restored_kitty_ids_reject_aliases_of_one_content() {
+        // Ids still strictly increase, so only content uniqueness refuses it.
+        let alias = mutate_image(|images| {
+            let mut alias = images["kitty_image_ids"]["normal"][0].clone();
+            alias["application_id"] = json!(8);
+            images["kitty_image_ids"]["normal"]
+                .as_array_mut()
+                .unwrap()
+                .push(alias);
+        });
+        assert!(matches!(
+            Terminal::restore_checkpoint(&alias, config()),
+            Err(CheckpointError::InvalidState)
+        ));
+    }
+
+    fn kitty_terminal() -> (Terminal, ImageContentId) {
+        let mut terminal = Terminal::new(4, 2, config());
+        terminal.set_cell_pixel_size(1, 1);
+        terminal.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\");
+        terminal.advance(b"\x1b_Ga=p,i=7,p=9,C=1\x1b\\");
+        let content = terminal
+            .kitty_image_ids
+            .get(ActiveScreen::Normal, 7)
+            .unwrap();
+        (terminal, content)
+    }
+
+    #[test]
+    fn removing_image_content_drops_its_kitty_ids_and_still_checkpoints() {
+        let (mut terminal, content) = kitty_terminal();
+        terminal.remove_image_content(content).unwrap();
+        assert!(terminal.kitty_image_ids.normal.is_empty());
+        let bytes = terminal.encode_checkpoint().unwrap();
+        let mut restored = Terminal::restore_checkpoint(&bytes, config()).unwrap();
+        assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
+        // The removed id names nothing, so placing it again fails.
+        restored.drain_events().for_each(drop);
+        restored.advance(b"\x1b_Ga=p,i=7,p=9,C=1\x1b\\");
+        assert!(
+            restored
+                .images
+                .placements(ActiveScreen::Normal)
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn capture_refuses_stale_or_aliased_kitty_ids() {
+        let (mut stale, content) = kitty_terminal();
+        stale
+            .images
+            .remove_content(ActiveScreen::Normal, content)
+            .unwrap();
+        assert!(matches!(
+            stale.encode_checkpoint(),
+            Err(CheckpointError::InvalidState)
+        ));
+
+        let (mut aliased, content) = kitty_terminal();
+        aliased
+            .kitty_image_ids
+            .insert(ActiveScreen::Normal, 8, content);
+        assert!(matches!(
+            aliased.encode_checkpoint(),
+            Err(CheckpointError::InvalidState)
+        ));
     }
 
     #[test]
