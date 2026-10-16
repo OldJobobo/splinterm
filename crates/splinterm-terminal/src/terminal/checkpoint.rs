@@ -364,6 +364,13 @@ fn validate_kitty_image_ids(
 
 impl TerminalCheckpointV2 {
     fn capture(terminal: &Terminal) -> Result<Self, CheckpointError> {
+        // Refuse an oversized image catalog before anything is copied.
+        if !terminal
+            .images
+            .checkpoint_may_fit(MAX_IMAGE_STATE_CHECKPOINT_BYTES)
+        {
+            return Err(CheckpointError::TooLarge);
+        }
         let terminal_body = TerminalCheckpointV1::capture(terminal)?;
         let normal_row_ids = terminal.normal.retained_row_ids();
         let alternate_row_ids = terminal.alternate.retained_row_ids();

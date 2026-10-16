@@ -1,5 +1,5 @@
 use splinterm_terminal::{
-    CheckpointError, ImageAlphaMode, ImageRetention, ImageSourceFormat,
+    CheckpointError, ImageAlphaMode, ImageLimits, ImageRetention, ImageSourceFormat,
     MAX_TERMINAL_CHECKPOINT_BYTES, MAX_TERMINAL_STATE_CHECKPOINT_BYTES, NewImageContent,
     SharedImageBudget, SharedKittyUploadBudget, SnapshotRequest, Terminal, TerminalConfig,
     TerminalEvent,
@@ -480,4 +480,38 @@ fn full_image_budget_and_deep_scrollback_checkpoint_together() {
     assert!(bytes.len() <= MAX_TERMINAL_CHECKPOINT_BYTES);
     let restored = Terminal::restore_checkpoint(&bytes, config).unwrap();
     assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
+}
+
+#[test]
+fn image_catalogs_past_the_checkpoint_allowance_are_too_large() {
+    // Configured limits may exceed the fixed image allowance. 41 MB of pixels
+    // encode past it, so capture refuses from live sizes as TooLarge.
+    let mut bytes = Terminal::new(
+        8,
+        2,
+        TerminalConfig {
+            image_limits: ImageLimits {
+                bytes_per_terminal: 64 * 1024 * 1024,
+                ..ImageLimits::default()
+            },
+            ..TerminalConfig::default()
+        },
+    );
+    let pixels = vec![7_u8; 1600 * 1600 * 4];
+    for _ in 0..4 {
+        bytes
+            .insert_image_content(NewImageContent {
+                width: 1600,
+                height: 1600,
+                source_format: ImageSourceFormat::KittyRgba,
+                alpha_mode: ImageAlphaMode::Premultiplied,
+                pixels: &pixels,
+                retention: ImageRetention::ExplicitDelete,
+            })
+            .unwrap();
+    }
+    assert!(matches!(
+        bytes.encode_checkpoint(),
+        Err(CheckpointError::TooLarge)
+    ));
 }
