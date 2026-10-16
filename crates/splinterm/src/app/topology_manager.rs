@@ -1471,6 +1471,10 @@ enum TopologyManagerCommandOutcome {
 struct TopologyManagerState {
     tabs: WindowTabSet<ManagedDojo>,
     transient_owners: HashMap<LairId, Connection>,
+    /// Set when the frontend dropped a status locally after an accepted clear,
+    /// so the next poll republishes the daemon's status rather than diffing
+    /// against what the frontend no longer shows.
+    agent_status_republish: bool,
 }
 
 struct ManagedWindowOpen {
@@ -2932,10 +2936,13 @@ async fn handle_session_manager_command(
         } => {
             let update =
                 match clear_agent_status(connection, &state.tabs, splint_id, incarnation).await {
-                    Ok(()) => WindowTopologyUpdate::AgentStatusCleared {
-                        splint_id,
-                        incarnation,
-                    },
+                    Ok(()) => {
+                        state.agent_status_republish = true;
+                        WindowTopologyUpdate::AgentStatusCleared {
+                            splint_id,
+                            incarnation,
+                        }
+                    }
                     Err(error) => WindowTopologyUpdate::TabFailed {
                         explorer_target: None,
                         dojo_id: None,
@@ -3228,6 +3235,7 @@ pub(in crate::app) async fn run_topology_manager(
             },
         )),
         transient_owners,
+        agent_status_republish: false,
     };
     loop {
         let command =
@@ -3264,6 +3272,10 @@ pub(in crate::app) async fn run_topology_manager(
                 return Err(error);
             }
         };
+        if std::mem::take(&mut state.agent_status_republish) {
+            explorer_observation = ExplorerObservation::default();
+            agent_status_observation = AgentStatusObservation::default();
+        }
         if explorer_observation.observe(&snapshot)
             && updates
                 .send(WindowTopologyUpdate::LairExplorerInvalidated)

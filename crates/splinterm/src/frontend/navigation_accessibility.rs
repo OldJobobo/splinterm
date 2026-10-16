@@ -12,7 +12,7 @@ use crate::accessibility::{
     SemanticNodeId, SemanticNodeRegistry, SemanticTreeItem, TERMINAL_NODE_ID, TREE_NODE_ID,
     is_bidi_formatting, valid_query_text,
 };
-use crate::navigation_projection::{NavigationExplorerView, NavigationNodeId};
+use crate::navigation_projection::{EndpointFreshness, NavigationExplorerView, NavigationNodeId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
@@ -182,10 +182,21 @@ impl NavigationAccessibility {
     /// Records each live incarnation's agent state and returns a polite
     /// announcement for transitions into needs input, error or done, or out of
     /// stale. Changes to and from working, and the first view, are silent.
+    /// A hidden Explorer or unavailable status forgets the baseline, and only
+    /// a current view sets a new one: showing the Explorer refreshes the view
+    /// it kept while hidden, which must not be the baseline the fresh view is
+    /// compared against. Changes made meanwhile are therefore not replayed.
     fn observe_agent_states(&mut self, explorer: &LairExplorerUi) -> Option<String> {
-        let view = explorer
+        let Some(view) = explorer
             .view()
-            .filter(|_| explorer.agent_status_available())?;
+            .filter(|_| explorer.visible() && explorer.agent_status_available())
+        else {
+            self.agent_states = None;
+            return None;
+        };
+        if self.agent_states.is_none() && view.freshness != EndpointFreshness::Current {
+            return None;
+        }
         let mut current = HashMap::new();
         let mut changes = Vec::new();
         for splint in view
@@ -220,13 +231,22 @@ impl NavigationAccessibility {
     }
 
     /// Prefixes a pending announcement until the navigation status it was
-    /// spoken with changes, so the live region speaks it exactly once.
+    /// spoken with changes, so the live region speaks it exactly once. A new
+    /// announcement identical to the status already shown is marked as
+    /// repeated, since the live region speaks only changed text.
     fn announced_status(&mut self, base: String) -> String {
+        let shown = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.status.as_deref());
         let Some((message, anchor)) = &mut self.agent_announcement else {
             return base;
         };
         if anchor.is_empty() {
             anchor.clone_from(&base);
+            if shown == Some(safe_text(&format!("{message} · {base}")).as_str()) {
+                message.push_str(" again");
+            }
         } else if *anchor != base {
             self.agent_announcement = None;
             return base;
@@ -842,6 +862,16 @@ mod tests {
             (AgentState::Error, false, Some("shell: Error")),
             (AgentState::Idle, false, None),
             (AgentState::Error, true, None),
+            // Ask, work, ask again: the repeat must still change the text.
+            (AgentState::NeedsInput, false, Some("shell: Needs input")),
+            (AgentState::Working, false, None),
+            (
+                AgentState::NeedsInput,
+                false,
+                Some("shell: Needs input again"),
+            ),
+            (AgentState::Working, false, None),
+            (AgentState::NeedsInput, false, Some("shell: Needs input")),
         ] {
             set_agent(&mut explorer, state, stale);
             let status = accessibility.refresh(&explorer, context()).status.unwrap();
@@ -865,6 +895,21 @@ mod tests {
         assert!(!status.contains("shell:"), "{status}");
     }
 
+    /// A current view carrying `state` for the shell Splint, as a topology
+    /// refresh delivers it.
+    fn fresh_view(explorer: &LairExplorerUi, state: AgentState) -> NavigationExplorerView {
+        let mut view = explorer.view().unwrap().clone();
+        view.freshness = EndpointFreshness::Current;
+        view.lairs[0].dojos[0].splints[0].agent_status =
+            Some(crate::navigation_projection::NavigationAgentStatus {
+                state,
+                detail: None,
+                stale: false,
+                stale_minutes: None,
+            });
+        view
+    }
+
     #[test]
     fn hidden_or_unavailable_explorer_does_not_announce_agent_status() {
         let mut explorer = explorer();
@@ -872,16 +917,24 @@ mod tests {
         set_agent(&mut explorer, AgentState::Working, false);
         accessibility.refresh(&explorer, context());
         explorer.toggle_visibility();
-        set_agent(&mut explorer, AgentState::NeedsInput, false);
         assert_eq!(accessibility.refresh(&explorer, context()).status, None);
-        explorer.focus();
+        // Showing refreshes the view kept while hidden; the fresh view then
+        // carries what changed meanwhile, which is not replayed.
+        explorer.toggle_visibility();
+        explorer.begin_refresh();
         let status = accessibility.refresh(&explorer, context()).status.unwrap();
         assert!(!status.contains("shell:"), "{status}");
+        explorer.set_view(fresh_view(&explorer, AgentState::NeedsInput));
+        let status = accessibility.refresh(&explorer, context()).status.unwrap();
+        assert!(!status.contains("shell:"), "{status}");
+        // The fresh view is the new baseline for changes seen while visible.
+        explorer.set_view(fresh_view(&explorer, AgentState::Done));
+        let status = accessibility.refresh(&explorer, context()).status.unwrap();
+        assert!(status.starts_with("shell: Done · "), "{status}");
 
-        set_agent(&mut explorer, AgentState::Working, false);
-        accessibility.refresh(&explorer, context());
         explorer.mark_disconnected();
-        set_agent(&mut explorer, AgentState::Error, false);
+        accessibility.refresh(&explorer, context());
+        explorer.set_view(fresh_view(&explorer, AgentState::Error));
         let status = accessibility.refresh(&explorer, context()).status.unwrap();
         assert!(!status.contains("shell:"), "{status}");
     }

@@ -1975,12 +1975,12 @@ pub(super) mod tests {
             columns,
             [Some("? "), Some("? "), Some("▸ "), Some("? "), Some("  ")]
         );
-        assert_eq!(rows[0].status, "Running · Saved · ? 1 · ▸ 1");
+        assert_eq!(rows[0].status, "Running · Saved · ? 1, ▸ 1");
         assert_eq!(
             rows[0].accessible_status,
             "Running · Saved · 1 needs input, 1 working"
         );
-        assert_eq!(rows[1].status, "Running · Current · ? 1 · ▸ 1");
+        assert_eq!(rows[1].status, "Running · Current · ? 1, ▸ 1");
         assert_eq!(
             rows[3].status,
             "Running · Needs input · waiting for approval"

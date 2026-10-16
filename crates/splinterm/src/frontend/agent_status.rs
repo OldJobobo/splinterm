@@ -194,7 +194,7 @@ impl AgentAggregate {
         )
     }
 
-    /// Visible counts for a Dojo or Lair row, e.g. "? 1 · ▸ 2".
+    /// Visible counts for a Dojo or Lair row, e.g. "? 1, ▸ 2".
     pub(crate) fn counts_text(&self, glyphs: AgentGlyphs) -> String {
         self.groups
             .iter()
@@ -206,7 +206,7 @@ impl AgentAggregate {
                 )
             })
             .collect::<Vec<_>>()
-            .join(" · ")
+            .join(", ")
     }
 
     /// Accessible counts in words, e.g. "1 needs input, 2 working".
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(aggregate.top(), Some((AgentState::NeedsInput, false, 1)));
         assert_eq!(
             aggregate.counts_text(AgentGlyphs::UNICODE),
-            "? 1 · ! 1 · ▸ 2 · ✓ 1 · · 1 · ?~ 1"
+            "? 1, ! 1, ▸ 2, ✓ 1, · 1, ?~ 1"
         );
         assert_eq!(
             aggregate.counts_words(),

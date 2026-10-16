@@ -239,7 +239,7 @@ font and its fallbacks lack `▸`, `✓`, or `·`, that glyph falls back to `>`,
   approval*. The agent's free-text detail appears only here, ellipsized to the
   row width.
 - **Dojo and Lair rows** show the most urgent glyph of the Splints inside them,
-  and the status line counts each state, for example *? 1 · ▸ 2*. Priority is
+  and the status line counts each state, for example *? 1, ▸ 2*. Priority is
   needs input, then error, working, done, and idle; stale statuses rank last.
   The glyph column appears while any Splint in the Explorer has a status.
 - **Dojo tabs** show one badge before the label: the most urgent glyph, with a

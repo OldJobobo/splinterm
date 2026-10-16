@@ -123,6 +123,7 @@ fn unrelated_state() -> (TopologyManagerState, DojoId) {
             },
         )),
         transient_owners: HashMap::new(),
+        agent_status_republish: false,
     };
     (state, unrelated_dojo)
 }
