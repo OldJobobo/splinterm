@@ -152,6 +152,7 @@ fn closed(dojo_id: DojoId) -> Response {
         dojo_id,
         outcome: UnusedDojoCloseOutcome::Closed {
             topology_revision: TopologyRevision::new(2),
+            lair_removed: false,
         },
     }
 }
@@ -242,6 +243,7 @@ fn only_a_confirmed_close_of_the_same_dojo_counts() {
             dojo_id: closed_id,
             outcome: UnusedDojoCloseOutcome::Closed {
                 topology_revision: TopologyRevision::new(2),
+                lair_removed: false,
             },
         })
     };

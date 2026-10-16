@@ -4861,8 +4861,16 @@ fn plain_shell_launch(shell: &Path) -> LaunchParameters {
 }
 
 async fn create_lair_with(admin: &mut Connection, launch: LaunchParameters) -> MutationTarget {
-    let expected_topology_revision = admin.topology_revision().await;
     let name = format!("unused {}", admin.topology().await.lairs().count());
+    create_named_lair(admin, name, launch).await
+}
+
+async fn create_named_lair(
+    admin: &mut Connection,
+    name: String,
+    launch: LaunchParameters,
+) -> MutationTarget {
+    let expected_topology_revision = admin.topology_revision().await;
     let Response::LairCreated { lair, .. } = admin
         .request(Request::CreateLair {
             expected_topology_revision,
@@ -4957,11 +4965,15 @@ async fn unused_dojo_closes_and_its_shell_is_reaped() {
             .input(target.splint_id, target.incarnation, b"\x1b[I\x1b[O")
             .await;
         admin.release_control().await;
-        let UnusedDojoCloseOutcome::Closed { topology_revision } =
-            close_unused(&mut admin, target.dojo_id).await
+        let UnusedDojoCloseOutcome::Closed {
+            topology_revision,
+            lair_removed,
+        } = close_unused(&mut admin, target.dojo_id).await
         else {
             panic!("an unused Dojo was kept");
         };
+        // The Lair has a name the user chose, so it stays, empty.
+        assert!(!lair_removed);
         let topology = admin.topology().await;
         assert_eq!(topology.revision(), topology_revision);
         assert!(topology.find_dojo(target.dojo_id).is_none());
@@ -5381,4 +5393,79 @@ async fn unused_close_does_not_wait_for_the_shell_under_the_transaction() {
     })
     .await
     .expect("retiring unused Dojo scenario timed out");
+}
+
+// A Lair the user never named goes with its last unused Dojo. A Lair that
+// still holds another Dojo, or that was renamed, stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unused_close_removes_an_empty_unnamed_lair() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let generated =
+            |index: u128| splinterm_core::generated_lair_name(1_787_899_189_000 + index, 42);
+
+        let unnamed = create_named_lair(&mut admin, generated(1), plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::DojoStarted {
+            dojo_id: second, ..
+        } = admin
+            .request(Request::NewDojo {
+                expected_topology_revision,
+                lair_id: unnamed.lair_id,
+                name: "Dojo 2".into(),
+                launch: plain_shell_launch(&shell),
+                promote_transient_lair: false,
+            })
+            .await
+        else {
+            panic!("daemon did not create the Dojo");
+        };
+        // With another Dojo left, the Lair stays.
+        assert!(matches!(
+            close_unused(&mut admin, second).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        assert!(admin.topology().await.find_lair(unnamed.lair_id).is_some());
+        // Its last Dojo takes it along, in one topology revision.
+        let before = admin.topology_revision().await;
+        let UnusedDojoCloseOutcome::Closed {
+            topology_revision,
+            lair_removed: true,
+        } = close_unused(&mut admin, unnamed.dojo_id).await
+        else {
+            panic!("the empty unnamed Lair was kept");
+        };
+        let topology = admin.topology().await;
+        assert!(topology.find_lair(unnamed.lair_id).is_none());
+        assert_eq!(topology.revision(), topology_revision);
+        assert!(topology_revision > before);
+
+        // Renaming names it.
+        let renamed = create_named_lair(&mut admin, generated(2), plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameLair {
+                expected_topology_revision,
+                lair_id: renamed.lair_id,
+                name: "kept".into(),
+            })
+            .await;
+        assert!(matches!(
+            close_unused(&mut admin, renamed.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        let kept = admin.topology().await;
+        assert!(kept.find_lair(renamed.lair_id).unwrap().dojos.is_empty());
+        daemon.shutdown();
+    })
+    .await
+    .expect("unnamed Lair scenario timed out");
 }

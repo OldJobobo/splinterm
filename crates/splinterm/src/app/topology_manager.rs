@@ -1042,7 +1042,7 @@ async fn create_daily_dojo(
     let (request, lifetime) = graphical_create_request(
         factory,
         expected,
-        format!("terminal-{stamp}-{}", std::process::id()),
+        splinterm_core::generated_lair_name(stamp, std::process::id()),
         false,
         Some(cwd),
         Vec::new(),

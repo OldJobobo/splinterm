@@ -339,8 +339,12 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
             exit_status.code, exit_status.signal
         ),
         Response::UnusedDojoClose { dojo_id, outcome } => match outcome {
-            splinterm_protocol::UnusedDojoCloseOutcome::Closed { .. } => {
-                println!("Closed unused Dojo {dojo_id}.");
+            splinterm_protocol::UnusedDojoCloseOutcome::Closed { lair_removed, .. } => {
+                if lair_removed {
+                    println!("Closed unused Dojo {dojo_id} and its empty unnamed Lair.");
+                } else {
+                    println!("Closed unused Dojo {dojo_id}.");
+                }
             }
             splinterm_protocol::UnusedDojoCloseOutcome::Used { reason } => {
                 println!("Dojo {dojo_id} is in use ({reason:?}); left running.");

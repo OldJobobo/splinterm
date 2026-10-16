@@ -863,7 +863,12 @@ pub enum Response {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum UnusedDojoCloseOutcome {
     /// The Dojo was removed and its process is shutting down.
-    Closed { topology_revision: TopologyRevision },
+    Closed {
+        topology_revision: TopologyRevision,
+        /// Its Lair, never named by the user, held no other Dojo and went too.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        lair_removed: bool,
+    },
     /// The Dojo counts as used and was left unchanged.
     Used { reason: DojoUse },
 }
@@ -4497,9 +4502,25 @@ mod tests {
             dojo_id,
             outcome: UnusedDojoCloseOutcome::Closed {
                 topology_revision: TopologyRevision::default(),
+                lair_removed: false,
             },
         };
-        for response in [used, closed] {
+        assert_eq!(
+            serde_json::to_value(&closed).unwrap()["outcome"],
+            serde_json::json!({"outcome": "closed", "topology_revision": 0})
+        );
+        let lair_removed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&lair_removed).unwrap()["outcome"]["lair_removed"],
+            serde_json::json!(true)
+        );
+        for response in [used, closed, lair_removed] {
             assert_eq!(
                 serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap())
                     .unwrap(),

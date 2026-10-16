@@ -11,6 +11,30 @@ use crate::{Axis, LayoutNode, Splint, SplintId, SplintState, SplitRatio, SplitSi
 
 const MAX_NAME_BYTES: usize = 128;
 
+/// The collision-resistant name a graphical launch gives a Lair the user did
+/// not name, from a timestamp in nanoseconds and the launching process ID.
+#[must_use]
+pub fn generated_lair_name(stamp_nanos: u128, process_id: u32) -> String {
+    format!("terminal-{stamp_nanos}-{process_id}")
+}
+
+/// Whether `name` has the form [`generated_lair_name`] produces.
+#[must_use]
+pub fn is_generated_lair_name(name: &str) -> bool {
+    let Some((stamp, process_id)) = name
+        .strip_prefix("terminal-")
+        .and_then(|suffix| suffix.split_once('-'))
+    else {
+        return false;
+    };
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    // Launchers have stamped seconds through nanoseconds.
+    (10..=20).contains(&stamp.len())
+        && digits(stamp)
+        && digits(process_id)
+        && process_id.parse::<u32>().is_ok()
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TopologyRevision(pub(crate) u64);
 
@@ -920,6 +944,27 @@ pub enum TopologyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_lair_names_round_trip_and_custom_names_never_match() {
+        let generated = generated_lair_name(1_787_899_189_123_456_789, 42);
+        assert_eq!(generated, "terminal-1787899189123456789-42");
+        assert!(is_generated_lair_name(&generated));
+        assert!(is_generated_lair_name("terminal-1787899189-4132"));
+        for custom in [
+            "terminal",
+            "terminal-123-4",
+            "terminal-1787899189",
+            "terminal-1787899189-",
+            "terminal-1787899189-worker",
+            "terminal-1787899189-42-extra",
+            "terminal-1787899189-4294967296",
+            "my-terminal-1787899189-42",
+            "work",
+        ] {
+            assert!(!is_generated_lair_name(custom), "{custom}");
+        }
+    }
 
     #[test]
     fn default_dojo_names_start_at_one_and_advance_past_the_highest_exact_number() {

@@ -547,10 +547,12 @@ the close. A Dojo counts as unused only while all of these hold:
   even after the extra pane is closed again;
 - that Splint never received client input: keys, paste, or mouse. Focus
   reports and other replies the terminal generates do not count;
-- it started as a plain default-shell terminal under its default name, in the
-  running daemon. Command-bearing launches, presets, restored or relaunched
-  Splints, and Dojos from before the daemon last started count as used;
-- neither the Dojo nor its Splint was renamed;
+- it started as a plain default-shell terminal in the running daemon.
+  Command-bearing launches, presets, restored or relaunched Splints, and Dojos
+  from before the daemon last started count as used. The Lair's name does not
+  matter: Dojos in explicitly named Lairs qualify too;
+- the Dojo was never named: a name chosen when creating it, or renaming the
+  Dojo or its Splint later, counts as use;
 - no other Window is attached to it;
 - the shell itself holds the terminal foreground, so a program started from a
   shell startup file counts as use.
@@ -558,9 +560,14 @@ the close. A Dojo counts as unused only while all of these hold:
 Input that races the close either reaches the shell, which keeps the Dojo, or
 is refused because the close won. A used Dojo is detached as before, and so is
 every Dojo when the daemon gives no answer. **Detach Window** (`window.detach`)
-always detaches. Ending a Lair's last Dojo leaves the Lair in place, as closing
-that Dojo explicitly does. A remote Window gets the same decision from the
-remote daemon.
+always detaches.
+
+When the closed Dojo was the last one in a Lair the user never named, the Lair
+is removed in the same step. Such a Lair has the generated name a graphical
+launch gives (for example `terminal-1787899189123456789-4132`), was created in
+the running daemon, and was never renamed since. A Lair with a name the user
+chose stays, empty, as it does when its last Dojo is closed explicitly. A
+remote Window gets the same decision from the remote daemon.
 
 Dojo reopening is deliberately separate:
 
