@@ -111,6 +111,10 @@ pub(crate) struct Accepted {
     pub(crate) ttl: Option<Duration>,
     /// A visible change that must be published; identical refreshes are not.
     pub(crate) changed: bool,
+    /// The earliest deadline moved earlier, so the sleeping timer must wake to
+    /// reschedule. An identical refresh that adds or shortens a TTL sets this
+    /// without being a visible change.
+    pub(crate) wake_timer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +267,7 @@ impl AgentStatusStore {
         report: Option<&AgentStatusReport>,
         now: Instant,
     ) -> Accepted {
+        let earliest_before = self.next_deadline();
         let identical = self.slots.get(&splint_id).is_some_and(|slot| {
             slot.incarnation == incarnation
                 && slot
@@ -293,6 +298,7 @@ impl AgentStatusStore {
                 sequence: 0,
                 ttl,
                 changed: false,
+                wake_timer: false,
             };
         };
         match report {
@@ -318,10 +324,15 @@ impl AgentStatusStore {
         }
         let sequence = slot.sequence;
         self.reschedule(splint_id);
+        let wake_timer = changed
+            || self
+                .next_deadline()
+                .is_some_and(|earliest| earliest_before.is_none_or(|before| earliest < before));
         Accepted {
             sequence,
             ttl,
             changed,
+            wake_timer,
         }
     }
 
@@ -418,6 +429,9 @@ impl AgentStatusStore {
 pub(crate) struct AgentStatusService {
     store: StdMutex<AgentStatusStore>,
     changed: Notify,
+    /// Timer wakeups by notification rather than by deadline.
+    #[cfg(test)]
+    pub(crate) notified_wakes: std::sync::atomic::AtomicUsize,
 }
 
 impl AgentStatusService {
@@ -464,7 +478,12 @@ async fn run_timer(service: Arc<AgentStatusService>, state: Weak<DaemonState>) {
             .next_deadline()
             .unwrap_or_else(|| Instant::now() + IDLE_TIMER);
         tokio::select! {
-            () = service.changed.notified() => {}
+            () = service.changed.notified() => {
+                #[cfg(test)]
+                service
+                    .notified_wakes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             () = time::sleep_until(time::Instant::from_std(deadline)) => {}
         }
         let Some(state) = state.upgrade() else {
@@ -723,7 +742,7 @@ async fn accept_report(
         .await
         .is_ok_and(|current| current.incarnation == incarnation)
     {
-        if accepted.changed {
+        if accepted.wake_timer {
             state.agent_status.changed.notify_one();
         }
     } else {
@@ -779,6 +798,38 @@ pub(crate) async fn handle_self_report(
     Some(accept_report(state, peer, request, &target, ReportAuthority::SelfReport).await)
 }
 
+async fn splint_grant_authorizes(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> bool {
+    state
+        .grants
+        .lock()
+        .await
+        .authorize(
+            peer,
+            splint_id,
+            incarnation,
+            &[AccessScope::AgentStatusReport],
+        )
+        .is_some()
+}
+
+/// The Splint's newest incarnation, whether still running or exited.
+async fn newest_incarnation(state: &DaemonState, splint_id: SplintId) -> Option<u64> {
+    if let Some(handle) = state.runtimes.lock().await.handle(splint_id) {
+        return Some(handle.incarnation.value());
+    }
+    state
+        .topology
+        .read()
+        .await
+        .find_splint(splint_id)?
+        .last_incarnation
+}
+
 /// Accepts a report that passed ordinary authorization: persistent policy,
 /// a Lair grant, a Splint grant with `agent_status_report`, or the
 /// development bypass. The trusted UI may only clear.
@@ -807,18 +858,17 @@ pub(crate) async fn handle_authorized_report(
                     "the trusted UI may only clear agent status",
                 ));
             }
-        } else if state
-            .grants
-            .lock()
-            .await
-            .authorize(
-                peer,
-                *splint_id,
-                *incarnation,
-                &[AccessScope::AgentStatusReport],
-            )
-            .is_none()
-        {
+        } else if !splint_grant_authorizes(state, peer, *splint_id, *incarnation).await {
+            // A Splint grant names one incarnation. A reporter whose grant
+            // covers the Splint's newest incarnation is authorized, so its
+            // stale report is answered as stale, as on every other path; a
+            // peer without such a grant learns nothing about liveness.
+            let newest = newest_incarnation(state, *splint_id).await;
+            if let Some(newest) = newest.filter(|newest| newest != incarnation)
+                && splint_grant_authorizes(state, peer, *splint_id, newest).await
+            {
+                return Err(stale_incarnation());
+            }
             return Err(ProtocolError::new(
                 ErrorCode::Unauthorized,
                 "agent status requires a process inside the Splint or an agent_status_report grant",
@@ -924,6 +974,45 @@ mod tests {
         assert_eq!(timed.ttl, Some(Duration::from_secs(30)));
         let events = store.take_due(start + Duration::from_secs(30));
         assert!(events[0].status.as_ref().unwrap().stale);
+    }
+
+    // An identical report is not a visible change, but adding or shortening
+    // its TTL moves the earliest deadline earlier, so the timer sleeping on
+    // the old deadline (or on its idle wait) must still wake.
+    #[test]
+    fn identical_report_that_adds_or_shortens_a_ttl_wakes_the_timer() {
+        let mut store = AgentStatusStore::default();
+        let splint_id = SplintId::new();
+        let start = Instant::now();
+        admitted(&mut store, splint_id, start);
+        let untimed = store.apply(
+            splint_id,
+            1,
+            Some(&report(AgentState::Done, None, None)),
+            start,
+        );
+        assert!(untimed.changed && untimed.wake_timer);
+        assert_eq!(store.take_due(start).len(), 1);
+        assert_eq!(store.next_deadline(), None, "the timer idles");
+
+        let mut at = start;
+        for (ttl, wakes) in [
+            (Some(60), true),   // adds a TTL to an untimed status
+            (Some(30), true),   // shortens it
+            (Some(900), false), // lengthens it: waking early is not needed
+            (None, false),      // drops it
+        ] {
+            at += Duration::from_secs(1);
+            admitted(&mut store, splint_id, at);
+            let accepted =
+                store.apply(splint_id, 1, Some(&report(AgentState::Done, None, ttl)), at);
+            assert!(!accepted.changed, "{ttl:?}");
+            assert_eq!(accepted.wake_timer, wakes, "{ttl:?}");
+            assert_eq!(
+                store.next_deadline(),
+                ttl.map(|ttl| at + Duration::from_secs(u64::from(ttl)))
+            );
+        }
     }
 
     #[test]

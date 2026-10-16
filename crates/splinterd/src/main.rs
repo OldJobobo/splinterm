@@ -12185,6 +12185,109 @@ mod tests {
         assert_eq!(error.code, ErrorCode::DevelopmentFeatureDisabled);
     }
 
+    // A reporter holding a Splint grant for the live incarnation learns that
+    // its stale report is stale, as policy and self reporters do; a peer
+    // without a grant still gets Unauthorized and learns nothing. An
+    // identical report that adds a TTL wakes the status timer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_status_stale_granted_reports_are_stale_and_ttl_refreshes_wake_the_timer() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "status".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("Lair creation response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let peer = PeerIdentity::for_test();
+        let ungranted = RequestAuthorizationContext::default();
+        let report = |incarnation, ttl_seconds| Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds,
+            }),
+        };
+        let retired = incarnation + 1;
+
+        let error = agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(retired, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized, "no grant, no liveness");
+
+        state.grants.lock().await.grant(
+            &peer,
+            splint_id,
+            incarnation,
+            vec![AccessScope::AgentStatusReport],
+        );
+        let error = agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(retired, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleIncarnation);
+
+        let _timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
+        let wakes = || {
+            state
+                .agent_status
+                .notified_wakes
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(incarnation, None),
+        )
+        .await
+        .unwrap();
+        // Let the first change publish, leaving the timer on its idle wait.
+        time::sleep(agent_status::PUBLISH_INTERVAL * 2).await;
+        let idle = wakes();
+        assert!(idle >= 1, "a visible change wakes the timer");
+        agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(incarnation, Some(10)),
+        )
+        .await
+        .unwrap();
+        time::timeout(Duration::from_secs(5), async {
+            while wakes() == idle {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an identical report that adds a TTL wakes the idle timer");
+
+        for runtime in state.runtimes.lock().await.drain() {
+            let _ = runtime.shutdown().await;
+        }
+    }
+
     #[tokio::test]
     async fn agent_status_trusted_ui_may_only_clear_and_other_peers_need_a_grant() {
         let state = test_state(false);
