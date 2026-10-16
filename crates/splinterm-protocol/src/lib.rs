@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -441,6 +441,57 @@ pub struct PresetPaneIdentity {
     pub splint_id: SplintId,
 }
 
+/// Where a Splint, Dojo, or Lair created from inside a Window starts.
+///
+/// Every choice is resolved on the daemon that owns the source Splint, so a
+/// remote Window resolves remote paths and the remote owner's home.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
+pub enum LaunchDirectory {
+    /// The source Splint's live root-process directory, then its saved launch
+    /// directory, then the owner's home.
+    Inherit,
+    /// The daemon owner's home directory.
+    Home,
+    /// An absolute directory; falls back to the owner's home when unusable.
+    Absolute(PathBuf),
+    /// A directory below the owner's home; falls back to the home itself.
+    HomeRelative(PathBuf),
+}
+
+impl LaunchDirectory {
+    /// Validates path shape without touching the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` for an empty, oversized, NUL-bearing, or
+    /// wrongly anchored path, or a home-relative path that leaves the home.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let valid = match self {
+            Self::Inherit | Self::Home => true,
+            Self::Absolute(path) => bounded_path(path) && path.is_absolute(),
+            Self::HomeRelative(path) => {
+                bounded_path(path)
+                    && path
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+            }
+        };
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "launch directory is not a bounded absolute or home-relative path",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn bounded_path(path: &std::path::Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    !bytes.is_empty() && !bytes.contains(&0) && bytes.len() <= MAX_CWD_BYTES
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -450,6 +501,12 @@ pub enum Request {
     SubscribeTopology,
     InspectSplint {
         splint_id: SplintId,
+    },
+    /// Resolves where a Window-created Splint, Dojo, or Lair starts, on the
+    /// daemon that owns the source Splint.
+    ResolveLaunchDirectory {
+        source_splint_id: SplintId,
+        directory: LaunchDirectory,
     },
     ReadGraphicalFocus,
     PublishGraphicalFocus {
@@ -747,6 +804,12 @@ pub enum Response {
         runtime: SplintRuntimeSummary,
         /// Point-in-time launch default resolved on the owning daemon, not durable topology.
         resolved_cwd: Option<PathBuf>,
+    },
+    LaunchDirectoryResolved {
+        source_splint_id: SplintId,
+        /// Point-in-time usable directory, or `None` when neither the requested
+        /// directory nor its fallbacks are usable.
+        cwd: Option<PathBuf>,
     },
     GraphicalFocus {
         focused_splint_id: Option<SplintId>,
@@ -3023,6 +3086,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_directories_are_bounded_and_anchored() {
+        for valid in [
+            LaunchDirectory::Inherit,
+            LaunchDirectory::Home,
+            LaunchDirectory::Absolute(PathBuf::from("/srv/projects")),
+            LaunchDirectory::HomeRelative(PathBuf::from("src/work")),
+        ] {
+            assert!(valid.validate().is_ok(), "{valid:?}");
+            let request = Request::ResolveLaunchDirectory {
+                source_splint_id: SplintId::new(),
+                directory: valid,
+            };
+            let round_trip: Request =
+                serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+            assert_eq!(round_trip, request);
+        }
+        for invalid in [
+            LaunchDirectory::Absolute(PathBuf::from("relative")),
+            LaunchDirectory::Absolute(PathBuf::new()),
+            LaunchDirectory::Absolute(PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES)))),
+            LaunchDirectory::HomeRelative(PathBuf::from("/absolute")),
+            LaunchDirectory::HomeRelative(PathBuf::from("../escape")),
+            LaunchDirectory::HomeRelative(PathBuf::from("./a")),
+            LaunchDirectory::HomeRelative(PathBuf::new()),
+        ] {
+            assert_eq!(
+                invalid.validate().unwrap_err().code,
+                ErrorCode::InvalidArgument,
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
     fn audit_operation_name_matches_its_wire_representation() {
         for operation in [
             AuditOperation::Ping,
@@ -3741,7 +3838,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 37);
+        assert_eq!(PROTOCOL_VERSION, 38);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,

@@ -101,6 +101,10 @@ const fn preflight_authorization(
 }
 
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive table maps every request to its authorization plan"
+)]
 pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
 
@@ -109,7 +113,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::PublishGraphicalFocus { .. }
         | Request::CreateTransientLair { .. }
         | Request::MaterializePreset { .. } => RequestAuthorization::TrustedUi,
-        Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
+        Request::ListLairs
+        | Request::InspectTopology
+        | Request::InspectSplint { .. }
+        | Request::ResolveLaunchDirectory { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
         Request::SubscribeTopology => {

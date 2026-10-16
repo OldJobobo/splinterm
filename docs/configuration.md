@@ -122,6 +122,8 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
 | `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically | yes |
+| `multiplexer.new-dojo-directory` | where a Dojo or Lair created inside a Window starts: `inherit`, `home`, an absolute path, or `~/path` | home |
+| `multiplexer.new-splint-directory` | where a Splint split inside a Dojo starts; same values | inherit |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
@@ -286,18 +288,28 @@ transactional config reload, and current-Lair lifecycle bindings:
 `Prefix Shift+S` saves, `Prefix Shift+F` toggles pinned state,
 `Prefix Shift+V` previews, and `Prefix Shift+O` opens the existing restore
 confirmation path. These are Splinterm additions; the checked stock Omarchy tmux
-profile defines no actions on those four shifted prefix keys. New Splints, Dojos,
-and Lairs created within a Window
-inherit the exact focused/source Splint's live root-process working directory
-(normally its shell), resolved on that Splint's owning daemon, including remote
-sessions. Foreground descendants and terminal text are not consulted. If that
-cwd is deleted, inaccessible, or unavailable, creation uses the same source's
-valid saved launch directory, then the daemon owner's valid home directory;
-otherwise it reports that the source working directory is unavailable. A missing
-source is rejected rather than replaced by another Window's focus. This is a
-point-in-time default: the shell can change directory again before launch.
-Explicit `--cwd` takes precedence; shell, login-shell, scrollback, and command
-settings are unchanged. Saved layouts retain their durable launch directories.
+profile defines no actions on those four shifted prefix keys. Where a Splint, Dojo, or Lair created within a Window starts is configurable.
+`[multiplexer] new-splint-directory` applies to splits inside a Dojo and defaults
+to `inherit`; `new-dojo-directory` applies to new Dojos **and new Lairs** and
+defaults to `home`. Each accepts:
+
+- `inherit`: the exact focused/source Splint's live root-process working
+  directory (normally its shell). Foreground descendants and terminal text are
+  not consulted. If that cwd is deleted, inaccessible, or unavailable, creation
+  uses the same source's valid saved launch directory, then the daemon owner's
+  valid home directory.
+- `home`: the daemon owner's home directory.
+- an absolute path, or `~/path` below the daemon owner's home. An unusable path
+  falls back to that home directory.
+
+Every choice is resolved on the daemon that owns the source Splint, so a remote
+Window uses remote paths and the remote owner's home; `~` is never expanded on
+the client. When nothing usable remains, creation reports that the launch
+directory is unavailable. A missing source is rejected rather than replaced by
+another Window's focus. This is a point-in-time default: the shell can change
+directory again before launch. The settings are read when a Window starts.
+Explicit `--cwd`, fresh desktop and CLI launches, presets, and saved layouts are
+unchanged; shell, login-shell, scrollback, and command settings are unchanged.
 
 `Prefix+[` enters copy mode at the live cursor or current history viewport.
 `h/j/k/l` and arrows move over visible and loaded historical rows; `w`, `b`, and

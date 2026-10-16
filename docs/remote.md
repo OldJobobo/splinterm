@@ -159,7 +159,8 @@ are distinct, and profile names—not remote titles or CWDs—select the namespa
 Remote creation uses the existing remote-safe launch envelope: absent CWD and
 argv cause the remote daemon to select its own home, shell, and defaults.
 Split/relaunch inheritance is resolved by the remote daemon from the exact target
-Splint. Because remote creation and attachment require several bounded protocol
+Splint, and the `new-dojo-directory`/`new-splint-directory` choices (`home`, a
+path, or `~/path`) are resolved there too, against the remote owner's home. Because remote creation and attachment require several bounded protocol
 round trips, a split immediately renders a noninteractive `Opening remote pane…`
 placeholder before dispatching the mutation. One split may be pending per Dojo
 tab. The client-local placeholder cannot receive focus or send terminal/topology
