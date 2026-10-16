@@ -61,6 +61,7 @@ MCP_TOOLS = (
     "splinterm.release_control",
     "splinterm.input",
     "splinterm.resize",
+    "splinterm.report_agent_status",
 )
 MCP_RESOURCES = ("topology", "terminal", "control")
 MCP_ERROR_CODES = (
@@ -109,6 +110,7 @@ MCP_MUTATION_TOOLS = {
     "splinterm.release_control",
     "splinterm.input",
     "splinterm.resize",
+    "splinterm.report_agent_status",
 }
 MCP_CONFIRMED_TOOLS = {
     "splinterm.revoke_access",
@@ -166,6 +168,7 @@ MCP_OUTPUT_RESOURCE_DEFS = {
     "splinterm.release_control": "control_resource",
     "splinterm.input": "control_resource",
     "splinterm.resize": "control_resource",
+    "splinterm.report_agent_status": "agent_status_resource",
 }
 MCP_RESOURCE_IDENTITY_DEFS = {
     "topology": "topology_resource",
@@ -202,7 +205,7 @@ EXPECTED_MCP_SCHEMAS = {
     ),
 }
 EXPECTED_MCP_SCHEMA_SHA256 = {
-    'common.schema.json': '0210e169dc5dce33547ea62ec33aa44359058f104aa2e5ac3a249d12a2c6d973',
+    'common.schema.json': '9439060f1dca6f5993fc412c993cf5d740c887aa9dd24814ecf5c002445e2a76',
     'error.schema.json': 'db5e68a6494912da6a114d055e8b5ae0426051f3f39ab9a5721d9b482e0307fe',
     'resources/control.schema.json': 'bf27457edc5eb95e7635ae4204ca462d319f1bdb64056f667a3409cf11bdcc34',
     'resources/terminal.schema.json': '54015be8b7cfa3880fb98e6c10448a93aa4750935b9f4f70ba9588bf6da302f8',
@@ -224,7 +227,7 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/inspect_audit.input.schema.json': 'c8d137b259cd0518e521326d3e56433883635de94743d6b9f2c428ff4b5e66bd',
     'tools/inspect_audit.output.schema.json': '61a80e47dd290aa22c3d4d29ee09c17db00191f4242c87630cc52fe6e61d2e8f',
     'tools/inspect_splint.input.schema.json': '902a3b772f508aa3f083f8530668c238fd3e5a8bd6716e464eb71e8017a10ed0',
-    'tools/inspect_splint.output.schema.json': '5485e2265d35dd749c247b234e0fe2783ceeedcbd86529e0f241d639a7986f7d',
+    'tools/inspect_splint.output.schema.json': '72345632f3b1e7f1d81a404aa37da9629d0b8d5b45fde58e7261ff99613254bf',
     'tools/inspect_topology.input.schema.json': 'db3a7bd4e72d5975eaf9c19c41fc83d472f28f2df6a9775d56fa53d2207f92b5',
     'tools/inspect_topology.output.schema.json': 'dc7113be2e11d285818884cbf03d352dcb06606e6c618fec86887a680d11e580',
     'tools/kill_splint.input.schema.json': '125bef6e18229f26bc88c49b3ecf3201187ebcdf49c748fb17c6feca892a247f',
@@ -249,6 +252,8 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/rename_lair.output.schema.json': 'e3b427c306ac80808dc15b08053da509132b48caaa49d0754e4604f3e32af833',
     'tools/rename_splint.input.schema.json': '3835f78e6bc2c3381ae244e2fc79490de1aa67e7515502fb3ec108571bf571ac',
     'tools/rename_splint.output.schema.json': '456d8be17a96531b3ecf42d804395539418e11c830bfe5156f74a630a3437237',
+    'tools/report_agent_status.input.schema.json': '6f5610e21ee0eff5193bdef4aa30e705852f5c4e8ee0a15acc509155ba30d4e5',
+    'tools/report_agent_status.output.schema.json': '519c75e937b7b9e7b65a32ae0d7b5186baa681ac6742186cd9445936f21d5c49',
     'tools/request_access.input.schema.json': '97aaf9b747784f6274a40b7de3f00f8a85bcf905719f91ceb2701993d8de5041',
     'tools/request_access.output.schema.json': 'cda84ab8391295f4c13c8ab0d9f25e9388df5f52f84992d6d46c56400facec1c',
     'tools/request_lair_access.input.schema.json': '8ef09af1c7a20c59ab710a66f21d26e611f01e4ab31d71429e1b80d15ed2bf08',
@@ -279,6 +284,10 @@ EXPECTED_MCP_VALID_FIXTURES = {
     *(f"{tool.removeprefix('splinterm.')}.output.json" for tool in MCP_TOOLS),
     *(f"resource-{resource}.json" for resource in MCP_RESOURCES),
     *(f"error-{error_code.replace('_', '-')}.json" for error_code in MCP_ERROR_CODES),
+    # Additive optional output fields keep the reviewed per-tool fixtures intact.
+    "inspect_splint-agent-status.output.json",
+    "inspect_topology-agent-status.output.json",
+    "report_agent_status-clear.output.json",
 }
 EXPECTED_MCP_INVALID_FIXTURES = {
     "argv-echo.json",
@@ -305,6 +314,9 @@ EXPECTED_MCP_INVALID_FIXTURES = {
     "private-daemon-id.json",
     "query-echo.json",
     "raw-bytes-leak.json",
+    "report_agent_status-control-detail.input.json",
+    "report_agent_status-detail-echo.json",
+    "report_agent_status-unknown-state.input.json",
     "request_lair_access-unsupported-scope.input.json",
     "resource-open-metadata.json",
     "resource-private-controller-id.json",
@@ -583,6 +595,7 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
             "kind", "lair_id", "dojo_id", "splint_id", "incarnation",
             "control_revision",
         },
+        "agent_status_resource": {"kind", "splint_id", "incarnation"},
     }
     for definition, expected_properties in identity_properties.items():
         identity = common_defs[definition]
@@ -606,11 +619,14 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
             "splint_id", "current_incarnation", "last_incarnation", "title", "state",
         },
     }
+    # Additive optional fields: present only when the daemon holds a value.
+    topology_optional = {"topology_splint": {"agent_status"}}
     for definition, expected_properties in topology_shapes.items():
         topology = common_defs[definition]
+        optional = topology_optional.get(definition, set())
         require_schema_condition(
             topology.get("additionalProperties") is False
-            and set(topology.get("properties", {})) == expected_properties
+            and set(topology.get("properties", {})) == expected_properties | optional
             and set(topology.get("required", [])) == expected_properties,
             f"common.schema.json: {definition} full topology DTO is not exact",
         )

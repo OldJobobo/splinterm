@@ -5217,3 +5217,208 @@ async fn agent_status_ancestry_grant_and_relaunch_binding() {
     .await
     .expect("agent status ancestry and grant scenario timed out");
 }
+
+const AGENT_STATUS_MCP_RESULTS: &str = "SPLINTERM_E2E_AGENT_STATUS_MCP_RESULTS";
+
+async fn wait_for_signal_file(path: &Path, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "{label} was not signalled");
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn write_results_atomically(path: &Path, document: &serde_json::Value) {
+    let pending = path.with_extension("pending");
+    fs::write(&pending, serde_json::to_vec(document).unwrap()).unwrap();
+    fs::rename(&pending, path).unwrap();
+}
+
+/// Not a scenario of its own: the MCP agent status scenario re-executes this
+/// test binary inside a Splint, where the MCP adapter projection fills its
+/// target from the inherited Splint environment and self-reports.
+#[tokio::test(flavor = "current_thread")]
+async fn agent_status_mcp_in_splint_reporter() {
+    let Some(results) = std::env::var_os(AGENT_STATUS_MCP_RESULTS) else {
+        return;
+    };
+    let results = PathBuf::from(results);
+    let socket = PathBuf::from(std::env::var_os("SPLINTERM_SOCKET").unwrap());
+    let outcome = |result: anyhow::Result<serde_json::Value>| match result {
+        Ok(value) => value,
+        Err(error) => serde_json::json!({"error": error.to_string()}),
+    };
+    let reported = outcome(
+        splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.report_agent_status",
+            &serde_json::json!({"state": "needs_input", "detail": "waiting for approval"}),
+            &socket,
+        )
+        .await,
+    );
+    // Self-report authority covers only the reporter's own Splint.
+    let elsewhere = outcome(
+        splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.report_agent_status",
+            &serde_json::json!({
+                "state": "done",
+                "splint_id": SplintId::new().to_string(),
+                "incarnation": 1
+            }),
+            &socket,
+        )
+        .await,
+    );
+    write_results_atomically(
+        &results,
+        &serde_json::json!({
+            "environment_splint_id": std::env::var("SPLINTERM_SPLINT_ID").unwrap(),
+            "environment_incarnation": std::env::var("SPLINTERM_SPLINT_INCARNATION").unwrap(),
+            "reported": reported,
+            "elsewhere": elsewhere,
+        }),
+    );
+    wait_for_signal_file(&results.with_extension("clear"), "MCP clear").await;
+    let cleared = outcome(
+        splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.report_agent_status",
+            &serde_json::json!({"state": null}),
+            &socket,
+        )
+        .await,
+    );
+    write_results_atomically(
+        &results.with_extension("cleared"),
+        &serde_json::json!({"cleared": cleared}),
+    );
+    wait_for_signal_file(&results.with_extension("release"), "MCP reporter release").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real in-Splint MCP reporter proves env defaults, authority, projection, and clear"
+)]
+async fn agent_status_mcp_adapter_reports_from_inside_the_splint() {
+    use splinterm_protocol::AgentState;
+
+    time::timeout(Duration::from_secs(90), async {
+        // No policy rule grants agent_status_report: authority is self-report.
+        let daemon = Daemon::start_with_policy(&agent_status_policy(None)).await;
+        let results = daemon.runtime.join("agent-status-mcp.json");
+        let program = std::env::current_exe().unwrap();
+        let mut client = daemon.connect().await;
+        let revision = client.topology_revision().await;
+        let Response::LairCreated {
+            lair,
+            incarnation,
+            topology_revision: created,
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "agent-status-mcp".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "{AGENT_STATUS_MCP_RESULTS}=\"$1\" exec \"$0\" \
+                             --exact agent_status_mcp_in_splint_reporter --test-threads=1 -q"
+                        ),
+                        program.to_string_lossy().into_owned(),
+                        results.to_string_lossy().into_owned(),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("MCP agent status Lair was not created");
+        };
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("MCP agent status Lair was not a leaf");
+        };
+        let splint_id = splint.id;
+        let document = wait_for_agent_status_results(&results).await;
+        assert_eq!(document["environment_splint_id"], splint_id.to_string());
+        assert_eq!(document["environment_incarnation"], incarnation.to_string());
+        let reported = &document["reported"];
+        assert_eq!(
+            reported["tool"], "splinterm.report_agent_status",
+            "{document}"
+        );
+        assert_eq!(
+            reported["resource"],
+            serde_json::json!({
+                "kind": "agent_status",
+                "splint_id": splint_id.to_string(),
+                "incarnation": incarnation
+            })
+        );
+        assert_eq!(reported["data"]["committed"], true);
+        assert_eq!(reported["data"]["state"], "needs_input");
+        assert!(reported["data"]["expires_at_ms"].as_u64().is_some());
+        assert!(!reported.to_string().contains("waiting for approval"));
+        assert!(
+            document["elsewhere"].get("error").is_some(),
+            "a Splint process cannot report for another Splint: {document}"
+        );
+
+        let Response::Topology { snapshot } = client.request(Request::InspectTopology).await else {
+            panic!("topology was not returned");
+        };
+        assert_eq!(
+            snapshot.revision, created,
+            "reports never bump the revision"
+        );
+        let runtime = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.splint_id == splint_id)
+            .unwrap();
+        let status = runtime
+            .agent_status
+            .as_ref()
+            .expect("MCP status is visible");
+        assert_eq!(status.state, AgentState::NeedsInput);
+        assert_eq!(status.detail.as_deref(), Some("waiting for approval"));
+        // The CLI v2 projections carry the same status.
+        let inspected = serde_json::to_value(
+            splinterm_automation_client::inspect_splint_envelope(&snapshot, splint_id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inspected["data"]["agent_status"]["state"], "needs_input");
+        assert_eq!(
+            inspected["data"]["agent_status"]["detail"],
+            "waiting for approval"
+        );
+        let get = serde_json::to_value(
+            splinterm_automation_client::agent_status_get_envelope(&snapshot, splint_id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(get["data"]["current_incarnation"], incarnation);
+        assert_eq!(get["data"]["agent_status"]["stale"], false);
+
+        fs::write(results.with_extension("clear"), b"").unwrap();
+        let cleared = wait_for_agent_status_results(&results.with_extension("cleared")).await;
+        assert_eq!(
+            cleared["cleared"]["data"]["state"],
+            serde_json::Value::Null,
+            "{cleared}"
+        );
+        assert_eq!(cleared["cleared"]["data"]["committed"], true);
+        let (_, runtime) = splint_runtime(&mut client, splint_id).await;
+        assert_eq!(runtime.live_incarnation, Some(incarnation));
+        assert_eq!(
+            runtime.agent_status, None,
+            "the MCP clear removed the status"
+        );
+        fs::write(results.with_extension("release"), b"").unwrap();
+        daemon.shutdown();
+    })
+    .await
+    .expect("MCP agent status scenario timed out");
+}

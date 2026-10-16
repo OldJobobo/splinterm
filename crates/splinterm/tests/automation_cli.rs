@@ -1613,3 +1613,346 @@ fn malformed_machine_invocation_has_empty_stdout() {
         assert!(!output.stderr.is_empty());
     }
 }
+
+const AGENT_SPLINT: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103";
+const OTHER_SPLINT: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104";
+
+/// Runs the client without inherited Splint discovery hints, then with exactly
+/// the given environment.
+fn run_agent_status(
+    arguments: &[&str],
+    socket: &std::path::Path,
+    environment: &[(&str, &str)],
+) -> Output {
+    binary()
+        .env("SPLINTERM_SOCKET", socket)
+        .env_remove("SPLINTERM_SPLINT_ID")
+        .env_remove("SPLINTERM_SPLINT_INCARNATION")
+        .envs(environment.iter().copied())
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+fn inside_splint() -> [(&'static str, &'static str); 2] {
+    [
+        ("SPLINTERM_SPLINT_ID", AGENT_SPLINT),
+        ("SPLINTERM_SPLINT_INCARNATION", "2"),
+    ]
+}
+
+/// Serves exactly one automation-role report and checks it without any
+/// topology preflight.
+fn serve_agent_status_report(
+    expected: splinterm_protocol::Request,
+    result: Result<Response, ProtocolError>,
+) -> (PathBuf, thread::JoinHandle<()>) {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        assert!(matches!(
+            read_client_frame(&mut stream),
+            ClientFrame::Hello {
+                role: ClientRole::Automation,
+                ..
+            }
+        ));
+        stream
+            .write_all(
+                &encode_frame(&ServerFrame::Hello {
+                    version: PROTOCOL_VERSION,
+                    limits: ServerLimits::default(),
+                    development_terminal_access: false,
+                    daemon_hostname: None,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let ClientFrame::Request {
+            request_id,
+            request,
+            ..
+        } = read_client_frame(&mut stream)
+        else {
+            panic!("expected one agent status request");
+        };
+        assert_eq!(request, expected);
+        let frame = match result {
+            Ok(result) => ServerFrame::Response { request_id, result },
+            Err(error) => ServerFrame::Error {
+                request_id: Some(request_id),
+                error,
+            },
+        };
+        stream.write_all(&encode_frame(&frame).unwrap()).unwrap();
+    });
+    (socket, server)
+}
+
+fn agent_report(
+    splint: &str,
+    incarnation: u64,
+    status: Option<splinterm_protocol::AgentStatusReport>,
+) -> splinterm_protocol::Request {
+    splinterm_protocol::Request::ReportAgentStatus {
+        splint_id: splint.parse().unwrap(),
+        incarnation,
+        status,
+    }
+}
+
+fn fixture(name: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/automation/fixtures/valid")
+        .join(name);
+    serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap()["document"].clone()
+}
+
+#[test]
+fn agent_status_set_defaults_to_the_splint_environment_without_echoing_detail() {
+    use splinterm_protocol::{AgentState, AgentStatusReport};
+
+    let (socket, server) = serve_agent_status_report(
+        agent_report(
+            AGENT_SPLINT,
+            2,
+            Some(AgentStatusReport {
+                state: AgentState::NeedsInput,
+                detail: Some("waiting for approval".into()),
+                ttl_seconds: None,
+            }),
+        ),
+        Ok(Response::AgentStatusAccepted {
+            sequence: 4,
+            expires_at_ms: Some(1_760_630_400_000),
+        }),
+    );
+    let output = run_agent_status(
+        &[
+            "--output",
+            "json",
+            "agent-status",
+            "set",
+            "needs_input",
+            "--detail",
+            "waiting for approval",
+        ],
+        &socket,
+        &inside_splint(),
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document, fixture("cli-agent-status-set.json"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("waiting for approval"));
+}
+
+#[test]
+fn agent_status_flags_override_the_environment_in_every_mode() {
+    use splinterm_protocol::{AgentState, AgentStatusReport};
+
+    let (socket, server) = serve_agent_status_report(
+        agent_report(OTHER_SPLINT, 7, None),
+        Ok(Response::AgentStatusAccepted {
+            sequence: 5,
+            expires_at_ms: None,
+        }),
+    );
+    let output = run_agent_status(
+        &[
+            "agent-status",
+            "clear",
+            "--splint",
+            OTHER_SPLINT,
+            "--incarnation",
+            "7",
+            "--output",
+            "json",
+        ],
+        &socket,
+        &inside_splint(),
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(output.status.success());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "agent_status_clear");
+    assert_eq!(document["resource"]["splint_id"], OTHER_SPLINT);
+    assert_eq!(document["resource"]["incarnation"], 7);
+    assert_eq!(document["data"]["cleared"], true);
+
+    // Human mode reports through the automation role, never the trusted UI.
+    let (socket, server) = serve_agent_status_report(
+        agent_report(
+            AGENT_SPLINT,
+            2,
+            Some(AgentStatusReport {
+                state: AgentState::Done,
+                detail: None,
+                ttl_seconds: Some(600),
+            }),
+        ),
+        Ok(Response::AgentStatusAccepted {
+            sequence: 6,
+            expires_at_ms: Some(1_760_630_400_000),
+        }),
+    );
+    let output = run_agent_status(
+        &["agent-status", "set", "done", "--ttl", "600"],
+        &socket,
+        &inside_splint(),
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Agent status done reported for Splint {AGENT_SPLINT} incarnation 2.\n")
+    );
+}
+
+#[test]
+fn agent_status_outside_a_splint_is_a_distinct_usage_error() {
+    let socket = PathBuf::from("/definitely/not/a/daemon.sock");
+    for arguments in [
+        vec!["--output", "json", "agent-status", "set", "working"],
+        vec!["agent-status", "set", "working"],
+        vec!["--output", "json", "agent-status", "clear"],
+        vec!["agent-status", "get"],
+        vec!["--output", "json", "agent-status", "get"],
+    ] {
+        let output = run_agent_status(&arguments, &socket, &[]);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("not inside a Splint"), "{stderr}");
+    }
+    let partial = run_agent_status(
+        &["--output", "json", "agent-status", "set", "idle"],
+        &socket,
+        &[("SPLINTERM_SPLINT_ID", AGENT_SPLINT)],
+    );
+    assert_eq!(partial.status.code(), Some(2));
+    assert!(partial.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&partial.stderr);
+    assert!(stderr.contains("malformed") && !stderr.contains("not inside a Splint"));
+    for arguments in [
+        vec!["agent-status", "set", "thinking"],
+        vec!["agent-status", "set", "working", "--detail", "two\nlines"],
+        vec!["agent-status", "set", "working", "--ttl", "5"],
+        vec!["agent-status", "set", "working", "--splint", OTHER_SPLINT],
+        vec!["--output", "ndjson", "agent-status", "clear"],
+        vec!["--remote", "devbox", "agent-status", "set", "working"],
+    ] {
+        let output = run_agent_status(&arguments, &socket, &inside_splint());
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+    }
+}
+
+#[test]
+fn agent_status_daemon_refusals_use_documented_exit_codes() {
+    for (error, code, exit, retryable) in [
+        (ErrorCode::RateLimited, "resource_limit", 5, true),
+        (ErrorCode::StaleIncarnation, "stale_incarnation", 5, true),
+        (ErrorCode::Unauthorized, "unauthorized", 3, false),
+        (ErrorCode::InvalidArgument, "invalid_argument", 5, false),
+    ] {
+        let (socket, server) = serve_agent_status_report(
+            agent_report(AGENT_SPLINT, 2, None),
+            Err(ProtocolError::new(error, "agent status refused")),
+        );
+        let output = run_agent_status(
+            &["--output", "json", "agent-status", "clear"],
+            &socket,
+            &inside_splint(),
+        );
+        server.join().unwrap();
+        fs::remove_file(socket).unwrap();
+        assert_eq!(output.status.code(), Some(exit), "{code}");
+        let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(document["operation"], "agent_status_clear");
+        assert_eq!(document["ok"], false);
+        assert_eq!(document["error"]["code"], code);
+        assert_eq!(document["error"]["retryable"], retryable);
+    }
+}
+
+#[test]
+fn agent_status_get_and_inspect_add_status_only_when_reported() {
+    use splinterm_protocol::{AgentState, AgentStatusSummary};
+
+    let mut topology = reviewed_topology();
+    topology.runtimes[0].agent_status = Some(AgentStatusSummary {
+        state: AgentState::NeedsInput,
+        detail: Some("waiting for approval".into()),
+        sequence: 4,
+        stale: false,
+        reported_age_ms: 1_500,
+    });
+    let run = |arguments: &[&str], snapshot: &TopologySnapshot, environment: &[(&str, &str)]| {
+        let (socket, server) = serve_one(Ok(Response::Topology {
+            snapshot: snapshot.clone(),
+        }));
+        let output = run_agent_status(arguments, &socket, environment);
+        server.join().unwrap();
+        fs::remove_file(socket).unwrap();
+        output
+    };
+    let output = run(
+        &["--output", "json", "agent-status", "get"],
+        &topology,
+        &inside_splint(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document, fixture("cli-agent-status-get.json"));
+
+    let output = run(
+        &["--output", "json", "inspect", AGENT_SPLINT],
+        &topology,
+        &[],
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["data"]["agent_status"]["state"], "needs_input");
+    let output = run(&["--output", "json", "topology"], &topology, &[]);
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document, fixture("cli-inspect-topology-agent-status.json"));
+
+    let plain = reviewed_topology();
+    let output = run(
+        &["--output", "json", "agent-status", "get", AGENT_SPLINT],
+        &plain,
+        &[],
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["data"]["agent_status"], Value::Null);
+    let output = run(&["--output", "json", "inspect", AGENT_SPLINT], &plain, &[]);
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(document["data"].get("agent_status").is_none());
+
+    let output = run(
+        &["--output", "json", "agent-status", "get", OTHER_SPLINT],
+        &plain,
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "agent_status_get");
+    assert_eq!(document["error"]["code"], "not_found");
+}

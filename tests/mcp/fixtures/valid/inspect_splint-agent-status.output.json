@@ -1,0 +1,30 @@
+{
+  "$schema_file": "tools/inspect_splint.output.schema.json",
+  "document": {
+    "schema": "splinterm.mcp.v2",
+    "tool": "splinterm.inspect_splint",
+    "ok": true,
+    "resource": {
+      "kind": "splint",
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+      "current_incarnation": 2,
+      "last_incarnation": 2,
+      "topology_revision": 8
+    },
+    "data": {
+      "title": "build",
+      "state": "running",
+      "agent_status": {
+        "state": "needs_input",
+        "detail": "waiting for approval",
+        "stale": false,
+        "reported_age_ms": 1500,
+        "sequence": 4
+      }
+    },
+    "truncated": false,
+    "content_trust": "untrusted_terminal_data"
+  }
+}

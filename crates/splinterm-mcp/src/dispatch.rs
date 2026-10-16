@@ -14,11 +14,11 @@ use splinterm_automation_client::{
 };
 use splinterm_core::{Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
-    AccessGrant, AccessGrantSource, AccessScope, AuditDecision, AuditOutcome, AutomationLaunch,
-    ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
-    MutationPreflight, MutationPreparation, Request, Response, RestoreLeafResult, ScrollbackPage,
-    SearchPage, SplintLifecycle, SplintRuntimeSummary, TerminalProvenance, TerminalSnapshot,
-    TopologySnapshot,
+    AccessGrant, AccessGrantSource, AccessScope, AgentState, AgentStatusReport, AuditDecision,
+    AuditOutcome, AutomationLaunch, ErrorCode, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_QUERY_BYTES,
+    MAX_SEARCH_RESULTS, MutationPreflight, MutationPreparation, Request, Response,
+    RestoreLeafResult, ScrollbackPage, SearchPage, SplintLifecycle, SplintRuntimeSummary,
+    TerminalProvenance, TerminalSnapshot, TopologySnapshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -554,28 +554,56 @@ fn runtime_for(
 fn topology_splints(
     node: &LayoutNode,
     snapshot: &TopologySnapshot,
+    include_agent_status: bool,
     output: &mut Vec<Value>,
 ) -> Result<(), DispatchFailure> {
     match node {
         LayoutNode::Leaf(splint) => {
             let runtime = runtime_for(snapshot, splint.id)?;
-            output.push(json!({
+            let mut value = json!({
                 "splint_id": splint.id.to_string(),
                 "current_incarnation": runtime.live_incarnation,
                 "last_incarnation": runtime.last_incarnation,
                 "title": splint.title,
                 "state": state_name(runtime),
-            }));
+            });
+            if include_agent_status && let Some(status) = agent_status_value(runtime)? {
+                value["agent_status"] = status;
+            }
+            output.push(value);
             Ok(())
         }
         LayoutNode::Branch { first, second, .. } => {
-            topology_splints(first, snapshot, output)?;
-            topology_splints(second, snapshot, output)
+            topology_splints(first, snapshot, include_agent_status, output)?;
+            topology_splints(second, snapshot, include_agent_status, output)
         }
     }
 }
 
-pub(crate) fn topology_data(snapshot: &TopologySnapshot) -> Result<Value, DispatchFailure> {
+/// Projects explicitly reported display status of a live incarnation only.
+fn agent_status_value(runtime: &SplintRuntimeSummary) -> Result<Option<Value>, DispatchFailure> {
+    let Some(status) = &runtime.agent_status else {
+        return Ok(None);
+    };
+    if runtime.live_incarnation.is_none() || !status.validate() {
+        return Err(DispatchFailure::internal());
+    }
+    Ok(Some(json!({
+        "state": status.state.as_str(),
+        "detail": status.detail,
+        "stale": status.stale,
+        "reported_age_ms": status.reported_age_ms,
+        "sequence": status.sequence,
+    })))
+}
+
+/// Projects the full logical topology. Agent status rides only the
+/// `inspect_topology` tool; the topology resource does not carry it because
+/// status changes publish no resource update.
+pub(crate) fn topology_data(
+    snapshot: &TopologySnapshot,
+    include_agent_status: bool,
+) -> Result<Value, DispatchFailure> {
     snapshot
         .validate()
         .map_err(|_| DispatchFailure::internal())?;
@@ -584,7 +612,7 @@ pub(crate) fn topology_data(snapshot: &TopologySnapshot) -> Result<Value, Dispat
         let mut dojos = Vec::new();
         for dojo in &lair.dojos {
             let mut splints = Vec::new();
-            topology_splints(&dojo.root, snapshot, &mut splints)?;
+            topology_splints(&dojo.root, snapshot, include_agent_status, &mut splints)?;
             dojos.push(json!({
                 "dojo_id": dojo.id.to_string(),
                 "name": dojo.name,
@@ -1307,6 +1335,142 @@ fn aggregate_restore_output(
     ))
 }
 
+const SPLINT_ID_ENV: &str = "SPLINTERM_SPLINT_ID";
+const SPLINT_INCARNATION_ENV: &str = "SPLINTERM_SPLINT_INCARNATION";
+const NOT_INSIDE_SPLINT: DispatchFailure = DispatchFailure::new(
+    "invalid_argument",
+    "not inside a Splint: the adapter environment has no SPLINTERM_SPLINT_ID or SPLINTERM_SPLINT_INCARNATION; pass splint_id and incarnation",
+    false,
+);
+const MALFORMED_SPLINT_ENVIRONMENT: DispatchFailure = DispatchFailure::new(
+    "invalid_argument",
+    "the adapter Splint environment is incomplete or malformed; pass splint_id and incarnation",
+    false,
+);
+
+/// Resolves the report target from explicit arguments, else from the
+/// adapter's own environment, which it inherits from the agent. The values
+/// are discovery hints only: the daemon decides authority from the peer.
+fn agent_status_target(
+    arguments: &Value,
+    environment: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<(SplintId, u64), DispatchFailure> {
+    match (arguments.get("splint_id"), arguments.get("incarnation")) {
+        (Some(_), Some(_)) => Ok((parse_splint(arguments)?, parse_incarnation(arguments)?)),
+        (None, None) => {
+            let read = |name| environment(name).filter(|value| !value.is_empty());
+            match (read(SPLINT_ID_ENV), read(SPLINT_INCARNATION_ENV)) {
+                (None, None) => Err(NOT_INSIDE_SPLINT),
+                (Some(splint_id), Some(incarnation)) => splint_id
+                    .to_str()
+                    .and_then(|value| value.parse::<SplintId>().ok())
+                    .zip(
+                        incarnation
+                            .to_str()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|value| *value > 0),
+                    )
+                    .ok_or(MALFORMED_SPLINT_ENVIRONMENT),
+                _ => Err(MALFORMED_SPLINT_ENVIRONMENT),
+            }
+        }
+        _ => Err(DispatchFailure::new(
+            "invalid_argument",
+            "splint_id and incarnation must be passed together",
+            false,
+        )),
+    }
+}
+
+/// Converts schema-validated arguments to a report; a null state clears.
+fn agent_status_report(arguments: &Value) -> Result<Option<AgentStatusReport>, DispatchFailure> {
+    if arguments["state"].is_null() {
+        if arguments.get("detail").is_some() || arguments.get("ttl_seconds").is_some() {
+            return Err(DispatchFailure::new(
+                "invalid_argument",
+                "clearing agent status takes no detail or ttl_seconds",
+                false,
+            ));
+        }
+        return Ok(None);
+    }
+    let state = serde_json::from_value::<AgentState>(arguments["state"].clone())
+        .map_err(|_| DispatchFailure::internal())?;
+    let detail = arguments
+        .get("detail")
+        .map(|detail| {
+            detail
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(DispatchFailure::internal)
+        })
+        .transpose()?;
+    let ttl_seconds = arguments
+        .get("ttl_seconds")
+        .map(|ttl| {
+            ttl.as_u64()
+                .and_then(|ttl| u32::try_from(ttl).ok())
+                .ok_or_else(DispatchFailure::internal)
+        })
+        .transpose()?;
+    let report = AgentStatusReport {
+        state,
+        detail,
+        ttl_seconds,
+    };
+    report.validate().map_err(|_| {
+        DispatchFailure::new(
+            "invalid_argument",
+            "agent status detail or TTL is outside its bounds",
+            false,
+        )
+    })?;
+    Ok(Some(report))
+}
+
+/// Reports explicit display status without any topology preflight, so a
+/// process inside the Splint needs no read grant. The detail is never echoed.
+async fn report_agent_status(
+    tool: &str,
+    arguments: &Value,
+    cancellation: &CancellationToken,
+    socket: Option<&Path>,
+) -> Result<Value, DispatchFailure> {
+    let status = agent_status_report(arguments)?;
+    let (splint_id, incarnation) = agent_status_target(arguments, |name| env::var_os(name))?;
+    let state = status.as_ref().map(|status| status.state);
+    let mut session = DaemonSession::connect_to(cancellation, socket).await?;
+    match session
+        .request(Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status,
+        })
+        .await?
+    {
+        Response::AgentStatusAccepted {
+            sequence,
+            expires_at_ms,
+        } if state.is_some() || expires_at_ms.is_none() => Ok(success(
+            tool,
+            json!({
+                "kind": "agent_status",
+                "splint_id": splint_id.to_string(),
+                "incarnation": incarnation,
+            }),
+            json!({
+                "committed": true,
+                "state": state.map(AgentState::as_str),
+                "sequence": sequence,
+                "expires_at_ms": expires_at_ms,
+            }),
+            false,
+            "trusted_metadata",
+        )),
+        _ => Err(DispatchFailure::internal()),
+    }
+}
+
 async fn dispatch_mutation(
     tool: &str,
     arguments: &Value,
@@ -1335,6 +1499,9 @@ async fn dispatch_mutation_to(
     cancellation: &CancellationToken,
     socket: Option<&Path>,
 ) -> Result<Value, DispatchFailure> {
+    if tool == "splinterm.report_agent_status" {
+        return report_agent_status(tool, arguments, cancellation, socket).await;
+    }
     if matches!(
         tool,
         "splinterm.create_lair"
@@ -1940,7 +2107,7 @@ pub(crate) async fn dispatch(
                 Response::Topology { snapshot } => Ok(success(
                     tool,
                     json!({"kind": "topology", "topology_revision": snapshot.revision.get()}),
-                    topology_data(&snapshot)?,
+                    topology_data(&snapshot, true)?,
                     false,
                     "untrusted_terminal_data",
                 )),
@@ -1957,21 +2124,27 @@ pub(crate) async fn dispatch(
                     topology_revision,
                     runtime,
                     ..
-                } if runtime.splint_id == splint_id => Ok(success(
-                    tool,
-                    json!({
-                        "kind": "splint",
-                        "lair_id": lair_id.to_string(),
-                        "dojo_id": dojo_id.to_string(),
-                        "splint_id": splint_id.to_string(),
-                        "current_incarnation": runtime.live_incarnation,
-                        "last_incarnation": runtime.last_incarnation,
-                        "topology_revision": topology_revision.get(),
-                    }),
-                    json!({"title": title, "state": state_name(&runtime)}),
-                    false,
-                    "untrusted_terminal_data",
-                )),
+                } if runtime.splint_id == splint_id => {
+                    let mut data = json!({"title": title, "state": state_name(&runtime)});
+                    if let Some(status) = agent_status_value(&runtime)? {
+                        data["agent_status"] = status;
+                    }
+                    Ok(success(
+                        tool,
+                        json!({
+                            "kind": "splint",
+                            "lair_id": lair_id.to_string(),
+                            "dojo_id": dojo_id.to_string(),
+                            "splint_id": splint_id.to_string(),
+                            "current_incarnation": runtime.live_incarnation,
+                            "last_incarnation": runtime.last_incarnation,
+                            "topology_revision": topology_revision.get(),
+                        }),
+                        data,
+                        false,
+                        "untrusted_terminal_data",
+                    ))
+                }
                 _ => Err(DispatchFailure::internal()),
             }
         }
@@ -1996,9 +2169,8 @@ pub(crate) async fn dispatch(
         | "splinterm.rename_lair"
         | "splinterm.rename_dojo"
         | "splinterm.rename_splint"
-        | "splinterm.set_dojo_default_focus" => {
-            dispatch_mutation(tool, arguments, cancellation).await
-        }
+        | "splinterm.set_dojo_default_focus"
+        | "splinterm.report_agent_status" => dispatch_mutation(tool, arguments, cancellation).await,
         "splinterm.request_access" => {
             let splint_id = parse_splint(arguments)?;
             let incarnation = parse_incarnation(arguments)?;
@@ -2501,5 +2673,126 @@ mod tests {
             search_output(&registry, requested, "needle", false, &provenance, &search).is_err()
         );
         assert!(registry.lock().unwrap().entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod agent_status_tests {
+    use std::{collections::HashMap, ffi::OsString, path::PathBuf};
+
+    use splinterm_core::{Dojo, Lair, Splint, SplintState, Topology, TopologyRevision};
+    use splinterm_protocol::AgentStatusSummary;
+
+    use super::*;
+
+    const SPLINT: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103";
+
+    fn environment(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let values = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), OsString::from(value)))
+            .collect::<HashMap<_, _>>();
+        move |key| values.get(key).cloned()
+    }
+
+    #[test]
+    fn report_target_prefers_arguments_then_the_adapter_environment() {
+        let inside = environment(&[(SPLINT_ID_ENV, SPLINT), (SPLINT_INCARNATION_ENV, "3")]);
+        assert_eq!(
+            agent_status_target(&json!({"state": "idle"}), &inside).unwrap(),
+            (SPLINT.parse().unwrap(), 3)
+        );
+        let other = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104";
+        assert_eq!(
+            agent_status_target(
+                &json!({"state": "idle", "splint_id": other, "incarnation": 9}),
+                &inside
+            )
+            .unwrap(),
+            (other.parse().unwrap(), 9)
+        );
+        let outside = environment(&[]);
+        assert_eq!(
+            agent_status_target(&json!({"state": "idle"}), &outside)
+                .unwrap_err()
+                .message,
+            NOT_INSIDE_SPLINT.message
+        );
+        assert_eq!(
+            agent_status_target(&json!({"state": "idle", "splint_id": other}), &inside)
+                .unwrap_err()
+                .code,
+            "invalid_argument"
+        );
+    }
+
+    #[test]
+    fn report_arguments_map_to_the_closed_protocol_report() {
+        assert_eq!(agent_status_report(&json!({"state": null})).unwrap(), None);
+        let report = agent_status_report(
+            &json!({"state": "needs_input", "detail": "waiting", "ttl_seconds": 60}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(report.state, AgentState::NeedsInput);
+        assert_eq!(report.detail.as_deref(), Some("waiting"));
+        assert_eq!(report.ttl_seconds, Some(60));
+        assert!(agent_status_report(&json!({"state": null, "detail": "x"})).is_err());
+        assert!(agent_status_report(&json!({"state": "done", "detail": "a\u{2066}b"})).is_err());
+    }
+
+    #[test]
+    fn topology_resource_projection_omits_agent_status() {
+        let splint_id: SplintId = SPLINT.parse().unwrap();
+        let mut splint = Splint::shell(PathBuf::from("/srv"));
+        splint.id = splint_id;
+        splint.last_incarnation = Some(2);
+        splint.state = SplintState::Running;
+        let lair = Lair {
+            id: LairId::new(),
+            name: "main".to_owned(),
+            lifetime: splinterm_core::LairLifetime::default(),
+            retention: splinterm_core::LairRetention::default(),
+            provenance: None,
+            dojos: vec![Dojo {
+                id: DojoId::new(),
+                name: "terminal".to_owned(),
+                default_focus: splint_id,
+                root: LayoutNode::Leaf(splint),
+            }],
+        };
+        let mut topology = Topology::new();
+        topology
+            .insert_lair_at(TopologyRevision::new(0), lair)
+            .unwrap();
+        let snapshot = TopologySnapshot {
+            revision: topology.revision(),
+            topology,
+            runtimes: vec![SplintRuntimeSummary {
+                splint_id,
+                live_incarnation: Some(2),
+                last_incarnation: Some(2),
+                restorable: false,
+                lifecycle: SplintLifecycle::Running,
+                exit_status: None,
+                agent_status: Some(AgentStatusSummary {
+                    state: AgentState::Done,
+                    detail: None,
+                    sequence: 1,
+                    stale: false,
+                    reported_age_ms: 10,
+                }),
+            }],
+        };
+        let splint = |value: Value| value["lairs"][0]["dojos"][0]["splints"][0].clone();
+        assert_eq!(
+            splint(topology_data(&snapshot, true).unwrap())["agent_status"]["state"],
+            "done"
+        );
+        assert!(
+            splint(topology_data(&snapshot, false).unwrap())
+                .get("agent_status")
+                .is_none()
+        );
     }
 }

@@ -54,6 +54,32 @@ splinterm --output ndjson --schema-major 2 --timeout-ms 300000 \
 
 A sequence gap, replaced history, or stalled subscriber emits `resync_required` and ends the stream. Clients must fetch fresh authoritative state and explicitly subscribe again rather than silently guessing what was missed.
 
+### Report agent status
+
+An agent can tell Splinterm whether it is `working`, `needs_input`, `done`, `error`, or `idle`. Status comes only from an explicit report and is display data, never authority. Splinterm never infers it from terminal text, titles, or output.
+
+```bash
+splinterm agent-status set needs_input --detail 'waiting for approval'
+splinterm agent-status clear
+splinterm --output json agent-status get
+```
+
+Inside a Splint the target defaults to `$SPLINTERM_SPLINT_ID` and `$SPLINTERM_SPLINT_INCARNATION`. Outside one, without `--splint ID --incarnation N`, the command fails with the usage error `not inside a Splint`. A process in the Splint's session or process ancestry, such as an agent hook, reports for that Splint with no grant or prompt. An agent that fully detaches from the Splint (for example inside a tmux server started there) needs an `agent_status_report` grant.
+
+Active states turn stale without a fresh report (120 seconds by default). `inspect` and `topology` JSON gain an optional `agent_status` object while a status is set. Agent hooks make this work without MCP; for Claude Code:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "splinterm agent-status set needs_input >/dev/null 2>&1 || true"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "splinterm agent-status set done >/dev/null 2>&1 || true"}]}]
+  }
+}
+```
+
+Codex can map its `notify` program to `done`. The repository `docs/automation.md` has the full contract, exit codes, and recipes.
+
 ## The authority model
 
 Persistent policy is owner-controlled and fails closed. A policy rule binds:
