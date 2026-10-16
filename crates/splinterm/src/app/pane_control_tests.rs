@@ -236,6 +236,7 @@ async fn reacquire_applies_prepared_resize_before_input_and_releases_new_lease()
                     splint_id: id,
                     incarnation: 7,
                     bytes: b"marker".to_vec(),
+                    focus_report: false,
                 },
                 ack(),
             ),
@@ -380,4 +381,47 @@ async fn unexpected_control_errors_and_responses_are_still_fatal() {
         assert!(result.is_err());
         assert_eq!(resyncs, 0);
     }
+}
+
+#[tokio::test]
+async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
+    let id = SplintId::new();
+    let ack = || {
+        Ok(Response::TerminalActionAcknowledged {
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            splint_id: id,
+            incarnation: 7,
+            terminal_revision: 10,
+            history_generation: 0,
+        })
+    };
+    let input = |bytes: &[u8], focus_report| Request::Input {
+        controller_id: 1,
+        splint_id: id,
+        incarnation: 7,
+        bytes: bytes.to_vec(),
+        focus_report,
+    };
+    let (result, _, _) = run_case(
+        id,
+        true,
+        vec![
+            WindowCommand::FocusReport(true),
+            // The same bytes typed or pasted are ordinary input.
+            WindowCommand::Input(b"\x1b[I".to_vec()),
+            WindowCommand::FocusReport(false),
+        ],
+        vec![
+            (input(b"\x1b[I", true), ack()),
+            (input(b"\x1b[I", false), ack()),
+            (input(b"\x1b[O", true), ack()),
+            (
+                Request::ReleaseControl { controller_id: 1 },
+                Ok(Response::Acknowledged),
+            ),
+        ],
+    )
+    .await;
+    result.unwrap();
 }

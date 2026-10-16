@@ -388,6 +388,7 @@ mod tests {
                 splint_id,
                 incarnation: 1,
                 bytes: vec![],
+                focus_report: false,
             }),
             RequestAuthorization::PolicyAndOwned {
                 required: &[OperationScope::Input],

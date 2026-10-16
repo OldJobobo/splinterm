@@ -405,6 +405,21 @@ impl Connection {
     }
 
     async fn input(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        self.send_input(splint_id, incarnation, bytes, false).await;
+    }
+
+    /// Sends bytes the way the graphical client sends its focus reports.
+    async fn focus_report(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        self.send_input(splint_id, incarnation, bytes, true).await;
+    }
+
+    async fn send_input(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        bytes: &[u8],
+        focus_report: bool,
+    ) {
         let controller_id = self.acquire_control(splint_id, incarnation).await;
         assert!(matches!(
             self.request(Request::Input {
@@ -412,6 +427,7 @@ impl Connection {
                 splint_id,
                 incarnation,
                 bytes: bytes.to_vec(),
+                focus_report,
             })
             .await,
             Response::TerminalActionAcknowledged {
@@ -3734,6 +3750,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                 splint_id,
                 incarnation,
                 bytes: b"stale".to_vec(),
+                focus_report: false,
             })
             .await
             .unwrap_err();
@@ -3745,6 +3762,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     splint_id,
                     incarnation,
                     bytes: b"printf 'transferred-control\\n'\n".to_vec(),
+                    focus_report: false,
                 })
                 .await,
             Response::TerminalActionAcknowledged {
@@ -3964,6 +3982,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                 splint_id: first_id,
                 incarnation: first_incarnation,
                 bytes: b"stale".to_vec(),
+                focus_report: false,
             })
             .await
             .unwrap_err();
@@ -5018,9 +5037,9 @@ async fn unused_dojo_closes_and_its_shell_is_reaped() {
         let mut admin = daemon.connect().await;
         let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
         let pid = wait_for_pid_file(&pid_file).await;
-        // Focus reports come from the terminal, so they leave it unused.
+        // Focus reports the client generates leave it unused.
         admin
-            .input(target.splint_id, target.incarnation, b"\x1b[I\x1b[O")
+            .focus_report(target.splint_id, target.incarnation, b"\x1b[I\x1b[O")
             .await;
         admin.release_control().await;
         let UnusedDojoCloseOutcome::Closed {
@@ -5149,6 +5168,15 @@ async fn dojos_count_as_used_after_input_or_rename() {
         admin.input(typed.splint_id, typed.incarnation, b"x").await;
         admin.release_control().await;
         assert_dojo_used(&mut admin, typed.dojo_id, DojoUse::Input).await;
+
+        // Focus-shaped bytes the client did not flag, from automation or an
+        // unbracketed paste, reached the shell and count as input.
+        let pasted = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin
+            .input(pasted.splint_id, pasted.incarnation, b"\x1b[I\x1b[O")
+            .await;
+        admin.release_control().await;
+        assert_dojo_used(&mut admin, pasted.dojo_id, DojoUse::Input).await;
 
         let renamed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
         let expected_topology_revision = admin.topology_revision().await;
@@ -5325,6 +5353,7 @@ async fn racing_input(
             splint_id: target.splint_id,
             incarnation: target.incarnation,
             bytes: b"x".to_vec(),
+            focus_report: false,
         },
     };
     if connection

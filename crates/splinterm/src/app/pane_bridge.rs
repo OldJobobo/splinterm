@@ -376,11 +376,27 @@ pub(in crate::app) async fn wait_for_resize_deadline(deadline: Option<tokio::tim
     }
 }
 
+/// The bytes of a focus report this Window generated under DECSET 1004.
+const fn focus_report_bytes(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
+/// Terminal input to send for a command, and whether it is a focus report
+/// this Window generated rather than input from the user.
+fn terminal_input(command: WindowCommand) -> Option<(Vec<u8>, bool)> {
+    match command {
+        WindowCommand::Input(bytes) => Some((bytes, false)),
+        WindowCommand::FocusReport(focused) => Some((focus_report_bytes(focused).to_vec(), true)),
+        _ => None,
+    }
+}
+
 fn input_requests(
     controller_id: u64,
     splint_id: SplintId,
     incarnation: u64,
     bytes: &[u8],
+    focus_report: bool,
     maximum_input_bytes: usize,
 ) -> Result<Vec<Request>> {
     if maximum_input_bytes == 0 {
@@ -393,6 +409,7 @@ fn input_requests(
             splint_id,
             incarnation,
             bytes: chunk.to_vec(),
+            focus_report,
         })
         .collect())
 }
@@ -733,7 +750,10 @@ pub(in crate::app) async fn run_controller(
                 command
             };
             let request = match command {
-                WindowCommand::Input(bytes) => {
+                WindowCommand::Input(_) | WindowCommand::FocusReport(_) => {
+                    let Some((bytes, focus_report)) = terminal_input(command) else {
+                        unreachable!("matched terminal input");
+                    };
                     let Some(controller_id) = ensure_pane_control(
                         &mut control,
                         &mut active_controller,
@@ -753,6 +773,7 @@ pub(in crate::app) async fn run_controller(
                         splint_id,
                         incarnation,
                         &bytes,
+                        focus_report,
                         maximum_input_bytes,
                     )? {
                         match control.request(request).await {
@@ -1508,7 +1529,7 @@ mod tests {
     fn terminal_input_is_chunked_to_the_negotiated_server_limit() {
         let splint_id = SplintId::new();
         let bytes = vec![7; 17];
-        let requests = input_requests(3, splint_id, 9, &bytes, 8).unwrap();
+        let requests = input_requests(3, splint_id, 9, &bytes, false, 8).unwrap();
 
         assert_eq!(requests.len(), 3);
         let chunks = requests
@@ -1519,10 +1540,12 @@ mod tests {
                     splint_id: request_splint_id,
                     incarnation,
                     bytes,
+                    focus_report,
                 } => {
                     assert_eq!(controller_id, 3);
                     assert_eq!(request_splint_id, splint_id);
                     assert_eq!(incarnation, 9);
+                    assert!(!focus_report);
                     bytes
                 }
                 _ => panic!("expected an input request"),
@@ -1530,7 +1553,24 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [8, 8, 1]);
         assert_eq!(chunks.concat(), bytes);
-        assert!(input_requests(3, splint_id, 9, &bytes, 0).is_err());
+        assert!(input_requests(3, splint_id, 9, &bytes, false, 0).is_err());
+    }
+
+    #[test]
+    fn only_generated_focus_reports_are_flagged() {
+        assert_eq!(
+            terminal_input(WindowCommand::FocusReport(true)),
+            Some((b"\x1b[I".to_vec(), true))
+        );
+        assert_eq!(
+            terminal_input(WindowCommand::FocusReport(false)),
+            Some((b"\x1b[O".to_vec(), true))
+        );
+        assert_eq!(
+            terminal_input(WindowCommand::Input(b"\x1b[I".to_vec())),
+            Some((b"\x1b[I".to_vec(), false))
+        );
+        assert_eq!(terminal_input(WindowCommand::Resynchronize), None);
     }
 
     #[test]

@@ -695,6 +695,11 @@ pub enum Request {
         splint_id: SplintId,
         incarnation: u64,
         bytes: Vec<u8>,
+        /// Set only by the graphical client for the focus in and out reports
+        /// it generates under DECSET 1004. Such bytes leave a Dojo unused;
+        /// identical bytes sent without this flag count as use.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        focus_report: bool,
     },
     Resize {
         controller_id: u64,
@@ -4552,6 +4557,31 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<Request>(serde_json::to_value(&request).unwrap()).unwrap(),
             request
+        );
+    }
+
+    #[test]
+    fn input_marks_focus_reports_only_when_flagged() {
+        let splint_id = SplintId::new();
+        let input = |focus_report| Request::Input {
+            controller_id: 3,
+            splint_id,
+            incarnation: 4,
+            bytes: b"\x1b[I".to_vec(),
+            focus_report,
+        };
+        let ordinary = serde_json::to_value(input(false)).unwrap();
+        // Ordinary input keeps the encoding older peers send and accept.
+        assert!(ordinary.get("focus_report").is_none());
+        assert_eq!(
+            serde_json::from_value::<Request>(ordinary).unwrap(),
+            input(false)
+        );
+        let flagged = serde_json::to_value(input(true)).unwrap();
+        assert_eq!(flagged["focus_report"], true);
+        assert_eq!(
+            serde_json::from_value::<Request>(flagged).unwrap(),
+            input(true)
         );
     }
 

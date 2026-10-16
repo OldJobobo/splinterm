@@ -3512,6 +3512,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                     splint_id: requested,
                     incarnation: 2,
                     bytes,
+                    focus_report: false,
                 },
         } = read_private_frame(&mut owner)
         else {

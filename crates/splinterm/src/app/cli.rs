@@ -685,6 +685,7 @@ async fn run_headless(
                     splint_id,
                     incarnation,
                     bytes: text.into_bytes(),
+                    focus_report: false,
                 })
                 .await?;
             connection.release_control(controller_id).await?;

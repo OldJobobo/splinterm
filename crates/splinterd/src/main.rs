@@ -7289,6 +7289,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
             bytes,
+            focus_report,
         } => {
             if !authorization.policy_authorized() && authorization.authorized_grant_id().is_none() {
                 let _ = authorize_scope(
@@ -7308,10 +7309,14 @@ async fn handle_authorized_request(
             let handle =
                 controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
                     .await?;
-            handle
-                .input(bytes)
-                .await
-                .map_err(|error| input_error(&error))?;
+            // Only input the client marks as its own focus reports can leave
+            // the Dojo unused; the same bytes from anywhere else are input.
+            let written = if focus_report {
+                handle.focus_report(bytes).await
+            } else {
+                handle.input(bytes).await
+            };
+            written.map_err(|error| input_error(&error))?;
             terminal_action_acknowledgement(state, &handle).await?
         }
         Request::Resize {
@@ -11251,6 +11256,68 @@ mod tests {
         ));
         drop(attachment);
         assert!(registry.claim_unattached(handle).is_ok());
+        reap_all(&state).await;
+    }
+
+    // Only bytes the client flags as its own focus reports leave a runtime
+    // unused; identical bytes from automation or a paste are input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_flagged_focus_reports_leave_a_runtime_unused() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            51,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "focus".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        handle.focus_report(b"\x1b[I\x1b[O".to_vec()).await.unwrap();
+        assert!(!handle.has_received_input(), "flagged focus reports");
+        handle.focus_report(b"\x1b[Ix".to_vec()).await.unwrap();
+        assert!(
+            handle.has_received_input(),
+            "a flag does not excuse other bytes"
+        );
+
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            52,
+            Request::CreateTransientLair {
+                expected_topology_revision,
+                name: "pasted".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        handle.input(b"\x1b[I\x1b[O".to_vec()).await.unwrap();
+        assert!(
+            handle.has_received_input(),
+            "unflagged focus-shaped bytes are input"
+        );
         reap_all(&state).await;
     }
 

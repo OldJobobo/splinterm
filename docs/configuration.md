@@ -546,7 +546,9 @@ the close. A Dojo counts as unused only while all of these hold:
 - it still holds only the Splint it was created with; a split counts as use,
   even after the extra pane is closed again;
 - that Splint never received client input: keys, paste, or mouse. Focus
-  reports and other replies the terminal generates do not count;
+  reports the graphical client marks as its own and other replies the
+  terminal generates do not count; the same bytes sent by automation or
+  pasted do;
 - it started as a plain default-shell terminal in the running daemon.
   Command-bearing launches, presets, restored or relaunched Splints, and Dojos
   from before the daemon last started count as used. The Lair's name does not
