@@ -21,7 +21,9 @@ use thiserror::Error;
 
 use crate::{
     ImageContentId, SharedImageBudget,
+    grid::MAX_CHECKPOINT_GRID_ROWS,
     image::{ImageCheckpointV1, MAX_IMAGE_CHECKPOINT_CONTENTS},
+    row::MAX_CHECKPOINT_CELLS,
 };
 
 use super::{
@@ -68,6 +70,7 @@ pub enum CheckpointError {
 struct CheckpointHeader {
     magic: [u8; 8],
     schema: u16,
+    body: CheckpointBodyShape,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -381,6 +384,11 @@ impl TerminalCheckpointV1 {
             || terminal.kitty_upload.is_some()
             || terminal.iterm_transfer.is_some()
             || terminal.event_overflowed
+            || terminal
+                .normal
+                .allocated_cells()
+                .checked_add(terminal.alternate.allocated_cells())
+                .is_none_or(|cells| cells > MAX_CHECKPOINT_CELLS)
         {
             return Err(CheckpointError::UnsupportedState);
         }
@@ -632,8 +640,7 @@ impl Terminal {
         if bytes.len() > MAX_TERMINAL_CHECKPOINT_BYTES {
             return Err(CheckpointError::TooLarge);
         }
-        let header: CheckpointHeader =
-            serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+        let header = decode_header(bytes)?;
         match (header.magic, header.schema) {
             (CHECKPOINT_MAGIC_V1, TERMINAL_CHECKPOINT_SCHEMA_V1) => {
                 let envelope: CheckpointEnvelopeV1 =
@@ -727,6 +734,105 @@ where
         MAX_IMAGE_CHECKPOINT_CONTENTS,
         "Kitty application image mappings",
     )
+}
+
+/// Reads the envelope schema and sums every allocated row's declared width
+/// without decoding any cell.
+///
+/// A packed row stores its trailing run once, so the full decode would expand
+/// a few bytes into a whole row. This pass reads only the grid rows' widths,
+/// so a checkpoint past [`MAX_CHECKPOINT_CELLS`] fails before any expansion.
+fn decode_header(bytes: &[u8]) -> Result<CheckpointHeader, CheckpointError> {
+    let header: CheckpointHeader =
+        serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+    header
+        .body
+        .declared_cells()
+        .filter(|cells| *cells <= MAX_CHECKPOINT_CELLS)
+        .ok_or_else(|| CheckpointError::Encoding(cell_budget_error()))?;
+    Ok(header)
+}
+
+fn cell_budget_error<E: serde::de::Error>() -> E {
+    E::custom("terminal checkpoint rows exceed the aggregate cell budget")
+}
+
+/// The body fields of either schema that size its grids; every other field,
+/// including each row's packed cells, is skipped without allocation.
+#[derive(Deserialize)]
+struct CheckpointBodyShape {
+    normal: Option<GridShape>,
+    alternate: Option<GridShape>,
+    /// Schema v2 nests the v1 body, and so its grids, under `terminal`.
+    terminal: Option<Box<CheckpointBodyShape>>,
+}
+
+impl CheckpointBodyShape {
+    fn declared_cells(&self) -> Option<usize> {
+        let nested = self
+            .terminal
+            .as_ref()
+            .map_or(Some(0), |terminal| terminal.declared_cells())?;
+        [&self.normal, &self.alternate]
+            .into_iter()
+            .flatten()
+            .try_fold(nested, |total, grid| total.checked_add(grid.rows.0))
+    }
+}
+
+#[derive(Deserialize)]
+struct GridShape {
+    rows: DeclaredRowCells,
+}
+
+#[derive(Deserialize)]
+struct RowShape {
+    cells: (usize, serde::de::IgnoredAny),
+}
+
+/// Total declared width of one grid's allocated rows.
+struct DeclaredRowCells(usize);
+
+impl<'de> Deserialize<'de> for DeclaredRowCells {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RowsVisitor;
+
+        impl<'de> Visitor<'de> for RowsVisitor {
+            type Value = DeclaredRowCells;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "at most {MAX_CHECKPOINT_GRID_ROWS} grid rows")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut rows = 0_usize;
+                let mut cells = 0_usize;
+                while let Some(row) = sequence.next_element::<Option<RowShape>>()? {
+                    rows += 1;
+                    if rows > MAX_CHECKPOINT_GRID_ROWS {
+                        return Err(serde::de::Error::custom(
+                            "grid rows exceed checkpoint bound",
+                        ));
+                    }
+                    if let Some(row) = row {
+                        cells = cells
+                            .checked_add(row.cells.0)
+                            .filter(|cells| *cells <= MAX_CHECKPOINT_CELLS)
+                            .ok_or_else(cell_budget_error)?;
+                    }
+                }
+                Ok(DeclaredRowCells(cells))
+            }
+        }
+
+        deserializer.deserialize_seq(RowsVisitor)
+    }
 }
 
 fn deserialize_tab_stops<'de, D>(deserializer: D) -> Result<Vec<bool>, D::Error>
@@ -894,6 +1000,42 @@ mod tests {
             Sha256::digest(encode_json(&envelope.body.images).unwrap()).into();
         envelope.body_sha256 = Sha256::digest(encode_json(&envelope.body).unwrap()).into();
         encode_json(&envelope).unwrap()
+    }
+
+    #[test]
+    fn declared_cells_sum_both_grids_against_the_aggregate_budget() {
+        let row = |columns: usize| json!({"cells": [columns, "x"], "dirty": false});
+        let full = MAX_CHECKPOINT_CELLS / crate::row::MAX_CHECKPOINT_COLUMNS;
+        let wide = || vec![row(crate::row::MAX_CHECKPOINT_COLUMNS); full];
+        // Schema v1 keeps the grids in the body; v2 nests them under `terminal`.
+        for nested in [false, true] {
+            let header = |normal: Vec<Value>, alternate: Vec<Value>| {
+                let grids = json!({"normal": {"rows": normal}, "alternate": {"rows": alternate}});
+                let body = if nested {
+                    json!({"terminal": grids, "images": {}})
+                } else {
+                    grids
+                };
+                serde_json::to_vec(&json!({"magic": vec![0_u8; 8], "schema": 1, "body": body}))
+                    .unwrap()
+            };
+            decode_header(&header(wide(), Vec::new())).unwrap();
+            decode_header(&header(Vec::new(), wide())).unwrap();
+            let mut with_null = wide();
+            with_null.push(Value::Null);
+            decode_header(&header(with_null, Vec::new())).unwrap();
+            // One more cell in either grid crosses the shared budget.
+            for (normal, alternate) in [
+                (wide(), vec![row(1)]),
+                ([wide(), vec![row(1)]].concat(), Vec::new()),
+                (vec![row(usize::MAX)], vec![row(1)]),
+            ] {
+                assert!(matches!(
+                    decode_header(&header(normal, alternate)),
+                    Err(CheckpointError::Encoding(_))
+                ));
+            }
+        }
     }
 
     #[test]
