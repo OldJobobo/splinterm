@@ -11,23 +11,12 @@ use splinterm::{
     remote_launch::open_remote_window,
 };
 
-use super::sessions::run_standalone_picker;
+use super::{remote_status::destination, sessions::run_standalone_picker};
 
 const REMOTE_DOJOS_TITLE: &str = "Remote Dojos…";
 const PROFILES_BLOCKER: &str = "Add profiles in remotes.toml";
 const EMPTY_BLOCKER: &str = "No remote profiles · add one to remotes.toml";
 const INVALID_BLOCKER: &str = "remotes.toml is invalid · run `splinterm remote list`";
-
-/// Formats the OpenSSH destination a profile connects to.
-fn destination(profile: &RemoteProfile) -> String {
-    let user = profile
-        .user()
-        .map_or_else(String::new, |user| format!("{user}@"));
-    let port = profile
-        .port()
-        .map_or_else(String::new, |port| format!(":{port}"));
-    format!("{user}{}{port}", profile.host())
-}
 
 /// A profile row. Rows without panes render without a running status.
 fn remote_profile_item(profile: &RemoteProfile) -> SessionPickerItem {

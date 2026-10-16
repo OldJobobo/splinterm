@@ -73,10 +73,25 @@ pub struct RemoteFailure {
 }
 
 impl RemoteFailure {
+    /// Builds a categorized failure; the diagnostic is sanitized and bounded.
+    #[must_use]
+    pub fn new(kind: RemoteFailureKind, diagnostic: &str) -> Self {
+        Self {
+            kind,
+            diagnostic: bounded_failure_message(diagnostic),
+        }
+    }
+
     /// Returns the stable failure category.
     #[must_use]
     pub const fn kind(&self) -> RemoteFailureKind {
         self.kind
+    }
+
+    /// Returns the bounded, sanitized OpenSSH and relay diagnostic text.
+    #[must_use]
+    pub fn diagnostic(&self) -> &str {
+        &self.diagnostic
     }
 }
 

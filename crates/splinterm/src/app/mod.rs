@@ -15,6 +15,7 @@ mod pane_bridge;
 mod presets;
 mod remote_chooser;
 mod remote_cli;
+mod remote_status;
 mod session_catalog;
 mod sessions;
 mod shell_integration;

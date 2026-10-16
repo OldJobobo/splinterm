@@ -54,6 +54,7 @@ use super::{
     presets::{materialize_preset, run_preset_command},
     remote_chooser::run_remotes,
     remote_cli::run_remote_command,
+    remote_status::connect_with_status,
     session_catalog::{
         automation_launch, create_request, launch_parameters, new_dojo_request_for, remember_dojo,
     },
@@ -228,12 +229,6 @@ pub(crate) async fn run() -> Result<()> {
         install_termination_signal_task();
     }
 
-    let factory = if let Some(profile_name) = remote {
-        let catalog = RemoteCatalog::load_default()?;
-        ConnectionFactory::remote(catalog.get(&profile_name)?).await?
-    } else {
-        ConnectionFactory::local()
-    };
     let ConfigLoad {
         config,
         diagnostics,
@@ -252,6 +247,21 @@ pub(crate) async fn run() -> Result<()> {
             eprintln!("splinterm config: {diagnostic}");
         }
     }
+    let factory = match remote {
+        // Graphical remote launches connect inside a status Window that shows
+        // progress and categorized failures instead of terminal output.
+        Some(profile_name) if graphical => {
+            match connect_with_status(profile_name, &config).await? {
+                Some(factory) => factory,
+                None => return Ok(()),
+            }
+        }
+        Some(profile_name) => {
+            let catalog = RemoteCatalog::load_default()?;
+            ConnectionFactory::remote(catalog.get(&profile_name)?).await?
+        }
+        None => ConnectionFactory::local(),
+    };
     run_configured_command(command, config, factory).await
 }
 

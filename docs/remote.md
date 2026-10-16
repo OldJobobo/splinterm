@@ -201,8 +201,26 @@ the terminal that started Splinterm, so use an agent key or your own
 absent, empty, or invalid `remotes.toml` leaves the chooser empty with a
 one-line explanation; `splinterm remote list` reports the parse error.
 
-There is no connection-status Window yet. If the connection fails, no Window
-appears; `splinterm remote check PROFILE` shows the categorized failure.
+### Connection status
+
+Every graphical `--remote` launch, including those started from the app, first
+maps a status Window reading "Connecting to DESTINATION…" while OpenSSH
+authenticates and the remote daemon answers a ping. On success that Window
+closes and the remote's own picker or Window opens. On failure it shows the
+categorized cause, a one-line remedy, the newest sanitized OpenSSH lines, and a
+reminder that an ssh-agent key or `SSH_ASKPASS` is the preferred way to
+authenticate without a terminal. Press R or Enter to retry once, or C, Q, or
+Escape to close; Escape also cancels a connection in progress. Each retry
+reloads the profile from `remotes.toml`.
+
+Raw OpenSSH output appears only in that Window, never on a terminal. Each
+failure is also recorded in the client diagnostics log
+(`${XDG_STATE_HOME:-~/.local/state}/splinterm/logs/`) as a
+`remote_connect_failure` event whose error code names only the category:
+`remote_host_key`, `remote_authentication`, `remote_unreachable`,
+`remote_installation`, `remote_daemon`, `remote_incompatible`,
+`remote_transport`, or `remote_profile`. Non-graphical commands such as
+`remote check PROFILE` still report on the terminal.
 
 ## Remote profiles
 
@@ -253,8 +271,9 @@ OpenSSH's authority. Splinterm requires that value to name an absolute executabl
 local file before setting `SSH_ASKPASS_REQUIRE=force`. It never places a password
 or passphrase in argv, TOML, relay frames, diagnostics, or application storage.
 Agent-backed authentication can still succeed without a prompt provider;
-interactive authentication failures are reported rather than replaced with an
-application password field. Post-connect SSH authentication and relay
+interactive authentication failures are reported, in the connection status
+Window for graphical launches, rather than replaced with an application password
+field. Post-connect SSH authentication and relay
 negotiation are bounded by the profile timeout plus a 120-second human/hardware
 interaction allowance. Logical-channel admission, private daemon handshake, and
 each `remote check` probe use the validated profile timeout.

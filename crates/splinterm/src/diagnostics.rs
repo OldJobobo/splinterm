@@ -111,6 +111,8 @@ pub enum DiagnosticEventCode {
     Panic,
     TerminationSignal,
     DiagnosticRecordOmitted,
+    /// A remote connection attempt failed; the error code carries its category.
+    RemoteConnectFailure,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,6 +129,14 @@ pub enum DiagnosticErrorCode {
     Protocol,
     Panic,
     TerminationSignal,
+    RemoteHostKey,
+    RemoteAuthentication,
+    RemoteUnreachable,
+    RemoteInstallation,
+    RemoteDaemon,
+    RemoteIncompatible,
+    RemoteTransport,
+    RemoteProfile,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -833,7 +843,8 @@ const fn module_for_event(event: DiagnosticEventCode) -> DiagnosticModule {
         | DiagnosticEventCode::ClientExit
         | DiagnosticEventCode::Panic
         | DiagnosticEventCode::TerminationSignal
-        | DiagnosticEventCode::DiagnosticRecordOmitted => DiagnosticModule::Client,
+        | DiagnosticEventCode::DiagnosticRecordOmitted
+        | DiagnosticEventCode::RemoteConnectFailure => DiagnosticModule::Client,
     }
 }
 
@@ -1384,5 +1395,39 @@ mod tests {
         assert!(value.get("path").is_none());
         assert!(value.get("argv").is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_connect_failures_record_only_a_documented_category_code() {
+        assert_eq!(
+            serde_json::to_string(&DiagnosticEventCode::RemoteConnectFailure).unwrap(),
+            "\"remote_connect_failure\""
+        );
+        assert_eq!(
+            module_for_event(DiagnosticEventCode::RemoteConnectFailure),
+            DiagnosticModule::Client
+        );
+        let codes = [
+            (DiagnosticErrorCode::RemoteHostKey, "remote_host_key"),
+            (
+                DiagnosticErrorCode::RemoteAuthentication,
+                "remote_authentication",
+            ),
+            (DiagnosticErrorCode::RemoteUnreachable, "remote_unreachable"),
+            (
+                DiagnosticErrorCode::RemoteInstallation,
+                "remote_installation",
+            ),
+            (DiagnosticErrorCode::RemoteDaemon, "remote_daemon"),
+            (
+                DiagnosticErrorCode::RemoteIncompatible,
+                "remote_incompatible",
+            ),
+            (DiagnosticErrorCode::RemoteTransport, "remote_transport"),
+            (DiagnosticErrorCode::RemoteProfile, "remote_profile"),
+        ];
+        for (code, name) in codes {
+            assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{name}\""));
+        }
     }
 }
