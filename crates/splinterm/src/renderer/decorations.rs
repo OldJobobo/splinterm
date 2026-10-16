@@ -420,7 +420,8 @@ mod tests {
             style,
             [255, 255, 255, 255],
         );
-        canvas.chunks_exact(4).map(|pixel| pixel[2]).collect()
+        let (pixels, _) = canvas.as_chunks::<4>();
+        pixels.iter().map(|pixel| pixel[2]).collect()
     }
 
     #[test]
@@ -535,7 +536,7 @@ mod tests {
                 style,
                 [255, 255, 255, 255],
             );
-            assert!(canvas.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            assert!(canvas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
             outputs.push(canvas);
         }
         for left in 0..outputs.len() {

@@ -69,7 +69,7 @@ pub fn scale_bgra_lanczos3(
     }
     if pixel_fixup == 1.0 {
         let mut rgba = Vec::with_capacity(bgra.len());
-        for pixel in bgra.chunks_exact(4) {
+        for pixel in bgra.as_chunks::<4>().0 {
             rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
         }
         return Ok((width, height, rgba));
@@ -85,8 +85,9 @@ pub fn scale_bgra_lanczos3(
         return Err(ScaleError::BitmapTooLarge);
     }
 
-    let mut source: Vec<u32> = bgra
-        .chunks_exact(4)
+    let (pixels, _) = bgra.as_chunks::<4>();
+    let mut source: Vec<u32> = pixels
+        .iter()
         .map(|pixel| {
             u32::from(pixel[3]) << 24
                 | u32::from(pixel[2]) << 16
