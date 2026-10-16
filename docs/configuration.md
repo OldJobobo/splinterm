@@ -634,13 +634,20 @@ With `main.theme` unset, Splinterm reads the active Quattro theme directly from
 `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective
 `foot.ini` supplies the terminal foreground/background, ANSI 16, cursor,
 selection background and foreground, alpha, and blur; `colors.toml` supplies the
-standard Omarchy `accent` and `lighter_bg` roles used by application chrome. The
-selected-Dojo-tab body uses `lighter_bg` when present and otherwise Foot
-`bright0`; it never borrows the terminal selection background. Its label and
-close affordance use whichever effective Foot background or foreground has
+standard Omarchy `accent`, `lighter_bg`, and `muted` roles used by application
+chrome. The selected-Dojo-tab body uses `lighter_bg` when present and otherwise
+Foot `bright0`; it never borrows the terminal selection background. Its label
+and close affordance use whichever effective Foot background or foreground has
 higher WCAG contrast against that resolved tab body, preferring foreground on
-an exact tie. Native Omarchy themes do not need Splinterm-specific palette
-roles.
+an exact tie.
+
+Inactive tab labels and close affordances are muted. Splinterm starts from
+`muted`, or Foot `bright0` when `muted` is absent, and keeps it when it has at
+least 4.5:1 WCAG contrast against the tab-strip background without exceeding
+the foreground's own contrast. Otherwise it tries fixed mixes of that color
+with 25, 50, and 75 % foreground and takes the first that qualifies, falling
+back to the plain foreground. Contrast ignores alpha. Native Omarchy themes do
+not need Splinterm-specific palette roles.
 
 The tab-strip and selected-tab backgrounds both inherit the terminal alpha
 while preserving their resolved colors. The selected-tab underline remains the
@@ -673,10 +680,15 @@ No theme hook, generated file, or manual integration step is required. Setting
 `main.theme=/path/to/theme.json` explicitly opts out of Omarchy discovery for
 portable or isolated use. The strict JSON schema retains optional
 `selection_foreground`, `active_tab_background`, `active_tab_foreground`,
-`pane_border`, and `pane_border_active` overrides. `selection_foreground` falls
-back to the normal foreground and `active_tab_background` falls back to ANSI
-color 8 for older JSON themes. A missing `active_tab_foreground` uses the
-same contrast algorithm against the JSON palette's resolved `background` and
-`foreground`; malformed explicit values fail theme loading. The optional
-`tools/generate-omarchy-theme.py` exporter derives these JSON roles from the
-standard Omarchy background ramp and foreground/background endpoints.
+`inactive_tab_foreground`, `pane_border`, and `pane_border_active` overrides.
+`selection_foreground` falls back to the normal foreground and
+`active_tab_background` falls back to ANSI color 8 for older JSON themes. A
+missing `active_tab_foreground` uses the same contrast algorithm against the
+JSON palette's resolved `background` and `foreground`. A missing
+`inactive_tab_foreground` applies the inactive-tab rule above to ANSI color 8;
+an explicit value is used verbatim. Malformed explicit values fail theme
+loading. The optional `tools/generate-omarchy-theme.py` exporter derives the
+other JSON roles from the standard Omarchy background ramp and
+foreground/background endpoints. It leaves `inactive_tab_foreground` unset, so
+that role is derived from ANSI color 8, which the exporter fills from `muted`,
+when the theme loads.
