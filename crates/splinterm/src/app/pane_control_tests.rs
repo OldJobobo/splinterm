@@ -381,3 +381,64 @@ async fn unexpected_control_errors_and_responses_are_still_fatal() {
         assert_eq!(resyncs, 0);
     }
 }
+
+#[tokio::test]
+async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
+    let id = SplintId::new();
+    let ack = || {
+        Ok(Response::TerminalActionAcknowledged {
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            splint_id: id,
+            incarnation: 7,
+            terminal_revision: 10,
+            history_generation: 0,
+        })
+    };
+    let input = |bytes: &[u8]| Request::Input {
+        controller_id: 1,
+        splint_id: id,
+        incarnation: 7,
+        bytes: bytes.to_vec(),
+    };
+    let (result, _, _) = run_case(
+        id,
+        true,
+        vec![
+            WindowCommand::Input(b"ab".to_vec()),
+            WindowCommand::Input(b"c".to_vec()),
+            WindowCommand::Input(b"d".to_vec()),
+            WindowCommand::Resize {
+                columns: 90,
+                rows: 30,
+                pixel_width: 900,
+                pixel_height: 600,
+            },
+            WindowCommand::Input(b"e".to_vec()),
+            WindowCommand::Input(Vec::new()),
+            WindowCommand::Input(b"f".to_vec()),
+        ],
+        vec![
+            (input(b"abcd"), ack()),
+            (
+                Request::Resize {
+                    controller_id: 1,
+                    splint_id: id,
+                    incarnation: 7,
+                    columns: 90,
+                    rows: 30,
+                    pixel_width: 900,
+                    pixel_height: 600,
+                },
+                ack(),
+            ),
+            (input(b"ef"), ack()),
+            (
+                Request::ReleaseControl { controller_id: 1 },
+                Ok(Response::Acknowledged),
+            ),
+        ],
+    )
+    .await;
+    result.unwrap();
+}
