@@ -235,34 +235,110 @@ async fn a_used_or_unsupported_answer_leaves_the_tab_detached() {
     }
 }
 
+/// Closes the second of two tabs, whose transient Lair this Window owns, and
+/// reports whether the Window still holds that Lair's owner connection.
+async fn close_transient_tab(lair_removed: bool) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let detached = Arc::new(AtomicBool::new(false));
+        let target = managed_tab(slow_pane(&detached));
+        let (target_id, target_lair) = (target.dojo_id, target.lair_id);
+        let (mut connection, peer, finished) = scripted_connection(
+            vec![Ok(Response::UnusedDojoClose {
+                dojo_id: target_id,
+                outcome: UnusedDojoCloseOutcome::Closed {
+                    topology_revision: TopologyRevision::new(2),
+                    lair_removed,
+                },
+            })],
+            Arc::clone(&detached),
+        )
+        .await;
+        let (owner, owner_peer, owner_finished) =
+            scripted_connection(Vec::new(), Arc::new(AtomicBool::new(false))).await;
+        let mut state = TopologyManagerState {
+            tabs: WindowTabSet::new(managed_tab(HashMap::new())),
+            transient_owners: HashMap::from([(target_lair, owner)]),
+        };
+        state.tabs.open_or_activate(target).unwrap();
+        let (updates, receiver) = mpsc::channel(16);
+        acknowledge_tab_removals(receiver);
+        let outcome = handle_session_manager_command(
+            &ConnectionFactory::local(),
+            WindowTopologyCommand::CloseTab { dojo_id: target_id },
+            &mut connection,
+            &close_unused_config(true),
+            &SharedImageContentCache::default(),
+            &updates,
+            &mut state,
+        )
+        .await;
+        assert!(matches!(outcome, TopologyManagerCommandOutcome::Continue));
+        let _ = finished.send(());
+        let _ = owner_finished.send(());
+        assert_eq!(peer.await.unwrap().len(), 1);
+        assert!(owner_peer.await.unwrap().is_empty());
+        state.transient_owners.contains_key(&target_lair)
+    })
+    .await
+    .expect("bounded scripted transient tab close")
+}
+
+#[tokio::test]
+async fn a_removed_transient_lair_releases_its_owner_connection() {
+    assert!(
+        !close_transient_tab(true).await,
+        "the removed Lair's owner connection is dropped"
+    );
+    assert!(
+        close_transient_tab(false).await,
+        "a Lair that still exists keeps its owner"
+    );
+}
+
 #[test]
 fn only_a_confirmed_close_of_the_same_dojo_counts() {
     let dojo_id = DojoId::new();
-    let confirmed = |closed_id| {
+    let confirmed = |closed_id, lair_removed| {
         Ok(Response::UnusedDojoClose {
             dojo_id: closed_id,
             outcome: UnusedDojoCloseOutcome::Closed {
                 topology_revision: TopologyRevision::new(2),
-                lair_removed: false,
+                lair_removed,
             },
         })
     };
-    assert!(unused_dojo_closed(dojo_id, &confirmed(dojo_id)));
-    assert!(!unused_dojo_closed(dojo_id, &confirmed(DojoId::new())));
-    assert!(!unused_dojo_closed(
-        dojo_id,
-        &Ok(Response::UnusedDojoClose {
+    assert_eq!(
+        unused_dojo_closed(dojo_id, &confirmed(dojo_id, false)),
+        Some(false)
+    );
+    assert_eq!(
+        unused_dojo_closed(dojo_id, &confirmed(dojo_id, true)),
+        Some(true)
+    );
+    assert_eq!(
+        unused_dojo_closed(dojo_id, &confirmed(DojoId::new(), true)),
+        None
+    );
+    assert_eq!(
+        unused_dojo_closed(
             dojo_id,
-            outcome: UnusedDojoCloseOutcome::Used {
-                reason: DojoUse::Attached,
-            },
-        })
-    ));
-    assert!(!unused_dojo_closed(dojo_id, &Ok(Response::Acknowledged)));
-    assert!(!unused_dojo_closed(
-        dojo_id,
-        &Err(anyhow::anyhow!("connection closed"))
-    ));
+            &Ok(Response::UnusedDojoClose {
+                dojo_id,
+                outcome: UnusedDojoCloseOutcome::Used {
+                    reason: DojoUse::Attached,
+                },
+            })
+        ),
+        None
+    );
+    assert_eq!(
+        unused_dojo_closed(dojo_id, &Ok(Response::Acknowledged)),
+        None
+    );
+    assert_eq!(
+        unused_dojo_closed(dojo_id, &Err(anyhow::anyhow!("connection closed"))),
+        None
+    );
 }
 
 #[tokio::test]

@@ -1432,42 +1432,69 @@ fn may_close_unused(config: &AppConfig, pane_tasks: &HashMap<SplintId, PaneTask>
 /// Asks the daemon to end a Dojo that was never used. A used Dojo, an error,
 /// or a daemon without the request all leave the Dojo running, which is the
 /// detach a closed tab always performed.
+///
+/// Returns whether the daemon removed the Dojo's Lair along with it.
 async fn close_if_unused(connection: &mut Connection, dojo_id: DojoId) -> bool {
     let response = connection
         .request(Request::CloseUnusedDojo { dojo_id })
         .await;
-    unused_dojo_closed(dojo_id, &response)
+    unused_dojo_closed(dojo_id, &response) == Some(true)
 }
 
-fn unused_dojo_closed(dojo_id: DojoId, response: &Result<Response>) -> bool {
-    matches!(
-        response,
+/// Whether the daemon confirmed closing this Dojo, and if so whether its Lair
+/// went with it.
+fn unused_dojo_closed(dojo_id: DojoId, response: &Result<Response>) -> Option<bool> {
+    match response {
         Ok(Response::UnusedDojoClose {
             dojo_id: closed,
-            outcome: UnusedDojoCloseOutcome::Closed { .. },
-        }) if *closed == dojo_id
-    )
+            outcome: UnusedDojoCloseOutcome::Closed { lair_removed, .. },
+        }) if *closed == dojo_id => Some(*lair_removed),
+        _ => None,
+    }
 }
 
 /// Releases a tab the Window just removed: detach, or end the Dojo when the
 /// configuration allows it and the daemon finds it unused.
+///
+/// Returns whether the daemon removed the tab's Lair too.
 async fn release_closed_tab(
     connection: &mut Connection,
     config: &AppConfig,
     dojo_id: DojoId,
     pane_tasks: HashMap<SplintId, PaneTask>,
-) {
+) -> bool {
     if !may_close_unused(config, &pane_tasks) {
         retire_pane_tasks(pane_tasks);
-        return;
+        return false;
     }
     // A pane that cannot finish detaching leaves the Dojo attached, so the
     // tab just detaches; its task finishes in the background.
-    if tokio::time::timeout(CLOSE_TAB_DETACH_DEADLINE, detach_pane_tasks(pane_tasks))
+    tokio::time::timeout(CLOSE_TAB_DETACH_DEADLINE, detach_pane_tasks(pane_tasks))
         .await
         .is_ok()
+        && close_if_unused(connection, dojo_id).await
+}
+
+/// Releases a tab this Window closed. A Lair the daemon removed with its
+/// Dojo no longer needs the transient owner connection this Window held for
+/// it; keeping it would leave an idle daemon connection open for the rest of
+/// the Window's life.
+async fn release_managed_tab(
+    connection: &mut Connection,
+    config: &AppConfig,
+    state: &mut TopologyManagerState,
+    removed: DojoTab<ManagedDojo>,
+) {
+    let lair_id = removed.lair_id;
+    if release_closed_tab(
+        connection,
+        config,
+        removed.dojo_id,
+        removed.value.pane_tasks,
+    )
+    .await
     {
-        close_if_unused(connection, dojo_id).await;
+        state.transient_owners.remove(&lair_id);
     }
 }
 
@@ -2980,7 +3007,7 @@ async fn handle_session_manager_command(
         WindowTopologyCommand::CloseTab { dojo_id } => {
             if let Some(removed) = state.tabs.close(dojo_id) {
                 let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                release_closed_tab(connection, config, dojo_id, removed.value.pane_tasks).await;
+                release_managed_tab(connection, config, state, removed).await;
                 if !acknowledged {
                     return TopologyManagerCommandOutcome::Stop;
                 }
@@ -3005,7 +3032,7 @@ async fn handle_session_manager_command(
             for dojo_id in dojo_ids {
                 if let Some(removed) = state.tabs.close(dojo_id) {
                     let acknowledged = remove_frontend_tab(updates, dojo_id).await;
-                    release_closed_tab(connection, config, dojo_id, removed.value.pane_tasks).await;
+                    release_managed_tab(connection, config, state, removed).await;
                     if !acknowledged {
                         return TopologyManagerCommandOutcome::Stop;
                     }
