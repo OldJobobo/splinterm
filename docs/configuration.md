@@ -243,6 +243,8 @@ named confirmation showing the captured pane count with Cancel selected by
 default. Arrows navigate, Enter runs, and Escape or an outside click closes the
 active surface.
 Ctrl+Tab and Ctrl+Shift+Tab cycle Window-local Dojo tabs;
+Ctrl+Shift+1 through Ctrl+Shift+9 activate the first nine tabs in strip order,
+and a number with no tab is consumed without effect;
 Ctrl+Shift+D creates and opens a Dojo in the active tab's Lair; Ctrl+Shift+Q
 detaches the active tab and closes the Window when it was the final tab. These
 application-owned chords are consumed on press, repeat, and release rather than
@@ -278,8 +280,9 @@ bounds an armed prefix sequence. Packaged profiles are `splinterm` and
 `omarchy-tmux`; selecting an unknown profile is a startup error that lists both
 available names. The Omarchy profile provides `Ctrl+Space` and `Ctrl+B` prefixes,
 its direct and prefixed pane controls, exact five-cell directional resize,
-client-local pane zoom, Dojo/Lair creation and selection, numeric and reordered
-Window-local tabs, stable-ID trusted choosers, confirmed rename/termination,
+client-local pane zoom, Dojo/Lair creation and selection, numeric (`Alt+1`–`9`,
+plus the default `Ctrl+Shift+1`–`9`) and reordered Window-local tabs,
+stable-ID trusted choosers, confirmed rename/termination,
 Lair navigation, clean Window detach, a per-Window `Prefix+B` Dojo tab-strip
 toggle, a generated searchable trusted `Prefix+?` help overlay, vi copy mode,
 transactional config reload, and current-Lair lifecycle bindings:
@@ -356,8 +359,18 @@ Tab, Enter/KP_Enter, Escape, Space, slash/question, arrows, PageUp/PageDown, End
 backslash, brackets, ampersand, Plus/Equal/Minus, digits 0–9, and KP_0. Empty or
 duplicate modifiers and unsupported keys fail with source context.
 
+Keys match the symbol the layout produces. With Shift held, a press on the
+number-row 1–9 key that matches no binding as a symbol is retried as that digit,
+so `Ctrl+Shift+1` works where Shift+1 produces `!`, while symbol bindings such
+as `Prefix &` keep priority. The 0 key has no such fallback. On US layouts the
+default `Ctrl+Shift+2` and `Ctrl+Shift+6` therefore no longer send `Ctrl+@`
+(NUL) and `Ctrl+^` to the terminal; `Ctrl+2` or `Ctrl+Space` and `Ctrl+6` still
+do.
+
 An overlay applies unbinds before bindings. An unmatched unbind is a diagnostic;
-duplicate or semantically overlapping chords are errors naming both sources.
+duplicate or semantically overlapping chords are errors naming both sources. A
+conflict with a built-in binding also names the `[[unbind]]` sequence that frees
+the chord, for example `sequence = ["Ctrl+Shift+1"]`.
 Only closed application actions can be selected—configuration cannot register
 shell commands or callbacks. Bindable action IDs are:
 

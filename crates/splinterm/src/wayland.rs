@@ -4195,15 +4195,15 @@ impl App {
         event: &KeyEvent,
         queue_handle: &QueueHandle<Self>,
     ) -> Result<bool> {
-        let navigation =
-            match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
-                Some(ActionId::PageUp) => HistoryNavigation::PageUp,
-                Some(ActionId::PageDown) => HistoryNavigation::PageDown,
-                Some(ActionId::ReturnToLive) if !self.panes.pane.scrollback_viewport.is_live() => {
-                    HistoryNavigation::ReturnToLive
-                }
-                _ => return Ok(false),
-            };
+        let navigation = match shortcut_action_for(&self.input.keymap, event, self.input.modifiers)
+        {
+            Some(ActionId::PageUp) => HistoryNavigation::PageUp,
+            Some(ActionId::PageDown) => HistoryNavigation::PageDown,
+            Some(ActionId::ReturnToLive) if !self.panes.pane.scrollback_viewport.is_live() => {
+                HistoryNavigation::ReturnToLive
+            }
+            _ => return Ok(false),
+        };
         self.apply_history_navigation(navigation, queue_handle)?;
         Ok(true)
     }
@@ -8008,7 +8008,7 @@ impl App {
             self.refresh_search_overlay(queue_handle);
             return;
         }
-        match shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers) {
+        match shortcut_action_for(&self.input.keymap, event, self.input.modifiers) {
             Some(ActionId::RevokeAllAccess) => {
                 let ids: Vec<_> = self
                     .panes

@@ -606,7 +606,7 @@ impl KeyboardHandler for App {
         {
             return;
         }
-        let shortcut = shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers);
+        let shortcut = shortcut_action_for(&self.input.keymap, &event, self.input.modifiers);
         if command_palette_shortcut_action(
             shortcut,
             true,
