@@ -1142,6 +1142,21 @@ action = "dojo.close-other-tabs"
     }
 
     #[test]
+    fn built_in_symbol_bindings_win_over_the_number_row_fallback() {
+        let keymap = ResolvedKeymap::default();
+        // Swiss Shift+1 produces `+`, which the any-Shift zoom-in binding owns.
+        assert_eq!(
+            action_for_key(&keymap, Keysym::plus, KEY_1, ctrl_shift()),
+            Some(ActionId::ZoomIn)
+        );
+        // Hungarian Shift+7 produces `=`, the other zoom-in key.
+        assert_eq!(
+            action_for_key(&keymap, Keysym::equal, KEY_7, ctrl_shift()),
+            Some(ActionId::ZoomIn)
+        );
+    }
+
+    #[test]
     fn shifted_symbol_bindings_win_over_the_number_row_fallback() {
         let resolved = crate::keymap::resolve_keymap_text(
             crate::keymap::KeymapProfile::Splinterm,

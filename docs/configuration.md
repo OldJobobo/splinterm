@@ -362,10 +362,13 @@ duplicate modifiers and unsupported keys fail with source context.
 Keys match the symbol the layout produces. With Shift held, a press on the
 number-row 1–9 key that matches no binding as a symbol is retried as that digit,
 so `Ctrl+Shift+1` works where Shift+1 produces `!`, while symbol bindings such
-as `Prefix &` keep priority. The 0 key has no such fallback. On US layouts the
-default `Ctrl+Shift+2` and `Ctrl+Shift+6` therefore no longer send `Ctrl+@`
-(NUL) and `Ctrl+^` to the terminal; `Ctrl+2` or `Ctrl+Space` and `Ctrl+6` still
-do.
+as `Prefix &` keep priority. The 0 key has no such fallback. A symbol binding
+also wins where a layout's Shift+digit produces it: zoom-in (`Ctrl++`, which
+also matches `=`) takes Swiss `Ctrl+Shift+1`, Turkish Q `Ctrl+Shift+4`, and
+Hungarian `Ctrl+Shift+3`/`7` instead of selecting a tab. With managed tabs, the
+default `Ctrl+Shift+2` and `Ctrl+Shift+6` no longer send `Ctrl+@` (NUL) and
+`Ctrl+^` to the terminal on US layouts; `Ctrl+2` or `Ctrl+Space` and `Ctrl+6`
+still do. Legacy direct single-Splint attachments still forward them.
 
 An overlay applies unbinds before bindings. An unmatched unbind is a diagnostic;
 duplicate or semantically overlapping chords are errors naming both sources. A

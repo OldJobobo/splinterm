@@ -551,7 +551,11 @@ pub enum KeymapPress {
 
 /// One key press: the identity of its produced symbol, plus an optional
 /// identity of the same physical key that is consulted only when the symbol
-/// binds nothing. A fallback never arms a prefix.
+/// binds nothing. Only `key` is checked against prefix chords. When the symbol
+/// has no identity, the input layer promotes the number-row digit to `key`;
+/// that cannot arm a prefix only because no prefix chord uses Shift with a
+/// digit (the built-in prefixes are `Ctrl+Space` and `Ctrl+B`, and overlays
+/// cannot add prefixes).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PressedKey {
     pub key: KeyIdentity,
