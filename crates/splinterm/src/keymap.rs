@@ -549,6 +549,28 @@ pub enum KeymapPress {
     Consumed(Option<ActionId>),
 }
 
+/// One key press: the identity of its produced symbol, plus an optional
+/// identity of the same physical key that is consulted only when the symbol
+/// binds nothing. Only `key` is checked against prefix chords. When the symbol
+/// has no identity, the input layer promotes the number-row digit to `key`;
+/// that cannot arm a prefix only because no prefix chord uses Shift with a
+/// digit (the built-in prefixes are `Ctrl+Space` and `Ctrl+B`, and overlays
+/// cannot add prefixes).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PressedKey {
+    pub key: KeyIdentity,
+    pub fallback: Option<KeyIdentity>,
+}
+
+impl From<KeyIdentity> for PressedKey {
+    fn from(key: KeyIdentity) -> Self {
+        Self {
+            key,
+            fallback: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedKeymap {
     profile: KeymapProfile,
@@ -572,29 +594,44 @@ impl ResolvedKeymap {
             .map(|binding| binding.action)
     }
 
+    /// Resolves a direct binding for the symbol, then for its fallback.
+    #[must_use]
+    pub fn pressed_action(
+        &self,
+        key: impl Into<PressedKey>,
+        modifiers: ActiveModifiers,
+    ) -> Option<ActionId> {
+        let PressedKey { key, fallback } = key.into();
+        self.action(key, modifiers)
+            .or_else(|| fallback.and_then(|fallback| self.action(fallback, modifiers)))
+    }
+
     #[must_use]
     pub fn press(
         &self,
         state: &mut PrefixState,
-        key: KeyIdentity,
+        key: impl Into<PressedKey>,
         modifiers: ActiveModifiers,
         raw_code: u32,
         now: Instant,
         timeout: Duration,
     ) -> KeymapPress {
+        let PressedKey { key, fallback } = key.into();
         if matches!(*state, PrefixState::Armed { deadline, .. } if now >= deadline) {
             state.clear();
         }
         if state.is_armed() {
             state.clear();
-            let action = self
-                .bindings
-                .iter()
-                .filter(|binding| matches!(binding.sequence, NormalizedSequence::Prefix(_)))
-                .find(|binding| {
-                    binding.chord.key == key && binding.chord.modifiers.matches(modifiers)
-                })
-                .map(|binding| binding.action);
+            let prefixed = |key: KeyIdentity| {
+                self.bindings
+                    .iter()
+                    .filter(|binding| matches!(binding.sequence, NormalizedSequence::Prefix(_)))
+                    .find(|binding| {
+                        binding.chord.key == key && binding.chord.modifiers.matches(modifiers)
+                    })
+                    .map(|binding| binding.action)
+            };
+            let action = prefixed(key).or_else(|| fallback.and_then(prefixed));
             return KeymapPress::Consumed(action);
         }
         if self
@@ -608,7 +645,7 @@ impl ResolvedKeymap {
             };
             return KeymapPress::Consumed(None);
         }
-        self.action(key, modifiers)
+        self.pressed_action(PressedKey { key, fallback }, modifiers)
             .map_or(KeymapPress::PassThrough, |action| {
                 KeymapPress::Consumed(Some(action))
             })
@@ -785,6 +822,69 @@ pub fn built_in_keymap(profile: KeymapProfile) -> ResolvedKeymap {
                     KeyIdentity::Tab,
                     ActionId::PreviousDojo,
                     "Ctrl+Shift+Tab",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::One),
+                    KeyIdentity::One,
+                    ActionId::SelectDojo1,
+                    "Ctrl+Shift+1",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Two),
+                    KeyIdentity::Two,
+                    ActionId::SelectDojo2,
+                    "Ctrl+Shift+2",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Three),
+                    KeyIdentity::Three,
+                    ActionId::SelectDojo3,
+                    "Ctrl+Shift+3",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Four),
+                    KeyIdentity::Four,
+                    ActionId::SelectDojo4,
+                    "Ctrl+Shift+4",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Five),
+                    KeyIdentity::Five,
+                    ActionId::SelectDojo5,
+                    "Ctrl+Shift+5",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Six),
+                    KeyIdentity::Six,
+                    ActionId::SelectDojo6,
+                    "Ctrl+Shift+6",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Seven),
+                    KeyIdentity::Seven,
+                    ActionId::SelectDojo7,
+                    "Ctrl+Shift+7",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Eight),
+                    KeyIdentity::Eight,
+                    ActionId::SelectDojo8,
+                    "Ctrl+Shift+8",
+                ),
+                built_in_binding(
+                    CTRL_SHIFT_NO_ALT_LOGO,
+                    normalized(true, true, KeyIdentity::Nine),
+                    KeyIdentity::Nine,
+                    ActionId::SelectDojo9,
+                    "Ctrl+Shift+9",
                 ),
                 built_in_binding(
                     CTRL_SHIFT_NO_ALT_LOGO,
@@ -1476,8 +1576,16 @@ pub(crate) fn resolve_keymap_text(
             std::mem::discriminant(&existing.sequence) == std::mem::discriminant(&normalized)
                 && chords_overlap(existing.chord, chord)
         }) {
+            let hint = if matches!(existing.source, BindingSource::BuiltIn { .. }) {
+                format!(
+                    "; to replace it, add [[unbind]] sequence = {} first",
+                    unbind_sequence_toml(existing.sequence)
+                )
+            } else {
+                String::new()
+            };
             validation_errors.push(format!(
-                "{}:{line}: chord {} for {} conflicts with {} from {}",
+                "{}:{line}: chord {} for {} conflicts with {} from {}{hint}",
                 path.display(),
                 normalized.display(),
                 action.config_name(),
@@ -1511,6 +1619,14 @@ pub(crate) fn resolve_keymap_text(
         },
         diagnostics,
     })
+}
+
+/// Formats an inherited sequence as the TOML array an `[[unbind]]` accepts.
+fn unbind_sequence_toml(sequence: NormalizedSequence) -> String {
+    match sequence {
+        NormalizedSequence::Direct(chord) => format!("[\"{}\"]", chord.display()),
+        NormalizedSequence::Prefix(chord) => format!("[\"Prefix\", \"{}\"]", chord.display()),
+    }
 }
 
 fn line_at_byte(text: &str, byte: usize) -> usize {
@@ -2238,5 +2354,170 @@ action = "pane.zoom-toggle"
         assert!(resolved.keymap.bindings().iter().any(|binding| {
             binding.action() == ActionId::TogglePaneZoom && binding.display() == "Prefix X"
         }));
+    }
+
+    #[test]
+    fn default_profile_binds_ctrl_shift_digits_to_numbered_dojos() {
+        let select = [
+            (KeyIdentity::One, ActionId::SelectDojo1),
+            (KeyIdentity::Two, ActionId::SelectDojo2),
+            (KeyIdentity::Three, ActionId::SelectDojo3),
+            (KeyIdentity::Four, ActionId::SelectDojo4),
+            (KeyIdentity::Five, ActionId::SelectDojo5),
+            (KeyIdentity::Six, ActionId::SelectDojo6),
+            (KeyIdentity::Seven, ActionId::SelectDojo7),
+            (KeyIdentity::Eight, ActionId::SelectDojo8),
+            (KeyIdentity::Nine, ActionId::SelectDojo9),
+        ];
+        let ctrl_shift = ActiveModifiers {
+            ctrl: true,
+            shift: true,
+            ..ActiveModifiers::default()
+        };
+        let splinterm = built_in_keymap(KeymapProfile::Splinterm);
+        let omarchy = built_in_keymap(KeymapProfile::OmarchyTmux);
+        for (index, (key, action)) in select.into_iter().enumerate() {
+            let digit = index + 1;
+            assert_eq!(splinterm.action(key, ctrl_shift), Some(action));
+            assert_eq!(
+                splinterm.primary_shortcut(action),
+                format!("Ctrl+Shift+{digit}")
+            );
+            assert_eq!(
+                splinterm.action(
+                    key,
+                    ActiveModifiers {
+                        alt: true,
+                        ..ctrl_shift
+                    }
+                ),
+                None,
+                "Ctrl+Shift+Alt+{digit} stays unbound"
+            );
+            assert_eq!(omarchy.action(key, ctrl_shift), Some(action));
+            assert_eq!(omarchy.primary_shortcut(action), format!("Alt+{digit}"));
+        }
+        assert_eq!(
+            splinterm.action(KeyIdentity::Zero, ctrl_shift),
+            Some(ActionId::ResetZoom),
+            "the Ctrl+0 zoom reset keeps accepting Shift"
+        );
+    }
+
+    #[test]
+    fn press_fallback_applies_only_when_the_symbol_binds_nothing() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let ctrl_shift = ActiveModifiers {
+            ctrl: true,
+            shift: true,
+            ..ActiveModifiers::default()
+        };
+        let splinterm = built_in_keymap(KeymapProfile::Splinterm);
+        let mut state = PrefixState::Idle;
+        let fallback = PressedKey {
+            key: KeyIdentity::Ampersand,
+            fallback: Some(KeyIdentity::Seven),
+        };
+        assert_eq!(
+            splinterm.press(&mut state, fallback, ctrl_shift, 8, now, timeout),
+            KeymapPress::Consumed(Some(ActionId::SelectDojo7))
+        );
+        assert_eq!(
+            splinterm.press(
+                &mut state,
+                KeyIdentity::Ampersand,
+                ctrl_shift,
+                8,
+                now,
+                timeout
+            ),
+            KeymapPress::PassThrough
+        );
+
+        let omarchy = built_in_keymap(KeymapProfile::OmarchyTmux);
+        let ctrl = ActiveModifiers {
+            ctrl: true,
+            ..ActiveModifiers::default()
+        };
+        let shift = ActiveModifiers {
+            shift: true,
+            ..ActiveModifiers::default()
+        };
+        assert_eq!(
+            omarchy.press(&mut state, KeyIdentity::Space, ctrl, 57, now, timeout),
+            KeymapPress::Consumed(None)
+        );
+        assert_eq!(
+            omarchy.press(&mut state, fallback, shift, 8, now, timeout),
+            KeymapPress::Consumed(Some(ActionId::TerminateCurrentDojo)),
+            "the shifted-symbol prefix binding keeps priority"
+        );
+    }
+
+    #[test]
+    fn overlay_conflict_with_a_built_in_names_the_unbind_that_replaces_it() {
+        let path = Path::new("keybindings.toml");
+        let conflict = r#"
+version = 1
+inherits = "splinterm"
+[[binding]]
+sequence = ["Ctrl+Shift+1"]
+action = "app.command-palette"
+"#;
+        let error = format!(
+            "{:#}",
+            resolve_keymap_text(KeymapProfile::Splinterm, conflict, path).unwrap_err()
+        );
+        assert!(error.contains("conflicts with dojo.select-1"), "{error}");
+        assert!(
+            error.contains(r#"add [[unbind]] sequence = ["Ctrl+Shift+1"] first"#),
+            "{error}"
+        );
+
+        let replaced = r#"
+version = 1
+inherits = "splinterm"
+[[unbind]]
+sequence = ["Ctrl+Shift+1"]
+[[binding]]
+sequence = ["Ctrl+Shift+1"]
+action = "app.command-palette"
+"#;
+        let resolved = resolve_keymap_text(KeymapProfile::Splinterm, replaced, path).unwrap();
+        assert_eq!(resolved.keymap.primary_shortcut(ActionId::SelectDojo1), "");
+
+        let prefixed = r#"
+version = 1
+inherits = "omarchy-tmux"
+[[binding]]
+sequence = ["Prefix", "Shift+&"]
+action = "pane.zoom-toggle"
+"#;
+        let error = format!(
+            "{:#}",
+            resolve_keymap_text(KeymapProfile::OmarchyTmux, prefixed, path).unwrap_err()
+        );
+        assert!(
+            error.contains(r#"add [[unbind]] sequence = ["Prefix", "Shift+&"] first"#),
+            "{error}"
+        );
+
+        let user_duplicate = r#"
+version = 1
+inherits = "splinterm"
+[[binding]]
+sequence = ["Ctrl+Alt+P"]
+action = "app.command-palette"
+[[binding]]
+sequence = ["Ctrl+Alt+P"]
+action = "session.recent"
+"#;
+        let error = format!(
+            "{:#}",
+            resolve_keymap_text(KeymapProfile::Splinterm, user_duplicate, path).unwrap_err()
+        );
+        assert!(error.contains("conflicts"), "{error}");
+        assert!(!error.contains("[[unbind]]"), "{error}");
     }
 }
