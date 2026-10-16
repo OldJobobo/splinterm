@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use splinterm_filemap::{FileIdentity, ReadOnlyFileMap};
 use splinterm_freetype::{MAX_STAGED_FONT_BYTES, RasterFace};
 use swash::{
-    FontRef, NormalizedCoord,
+    FontRef, NormalizedCoord, TableProvider, Tag,
     scale::{Render, ScaleContext, Source, StrikeWith, image::Content},
     shape::ShapeContext,
     zeno::Format,
@@ -1994,15 +1994,48 @@ pub(super) fn font_data(face: &FontFace) -> Result<&[u8]> {
         .context("fallback font data requires the bounded mapping cache")
 }
 
+const HEAD: Tag = swash::tag_from_bytes(b"head");
+const MAXP: Tag = swash::tag_from_bytes(b"maxp");
+const HHEA: Tag = swash::tag_from_bytes(b"hhea");
+/// Byte offset of `numberOfHMetrics` in the `hhea` table.
+const HHEA_LONG_METRIC_COUNT: usize = 34;
+
+/// Rejects a face for which Swash would use zero long horizontal metrics.
+/// Swash measures a glyph advance at `numberOfHMetrics - 1`, which underflows:
+/// debug builds panic inside the parser and release builds read a wrapped
+/// offset. Swash takes the count from `hhea` (assuming one without it), but
+/// leaves it at zero when `head` or `maxp` is missing.
+fn ensure_horizontal_metrics(font: FontRef<'_>) -> Result<()> {
+    anyhow::ensure!(
+        font.table_by_tag(HEAD).is_some() && font.table_by_tag(MAXP).is_some(),
+        "font has no horizontal metrics (head or maxp table is missing)"
+    );
+    let Some(hhea) = font.table_by_tag(HHEA) else {
+        return Ok(());
+    };
+    // Swash reads a short table's count as zero, so do the same here.
+    let count = hhea
+        .get(HHEA_LONG_METRIC_COUNT..HHEA_LONG_METRIC_COUNT + 2)
+        .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+    anyhow::ensure!(
+        count > 0,
+        "font has no horizontal metrics (hhea numberOfHMetrics is 0)"
+    );
+    Ok(())
+}
+
 fn parse_font_ref<'a>(face: &FontFace, data: &'a [u8]) -> Result<FontRef<'a>> {
-    FontRef::from_index(data, face.index.collection_index()).with_context(|| {
+    let context = || {
         format!(
             "parse {} Fontconfig face {} (collection face {}) with Swash",
             face.path.display(),
             face.index.raw(),
             face.index.collection_index()
         )
-    })
+    };
+    let font = FontRef::from_index(data, face.index.collection_index()).with_context(context)?;
+    ensure_horizontal_metrics(font).with_context(context)?;
+    Ok(font)
 }
 
 fn normalized_coords<'a>(face: &'a FontFace, font: FontRef<'_>) -> Result<&'a [NormalizedCoord]> {
@@ -2218,6 +2251,121 @@ mod tests {
         assert_eq!(collection_instance.collection_index(), 4);
         assert_eq!(collection_instance.named_instance_index(), Some(2));
         assert!(FontconfigFaceIndex::from_fontconfig(0x8000_0000).is_err());
+    }
+
+    /// A minimal sfnt holding only `tables`, enough for Swash to parse.
+    fn synthetic_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut tables = tables.to_vec();
+        tables.sort_by_key(|(tag, _)| **tag);
+        let count = u16::try_from(tables.len()).unwrap();
+        let mut font = vec![0, 1, 0, 0];
+        font.extend(count.to_be_bytes());
+        font.extend([0; 6]);
+        let mut offset = 12 + 16 * tables.len();
+        let mut bodies = Vec::new();
+        for (tag, body) in &tables {
+            font.extend(*tag);
+            font.extend([0; 4]);
+            font.extend(u32::try_from(offset).unwrap().to_be_bytes());
+            font.extend(u32::try_from(body.len()).unwrap().to_be_bytes());
+            let mut padded = body.clone();
+            padded.resize(body.len().next_multiple_of(4), 0);
+            offset += padded.len();
+            bodies.extend(padded);
+        }
+        font.extend(bodies);
+        font
+    }
+
+    fn hhea_with_long_metrics(count: u16) -> Vec<u8> {
+        let mut hhea = vec![0; 36];
+        hhea[..4].copy_from_slice(&[0, 1, 0, 0]);
+        hhea[HHEA_LONG_METRIC_COUNT..].copy_from_slice(&count.to_be_bytes());
+        hhea
+    }
+
+    /// Stages `bytes` as a resolved primary regular face, as the live watcher would.
+    fn stage_bytes(name: &str, bytes: &[u8]) -> Result<FontFace> {
+        let path =
+            std::env::temp_dir().join(format!("splinterm-hmetrics-{name}-{}", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let output = format!(
+            "{}\n0\nSynthetic Mono\nRegular\n80\n0\n14\nTrue\n20-7e\n--record--\n",
+            path.display()
+        );
+        let source = parse_fontconfig_sources("primary regular", output.as_bytes())
+            .unwrap()
+            .remove(0);
+        let staged = stage_face(source);
+        std::fs::remove_file(path).unwrap();
+        staged
+    }
+
+    #[test]
+    fn fonts_without_horizontal_metrics_are_rejected_before_measuring() {
+        let head = || (b"head", vec![0; 54]);
+        let maxp = || (b"maxp", vec![0; 6]);
+        let hhea = |count| (b"hhea", hhea_with_long_metrics(count));
+        for (name, tables) in [
+            ("zero", vec![head(), maxp(), hhea(0)]),
+            // Swash reads a truncated hhea's count as zero too.
+            ("short", vec![head(), maxp(), (b"hhea", vec![0, 1, 0, 0])]),
+            // Without head or maxp Swash never reads hhea and keeps zero.
+            ("no-head", vec![maxp(), hhea(1)]),
+            ("no-maxp", vec![head(), hhea(1)]),
+        ] {
+            let error = format!(
+                "{:#}",
+                stage_bytes(name, &synthetic_sfnt(&tables)).unwrap_err()
+            );
+            assert!(
+                error.contains("parse resolved primary regular font"),
+                "{name}: {error}"
+            );
+            assert!(error.contains("no horizontal metrics"), "{name}: {error}");
+        }
+        // One long metric, or no hhea at all (Swash then assumes one), stages
+        // and measures without panicking in any build profile.
+        for (name, tables) in [
+            ("one", vec![head(), maxp(), hhea(1)]),
+            ("absent", vec![head(), maxp()]),
+        ] {
+            let face = stage_bytes(name, &synthetic_sfnt(&tables)).unwrap();
+            let advance = face_advance(&face, BASE_FONT_SIZE);
+            assert!(advance.is_ok() || advance.is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_installed_font_with_its_long_metric_count_zeroed_is_rejected() {
+        let Some(source) =
+            run_fontconfig_sources("hmetrics fixture", "monospace:style=Regular", false)
+                .ok()
+                .and_then(|sources| sources.into_iter().next())
+        else {
+            return;
+        };
+        let mut bytes = std::fs::read(&source.path).unwrap();
+        if bytes.get(..4) == Some(b"ttcf") {
+            return;
+        }
+        let tables = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        let hhea = (0..tables)
+            .map(|index| 12 + 16 * index)
+            .find(|record| bytes[*record..*record + 4] == *b"hhea")
+            .map(|record| {
+                usize::try_from(u32::from_be_bytes(
+                    bytes[record + 8..record + 12].try_into().unwrap(),
+                ))
+                .unwrap()
+            })
+            .expect("installed monospace font has an hhea table");
+        let original = stage_bytes("original", &bytes).unwrap();
+        assert!(face_advance(&original, BASE_FONT_SIZE).unwrap() > 0.0);
+        bytes[hhea + HHEA_LONG_METRIC_COUNT..hhea + HHEA_LONG_METRIC_COUNT + 2]
+            .copy_from_slice(&[0, 0]);
+        let error = format!("{:#}", stage_bytes("zeroed", &bytes).unwrap_err());
+        assert!(error.contains("no horizontal metrics"), "{error}");
     }
 
     #[test]
