@@ -225,6 +225,40 @@ fn show_failure(
     code
 }
 
+/// What one Window command means to the flow.
+enum CommandEffect {
+    /// Input consumed by an open secret or question prompt.
+    Prompt(PromptInput),
+    Status(RemoteStatusEffect),
+}
+
+/// Classifies one Window command. An open secret or question takes key input
+/// before the status keys; key bytes are wiped once used.
+fn command_effect(
+    command: Option<WindowCommand>,
+    active: &mut Option<ActivePrompt>,
+    status: &mut RemoteStatus,
+) -> CommandEffect {
+    let intercepted = active
+        .as_ref()
+        .is_some_and(|prompt| prompt.request.kind() != AskpassKind::Notice);
+    match command {
+        None => CommandEffect::Status(status.on_window_closed()),
+        Some(WindowCommand::Input(mut bytes)) if intercepted => {
+            let input = prompt_input(active, status, &bytes);
+            askpass::wipe(&mut bytes);
+            CommandEffect::Prompt(input)
+        }
+        Some(WindowCommand::Input(mut bytes)) => {
+            let effect =
+                status_key(&bytes).map_or(RemoteStatusEffect::None, |key| status.on_key(key));
+            askpass::wipe(&mut bytes);
+            CommandEffect::Status(effect)
+        }
+        Some(_) => CommandEffect::Status(RemoteStatusEffect::None),
+    }
+}
+
 /// Drives one status screen until it hands over a connected endpoint, or the
 /// Window closes first. The first attempt starts once the Window has mapped.
 /// `connect` starts one attempt and returns the destination it connects to,
@@ -276,28 +310,17 @@ where
             // Escape, or a compositor close is never overtaken by hand-over.
             biased;
             command = commands.recv() => {
-                let intercepted = active
-                    .as_ref()
-                    .is_some_and(|prompt| prompt.request.kind() != AskpassKind::Notice);
-                let effect = match command {
-                    None => status.on_window_closed(),
-                    Some(WindowCommand::Input(mut bytes)) if intercepted => {
-                        let input = prompt_input(&mut active, &mut status, &bytes);
-                        askpass::wipe(&mut bytes);
-                        match input {
-                            PromptInput::None => {}
-                            PromptInput::Redraw => window.show(&status),
-                            PromptInput::CancelAttempt => end_attempt = Some(PROMPT_CANCELLED),
-                        }
+                let effect = match command_effect(command, &mut active, &mut status) {
+                    CommandEffect::Status(effect) => effect,
+                    CommandEffect::Prompt(PromptInput::None) => RemoteStatusEffect::None,
+                    CommandEffect::Prompt(PromptInput::Redraw) => {
+                        window.show(&status);
                         RemoteStatusEffect::None
                     }
-                    Some(WindowCommand::Input(mut bytes)) => {
-                        let effect = status_key(&bytes)
-                            .map_or(RemoteStatusEffect::None, |key| status.on_key(key));
-                        askpass::wipe(&mut bytes);
-                        effect
+                    CommandEffect::Prompt(PromptInput::CancelAttempt) => {
+                        end_attempt = Some(PROMPT_CANCELLED);
+                        RemoteStatusEffect::None
                     }
-                    Some(_) => RemoteStatusEffect::None,
                 };
                 match effect {
                     RemoteStatusEffect::StartAttempt => {
