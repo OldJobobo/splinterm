@@ -687,10 +687,6 @@ pub(in crate::app) async fn run_controller(
             let (command, debounce_incoming_resize) = if let Some(command) = deferred_command.take()
             {
                 (Some(command), false)
-            } else if let Some(command) = coalescing_barrier.take() {
-                // Taken from the queue while coalescing input, so it is handled
-                // exactly as if `recv` had just returned it.
-                (Some(command), true)
             } else {
                 tokio::select! {
                     biased;
@@ -712,6 +708,14 @@ pub(in crate::app) async fn run_controller(
                             ).await?;
                         }
                         continue;
+                    }
+                    // A command taken from the queue while coalescing input is
+                    // handled as if `recv` had just returned it, but only after
+                    // cancellation and control changes, so a chain of oversized
+                    // inputs cannot outrun a lost controller or a closing pane.
+                    // The async block takes the barrier only when this branch wins.
+                    command = async { coalescing_barrier.take() }, if coalescing_barrier.is_some() => {
+                        (command, true)
                     }
                     command = commands.recv() => (command, true),
                     () = wait_for_resize_deadline(resize_deadline) => {
