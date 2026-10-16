@@ -81,6 +81,8 @@ Active states turn stale without a fresh report (120 seconds by default). `inspe
 
 The `permission_prompt` matcher keeps Claude Code's idle-prompt notification from replacing `done` with `needs_input` after every turn, and `PostToolUse` returns the status to `working` after a permission is approved. Codex can map its `notify` program to `done`. The repository `docs/automation.md` has the full contract, exit codes, and recipes.
 
+The graphical client shows each status as a static glyph: `▸` working, `?` needs input, `✓` done, `!` error, `·` idle (ASCII `>`, `+`, `-` when the font lacks a glyph). Splint rows in the Lair Explorer show the glyph, the state, and the detail; Dojo and Lair rows and each Dojo tab show the most urgent state, with needs input first. A stale status keeps its glyph with a trailing `~`, and the Explorer shows "Agent status unavailable" while its data is stale or disconnected. Explorer search matches state words such as `needs input`. The palette command **Clear agent status** clears the focused Splint, and `agent-status=no` in the `[explorer]` configuration section hides all of it.
+
 ## The authority model
 
 Persistent policy is owner-controlled and fails closed. A policy rule binds:

@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use super::LairExplorerUi;
+use splinterm_core::SplintId;
+use splinterm_protocol::AgentState;
+
+use super::{LairExplorerUi, agent_status::state_text};
 use crate::accessibility::{
     MAX_ACCESSIBILITY_ITEMS, MAX_ACCESSIBLE_NAME_CHARS, SEARCH_NODE_ID, SemanticAction,
     SemanticActionRequest, SemanticAvailability, SemanticFocus, SemanticNavigationSnapshot,
@@ -56,6 +59,19 @@ pub(crate) struct NavigationAccessibility {
     view: Option<NavigationExplorerView>,
     snapshot: Option<SemanticNavigationSnapshot>,
     generation: u64,
+    /// Last observed agent state per live incarnation; `None` until the first
+    /// available view so existing statuses are not announced on load.
+    agent_states: Option<HashMap<AgentStatusKey, (AgentState, bool)>>,
+    /// A pending polite announcement and the navigation status it prefixes.
+    agent_announcement: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AgentStatusKey {
+    endpoint: String,
+    endpoint_generation: u64,
+    splint_id: SplintId,
+    incarnation: u64,
 }
 
 impl NavigationAccessibility {
@@ -65,10 +81,17 @@ impl NavigationAccessibility {
         context: NavigationAccessContext,
     ) -> SemanticNavigationSnapshot {
         let identities = identities(explorer.view());
+        if let Some(announcement) = self.observe_agent_states(explorer) {
+            self.agent_announcement = Some((announcement, String::new()));
+        }
         self.registry
             .retain(|key| identities.contains_key(&key.node) && identities[&key.node] == *key);
         self.targets.clear();
         let visible = explorer.visible() && !context.modal;
+        if !visible {
+            // Announcements are spoken only from a visible Explorer status node.
+            self.agent_announcement = None;
+        }
         let enabled = visible && context.enabled();
         let mut items = Vec::new();
         let mut ids = HashMap::new();
@@ -93,7 +116,7 @@ impl NavigationAccessibility {
                     id,
                     parent,
                     name: safe_text(&row.label),
-                    status: safe_text(&row.status),
+                    status: safe_text(&row.accessible_status),
                     level: row.level,
                     expanded: row.expanded,
                     selected: explorer.selected() == Some(row.id),
@@ -131,7 +154,9 @@ impl NavigationAccessibility {
             visible,
             enabled,
             result_count: items.len(),
-            status: visible.then(|| navigation_status(explorer, limited, items.len(), &focus)),
+            status: visible.then(|| {
+                self.announced_status(navigation_status(explorer, limited, items.len(), &focus))
+            }),
             items,
             query: if visible {
                 explorer.query().to_owned()
@@ -152,6 +177,61 @@ impl NavigationAccessibility {
             self.snapshot = Some(next.clone());
         }
         next
+    }
+
+    /// Records each live incarnation's agent state and returns a polite
+    /// announcement for transitions into needs input, error or done, or out of
+    /// stale. Changes to and from working, and the first view, are silent.
+    fn observe_agent_states(&mut self, explorer: &LairExplorerUi) -> Option<String> {
+        let view = explorer
+            .view()
+            .filter(|_| explorer.agent_status_available())?;
+        let mut current = HashMap::new();
+        let mut changes = Vec::new();
+        for splint in view
+            .lairs
+            .iter()
+            .flat_map(|lair| &lair.dojos)
+            .flat_map(|dojo| &dojo.splints)
+        {
+            let (Some(status), Some(incarnation)) =
+                (&splint.agent_status, splint.target.live_incarnation)
+            else {
+                continue;
+            };
+            let key = AgentStatusKey {
+                endpoint: view.endpoint_namespace.clone(),
+                endpoint_generation: view.endpoint_generation,
+                splint_id: splint.target.splint_id,
+                incarnation,
+            };
+            current.insert(key.clone(), (status.state, status.stale));
+            changes.push((key, splint.label.as_str(), status.state, status.stale));
+        }
+        let previous = self.agent_states.replace(current)?;
+        let messages = changes
+            .into_iter()
+            .filter(|(key, _, state, is_stale)| {
+                announces_agent_transition(previous.get(key).copied(), *state, *is_stale)
+            })
+            .map(|(_, label, state, _)| format!("{label}: {}", state_text(state)))
+            .collect::<Vec<_>>();
+        (!messages.is_empty()).then(|| messages.join("; "))
+    }
+
+    /// Prefixes a pending announcement until the navigation status it was
+    /// spoken with changes, so the live region speaks it exactly once.
+    fn announced_status(&mut self, base: String) -> String {
+        let Some((message, anchor)) = &mut self.agent_announcement else {
+            return base;
+        };
+        if anchor.is_empty() {
+            anchor.clone_from(&base);
+        } else if *anchor != base {
+            self.agent_announcement = None;
+            return base;
+        }
+        safe_text(&format!("{message} · {base}"))
     }
 
     pub(crate) fn resolve(
@@ -198,6 +278,25 @@ impl NavigationAccessibility {
             }
             SemanticAction::SetSearch(_) => None,
         }
+    }
+}
+
+/// Equivalent states and stale entries are silent; leaving stale is spoken.
+fn announces_agent_transition(
+    before: Option<(AgentState, bool)>,
+    state: AgentState,
+    is_stale: bool,
+) -> bool {
+    if is_stale {
+        return false;
+    }
+    match before {
+        Some((_, true)) => true,
+        Some((previous, false)) if previous == state => false,
+        _ => matches!(
+            state,
+            AgentState::NeedsInput | AgentState::Error | AgentState::Done
+        ),
     }
 }
 
@@ -676,5 +775,114 @@ mod tests {
             registry.retain(|_| false);
             assert_ne!(registry.id_for(value).unwrap(), first);
         }
+    }
+
+    fn set_agent(explorer: &mut LairExplorerUi, state: AgentState, is_stale: bool) {
+        let splint_id = explorer.view().unwrap().lairs[0].dojos[0].splints[0]
+            .target
+            .splint_id;
+        explorer.apply_agent_status(
+            splint_id,
+            3,
+            Some(crate::navigation_projection::NavigationAgentStatus {
+                state,
+                detail: Some("approve the plan".to_owned()),
+                stale: is_stale,
+                stale_minutes: is_stale.then_some(1),
+            }),
+        );
+    }
+
+    #[test]
+    fn item_states_carry_agent_state_in_words() {
+        let mut explorer = explorer();
+        set_agent(&mut explorer, AgentState::NeedsInput, false);
+        let snapshot = NavigationAccessibility::default().refresh(&explorer, context());
+        snapshot.tree_update().unwrap();
+        let statuses = snapshot
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.status.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            [
+                ("work", "Running · Saved · 1 needs input"),
+                ("editor", "Running · Current · 1 needs input"),
+                ("shell", "Running · Needs input · approve the plan"),
+                ("notes", "Unavailable · Pinned"),
+            ]
+        );
+        set_agent(&mut explorer, AgentState::Working, true);
+        let snapshot = NavigationAccessibility::default().refresh(&explorer, context());
+        assert_eq!(
+            snapshot.items[2].status,
+            "Running · Working · stale (no report for 1 min) · approve the plan"
+        );
+    }
+
+    #[test]
+    fn agent_announcements_speak_only_needs_input_error_done_and_leaving_stale() {
+        let mut explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        set_agent(&mut explorer, AgentState::NeedsInput, false);
+        let mut previous = accessibility.refresh(&explorer, context()).status.unwrap();
+        assert!(
+            !previous.contains("shell:"),
+            "statuses present at first view are not announced"
+        );
+        for (state, stale, spoken) in [
+            (AgentState::NeedsInput, false, None),
+            (AgentState::Working, false, None),
+            (AgentState::NeedsInput, false, Some("shell: Needs input")),
+            (AgentState::Done, false, Some("shell: Done")),
+            (AgentState::Working, false, None),
+            (AgentState::Working, true, None),
+            (AgentState::Working, false, Some("shell: Working")),
+            (AgentState::Error, false, Some("shell: Error")),
+            (AgentState::Idle, false, None),
+            (AgentState::Error, true, None),
+        ] {
+            set_agent(&mut explorer, state, stale);
+            let status = accessibility.refresh(&explorer, context()).status.unwrap();
+            // A second owner refresh in the same turn must not repeat or drop it.
+            assert_eq!(
+                accessibility.refresh(&explorer, context()).status.as_ref(),
+                Some(&status)
+            );
+            match spoken {
+                Some(message) => {
+                    assert_ne!(status, previous, "{state:?} stale={stale}");
+                    assert!(status.starts_with(&format!("{message} · ")), "{status}");
+                }
+                None => assert_eq!(status, previous, "{state:?} stale={stale}"),
+            }
+            previous = status;
+        }
+        // A changed navigation status supersedes the announcement.
+        explorer.set_filter(crate::frontend::LairExplorerFilter::Saved);
+        let status = accessibility.refresh(&explorer, context()).status.unwrap();
+        assert!(!status.contains("shell:"), "{status}");
+    }
+
+    #[test]
+    fn hidden_or_unavailable_explorer_does_not_announce_agent_status() {
+        let mut explorer = explorer();
+        let mut accessibility = NavigationAccessibility::default();
+        set_agent(&mut explorer, AgentState::Working, false);
+        accessibility.refresh(&explorer, context());
+        explorer.toggle_visibility();
+        set_agent(&mut explorer, AgentState::NeedsInput, false);
+        assert_eq!(accessibility.refresh(&explorer, context()).status, None);
+        explorer.focus();
+        let status = accessibility.refresh(&explorer, context()).status.unwrap();
+        assert!(!status.contains("shell:"), "{status}");
+
+        set_agent(&mut explorer, AgentState::Working, false);
+        accessibility.refresh(&explorer, context());
+        explorer.mark_disconnected();
+        set_agent(&mut explorer, AgentState::Error, false);
+        let status = accessibility.refresh(&explorer, context()).status.unwrap();
+        assert!(!status.contains("shell:"), "{status}");
     }
 }

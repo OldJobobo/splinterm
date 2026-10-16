@@ -292,6 +292,7 @@ async fn run_live_multipane_window_inner(
             theme,
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
+            agent_status_presentation: window_config.explorer_agent_status,
             keymap: window_config.keymap,
             prefix_timeout_ms: window_config.prefix_timeout_ms,
             ..WindowOptions::default()
@@ -444,6 +445,7 @@ pub(super) async fn run_live_window(
             theme,
             pane_divider_style: window_config.pane_divider_style,
             frame_title_mode: window_config.frame_title_mode,
+            agent_status_presentation: window_config.explorer_agent_status,
             keymap: window_config.keymap,
             prefix_timeout_ms: window_config.prefix_timeout_ms,
             ..WindowOptions::default()

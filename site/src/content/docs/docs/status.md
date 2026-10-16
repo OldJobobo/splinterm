@@ -49,7 +49,7 @@ The development source on `main` may differ from the immutable release.
 | SSH stdio relay | Implemented and validated |
 | [Native remote graphical client](/docs/remote/) | Implemented and validated with profile-bound OpenSSH transport; remote image transfer is excluded |
 | [MCP adapter](/docs/mcp/) | Implemented and validated as an optional, separately policy-identified package |
-| Agent status reporting | In development for 0.2 on `main`, not in a release: explicit reports through `splinterm agent-status` and the MCP adapter; Explorer and tab presentation pending |
+| Agent status reporting | In development for 0.2 on `main`, not in a release: explicit reports through `splinterm agent-status` and the MCP adapter, shown as static glyphs in the Explorer and on Dojo tabs; graphical acceptance pending |
 | Sixel, practical Kitty static images, inline iTerm2 PNG | Documented supported subsets |
 | Arch/Omarchy package | Versioned GitHub release and AUR packages validated |
 | Public source and versioned builds | Available |

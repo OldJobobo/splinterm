@@ -173,6 +173,7 @@ use crate::{
     viewport::ScrollbackViewport,
 };
 
+mod agent_status;
 mod chrome;
 mod clipboard;
 mod clipboard_image;
@@ -977,6 +978,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             topology_commands: options.topology_commands,
             session_switch_pending: false,
             deferred_topology_updates: Vec::new(),
+            agent: agent_status::TabAgentStatus::new(options.agent_status_presentation),
         },
         modal: ModalState {
             trusted_consent,
@@ -1028,6 +1030,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pending_frame_trace: None,
         },
     };
+    app.explorer
+        .set_agent_status_enabled(options.agent_status_presentation);
 
     let event_loop_result: Result<()> = (|| {
         while !app.scheduling.exit {
@@ -5361,6 +5365,7 @@ impl App {
                 .map(|(id, _)| *id)
                 .collect(),
             pending_transfer_id: self.panes.pane.pending_control_transfer,
+            agent_status_incarnation: self.tab_state.agent.clearable_incarnation(splint_id),
         }));
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
@@ -5391,6 +5396,9 @@ impl App {
                 self.input.prefix_timeout =
                     std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
                 self.input.prefix_state.clear();
+                if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
+                    self.presentation.full_redraw = true;
+                }
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
                 }
@@ -8884,6 +8892,21 @@ impl App {
                     changed = true;
                 }
                 WindowTopologyUpdate::LairExplorerInvalidated => {}
+                WindowTopologyUpdate::AgentStatus(status) => {
+                    if self.apply_window_agent_status(status) {
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
+                }
+                WindowTopologyUpdate::AgentStatusCleared {
+                    splint_id,
+                    incarnation,
+                } => {
+                    if self.apply_agent_status_cleared(splint_id, incarnation) {
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
+                }
                 WindowTopologyUpdate::LairExplorerFailed(message) => {
                     self.explorer.mark_disconnected();
                     self.explorer
@@ -10341,6 +10364,7 @@ impl App {
         } else {
             None
         };
+        self.sync_agent_status_glyphs();
         self.prepare_remote_host_text()?;
         let tab_layout = self.current_tab_strip_layout();
         let content_rect = self.content_rect();

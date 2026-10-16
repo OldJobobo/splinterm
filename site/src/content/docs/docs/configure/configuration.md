@@ -70,6 +70,7 @@ Malformed supported values fail startup. Unknown sections and keys produce line-
 | `multiplexer.persist-on-tab-organization` | create/name/rename a tab atomically promotes its transient Lair | `yes` |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` | `line` |
 | `multiplexer.frame-title` | `splint` or `none` | `splint` |
+| `explorer.agent-status` | show reported agent status in the Explorer and on Dojo tabs (`no` hides it) | `yes` |
 | `key-bindings.profile` | `splinterm` or `omarchy-tmux` | `splinterm` |
 | `key-bindings.file` | optional strict TOML overlay | unset |
 | `key-bindings.prefix-timeout-ms` | prefix timeout in milliseconds | 250–5000; 1000 |

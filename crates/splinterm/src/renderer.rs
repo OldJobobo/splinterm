@@ -116,7 +116,7 @@ use settings::{
 pub use settings::{
     RenderContext, RendererOptions, RendererResources, configure, effective_font_resolution,
 };
-pub(crate) use text::{ChromeText, ChromeTextStyle};
+pub(crate) use text::{ChromeText, ChromeTextStyle, chrome_text_covered};
 
 pub(crate) fn premultiplied_theme_rgba(color: u32, alpha: u16) -> [u8; 4] {
     premultiplied_rgba(

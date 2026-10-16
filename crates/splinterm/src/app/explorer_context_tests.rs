@@ -8,6 +8,13 @@ async fn routed(
     command: WindowTopologyCommand,
     replies: Vec<Response>,
 ) -> (Vec<Request>, Vec<WindowTopologyUpdate>) {
+    routed_with(|_| command, replies).await
+}
+
+async fn routed_with(
+    command: impl FnOnce(&TopologyManagerState) -> WindowTopologyCommand,
+    replies: Vec<Response>,
+) -> (Vec<Request>, Vec<WindowTopologyUpdate>) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let (client, server) = tokio::io::duplex(65536);
         let (finished, finish) = tokio::sync::oneshot::channel();
@@ -65,6 +72,7 @@ async fn routed(
             .await
             .unwrap();
         let (mut state, unrelated_dojo) = unrelated_state();
+        let command = command(&state);
         let (updates, mut receiver) = mpsc::channel(16);
         let outcome = handle_session_manager_command(
             &ConnectionFactory::local(),
@@ -935,4 +943,110 @@ async fn mixed_lair_termination_matches_daemon_complete_pane_contract() {
         &updates[..],
         [WindowTopologyUpdate::TabFailed { .. }]
     ));
+}
+
+#[tokio::test]
+async fn clear_agent_status_sends_only_a_clear_for_a_window_splint() {
+    let (requests, updates) = routed_with(
+        |state| {
+            let splint_id = state
+                .tabs
+                .iter()
+                .next()
+                .unwrap()
+                .value
+                .root
+                .first_splint_id();
+            WindowTopologyCommand::ClearAgentStatus {
+                splint_id,
+                incarnation: 5,
+            }
+        },
+        vec![Response::AgentStatusAccepted {
+            sequence: 12,
+            expires_at_ms: None,
+        }],
+    )
+    .await;
+    let [
+        Request::ReportAgentStatus {
+            splint_id,
+            incarnation: 5,
+            status: None,
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("the trusted UI may only send a clear: {requests:?}");
+    };
+    assert!(matches!(
+        updates.as_slice(),
+        [WindowTopologyUpdate::AgentStatusCleared {
+            splint_id: cleared,
+            incarnation: 5,
+        }] if cleared == splint_id
+    ));
+}
+
+#[tokio::test]
+async fn clear_agent_status_refuses_splints_outside_the_window() {
+    let (requests, updates) = routed(
+        WindowTopologyCommand::ClearAgentStatus {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+        },
+        Vec::new(),
+    )
+    .await;
+    assert!(requests.is_empty());
+    assert!(matches!(
+        updates.as_slice(),
+        [WindowTopologyUpdate::TabFailed { message, .. }] if message.contains("outside this Window")
+    ));
+}
+
+#[test]
+fn explorer_observation_ignores_agent_status_age_and_sequence_but_not_state() {
+    use splinterm_protocol::{
+        AgentState, AgentStatusSummary, SplintLifecycle, SplintRuntimeSummary, TopologySnapshot,
+    };
+    let summary = |state, sequence, stale, reported_age_ms| AgentStatusSummary {
+        state,
+        detail: None,
+        sequence,
+        stale,
+        reported_age_ms,
+    };
+    let mut snapshot = TopologySnapshot {
+        topology: splinterm_core::Topology::new(),
+        revision: TopologyRevision::new(1),
+        runtimes: vec![SplintRuntimeSummary {
+            splint_id: SplintId::new(),
+            live_incarnation: Some(3),
+            last_incarnation: Some(3),
+            restorable: false,
+            lifecycle: SplintLifecycle::Running,
+            exit_status: None,
+            agent_status: Some(summary(AgentState::Working, 1, false, 0)),
+        }],
+    };
+    let mut observer = ExplorerObservation::default();
+    assert!(observer.observe(&snapshot));
+    snapshot.runtimes[0].agent_status = Some(summary(AgentState::Working, 2, false, 40_000));
+    assert!(
+        !observer.observe(&snapshot),
+        "heartbeats and report age alone must not refresh the Explorer"
+    );
+    snapshot.runtimes[0].agent_status = Some(summary(AgentState::Working, 2, true, 130_000));
+    assert!(observer.observe(&snapshot), "becoming stale is presented");
+    snapshot.runtimes[0].agent_status = Some(summary(AgentState::Working, 2, true, 170_000));
+    assert!(!observer.observe(&snapshot), "same stale minute");
+    snapshot.runtimes[0].agent_status = Some(summary(AgentState::Working, 2, true, 180_000));
+    assert!(
+        observer.observe(&snapshot),
+        "the stale age is shown in minutes"
+    );
+    snapshot.runtimes[0].agent_status = Some(summary(AgentState::NeedsInput, 3, false, 0));
+    assert!(observer.observe(&snapshot));
+    snapshot.runtimes[0].agent_status = None;
+    assert!(observer.observe(&snapshot));
 }

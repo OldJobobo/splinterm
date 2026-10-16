@@ -119,6 +119,8 @@ pub struct WindowOptions {
     pub initial_tab_strip_visible: bool,
     /// Remote daemon identity from this Window's initial connection; never terminal content.
     pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
+    /// `[explorer] agent-status`: show explicitly reported agent status.
+    pub agent_status_presentation: bool,
 }
 
 impl Default for WindowOptions {
@@ -160,6 +162,7 @@ impl Default for WindowOptions {
             initial_dojo: None,
             initial_tab_strip_visible: true,
             remote_display_identity: None,
+            agent_status_presentation: true,
         }
     }
 }

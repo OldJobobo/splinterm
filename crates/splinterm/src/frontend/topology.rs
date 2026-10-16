@@ -8,6 +8,7 @@ use splinterm_protocol::{MutationTarget, PresetDojoLaunch, PresetTarget};
 use super::{FontUpdate, SessionPickerItem, ThemeUpdate, WindowPaneOptions};
 use crate::navigation_projection::{
     NavigationAction, NavigationExplorerSplintTarget, NavigationExplorerView, NavigationNodeId,
+    WindowAgentStatus,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,6 +218,12 @@ pub enum WindowTopologyCommand {
         retain_dojo_id: DojoId,
         dojo_ids: Vec<DojoId>,
     },
+    /// The person's explicit "Clear agent status" for one live incarnation.
+    /// The trusted UI may only clear a status, never set one.
+    ClearAgentStatus {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
 }
 
 pub enum WindowTopologyUpdate {
@@ -279,6 +286,14 @@ pub enum WindowTopologyUpdate {
     LairExplorerFailed(String),
     /// Daemon lifecycle or topology changed, including work not open in a tab.
     LairExplorerInvalidated,
+    /// Agent status of this Window's attached Dojos changed. Display data only.
+    AgentStatus(WindowAgentStatus),
+    /// The daemon accepted a clear for one live incarnation; the next topology
+    /// poll supersedes this local application.
+    AgentStatusCleared {
+        splint_id: SplintId,
+        incarnation: u64,
+    },
     Theme(ThemeUpdate),
     Font(FontUpdate),
     Closed,

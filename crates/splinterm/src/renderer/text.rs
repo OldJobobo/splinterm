@@ -10,7 +10,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::geometry::Rect;
 
-use super::{RenderContext, SnapshotFrame, blend_glyph, packed_rgb, round_to_i32};
+use super::{
+    RenderContext, SnapshotFrame, blend_glyph, frame::select_face_for_text, packed_rgb,
+    round_to_i32,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ChromeTextStyle {
@@ -21,6 +24,37 @@ pub(crate) enum ChromeTextStyle {
 pub(crate) struct ChromeText {
     pub(super) frame: SnapshotFrame,
     cells: u32,
+}
+
+/// Whether the chrome fonts, including the CJK, emoji and Fontconfig fallback
+/// faces, render every character of `text` without a replacement glyph.
+pub(crate) fn chrome_text_covered(text: &str, context: &RenderContext) -> bool {
+    let Ok(generation) = context.font_generation() else {
+        return false;
+    };
+    let attributes = chrome_attributes(ChromeTextStyle::Regular);
+    text.chars().all(|character| {
+        select_face_for_text(&generation.faces, &character.to_string(), &attributes).is_ok()
+    })
+}
+
+const fn chrome_attributes(style: ChromeTextStyle) -> CellAttributes {
+    CellAttributes {
+        bold: matches!(style, ChromeTextStyle::Bold),
+        dim: false,
+        italic: false,
+        underline: UnderlineStyle::None,
+        underline_color_source: ColorSource::Default,
+        underline_color: 0,
+        strikethrough: false,
+        blink: false,
+        conceal: false,
+        reverse: false,
+        foreground_source: ColorSource::Default,
+        foreground: 0,
+        background_source: ColorSource::Default,
+        background: 0,
+    }
 }
 
 impl ChromeText {
@@ -49,22 +83,7 @@ impl ChromeText {
         style: ChromeTextStyle,
         context: &RenderContext,
     ) -> Result<Self> {
-        let attributes = CellAttributes {
-            bold: style == ChromeTextStyle::Bold,
-            dim: false,
-            italic: false,
-            underline: UnderlineStyle::None,
-            underline_color_source: ColorSource::Default,
-            underline_color: 0,
-            strikethrough: false,
-            blink: false,
-            conceal: false,
-            reverse: false,
-            foreground_source: ColorSource::Default,
-            foreground: 0,
-            background_source: ColorSource::Default,
-            background: 0,
-        };
+        let attributes = chrome_attributes(style);
         let mut cell_row: Vec<TerminalCell> = Vec::new();
         for character in text.chars() {
             let width = character.width().unwrap_or(0).min(2);
@@ -222,5 +241,20 @@ mod tests {
             0x12_34_56,
         );
         assert!(canvas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
+    }
+
+    #[test]
+    fn chrome_coverage_uses_fallback_faces_and_rejects_missing_glyphs() {
+        let context = super::super::compatibility_render_context().unwrap();
+        // Requires the pinned renderer test fonts, like the other renderer tests.
+        context.font_generation().unwrap();
+        assert!(chrome_text_covered("?!", &context));
+        assert!(chrome_text_covered("界", &context), "CJK fallback face");
+        assert!(!chrome_text_covered("?\u{10fffd}", &context));
+        let glyphs = crate::frontend::AgentGlyphs::with_coverage(|glyph| {
+            chrome_text_covered(glyph, &context)
+        });
+        // The pinned renderer test fonts cover every agent status glyph.
+        assert_eq!(glyphs, crate::frontend::AgentGlyphs::UNICODE);
     }
 }

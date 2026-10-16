@@ -484,7 +484,10 @@ pub(crate) fn paint_lair_explorer(
                 (None, false) => "   ",
             }
         };
-        let source = format!("{marker} {}", row.label);
+        let source = row.agent_column.as_ref().map_or_else(
+            || format!("{marker} {}", row.label),
+            |column| format!("{marker} {column} {}", row.label),
+        );
         let (label_clip, status_clip) = row_text_clips(rect, row.level, inset);
         let primary = if selected == Some(row.id) {
             if row.enabled {
@@ -569,7 +572,9 @@ mod tests {
             id,
             kind: LairExplorerRowKind::Lair,
             label: "work".into(),
+            agent_column: None,
             status: "Saved".into(),
+            accessible_status: "Saved".into(),
             level: 1,
             expanded: Some(false),
             current: false,
@@ -859,5 +864,94 @@ mod tests {
             lair_explorer_disclosure_hit_test(&drawer, &rows, (100.0, row_y)),
             None
         );
+    }
+
+    /// Paints one unselected Lair row and returns the canvas and its label clip.
+    fn paint_agent_row(
+        context: &RenderContext,
+        agent_column: Option<&str>,
+        scale: u32,
+    ) -> (Vec<u8>, u32, Rect) {
+        use super::super::picker::session_picker_palette;
+        use crate::config::ResolvedTheme;
+
+        let id = NavigationNodeId::Lair(LairId::new());
+        let mut agent_row = row(id);
+        agent_row.agent_column = agent_column.map(str::to_owned);
+        let rows = [agent_row];
+        let surface = Rect {
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: HEADER_HEIGHT + FOOTER_HEIGHT + ROW_HEIGHT,
+        };
+        let layout = lair_explorer_layout(surface, 640, &rows, None, 0).unwrap();
+        let canvas_width = surface.width * scale / 120 + 1;
+        let canvas_height = surface.height * scale / 120 + 1;
+        let mut canvas = vec![0; (canvas_width * canvas_height * 4) as usize];
+        paint_lair_explorer(
+            &mut SessionPickerTextCache::default(),
+            context,
+            &mut canvas,
+            canvas_width,
+            canvas_height,
+            scale,
+            1,
+            &layout,
+            session_picker_palette(ResolvedTheme::default()),
+            &rows,
+            None,
+            None,
+            "",
+            None,
+            false,
+            LairExplorerFilter::All,
+            false,
+        )
+        .unwrap();
+        let inset = 12_u32.saturating_mul(scale).div_ceil(120);
+        let (label, _) = row_text_clips(buffer_rect(layout.rows[0].rect, scale), 1, inset);
+        (canvas, canvas_width, label)
+    }
+
+    #[test]
+    fn agent_glyph_column_paints_only_its_fixed_cells_and_keeps_labels_aligned() {
+        let context = RenderContext::new(u16::MAX);
+        for scale in [120, 150, 180, 240] {
+            let cell = super::super::super::ChromeText::load_with_context(" ", scale, &context)
+                .unwrap()
+                .frame
+                .cell_width;
+            let (blank, width, label) = paint_agent_row(&context, Some("  "), scale);
+            // The label line is "{marker} {column} {label}": the column occupies
+            // cells four and five after a three-cell marker and a space.
+            let column_left = label.x + 4 * cell;
+            let column_right = label.x + 6 * cell;
+            for column in ["? ", "! ", "▸~", "✓ ", "· ", "> ", "+~", "- "] {
+                let (painted, _, _) = paint_agent_row(&context, Some(column), scale);
+                let mut changed = 0;
+                for (index, (a, b)) in painted
+                    .chunks_exact(4)
+                    .zip(blank.chunks_exact(4))
+                    .enumerate()
+                {
+                    if a == b {
+                        continue;
+                    }
+                    changed += 1;
+                    let x = u32::try_from(index).unwrap() % width;
+                    let y = u32::try_from(index).unwrap() / width;
+                    assert!(
+                        (column_left..column_right).contains(&x)
+                            && (label.y..label.y + label.height).contains(&y),
+                        "{column:?} painted outside its column at {x},{y}, scale {scale}"
+                    );
+                }
+                assert!(changed > 0, "{column:?} painted nothing at scale {scale}");
+            }
+            // Without any status in view there is no column and the label moves left.
+            let (without, _, _) = paint_agent_row(&context, None, scale);
+            assert_ne!(without, blank);
+        }
     }
 }

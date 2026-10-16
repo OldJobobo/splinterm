@@ -213,6 +213,65 @@ field behind it.
 interface and its limitations. The guide is included in the 0.1.1 Arch and Nix
 package documentation. This is not whole-terminal screen-reader support.
 
+### Agent status in the Explorer and on Dojo tabs
+
+An agent running in a Splint can report whether it is working, needs you, or has
+finished, through `splinterm agent-status`, the MCP tool, or an agent hook (see
+[automation](automation.md#agent-status)). Splinterm shows only what was
+explicitly reported. It never guesses from terminal text, titles, prompts, or
+output, and a status is display data: it cannot approve, type, or take control.
+
+| State | Glyph | Text |
+| --- | --- | --- |
+| working | `▸` | Working |
+| needs input | `?` | Needs input |
+| done | `✓` | Done |
+| error | `!` | Error |
+| idle | `·` | Idle |
+
+Every state differs by glyph shape and by text, never by colour or motion alone.
+Glyphs are static: there is no spinner or other animation. When the interface
+font and its fallbacks lack `▸`, `✓`, or `·`, that glyph falls back to `>`,
+`+`, or `-`.
+
+- **Splint rows** show the glyph in a fixed-width column before the name and add
+  the state to the status line, for example *Running · Needs input · waiting for
+  approval*. The agent's free-text detail appears only here, ellipsized to the
+  row width.
+- **Dojo and Lair rows** show the most urgent glyph of the Splints inside them,
+  and the status line counts each state, for example *? 1 · ▸ 2*. Priority is
+  needs input, then error, working, done, and idle; stale statuses rank last.
+  The glyph column appears while any Splint in the Explorer has a status.
+- **Dojo tabs** show one badge before the label: the most urgent glyph, with a
+  count when several Splints share it (`?2`). The badge takes space from the
+  label, never from the close control, so on a narrow tab the label is
+  shortened first and the badge is the last thing dropped. Tabs never show the
+  detail text.
+- **Stale.** `working` and `needs input` expire unless the agent reports again,
+  after two minutes by default. Splinterm then keeps the last glyph and marks it
+  stale: a trailing `~` in the glyph column and tab badge (`▸~`), and *Working ·
+  stale (no report for 2 min)* in the Explorer. A stale status is dropped after
+  15 more minutes.
+- **Unavailable.** While the Explorer's view of the daemon is stale or
+  disconnected, rows show *Agent status unavailable* instead of the last value.
+- **Search.** Explorer search also matches state words, so `needs input` (or
+  `needs_input`, `error`, `done`, `stale`) filters to those Splints. It does not
+  match the detail text.
+- **Clear.** The palette command **Clear agent status** clears the focused
+  Splint's status. It is offered only while that Splint shows one. Splinterm's
+  own interface can clear a status but never set one.
+
+Relaunching or restoring a Splint starts with no status, and so does every Splint
+after a daemon restart or live upgrade until its agent reports again. To hide all
+agent status presentation, set `agent-status=no` in the `[explorer]` section of
+the [configuration](configuration.md); **Reload configuration** applies it.
+
+The Explorer's accessible item states include the state in words, and a polite
+announcement is made only when a visible Splint enters needs input, error, or
+done, or stops being stale. Changes to and from working are not announced.
+`SPLINTERM_REDUCED_MOTION=1` is honoured, but agent status adds nothing to
+animate; Splinterm does not yet read the desktop's reduce-animation setting.
+
 ## Panes and layouts
 
 The built-in application controls are:
