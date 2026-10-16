@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import json
 from pathlib import Path
 import re
@@ -157,6 +158,7 @@ def prepare(path: Path, owner_path: Path | None = None) -> None:
             "cursor": {"x": cursor.get("x"), "y": cursor.get("y")},
             "monitor": monitor,
             "owner_address": owner_address,
+            "owner_state": None if owner_path is None else str(owner_path.resolve()),
             "target_address": None,
             "target_initial": None,
             "target_final": None,
@@ -268,15 +270,41 @@ def place(path: Path, client_pid: int, client_token: str) -> None:
     )
 
 
+def sibling_window_addresses(path: Path, state: dict[str, Any]) -> set[str]:
+    """Windows placed by the owner's other live additional-window slots.
+
+    Additional windows may close in any order, so a sibling launched after this
+    one (absent from its before_addresses) is still owned by the session.
+    """
+    owner_state = state.get("owner_state")
+    if not isinstance(owner_state, str):
+        return set()
+    addresses = set()
+    for sibling in Path(owner_state).parent.glob("extra-*/guest-window.json"):
+        if sibling.resolve() == path.resolve():
+            continue
+        try:
+            address = json.loads(sibling.read_text(encoding="utf-8")).get("target_address")
+        except (OSError, ValueError, AttributeError):
+            # A sibling slot may be released while this one restores.
+            continue
+        if isinstance(address, str) and ADDRESS.fullmatch(address):
+            addresses.add(address)
+    return addresses
+
+
 def target_workspace_problem(
-    state: dict[str, Any], current_clients: list[dict[str, Any]]
+    state: dict[str, Any],
+    current_clients: list[dict[str, Any]],
+    siblings: Iterable[str] = (),
 ) -> str | None:
     """Why the test workspace is not yet back to its pre-launch state, if it is not."""
     try:
         if state.get("owner_address") is None:
             require_empty_target_workspace(current_clients)
         else:
-            before = set(state.get("before_addresses", []))
+            before = set(state.get("before_addresses", [])) | set(siblings)
+            before.add(state["owner_address"])
             unowned = sorted(
                 str(client.get("address"))
                 for client in current_clients
@@ -304,7 +332,9 @@ def restore(path: Path) -> None:
     # stops every client at once), so give the workspace the same bound.
     deadline = time.monotonic() + RESTORE_SETTLE_SECONDS
     while True:
-        problem = target_workspace_problem(state, current_clients)
+        problem = target_workspace_problem(
+            state, current_clients, sibling_window_addresses(path, state)
+        )
         if problem is None or time.monotonic() >= deadline:
             break
         time.sleep(0.05)

@@ -332,5 +332,77 @@ class GuestWindowTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
 
+    def test_extra_windows_close_in_any_order(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime = Path(temporary.name)
+        owner = runtime / "guest-window.json"
+        guest_window.write_state(owner, {"target_address": "0xa1"})
+        main = {
+            "address": "0xa1",
+            "workspace": {"id": 8},
+            "initialClass": guest_window.APP_ID,
+        }
+
+        def launch_extra(index: int, address: str, current: list) -> Path:
+            path = runtime / f"extra-{index}" / "guest-window.json"
+
+            def hypr_json(name: str, *_: str) -> object:
+                return {
+                    "activeworkspace": {"id": 8, "monitor": "Virtual-1"},
+                    "activewindow": {"address": "0xa1"},
+                    "cursorpos": {"x": 5, "y": 6},
+                }[name]
+
+            with (
+                mock.patch.object(guest_window, "clients", return_value=current),
+                mock.patch.object(guest_window, "hypr_json", side_effect=hypr_json),
+                mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+                mock.patch.object(guest_window, "command"),
+            ):
+                guest_window.prepare(path, owner)
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["target_address"] = address
+            guest_window.write_state(path, state)
+            return path
+
+        first = launch_extra(1, "0xb2", [main])
+        first_window = dict(main, address="0xb2")
+        second_window = dict(main, address="0xc3")
+        second = launch_extra(2, "0xc3", [main, first_window])
+
+        # A window no live slot placed is still rejected.
+        stray = {"address": "0xd4", "workspace": {"id": 8}}
+        with (
+            mock.patch.object(
+                guest_window, "clients", return_value=[main, second_window, stray]
+            ),
+            mock.patch.object(guest_window, "RESTORE_SETTLE_SECONDS", 0),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command"),
+            self.assertRaisesRegex(RuntimeError, r"unowned windows: \['0xd4'\]"),
+        ):
+            guest_window.restore(first)
+        self.assertTrue(first.exists())
+
+        # Closing the first extra leaves the later second extra on the workspace.
+        with (
+            mock.patch.object(guest_window, "clients", return_value=[main, second_window]),
+            mock.patch.object(guest_window, "RESTORE_SETTLE_SECONDS", 0),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command"),
+        ):
+            guest_window.restore(first)
+        self.assertFalse(first.exists())
+
+        with (
+            mock.patch.object(guest_window, "clients", return_value=[main]),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command"),
+        ):
+            guest_window.restore(second)
+        self.assertFalse(second.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
