@@ -59,7 +59,7 @@ const ERROR_CODES: &[&str] = &[
 ];
 
 const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
-    ("common.schema.json", 0x106d_950e_50ab_948e),
+    ("common.schema.json", 0x4ed0_cbfb_deb7_012f),
     ("error.schema.json", 0x9dd2_e2af_f101_25fe),
     ("resources/control.schema.json", 0xd4f3_1fbc_06b2_5c2b),
     ("resources/terminal.schema.json", 0x20c0_6b33_9e25_c903),
@@ -78,7 +78,7 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     ),
     (
         "tools/authorization_status.output.schema.json",
-        0x1a6b_800b_4983_198d,
+        0xe4f3_d913_1efb_cca2,
     ),
     ("tools/close_dojo.input.schema.json", 0x8a94_83a8_db18_ddda),
     ("tools/close_dojo.output.schema.json", 0xa13a_7239_1643_8d21),

@@ -1296,6 +1296,7 @@ mod tests {
             restorable,
             lifecycle,
             exit_status,
+            agent_status: None,
         }
     }
 

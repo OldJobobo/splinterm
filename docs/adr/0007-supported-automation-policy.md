@@ -1,6 +1,6 @@
 # ADR 0007: supported automation policy and audit boundary
 
-- **Status:** Accepted; hierarchy, selectors, and public schema amended by [ADR 0009](0009-topology-lair-dojo-migration.md)
+- **Status:** Accepted; hierarchy, selectors, and public schema amended by [ADR 0009](0009-topology-lair-dojo-migration.md); agent status reporting added by the protocol 38 amendment below
 - **Date:** 2026-07-23
 - **Supersedes:** the persistent-policy deferral in [ADR 0005](0005-trusted-consent-broker.md)
 
@@ -136,7 +136,8 @@ Policy v1 uses these closed scopes:
 - `controller_acquire`, `controller_transfer`, `input`, and `resize`;
 - `process_spawn`, `process_restore`, and `process_terminate`;
 - `topology_layout_mutate` and `topology_name_mutate`;
-- `authorization_inspect`, `authorization_revoke`, and `audit_inspect`.
+- `authorization_inspect`, `authorization_revoke`, and `audit_inspect`;
+- `agent_status_report` (protocol 38 amendment).
 
 Clipboard scopes remain reserved internal consent scopes until a daemon
 clipboard operation exists. Forced controller takeover is trusted-UI-only in
@@ -197,6 +198,7 @@ checked in addition to every listed scope.
 | `Detach` | own subscription; no additional scope |
 | `KillSplint` | `process_terminate` for exact Splint/incarnation |
 | `AuditInspect` | `audit_inspect` for daemon-lifetime bounded metadata |
+| `ReportAgentStatus` (protocol 38) | a process inside the target Splint's live incarnation, with no grant; otherwise `agent_status_report` for the Splint from policy or a grant; the trusted UI may only clear |
 
 Audit inspection is paginated and requires `audit_inspect`.
 Cancellation is connection-local and needs no separate scope, but can cancel
@@ -225,6 +227,53 @@ reload outcome. Audit insertion is ordered by the daemon and occurs without
 holding policy, topology, PTY, protocol-writer, or consent locks. Audit loss or
 inspection backpressure cannot block PTY consumption; a retention gap is
 reported rather than hidden.
+
+### Amendment: explicitly reported agent status (protocol 38)
+
+`ReportAgentStatus { splint_id, incarnation, status }` sets or clears one
+display status for one live Splint incarnation. The state is one of `working`,
+`needs_input`, `done`, `error`, or `idle`; an optional detail is at most 80
+Unicode scalars and 240 bytes, and control, bidi-formatting, and line-break
+characters are rejected rather than stripped. Nothing is inferred from terminal
+content, titles, OSC sequences, process names, or output. A status is display
+data: it grants no access, confirms no consent, sends no input, and changes no
+topology.
+
+Authority, evaluated in this order:
+
+1. **Self-report.** The peer is accepted without a grant when its connection has
+   a pidfd-monitored persistent identity and its `SO_PEERCRED` process is in the
+   incarnation's live PTY session (the session leader is the Splint's live root
+   process), else a parent walk of at most 64 `/proc/<pid>/stat` steps reaches
+   that root process, else, when workload units are active, its cgroup path
+   contains the incarnation's `splinterm-splint…-i<incarnation>.scope`. A
+   self-reporter can only report for the Splint it runs in.
+2. **Granted report.** Any other peer needs `agent_status_report` for the Splint
+   from an exact persistent policy rule, a Lair grant, or a Splint grant. A
+   Splint selector resolves to the current incarnation; a report naming another
+   incarnation then fails as stale.
+3. **Trusted UI.** The installed trusted UI may only clear a status.
+
+A report for an incarnation other than the live one fails with
+`stale_incarnation`. Admission is limited to 10 reports per second per Splint;
+excess reports fail with the retryable private `rate_limited` error, which the
+CLI and MCP surfaces report as their retryable `resource_limit`.
+
+Granted and refused reports are audited as operation `agent_status_report` with
+decision and outcome only. Self-reports are not audited per update, so
+heartbeats cannot flood bounded audit; a self-report rate refusal is audited
+once per incarnation. The detail text is never audited, logged, or traced.
+
+The status lives only in daemon memory, keyed by Splint and bound to one
+incarnation. It is never persisted, never carried through handoff, and never
+bumps the topology revision. The transaction that publishes an exit,
+relaunch, restore, close, or termination drops the retired incarnation's
+status. Topology snapshots carry it in `SplintRuntimeSummary.agent_status`, and
+changes are delivered on topology subscriptions as `AgentStatusChanged`,
+coalesced to at most one event per Splint every 250 ms. `working` and
+`needs_input` expire after their TTL (default 120 s, bounds 10 to 900 s) and are
+then marked stale; a stale status is dropped after 15 more minutes. Reading the
+status needs no new scope: it follows `topology_metadata_read`.
 
 ## Threat-model conclusions
 

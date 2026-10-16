@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 38;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -64,6 +64,11 @@ pub const MAX_IMAGE_TRANSFERS_PER_SPLINT: usize = 2;
 pub const MAX_IMAGE_TRANSFERS_PER_DAEMON: usize = 4;
 pub const IMAGE_TRANSFER_TOKEN_BYTES: usize = 32;
 pub const IMAGE_TRANSFER_TOKEN_TTL_MILLIS: u32 = 5_000;
+pub const MAX_AGENT_STATUS_DETAIL_SCALARS: usize = 80;
+pub const MAX_AGENT_STATUS_DETAIL_BYTES: usize = 240;
+pub const MIN_AGENT_STATUS_TTL_SECONDS: u32 = 10;
+pub const MAX_AGENT_STATUS_TTL_SECONDS: u32 = 900;
+pub const DEFAULT_AGENT_STATUS_ACTIVE_TTL_SECONDS: u32 = 120;
 
 #[must_use]
 pub fn image_content_socket_path(control_socket: &Path) -> PathBuf {
@@ -690,6 +695,13 @@ pub enum Request {
         after_audit_id: Option<u64>,
         max_records: usize,
     },
+    /// Explicitly reported display status for one live Splint incarnation.
+    /// `None` clears the status. Never inferred from terminal content.
+    ReportAgentStatus {
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<AgentStatusReport>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -846,6 +858,12 @@ pub enum Response {
         incarnation: u64,
         exit_status: ProcessExitStatus,
     },
+    AgentStatusAccepted {
+        /// Daemon-lifetime status sequence current after this report.
+        sequence: u64,
+        /// Unix milliseconds when an expiring status becomes stale.
+        expires_at_ms: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -883,6 +901,15 @@ pub enum SubscriptionEvent {
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
+    },
+    /// Delivered on topology subscriptions without a topology revision bump.
+    /// Clients apply it only to a matching live incarnation; the next topology
+    /// snapshot supersedes it.
+    AgentStatusChanged {
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<AgentStatusSummary>,
+        sequence: u64,
     },
 }
 
@@ -1373,12 +1400,20 @@ pub struct SplintRuntimeSummary {
     pub restorable: bool,
     pub lifecycle: SplintLifecycle,
     pub exit_status: Option<ProcessExitStatus>,
+    /// Explicitly reported display status of the live incarnation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<AgentStatusSummary>,
 }
 
 impl SplintRuntimeSummary {
     #[must_use]
     pub fn validate(&self) -> bool {
         let valid_last = self.last_incarnation.is_none_or(|value| value > 0);
+        if let Some(status) = &self.agent_status
+            && (self.live_incarnation.is_none() || !status.validate())
+        {
+            return false;
+        }
         match self.lifecycle {
             SplintLifecycle::Starting => {
                 !self.restorable
@@ -1404,6 +1439,144 @@ pub enum SplintLifecycle {
     Starting,
     Running,
     Exited,
+}
+
+/// Closed vocabulary of explicitly reported agent display states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Working,
+    NeedsInput,
+    Done,
+    Error,
+    Idle,
+}
+
+impl AgentState {
+    /// Active states always expire; resting states last until replaced.
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Working | Self::NeedsInput)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::NeedsInput => "needs_input",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+/// One explicit agent status report. Display data only, never authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStatusReport {
+    pub state: AgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u32>,
+}
+
+impl AgentStatusReport {
+    /// Validates the bounded detail and TTL.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` for an out-of-range TTL or a detail that is
+    /// empty, oversized, or contains control, bidi-formatting, or line-break
+    /// characters. Invalid text is rejected, never stripped.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if let Some(detail) = &self.detail {
+            validate_agent_status_detail(detail)?;
+        }
+        if self.ttl_seconds.is_some_and(|ttl| {
+            !(MIN_AGENT_STATUS_TTL_SECONDS..=MAX_AGENT_STATUS_TTL_SECONDS).contains(&ttl)
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent status TTL is outside 10 to 900 seconds",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The TTL that applies: the reported one, else the active-state default.
+    #[must_use]
+    pub fn effective_ttl_seconds(&self) -> Option<u32> {
+        self.ttl_seconds.or_else(|| {
+            self.state
+                .is_active()
+                .then_some(DEFAULT_AGENT_STATUS_ACTIVE_TTL_SECONDS)
+        })
+    }
+}
+
+fn is_agent_status_forbidden_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'..='\u{2029}'
+        )
+}
+
+/// Validates explicitly reported agent status detail text.
+///
+/// # Errors
+///
+/// Returns `InvalidArgument` unless the detail is nonempty, at most 80 Unicode
+/// scalars and 240 bytes, and free of control, bidi-formatting, and line-break
+/// characters.
+pub fn validate_agent_status_detail(detail: &str) -> Result<(), ProtocolError> {
+    if detail.is_empty()
+        || detail.len() > MAX_AGENT_STATUS_DETAIL_BYTES
+        || detail.chars().count() > MAX_AGENT_STATUS_DETAIL_SCALARS
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "agent status detail is empty or exceeds 80 characters or 240 bytes",
+        ));
+    }
+    if detail.chars().any(is_agent_status_forbidden_character) {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "agent status detail contains control, bidi-formatting, or line-break characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Daemon-held agent status for one live incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStatusSummary {
+    pub state: AgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub sequence: u64,
+    /// An active state's TTL lapsed; the last state and detail are kept.
+    pub stale: bool,
+    /// Milliseconds since the last accepted report, at summary time.
+    pub reported_age_ms: u64,
+}
+
+impl AgentStatusSummary {
+    #[must_use]
+    pub fn validate(&self) -> bool {
+        self.sequence > 0
+            && self
+                .detail
+                .as_deref()
+                .is_none_or(|detail| validate_agent_status_detail(detail).is_ok())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1452,6 +1625,7 @@ pub enum AutomationScope {
     AuthorizationInspect,
     AuthorizationRevoke,
     AuditInspect,
+    AgentStatusReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1501,6 +1675,7 @@ pub enum AuditOperation {
     ProcessExit,
     AuditInspect,
     PolicyReload,
+    AgentStatusReport,
 }
 
 impl AuditOperation {
@@ -1551,6 +1726,7 @@ impl AuditOperation {
             Self::ProcessExit => "process_exit",
             Self::AuditInspect => "audit_inspect",
             Self::PolicyReload => "policy_reload",
+            Self::AgentStatusReport => "agent_status_report",
         }
     }
 }
@@ -1647,6 +1823,7 @@ pub enum AccessScope {
     TopologyName,
     ProcessSpawn,
     ProcessRestore,
+    AgentStatusReport,
 }
 
 impl AccessScope {
@@ -1666,6 +1843,7 @@ impl AccessScope {
             Self::TopologyName => "rename this Lair and its sessions",
             Self::ProcessSpawn => "start processes in this Lair",
             Self::ProcessRestore => "restore processes in this Lair",
+            Self::AgentStatusReport => "report agent status",
         }
     }
 }
@@ -1759,6 +1937,8 @@ pub enum ErrorCode {
     StaleImageContent,
     InvalidArgument,
     ResourceLimit,
+    /// A per-target admission rate was exceeded; retry after a short delay.
+    RateLimited,
     Cancelled,
     RequestNotFound,
     Internal,
@@ -3741,7 +3921,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 37);
+        assert_eq!(PROTOCOL_VERSION, 38);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -4101,6 +4281,7 @@ mod tests {
                 code: Some(0),
                 signal: None,
             }),
+            agent_status: None,
         };
         let snapshot = TopologySnapshot {
             revision: topology.revision(),
@@ -4540,5 +4721,189 @@ mod tests {
         assert!(stale_clear.validate_against(4, 2, 80, 24).is_err());
         stale_clear.scrollback.as_mut().unwrap().history_generation = 3;
         assert!(stale_clear.validate_against(4, 2, 80, 24).is_ok());
+    }
+
+    #[test]
+    fn agent_status_report_wire_shapes_are_closed_and_additive() {
+        let splint_id = SplintId::new();
+        let request = Request::ReportAgentStatus {
+            splint_id,
+            incarnation: 3,
+            status: Some(AgentStatusReport {
+                state: AgentState::NeedsInput,
+                detail: Some("waiting for approval".into()),
+                ttl_seconds: None,
+            }),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], "report_agent_status");
+        assert_eq!(value["status"]["state"], "needs_input");
+        assert!(value["status"].get("ttl_seconds").is_none());
+        assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+        let clear: Request = serde_json::from_value(serde_json::json!({
+            "type": "report_agent_status",
+            "splint_id": splint_id,
+            "incarnation": 3,
+            "status": null
+        }))
+        .unwrap();
+        assert!(matches!(
+            clear,
+            Request::ReportAgentStatus { status: None, .. }
+        ));
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "type": "report_agent_status",
+                "splint_id": splint_id,
+                "incarnation": 3,
+                "status": {"state": "thinking"}
+            }))
+            .is_err(),
+            "unknown states are rejected by the closed vocabulary"
+        );
+        assert!(
+            serde_json::from_value::<AgentStatusReport>(serde_json::json!({
+                "state": "done",
+                "progress": 50
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(Response::AgentStatusAccepted {
+                sequence: 4,
+                expires_at_ms: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "agent_status_accepted",
+                "sequence": 4,
+                "expires_at_ms": null
+            })
+        );
+        let event = SubscriptionEvent::AgentStatusChanged {
+            splint_id,
+            incarnation: 3,
+            status: None,
+            sequence: 5,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "agent_status_changed");
+        assert_eq!(
+            serde_json::from_value::<SubscriptionEvent>(value).unwrap(),
+            event
+        );
+        assert_eq!(
+            serde_json::to_value(AutomationScope::AgentStatusReport).unwrap(),
+            "agent_status_report"
+        );
+        assert_eq!(
+            serde_json::to_value(AccessScope::AgentStatusReport).unwrap(),
+            "agent_status_report"
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorCode::RateLimited).unwrap(),
+            "rate_limited"
+        );
+        assert_eq!(
+            AuditOperation::AgentStatusReport.as_str(),
+            serde_json::to_value(AuditOperation::AgentStatusReport).unwrap()
+        );
+        for state in [
+            AgentState::Working,
+            AgentState::NeedsInput,
+            AgentState::Done,
+            AgentState::Error,
+            AgentState::Idle,
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        }
+    }
+
+    #[test]
+    fn runtime_summary_agent_status_is_optional_and_live_only() {
+        let splint_id = SplintId::new();
+        let mut runtime = SplintRuntimeSummary {
+            splint_id,
+            live_incarnation: Some(2),
+            last_incarnation: Some(2),
+            restorable: false,
+            lifecycle: SplintLifecycle::Running,
+            exit_status: None,
+            agent_status: None,
+        };
+        let value = serde_json::to_value(&runtime).unwrap();
+        assert!(value.get("agent_status").is_none());
+        assert_eq!(
+            serde_json::from_value::<SplintRuntimeSummary>(value).unwrap(),
+            runtime
+        );
+        runtime.agent_status = Some(AgentStatusSummary {
+            state: AgentState::Working,
+            detail: Some("compiling".into()),
+            sequence: 1,
+            stale: true,
+            reported_age_ms: 121_000,
+        });
+        assert!(runtime.validate());
+        let mut invalid = runtime.clone();
+        invalid.agent_status.as_mut().unwrap().sequence = 0;
+        assert!(!invalid.validate());
+        let mut exited = runtime;
+        exited.live_incarnation = None;
+        exited.lifecycle = SplintLifecycle::Exited;
+        exited.restorable = true;
+        assert!(!exited.validate(), "exited incarnations carry no status");
+    }
+
+    #[test]
+    fn agent_status_detail_and_ttl_are_bounded_and_rejected_not_stripped() {
+        let report = |detail: &str, ttl_seconds| AgentStatusReport {
+            state: AgentState::Working,
+            detail: Some(detail.to_owned()),
+            ttl_seconds,
+        };
+        assert!(report("waiting for approval", None).validate().is_ok());
+        assert!(report(&"x".repeat(80), Some(10)).validate().is_ok());
+        assert!(report(&"界".repeat(80), Some(900)).validate().is_ok());
+        assert!(report(&"x".repeat(81), None).validate().is_err());
+        // 61 four-byte scalars stay under 80 scalars but exceed 240 bytes.
+        assert!(report(&"🦀".repeat(61), None).validate().is_err());
+        assert!(report(&"🦀".repeat(60), None).validate().is_ok());
+        assert!(report("", None).validate().is_err());
+        for forbidden in [
+            "line\nbreak",
+            "carriage\rreturn",
+            "tab\there",
+            "nel\u{85}",
+            "line\u{2028}separator",
+            "para\u{2029}separator",
+            "rlo\u{202e}",
+            "isolate\u{2066}",
+            "mark\u{200f}",
+            "arabic\u{061c}",
+            "escape\u{1b}[31m",
+        ] {
+            let error = report(forbidden, None).validate().unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{forbidden:?}");
+        }
+        assert!(report("ok", Some(9)).validate().is_err());
+        assert!(report("ok", Some(901)).validate().is_err());
+        let working = AgentStatusReport {
+            state: AgentState::Working,
+            detail: None,
+            ttl_seconds: None,
+        };
+        assert_eq!(working.effective_ttl_seconds(), Some(120));
+        let done = AgentStatusReport {
+            state: AgentState::Done,
+            detail: None,
+            ttl_seconds: None,
+        };
+        assert_eq!(done.effective_ttl_seconds(), None);
+        let timed_done = AgentStatusReport {
+            ttl_seconds: Some(30),
+            ..done
+        };
+        assert_eq!(timed_done.effective_ttl_seconds(), Some(30));
     }
 }

@@ -202,7 +202,7 @@ EXPECTED_MCP_SCHEMAS = {
     ),
 }
 EXPECTED_MCP_SCHEMA_SHA256 = {
-    'common.schema.json': 'ceca570328eb078c6387a16eb37a25205a91ecdbf2b436ba5065a3dcee277646',
+    'common.schema.json': '0210e169dc5dce33547ea62ec33aa44359058f104aa2e5ac3a249d12a2c6d973',
     'error.schema.json': 'db5e68a6494912da6a114d055e8b5ae0426051f3f39ab9a5721d9b482e0307fe',
     'resources/control.schema.json': 'bf27457edc5eb95e7635ae4204ca462d319f1bdb64056f667a3409cf11bdcc34',
     'resources/terminal.schema.json': '54015be8b7cfa3880fb98e6c10448a93aa4750935b9f4f70ba9588bf6da302f8',
@@ -210,7 +210,7 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/acquire_control.input.schema.json': 'bd216c2dfcd3986454d464e19a094f55ec55bafddc4357db58a7b08b02f11aff',
     'tools/acquire_control.output.schema.json': '5918e96c02ace8ccae4e93aa9c1659f7bb962784c17ec93e92907d00322e7e4f',
     'tools/authorization_status.input.schema.json': '7e55181e0b1e47d7b899625964398fa1e71e895219c8ca4527f9b58ae4da967f',
-    'tools/authorization_status.output.schema.json': '13d2da8b86f49748efcd0f6414920b9bdb8d618adf153e7f3237afa74dca8586',
+    'tools/authorization_status.output.schema.json': '34215f4f7905bbc557d7b4628709c79d95ba49e5c34e1e7f7a24756d10fd1262',
     'tools/close_dojo.input.schema.json': '7ef1e2abfa3b42b31ec78cba43e70c9dc948c7383b2f992a2ad6b51d71629e60',
     'tools/close_dojo.output.schema.json': 'a921e694a1c4f6cc7b2f16b7c1cd07fd1519e9c6b23fe042670c8e009662b9f0',
     'tools/close_splint.input.schema.json': 'd4bc7afbcfa9467e4bd6610d0f2198ab65372f8f2ee81ce72a347cff9648fe5a',

@@ -22,6 +22,11 @@ pub enum ConditionalRequirement {
     AttachScrollback,
     LiveProcessTermination,
     ExpandedLiveProcessTermination,
+    /// A process inside the target Splint's live session or ancestry may
+    /// report without a grant and without per-update audit. Other peers need
+    /// `agent_status_report` from policy or a grant; the trusted UI may only
+    /// clear.
+    AgentStatusSelfReportOrGrant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +106,10 @@ const fn preflight_authorization(
 }
 
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive request-to-authority table stays contiguous for review"
+)]
 pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
 
@@ -202,6 +211,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::Detach { .. } => RequestAuthorization::Owned(OwnedAuthority::Subscription),
         Request::KillSplint { .. } => RequestAuthorization::policy(&[Scope::ProcessTerminate]),
         Request::AuditInspect { .. } => RequestAuthorization::policy(&[Scope::AuditInspect]),
+        Request::ReportAgentStatus { .. } => RequestAuthorization::Conditional {
+            base: &[Scope::AgentStatusReport],
+            requirement: ConditionalRequirement::AgentStatusSelfReportOrGrant,
+        },
     }
 }
 
@@ -234,6 +247,7 @@ mod tests {
             OperationScope::AuthorizationInspect,
             OperationScope::AuthorizationRevoke,
             OperationScope::AuditInspect,
+            OperationScope::AgentStatusReport,
         ];
         let json = serde_json::to_value(scopes).unwrap();
         let values = json.as_array().unwrap();
@@ -241,10 +255,11 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap())
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(values.len(), 18);
+        assert_eq!(values.len(), 19);
         assert_eq!(unique.len(), values.len());
         assert_eq!(values[0], "topology_metadata_read");
         assert_eq!(values[17], "audit_inspect");
+        assert_eq!(values[18], "agent_status_report");
     }
 
     #[test]
@@ -370,6 +385,17 @@ mod tests {
             RequestAuthorization::PolicyAndOwned {
                 required: &[OperationScope::Input],
                 owned: OwnedAuthority::Controller,
+            }
+        );
+        assert_eq!(
+            for_request(&Request::ReportAgentStatus {
+                splint_id,
+                incarnation: 1,
+                status: None,
+            }),
+            RequestAuthorization::Conditional {
+                base: &[OperationScope::AgentStatusReport],
+                requirement: ConditionalRequirement::AgentStatusSelfReportOrGrant,
             }
         );
         assert_eq!(

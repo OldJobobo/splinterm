@@ -404,6 +404,11 @@ pub(crate) fn map_client_error(error: &Error) -> DispatchFailure {
             "the local automation resource limit was reached",
             true,
         ),
+        ErrorCode::RateLimited => (
+            "resource_limit",
+            "the daemon request rate limit was reached; retry later",
+            true,
+        ),
         ErrorCode::Cancelled => ("cancelled", "the daemon request was cancelled", true),
         ErrorCode::Internal => ("internal", "the local automation request failed", false),
     };
@@ -478,6 +483,7 @@ fn access_scope_name(scope: AccessScope) -> Option<&'static str> {
         AccessScope::TopologyName => Some("topology_name_mutate"),
         AccessScope::ProcessSpawn => Some("process_spawn"),
         AccessScope::ProcessRestore => Some("process_restore"),
+        AccessScope::AgentStatusReport => Some("agent_status_report"),
         AccessScope::ClipboardRead | AccessScope::ClipboardWrite => None,
     }
 }
@@ -502,6 +508,7 @@ fn automation_scope_name(scope: splinterm_protocol::AutomationScope) -> &'static
         splinterm_protocol::AutomationScope::AuthorizationInspect => "authorization_inspect",
         splinterm_protocol::AutomationScope::AuthorizationRevoke => "authorization_revoke",
         splinterm_protocol::AutomationScope::AuditInspect => "audit_inspect",
+        splinterm_protocol::AutomationScope::AgentStatusReport => "agent_status_report",
     }
 }
 

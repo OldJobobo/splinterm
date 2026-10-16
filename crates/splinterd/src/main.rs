@@ -1,3 +1,4 @@
+mod agent_status;
 mod audit;
 mod cgroup;
 mod consent;
@@ -679,9 +680,17 @@ impl RuntimeRegistry {
     }
 }
 
+/// Ordered topology subscription traffic: snapshots and agent status events
+/// share one queue so a status event never overtakes an older snapshot.
+#[derive(Debug)]
+enum TopologyHubEvent {
+    Change(Arc<TopologyChange>),
+    AgentStatus(Arc<SubscriptionEvent>),
+}
+
 struct TopologySubscriber {
     owner_connection_id: u64,
-    changes: mpsc::Sender<Arc<TopologyChange>>,
+    changes: mpsc::Sender<TopologyHubEvent>,
     resync: tokio::sync::watch::Sender<Option<splinterm_core::TopologyRevision>>,
 }
 
@@ -692,7 +701,7 @@ struct TopologyHub {
 
 #[derive(Debug)]
 struct TopologySubscription {
-    changes: mpsc::Receiver<Arc<TopologyChange>>,
+    changes: mpsc::Receiver<TopologyHubEvent>,
     resync: tokio::sync::watch::Receiver<Option<splinterm_core::TopologyRevision>>,
 }
 
@@ -724,17 +733,39 @@ impl TopologyHub {
     }
 
     fn publish(&mut self, change: &TopologyChange) {
+        let revision = change.revision;
         let change = Arc::new(change.clone());
-        self.subscribers.retain(|_, subscriber| {
-            match subscriber.changes.try_send(Arc::clone(&change)) {
+        self.broadcast(revision, || TopologyHubEvent::Change(Arc::clone(&change)));
+    }
+
+    /// Publishes a status event without a revision bump. A full queue asks
+    /// the subscriber to resynchronize at the current revision, whose
+    /// snapshot carries the latest status.
+    fn publish_agent_status(
+        &mut self,
+        event: SubscriptionEvent,
+        current_revision: splinterm_core::TopologyRevision,
+    ) {
+        let event = Arc::new(event);
+        self.broadcast(current_revision, || {
+            TopologyHubEvent::AgentStatus(Arc::clone(&event))
+        });
+    }
+
+    fn broadcast(
+        &mut self,
+        revision: splinterm_core::TopologyRevision,
+        event: impl Fn() -> TopologyHubEvent,
+    ) {
+        self.subscribers
+            .retain(|_, subscriber| match subscriber.changes.try_send(event()) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    subscriber.resync.send_replace(Some(change.revision));
+                    subscriber.resync.send_replace(Some(revision));
                     true
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
-            }
-        });
+            });
     }
 }
 
@@ -791,6 +822,7 @@ struct DaemonState {
     workload_units: Option<WorkloadUnitManager>,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
+    agent_status: Arc<agent_status::AgentStatusService>,
 }
 
 /// Read the kernel nodename once for this handshake, without environment or subprocesses.
@@ -978,7 +1010,9 @@ async fn run_daemon() -> Result<()> {
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
+        agent_status: Arc::default(),
     });
+    let _agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
@@ -3388,6 +3422,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::Resize { .. }
             | Request::Detach { .. }
             | Request::KillSplint { .. }
+            | Request::ReportAgentStatus { .. }
     )
 }
 
@@ -3466,6 +3501,7 @@ fn consent_capable_request(request: &Request) -> bool {
             | Request::Input { .. }
             | Request::Resize { .. }
             | Request::KillSplint { .. }
+            | Request::ReportAgentStatus { .. }
     )
 }
 
@@ -3506,6 +3542,7 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                             AccessScope::TopologyName => Scope::TopologyNameMutate,
                             AccessScope::ProcessSpawn => Scope::ProcessSpawn,
                             AccessScope::ProcessRestore => Scope::ProcessRestore,
+                            AccessScope::AgentStatusReport => Scope::AgentStatusReport,
                             AccessScope::ClipboardRead | AccessScope::ClipboardWrite => {
                                 return None;
                             }
@@ -3536,7 +3573,8 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                 }
                 ConditionalRequirement::RequestedControlTakeover
                 | ConditionalRequirement::LiveProcessTermination
-                | ConditionalRequirement::ExpandedLiveProcessTermination => {}
+                | ConditionalRequirement::ExpandedLiveProcessTermination
+                | ConditionalRequirement::AgentStatusSelfReportOrGrant => {}
             }
             scopes
         }
@@ -4034,7 +4072,10 @@ async fn request_policy_resources(
                 }
             }
         }
+        // The report's incarnation is checked after authorization, so an
+        // authorized reporter learns of a stale incarnation explicitly.
         Request::InspectSplint { splint_id }
+        | Request::ReportAgentStatus { splint_id, .. }
         | Request::RelaunchSplint { splint_id, .. }
         | Request::RelaunchSplintAutomation { splint_id, .. }
         | Request::RestoreSplint { splint_id, .. }
@@ -4203,6 +4244,7 @@ fn ephemeral_access_scopes(required: &[authorization::OperationScope]) -> Option
             Scope::ProcessTerminate => AccessScope::Terminate,
             Scope::TopologyLayoutMutate => AccessScope::TopologyLayout,
             Scope::TopologyNameMutate => AccessScope::TopologyName,
+            Scope::AgentStatusReport => AccessScope::AgentStatusReport,
             Scope::AuthorizationInspect | Scope::AuthorizationRevoke | Scope::AuditInspect => {
                 return None;
             }
@@ -4885,6 +4927,14 @@ async fn handle_request(
     remote_interactive_client: bool,
 ) -> Result<Handled, ProtocolError> {
     let request = bind_current_terminal_incarnation(request, state, peer).await?;
+    // Self-reports from inside the Splint need no grant and are not audited
+    // per update; any other peer takes the ordinary authorized path below.
+    if let Some(result) = agent_status::handle_self_report(state, peer, &request).await {
+        return result.map(|response| Handled {
+            response,
+            subscription: None,
+        });
+    }
     let audit_resource = request_policy_resources(&request, state)
         .await
         .unwrap_or_default()
@@ -6894,6 +6944,9 @@ async fn handle_authorized_request(
         | Request::NewDojoAutomation { .. } => {
             unreachable!("automation launch requests are resolved before dispatch")
         }
+        request @ Request::ReportAgentStatus { .. } => {
+            agent_status::handle_authorized_report(state, peer, authorization, &request).await?
+        }
         Request::AuditInspect {
             after_audit_id,
             max_records,
@@ -6924,7 +6977,8 @@ async fn subscribe_topology(
     let lair_guard = state.topology.read().await;
     let lair = lair_guard.clone();
     let live = state.runtimes.lock().await.handles();
-    let snapshot = topology_snapshot_from(lair, &live);
+    let mut snapshot = topology_snapshot_from(lair, &live);
+    state.agent_status.attach(&mut snapshot);
     let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
     let subscription = state.topology_hub.lock().await.subscribe(id, connection_id);
     drop(lair_guard);
@@ -6943,7 +6997,10 @@ async fn consistent_topology_snapshot(state: &DaemonState) -> TopologySnapshot {
 async fn topology_snapshot(state: &DaemonState) -> TopologySnapshot {
     let lair = state.topology.read().await.clone();
     let live = state.runtimes.lock().await.handles();
-    topology_snapshot_from(lair, &live)
+    let mut snapshot = topology_snapshot_from(lair, &live);
+    // Also drops statuses of retired incarnations in the publishing transaction.
+    state.agent_status.attach(&mut snapshot);
+    snapshot
 }
 
 fn topology_snapshot_from(
@@ -7004,6 +7061,7 @@ fn collect_runtime_summaries(
                 restorable: matches!(splint.state, SplintState::Exited(_)),
                 lifecycle,
                 exit_status,
+                agent_status: None,
             });
         }
         LayoutNode::Branch { first, second, .. } => {
@@ -7310,12 +7368,13 @@ fn spawn_topology_subscription(
                 }
                 change = subscription.changes.recv() => {
                     let Some(change) = change else { break; };
-                    (
-                        SubscriptionEvent::TopologyChanged {
+                    let event = match change {
+                        TopologyHubEvent::Change(change) => SubscriptionEvent::TopologyChanged {
                             change: (*change).clone(),
                         },
-                        false,
-                    )
+                        TopologyHubEvent::AgentStatus(event) => (*event).clone(),
+                    };
+                    (event, false)
                 }
             };
             let frame = ServerFrame::Event {
@@ -9646,6 +9705,7 @@ mod tests {
             workload_units: None,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
+            agent_status: Arc::default(),
         })
     }
 
@@ -11155,6 +11215,7 @@ mod tests {
                 restorable: true,
                 lifecycle: SplintLifecycle::Exited,
                 exit_status: None,
+                agent_status: None,
             }],
         };
         let rename = prepare_mutation(
@@ -12117,5 +12178,66 @@ mod tests {
             "development terminal access is disabled",
         );
         assert_eq!(error.code, ErrorCode::DevelopmentFeatureDisabled);
+    }
+
+    #[tokio::test]
+    async fn agent_status_trusted_ui_may_only_clear_and_other_peers_need_a_grant() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let set = Request::ReportAgentStatus {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds: None,
+            }),
+        };
+        let Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            ..
+        } = set
+        else {
+            unreachable!()
+        };
+        let clear = Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: None,
+        };
+        assert!(trusted_ui_request(&clear));
+        let trusted = RequestAuthorizationContext {
+            interactive_bypass: true,
+            ..RequestAuthorizationContext::default()
+        };
+        let error = agent_status::handle_authorized_report(&state, &peer, &trusted, &set)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        // A clear passes the authority gate and then needs a live target.
+        let error = agent_status::handle_authorized_report(&state, &peer, &trusted, &clear)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        let ungranted = RequestAuthorizationContext::default();
+        let error = agent_status::handle_authorized_report(&state, &peer, &ungranted, &clear)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        assert!(
+            agent_status::handle_self_report(&state, &peer, &set)
+                .await
+                .is_none(),
+            "a peer outside every Splint takes the audited path"
+        );
+        assert_eq!(
+            requested_operation_scopes(&set),
+            Some(vec![authorization::OperationScope::AgentStatusReport])
+        );
+        assert_eq!(
+            ephemeral_access_scopes(&[authorization::OperationScope::AgentStatusReport]),
+            Some(vec![AccessScope::AgentStatusReport])
+        );
     }
 }

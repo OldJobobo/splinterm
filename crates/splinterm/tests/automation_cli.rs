@@ -108,6 +108,7 @@ fn reviewed_topology() -> TopologySnapshot {
             restorable: false,
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
+            agent_status: None,
         }],
     }
 }

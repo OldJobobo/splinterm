@@ -385,6 +385,7 @@ mod tests {
                                     restorable: false,
                                     lifecycle: SplintLifecycle::Exited,
                                     exit_status: None,
+                                    agent_status: None,
                                 },
                             },
                         })

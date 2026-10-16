@@ -142,7 +142,7 @@ Lifecycle-management rule (no terminal observation or control):
 }
 ```
 
-A full supported-automation profile uses all 18 policy scopes, but is not a
+A full supported-automation profile uses all 19 policy scopes, but is not a
 recommended default:
 
 ```json
@@ -151,7 +151,7 @@ recommended default:
   "rules": [{
     "id": "mcp-full-reviewed",
     "executable": {"path": "/usr/bin/splinterm-mcp", "sha256": "REPLACE_WITH_SHA256"},
-    "scopes": ["topology_metadata_read", "topology_subscribe", "terminal_visible_read", "terminal_subscribe", "scrollback_read", "scrollback_search", "controller_acquire", "controller_transfer", "input", "resize", "process_spawn", "process_restore", "process_terminate", "topology_layout_mutate", "topology_name_mutate", "authorization_inspect", "authorization_revoke", "audit_inspect"],
+    "scopes": ["topology_metadata_read", "topology_subscribe", "terminal_visible_read", "terminal_subscribe", "scrollback_read", "scrollback_search", "controller_acquire", "controller_transfer", "input", "resize", "process_spawn", "process_restore", "process_terminate", "topology_layout_mutate", "topology_name_mutate", "authorization_inspect", "authorization_revoke", "audit_inspect", "agent_status_report"],
     "resources": [{"kind": "daemon"}, {"kind": "lair", "lair_id": "REPLACE_WITH_UUID"}],
     "limits": {"max_returned_rows": 64, "max_results": 64, "max_returned_bytes": 1048576, "max_live_subscriptions": 4, "max_spawn_count": 4, "deadline_ms": 10000}
   }]

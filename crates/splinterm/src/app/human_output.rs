@@ -338,6 +338,9 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
             "Splint {splint_id} incarnation {incarnation} exited (code={:?}, signal={:?}).",
             exit_status.code, exit_status.signal
         ),
+        Response::AgentStatusAccepted { sequence, .. } => {
+            println!("Agent status accepted (sequence {sequence}).");
+        }
     }
     io::stdout()
         .flush()
