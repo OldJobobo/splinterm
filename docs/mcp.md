@@ -80,7 +80,9 @@ the host's `env`. `splinterm-mcp` does not read MCP roots, the host working
 directory, shell configuration, or SSH material. The only inherited Splinterm
 context it reads is `SPLINTERM_SPLINT_ID` and `SPLINTERM_SPLINT_INCARNATION`,
 as the default target of `splinterm.report_agent_status`; they are discovery
-hints, never authority.
+hints, never authority. Hosts that start stdio servers with a filtered
+environment must forward both variables, or the tool needs explicit
+`splint_id` and `incarnation` (see [Reporting agent status](#reporting-agent-status)).
 
 ## Handshake compatibility
 
@@ -244,9 +246,23 @@ idempotent. Input is `{ state, detail?, ttl_seconds?, splint_id?, incarnation? }
   the TTL; re-report at no more than half of it.
 - `splint_id` and `incarnation` are given together or not at all. Omitted, the
   adapter fills them from its own `SPLINTERM_SPLINT_ID` and
-  `SPLINTERM_SPLINT_INCARNATION`, which it inherits from the agent that launched
-  it. Without either, the call fails with `invalid_argument`
-  (`not inside a Splint`) before connecting to the daemon.
+  `SPLINTERM_SPLINT_INCARNATION`. Without either, the call fails with
+  `invalid_argument` (`not inside a Splint`) before connecting to the daemon.
+
+The adapter sees those variables only if the MCP host passes them to the
+server process. A host that starts stdio servers with the agent's full
+environment forwards them automatically. A host that filters the server
+environment must forward both variables explicitly. Codex starts stdio servers
+with a whitelisted environment, so add them to its server entry in
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.splinterm]
+command = "/usr/bin/splinterm-mcp"
+env_vars = ["SPLINTERM_SPLINT_ID", "SPLINTERM_SPLINT_INCARNATION"]
+```
+
+Without them, call the tool with explicit `splint_id` and `incarnation`.
 
 The output resource is `{"kind": "agent_status", "splint_id", "incarnation"}`
 and its data is `committed: true`, the reported `state`, the daemon status

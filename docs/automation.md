@@ -392,8 +392,11 @@ Claude Code (`~/.claude/settings.json` or a project `.claude/settings.json`):
     "UserPromptSubmit": [
       {"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}
     ],
+    "PostToolUse": [
+      {"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}
+    ],
     "Notification": [
-      {"hooks": [{"type": "command", "command": "splinterm agent-status set needs_input >/dev/null 2>&1 || true"}]}
+      {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": "splinterm agent-status set needs_input --ttl 900 >/dev/null 2>&1 || true"}]}
     ],
     "Stop": [
       {"hooks": [{"type": "command", "command": "splinterm agent-status set done >/dev/null 2>&1 || true"}]}
@@ -406,13 +409,15 @@ Claude Code (`~/.claude/settings.json` or a project `.claude/settings.json`):
 ```
 
 `UserPromptSubmit` marks the agent `working`, `Notification` marks it
-`needs_input` when Claude Code asks for permission or attention, and `Stop`
-marks it `done` when the turn ends. Long turns can add the same `working`
-command as a `PostToolUse` hook so tool activity refreshes the TTL. Claude Code
-also sends a notification after a period of waiting idle for a prompt; to keep
-`done` showing until the next prompt, give the `Notification` entry a
-`"matcher": "permission_prompt"` where your Claude Code version supports
-notification matchers.
+`needs_input` when Claude Code asks for permission, and `Stop` marks it `done`
+when the turn ends. `PostToolUse` returns the status to `working` after a
+permission is approved and refreshes the TTL during long turns; identical
+re-reports do not publish a change. The `permission_prompt` matcher matters:
+Claude Code also sends a notification after waiting idle for a prompt for about
+a minute, and an unmatched `Notification` hook would replace `done` with
+`needs_input` after every turn. Both active states use `--ttl 900`, so a long
+tool run or an unanswered permission prompt stays visible for 15 minutes before
+it is shown as stale.
 
 Codex CLI runs its `notify` program after each completed agent turn. Map that
 to `done` in `~/.codex/config.toml`:

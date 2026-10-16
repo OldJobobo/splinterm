@@ -5219,6 +5219,8 @@ async fn agent_status_ancestry_grant_and_relaunch_binding() {
 }
 
 const AGENT_STATUS_MCP_RESULTS: &str = "SPLINTERM_E2E_AGENT_STATUS_MCP_RESULTS";
+const AGENT_STATUS_MCP_OTHER_SPLINT: &str = "SPLINTERM_E2E_AGENT_STATUS_OTHER_SPLINT";
+const AGENT_STATUS_MCP_OTHER_INCARNATION: &str = "SPLINTERM_E2E_AGENT_STATUS_OTHER_INCARNATION";
 
 async fn wait_for_signal_file(path: &Path, label: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -5256,14 +5258,20 @@ async fn agent_status_mcp_in_splint_reporter() {
         )
         .await,
     );
-    // Self-report authority covers only the reporter's own Splint.
+    // Self-report authority covers only the reporter's own Splint: another
+    // live Splint in the same daemon needs a grant this policy lacks.
+    let other_splint = std::env::var(AGENT_STATUS_MCP_OTHER_SPLINT).unwrap();
+    let other_incarnation: u64 = std::env::var(AGENT_STATUS_MCP_OTHER_INCARNATION)
+        .unwrap()
+        .parse()
+        .unwrap();
     let elsewhere = outcome(
         splinterm_mcp::dispatch_mutation_for_integration_test(
             "splinterm.report_agent_status",
             &serde_json::json!({
                 "state": "done",
-                "splint_id": SplintId::new().to_string(),
-                "incarnation": 1
+                "splint_id": other_splint,
+                "incarnation": other_incarnation
             }),
             &socket,
         )
@@ -5309,6 +5317,31 @@ async fn agent_status_mcp_adapter_reports_from_inside_the_splint() {
         let program = std::env::current_exe().unwrap();
         let mut client = daemon.connect().await;
         let revision = client.topology_revision().await;
+        // A second live Splint the in-Splint reporter must not be able to target.
+        let Response::LairCreated {
+            lair: other_lair,
+            incarnation: other_incarnation,
+            topology_revision: revision,
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "agent-status-mcp-other".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 60".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("second agent status Lair was not created");
+        };
+        let LayoutNode::Leaf(other_splint) = &other_lair.dojos[0].root else {
+            panic!("second agent status Lair was not a leaf");
+        };
+        let other_splint_id = other_splint.id;
         let Response::LairCreated {
             lair,
             incarnation,
@@ -5323,11 +5356,15 @@ async fn agent_status_mcp_adapter_reports_from_inside_the_splint() {
                         "/bin/sh".into(),
                         "-c".into(),
                         format!(
-                            "{AGENT_STATUS_MCP_RESULTS}=\"$1\" exec \"$0\" \
+                            "{AGENT_STATUS_MCP_RESULTS}=\"$1\" \
+                             {AGENT_STATUS_MCP_OTHER_SPLINT}=\"$2\" \
+                             {AGENT_STATUS_MCP_OTHER_INCARNATION}=\"$3\" exec \"$0\" \
                              --exact agent_status_mcp_in_splint_reporter --test-threads=1 -q"
                         ),
                         program.to_string_lossy().into_owned(),
                         results.to_string_lossy().into_owned(),
+                        other_splint_id.to_string(),
+                        other_incarnation.to_string(),
                     ],
                     shell: None,
                     login_shell: false,
@@ -5362,9 +5399,9 @@ async fn agent_status_mcp_adapter_reports_from_inside_the_splint() {
         assert_eq!(reported["data"]["state"], "needs_input");
         assert!(reported["data"]["expires_at_ms"].as_u64().is_some());
         assert!(!reported.to_string().contains("waiting for approval"));
-        assert!(
-            document["elsewhere"].get("error").is_some(),
-            "a Splint process cannot report for another Splint: {document}"
+        assert_eq!(
+            document["elsewhere"]["error"], "the exact policy scope or resource is not authorized",
+            "a Splint process cannot report for another live Splint without a grant: {document}"
         );
 
         let Response::Topology { snapshot } = client.request(Request::InspectTopology).await else {
@@ -5385,6 +5422,16 @@ async fn agent_status_mcp_adapter_reports_from_inside_the_splint() {
             .expect("MCP status is visible");
         assert_eq!(status.state, AgentState::NeedsInput);
         assert_eq!(status.detail.as_deref(), Some("waiting for approval"));
+        let other_runtime = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.splint_id == other_splint_id)
+            .unwrap();
+        assert_eq!(other_runtime.live_incarnation, Some(other_incarnation));
+        assert_eq!(
+            other_runtime.agent_status, None,
+            "the refused report left no status"
+        );
         // The CLI v2 projections carry the same status.
         let inspected = serde_json::to_value(
             splinterm_automation_client::inspect_splint_envelope(&snapshot, splint_id).unwrap(),

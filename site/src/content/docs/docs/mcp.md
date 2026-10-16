@@ -150,7 +150,13 @@ Terminal content is `untrusted_terminal_data`. An MCP host may display or index 
 
 ## Report agent status
 
-`splinterm.report_agent_status` takes `{ state, detail?, ttl_seconds?, splint_id?, incarnation? }`. `state` is `working`, `needs_input`, `done`, `error`, `idle`, or `null` to clear. Without `splint_id` and `incarnation`, the adapter uses the Splint environment it inherits from the agent that launched it, and fails with `invalid_argument` (`not inside a Splint`) when there is none.
+`splinterm.report_agent_status` takes `{ state, detail?, ttl_seconds?, splint_id?, incarnation? }`. `state` is `working`, `needs_input`, `done`, `error`, `idle`, or `null` to clear. Without `splint_id` and `incarnation`, the adapter uses `SPLINTERM_SPLINT_ID` and `SPLINTERM_SPLINT_INCARNATION` from its own environment, and fails with `invalid_argument` (`not inside a Splint`) when there are none. A host that starts stdio servers with a filtered environment must forward both variables. For Codex, add them to the server entry in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.splinterm]
+command = "/usr/bin/splinterm-mcp"
+env_vars = ["SPLINTERM_SPLINT_ID", "SPLINTERM_SPLINT_INCARNATION"]
+```
 
 An adapter launched by an agent inside a Splint reports for that Splint with no policy rule; reporting for another Splint, or from an agent that fully detached from its Splint, needs an `agent_status_report` rule for the exact Splint. The reported detail is never echoed. `inspect_splint` and `inspect_topology` gain an optional `agent_status` object while a status is set. Agents with command hooks can use `splinterm agent-status` instead; see [Bounded automation](/docs/automation/).
 

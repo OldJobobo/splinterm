@@ -72,13 +72,14 @@ Active states turn stale without a fresh report (120 seconds by default). `inspe
 {
   "hooks": {
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": "splinterm agent-status set needs_input >/dev/null 2>&1 || true"}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}],
+    "Notification": [{"matcher": "permission_prompt", "hooks": [{"type": "command", "command": "splinterm agent-status set needs_input --ttl 900 >/dev/null 2>&1 || true"}]}],
     "Stop": [{"hooks": [{"type": "command", "command": "splinterm agent-status set done >/dev/null 2>&1 || true"}]}]
   }
 }
 ```
 
-Codex can map its `notify` program to `done`. The repository `docs/automation.md` has the full contract, exit codes, and recipes.
+The `permission_prompt` matcher keeps Claude Code's idle-prompt notification from replacing `done` with `needs_input` after every turn, and `PostToolUse` returns the status to `working` after a permission is approved. Codex can map its `notify` program to `done`. The repository `docs/automation.md` has the full contract, exit codes, and recipes.
 
 ## The authority model
 
