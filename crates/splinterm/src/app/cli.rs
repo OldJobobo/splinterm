@@ -252,7 +252,15 @@ pub(crate) async fn run() -> Result<()> {
         // progress and categorized failures instead of terminal output. A
         // Window closed before connecting returns `RemoteNotConnected`, which
         // `main` turns into exit status 1.
-        Some(profile_name) if graphical => connect_with_status(profile_name, &config).await?,
+        Some(profile_name) if graphical => {
+            let factory = connect_with_status(profile_name, &config).await?;
+            // The status Window has ended and recorded its own clean exit; the
+            // remote Window that follows is a new diagnostic Window.
+            if let Some(client_diagnostics) = diagnostics_global() {
+                client_diagnostics.begin_window(None, None);
+            }
+            factory
+        }
         Some(profile_name) => {
             let catalog = RemoteCatalog::load_default()?;
             ConnectionFactory::remote(catalog.get(&profile_name)?).await?
