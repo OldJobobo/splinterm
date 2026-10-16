@@ -71,6 +71,7 @@ async fn machine_control_envelope(
             splint_id,
             incarnation,
             bytes: bytes.clone(),
+            focus_report: false,
         },
         MachineControl::Resize { columns, rows } => Request::Resize {
             controller_id,

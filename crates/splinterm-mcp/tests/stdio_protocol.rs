@@ -3516,6 +3516,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                     splint_id: requested,
                     incarnation: 2,
                     bytes,
+                    focus_report: false,
                 },
         } = read_private_frame(&mut owner)
         else {
@@ -4980,6 +4981,7 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                     expected_topology_revision,
                     name,
                     launch,
+                    generated_name: false,
                 } if expected_topology_revision.get() == 7
                     && name == "lair"
                     && launch.cwd == Some("/tmp".into())

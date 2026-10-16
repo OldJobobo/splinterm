@@ -1199,7 +1199,7 @@ fn friendly_labels<'a>(names: impl Iterator<Item = &'a str>, kind: &str) -> Vec<
         .collect()
 }
 
-fn is_generated_terminal_name(name: &str) -> bool {
+pub(crate) fn is_generated_terminal_name(name: &str) -> bool {
     if name == "terminal" {
         return true;
     }

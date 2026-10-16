@@ -27,6 +27,14 @@ async fn run_client() {
             }
         }
         Err(error) => {
+            if let Some(not_connected) = error.downcast_ref::<app::RemoteNotConnected>() {
+                // The status Window already explained any failure; record its
+                // category rather than an internal error. Closing that Window
+                // queued a clean exit, which this unclean result overrides.
+                finish_global(ExitClass::Unknown, not_connected.last_failure);
+                eprintln!("splinterm: {not_connected}");
+                std::process::exit(app::RemoteNotConnected::EXIT_CODE);
+            }
             if graphical_diagnostics().is_some() {
                 finish_global(ExitClass::Unknown, Some(DiagnosticErrorCode::InternalError));
                 eprintln!("splinterm graphical client failed");

@@ -6,9 +6,9 @@ use super::super::{
     RawModifiers, SessionPickerShortcutAction, TabShortcutAction, WaylandSurface, WindowCommand,
     WindowTopologyCommand, binding_help_repeat_consumed, close_other_tabs_command,
     command_palette_shortcut_action, consume_detached_enter_press, font_zoom_action,
-    keymap_press_for, lair_lifecycle_command, pane_focus_action, pane_topology_action,
-    session_picker_shortcut_action, shortcut_action_for, tab_action_dispatch_allowed,
-    tab_shortcut_action, wl_keyboard, wl_surface,
+    keymap_press_consumes_key, keymap_press_for, lair_lifecycle_command, pane_focus_action,
+    pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
+    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -26,7 +26,7 @@ impl KeyboardHandler for App {
             self.set_ime_focus(true);
             self.presentation.full_redraw = true;
             if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
-                self.send_command(WindowCommand::Input(b"\x1b[I".to_vec()));
+                self.request_active_pane_focus_report(true);
                 self.input.terminal_focus_reported = true;
             }
             if let Err(error) = self.schedule_draw(queue_handle) {
@@ -49,7 +49,7 @@ impl KeyboardHandler for App {
             self.set_ime_focus(false);
             self.presentation.full_redraw = true;
             if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
-                self.send_command(WindowCommand::Input(b"\x1b[O".to_vec()));
+                self.request_active_pane_focus_report(false);
                 self.input.terminal_focus_reported = false;
             }
             if let Err(error) = self.schedule_draw(queue_handle) {
@@ -164,7 +164,7 @@ impl KeyboardHandler for App {
                 return;
             }
             KeymapPress::Consumed(Some(action)) => {
-                if !matches!(action, ActionId::ZoomIn | ActionId::ZoomOut) {
+                if keymap_press_consumes_key(action, self.tab_state.managed_tabs) {
                     self.modal
                         .session_picker_consumed_keys
                         .insert(event.raw_code);
@@ -606,7 +606,7 @@ impl KeyboardHandler for App {
         {
             return;
         }
-        let shortcut = shortcut_action_for(&self.input.keymap, event.keysym, self.input.modifiers);
+        let shortcut = shortcut_action_for(&self.input.keymap, &event, self.input.modifiers);
         if command_palette_shortcut_action(
             shortcut,
             true,

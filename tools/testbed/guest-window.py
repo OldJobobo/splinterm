@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import json
 from pathlib import Path
 import re
@@ -18,6 +19,8 @@ TARGET_MONITOR = "Virtual-1"
 TARGET_WORKSPACE = 8
 ADDRESS = re.compile(r"^0x[0-9A-Fa-f]+$")
 LAUNCH_TOKEN = re.compile(r"^[0-9a-f]{32}$")
+# How long restore waits for closing windows to leave the test workspace.
+RESTORE_SETTLE_SECONDS = 10.0
 
 
 def fail(message: str) -> NoReturn:
@@ -104,11 +107,37 @@ def read_state(path: Path) -> dict[str, Any]:
     return value
 
 
-def prepare(path: Path) -> None:
+def require_owned_target_workspace(
+    current_clients: list[dict[str, Any]], owner: dict[str, Any]
+) -> str:
+    """An additional window may join only the owner's guarded test workspace."""
+    owner_address = owner.get("target_address")
+    if not isinstance(owner_address, str) or not ADDRESS.fullmatch(owner_address):
+        fail("owner guest window state has no placed test window")
+    occupants = [
+        client for client in current_clients if workspace_id(client) == TARGET_WORKSPACE
+    ]
+    if not any(client.get("address") == owner_address for client in occupants):
+        fail(f"owner test window {owner_address} is not on workspace {TARGET_WORKSPACE}")
+    strangers = [
+        client.get("address")
+        for client in occupants
+        if client.get("initialClass") != APP_ID
+    ]
+    if strangers:
+        fail(f"guest workspace {TARGET_WORKSPACE} holds non-Splinterm windows: {strangers}")
+    return owner_address
+
+
+def prepare(path: Path, owner_path: Path | None = None) -> None:
     if path.exists():
         fail(f"guest window state already exists; run stop first: {path}")
     current_clients = clients()
-    require_empty_target_workspace(current_clients)
+    owner_address = None
+    if owner_path is None:
+        require_empty_target_workspace(current_clients)
+    else:
+        owner_address = require_owned_target_workspace(current_clients, read_state(owner_path))
     active_workspace = hypr_json("activeworkspace")
     active_window = hypr_json("activewindow")
     cursor = hypr_json("cursorpos")
@@ -116,9 +145,22 @@ def prepare(path: Path) -> None:
     address = active_window.get("address", "") if isinstance(active_window, dict) else ""
     if address and not ADDRESS.fullmatch(address):
         fail(f"active window returned an invalid address: {address}")
+    baseline = {
+        "active_window": address,
+        "active_workspace": active_workspace.get("id"),
+        "cursor": {"x": cursor.get("x"), "y": cursor.get("y")},
+    }
+    if owner_path is not None:
+        # Every extra window of a session restores to the state before the
+        # first one opened, whichever slot closes last.
+        for sibling in sibling_states(path, owner_path.resolve()):
+            if isinstance(sibling.get("baseline"), dict):
+                baseline = sibling["baseline"]
+                break
     write_state(
         path,
         {
+            "baseline": baseline,
             "active_window": address,
             "active_workspace": active_workspace.get("id"),
             "before_addresses": sorted(
@@ -128,6 +170,8 @@ def prepare(path: Path) -> None:
             ),
             "cursor": {"x": cursor.get("x"), "y": cursor.get("y")},
             "monitor": monitor,
+            "owner_address": owner_address,
+            "owner_state": None if owner_path is None else str(owner_path.resolve()),
             "target_address": None,
             "target_initial": None,
             "target_final": None,
@@ -239,6 +283,63 @@ def place(path: Path, client_pid: int, client_token: str) -> None:
     )
 
 
+def sibling_window_addresses(path: Path, state: dict[str, Any]) -> set[str]:
+    """Windows placed by the owner's other live additional-window slots.
+
+    Additional windows may close in any order, so a sibling launched after this
+    one (absent from its before_addresses) is still owned by the session.
+    """
+    owner_state = state.get("owner_state")
+    if not isinstance(owner_state, str):
+        return set()
+    return {
+        address
+        for sibling in sibling_states(path, Path(owner_state))
+        if isinstance(address := sibling.get("target_address"), str)
+        and ADDRESS.fullmatch(address)
+    }
+
+
+def sibling_states(path: Path, owner_state: Path) -> list[dict[str, Any]]:
+    """States of the owner's other live additional-window slots, oldest slot first."""
+    states = []
+    for sibling in sorted(owner_state.parent.glob("extra-*/guest-window.json")):
+        if sibling.resolve() == path.resolve():
+            continue
+        try:
+            value = json.loads(sibling.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A sibling slot may be released while this one is read.
+            continue
+        if isinstance(value, dict):
+            states.append(value)
+    return states
+
+
+def target_workspace_problem(
+    state: dict[str, Any],
+    current_clients: list[dict[str, Any]],
+    siblings: Iterable[str] = (),
+) -> str | None:
+    """Why the test workspace is not yet back to its pre-launch state, if it is not."""
+    try:
+        if state.get("owner_address") is None:
+            require_empty_target_workspace(current_clients)
+        else:
+            before = set(state.get("before_addresses", [])) | set(siblings)
+            before.add(state["owner_address"])
+            unowned = sorted(
+                str(client.get("address"))
+                for client in current_clients
+                if workspace_id(client) == TARGET_WORKSPACE and client.get("address") not in before
+            )
+            if unowned:
+                fail(f"guest workspace {TARGET_WORKSPACE} gained unowned windows: {unowned}")
+    except RuntimeError as error:
+        return str(error)
+    return None
+
+
 def restore(path: Path) -> None:
     state = read_state(path)
     target_address = state.get("target_address")
@@ -250,16 +351,42 @@ def restore(path: Path) -> None:
     current_clients = clients()
     if target_address and any(client.get("address") == target_address for client in current_clients):
         fail(f"guest test window is still mapped: {target_address}")
-    require_empty_target_workspace(current_clients)
+    # Other windows of the same session may still be closing (package-stop
+    # stops every client at once), so give the workspace the same bound.
+    deadline = time.monotonic() + RESTORE_SETTLE_SECONDS
+    while True:
+        problem = target_workspace_problem(
+            state, current_clients, sibling_window_addresses(path, state)
+        )
+        if problem is None or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+        current_clients = clients()
+    if problem is not None:
+        fail(problem)
 
     recorded_monitor = state.get("monitor")
     if monitor_record() != recorded_monitor:
         fail(f"target monitor state changed during the test: {recorded_monitor!r}")
-    workspace = state.get("active_workspace")
+    owner_state = state.get("owner_state")
+    if (
+        state.get("owner_address") is not None
+        and isinstance(owner_state, str)
+        and sibling_states(path, Path(owner_state))
+    ):
+        # Other extra windows remain: the last one to close restores the
+        # session baseline, so a stale per-slot snapshot is never reapplied.
+        path.unlink()
+        print("additional guest window closed; other additional windows remain")
+        return
+    baseline = state.get("baseline")
+    if not isinstance(baseline, dict):
+        baseline = state
+    workspace = baseline.get("active_workspace")
     if not isinstance(workspace, int) or workspace < 1:
         fail(f"recorded workspace is invalid: {workspace!r}")
     command("hyprctl", "dispatch", f'hl.dsp.focus({{ workspace = "{workspace}" }})')
-    active_window = state.get("active_window")
+    active_window = baseline.get("active_window")
     if active_window:
         if not ADDRESS.fullmatch(active_window):
             fail(f"recorded active window address is invalid: {active_window}")
@@ -269,7 +396,7 @@ def restore(path: Path) -> None:
                 "dispatch",
                 f'hl.dsp.focus({{ window = "address:{active_window}" }})',
             )
-    cursor = state.get("cursor", {})
+    cursor = baseline.get("cursor", {})
     x, y = cursor.get("x"), cursor.get("y")
     if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
         fail(f"recorded cursor is invalid: {cursor!r}")
@@ -279,7 +406,10 @@ def restore(path: Path) -> None:
         f"hl.dsp.cursor.move({{ x = {round(x)}, y = {round(y)} }})",
     )
     path.unlink()
-    print(f"guest workspace {TARGET_WORKSPACE} is empty; prior focus and cursor restored")
+    if state.get("owner_address") is None:
+        print(f"guest workspace {TARGET_WORKSPACE} is empty; prior focus and cursor restored")
+    else:
+        print("additional guest window closed; prior focus and cursor restored")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -288,6 +418,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--state", required=True, type=Path)
     result.add_argument("--client-pid", type=int)
     result.add_argument("--client-token")
+    result.add_argument(
+        "--owner-state",
+        type=Path,
+        help="prepare an additional window beside the window this state guards",
+    )
     return result
 
 
@@ -302,8 +437,12 @@ def main() -> int:
             ):
                 fail("place requires a 32-character lowercase hexadecimal --client-token")
             place(arguments.state, arguments.client_pid, arguments.client_token)
+        elif arguments.action == "prepare":
+            prepare(arguments.state, arguments.owner_state)
         else:
-            {"prepare": prepare, "restore": restore}[arguments.action](arguments.state)
+            if arguments.owner_state is not None:
+                fail("--owner-state applies only to prepare")
+            restore(arguments.state)
     except (RuntimeError, subprocess.CalledProcessError) as error:
         if isinstance(error, subprocess.CalledProcessError) and error.stderr:
             print(error.stderr.rstrip(), file=sys.stderr)
