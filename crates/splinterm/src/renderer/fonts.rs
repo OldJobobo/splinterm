@@ -1262,14 +1262,14 @@ pub(super) fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 pub(super) fn glyph_alpha_bytes(glyph: &CachedGlyph) -> Vec<u8> {
+    let (pixels, _) = glyph.data.as_chunks::<4>();
     match glyph.content {
         Content::Mask => glyph.data.clone(),
-        Content::SubpixelMask => glyph
-            .data
-            .chunks_exact(4)
+        Content::SubpixelMask => pixels
+            .iter()
             .map(|pixel| pixel[..3].iter().copied().max().unwrap_or(0))
             .collect(),
-        Content::Color => glyph.data.chunks_exact(4).map(|pixel| pixel[3]).collect(),
+        Content::Color => pixels.iter().map(|pixel| pixel[3]).collect(),
     }
 }
 
@@ -2135,7 +2135,7 @@ pub(crate) fn paint(canvas: &mut [u8], width: u32, height: u32, row: &TextRow) {
         .and_then(|pixels| pixels.checked_mul(4))
         .expect("canvas dimensions fit usize");
     assert_eq!(canvas.len(), expected_len, "canvas matches its dimensions");
-    for pixel in canvas.chunks_exact_mut(4) {
+    for pixel in canvas.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&[22, 18, 14, 0xff]);
     }
 
