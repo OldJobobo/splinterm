@@ -211,16 +211,29 @@ categorized cause, a one-line remedy, the newest sanitized OpenSSH lines, and a
 reminder that an ssh-agent key or `SSH_ASKPASS` is the preferred way to
 authenticate without a terminal. Press R or Enter to retry once, or C, Q, or
 Escape to close; Escape also cancels a connection in progress. Each retry
-reloads the profile from `remotes.toml`.
+reloads the profile from `remotes.toml`. A `--remote` argument that breaks the
+profile-name rules is shown as "remote" rather than echoed.
 
-Raw OpenSSH output appears only in that Window, never on a terminal. Each
-failure is also recorded in the client diagnostics log
+OpenSSH's error output appears only in that Window, never on a terminal. When
+`splinterm --remote` is started from a terminal, stdin is a terminal, so
+Splinterm does not set `SSH_ASKPASS_REQUIRE=force` and OpenSSH may still prompt
+for a password or passphrase on that terminal; the Connecting screen says so.
+Launches from the app have no terminal and never prompt there.
+
+If the status Window closes before a connection is made, whether after a
+failure, by cancelling with Escape, or by the compositor, `splinterm` exits
+with status 1, so a terminal caller can tell that no remote Window opened.
+
+Each failure is also recorded in the client diagnostics log
 (`${XDG_STATE_HOME:-~/.local/state}/splinterm/logs/`) as a
 `remote_connect_failure` event whose error code names only the category:
 `remote_host_key`, `remote_authentication`, `remote_unreachable`,
 `remote_installation`, `remote_daemon`, `remote_incompatible`,
-`remote_transport`, or `remote_profile`. Non-graphical commands such as
-`remote check PROFILE` still report on the terminal.
+`remote_transport`, `remote_profile` (`remotes.toml` could not be loaded or
+lacks the profile), or `remote_local_setup` (`SSH_ASKPASS` does not name an
+absolute executable, or the local `ssh` could not be started). Errors without a
+more specific category are reported as `remote_transport`. Non-graphical
+commands such as `remote check PROFILE` still report on the terminal.
 
 ## Remote profiles
 

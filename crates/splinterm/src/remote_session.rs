@@ -107,6 +107,53 @@ impl std::fmt::Display for RemoteFailure {
 
 impl std::error::Error for RemoteFailure {}
 
+/// A local OpenSSH setup problem found before OpenSSH runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalSshProblem {
+    /// `SSH_ASKPASS` is set but does not name an absolute executable file.
+    InvalidAskpass,
+    /// The OpenSSH client executable could not be started.
+    OpenSshUnavailable,
+}
+
+/// A local setup failure; no connection was attempted.
+#[derive(Debug)]
+pub struct LocalSshFailure {
+    problem: LocalSshProblem,
+    message: String,
+}
+
+impl LocalSshFailure {
+    /// Builds a local setup failure; the message is sanitized and bounded.
+    #[must_use]
+    pub fn new(problem: LocalSshProblem, message: &str) -> Self {
+        Self {
+            problem,
+            message: bounded_failure_message(message),
+        }
+    }
+
+    /// Returns which local setup step failed.
+    #[must_use]
+    pub const fn problem(&self) -> LocalSshProblem {
+        self.problem
+    }
+
+    /// Returns the bounded, sanitized message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for LocalSshFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LocalSshFailure {}
+
 #[derive(Debug, Default)]
 struct DiagnosticRing {
     bytes: VecDeque<u8>,
@@ -194,7 +241,9 @@ impl RemoteSession {
             bail!("remote relay negotiation timeout must be nonzero");
         }
         let terminal = std::io::stdin().is_terminal();
-        let askpass_available = validate_askpass(terminal)?;
+        let askpass_available = validate_askpass(terminal).map_err(|error| {
+            LocalSshFailure::new(LocalSshProblem::InvalidAskpass, &format!("{error:#}"))
+        })?;
         let plan = profile.ssh_plan();
         let mut command = Command::new(program);
         command
@@ -206,10 +255,13 @@ impl RemoteSession {
         if !terminal && askpass_available {
             command.env("SSH_ASKPASS_REQUIRE", "force");
         }
-        let mut child = command.spawn().with_context(|| {
-            format!(
-                "cannot launch OpenSSH executable {}",
-                program.to_string_lossy()
+        let mut child = command.spawn().map_err(|error| {
+            LocalSshFailure::new(
+                LocalSshProblem::OpenSshUnavailable,
+                &format!(
+                    "cannot launch OpenSSH executable {}: {error}",
+                    program.to_string_lossy()
+                ),
             )
         })?;
         let stdin = child
@@ -485,7 +537,7 @@ fn rendered_diagnostics(diagnostics: &Mutex<DiagnosticRing>) -> String {
     )
 }
 
-fn is_bidi_control(character: char) -> bool {
+pub(crate) fn is_bidi_control(character: char) -> bool {
     matches!(
         character,
         '\u{061c}'

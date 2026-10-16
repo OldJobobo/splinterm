@@ -1,15 +1,18 @@
 //! Remote connection-status Window: connect, report, retry, or hand over.
 
-use std::{future::Future, time::Duration};
+use std::{future::Future, io::IsTerminal as _, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
     WindowCommand, WindowOptions, WindowUpdate,
     config::AppConfig,
-    diagnostics::{DiagnosticEventCode, DiagnosticLevel, global},
+    diagnostics::{DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global},
     endpoint::ConnectionFactory,
     remote::{RemoteCatalog, RemoteProfile},
-    remote_status::{RemoteStatus, RemoteStatusEffect, RemoteStatusFailure, status_key},
+    remote_status::{
+        RemoteProfileError, RemoteStatus, RemoteStatusEffect, RemoteStatusFailure, profile_label,
+        status_key,
+    },
     run_window,
 };
 use splinterm_automation_client::ImageContentLeaseSet;
@@ -24,6 +27,28 @@ use super::{
 
 const STATUS_UPDATE_CAPACITY: usize = 8;
 const STATUS_COMMAND_CAPACITY: usize = 64;
+
+/// The status Window closed before a connection was made: after a shown
+/// failure, by cancelling an attempt, or by the compositor. The process exits
+/// with status 1 so a terminal caller sees that no remote Window opened.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct RemoteNotConnected {
+    /// The category of the last failure shown, if any.
+    pub(crate) last_failure: Option<DiagnosticErrorCode>,
+}
+
+impl RemoteNotConnected {
+    /// The process exit status for a remote launch that never connected.
+    pub(crate) const EXIT_CODE: i32 = 1;
+}
+
+impl std::fmt::Display for RemoteNotConnected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("remote connection was not opened")
+    }
+}
+
+impl std::error::Error for RemoteNotConnected {}
 
 /// Formats the OpenSSH destination a profile connects to.
 pub(in crate::app) fn destination(profile: &RemoteProfile) -> String {
@@ -66,20 +91,21 @@ impl StatusWindow {
 }
 
 /// Drives one status screen until it hands over a connected endpoint, or the
-/// user closes it. `connect` runs one attempt; `report` records each failure.
-/// Nothing here writes to stdout or stderr.
+/// Window closes first. `connect` runs one attempt; `report` records each
+/// failure. Nothing here writes to stdout or stderr.
 async fn run_status_flow<T, F, Fut>(
     mut status: RemoteStatus,
     mut window: StatusWindow,
     mut commands: mpsc::Receiver<WindowCommand>,
     mut connect: F,
     mut report: impl FnMut(&RemoteStatusFailure),
-) -> Option<T>
+) -> Result<T, RemoteNotConnected>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let mut attempt = Some(Box::pin(connect()));
+    let mut last_failure = None;
     loop {
         tokio::select! {
             result = async { attempt.as_mut().expect("guarded attempt").await }, if attempt.is_some() => {
@@ -88,12 +114,13 @@ where
                     Ok(connected) => {
                         if status.on_attempt(Ok(())) == RemoteStatusEffect::HandOver {
                             window.close().await;
-                            return Some(connected);
+                            return Ok(connected);
                         }
                     }
                     Err(error) => {
                         let failure = RemoteStatusFailure::from_error(&error);
                         report(&failure);
+                        last_failure = Some(failure.copy().diagnostic_code);
                         if status.on_attempt(Err(failure)) == RemoteStatusEffect::ShowFailure {
                             window.show(&status);
                         }
@@ -116,7 +143,7 @@ where
                         // Dropping the attempt kills its OpenSSH child.
                         drop(attempt.take());
                         window.close().await;
-                        return None;
+                        return Err(RemoteNotConnected { last_failure });
                     }
                     RemoteStatusEffect::None
                     | RemoteStatusEffect::ShowFailure
@@ -129,9 +156,14 @@ where
 
 /// One attempt: reload the profile, authenticate, and prove the remote daemon
 /// answers, so daemon failures are reported here rather than after hand-over.
+/// Only catalog errors are marked as profile errors; every later error keeps
+/// its own category or is reported as a transport failure.
 async fn connect_profile(profile_name: String) -> Result<ConnectionFactory> {
-    let catalog = RemoteCatalog::load_default()?;
-    let profile = catalog.get(&profile_name)?;
+    let catalog =
+        RemoteCatalog::load_default().map_err(|error| RemoteProfileError::wrap(&error))?;
+    let profile = catalog
+        .get(&profile_name)
+        .map_err(|error| RemoteProfileError::wrap(&error))?;
     let deadline = Duration::from_secs(u64::from(profile.connect_timeout_seconds()));
     let factory = ConnectionFactory::remote(profile).await?;
     let mut connection = factory.connect().await?;
@@ -158,16 +190,22 @@ fn report_failure(failure: &RemoteStatusFailure) {
 }
 
 /// Maps a status Window, connects to `profile_name`, and returns the connected
-/// endpoint once the Window has closed, or `None` when the user closed it.
+/// endpoint once the Window has closed.
+///
+/// # Errors
+///
+/// Returns [`RemoteNotConnected`] when the Window closed before connecting,
+/// or an error when the Window itself failed.
 pub(in crate::app) async fn connect_with_status(
     profile_name: String,
     config: &AppConfig,
-) -> Result<Option<ConnectionFactory>> {
+) -> Result<ConnectionFactory> {
     let destination_label = RemoteCatalog::load_default()
         .ok()
         .and_then(|catalog| catalog.get(&profile_name).ok().map(destination))
-        .unwrap_or_else(|| profile_name.clone());
-    let status = RemoteStatus::new(&profile_name, &destination_label);
+        .unwrap_or_else(|| profile_label(&profile_name).to_owned());
+    let status = RemoteStatus::new(&profile_name, &destination_label)
+        .with_terminal(std::io::stdin().is_terminal());
     let splint_id = SplintId::new();
     let snapshot = status.snapshot(splint_id, 1);
     let (updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
@@ -207,7 +245,7 @@ pub(in crate::app) async fn connect_with_status(
     window_task
         .await
         .context("remote status Window task failed")??;
-    Ok(connected)
+    connected.map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]
@@ -294,7 +332,7 @@ mod tests {
             |_| reports.set(reports.get() + 1),
         )
         .await;
-        assert_eq!(connected, Some("factory"));
+        assert_eq!(connected, Ok("factory"));
         expect_closed(&mut harness).await;
         assert_eq!(reports.get(), 0);
     }
@@ -383,7 +421,7 @@ mod tests {
             .await
             .unwrap();
         let _retrying = next_snapshot(&mut harness).await;
-        assert_eq!(flow.await.unwrap(), Some(3));
+        assert_eq!(flow.await.unwrap(), Ok(3));
         expect_closed(&mut harness).await;
         assert_eq!(*attempts.lock().unwrap(), 3);
         assert_eq!(
@@ -410,7 +448,10 @@ mod tests {
             .send(WindowCommand::Input(b"\x1b".to_vec()))
             .await
             .unwrap();
-        assert_eq!(flow.await.unwrap(), None);
+        assert_eq!(
+            flow.await.unwrap(),
+            Err(RemoteNotConnected { last_failure: None })
+        );
         expect_closed(&mut harness).await;
     }
 
@@ -429,17 +470,21 @@ mod tests {
             |_| {},
         )
         .await;
-        assert_eq!(connected, None);
+        assert_eq!(connected, Err(RemoteNotConnected { last_failure: None }));
     }
 
     #[tokio::test]
-    async fn profile_errors_are_shown_with_the_configuration_remedy() {
+    async fn closing_after_a_profile_failure_reports_it_and_is_not_connected() {
         let (mut harness, window, commands) = harness();
         let flow = tokio::spawn(run_status_flow::<(), _, _>(
             RemoteStatus::new("gone", "gone"),
             window,
             commands,
-            || async { Err(anyhow::anyhow!("remote profile \"gone\" is not configured")) },
+            || async {
+                Err(RemoteProfileError::wrap(&anyhow::anyhow!(
+                    "remote profile \"gone\" is not configured"
+                )))
+            },
             |_| {},
         ));
         let screen = text(&next_snapshot(&mut harness).await);
@@ -450,7 +495,48 @@ mod tests {
             .send(WindowCommand::Input(b"c".to_vec()))
             .await
             .unwrap();
-        assert_eq!(flow.await.unwrap(), None);
+        let outcome = flow.await.unwrap();
+        assert_eq!(
+            outcome,
+            Err(RemoteNotConnected {
+                last_failure: Some(DiagnosticErrorCode::RemoteProfile)
+            })
+        );
+        // `main` exits nonzero for this error, as before the status Window.
+        let error = anyhow::Error::new(outcome.unwrap_err());
+        assert!(error.downcast_ref::<RemoteNotConnected>().is_some());
+        assert_ne!(RemoteNotConnected::EXIT_CODE, 0);
+    }
+
+    #[tokio::test]
+    async fn uncategorized_attempt_errors_are_shown_as_transport_failures() {
+        let (mut harness, window, commands) = harness();
+        let flow = tokio::spawn(run_status_flow::<(), _, _>(
+            RemoteStatus::new("wintermute", "wintermute"),
+            window,
+            commands,
+            || async {
+                Err(anyhow::anyhow!(
+                    "remote splinterd returned an invalid ping response"
+                ))
+            },
+            |_| {},
+        ));
+        let screen = text(&next_snapshot(&mut harness).await);
+        assert!(screen.contains("The SSH connection failed."));
+        assert!(!screen.contains("remote profile could not be loaded"));
+        assert!(screen.contains("invalid ping response"));
+        harness
+            .commands
+            .send(WindowCommand::Input(b"q".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            flow.await.unwrap(),
+            Err(RemoteNotConnected {
+                last_failure: Some(DiagnosticErrorCode::RemoteTransport)
+            })
+        );
     }
 
     #[test]

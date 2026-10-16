@@ -12,11 +12,64 @@ use splinterm_protocol::TerminalSnapshot;
 use crate::{
     diagnostics::DiagnosticErrorCode,
     frontend::synthetic_text_snapshot,
-    remote_session::{RemoteFailure, RemoteFailureKind},
+    remote::is_valid_profile_name,
+    remote_session::{
+        LocalSshFailure, LocalSshProblem, RemoteFailure, RemoteFailureKind, is_bidi_control,
+    },
 };
 
 const MAX_DETAIL_LINES: usize = 6;
 const MAX_DETAIL_CHARS: usize = 100;
+/// Shown instead of a `--remote` argument that fails the profile-name rule.
+pub const FALLBACK_PROFILE_LABEL: &str = "remote";
+
+/// Returns `name` when it satisfies the profile-name rule, so untrusted argv
+/// text (bidi or control characters) never reaches the title or screen.
+#[must_use]
+pub fn profile_label(name: &str) -> &str {
+    if is_valid_profile_name(name) {
+        name
+    } else {
+        FALLBACK_PROFILE_LABEL
+    }
+}
+
+/// Marks an attempt error as a profile-loading problem: `remotes.toml` could
+/// not be read or does not configure the requested profile.
+#[derive(Debug)]
+pub struct RemoteProfileError {
+    message: String,
+}
+
+impl RemoteProfileError {
+    /// Wraps a catalog load or lookup error, keeping its message chain.
+    #[must_use]
+    pub fn wrap(error: &anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            message: format!("{error:#}"),
+        })
+    }
+}
+
+impl std::fmt::Display for RemoteProfileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RemoteProfileError {}
+
+/// What a failed connection attempt is attributed to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteFailureCategory {
+    /// `remotes.toml` could not be loaded or lacks the profile.
+    Profile,
+    /// A local OpenSSH setup problem found before connecting.
+    LocalSetup(LocalSshProblem),
+    /// A categorized OpenSSH, relay, or remote-daemon failure. Errors that
+    /// carry no category are reported as [`RemoteFailureKind::TransportFailed`].
+    Remote(RemoteFailureKind),
+}
 
 /// The preferred way to authenticate without a terminal (Plan 0055 decision).
 pub const AGENT_GUIDANCE: [&str; 2] = [
@@ -50,63 +103,74 @@ pub struct FailureCopy {
     pub diagnostic_code: DiagnosticErrorCode,
 }
 
-/// Explains a failure category; `None` is a profile or configuration problem.
+/// Explains a failure category.
 #[must_use]
-pub const fn failure_copy(kind: Option<RemoteFailureKind>) -> FailureCopy {
+pub const fn failure_copy(category: RemoteFailureCategory) -> FailureCopy {
     use DiagnosticErrorCode as Code;
+    use RemoteFailureCategory as Category;
     use RemoteFailureKind as Kind;
-    let (summary, remedy, diagnostic_code) = match kind {
-        None => (
+    let (summary, remedy, diagnostic_code) = match category {
+        Category::Profile => (
             "The remote profile could not be loaded.",
             "Fix remotes.toml; `splinterm remote list` shows the error.",
             Code::RemoteProfile,
         ),
-        Some(Kind::UnknownHostKey) => (
+        Category::LocalSetup(LocalSshProblem::InvalidAskpass) => (
+            "SSH_ASKPASS does not name a usable prompt program.",
+            "Set SSH_ASKPASS to an absolute executable path, or unset it.",
+            Code::RemoteLocalSetup,
+        ),
+        Category::LocalSetup(LocalSshProblem::OpenSshUnavailable) => (
+            "OpenSSH (ssh) could not be started on this computer.",
+            "Install the OpenSSH client so `ssh` is on PATH, then retry.",
+            Code::RemoteLocalSetup,
+        ),
+        Category::Remote(Kind::UnknownHostKey) => (
             "The server's SSH host key is not known.",
             "Verify its fingerprint, then accept it once with `ssh HOST` in a terminal.",
             Code::RemoteHostKey,
         ),
-        Some(Kind::ChangedHostKey) => (
+        Category::Remote(Kind::ChangedHostKey) => (
             "The server's SSH host key has changed.",
             "Confirm the change with the server's owner before updating known_hosts.",
             Code::RemoteHostKey,
         ),
-        Some(Kind::RoutingOrTimeout) => (
+        Category::Remote(Kind::RoutingOrTimeout) => (
             "The server could not be reached.",
             "Check the host name, port, and network, then retry.",
             Code::RemoteUnreachable,
         ),
-        Some(Kind::AuthenticationFailed) => (
+        Category::Remote(Kind::AuthenticationFailed) => (
             "SSH authentication failed.",
             "Check the user and key in remotes.toml, and load the key into ssh-agent.",
             Code::RemoteAuthentication,
         ),
-        Some(Kind::InteractiveAuthenticationUnavailable) => (
+        Category::Remote(Kind::InteractiveAuthenticationUnavailable) => (
             "SSH needs a password or passphrase, but nothing can ask for it.",
             "Load the key into ssh-agent or set SSH_ASKPASS, then retry.",
             Code::RemoteAuthentication,
         ),
-        Some(Kind::RemoteCommandUnavailable) => (
+        Category::Remote(Kind::RemoteCommandUnavailable) => (
             "Splinterm is not installed on the server.",
             "Install Splinterm there, or set `executable` in remotes.toml.",
             Code::RemoteInstallation,
         ),
-        Some(Kind::RemoteDaemonUnavailable) => (
+        Category::Remote(Kind::RemoteDaemonUnavailable) => (
             "splinterd is not running on the server.",
             "Start it there with `systemctl --user start splinterd.service`.",
             Code::RemoteDaemon,
         ),
-        Some(Kind::RelayIdentityRejected) => (
+        Category::Remote(Kind::RelayIdentityRejected) => (
             "The server's splinterd rejected its Splinterm relay.",
             "Reinstall Splinterm on the server so the relay and daemon match.",
             Code::RemoteInstallation,
         ),
-        Some(Kind::MultiplexerIncompatible | Kind::DaemonProtocolIncompatible) => (
+        Category::Remote(Kind::MultiplexerIncompatible | Kind::DaemonProtocolIncompatible) => (
             "The server runs an incompatible Splinterm version.",
             "Install the same Splinterm version on both machines.",
             Code::RemoteIncompatible,
         ),
-        Some(Kind::TransportFailed) => (
+        Category::Remote(Kind::TransportFailed) => (
             "The SSH connection failed.",
             "Run `splinterm remote check PROFILE` for details, then retry.",
             Code::RemoteTransport,
@@ -119,53 +183,74 @@ pub const fn failure_copy(kind: Option<RemoteFailureKind>) -> FailureCopy {
     }
 }
 
-/// A failed attempt: its category, if known, and bounded detail lines.
+/// A failed attempt: its category and bounded, sanitized detail lines.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteStatusFailure {
-    pub kind: Option<RemoteFailureKind>,
+    pub category: RemoteFailureCategory,
     pub details: Vec<String>,
 }
 
 impl RemoteStatusFailure {
-    /// Classifies an attempt error. Categorized remote failures keep their raw,
-    /// already sanitized OpenSSH diagnostic as detail; other errors (profile
-    /// loading) keep their message chain.
+    /// Classifies an attempt error. Categorized remote failures keep their
+    /// OpenSSH diagnostic as detail, local setup and [`RemoteProfileError`]
+    /// failures keep their message, and any other error is a transport failure
+    /// that keeps its message chain. All detail text is sanitized again here.
     #[must_use]
     pub fn from_error(error: &anyhow::Error) -> Self {
-        let remote = error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<RemoteFailure>());
-        let (kind, text) = match remote {
-            Some(failure) => (Some(failure.kind()), failure.diagnostic().to_owned()),
-            None => (None, format!("{error:#}")),
-        };
+        let classified = error.chain().find_map(|cause| {
+            if let Some(failure) = cause.downcast_ref::<RemoteFailure>() {
+                Some((
+                    RemoteFailureCategory::Remote(failure.kind()),
+                    failure.diagnostic().to_owned(),
+                ))
+            } else if let Some(failure) = cause.downcast_ref::<LocalSshFailure>() {
+                Some((
+                    RemoteFailureCategory::LocalSetup(failure.problem()),
+                    failure.message().to_owned(),
+                ))
+            } else {
+                cause
+                    .downcast_ref::<RemoteProfileError>()
+                    .map(|failure| (RemoteFailureCategory::Profile, failure.to_string()))
+            }
+        });
+        let (category, text) = classified.unwrap_or_else(|| {
+            (
+                RemoteFailureCategory::Remote(RemoteFailureKind::TransportFailed),
+                format!("{error:#}"),
+            )
+        });
         Self {
-            kind,
+            category,
             details: detail_lines(&text),
         }
     }
 
     #[must_use]
     pub const fn copy(&self) -> FailureCopy {
-        failure_copy(self.kind)
+        failure_copy(self.category)
     }
 }
 
-/// Bounds diagnostic text to a few short, control-free, non-empty lines.
+/// Replaces control and bidirectional-override characters with spaces.
+fn display_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() || is_bidi_control(character) {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Bounds diagnostic text to a few short, non-empty lines free of control and
+/// bidirectional-override characters.
 fn detail_lines(text: &str) -> Vec<String> {
     let mut lines = text
         .lines()
-        .map(|line| {
-            line.chars()
-                .map(|character| {
-                    if character.is_control() {
-                        ' '
-                    } else {
-                        character
-                    }
-                })
-                .collect::<String>()
-        })
+        .map(display_text)
         .map(|line| line.trim().to_owned())
         .filter(|line| !line.is_empty())
         .map(|line| {
@@ -215,17 +300,30 @@ pub struct RemoteStatus {
     destination: String,
     phase: RemoteStatusPhase,
     attempts: u32,
+    terminal: bool,
 }
 
 impl RemoteStatus {
+    /// Starts the screen. A `profile` that fails the profile-name rule is shown
+    /// as [`FALLBACK_PROFILE_LABEL`]; control and bidi characters in
+    /// `destination` are replaced.
     #[must_use]
     pub fn new(profile: &str, destination: &str) -> Self {
         Self {
-            profile: profile.to_owned(),
-            destination: destination.to_owned(),
+            profile: profile_label(profile).to_owned(),
+            destination: display_text(destination),
             phase: RemoteStatusPhase::Connecting,
             attempts: 1,
+            terminal: false,
         }
+    }
+
+    /// Records whether Splinterm was started from a terminal, where OpenSSH
+    /// may prompt instead of using `SSH_ASKPASS`.
+    #[must_use]
+    pub const fn with_terminal(mut self, terminal: bool) -> Self {
+        self.terminal = terminal;
+        self
     }
 
     #[must_use]
@@ -239,7 +337,7 @@ impl RemoteStatus {
     }
 
     pub fn set_destination(&mut self, destination: &str) {
-        destination.clone_into(&mut self.destination);
+        self.destination = display_text(destination);
     }
 
     /// Handles one key. Retry acts only on a shown failure, so repeated
@@ -332,6 +430,11 @@ impl RemoteStatus {
                 lines.push(String::new());
                 lines.push("OpenSSH is authenticating. An agent key or SSH_ASKPASS".to_owned());
                 lines.push("is used when available.".to_owned());
+                if self.terminal {
+                    lines.push(
+                        "OpenSSH may prompt on the terminal that started Splinterm.".to_owned(),
+                    );
+                }
                 if self.attempts > 1 {
                     lines.push(format!("Attempt {}.", self.attempts));
                 }
@@ -353,9 +456,9 @@ impl RemoteStatus {
 mod tests {
     use super::*;
 
-    fn failure(kind: Option<RemoteFailureKind>) -> RemoteStatusFailure {
+    fn failure(kind: RemoteFailureKind) -> RemoteStatusFailure {
         RemoteStatusFailure {
-            kind,
+            category: RemoteFailureCategory::Remote(kind),
             details: vec!["Permission denied (publickey).".to_owned()],
         }
     }
@@ -395,7 +498,7 @@ mod tests {
             RemoteStatusEffect::None,
             "retry does nothing while the first attempt runs"
         );
-        let denied = failure(Some(RemoteFailureKind::AuthenticationFailed));
+        let denied = failure(RemoteFailureKind::AuthenticationFailed);
         assert_eq!(
             status.on_attempt(Err(denied.clone())),
             RemoteStatusEffect::ShowFailure
@@ -443,59 +546,75 @@ mod tests {
     #[test]
     fn every_category_has_a_summary_remedy_and_structured_code() {
         let cases = [
-            (None, DiagnosticErrorCode::RemoteProfile, "remotes.toml"),
             (
-                Some(RemoteFailureKind::UnknownHostKey),
+                RemoteFailureCategory::Profile,
+                DiagnosticErrorCode::RemoteProfile,
+                "remotes.toml",
+            ),
+            (
+                RemoteFailureCategory::LocalSetup(LocalSshProblem::InvalidAskpass),
+                DiagnosticErrorCode::RemoteLocalSetup,
+                "SSH_ASKPASS to an absolute executable",
+            ),
+            (
+                RemoteFailureCategory::LocalSetup(LocalSshProblem::OpenSshUnavailable),
+                DiagnosticErrorCode::RemoteLocalSetup,
+                "OpenSSH client",
+            ),
+            (
+                RemoteFailureCategory::Remote(RemoteFailureKind::UnknownHostKey),
                 DiagnosticErrorCode::RemoteHostKey,
                 "fingerprint",
             ),
             (
-                Some(RemoteFailureKind::ChangedHostKey),
+                RemoteFailureCategory::Remote(RemoteFailureKind::ChangedHostKey),
                 DiagnosticErrorCode::RemoteHostKey,
                 "known_hosts",
             ),
             (
-                Some(RemoteFailureKind::RoutingOrTimeout),
+                RemoteFailureCategory::Remote(RemoteFailureKind::RoutingOrTimeout),
                 DiagnosticErrorCode::RemoteUnreachable,
                 "network",
             ),
             (
-                Some(RemoteFailureKind::AuthenticationFailed),
+                RemoteFailureCategory::Remote(RemoteFailureKind::AuthenticationFailed),
                 DiagnosticErrorCode::RemoteAuthentication,
                 "ssh-agent",
             ),
             (
-                Some(RemoteFailureKind::InteractiveAuthenticationUnavailable),
+                RemoteFailureCategory::Remote(
+                    RemoteFailureKind::InteractiveAuthenticationUnavailable,
+                ),
                 DiagnosticErrorCode::RemoteAuthentication,
                 "SSH_ASKPASS",
             ),
             (
-                Some(RemoteFailureKind::RemoteCommandUnavailable),
+                RemoteFailureCategory::Remote(RemoteFailureKind::RemoteCommandUnavailable),
                 DiagnosticErrorCode::RemoteInstallation,
                 "executable",
             ),
             (
-                Some(RemoteFailureKind::RemoteDaemonUnavailable),
+                RemoteFailureCategory::Remote(RemoteFailureKind::RemoteDaemonUnavailable),
                 DiagnosticErrorCode::RemoteDaemon,
                 "splinterd.service",
             ),
             (
-                Some(RemoteFailureKind::RelayIdentityRejected),
+                RemoteFailureCategory::Remote(RemoteFailureKind::RelayIdentityRejected),
                 DiagnosticErrorCode::RemoteInstallation,
                 "Reinstall",
             ),
             (
-                Some(RemoteFailureKind::MultiplexerIncompatible),
+                RemoteFailureCategory::Remote(RemoteFailureKind::MultiplexerIncompatible),
                 DiagnosticErrorCode::RemoteIncompatible,
                 "same Splinterm version",
             ),
             (
-                Some(RemoteFailureKind::DaemonProtocolIncompatible),
+                RemoteFailureCategory::Remote(RemoteFailureKind::DaemonProtocolIncompatible),
                 DiagnosticErrorCode::RemoteIncompatible,
                 "same Splinterm version",
             ),
             (
-                Some(RemoteFailureKind::TransportFailed),
+                RemoteFailureCategory::Remote(RemoteFailureKind::TransportFailed),
                 DiagnosticErrorCode::RemoteTransport,
                 "remote check",
             ),
@@ -520,15 +639,21 @@ mod tests {
         ))
         .context("open remote");
         let failure = RemoteStatusFailure::from_error(&remote);
-        assert_eq!(failure.kind, Some(RemoteFailureKind::UnknownHostKey));
+        assert_eq!(
+            failure.category,
+            RemoteFailureCategory::Remote(RemoteFailureKind::UnknownHostKey)
+        );
         assert_eq!(
             failure.details,
             ["line one", "Host key verification failed."]
         );
 
-        let profile = anyhow::anyhow!("remote profile \"gone\" is not configured");
+        let profile = RemoteProfileError::wrap(&anyhow::anyhow!(
+            "remote profile \"gone\" is not configured"
+        ))
+        .context("load profile");
         let failure = RemoteStatusFailure::from_error(&profile);
-        assert_eq!(failure.kind, None);
+        assert_eq!(failure.category, RemoteFailureCategory::Profile);
         assert_eq!(
             failure.details,
             ["remote profile \"gone\" is not configured"]
@@ -549,6 +674,87 @@ mod tests {
     }
 
     #[test]
+    fn uncategorized_errors_are_transport_failures_not_profile_errors() {
+        for error in [
+            anyhow::anyhow!("remote splinterd returned an invalid ping response"),
+            anyhow::anyhow!("deadline elapsed").context("ping remote splinterd"),
+        ] {
+            let failure = RemoteStatusFailure::from_error(&error);
+            assert_ne!(failure.category, RemoteFailureCategory::Profile);
+            assert_eq!(
+                failure.category,
+                RemoteFailureCategory::Remote(RemoteFailureKind::TransportFailed)
+            );
+            assert_eq!(
+                failure.copy().diagnostic_code,
+                DiagnosticErrorCode::RemoteTransport
+            );
+        }
+    }
+
+    #[test]
+    fn local_setup_failures_get_a_local_remedy() {
+        let askpass = anyhow::Error::new(LocalSshFailure::new(
+            LocalSshProblem::InvalidAskpass,
+            "SSH_ASKPASS must name an absolute local executable",
+        ));
+        let failure = RemoteStatusFailure::from_error(&askpass);
+        assert_eq!(
+            failure.category,
+            RemoteFailureCategory::LocalSetup(LocalSshProblem::InvalidAskpass)
+        );
+        let copy = failure.copy();
+        assert!(copy.summary.contains("SSH_ASKPASS"));
+        assert!(copy.remedy.contains("SSH_ASKPASS"));
+        assert!(!copy.remedy.contains("remotes.toml"));
+        assert_eq!(copy.diagnostic_code, DiagnosticErrorCode::RemoteLocalSetup);
+        assert_eq!(
+            failure.details,
+            ["SSH_ASKPASS must name an absolute local executable"]
+        );
+
+        let missing = anyhow::Error::new(LocalSshFailure::new(
+            LocalSshProblem::OpenSshUnavailable,
+            "cannot launch OpenSSH executable ssh: No such file or directory",
+        ));
+        let failure = RemoteStatusFailure::from_error(&missing);
+        assert!(failure.copy().remedy.contains("OpenSSH client"));
+    }
+
+    #[test]
+    fn bidi_and_control_characters_never_reach_the_screen() {
+        let error = anyhow::anyhow!("evil\u{202e}txt.exe\u{2066} \u{1b}[31mred");
+        let failure = RemoteStatusFailure::from_error(&error);
+        assert_eq!(failure.details, ["evil txt.exe   [31mred"]);
+
+        for spoofed in ["gone\u{202e}", "\u{202e}", "-gone", "a b", ""] {
+            let mut status = RemoteStatus::new(spoofed, "gone\u{202e}host");
+            assert_eq!(status.title(), "Connecting to remote", "{spoofed:?}");
+            let lines = status.lines();
+            assert_eq!(lines[0], "REMOTE · remote");
+            assert!(lines.contains(&"Connecting to gone host…".to_owned()));
+            status.on_attempt(Err(failure.clone()));
+            assert_eq!(status.title(), "Could not connect to remote");
+            assert!(status.lines().iter().all(|line| {
+                !line
+                    .chars()
+                    .any(|character| character.is_control() || is_bidi_control(character))
+            }));
+        }
+        assert_eq!(profile_label("wintermute"), "wintermute");
+        assert_eq!(profile_label("gone\u{202e}"), FALLBACK_PROFILE_LABEL);
+    }
+
+    #[test]
+    fn a_terminal_launch_says_openssh_may_prompt_there() {
+        let prompt = "OpenSSH may prompt on the terminal that started Splinterm.".to_owned();
+        let detached = RemoteStatus::new("wintermute", "wintermute");
+        assert!(!detached.lines().contains(&prompt));
+        let attached = RemoteStatus::new("wintermute", "wintermute").with_terminal(true);
+        assert!(attached.lines().contains(&prompt));
+    }
+
+    #[test]
     fn screens_explain_progress_failure_remedy_and_the_agent_path() {
         let mut status = RemoteStatus::new("wintermute", "case@wintermute.example:2222");
         let connecting = status.lines();
@@ -557,7 +763,7 @@ mod tests {
         assert!(connecting.contains(&"C / Esc: cancel".to_owned()));
         assert_eq!(status.title(), "Connecting to wintermute");
 
-        status.on_attempt(Err(failure(Some(RemoteFailureKind::AuthenticationFailed))));
+        status.on_attempt(Err(failure(RemoteFailureKind::AuthenticationFailed)));
         let failed = status.lines();
         assert_eq!(status.title(), "Could not connect to wintermute");
         assert!(failed.contains(&"SSH authentication failed.".to_owned()));

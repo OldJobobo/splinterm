@@ -137,6 +137,7 @@ pub enum DiagnosticErrorCode {
     RemoteIncompatible,
     RemoteTransport,
     RemoteProfile,
+    RemoteLocalSetup,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1425,6 +1426,7 @@ mod tests {
             ),
             (DiagnosticErrorCode::RemoteTransport, "remote_transport"),
             (DiagnosticErrorCode::RemoteProfile, "remote_profile"),
+            (DiagnosticErrorCode::RemoteLocalSetup, "remote_local_setup"),
         ];
         for (code, name) in codes {
             assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{name}\""));

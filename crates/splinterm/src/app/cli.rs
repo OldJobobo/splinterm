@@ -249,13 +249,10 @@ pub(crate) async fn run() -> Result<()> {
     }
     let factory = match remote {
         // Graphical remote launches connect inside a status Window that shows
-        // progress and categorized failures instead of terminal output.
-        Some(profile_name) if graphical => {
-            match connect_with_status(profile_name, &config).await? {
-                Some(factory) => factory,
-                None => return Ok(()),
-            }
-        }
+        // progress and categorized failures instead of terminal output. A
+        // Window closed before connecting returns `RemoteNotConnected`, which
+        // `main` turns into exit status 1.
+        Some(profile_name) if graphical => connect_with_status(profile_name, &config).await?,
         Some(profile_name) => {
             let catalog = RemoteCatalog::load_default()?;
             ConnectionFactory::remote(catalog.get(&profile_name)?).await?

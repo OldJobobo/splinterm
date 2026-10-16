@@ -24,3 +24,4 @@ mod topology_manager;
 mod window;
 
 pub(crate) use cli::run;
+pub(crate) use remote_status::RemoteNotConnected;
