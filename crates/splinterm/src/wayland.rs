@@ -2505,6 +2505,9 @@ fn apply_ime_preedit(snapshot: &mut TerminalSnapshot, text: Option<&str>) -> Opt
     Some(row)
 }
 
+/// `modal_open` covers input modals, a trusted consent prompt, and a
+/// non-inline session picker. Beneath any of them IME is allowed only into
+/// the owned field, so composed text never reaches the PTY.
 const fn terminal_ime_allowed(
     keyboard_focused: bool,
     modal_open: bool,
@@ -4635,51 +4638,47 @@ impl App {
     }
 
     fn owned_field_modal_open(&self) -> bool {
-        self.modal.input_modal_open()
-            || self.modal.session_picker.is_some()
-            || self.modal.trusted_consent.is_some()
+        self.modal.input_modal_open() || self.consent_or_picker_open()
+    }
+
+    /// A trusted consent prompt or a non-inline session picker. Each blocks
+    /// terminal input and Explorer search, but not an open terminal search.
+    fn consent_or_picker_open(&self) -> bool {
+        self.modal.session_picker.is_some() || self.modal.trusted_consent.is_some()
     }
 
     /// Returns the Splinterm-owned field that may receive IME composition.
-    /// Explorer focus keeps terminal and Explorer-search composition blocked.
+    /// It follows typed-text ownership, except that Explorer focus keeps
+    /// terminal and Explorer-search composition blocked.
     fn ime_owned_field_target(&self) -> Option<OwnedFieldTarget> {
-        if self.modal.binding_help.is_some() {
-            return Some(OwnedFieldTarget::BindingHelp);
-        }
-        if self.modal.command_palette.is_some() {
-            return Some(OwnedFieldTarget::CommandPalette);
-        }
-        if self
-            .modal
-            .dojo_prompt
-            .as_ref()
-            .is_some_and(|prompt| prompt.input().is_some())
-        {
-            return Some(OwnedFieldTarget::DojoPrompt);
-        }
-        if self.owned_field_modal_open() || self.explorer.focused() {
-            return None;
-        }
-        self.panes
-            .pane
-            .search
-            .input
-            .is_some()
-            .then_some(OwnedFieldTarget::Search)
+        let terminal_search = !self.explorer.focused() && self.panes.pane.search.input.is_some();
+        Self::select_owned_field(
+            self.modal.input_modal_open(),
+            self.consent_or_picker_open(),
+            self.modal.binding_help.as_ref().map(|_| ()),
+            self.modal.command_palette.as_ref().map(|_| ()),
+            self.modal
+                .dojo_prompt
+                .as_ref()
+                .and_then(DojoPromptUi::input)
+                .map(|_| ()),
+            None,
+            terminal_search.then_some(()),
+        )
+        .map(|(target, ())| target)
     }
 
     fn active_owned_field(&mut self) -> Option<(OwnedFieldTarget, &mut BoundedTextEditor)> {
-        if self.modal.binding_help.is_some() {
-            return self
-                .modal
-                .binding_help
-                .as_mut()
-                .map(|help| (OwnedFieldTarget::BindingHelp, help.editor_mut()));
-        }
-        let modal_open = self.owned_field_modal_open();
+        let input_modal_open = self.modal.input_modal_open();
+        let consent_or_picker_open = self.consent_or_picker_open();
         let explorer_search = self.explorer.focused() && self.explorer.search_active();
         Self::select_owned_field(
-            modal_open,
+            input_modal_open,
+            consent_or_picker_open,
+            self.modal
+                .binding_help
+                .as_mut()
+                .map(BindingHelpUi::editor_mut),
             self.modal
                 .command_palette
                 .as_mut()
@@ -4693,28 +4692,38 @@ impl App {
         )
     }
 
-    fn select_owned_field<'a>(
-        modal_open: bool,
-        palette: Option<&'a mut BoundedTextEditor>,
-        prompt: Option<&'a mut BoundedTextEditor>,
-        explorer: Option<&'a mut BoundedTextEditor>,
-        terminal_search: Option<&'a mut BoundedTextEditor>,
-    ) -> Option<(OwnedFieldTarget, &'a mut BoundedTextEditor)> {
-        // Explorer keeps its focus while a modal is open, but must not keep
-        // ownership of text editing above that modal.
-        if let Some(editor) = palette {
-            return Some((OwnedFieldTarget::CommandPalette, editor));
+    /// Chooses the field that owns typed text and IME composition. Binding
+    /// help, the command palette, and Dojo prompt input take priority. An
+    /// input modal blocks both background searches. A consent prompt or
+    /// non-inline picker blocks Explorer search but leaves an open terminal
+    /// search as the destination, so text never reaches the PTY beneath it.
+    fn select_owned_field<T>(
+        input_modal_open: bool,
+        consent_or_picker_open: bool,
+        binding_help: Option<T>,
+        palette: Option<T>,
+        prompt: Option<T>,
+        explorer: Option<T>,
+        terminal_search: Option<T>,
+    ) -> Option<(OwnedFieldTarget, T)> {
+        if let Some(field) = binding_help {
+            return Some((OwnedFieldTarget::BindingHelp, field));
         }
-        if let Some(editor) = prompt {
-            return Some((OwnedFieldTarget::DojoPrompt, editor));
+        if let Some(field) = palette {
+            return Some((OwnedFieldTarget::CommandPalette, field));
         }
-        if modal_open {
+        if let Some(field) = prompt {
+            return Some((OwnedFieldTarget::DojoPrompt, field));
+        }
+        if input_modal_open {
             return None;
         }
-        if let Some(editor) = explorer {
-            return Some((OwnedFieldTarget::ExplorerSearch, editor));
+        // Explorer keeps its focus while a modal is open, but must not keep
+        // ownership of text editing above that modal.
+        if !consent_or_picker_open && let Some(field) = explorer {
+            return Some((OwnedFieldTarget::ExplorerSearch, field));
         }
-        terminal_search.map(|editor| (OwnedFieldTarget::Search, editor))
+        terminal_search.map(|field| (OwnedFieldTarget::Search, field))
     }
 
     fn owned_field_editor_mut(
@@ -6232,7 +6241,10 @@ impl App {
 
     fn send_command(&mut self, command: WindowCommand) {
         if let WindowCommand::Input(bytes) = command {
+            // Nothing typed, pasted, or composed reaches the PTY behind an
+            // input modal or a pending trusted consent prompt.
             if !self.modal.input_modal_open()
+                && self.modal.trusted_consent.is_none()
                 && let Err(error) = self.queue_terminal_input(bytes)
             {
                 self.scheduling.fail(error);
@@ -6356,7 +6368,7 @@ impl App {
         } else if self.input.ime.entered
             && terminal_ime_allowed(
                 focused,
-                self.modal.input_modal_open(),
+                self.owned_field_modal_open(),
                 self.explorer.focused(),
                 self.ime_owned_field_target(),
             )
@@ -6387,7 +6399,7 @@ impl App {
     fn enable_text_input_if_allowed(&mut self) {
         if terminal_ime_allowed(
             self.input.keyboard_focused,
-            self.modal.input_modal_open(),
+            self.owned_field_modal_open(),
             self.explorer.focused(),
             self.ime_owned_field_target(),
         ) {
@@ -11245,6 +11257,8 @@ mod tests {
         let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
         let (target, editor) = App::select_owned_field(
             true,
+            false,
+            None,
             Some(&mut palette),
             None,
             Some(&mut explorer),
@@ -11265,6 +11279,8 @@ mod tests {
         let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
         let (target, editor) = App::select_owned_field(
             true,
+            false,
+            None,
             None,
             Some(&mut prompt),
             Some(&mut explorer),
@@ -11280,43 +11296,189 @@ mod tests {
 
     #[test]
     fn owned_fields_nonediting_modal_blocks_background_searches() {
-        for explorer_active in [false, true] {
-            for terminal_active in [false, true] {
-                let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
-                let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
-                assert!(
-                    App::select_owned_field(
-                        true,
-                        None,
-                        None,
-                        explorer_active.then_some(&mut explorer),
-                        terminal_active.then_some(&mut terminal),
-                    )
-                    .is_none()
-                );
-                assert_eq!(explorer.text(), "keep");
-                assert_eq!(terminal.text(), "terminal");
+        for consent_or_picker_open in [false, true] {
+            for explorer_active in [false, true] {
+                for terminal_active in [false, true] {
+                    let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+                    let mut terminal = BoundedTextEditor::new("terminal".into(), 128, 128, true);
+                    assert!(
+                        App::select_owned_field(
+                            true,
+                            consent_or_picker_open,
+                            None,
+                            None,
+                            None,
+                            explorer_active.then_some(&mut explorer),
+                            terminal_active.then_some(&mut terminal),
+                        )
+                        .is_none()
+                    );
+                    assert_eq!(explorer.text(), "keep");
+                    assert_eq!(terminal.text(), "terminal");
+                }
             }
         }
+    }
+
+    #[test]
+    fn owned_fields_consent_or_picker_keeps_terminal_search_and_blocks_explorer() {
+        let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+        let mut terminal = BoundedTextEditor::new(String::new(), 128, 128, true);
+        let (target, editor) = App::select_owned_field(
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(&mut explorer),
+            Some(&mut terminal),
+        )
+        .unwrap();
+        assert_eq!(target, OwnedFieldTarget::Search);
+        assert!(editor.insert("needle"));
+        assert_eq!(terminal.text(), "needle");
+        assert_eq!(explorer.text(), "keep");
+        let mut explorer = BoundedTextEditor::new("keep".into(), 128, 128, true);
+        assert!(
+            App::select_owned_field(false, true, None, None, None, Some(&mut explorer), None)
+                .is_none()
+        );
+        assert_eq!(explorer.text(), "keep");
     }
 
     #[test]
     fn owned_fields_restore_background_search_priority_without_a_modal() {
         let mut explorer = BoundedTextEditor::new(String::new(), 128, 128, true);
         let mut terminal = BoundedTextEditor::new(String::new(), 128, 128, true);
-        let (target, editor) =
-            App::select_owned_field(false, None, None, Some(&mut explorer), Some(&mut terminal))
-                .unwrap();
+        let (target, editor) = App::select_owned_field(
+            false,
+            false,
+            None,
+            None,
+            None,
+            Some(&mut explorer),
+            Some(&mut terminal),
+        )
+        .unwrap();
         assert_eq!(target, OwnedFieldTarget::ExplorerSearch);
         assert!(editor.insert("explorer"));
         assert_eq!(terminal.text(), "");
         let (target, editor) =
-            App::select_owned_field(false, None, None, None, Some(&mut terminal)).unwrap();
+            App::select_owned_field(false, false, None, None, None, None, Some(&mut terminal))
+                .unwrap();
         assert_eq!(target, OwnedFieldTarget::Search);
         assert!(editor.insert("terminal"));
         assert_eq!(explorer.text(), "explorer");
         assert_eq!(terminal.text(), "terminal");
-        assert!(App::select_owned_field(false, None, None, None, None).is_none());
+        assert!(
+            App::select_owned_field::<&mut BoundedTextEditor>(
+                false, false, None, None, None, None, None
+            )
+            .is_none()
+        );
+    }
+
+    /// Mirrors the App wiring: `ime_owned_field_target`, then the IME enable
+    /// gate and the batch gate with `owned_field_modal_open`. Returns the IME
+    /// target, whether IME is enabled, and whether a committed batch is
+    /// dropped. A dropped batch never reaches `WindowCommand::Input`; an
+    /// allowed batch with no target is the only path that writes to the PTY.
+    #[allow(
+        clippy::fn_params_excessive_bools,
+        reason = "each flag is one independent modal layer in the routing table"
+    )]
+    fn ime_route(
+        input_modal_open: bool,
+        consent_or_picker_open: bool,
+        explorer_focused: bool,
+        binding_help: bool,
+        palette: bool,
+        prompt_input: bool,
+        terminal_search: bool,
+    ) -> (Option<OwnedFieldTarget>, bool, bool) {
+        let target = App::select_owned_field(
+            input_modal_open,
+            consent_or_picker_open,
+            binding_help.then_some(()),
+            palette.then_some(()),
+            prompt_input.then_some(()),
+            None,
+            (!explorer_focused && terminal_search).then_some(()),
+        )
+        .map(|(target, ())| target);
+        let modal_open = input_modal_open || consent_or_picker_open;
+        (
+            target,
+            terminal_ime_allowed(true, modal_open, explorer_focused, target),
+            ime_batch_blocked(modal_open, explorer_focused, false, target),
+        )
+    }
+
+    #[test]
+    fn ime_composes_into_terminal_search_under_consent_or_non_inline_picker() {
+        // Trusted consent and a non-inline picker are the same modal layer.
+        assert_eq!(
+            ime_route(false, true, false, false, false, false, true),
+            (Some(OwnedFieldTarget::Search), true, false)
+        );
+        // Explorer focus still blocks composition beneath them.
+        assert_eq!(
+            ime_route(false, true, true, false, false, false, true),
+            (None, false, true)
+        );
+        // An inline picker is an input modal and keeps search composition blocked.
+        assert_eq!(
+            ime_route(true, false, false, false, false, false, true),
+            (None, false, true)
+        );
+    }
+
+    #[test]
+    fn ime_never_reaches_the_pty_beneath_a_consent_prompt() {
+        for explorer_focused in [false, true] {
+            let (target, allowed, blocked) =
+                ime_route(false, true, explorer_focused, false, false, false, false);
+            assert_eq!(target, None);
+            assert!(!allowed);
+            assert!(blocked);
+            assert!(ime_batch_blocked(true, explorer_focused, true, target));
+        }
+        // Without a modal the PTY remains the IME destination.
+        assert_eq!(
+            ime_route(false, false, false, false, false, false, false),
+            (None, true, false)
+        );
+    }
+
+    #[test]
+    fn ime_keeps_explicit_field_priority_over_terminal_search() {
+        for consent_or_picker_open in [false, true] {
+            for explorer_focused in [false, true] {
+                let route = |help, palette, prompt| {
+                    ime_route(
+                        true,
+                        consent_or_picker_open,
+                        explorer_focused,
+                        help,
+                        palette,
+                        prompt,
+                        true,
+                    )
+                };
+                assert_eq!(
+                    route(true, true, true),
+                    (Some(OwnedFieldTarget::BindingHelp), true, false)
+                );
+                assert_eq!(
+                    route(false, true, true),
+                    (Some(OwnedFieldTarget::CommandPalette), true, false)
+                );
+                assert_eq!(
+                    route(false, false, true),
+                    (Some(OwnedFieldTarget::DojoPrompt), true, false)
+                );
+            }
+        }
     }
 
     #[test]

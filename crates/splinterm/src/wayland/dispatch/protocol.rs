@@ -142,7 +142,7 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
         let owned_target = state.ime_owned_field_target();
         if ime_batch_event
             && ime_batch_blocked(
-                state.modal.input_modal_open(),
+                state.owned_field_modal_open(),
                 state.explorer.focused(),
                 state.input.ime_modal_barrier,
                 owned_target,
@@ -157,7 +157,7 @@ impl Dispatch<ZwpTextInputV3, u64> for App {
                     state.input.ime.entered = true;
                     if terminal_ime_allowed(
                         state.input.keyboard_focused,
-                        state.modal.input_modal_open(),
+                        state.owned_field_modal_open(),
                         state.explorer.focused(),
                         state.ime_owned_field_target(),
                     ) {
