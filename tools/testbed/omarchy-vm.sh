@@ -48,6 +48,14 @@ Actions:
   package-install --confirm-guest-install
                      Install the built guest package, preserving rollback copies
   package-launch     Launch installed /usr/bin siblings with private guest state
+  package-config RELPATH | --clear
+                     Seed (and, when live, write) a private config file from stdin
+  package-launch-extra launch|xdg [ARGS...]
+                     Add one guarded packaged window to the live session
+  package-close-extra ID
+                     Close one additional packaged window and restore focus
+  font-fixture invalid-candidate [--install]
+                     Build the invalid live-font fixture in the package root
   package-stop       Stop installed-package test processes and remove private state
   exec COMMAND...    Run a command from the guest checkout without syncing
   desktop-exec CMD... Run a command in the guest Wayland session
@@ -514,6 +522,11 @@ mkdir -m 700 "$state"
 created_state=true
 mkdir -m 700 "$config"
 created_config=true
+# A seeded private configuration (package-config) is copied in before launch.
+seed="$package_root/acceptance-seed"
+if [[ -d $seed && ! -L $seed ]]; then
+  cp -R -- "$seed/." "$config/"
+fi
 printf '%s\n' "$package_root" >"$runtime/testbed-root"
 instance=$(hyprctl instances -j | jq -er \
   'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
@@ -609,7 +622,226 @@ if [[ -e $window_state ]]; then
     --state "$window_state"
 fi
 rm -rf "$runtime" "$SPLINTERM_TESTBED_PACKAGE_ROOT/acceptance-state" \
-  "$SPLINTERM_TESTBED_PACKAGE_ROOT/acceptance-config"
+  "$SPLINTERM_TESTBED_PACKAGE_ROOT/acceptance-config" \
+  "$SPLINTERM_TESTBED_PACKAGE_ROOT/font-fixtures"
+REMOTE
+    ;;
+  package-config)
+    package_root="$remote_root/.testbed-package"
+    if [[ ${1:-} == --clear && $# == 1 ]]; then
+      ssh "${ssh_options[@]}" "$target" \
+        "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") bash -s" <<'REMOTE'
+set -euo pipefail
+seed="$SPLINTERM_TESTBED_PACKAGE_ROOT/acceptance-seed"
+test ! -L "$SPLINTERM_TESTBED_PACKAGE_ROOT"
+[[ ! -L $seed ]] || { printf 'config seed is a symlink: %s\n' "$seed" >&2; exit 1; }
+rm -rf -- "$seed"
+printf 'cleared private config seed: %s\n' "$seed"
+REMOTE
+      exit 0
+    fi
+    (($# == 1)) || fail 'package-config takes RELPATH (content on stdin) or --clear'
+    relpath=$1
+    [[ ${#relpath} -le 128 \
+      && $relpath =~ ^(splinterm|fontconfig)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ \
+      && ! $relpath =~ (^|/)\.\.?(/|$) ]] \
+      || fail 'package-config RELPATH must be splinterm/... or fontconfig/... without dot segments'
+    # The remote script travels as an argument so stdin carries the content.
+    remote_script=$(cat <<'REMOTE'
+set -euo pipefail
+package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
+relpath=$SPLINTERM_TESTBED_CONFIG_PATH
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
+seed="$package_root/acceptance-seed"
+config="$package_root/acceptance-config"
+test -d "$package_root" && test ! -L "$package_root"
+[[ ! -L $seed ]] || { printf 'config seed is a symlink: %s\n' "$seed" >&2; exit 1; }
+content=$(mktemp "$package_root/.config-content.XXXXXX")
+trap 'rm -f -- "$content"' EXIT
+head -c 65537 >"$content"
+(( $(stat -c %s "$content") <= 65536 )) || {
+  printf 'package-config content exceeds 64 KiB\n' >&2
+  exit 1
+}
+write_into() {
+  local root=$1 destination
+  destination="$root/$relpath"
+  mkdir -p -m 700 -- "$(dirname -- "$destination")"
+  [[ ! -L $destination ]] || { printf 'refusing symlink: %s\n' "$destination" >&2; exit 1; }
+  install -m 600 -- "$content" "$destination"
+  printf 'wrote %s\n' "$destination"
+}
+mkdir -p -m 700 -- "$seed"
+write_into "$seed"
+# A live packaged session owned by this checkout also receives the file now.
+owner="$runtime/testbed-root"
+if [[ -d $runtime && ! -L $runtime && -f $owner && ! -L $owner \
+  && $(<"$owner") == "$package_root" && -d $config && ! -L $config ]]; then
+  write_into "$config"
+fi
+REMOTE
+)
+    ssh "${ssh_options[@]}" "$target" \
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") SPLINTERM_TESTBED_CONFIG_PATH=$(printf '%q' "$relpath") bash -c $(printf '%q' "$remote_script")"
+    ;;
+  package-launch-extra)
+    (($# >= 1)) || fail 'package-launch-extra requires launch|xdg [ARGS...]'
+    case $1 in
+      launch|xdg) extra_program=$1 ;;
+      *) fail 'package-launch-extra requires launch|xdg [ARGS...]' ;;
+    esac
+    shift
+    package_root="$remote_root/.testbed-package"
+    extra_arguments=$(quote_command "$@")
+    ssh "${ssh_options[@]}" "$target" \
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") SPLINTERM_TESTBED_EXTRA_PROGRAM=$extra_program SPLINTERM_TESTBED_EXTRA_ARGUMENTS=$(printf '%q' "$extra_arguments") bash -s" <<'REMOTE'
+set -euo pipefail
+package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
+socket="$runtime/splinterd.sock"
+window_state="$runtime/guest-window.json"
+state="$package_root/acceptance-state"
+config="$package_root/acceptance-config"
+owner="$runtime/testbed-root"
+[[ -d $runtime && ! -L $runtime && -f $owner && ! -L $owner \
+  && $(<"$owner") == "$package_root" ]] || {
+  printf 'no packaged session owned by this checkout; run package-launch first\n' >&2
+  exit 1
+}
+[[ -S $socket && -f $window_state && -d $state && -d $config ]] || {
+  printf 'packaged session is incomplete: %s\n' "$runtime" >&2
+  exit 1
+}
+eval "extra_arguments=($SPLINTERM_TESTBED_EXTRA_ARGUMENTS)"
+case $SPLINTERM_TESTBED_EXTRA_PROGRAM in
+  launch) program=(/usr/bin/splinterm launch) ;;
+  xdg) program=(/usr/bin/splinterm-xdg-terminal-exec) ;;
+  *) printf 'invalid extra program\n' >&2; exit 2 ;;
+esac
+extra=
+for index in 1 2 3 4; do
+  if mkdir -m 700 "$runtime/extra-$index" 2>/dev/null; then
+    extra="$runtime/extra-$index"
+    break
+  fi
+done
+[[ -n $extra ]] || { printf 'at most four additional windows per session\n' >&2; exit 1; }
+extra_state="$extra/guest-window.json"
+instance=$(hyprctl instances -j | jq -er \
+  'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export WAYLAND_DISPLAY
+WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
+export HYPRLAND_INSTANCE_SIGNATURE
+HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+client_pid=
+cleanup_failed_extra() {
+  [[ -z $client_pid ]] || kill "$client_pid" 2>/dev/null || true
+  [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
+  if [[ -e $extra_state ]]; then
+    if ! python "$package_root/source/tools/testbed/guest-window.py" restore \
+      --state "$extra_state"; then
+      printf 'additional window restoration failed; state retained: %s\n' "$extra" >&2
+      return 1
+    fi
+  fi
+  rm -rf -- "$extra"
+}
+trap cleanup_failed_extra ERR
+python "$package_root/source/tools/testbed/guest-window.py" prepare \
+  --state "$extra_state" --owner-state "$window_state"
+client_token=$(python -c 'import secrets; print(secrets.token_hex(16))')
+printf '%s\n' "$client_token" >"$extra/client-token"
+SPLINTERM_TEST_WINDOW_TOKEN="$client_token" \
+SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
+  nohup "${program[@]}" "${extra_arguments[@]}" >"$extra/client.log" 2>&1 </dev/null &
+client_pid=$!
+printf '%s\n' "$client_pid" >"$extra/client-pid"
+python "$package_root/source/tools/testbed/guest-window.py" place --state "$extra_state" \
+  --client-pid "$client_pid" --client-token "$client_token"
+printf 'additional guest window id=%s pid=%s log=%s\n' \
+  "${extra##*-}" "$client_pid" "$extra/client.log"
+trap - ERR
+REMOTE
+    ;;
+  package-close-extra)
+    [[ $# == 1 && ${1:-} =~ ^[1-4]$ ]] || fail 'package-close-extra requires an id from 1 to 4'
+    package_root="$remote_root/.testbed-package"
+    ssh "${ssh_options[@]}" "$target" \
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") SPLINTERM_TESTBED_EXTRA_ID=$1 bash -s" <<'REMOTE'
+set -euo pipefail
+package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
+socket="$runtime/splinterd.sock"
+owner="$runtime/testbed-root"
+extra="$runtime/extra-$SPLINTERM_TESTBED_EXTRA_ID"
+[[ -d $runtime && ! -L $runtime && -f $owner && ! -L $owner \
+  && $(<"$owner") == "$package_root" ]] || {
+  printf 'no packaged session owned by this checkout\n' >&2
+  exit 1
+}
+[[ -d $extra && ! -L $extra ]] || { printf 'no additional window %s\n' "$extra" >&2; exit 1; }
+token=$(<"$extra/client-token")
+# Stop only processes carrying this window's launch token and private socket.
+for process in /proc/[0-9]*; do
+  [[ -r $process/environ ]] || continue
+  environment=$(tr '\0' '\n' <"$process/environ" 2>/dev/null || true)
+  grep -Fqx "SPLINTERM_TEST_WINDOW_TOKEN=$token" <<<"$environment" || continue
+  grep -Fqx "SPLINTERM_SOCKET=$socket" <<<"$environment" || continue
+  kill "${process##*/}" 2>/dev/null || true
+done
+instance=$(hyprctl instances -j | jq -er \
+  'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export WAYLAND_DISPLAY
+WAYLAND_DISPLAY=$(jq -r '.wl_socket' <<<"$instance")
+export HYPRLAND_INSTANCE_SIGNATURE
+HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+if [[ -e $extra/guest-window.json ]]; then
+  python "$package_root/source/tools/testbed/guest-window.py" restore \
+    --state "$extra/guest-window.json"
+fi
+rm -rf -- "$extra"
+REMOTE
+    ;;
+  font-fixture)
+    [[ ${1:-} == invalid-candidate && ($# == 1 || ($# == 2 && ${2:-} == --install)) ]] \
+      || fail 'font-fixture requires invalid-candidate [--install]'
+    install_fixture=false
+    [[ ${2:-} != --install ]] || install_fixture=true
+    package_root="$remote_root/.testbed-package"
+    ssh "${ssh_options[@]}" "$target" \
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") SPLINTERM_TESTBED_INSTALL_FIXTURE=$install_fixture bash -s" <<'REMOTE'
+set -euo pipefail
+package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
+runtime="/run/user/$(id -u)/${SPLINTERM_TESTBED_RUNTIME_LEAF}-package-test"
+fixtures="$package_root/font-fixtures"
+output="$fixtures/invalid-candidate"
+config="$package_root/acceptance-config"
+test -d "$package_root/source/.git" && test ! -L "$package_root"
+[[ ! -L $fixtures ]] || { printf 'font fixture root is a symlink\n' >&2; exit 1; }
+mkdir -p -m 700 -- "$fixtures"
+rm -rf -- "$output"
+python "$package_root/source/tools/testbed/font-fixture.py" invalid-candidate \
+  --output "$output"
+if [[ $SPLINTERM_TESTBED_INSTALL_FIXTURE == true ]]; then
+  owner="$runtime/testbed-root"
+  [[ -d $runtime && ! -L $runtime && -f $owner && ! -L $owner \
+    && $(<"$owner") == "$package_root" && -d $config && ! -L $config ]] || {
+    printf 'no packaged session owned by this checkout to install into\n' >&2
+    exit 1
+  }
+  mkdir -p -m 700 -- "$config/fontconfig"
+  destination="$config/fontconfig/fonts.conf"
+  [[ ! -L $destination ]] || { printf 'refusing symlink: %s\n' "$destination" >&2; exit 1; }
+  if [[ -e $destination && ! -e $destination.before-fixture ]]; then
+    cp -- "$destination" "$destination.before-fixture"
+  fi
+  install -m 600 -- "$output/fonts.conf" "$destination"
+  printf 'installed invalid-candidate fonts.conf into %s\n' "$destination"
+fi
 REMOTE
     ;;
   exec)

@@ -104,11 +104,37 @@ def read_state(path: Path) -> dict[str, Any]:
     return value
 
 
-def prepare(path: Path) -> None:
+def require_owned_target_workspace(
+    current_clients: list[dict[str, Any]], owner: dict[str, Any]
+) -> str:
+    """An additional window may join only the owner's guarded test workspace."""
+    owner_address = owner.get("target_address")
+    if not isinstance(owner_address, str) or not ADDRESS.fullmatch(owner_address):
+        fail("owner guest window state has no placed test window")
+    occupants = [
+        client for client in current_clients if workspace_id(client) == TARGET_WORKSPACE
+    ]
+    if not any(client.get("address") == owner_address for client in occupants):
+        fail(f"owner test window {owner_address} is not on workspace {TARGET_WORKSPACE}")
+    strangers = [
+        client.get("address")
+        for client in occupants
+        if client.get("initialClass") != APP_ID
+    ]
+    if strangers:
+        fail(f"guest workspace {TARGET_WORKSPACE} holds non-Splinterm windows: {strangers}")
+    return owner_address
+
+
+def prepare(path: Path, owner_path: Path | None = None) -> None:
     if path.exists():
         fail(f"guest window state already exists; run stop first: {path}")
     current_clients = clients()
-    require_empty_target_workspace(current_clients)
+    owner_address = None
+    if owner_path is None:
+        require_empty_target_workspace(current_clients)
+    else:
+        owner_address = require_owned_target_workspace(current_clients, read_state(owner_path))
     active_workspace = hypr_json("activeworkspace")
     active_window = hypr_json("activewindow")
     cursor = hypr_json("cursorpos")
@@ -128,6 +154,7 @@ def prepare(path: Path) -> None:
             ),
             "cursor": {"x": cursor.get("x"), "y": cursor.get("y")},
             "monitor": monitor,
+            "owner_address": owner_address,
             "target_address": None,
             "target_initial": None,
             "target_final": None,
@@ -250,7 +277,17 @@ def restore(path: Path) -> None:
     current_clients = clients()
     if target_address and any(client.get("address") == target_address for client in current_clients):
         fail(f"guest test window is still mapped: {target_address}")
-    require_empty_target_workspace(current_clients)
+    if state.get("owner_address") is None:
+        require_empty_target_workspace(current_clients)
+    else:
+        before = set(state.get("before_addresses", []))
+        unowned = sorted(
+            str(client.get("address"))
+            for client in current_clients
+            if workspace_id(client) == TARGET_WORKSPACE and client.get("address") not in before
+        )
+        if unowned:
+            fail(f"guest workspace {TARGET_WORKSPACE} gained unowned windows: {unowned}")
 
     recorded_monitor = state.get("monitor")
     if monitor_record() != recorded_monitor:
@@ -279,7 +316,10 @@ def restore(path: Path) -> None:
         f"hl.dsp.cursor.move({{ x = {round(x)}, y = {round(y)} }})",
     )
     path.unlink()
-    print(f"guest workspace {TARGET_WORKSPACE} is empty; prior focus and cursor restored")
+    if state.get("owner_address") is None:
+        print(f"guest workspace {TARGET_WORKSPACE} is empty; prior focus and cursor restored")
+    else:
+        print("additional guest window closed; prior focus and cursor restored")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -288,6 +328,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--state", required=True, type=Path)
     result.add_argument("--client-pid", type=int)
     result.add_argument("--client-token")
+    result.add_argument(
+        "--owner-state",
+        type=Path,
+        help="prepare an additional window beside the window this state guards",
+    )
     return result
 
 
@@ -302,8 +347,12 @@ def main() -> int:
             ):
                 fail("place requires a 32-character lowercase hexadecimal --client-token")
             place(arguments.state, arguments.client_pid, arguments.client_token)
+        elif arguments.action == "prepare":
+            prepare(arguments.state, arguments.owner_state)
         else:
-            {"prepare": prepare, "restore": restore}[arguments.action](arguments.state)
+            if arguments.owner_state is not None:
+                fail("--owner-state applies only to prepare")
+            restore(arguments.state)
     except (RuntimeError, subprocess.CalledProcessError) as error:
         if isinstance(error, subprocess.CalledProcessError) and error.stderr:
             print(error.stderr.rstrip(), file=sys.stderr)

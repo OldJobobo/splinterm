@@ -225,6 +225,96 @@ class GuestWindowTests(unittest.TestCase):
             ),
         )
 
+    MONITOR = {"id": 0, "name": "Virtual-1", "scale": 1.0, "transform": 0}
+
+    def owner_state(self, address: str | None = "0xa1") -> Path:
+        path = self.state_path()
+        guest_window.write_state(path, {"target_address": address})
+        return path
+
+    def prepare_extra(self, current: list[dict[str, object]], owner: Path) -> Path:
+        path = self.state_path()
+
+        def hypr_json(name: str, *_: str) -> object:
+            return {
+                "activeworkspace": {"id": 8, "monitor": "Virtual-1"},
+                "activewindow": {"address": "0xa1"},
+                "cursorpos": {"x": 5, "y": 6},
+            }[name]
+
+        with (
+            mock.patch.object(guest_window, "clients", return_value=current),
+            mock.patch.object(guest_window, "hypr_json", side_effect=hypr_json),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command"),
+        ):
+            guest_window.prepare(path, owner)
+        return path
+
+    def test_extra_prepare_joins_only_the_owned_test_workspace(self) -> None:
+        main = {
+            "address": "0xa1",
+            "workspace": {"id": 8},
+            "initialClass": guest_window.APP_ID,
+        }
+        path = self.prepare_extra([main], self.owner_state())
+        state = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(state["owner_address"], "0xa1")
+        self.assertEqual(state["before_addresses"], ["0xa1"])
+        self.assertEqual(state["active_window"], "0xa1")
+
+        stranger = {"address": "0xc3", "workspace": {"id": 8}, "initialClass": "foot"}
+        with self.assertRaisesRegex(RuntimeError, "non-Splinterm windows"):
+            self.prepare_extra([main, stranger], self.owner_state())
+        moved = dict(main, workspace={"id": 3})
+        with self.assertRaisesRegex(RuntimeError, "is not on workspace 8"):
+            self.prepare_extra([moved], self.owner_state())
+        with self.assertRaisesRegex(RuntimeError, "no placed test window"):
+            self.prepare_extra([main], self.owner_state(None))
+
+    def test_extra_restore_keeps_the_owner_window_and_rejects_unowned_windows(
+        self,
+    ) -> None:
+        def extra_state() -> Path:
+            path = self.state_path()
+            guest_window.write_state(
+                path,
+                {
+                    "active_window": "0xa1",
+                    "active_workspace": 8,
+                    "before_addresses": ["0xa1"],
+                    "cursor": {"x": 5, "y": 6},
+                    "monitor": self.MONITOR,
+                    "owner_address": "0xa1",
+                    "target_address": "0xb2",
+                },
+            )
+            return path
+
+        main = {"address": "0xa1", "workspace": {"id": 8}}
+        path = extra_state()
+        with (
+            mock.patch.object(guest_window, "clients", return_value=[main]),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command") as command,
+        ):
+            guest_window.restore(path)
+        self.assertFalse(path.exists())
+        calls = [call.args[2] for call in command.call_args_list]
+        self.assertIn('workspace = "8"', calls[0])
+        self.assertIn("address:0xa1", calls[1])
+
+        path = extra_state()
+        unowned = {"address": "0xd4", "workspace": {"id": 8}}
+        with (
+            mock.patch.object(guest_window, "clients", return_value=[main, unowned]),
+            mock.patch.object(guest_window, "monitor_record", return_value=self.MONITOR),
+            mock.patch.object(guest_window, "command"),
+            self.assertRaisesRegex(RuntimeError, "unowned windows"),
+        ):
+            guest_window.restore(path)
+        self.assertTrue(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
