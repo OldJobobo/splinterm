@@ -24,6 +24,15 @@ pub use live::{
 };
 pub use splinterm_policy::{executable_identity, inspect_policy_file, policy};
 
+/// Ceiling on live Splint runtimes, persistent and transient together.
+///
+/// The daemon runtime registry refuses every insertion past this bound, so no
+/// daemon generation can own more live Splints than this; handoff manifests
+/// carry only live Splints and are bounded by it.
+pub const MAX_LIVE_SPLINTS: usize = 256;
+// A full persisted topology must be able to run entirely live.
+const _: () = assert!(MAX_LIVE_SPLINTS >= splinterm_core::MAX_SPLINTS);
+
 /// Source commit for diagnostics: the packaged commit, or a best-effort commit
 /// for unpackaged builds. It is never part of the handoff identity.
 pub const SOURCE_COMMIT: Option<&str> = option_env!("SPLINTERM_SOURCE_COMMIT");

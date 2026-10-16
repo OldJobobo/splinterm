@@ -49,6 +49,7 @@ splinterm reopen
 | New vertical split | Ctrl+Shift+\\ |
 | Move between panes | Ctrl+Shift+Arrow |
 | Cycle tabs | Ctrl+Tab / Ctrl+Shift+Tab |
+| Jump to tab 1–9 | Ctrl+Shift+1 … Ctrl+Shift+9 |
 | New Dojo tab | Ctrl+Shift+D |
 | Detach active tab | Ctrl+Shift+Q |
 | Toggle tab strip | Ctrl+Shift+B |
