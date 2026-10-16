@@ -90,7 +90,7 @@ The default `main.font-sizing-policy=output-scale` follows Wayland compositor ou
 
 ## Omarchy theme integration
 
-With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies standard Omarchy accent and background-ramp roles. The active-tab body uses `lighter_bg`, then Foot `bright0`, rather than terminal selection color.
+With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies standard Omarchy accent and background-ramp roles. The active-tab body uses `lighter_bg`, then Foot `bright0`, rather than terminal selection color. Inactive tab labels use the theme's `muted` role (or Foot `bright0`) when it reaches 4.5:1 contrast against the tab strip without being louder than the foreground; otherwise they use the first qualifying 25/50/75 % mix with the foreground, or the plain foreground. JSON themes may set `inactive_tab_foreground` explicitly.
 
 Active tab text is independent from terminal selection text. Splinterm chooses whichever effective terminal background or foreground has higher WCAG contrast against the resolved active-tab body, preferring foreground on a tie. Native Omarchy themes need no Splinterm-specific roles. Explicit JSON themes may override the active-tab roles and use the same fallback rule against their own background and foreground roles.
 

@@ -239,7 +239,7 @@ const fn tab_foreground(theme: ResolvedTheme, active: bool) -> u32 {
     if active {
         theme.active_tab_foreground
     } else {
-        theme.foreground
+        theme.inactive_tab_foreground
     }
 }
 
@@ -1099,10 +1099,11 @@ mod tests {
             selection_foreground: 0x11_22_33,
             active_tab_background: 0x44_55_66,
             active_tab_foreground: 0xdd_ee_ff,
+            inactive_tab_foreground: 0x99_88_77,
             ui_accent: 0x77_88_99,
             ..ResolvedTheme::default()
         };
-        assert_eq!(tab_foreground(theme, false), 0xaa_bb_cc);
+        assert_eq!(tab_foreground(theme, false), 0x99_88_77);
         assert_eq!(tab_foreground(theme, true), 0xdd_ee_ff);
         assert_eq!(theme.selection_foreground, 0x11_22_33);
         assert_eq!(opaque_rgba(theme.ui_accent), [0x77, 0x88, 0x99, 0xff]);
