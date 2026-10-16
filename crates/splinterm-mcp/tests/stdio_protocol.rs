@@ -5381,7 +5381,8 @@ fn report_agent_status_fills_its_target_from_the_adapter_environment() {
                     status: None,
                 },
             ) if splint_id == flag_splint => Ok(Response::AgentStatusAccepted {
-                sequence: 5,
+                // A first clear for an incarnation is a no-op numbered 0.
+                sequence: 0,
                 expires_at_ms: None,
             }),
             (
@@ -5464,6 +5465,7 @@ fn report_agent_status_fills_its_target_from_the_adapter_environment() {
         FLAG_SPLINT
     );
     assert_eq!(cleared["structuredContent"]["data"]["state"], Value::Null);
+    assert_eq!(cleared["structuredContent"]["data"]["sequence"], 0);
     assert_eq!(
         cleared["structuredContent"]["data"]["expires_at_ms"],
         Value::Null

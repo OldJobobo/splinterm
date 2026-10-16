@@ -1012,4 +1012,35 @@ mod tests {
         assert!(!canonical_uuid("11111111-2222-4333-c444-555555555555"));
         assert!(!canonical_uuid("11111111-2222-4333-8444-55555555555A"));
     }
+
+    // The daemon accepts a clear that is the first report for an incarnation
+    // as a no-op with sequence 0; the MCP output contract must accept it.
+    #[test]
+    fn report_agent_status_output_accepts_a_first_clear_with_sequence_zero() {
+        let output = |sequence: i64| {
+            json!({
+                "schema": "splinterm.mcp.v2",
+                "tool": "splinterm.report_agent_status",
+                "ok": true,
+                "resource": {
+                    "kind": "agent_status",
+                    "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                    "incarnation": 2,
+                },
+                "data": {
+                    "committed": true,
+                    "state": null,
+                    "sequence": sequence,
+                    "expires_at_ms": null,
+                },
+                "truncated": false,
+                "content_trust": "trusted_metadata",
+            })
+        };
+        assert_eq!(
+            validate_output("splinterm.report_agent_status", &output(0)),
+            Ok(())
+        );
+        assert!(validate_output("splinterm.report_agent_status", &output(-1)).is_err());
+    }
 }

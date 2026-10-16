@@ -1754,6 +1754,33 @@ fn agent_status_set_defaults_to_the_splint_environment_without_echoing_detail() 
     assert!(!String::from_utf8_lossy(&output.stdout).contains("waiting for approval"));
 }
 
+// A clear that is the first report for an incarnation is a no-op the daemon
+// numbers 0; the CLI envelope reports it as the contract fixture shows.
+#[test]
+fn agent_status_first_clear_reports_sequence_zero() {
+    let (socket, server) = serve_agent_status_report(
+        agent_report(AGENT_SPLINT, 2, None),
+        Ok(Response::AgentStatusAccepted {
+            sequence: 0,
+            expires_at_ms: None,
+        }),
+    );
+    let output = run_agent_status(
+        &["--output", "json", "agent-status", "clear"],
+        &socket,
+        &inside_splint(),
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document, fixture("cli-agent-status-first-clear.json"));
+}
+
 #[test]
 fn agent_status_flags_override_the_environment_in_every_mode() {
     use splinterm_protocol::{AgentState, AgentStatusReport};

@@ -288,6 +288,8 @@ EXPECTED_MCP_VALID_FIXTURES = {
     "inspect_splint-agent-status.output.json",
     "inspect_topology-agent-status.output.json",
     "report_agent_status-clear.output.json",
+    # A first clear for an incarnation is a no-op the daemon numbers 0.
+    "report_agent_status-first-clear.output.json",
 }
 EXPECTED_MCP_INVALID_FIXTURES = {
     "argv-echo.json",
