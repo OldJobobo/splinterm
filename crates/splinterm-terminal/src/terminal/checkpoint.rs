@@ -285,20 +285,26 @@ impl CheckpointEvent {
 }
 
 impl KittyImageIdsCheckpointV1 {
-    fn capture(ids: &KittyImageIds) -> Self {
-        let capture = |entries: &std::collections::BTreeMap<u32, ImageContentId>| {
-            entries
+    /// Captures both screens' mappings after proving they satisfy the same
+    /// invariants restore enforces against the captured image plane.
+    fn capture(ids: &KittyImageIds, images: &ImagePlane) -> Result<Self, CheckpointError> {
+        let capture = |screen: ActiveScreen,
+                       entries: &std::collections::BTreeMap<u32, ImageContentId>|
+         -> Result<Vec<KittyImageIdCheckpoint>, CheckpointError> {
+            let entries = entries
                 .iter()
                 .map(|(application_id, content_id)| KittyImageIdCheckpoint {
                     application_id: *application_id,
                     content_id: *content_id,
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            validate_kitty_image_ids(images, screen, &entries)?;
+            Ok(entries)
         };
-        Self {
-            normal: capture(&ids.normal),
-            alternate: capture(&ids.alternate),
-        }
+        Ok(Self {
+            normal: capture(ActiveScreen::Normal, &ids.normal)?,
+            alternate: capture(ActiveScreen::Alternate, &ids.alternate)?,
+        })
     }
 
     fn restore(self, images: &ImagePlane) -> Result<KittyImageIds, CheckpointError> {
@@ -308,40 +314,52 @@ impl KittyImageIdsCheckpointV1 {
             std::collections::BTreeMap<u32, ImageContentId>,
             CheckpointError,
         > {
-            let mut restored = std::collections::BTreeMap::new();
-            let mut previous_application_id = None;
-            for entry in entries {
-                let is_kitty_content =
-                    images
-                        .content(screen, entry.content_id)
-                        .is_some_and(|content| {
-                            content.metadata().retention == ImageRetention::ExplicitDelete
-                                && matches!(
-                                    content.metadata().source_format,
-                                    ImageSourceFormat::KittyRgb
-                                        | ImageSourceFormat::KittyRgba
-                                        | ImageSourceFormat::KittyPng
-                                )
-                        });
-                if entry.application_id == 0
-                    || previous_application_id
-                        .is_some_and(|previous| previous >= entry.application_id)
-                    || !is_kitty_content
-                    || restored
-                        .insert(entry.application_id, entry.content_id)
-                        .is_some()
-                {
-                    return Err(CheckpointError::InvalidState);
-                }
-                previous_application_id = Some(entry.application_id);
-            }
-            Ok(restored)
+            validate_kitty_image_ids(images, screen, &entries)?;
+            Ok(entries
+                .into_iter()
+                .map(|entry| (entry.application_id, entry.content_id))
+                .collect())
         };
         Ok(KittyImageIds {
             normal: restore(ActiveScreen::Normal, self.normal)?,
             alternate: restore(ActiveScreen::Alternate, self.alternate)?,
         })
     }
+}
+
+/// One screen's Kitty mappings must use strictly increasing non-zero
+/// application ids, each naming distinct explicitly retained Kitty content on
+/// that screen. An alias would survive deletion of the image through its other
+/// id, and a mapping to absent content names nothing.
+fn validate_kitty_image_ids(
+    images: &ImagePlane,
+    screen: ActiveScreen,
+    entries: &[KittyImageIdCheckpoint],
+) -> Result<(), CheckpointError> {
+    let mut contents = std::collections::BTreeSet::new();
+    let mut previous_application_id = None;
+    for entry in entries {
+        let is_kitty_content = images
+            .content(screen, entry.content_id)
+            .is_some_and(|content| {
+                content.metadata().retention == ImageRetention::ExplicitDelete
+                    && matches!(
+                        content.metadata().source_format,
+                        ImageSourceFormat::KittyRgb
+                            | ImageSourceFormat::KittyRgba
+                            | ImageSourceFormat::KittyPng
+                    )
+            });
+        if entry.application_id == 0
+            || previous_application_id.is_some_and(|previous| previous >= entry.application_id)
+            || !is_kitty_content
+            || !contents.insert(entry.content_id)
+        {
+            return Err(CheckpointError::InvalidState);
+        }
+        previous_application_id = Some(entry.application_id);
+    }
+    Ok(())
 }
 
 impl TerminalCheckpointV2 {
@@ -354,7 +372,10 @@ impl TerminalCheckpointV2 {
                 .images
                 .capture_checkpoint(&normal_row_ids, &alternate_row_ids)
                 .map_err(|_| CheckpointError::InvalidState)?,
-            kitty_image_ids: KittyImageIdsCheckpointV1::capture(&terminal.kitty_image_ids),
+            kitty_image_ids: KittyImageIdsCheckpointV1::capture(
+                &terminal.kitty_image_ids,
+                &terminal.images,
+            )?,
         };
         digest_json(&terminal_body, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?;
         let image_sha256 = digest_json(&images, MAX_IMAGE_STATE_CHECKPOINT_BYTES)?;
@@ -1130,6 +1151,77 @@ mod tests {
                 Err(CheckpointError::InvalidState)
             ));
         }
+    }
+
+    #[test]
+    fn restored_kitty_ids_reject_aliases_of_one_content() {
+        // Ids still strictly increase, so only content uniqueness refuses it.
+        let alias = mutate_image(|images| {
+            let mut alias = images["kitty_image_ids"]["normal"][0].clone();
+            alias["application_id"] = json!(8);
+            images["kitty_image_ids"]["normal"]
+                .as_array_mut()
+                .unwrap()
+                .push(alias);
+        });
+        assert!(matches!(
+            Terminal::restore_checkpoint(&alias, config()),
+            Err(CheckpointError::InvalidState)
+        ));
+    }
+
+    fn kitty_terminal() -> (Terminal, ImageContentId) {
+        let mut terminal = Terminal::new(4, 2, config());
+        terminal.set_cell_pixel_size(1, 1);
+        terminal.advance(b"\x1b_Ga=t,f=32,s=1,v=1,i=7;/wAA/w==\x1b\\");
+        terminal.advance(b"\x1b_Ga=p,i=7,p=9,C=1\x1b\\");
+        let content = terminal
+            .kitty_image_ids
+            .get(ActiveScreen::Normal, 7)
+            .unwrap();
+        (terminal, content)
+    }
+
+    #[test]
+    fn removing_image_content_drops_its_kitty_ids_and_still_checkpoints() {
+        let (mut terminal, content) = kitty_terminal();
+        terminal.remove_image_content(content).unwrap();
+        assert!(terminal.kitty_image_ids.normal.is_empty());
+        let bytes = terminal.encode_checkpoint().unwrap();
+        let mut restored = Terminal::restore_checkpoint(&bytes, config()).unwrap();
+        assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
+        // The removed id names nothing, so placing it again fails.
+        restored.drain_events().for_each(drop);
+        restored.advance(b"\x1b_Ga=p,i=7,p=9,C=1\x1b\\");
+        assert!(
+            restored
+                .images
+                .placements(ActiveScreen::Normal)
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn capture_refuses_stale_or_aliased_kitty_ids() {
+        let (mut stale, content) = kitty_terminal();
+        stale
+            .images
+            .remove_content(ActiveScreen::Normal, content)
+            .unwrap();
+        assert!(matches!(
+            stale.encode_checkpoint(),
+            Err(CheckpointError::InvalidState)
+        ));
+
+        let (mut aliased, content) = kitty_terminal();
+        aliased
+            .kitty_image_ids
+            .insert(ActiveScreen::Normal, 8, content);
+        assert!(matches!(
+            aliased.encode_checkpoint(),
+            Err(CheckpointError::InvalidState)
+        ));
     }
 
     #[test]
