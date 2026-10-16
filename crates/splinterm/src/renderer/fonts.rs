@@ -2331,8 +2331,12 @@ mod tests {
             ("absent", vec![head(), maxp()]),
         ] {
             let face = stage_bytes(name, &synthetic_sfnt(&tables)).unwrap();
-            let advance = face_advance(&face, BASE_FONT_SIZE);
-            assert!(advance.is_ok() || advance.is_err(), "{name}");
+            // Without a cmap, 'M' maps to glyph 0; only the absence of a panic counts.
+            let _ = face_advance(&face, BASE_FONT_SIZE);
+            // A glyph past the long metrics takes Swash's `count - 1` branch.
+            let metrics = font_ref(&face).unwrap().glyph_metrics(&[]);
+            let _ = metrics.advance_width(u16::MAX);
+            let _ = metrics.lsb(u16::MAX);
         }
     }
 
@@ -2346,7 +2350,12 @@ mod tests {
             return;
         };
         let mut bytes = std::fs::read(&source.path).unwrap();
-        if bytes.get(..4) == Some(b"ttcf") {
+        // Only a single TrueType or CFF sfnt has the table directory read below;
+        // collections and non-sfnt formats such as PCF or Type 1 are skipped.
+        if !matches!(
+            bytes.get(..4),
+            Some([0, 1, 0, 0] | [b'O', b'T', b'T', b'O'] | [b't', b'r', b'u', b'e'])
+        ) {
             return;
         }
         let tables = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
