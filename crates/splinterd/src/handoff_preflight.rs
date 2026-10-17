@@ -33,7 +33,7 @@ use crate::{
     },
     handoff_compatibility::{
         BuildIdentity, BuildVersion, ExecutablePairBinding, ExecutablePairPreflight,
-        HandoffCapabilities, VersionRange,
+        HandoffCapabilities, RunningHandoffGeneration, VersionRange,
     },
     handoff_descriptors::{DescriptorHandoffError, PreparedDescriptorInheritance},
     package_provenance::compiled_build_provenance,
@@ -460,6 +460,23 @@ fn run_child(expected_role: PreflightRole) -> Result<(), PreflightError> {
     };
     send_packet(std::io::stdin().as_raw_fd(), &encode_report(report))?;
     Ok(())
+}
+
+/// Returns the generation identity and capabilities compiled into this image,
+/// exactly as its sealed preflight child would report them.
+///
+/// Candidate bootstrap uses this after descriptor claim to reject a manifest
+/// that does not identify the exact code now executing.
+///
+/// # Errors
+/// Rejects malformed embedded build provenance or version metadata.
+pub fn compiled_handoff_generation() -> Result<RunningHandoffGeneration, PreflightError> {
+    let (build_identity, build_version, capabilities) = compiled_contract()?;
+    Ok(RunningHandoffGeneration {
+        build_identity,
+        build_version,
+        capabilities,
+    })
 }
 
 fn compiled_contract() -> Result<(BuildIdentity, BuildVersion, HandoffCapabilities), PreflightError>

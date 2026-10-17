@@ -233,19 +233,11 @@ impl Drop for PreparedDescriptorInheritance<'_> {
 /// Every retained descriptor is close-on-exec. [`Self::take`] transfers one
 /// role to its adopting subsystem; all entries left in the table close on drop.
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "candidate claims land before the internal bootstrap adoption slice"
-)]
 pub(crate) struct CandidateDescriptorClaims {
     descriptors: BTreeMap<HandoffDescriptorSlot, OwnedFd>,
     closed_unexpected: usize,
 }
 
-#[allow(
-    dead_code,
-    reason = "candidate claims land before the internal bootstrap adoption slice"
-)]
 impl CandidateDescriptorClaims {
     /// Rebinds already-claimed owners to the complete validated manifest.
     ///
@@ -296,9 +288,17 @@ impl CandidateDescriptorClaims {
         self.descriptors.is_empty()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn contains(&self, slot: HandoffDescriptorSlot) -> bool {
         self.descriptors.contains_key(&slot)
+    }
+
+    /// Adds one owner outside manifest validation, so staging tests can prove
+    /// they do not depend on it.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&mut self, slot: HandoffDescriptorSlot, descriptor: OwnedFd) {
+        assert!(self.descriptors.insert(slot, descriptor).is_none());
     }
 
     #[must_use]

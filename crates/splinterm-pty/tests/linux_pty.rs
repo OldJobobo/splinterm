@@ -1,7 +1,10 @@
 use std::{
     fs,
     io::{ErrorKind, Read},
-    os::{fd::OwnedFd, unix::process::ExitStatusExt},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::{fs::OpenOptionsExt, process::ExitStatusExt},
+    },
     path::Path,
     process::Command,
     sync::{
@@ -215,8 +218,47 @@ fn live_session_identity_and_single_master_adoption_round_trip() {
     assert_eq!(identity.process_group(), identity.child_pid());
     assert_eq!(identity.session_id(), identity.child_pid());
     let master_fd = session.master_raw_fd();
+    let expected_size = session.size().unwrap();
+    let expected_foreground = session.foreground_process_group().unwrap();
     let adoptable = session.try_into_adoptable().unwrap();
     assert_eq!(adoptable.identity(), identity);
+    identity
+        .verify_inherited(adoptable.master(), expected_size, expected_foreground)
+        .unwrap();
+    assert!(matches!(
+        identity.verify_inherited(
+            adoptable.master(),
+            PtySize {
+                columns: expected_size.columns + 1,
+                ..expected_size
+            },
+            expected_foreground,
+        ),
+        Err(PtyError::IdentityMismatch)
+    ));
+    assert!(matches!(
+        identity.verify_inherited(adoptable.master(), expected_size, expected_foreground + 1),
+        Err(PtyError::IdentityMismatch)
+    ));
+    // The slave answers session, size, and foreground queries exactly like the
+    // master, so only the master check distinguishes them.
+    let slave_path = rustix::pty::ptsname(adoptable.master(), Vec::new()).unwrap();
+    let slave = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NOCTTY.bits().cast_signed())
+        .open(slave_path.to_str().unwrap())
+        .unwrap();
+    assert!(matches!(
+        identity.verify_inherited(slave.as_fd(), expected_size, expected_foreground),
+        Err(PtyError::IdentityMismatch)
+    ));
+    let not_a_terminal = fs::File::open("/dev/null").unwrap();
+    assert!(matches!(
+        splinterm_pty::verify_pty_master(not_a_terminal.as_fd()),
+        Err(PtyError::IdentityMismatch)
+    ));
+    drop(slave);
     let (manifest_identity, master) = adoptable.into_parts();
     let mut adopted =
         splinterm_pty::AdoptableLinuxPtySession::from_parts(manifest_identity, master)
@@ -285,8 +327,13 @@ fn adoption_reaps_a_child_that_exits_while_the_master_is_held() {
         )
         .unwrap();
     let child_pid = session.child_id();
+    let identity = session.identity();
     let adoptable = session.try_into_adoptable().unwrap();
     thread::sleep(Duration::from_millis(100));
+    assert!(matches!(
+        identity.verify_inherited(adoptable.master(), PtySize::cells(40, 10), child_pid),
+        Err(PtyError::ProcessExited)
+    ));
 
     let mut adopted = adoptable.try_adopt().unwrap();
     assert_eq!(adopted.wait().unwrap().code(), Some(7));

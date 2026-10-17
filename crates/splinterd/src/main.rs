@@ -1,5 +1,6 @@
 mod agent_status;
 mod audit;
+mod candidate_acquire;
 mod cgroup;
 mod consent;
 mod omarchy_environment;
@@ -1049,16 +1050,46 @@ fn require_workload_cgroups() -> Result<bool> {
 // Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
 // glibc per-thread allocator arenas after sustained terminal output.
 fn main() -> Result<()> {
-    if splinterd::handoff_preflight::dispatch_internal_preflight(
-        splinterd::handoff_preflight::PreflightRole::Daemon,
-    )? {
+    // Candidate activation is the first operation: nothing may create, close,
+    // or own a descriptor before the inherited set is claimed.
+    let candidate = candidate_acquire::acquire_before_tokio()?;
+    if candidate.is_none()
+        && splinterd::handoff_preflight::dispatch_internal_preflight(
+            splinterd::handoff_preflight::PreflightRole::Daemon,
+        )?
+    {
         return Ok(());
     }
     // Reject invalid invocations before sealed preflight executes both images.
     let require_workload_cgroups = require_workload_cgroups()?;
+    // One process-wide budget authority: staged terminals are restored against
+    // the same handles the daemon state owns.
+    let shared_image_budget = SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON);
+    let shared_kitty_upload_budget =
+        SharedKittyUploadBudget::new(DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON);
+    if let Some(candidate) = candidate {
+        let listener_path = socket_path()?;
+        let image_listener_path = image_content_socket_path(&listener_path);
+        // Staging is read-only. Until cooperative rollback is wired, a failure
+        // drops the recovery table, closing every claimed descriptor.
+        let stage = candidate.stage(
+            &shared_image_budget,
+            &shared_kitty_upload_budget,
+            &listener_path,
+            &image_listener_path,
+        )?;
+        // Forward exec does not activate this path yet, so a verified stage
+        // is a deliberate fatal stop rather than ordinary startup.
+        return stage.reject_until_runtime_adoption();
+    }
     let rollback_handoff =
         splinterd::handoff_coordinator::RollbackHandoffAuthority::prepare_installed();
-    run_daemon(require_workload_cgroups, rollback_handoff)
+    run_daemon(
+        require_workload_cgroups,
+        rollback_handoff,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+    )
 }
 
 #[allow(
@@ -1072,6 +1103,8 @@ async fn run_daemon(
         splinterd::handoff_coordinator::RollbackHandoffAuthority,
         splinterd::handoff_coordinator::HandoffCoordinatorError,
     >,
+    shared_image_budget: SharedImageBudget,
+    shared_kitty_upload_budget: SharedKittyUploadBudget,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -1213,10 +1246,8 @@ async fn run_daemon(
         revocations,
         image_transfers: Mutex::new(TransferAdmission::default()),
         image_transfer_expiry_changed: Notify::new(),
-        shared_image_budget: SharedImageBudget::new(MAX_IMAGE_BYTES_PER_DAEMON),
-        shared_kitty_upload_budget: SharedKittyUploadBudget::new(
-            DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
-        ),
+        shared_image_budget,
+        shared_kitty_upload_budget,
         pty_backend: LinuxPtyBackend::installed()?,
         workload_units,
         _rollback_handoff: rollback_handoff,

@@ -410,6 +410,29 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<HandoffManifestV1, ManifestError>
     Ok(manifest)
 }
 
+/// Canonicalizes one paired manifest fixture without exposing the internal
+/// manifest ABI to external integration tests.
+///
+/// # Errors
+/// Returns a bounded diagnostic when either JSON value is malformed or the
+/// decoded manifests do not form one exact forward/rollback pair.
+#[cfg(feature = "integration-test")]
+#[doc(hidden)]
+pub fn encode_manifest_pair_for_integration_test(
+    forward: serde_json::Value,
+    rollback: serde_json::Value,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let forward: HandoffManifestV1 = serde_json::from_value(forward)
+        .map_err(|error| format!("invalid forward manifest fixture: {error}"))?;
+    let rollback: HandoffManifestV1 = serde_json::from_value(rollback)
+        .map_err(|error| format!("invalid rollback manifest fixture: {error}"))?;
+    validate_manifest_pair(&forward, &rollback)
+        .map_err(|error| format!("invalid manifest fixture pair: {error}"))?;
+    let forward = encode_manifest(&forward).map_err(|error| error.to_string())?;
+    let rollback = encode_manifest(&rollback).map_err(|error| error.to_string())?;
+    Ok((forward, rollback))
+}
+
 /// Validates one complete body-free manifest without publishing partial state.
 ///
 /// # Errors
