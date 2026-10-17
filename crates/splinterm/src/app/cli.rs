@@ -29,7 +29,7 @@ use {
     tokio::sync::mpsc,
 };
 
-use super::commands::{Cli, Command, OutputMode, PresetCommand};
+use super::commands::{AgentStatusCommand, Cli, Command, OutputMode, PresetCommand};
 #[cfg(test)]
 use super::commands::{NewSplintSide, SplitAxis};
 use super::window::run_live_multipane_window;
@@ -41,6 +41,7 @@ use super::pane_bridge::{
     update_advances_from, validate_attached_snapshot, validate_scrollback_page_response,
 };
 use super::{
+    agent_status_cli::{resolve_agent_status_request, run_human_agent_status},
     consent::run_consent_client,
     human_output::{print_lairs, print_response},
     keymap_cli::{run_config_command, run_keymap_command},
@@ -48,8 +49,8 @@ use super::{
         confirm_kill, run_policy_command, run_relay_command, run_reset_command, usage_error,
     },
     machine::{
-        machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_command,
-        run_machine_subscription,
+        machine_exit_code, require_expected_incarnation, require_incarnation,
+        run_machine_agent_status, run_machine_command, run_machine_subscription,
     },
     presets::{materialize_preset, run_preset_command},
     remote_chooser::run_remotes,
@@ -116,6 +117,9 @@ pub(crate) async fn run() -> Result<()> {
         usage_error(
             "--remote is currently available for native and human command flows, not machine output",
         );
+    }
+    if let Command::AgentStatus { command } = command {
+        return run_agent_status_command(command, output, schema_major, timeout_ms, remote).await;
     }
     if output == Some(OutputMode::Json) {
         let focus_command = matches!(&command, Command::Focus);
@@ -270,6 +274,50 @@ pub(crate) async fn run() -> Result<()> {
     run_configured_command(command, config, factory).await
 }
 
+/// Resolves the agent status target before connecting, so a missing target is
+/// a usage error (exit 2, no machine document) in every output mode.
+async fn run_agent_status_command(
+    command: AgentStatusCommand,
+    output: Option<OutputMode>,
+    schema_major: Option<u16>,
+    timeout_ms: Option<u64>,
+    remote: Option<String>,
+) -> Result<()> {
+    if remote.is_some() && !matches!(command, AgentStatusCommand::Get { .. }) {
+        usage_error(
+            "agent status is reported to the local daemon only; run the command inside the remote Splint",
+        );
+    }
+    let request = resolve_agent_status_request(command, &|name| env::var_os(name))
+        .unwrap_or_else(|message| usage_error(message));
+    match output {
+        Some(OutputMode::Json) => {
+            match run_machine_agent_status(
+                request,
+                schema_major.unwrap_or(2),
+                timeout_ms.unwrap_or(5_000),
+            )
+            .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    std::process::exit(machine_exit_code(&error));
+                }
+            }
+        }
+        Some(OutputMode::Ndjson) => {
+            usage_error("NDJSON output is reserved for subscription commands")
+        }
+        Some(OutputMode::Human) | None => {
+            if schema_major.is_some() || timeout_ms.is_some() {
+                usage_error("--schema-major and --timeout-ms require --output json or ndjson");
+            }
+            run_human_agent_status(request, remote).await
+        }
+    }
+}
+
 /// An explicit `--picker` or `--new` wins; otherwise only a commandless launch
 /// follows `main.startup`, so command-bearing XDG launches stay transient.
 const fn xdg_launch_opens_picker(
@@ -415,6 +463,7 @@ async fn run_headless(
         | Command::Integration { .. }
         | Command::Policy { .. }
         | Command::Relay { .. }
+        | Command::AgentStatus { .. }
         | Command::Remote { .. }
         | Command::Reset { .. } => {
             unreachable!("graphical, policy, or relay command returned before daemon connection")
@@ -712,6 +761,7 @@ async fn run_headless(
                     splint_id,
                     incarnation,
                     bytes: text.into_bytes(),
+                    focus_report: false,
                 })
                 .await?;
             connection.release_control(controller_id).await?;
@@ -1252,6 +1302,7 @@ mod tests {
             LaunchSemantics::RemoteInteractive,
             TopologyRevision::default(),
             "remote".to_owned(),
+            false,
             None,
             Vec::new(),
             &config,

@@ -3,7 +3,7 @@ title: MCP adapter
 description: Install the optional Splinterm MCP adapter, connect a supported host, authorize the minimum required surface, and revoke it safely.
 ---
 
-`splinterm-mcp` is a local, bounded MCP `2025-11-25` stdio server. It presents a fixed catalog of 33 tools plus topology and terminal/control resources over the same daemon-owned topology used by the native client.
+`splinterm-mcp` is a local, bounded MCP `2025-11-25` stdio server. It presents a fixed catalog of 34 tools plus topology and terminal/control resources over the same daemon-owned topology used by the native client.
 
 The adapter is an optional, separately identified third-party client—not a trusted part of `splinterd`. Installing or launching it grants nothing until an owner-controlled policy authorizes its exact executable identity, operations, resources, and limits.
 
@@ -39,7 +39,7 @@ A generic local stdio definition is:
 }
 ```
 
-For a daemon using an isolated nondefault socket, set only `SPLINTERM_SOCKET` in the host environment. The adapter does not use MCP roots, the host working directory, shell configuration, SSH material, or inherited Splinterm context as authority.
+For a daemon using an isolated nondefault socket, set only `SPLINTERM_SOCKET` in the host environment. The adapter does not use MCP roots, the host working directory, shell configuration, SSH material, or inherited Splinterm context as authority. It reads `SPLINTERM_SPLINT_ID` and `SPLINTERM_SPLINT_INCARNATION` only as the default target of `splinterm.report_agent_status`.
 
 ### Claude Code
 
@@ -117,7 +117,7 @@ Create `~/.config/splinterm/policy.json` with mode `0600`. This observation-only
 }
 ```
 
-This rule cannot send input, resize, spawn, restore, terminate, rename, or inspect audit records. Add only the scopes and resources required by the intended workflow. The complete 18-scope inventory and reviewed control/lifecycle examples remain in repository `docs/mcp.md`.
+This rule cannot send input, resize, spawn, restore, terminate, rename, or inspect audit records. Add only the scopes and resources required by the intended workflow. The complete 19-scope inventory and reviewed control/lifecycle examples remain in repository `docs/mcp.md`.
 
 Lair and Dojo selectors snapshot only descendants present when that policy generation is published. New descendants remain denied until a reviewed reload.
 
@@ -138,7 +138,7 @@ Policy and consent bound a cooperating agent and show what it can reach. They ar
 
 The adapter exposes:
 
-- 33 fixed tools;
+- 34 fixed tools, including `splinterm.report_agent_status`;
 - one topology resource and terminal/control resource templates;
 - no arbitrary shell-string tool;
 - no filesystem, network, policy-write, clipboard, prompts, sampling, or elicitation capability; and
@@ -149,6 +149,18 @@ Requests, responses, pages, subscriptions, controllers, cursors, and deadlines a
 :::caution
 Terminal content is `untrusted_terminal_data`. An MCP host may display or index it as data, but it must never treat it as consent, authority, confirmation, executable source, or an instruction to call another tool.
 :::
+
+## Report agent status
+
+`splinterm.report_agent_status` takes `{ state, detail?, ttl_seconds?, splint_id?, incarnation? }`. `state` is `working`, `needs_input`, `done`, `error`, `idle`, or `null` to clear. Without `splint_id` and `incarnation`, the adapter uses `SPLINTERM_SPLINT_ID` and `SPLINTERM_SPLINT_INCARNATION` from its own environment, and fails with `invalid_argument` (`not inside a Splint`) when there are none. A host that starts stdio servers with a filtered environment must forward both variables. For Codex, add them to the server entry in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.splinterm]
+command = "/usr/bin/splinterm-mcp"
+env_vars = ["SPLINTERM_SPLINT_ID", "SPLINTERM_SPLINT_INCARNATION"]
+```
+
+An adapter launched by an agent inside a Splint reports for that Splint with no policy rule; reporting for another Splint, or from an agent that fully detached from its Splint, needs an `agent_status_report` rule for the exact Splint. The reported detail is never echoed. `inspect_splint` and `inspect_topology` gain an optional `agent_status` object while a status is set. Agents with command hooks can use `splinterm agent-status` instead; see [Bounded automation](/docs/automation/).
 
 ## Upgrade and revoke
 

@@ -47,8 +47,22 @@ impl Harness {
     }
 
     fn spawn_with_socket(socket: &Path, timeout_ms: Option<u64>) -> Self {
+        Self::spawn_with_environment(socket, timeout_ms, &[])
+    }
+
+    /// Spawns the adapter without inherited Splint discovery hints, then sets
+    /// exactly the given environment.
+    fn spawn_with_environment(
+        socket: &Path,
+        timeout_ms: Option<u64>,
+        environment: &[(&str, &str)],
+    ) -> Self {
         let mut command = Command::new(SERVER);
-        command.env("SPLINTERM_SOCKET", socket);
+        command
+            .env("SPLINTERM_SOCKET", socket)
+            .env_remove("SPLINTERM_SPLINT_ID")
+            .env_remove("SPLINTERM_SPLINT_INCARNATION")
+            .envs(environment.iter().copied());
         if let Some(timeout_ms) = timeout_ms {
             command.env("SPLINTERM_MCP_TIMEOUT_MS", timeout_ms.to_string());
         }
@@ -311,6 +325,7 @@ fn reviewed_topology() -> TopologySnapshot {
             restorable: false,
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
+            agent_status: None,
         }],
     }
 }
@@ -449,6 +464,7 @@ fn adversarial_topology(payloads: &[&str; 4]) -> TopologySnapshot {
             restorable: false,
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
+            agent_status: None,
         }],
     }
 }
@@ -472,6 +488,7 @@ fn reviewed_restorable_topology() -> TopologySnapshot {
             code: Some(0),
             signal: None,
         }),
+        agent_status: None,
     };
     snapshot
 }
@@ -1721,7 +1738,7 @@ fn prompt_injection_values_remain_inert_untrusted_data() {
 
     server.send(&request(204, "tools/list", json!({})));
     let catalog = server.receive_id(204);
-    assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 33);
+    assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 34);
     for tool in catalog["result"]["tools"].as_array().unwrap() {
         assert!(
             !PAYLOADS
@@ -1739,7 +1756,7 @@ fn prompt_injection_values_remain_inert_untrusted_data() {
 #[test]
 #[allow(
     clippy::too_many_lines,
-    reason = "the frozen 32-tool and three-resource adversarial inventory stays contiguous for review"
+    reason = "the frozen 34-tool and three-resource adversarial inventory stays contiguous for review"
 )]
 fn every_frozen_tool_is_routed_and_capability_surface_stays_closed() {
     let mut server = Harness::spawn();
@@ -1771,14 +1788,14 @@ fn every_frozen_tool_is_routed_and_capability_surface_stays_closed() {
     server.send(&request(300, "tools/list", json!({})));
     let listed = server.receive_id(300);
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 34);
     let mut names = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     names.sort();
     names.dedup();
-    assert_eq!(names.len(), 33);
+    assert_eq!(names.len(), 34);
     assert!(
         tools
             .iter()
@@ -1882,6 +1899,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
                     restorable: false,
                     lifecycle: SplintLifecycle::Running,
                     exit_status: None,
+                    agent_status: None,
                 });
             }
             lair.insert_lair_at(lair.revision(), dojo).unwrap();
@@ -3161,6 +3179,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
         "release_control",
         "input",
         "resize",
+        "report_agent_status",
     ];
     assert_eq!(tools.len(), expected_names.len());
     let schema_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/schemas/mcp/v2/tools");
@@ -3226,7 +3245,7 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
             "splinterm.rename_dojo",
             "splinterm.rename_splint",
             "splinterm.set_dojo_default_focus",
-            "splinterm.resize"
+            "splinterm.resize",
         ]
     );
 
@@ -3374,7 +3393,7 @@ fn duplicate_initialize_is_rejected_without_disrupting_the_session() {
             .as_array()
             .unwrap()
             .len(),
-        33
+        34
     );
     server.close_input();
     assert!(server.wait().success());
@@ -3404,7 +3423,7 @@ fn protocol_versions_are_negotiated_and_capabilities_do_not_enable_requests() {
                 .as_array()
                 .unwrap()
                 .len(),
-            33
+            34
         );
         assert!(
             server
@@ -3512,6 +3531,7 @@ fn controller_tools_preserve_owned_connections_modes_transfer_and_atomic_cleanup
                     splint_id: requested,
                     incarnation: 2,
                     bytes,
+                    focus_report: false,
                 },
         } = read_private_frame(&mut owner)
         else {
@@ -4376,7 +4396,7 @@ fn notifications_cancellation_response_ids_and_eof_are_protocol_clean() {
         response["id"] == "string-response-id"
             && response["result"]["tools"]
                 .as_array()
-                .is_some_and(|tools| tools.len() == 33)
+                .is_some_and(|tools| tools.len() == 34)
     }));
     assert!(
         responses.iter().any(|response| {
@@ -4976,6 +4996,7 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
                     expected_topology_revision,
                     name,
                     launch,
+                    generated_name: false,
                 } if expected_topology_revision.get() == 7
                     && name == "lair"
                     && launch.cwd == Some("/tmp".into())
@@ -5285,5 +5306,362 @@ fn lifecycle_mutation_tools_use_scoped_preflight_and_closed_commits() {
     server.close_input();
     assert!(server.wait().success());
     daemon.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+fn serve_private_requests(
+    listener: UnixListener,
+    mut respond: impl FnMut(usize, Request) -> Result<Response, ProtocolError> + Send + 'static,
+    connections: usize,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for index in 0..connections {
+            let mut stream = accept_automation(&listener);
+            let ClientFrame::Request {
+                diagnostic_correlation: _,
+                request_id,
+                request,
+            } = read_private_frame(&mut stream)
+            else {
+                panic!("mock daemon expected a request");
+            };
+            let frame = match respond(index, request) {
+                Ok(result) => ServerFrame::Response { request_id, result },
+                Err(error) => ServerFrame::Error {
+                    request_id: Some(request_id),
+                    error,
+                },
+            };
+            write_private_frame(&mut stream, &frame);
+        }
+    })
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered mock-daemon session proves environment defaults, overrides, and errors"
+)]
+fn report_agent_status_fills_its_target_from_the_adapter_environment() {
+    use splinterm_protocol::{AgentState, AgentStatusReport};
+
+    const ENV_SPLINT: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103";
+    const FLAG_SPLINT: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77104";
+    let (directory, socket) = isolated_socket("agentstatus");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let env_splint: SplintId = ENV_SPLINT.parse().unwrap();
+    let flag_splint: SplintId = FLAG_SPLINT.parse().unwrap();
+    let fake = serve_private_requests(
+        listener,
+        move |index, request| match (index, request) {
+            (
+                0,
+                Request::ReportAgentStatus {
+                    splint_id,
+                    incarnation: 3,
+                    status: Some(status),
+                },
+            ) if splint_id == env_splint
+                && status
+                    == AgentStatusReport {
+                        state: AgentState::NeedsInput,
+                        detail: Some("waiting for approval".into()),
+                        ttl_seconds: None,
+                    } =>
+            {
+                Ok(Response::AgentStatusAccepted {
+                    sequence: 4,
+                    expires_at_ms: Some(1_760_630_400_000),
+                })
+            }
+            (
+                1,
+                Request::ReportAgentStatus {
+                    splint_id,
+                    incarnation: 7,
+                    status: None,
+                },
+            ) if splint_id == flag_splint => Ok(Response::AgentStatusAccepted {
+                // A first clear for an incarnation is a no-op numbered 0.
+                sequence: 0,
+                expires_at_ms: None,
+            }),
+            (
+                2,
+                Request::ReportAgentStatus {
+                    status:
+                        Some(AgentStatusReport {
+                            state: AgentState::Working,
+                            ttl_seconds: Some(30),
+                            ..
+                        }),
+                    ..
+                },
+            ) => Err(ProtocolError::new(
+                ErrorCode::RateLimited,
+                "agent status reports exceed 10 per second for this Splint; retry later",
+            )),
+            (
+                3,
+                Request::ReportAgentStatus {
+                    status: Some(_), ..
+                },
+            ) => Err(ProtocolError::new(
+                ErrorCode::StaleIncarnation,
+                "agent status incarnation is not live",
+            )),
+            (index, request) => panic!("unexpected request {index}: {request:?}"),
+        },
+        4,
+    );
+    let mut server = Harness::spawn_with_environment(
+        &socket,
+        None,
+        &[
+            ("SPLINTERM_SPLINT_ID", ENV_SPLINT),
+            ("SPLINTERM_SPLINT_INCARNATION", "3"),
+        ],
+    );
+    server.initialize();
+    server.initialized();
+
+    let reported = call_tool(
+        &mut server,
+        10,
+        "splinterm.report_agent_status",
+        json!({"state": "needs_input", "detail": "waiting for approval"}),
+    );
+    assert_eq!(reported["isError"], false, "{reported}");
+    assert_eq!(
+        reported["structuredContent"],
+        json!({
+            "schema": "splinterm.mcp.v2",
+            "tool": "splinterm.report_agent_status",
+            "ok": true,
+            "resource": {"kind": "agent_status", "splint_id": ENV_SPLINT, "incarnation": 3},
+            "data": {
+                "committed": true,
+                "state": "needs_input",
+                "sequence": 4,
+                "expires_at_ms": 1_760_630_400_000_u64
+            },
+            "truncated": false,
+            "content_trust": "trusted_metadata"
+        })
+    );
+    assert!(
+        !reported.to_string().contains("waiting for approval"),
+        "the reported detail is never echoed"
+    );
+
+    let cleared = call_tool(
+        &mut server,
+        11,
+        "splinterm.report_agent_status",
+        json!({"state": null, "splint_id": FLAG_SPLINT, "incarnation": 7}),
+    );
+    assert_eq!(cleared["isError"], false, "{cleared}");
+    assert_eq!(
+        cleared["structuredContent"]["resource"]["splint_id"],
+        FLAG_SPLINT
+    );
+    assert_eq!(cleared["structuredContent"]["data"]["state"], Value::Null);
+    assert_eq!(cleared["structuredContent"]["data"]["sequence"], 0);
+    assert_eq!(
+        cleared["structuredContent"]["data"]["expires_at_ms"],
+        Value::Null
+    );
+
+    let limited = call_tool(
+        &mut server,
+        12,
+        "splinterm.report_agent_status",
+        json!({"state": "working", "ttl_seconds": 30}),
+    );
+    assert_eq!(limited["isError"], true);
+    assert_eq!(
+        limited["structuredContent"]["error"]["code"],
+        "resource_limit"
+    );
+    assert_eq!(limited["structuredContent"]["error"]["retryable"], true);
+
+    let stale = call_tool(
+        &mut server,
+        13,
+        "splinterm.report_agent_status",
+        json!({"state": "done"}),
+    );
+    assert_eq!(
+        stale["structuredContent"]["error"]["code"],
+        "stale_incarnation"
+    );
+
+    // Invalid arguments fail before any daemon connection.
+    for (id, arguments) in [
+        (14, json!({"state": "working", "splint_id": FLAG_SPLINT})),
+        (15, json!({"state": "working", "incarnation": 2})),
+        (16, json!({"state": null, "detail": "leftover"})),
+        (17, json!({"state": null, "ttl_seconds": 30})),
+        (18, json!({"state": "thinking"})),
+        (19, json!({"state": "error", "detail": "two\nlines"})),
+        (20, json!({"state": "error", "detail": "x".repeat(81)})),
+        (21, json!({"state": "error", "detail": "🦀".repeat(61)})),
+        (22, json!({"state": "working", "ttl_seconds": 901})),
+        (23, json!({})),
+    ] {
+        let response = call_tool(&mut server, id, "splinterm.report_agent_status", arguments);
+        assert_eq!(
+            response["structuredContent"]["error"]["code"], "invalid_argument",
+            "{id}: {response}"
+        );
+        assert!(!response.to_string().contains("leftover"));
+    }
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn report_agent_status_outside_a_splint_is_refused_before_connecting() {
+    let (directory, socket) = isolated_socket("agentoutside");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for environment in [
+        &[][..],
+        &[
+            ("SPLINTERM_SPLINT_ID", ""),
+            ("SPLINTERM_SPLINT_INCARNATION", ""),
+        ][..],
+        &[("SPLINTERM_SPLINT_ID", "caller-supplied-splint")][..],
+        &[
+            (
+                "SPLINTERM_SPLINT_ID",
+                "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+            ),
+            ("SPLINTERM_SPLINT_INCARNATION", "0"),
+        ][..],
+    ] {
+        let mut server = Harness::spawn_with_environment(&socket, None, environment);
+        server.initialize();
+        server.initialized();
+        let response = call_tool(
+            &mut server,
+            2,
+            "splinterm.report_agent_status",
+            json!({"state": "working"}),
+        );
+        assert_eq!(response["isError"], true);
+        assert_eq!(
+            response["structuredContent"]["error"]["code"],
+            "invalid_argument"
+        );
+        let message = response["structuredContent"]["error"]["message"]
+            .as_str()
+            .unwrap();
+        if environment.iter().all(|(_, value)| value.is_empty()) {
+            assert!(message.starts_with("not inside a Splint"), "{message}");
+        } else {
+            assert!(message.contains("malformed"), "{message}");
+        }
+        server.close_input();
+        assert!(server.wait().success());
+    }
+    assert!(
+        listener.accept().is_err(),
+        "no daemon connection is made without a target"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn inspect_tools_add_agent_status_only_when_reported() {
+    use splinterm_protocol::{AgentState, AgentStatusSummary};
+
+    let (directory, socket) = isolated_socket("agentinspect");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut topology = reviewed_topology();
+    topology.runtimes[0].agent_status = Some(AgentStatusSummary {
+        state: AgentState::NeedsInput,
+        detail: Some("waiting for approval".into()),
+        sequence: 4,
+        stale: false,
+        reported_age_ms: 1_500,
+    });
+    let without = reviewed_topology();
+    let lair = topology.topology.lairs().next().unwrap().clone();
+    let (lair_id, dojo_id, splint_id) = (lair.id, lair.dojos[0].id, topology.runtimes[0].splint_id);
+    let reported_topology = topology.clone();
+    let fake = serve_private_requests(
+        listener,
+        move |index, request| {
+            let snapshot = if index < 2 {
+                &reported_topology
+            } else {
+                &without
+            };
+            match request {
+                Request::InspectTopology => Ok(Response::Topology {
+                    snapshot: snapshot.clone(),
+                }),
+                Request::InspectSplint { .. } => Ok(Response::Splint {
+                    resolved_cwd: None,
+                    lair_id,
+                    dojo_id,
+                    title: "build".to_owned(),
+                    topology_revision: snapshot.revision,
+                    runtime: snapshot.runtimes[0].clone(),
+                }),
+                request => panic!("unexpected request {request:?}"),
+            }
+        },
+        4,
+    );
+    let mut server = Harness::spawn_with_socket(&socket, None);
+    server.initialize();
+    server.initialized();
+    let expected = json!({
+        "state": "needs_input",
+        "detail": "waiting for approval",
+        "stale": false,
+        "reported_age_ms": 1500,
+        "sequence": 4
+    });
+    let topology_output = call_tool(&mut server, 2, "splinterm.inspect_topology", json!({}));
+    assert_eq!(topology_output["isError"], false, "{topology_output}");
+    assert_eq!(
+        topology_output["structuredContent"]["data"]["lairs"][0]["dojos"][0]["splints"][0]["agent_status"],
+        expected
+    );
+    let splint_output = call_tool(
+        &mut server,
+        3,
+        "splinterm.inspect_splint",
+        json!({"splint_id": splint_id.to_string()}),
+    );
+    assert_eq!(splint_output["isError"], false, "{splint_output}");
+    assert_eq!(
+        splint_output["structuredContent"]["data"]["agent_status"],
+        expected
+    );
+    let topology_output = call_tool(&mut server, 4, "splinterm.inspect_topology", json!({}));
+    assert!(
+        topology_output["structuredContent"]["data"]["lairs"][0]["dojos"][0]["splints"][0]
+            .get("agent_status")
+            .is_none()
+    );
+    let splint_output = call_tool(
+        &mut server,
+        5,
+        "splinterm.inspect_splint",
+        json!({"splint_id": splint_id.to_string()}),
+    );
+    assert_eq!(
+        splint_output["structuredContent"]["data"],
+        json!({"title": "build", "state": "running"})
+    );
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
     fs::remove_dir_all(directory).unwrap();
 }

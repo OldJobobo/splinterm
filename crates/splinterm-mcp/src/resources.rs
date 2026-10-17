@@ -150,7 +150,7 @@ fn topology_document(
     let data = if resync {
         json!({"lairs": []})
     } else {
-        dispatch::topology_data(snapshot)
+        dispatch::topology_data(snapshot, false)
             .map_err(|_| resource_error("invalid topology resource"))?
     };
     let value = json!({
@@ -747,6 +747,13 @@ async fn subscription_task(
             break;
         }
         private_sequence = private_sequence.saturating_add(1);
+        // Agent status rides the topology subscription without a revision;
+        // the public topology resource does not project it yet.
+        if uri == ResourceUri::Topology
+            && matches!(event, SubscriptionEvent::AgentStatusChanged { .. })
+        {
+            continue;
+        }
         if apply_explicit_resync(&mut started.retained, &event, uri) {
             failed = true;
             break;

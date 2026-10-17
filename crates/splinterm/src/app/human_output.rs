@@ -220,6 +220,13 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
             "Splint {:?}: {:?}, incarnation={:?}, exit={:?}",
             runtime.splint_id, runtime.lifecycle, runtime.live_incarnation, runtime.exit_status
         ),
+        Response::LaunchDirectoryResolved {
+            source_splint_id,
+            cwd,
+        } => match cwd {
+            Some(cwd) => println!("Launch directory for {source_splint_id}: {}", cwd.display()),
+            None => println!("Launch directory for {source_splint_id} is unavailable."),
+        },
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
         Response::ImageContentReady { transfer } => println!(
             "Image content {} generation {} ready via {:?} ({} bytes).",
@@ -338,6 +345,21 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
             "Splint {splint_id} incarnation {incarnation} exited (code={:?}, signal={:?}).",
             exit_status.code, exit_status.signal
         ),
+        Response::AgentStatusAccepted { sequence, .. } => {
+            println!("Agent status accepted (sequence {sequence}).");
+        }
+        Response::UnusedDojoClose { dojo_id, outcome } => match outcome {
+            splinterm_protocol::UnusedDojoCloseOutcome::Closed { lair_removed, .. } => {
+                if lair_removed {
+                    println!("Closed unused Dojo {dojo_id} and its empty unnamed Lair.");
+                } else {
+                    println!("Closed unused Dojo {dojo_id}.");
+                }
+            }
+            splinterm_protocol::UnusedDojoCloseOutcome::Used { reason } => {
+                println!("Dojo {dojo_id} is in use ({reason:?}); left running.");
+            }
+        },
     }
     io::stdout()
         .flush()

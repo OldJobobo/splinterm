@@ -250,6 +250,7 @@ fn explorer_observes_detached_stop_and_restore_without_revision_change() {
         restorable: false,
         lifecycle: SplintLifecycle::Running,
         exit_status: None,
+        agent_status: None,
     };
     let stopped = SplintRuntimeSummary {
         live_incarnation: None,
@@ -287,6 +288,7 @@ fn explorer_observation_tracks_revision_and_ignores_runtime_order() {
                 restorable: false,
                 lifecycle: SplintLifecycle::Exited,
                 exit_status: None,
+                agent_status: None,
             })
             .collect(),
     };
@@ -655,6 +657,7 @@ fn topology_response(lair: Lair) -> Response {
                     splinterm_protocol::SplintLifecycle::Exited
                 },
                 exit_status: None,
+                agent_status: None,
             }
         })
         .collect();

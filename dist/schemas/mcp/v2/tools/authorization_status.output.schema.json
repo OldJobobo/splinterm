@@ -28,7 +28,7 @@
             },
             "scopes": {
               "type": "array",
-              "maxItems": 18,
+              "maxItems": 19,
               "uniqueItems": true,
               "items": {
                 "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/scope"

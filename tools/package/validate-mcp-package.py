@@ -202,7 +202,7 @@ def main() -> int:
             assert info["protocolVersion"] == "2025-11-25"
             assert info["capabilities"] == {"resources": {"subscribe": True}, "tools": {}}
             tools = host.request("tools/list")["result"]["tools"]
-            assert len(tools) == 33 and len({item["name"] for item in tools}) == 33
+            assert len(tools) == 34 and len({item["name"] for item in tools}) == 34
             resources = host.request("resources/list")["result"]["resources"]
             templates = host.request("resources/templates/list")["result"]["resourceTemplates"]
             assert [item["uri"] for item in resources] == ["splinterm://topology"]

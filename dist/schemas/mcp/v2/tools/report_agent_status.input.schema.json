@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splinterm.oldjobobo.com/schemas/mcp/v2/tools/report_agent_status.input.schema.json",
+  "title": "splinterm.report_agent_status input",
+  "allOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "$comment": "null clears the status; detail and ttl_seconds then must be absent.",
+          "oneOf": [
+            {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detail": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_status_detail"
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 900
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/positive_integer"
+        }
+      }
+    }
+  ]
+}

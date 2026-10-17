@@ -210,7 +210,10 @@ The current product does not promise:
 - a daemon TCP listener or unauthenticated remote API;
 - collaborative simultaneous typing or automatic controller stealing;
 - automation access to trusted graphical authority or compositor window control;
-- semantic coding-agent task status, inter-agent messaging, readiness, completion, or result transport;
+- inferred coding-agent task status, inter-agent messaging, readiness, completion, or result transport;
+  an agent may explicitly report one of a closed set of display states for its
+  own Splint (see [ADR 0007](adr/0007-supported-automation-policy.md)), which is
+  display data only and never authority, a message channel, or a completion signal;
 - terminal output as trusted instructions;
 - full Kitty graphics compatibility, external Kitty file/SHM transports, placeholders, relative placement, or animation;
 - arbitrary shell/plugin/terminal-content commands in trusted application menus;
