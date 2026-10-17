@@ -220,6 +220,13 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
             "Splint {:?}: {:?}, incarnation={:?}, exit={:?}",
             runtime.splint_id, runtime.lifecycle, runtime.live_incarnation, runtime.exit_status
         ),
+        Response::LaunchDirectoryResolved {
+            source_splint_id,
+            cwd,
+        } => match cwd {
+            Some(cwd) => println!("Launch directory for {source_splint_id}: {}", cwd.display()),
+            None => println!("Launch directory for {source_splint_id} is unavailable."),
+        },
         Response::Attached { snapshot, .. } => print_snapshot(&snapshot),
         Response::ImageContentReady { transfer } => println!(
             "Image content {} generation {} ready via {:?} ({} bytes).",

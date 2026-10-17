@@ -27,7 +27,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 use splinterm_protocol::{
-    ErrorCode, MutationTarget, Request, Response, UnusedDojoCloseOutcome,
+    ErrorCode, LaunchDirectory, MutationTarget, Request, Response, UnusedDojoCloseOutcome,
     validate_preset_materialized,
 };
 use tokio::sync::mpsc;
@@ -35,8 +35,8 @@ use tokio::sync::mpsc;
 use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane_at_incarnation},
     session_catalog::{
-        GraphicalLairLifetime, automation_launch, graphical_create_request, launch_parameters,
-        new_dojo_request_for, recent_dojo_ids, remember_dojo, select_dojo_from, source_splint_cwd,
+        GraphicalLairLifetime, automation_launch, creation_directory, graphical_create_request,
+        launch_parameters, new_dojo_request_for, recent_dojo_ids, remember_dojo, select_dojo_from,
     },
 };
 
@@ -428,7 +428,8 @@ async fn apply_topology_command(
                     side: SplitSide::Second,
                     ratio,
                     launch: launch_parameters(
-                        source_splint_cwd(connection, target).await?,
+                        creation_directory(connection, target, &config.new_splint_directory)
+                            .await?,
                         Vec::new(),
                         config,
                     ),
@@ -439,7 +440,17 @@ async fn apply_topology_command(
                     axis,
                     side: SplitSide::Second,
                     ratio,
-                    launch: automation_launch(None, Vec::new()),
+                    // The remote daemon inherits the source cwd itself; other
+                    // choices resolve there first.
+                    launch: automation_launch(
+                        match config.new_splint_directory {
+                            LaunchDirectory::Inherit => None,
+                            ref directory => {
+                                Some(creation_directory(connection, target, directory).await?)
+                            }
+                        },
+                        Vec::new(),
+                    ),
                 },
             }
         }
@@ -1038,7 +1049,8 @@ async fn create_daily_dojo(
             "picker creation target is stale"
         );
     }
-    let cwd = source_splint_cwd(connection, source_splint_id).await?;
+    // A new Lair starts like a new Dojo.
+    let cwd = creation_directory(connection, source_splint_id, &config.new_dojo_directory).await?;
     let (request, lifetime) = graphical_create_request(
         factory,
         expected,
@@ -1104,7 +1116,7 @@ async fn create_dojo_in_lair(
             "picker creation target is stale"
         );
     }
-    let cwd = source_splint_cwd(connection, source_splint_id).await?;
+    let cwd = creation_directory(connection, source_splint_id, &config.new_dojo_directory).await?;
     let request = new_dojo_request_for(
         factory.capabilities().launch_semantics,
         expected_topology_revision,
@@ -4424,3 +4436,7 @@ mod explorer_context_tests;
 #[cfg(test)]
 #[path = "close_unused_tests.rs"]
 mod close_unused_tests;
+
+#[cfg(test)]
+#[path = "creation_directory_tests.rs"]
+mod creation_directory_tests;

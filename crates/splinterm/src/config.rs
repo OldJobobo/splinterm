@@ -18,7 +18,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS};
+use splinterm_protocol::{LaunchDirectory, MAX_COLUMNS, MAX_ROWS};
 
 use crate::{
     font_shaping::{FeatureSettings, FontLigatures},
@@ -73,6 +73,12 @@ pub struct AppConfig {
     pub pane_divider_style: PaneDividerStyle,
     pub frame_title_mode: FrameTitleMode,
     pub multiplexer_lifetime: MultiplexerLifetimeConfig,
+    /// Where a new Dojo or Lair created inside a Window starts
+    /// (`[multiplexer] new-dojo-directory`).
+    pub new_dojo_directory: LaunchDirectory,
+    /// Where a new Splint split inside a Dojo starts
+    /// (`[multiplexer] new-splint-directory`).
+    pub new_splint_directory: LaunchDirectory,
     /// Effective, fully validated client-local keymap.
     pub keymap: ResolvedKeymap,
     pub keymap_profile: KeymapProfile,
@@ -161,6 +167,8 @@ impl Default for AppConfig {
             pane_divider_style: PaneDividerStyle::Line,
             frame_title_mode: FrameTitleMode::Splint,
             multiplexer_lifetime: MultiplexerLifetimeConfig::default(),
+            new_dojo_directory: LaunchDirectory::Home,
+            new_splint_directory: LaunchDirectory::Inherit,
             keymap: ResolvedKeymap::default(),
             keymap_profile: KeymapProfile::Splinterm,
             keymap_path: None,
@@ -488,6 +496,14 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 config.multiplexer_lifetime.persist_on_tab_organization = parse_bool(value, index)?;
                 false
             }
+            "multiplexer.new-dojo-directory" => {
+                config.new_dojo_directory = parse_launch_directory(value, index)?;
+                false
+            }
+            "multiplexer.new-splint-directory" => {
+                config.new_splint_directory = parse_launch_directory(value, index)?;
+                false
+            }
             "multiplexer.close-unused" => {
                 config.multiplexer_lifetime.close_unused = parse_bool(value, index)?;
                 false
@@ -597,6 +613,28 @@ fn parse_alpha(value: &str, line: usize) -> Result<f32> {
         bail!("line {}: number outside supported range", line + 1);
     }
     Ok(alpha)
+}
+
+/// Parses a Window-creation directory. Paths stay unexpanded: `~/` and `home`
+/// resolve against the home of the daemon that owns the source Splint.
+fn parse_launch_directory(value: &str, line: usize) -> Result<LaunchDirectory> {
+    let directory = if value.eq_ignore_ascii_case("inherit") {
+        LaunchDirectory::Inherit
+    } else if value.eq_ignore_ascii_case("home") || value == "~" || value == "~/" {
+        LaunchDirectory::Home
+    } else {
+        match value.strip_prefix("~/") {
+            Some(relative) => LaunchDirectory::HomeRelative(PathBuf::from(relative)),
+            None => LaunchDirectory::Absolute(PathBuf::from(value)),
+        }
+    };
+    directory.validate().map_err(|_| {
+        anyhow::anyhow!(
+            "line {}: directory must be inherit, home, an absolute path, or ~/ followed by a path inside the home directory",
+            line + 1
+        )
+    })?;
+    Ok(directory)
 }
 
 fn expand_path(value: &str) -> PathBuf {
@@ -1359,6 +1397,62 @@ mod tests {
             parse("[clipboard]\nunknown=x\n").unwrap().diagnostics.len(),
             1
         );
+    }
+
+    #[test]
+    fn creation_directories_default_to_home_for_dojos_and_inherit_for_splints() {
+        let defaults = parse("").unwrap().config;
+        assert_eq!(defaults.new_dojo_directory, LaunchDirectory::Home);
+        assert_eq!(defaults.new_splint_directory, LaunchDirectory::Inherit);
+        for (value, expected) in [
+            ("inherit", LaunchDirectory::Inherit),
+            ("INHERIT", LaunchDirectory::Inherit),
+            ("home", LaunchDirectory::Home),
+            ("Home", LaunchDirectory::Home),
+            ("~", LaunchDirectory::Home),
+            ("~/", LaunchDirectory::Home),
+            (
+                "~/src/work",
+                LaunchDirectory::HomeRelative(PathBuf::from("src/work")),
+            ),
+            (
+                "/srv/projects",
+                LaunchDirectory::Absolute(PathBuf::from("/srv/projects")),
+            ),
+        ] {
+            let loaded = parse(&format!(
+                "[multiplexer]\nnew-dojo-directory={value}\nnew-splint-directory={value}\n"
+            ))
+            .unwrap();
+            assert!(loaded.diagnostics.is_empty(), "{value}");
+            assert_eq!(loaded.config.new_dojo_directory, expected, "{value}");
+            assert_eq!(loaded.config.new_splint_directory, expected, "{value}");
+        }
+        // Paths are resolved by the owning daemon, so `~` is never expanded here.
+        assert_eq!(
+            parse("[multiplexer]\nnew-dojo-directory=~/x\n")
+                .unwrap()
+                .config
+                .new_dojo_directory,
+            LaunchDirectory::HomeRelative(PathBuf::from("x"))
+        );
+        for value in [
+            "",
+            "projects",
+            "./here",
+            "~user/x",
+            "~/../escape",
+            "~/a/../b",
+        ] {
+            let error = parse(&format!("[multiplexer]\nnew-dojo-directory={value}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("line 2: directory must be"),
+                "{value}: {error}"
+            );
+            assert!(parse(&format!("[multiplexer]\nnew-splint-directory={value}\n")).is_err());
+        }
     }
 
     #[test]
