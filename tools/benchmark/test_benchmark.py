@@ -1341,7 +1341,8 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     assert generated["alpha"] == 0.85
     assert generated["blur"] is True
     assert generated["background"] == legacy["background"]
-    assert generated["selection_foreground"] == legacy["foreground"]
+    # Omarchy resolves selection_foreground from bright_foreground (color15).
+    assert generated["selection_foreground"] == legacy["color15"]
     assert generated["active_tab_background"] == legacy["color8"]
     assert generated["active_tab_foreground"] == legacy["foreground"]
     assert generated["active_tab_background"] != legacy["selection_background"]
@@ -1381,11 +1382,13 @@ def test_omarchy_theme_generator_uses_foot_presentation_and_legacy_roles(
     )
     assert module.theme_settings(tmp_path) == (0.73, True)
 
+    # Foot merges [colors] into the dark theme, so an empty [colors-dark]
+    # keeps its values.
     (tmp_path / "foot.ini").write_text(
         "[colors]\nalpha=0.61\nblur=yes\n[colors-dark]\n",
         encoding="utf-8",
     )
-    assert module.theme_settings(tmp_path) == (1.0, False)
+    assert module.theme_settings(tmp_path) == (0.61, True)
 
     (tmp_path / "foot.ini").write_text("[colors-dark]\nalpha=1.1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="between"):

@@ -686,19 +686,44 @@ this MVP and produce diagnostics when represented as unknown keys.
 
 ## Native Omarchy theme integration
 
-With `main.theme` unset, Splinterm reads the active Quattro theme directly from
-`${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective
-`foot.ini` supplies the terminal foreground/background, ANSI 16, cursor,
-selection background and foreground, alpha, and blur; `colors.toml` supplies the
-standard Omarchy `accent`, `lighter_bg`, and `muted` roles used by application
-chrome. The selected-Dojo-tab body uses `lighter_bg` when present and otherwise
-Foot `bright0`; it never borrows the terminal selection background. Its label
-and close affordance use whichever effective Foot background or foreground has
-higher WCAG contrast against that resolved tab body, preferring foreground on
-an exact tie.
+With `main.theme` unset, Splinterm reads the active Omarchy theme directly. It
+considers these directories in order:
 
-Inactive tab labels and close affordances are muted. Splinterm starts from
-`muted`, or Foot `bright0` when `muted` is absent, and keeps it when it has at
+1. `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`.
+2. `~/.local/state/omarchy/current/theme/`, when `XDG_STATE_HOME` names a
+   different directory. Omarchy 4 always writes here, whatever
+   `XDG_STATE_HOME` says.
+3. Omarchy 3.x's `~/.config/omarchy/current/theme/`, read-only.
+
+Splinterm uses the first directory whose `omarchy/current` parent exists, and it
+re-evaluates that choice on every poll, so it follows the Omarchy 4 migration
+without a restart. A theme switch replaces only `current/theme`, so during that
+brief gap Splinterm keeps the directory it was reading rather than falling back
+to an older Omarchy 3.x leftover. If a higher-priority root vanishes entirely,
+the live watcher keeps it for four more polls (2 s) before using a lower one.
+
+The effective `foot.ini` supplies the terminal foreground/background, ANSI 16,
+cursor, selection background and foreground, alpha, and blur. `colors.toml`
+supplies the standard Omarchy `lighter_background`, `muted`, and `accent` roles
+used by application chrome. Splinterm reads the canonical Omarchy 4 name first,
+then the legacy aliases, in `omarchy-theme-color`'s order. An empty value counts
+as absent:
+
+| Role | Keys, in order | Last resort |
+| --- | --- | --- |
+| Selected-Dojo-tab body | `lighter_background`, `lighter_bg` | Foot `bright0` |
+| Inactive tab text | `muted`, `color8`, `dark_foreground`, `dark_fg` | Foot `bright0` |
+| UI accent and active pane border | `accent`, `cursor`, `blue`, `color4` | Foot cursor colour |
+
+Omarchy itself falls back from `lighter_background` to `color0`, which is the
+terminal background. That would make the selected tab invisible, so Splinterm
+uses Foot `bright0` instead. The selected-tab body never borrows the terminal
+selection background. Its label and close affordance use whichever effective
+Foot background or foreground has higher WCAG contrast against that resolved tab
+body, preferring the foreground on an exact tie.
+
+Inactive tab labels and close affordances are muted. Splinterm starts from the
+resolved `muted` role and keeps it when it has at
 least 4.5:1 WCAG contrast against the tab-strip background without exceeding
 the foreground's own contrast. Otherwise it tries fixed mixes of that color
 with 25, 50, and 75 % foreground and takes the first that qualifies, falling
@@ -709,14 +734,19 @@ The tab-strip and selected-tab backgrounds both inherit the terminal alpha
 while preserving their resolved colors. The selected-tab underline remains the
 opaque UI accent. Terminal selections continue to use Foot's independent
 `selection-foreground`, falling back to the terminal foreground when that Foot
-role is absent. Foot's `[main] initial-color-theme=light` selects the complete
-`[colors-light]` palette. Missing or `dark` selection uses `[colors-dark]`, which
-takes precedence over legacy `[colors]`. Palette sections are never mixed;
-missing or incomplete selected palettes are rejected. Absent alpha defaults
-opaque and absent blur defaults off. Theme switches re-read this selector along
-with the palette; Foot's separate runtime color-theme keybindings are not imported.
+role is absent. Foot's `[main] initial-color-theme=light` selects the light
+palette, `[colors-light]` together with the deprecated `[colors2]`. A missing or
+`dark` setting selects the dark palette, `[colors-dark]` together with the
+deprecated `[colors]`. Splinterm follows Foot 1.27.0 and merges those section
+pairs key by key in file order, with the last assignment winning. A legacy
+`[colors]`-only theme therefore keeps its palette when a later `[colors-dark]`
+adds only `alpha` and `blur`. The dark and light palettes are never mixed with
+each other. A missing or incomplete selected palette is rejected. Absent alpha
+defaults to opaque and absent blur defaults to off. Theme switches re-read this
+selector along with the palette. Foot's separate runtime color-theme
+keybindings are not imported.
 
-Splinterm fingerprints the active directory plus both source files every 500 ms.
+Splinterm fingerprints the selected directory plus both source files every 500 ms.
 This detects Omarchy's atomic current-theme directory replacement and applies a
 valid palette through the existing live theme channel without restarting the
 daemon, shell, or Wayland window. A transiently incomplete replacement or
@@ -724,8 +754,33 @@ malformed live theme retains the last valid palette and reports one bounded
 diagnostic. If Omarchy state is absent at startup, Splinterm uses its bundled
 safe fallback.
 
+### Glassy Windows
+
+Splinterm follows Omarchy's Glassy Windows through the theme's `foot.ini`, as
+Foot does, so no Hyprland opacity rule is involved. When Glassy Windows is on,
+`omarchy-theme-set-glass` inserts `alpha=0.65` and `blur=yes` between
+`# omarchy-glass begin` and `# omarchy-glass end` markers, directly under the
+first `[colors-dark]` header. It skips any setting the file already has. If the
+file has no `[colors-dark]` header, the script appends a `[colors-dark]` section
+holding only those lines. Turning glass off removes the block in place.
+Splinterm sees each edit within one 500 ms poll. It applies the change through
+`ext-background-effect-v1`, and the palette stays the same:
+
+* A theme that already sets `blur=yes`, as the stock template does, gains only
+  `alpha=0.65`.
+* A user template without `blur=` gains both settings.
+* A theme that declares its own `alpha` keeps it. Glass then adds only `blur`,
+  which updates the compositor effect without repainting.
+
+Only the default terminal background, the padding, and the tab strip become
+translucent; Splinterm premultiplies them by the alpha. Text, explicit cell
+backgrounds, and the cursor stay opaque, so text remains crisp over the blur. An
+explicit `[colors] alpha` or `blur` in Splinterm's own `config.ini` overrides
+the theme value and therefore also overrides Glassy Windows.
+
 For each new Splint, the persistent daemon also reads the active theme's
-`gum_env.lua`, removes inherited values in Omarchy's bounded Gum palette
+`gum_env.lua`. It picks the theme directory with the same order and
+`omarchy/current` test as above, then removes inherited values in Omarchy's bounded Gum palette
 namespace, and supplies the current rendered values to the new PTY. Theme
 changes therefore affect Gum in newly created shells without restarting the
 daemon or existing sessions. Existing shells retain their original environment.
@@ -745,6 +800,11 @@ JSON palette's resolved `background` and `foreground`. A missing
 an explicit value is used verbatim. Malformed explicit values fail theme
 loading. The optional `tools/generate-omarchy-theme.py` exporter derives the
 other JSON roles from the standard Omarchy background ramp and
-foreground/background endpoints. It leaves `inactive_tab_foreground` unset, so
-that role is derived from ANSI color 8, which the exporter fills from `muted`,
-when the theme loads.
+foreground/background endpoints. It reads the canonical Omarchy 4 names first,
+then the legacy short names and ANSI `colorN` aliases. Like Omarchy, it derives a
+missing bright accent by mixing its base colour 20 % toward white. The
+selected-tab body comes from `lighter_background`, then `lighter_bg`, then
+`color8`. The exporter reads `alpha` and `blur` with the same Foot section
+merge as above. It leaves `inactive_tab_foreground` unset, so that role is
+derived from ANSI color 8, which the exporter fills from `muted`, when the theme
+loads.
