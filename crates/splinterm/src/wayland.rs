@@ -712,9 +712,15 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let viewporter = globals
         .bind::<WpViewporter, _, _>(&queue_handle, 1..=1, ())
         .ok();
-    let text_input_manager = globals
-        .bind::<ZwpTextInputManagerV3, _, _>(&queue_handle, 1..=1, ())
-        .ok();
+    // Without the manager no text input is ever created, so nothing is composed.
+    let text_input_manager = options
+        .input_method
+        .then(|| {
+            globals
+                .bind::<ZwpTextInputManagerV3, _, _>(&queue_handle, 1..=1, ())
+                .ok()
+        })
+        .flatten();
     let (clipboard_tx, clipboard_rx) = std_mpsc::channel();
     let surface = compositor.create_surface(&queue_handle);
     let window = shell.create_window(surface, WindowDecorations::RequestServer, &queue_handle);

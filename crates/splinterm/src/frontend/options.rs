@@ -120,6 +120,10 @@ pub struct WindowOptions {
     pub initial_tab_strip_visible: bool,
     /// Remote daemon identity from this Window's initial connection; never terminal content.
     pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
+    /// Whether the Window binds the text-input (IME) protocol. The remote
+    /// connection status Window turns it off so an input method never sees or
+    /// draws a typed password as composing text.
+    pub input_method: bool,
     /// Fired once, after the first buffer commit maps the Window. Dropped unfired
     /// when the Window ends without mapping.
     pub mapped: Option<oneshot::Sender<()>>,
@@ -164,6 +168,7 @@ impl Default for WindowOptions {
             initial_dojo: None,
             initial_tab_strip_visible: true,
             remote_display_identity: None,
+            input_method: true,
             mapped: None,
         }
     }
