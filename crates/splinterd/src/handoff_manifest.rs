@@ -26,8 +26,8 @@ use crate::{
 
 pub const HANDOFF_MANIFEST_SCHEMA_V1: u16 = 1;
 pub const MAX_HANDOFF_MANIFEST_BYTES: usize = 256 * 1024;
-// A manifest carries only live Splints, and the runtime registry caps every
-// live Splint, persistent or transient, at the daemon-wide live limit.
+// A manifest carries only registered live Splints, which with retiring ones
+// never exceed the daemon-wide live limit.
 pub const MAX_MANIFEST_SPLINTS: usize = crate::MAX_LIVE_SPLINTS;
 // Every Lair and Dojo in a manifest holds a live Splint. Transient Lairs are not
 // capped like persistent ones, so only the Splint bound limits either count.
