@@ -322,7 +322,7 @@ state and detail and is dropped 15 minutes later. Status lives only in daemon
 memory: it is dropped when the incarnation exits or relaunches and does not
 survive a daemon restart or live handoff.
 
-The graphical client shows status in the Lair Explorer and as one glyph badge per
+The graphical client shows status in the Lair Explorer and as one icon badge per
 Dojo tab; see [Human usage](usage.md#agent-status-in-the-explorer-and-on-dojo-tabs).
 
 ### Target and authority

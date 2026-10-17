@@ -11,8 +11,9 @@ use unicode_width::UnicodeWidthChar;
 use crate::geometry::Rect;
 
 use super::{
-    RenderContext, SnapshotFrame, blend_glyph, frame::select_face_for_text, packed_rgb,
-    round_to_i32,
+    GlyphKey, RenderContext, SnapshotFrame, SnapshotGlyph, blend_glyph,
+    icons::{ChromeIcon, ICON_FACE, IconCell, icon_glyph},
+    packed_rgb, round_to_i32, u32_to_f32,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -26,16 +27,127 @@ pub(crate) struct ChromeText {
     cells: u32,
 }
 
-/// Whether the chrome fonts, including the CJK, emoji and Fontconfig fallback
-/// faces, render every character of `text` without a replacement glyph.
-pub(crate) fn chrome_text_covered(text: &str, context: &RenderContext) -> bool {
-    let Ok(generation) = context.font_generation() else {
-        return false;
-    };
-    let attributes = chrome_attributes(ChromeTextStyle::Regular);
-    text.chars().all(|character| {
-        select_face_for_text(&generation.faces, &character.to_string(), &attributes).is_ok()
-    })
+fn text_cells(text: &str) -> usize {
+    text.chars()
+        .map(|character| character.width().unwrap_or(0).min(2))
+        .sum()
+}
+
+/// Trusted chrome text with icons in reserved cells.
+///
+/// Each icon holds [`ChromeIcon::CELLS`] spaces in `text` and is drawn from the
+/// embedded icon face. Icons enter only through [`Self::push_icon`]: no
+/// character in a label, title, or agent detail ever becomes an icon.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) struct ChromeSource {
+    text: String,
+    /// `(first cell, icon)`, in cell order.
+    icons: Vec<(u32, ChromeIcon)>,
+}
+
+impl ChromeSource {
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn icons(&self) -> &[(u32, ChromeIcon)] {
+        &self.icons
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Display cells, counting each icon as [`ChromeIcon::CELLS`].
+    pub(crate) fn cells(&self) -> usize {
+        text_cells(&self.text)
+    }
+
+    pub(crate) fn push_str(&mut self, text: &str) -> &mut Self {
+        self.text.push_str(text);
+        self
+    }
+
+    pub(crate) fn push_icon(&mut self, icon: ChromeIcon) -> &mut Self {
+        let cell = u32::try_from(self.cells()).unwrap_or(u32::MAX);
+        self.icons.push((cell, icon));
+        for _ in 0..ChromeIcon::CELLS {
+            self.text.push(' ');
+        }
+        self
+    }
+
+    pub(crate) fn push_source(&mut self, other: &Self) -> &mut Self {
+        let offset = u32::try_from(self.cells()).unwrap_or(u32::MAX);
+        self.icons.extend(
+            other
+                .icons
+                .iter()
+                .map(|(cell, icon)| (cell.saturating_add(offset), *icon)),
+        );
+        self.text.push_str(&other.text);
+        self
+    }
+
+    /// Keeps `text`, a prefix of this source's text possibly ended by an
+    /// ellipsis, and only the icons wholly inside its first `kept_cells`.
+    pub(super) fn with_prefix_text(&self, text: String, kept_cells: usize) -> Self {
+        let kept_cells = u32::try_from(kept_cells).unwrap_or(u32::MAX);
+        Self {
+            text,
+            icons: self
+                .icons
+                .iter()
+                .copied()
+                .filter(|(cell, _)| cell.saturating_add(ChromeIcon::CELLS) <= kept_cells)
+                .collect(),
+        }
+    }
+
+    /// The text with each icon written as `[name]`, for assertions.
+    #[cfg(test)]
+    pub(crate) fn describe(&self) -> String {
+        let mut described = String::new();
+        let mut cell = 0_u32;
+        let mut skip = 0_u32;
+        for character in self.text.chars() {
+            let width = u32::try_from(character.width().unwrap_or(0).min(2)).unwrap_or(0);
+            if skip > 0 && width > 0 {
+                skip -= 1;
+                cell += width;
+                continue;
+            }
+            if let Some((_, icon)) = self.icons.iter().find(|(start, _)| *start == cell) {
+                described.push('[');
+                described.push_str(icon.name());
+                described.push(']');
+                skip = ChromeIcon::CELLS - 1;
+            } else {
+                described.push(character);
+            }
+            cell += width;
+        }
+        described
+    }
+}
+
+impl From<&str> for ChromeSource {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            icons: Vec::new(),
+        }
+    }
+}
+
+impl From<String> for ChromeSource {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            icons: Vec::new(),
+        }
+    }
 }
 
 const fn chrome_attributes(style: ChromeTextStyle) -> CellAttributes {
@@ -55,6 +167,45 @@ const fn chrome_attributes(style: ChromeTextStyle) -> CellAttributes {
         background_source: ColorSource::Default,
         background: 0,
     }
+}
+
+/// Adds each icon to a chrome frame as a mask glyph at its slot's first cell.
+/// Icons past the frame or missing from the face leave their blank cells.
+fn place_icons(
+    frame: &mut SnapshotFrame,
+    icons: &[(u32, ChromeIcon)],
+    cell_count: u32,
+) -> Result<()> {
+    let cell = IconCell {
+        width: frame.cell_width,
+        height: frame.cell_height,
+        ascent: frame.ascent,
+        baseline: frame.baseline,
+    };
+    for (column, icon) in icons {
+        if column.saturating_add(ChromeIcon::CELLS) > cell_count {
+            continue;
+        }
+        let Some(glyph) = icon_glyph(*icon, frame.font_generation.id, frame.font_size, cell) else {
+            continue;
+        };
+        let key = GlyphKey {
+            face: ICON_FACE,
+            glyph: u16::try_from(*icon as usize).context("icon index fits u16")?,
+        };
+        frame.cache.insert(key, glyph);
+        frame.glyphs.push(SnapshotGlyph {
+            key,
+            column: *column,
+            row: 0,
+            cells: ChromeIcon::CELLS,
+            cluster_advance: u32_to_f32(frame.cell_width.saturating_mul(ChromeIcon::CELLS)),
+            x_offset: 0.0,
+            y_offset: 0.0,
+            foreground: [0xff; 3],
+        });
+    }
+    Ok(())
 }
 
 impl ChromeText {
@@ -77,8 +228,37 @@ impl ChromeText {
         Self::load_styled_with_context(text, scale_120, style, &context)
     }
 
+    #[cfg(test)]
+    pub(crate) fn load_source_styled(
+        source: &ChromeSource,
+        scale_120: u32,
+        style: ChromeTextStyle,
+    ) -> Result<Self> {
+        let context = super::compatibility_render_context()?;
+        Self::load_source_styled_with_context(source, scale_120, style, &context)
+    }
+
     pub(crate) fn load_styled_with_context(
         text: &str,
+        scale_120: u32,
+        style: ChromeTextStyle,
+        context: &RenderContext,
+    ) -> Result<Self> {
+        Self::load_parts(text, &[], scale_120, style, context)
+    }
+
+    pub(crate) fn load_source_styled_with_context(
+        source: &ChromeSource,
+        scale_120: u32,
+        style: ChromeTextStyle,
+        context: &RenderContext,
+    ) -> Result<Self> {
+        Self::load_parts(&source.text, &source.icons, scale_120, style, context)
+    }
+
+    fn load_parts(
+        text: &str,
+        icons: &[(u32, ChromeIcon)],
         scale_120: u32,
         style: ChromeTextStyle,
         context: &RenderContext,
@@ -160,8 +340,10 @@ impl ChromeText {
             exited_code: None,
             exited_signal: None,
         };
+        let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, scale_120, context)?;
+        place_icons(&mut frame, icons, cell_count)?;
         Ok(Self {
-            frame: SnapshotFrame::load_scaled_with_context(&snapshot, scale_120, context)?,
+            frame,
             cells: cell_count,
         })
     }
@@ -241,20 +423,5 @@ mod tests {
             0x12_34_56,
         );
         assert!(canvas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
-    }
-
-    #[test]
-    fn chrome_coverage_uses_fallback_faces_and_rejects_missing_glyphs() {
-        let context = super::super::compatibility_render_context().unwrap();
-        // Requires the pinned renderer test fonts, like the other renderer tests.
-        context.font_generation().unwrap();
-        assert!(chrome_text_covered("?!", &context));
-        assert!(chrome_text_covered("界", &context), "CJK fallback face");
-        assert!(!chrome_text_covered("?\u{10fffd}", &context));
-        let glyphs = crate::frontend::AgentGlyphs::with_coverage(|glyph| {
-            chrome_text_covered(glyph, &context)
-        });
-        // The pinned renderer test fonts cover every agent status glyph.
-        assert_eq!(glyphs, crate::frontend::AgentGlyphs::UNICODE);
     }
 }

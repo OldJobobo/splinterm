@@ -1,7 +1,7 @@
 use super::{
-    App, CachedFrameTitle, ChromeText, ChromeTextStyle, Context, DojoId, HashMap, HashSet,
-    LayoutNode, PaneView, Receiver, Rect, RenderContext, ResolvedTheme, Result, Sender, SplintId,
-    Waker, WindowDojoIdentity, WindowPaneOptions, WindowTabSet, WindowTopologyCommand,
+    App, CachedFrameTitle, ChromeSource, ChromeText, ChromeTextStyle, Context, DojoId, HashMap,
+    HashSet, LayoutNode, PaneView, Receiver, Rect, RenderContext, ResolvedTheme, Result, Sender,
+    SplintId, Waker, WindowDojoIdentity, WindowPaneOptions, WindowTabSet, WindowTopologyCommand,
     WindowTopologyUpdate, WindowUpdate, apply_theme, drain_receiver, fill_rect,
     logical_extent_to_buffer, pane_stream_has_terminal_notice, premultiplied_theme_rgba,
     rect_contains, sanitized_tab_label,
@@ -671,7 +671,7 @@ impl App {
             let rect = Self::buffer_rect(host_label_rect(rect), self.surface.scale_120)?;
             let cell = full.pixel_width() / full.cells().max(1);
             let maximum_cells = rect.width / cell.max(1);
-            let source = identity.label();
+            let source = ChromeSource::from(identity.label());
             if self
                 .tab_state
                 .remote_host_clipped
@@ -682,7 +682,7 @@ impl App {
                         || cached.scale_120 != self.surface.scale_120
                 })
             {
-                let clipped = clipped_remote_label(&source, maximum_cells as usize);
+                let clipped = clipped_remote_label(source.text(), maximum_cells as usize);
                 self.tab_state.remote_host_clipped = Some(CachedFrameTitle {
                     text: ChromeText::load_with_context(
                         &clipped,
@@ -713,7 +713,7 @@ impl App {
             let maximum_cells = (tab.label_rect.width / 8).max(1);
             // The badge takes width from the label, never from the close control.
             let source = crate::frontend::badged_tab_label(
-                self.tab_state.agent.badge(tab.dojo_id).as_deref(),
+                self.tab_state.agent.badge(tab.dojo_id).as_ref(),
                 &self.tab_state.tab_label(tab.dojo_id),
                 usize::try_from(maximum_cells).unwrap_or(usize::MAX),
             );
@@ -737,7 +737,7 @@ impl App {
                 self.tab_state.tab_label_cache.insert(
                     tab.dojo_id,
                     CachedFrameTitle {
-                        text: ChromeText::load_styled_with_context(
+                        text: ChromeText::load_source_styled_with_context(
                             &source,
                             self.surface.scale_120,
                             style,
@@ -1352,88 +1352,103 @@ mod tests {
 
     #[test]
     fn tab_badge_paints_first_and_never_reaches_the_close_control() {
-        use super::{CachedFrameTitle, ChromeText, ChromeTextStyle, Rect};
+        use super::{CachedFrameTitle, ChromeSource, ChromeText, ChromeTextStyle, Rect};
         use crate::frontend::badged_tab_label;
+        use crate::renderer::ChromeIcon;
 
         let label = "a long Dojo label";
-        for scale in [120, 150, 180, 240] {
-            for logical_width in [420, 140, 60] {
-                let dojo = DojoId::new();
-                let layout = tab_strip_layout(logical_width, &[dojo], 0).unwrap();
-                let tab = &layout.tabs[0];
-                let maximum_cells = usize::try_from((tab.label_rect.width / 8).max(1)).unwrap();
-                let width = super::logical_extent_to_buffer(logical_width, scale).unwrap();
-                let height =
-                    super::logical_extent_to_buffer(TAB_STRIP_LOGICAL_HEIGHT, scale).unwrap();
-                let paint = |source: &str| {
-                    let text =
-                        ChromeText::load_styled(source, scale, ChromeTextStyle::Bold).unwrap();
-                    let labels = HashMap::from([(
-                        dojo,
-                        CachedFrameTitle {
-                            source: source.to_owned(),
-                            maximum_cells: 0,
-                            scale_120: scale,
-                            bold: true,
-                            text,
-                        },
-                    )]);
-                    let close = ChromeText::load("×", scale).unwrap();
-                    let mut canvas = vec![0; (width * height * 4) as usize];
-                    App::paint_tab_strip(
-                        &mut canvas,
-                        width,
-                        height,
-                        &layout,
-                        scale,
-                        ResolvedTheme::default(),
-                        dojo,
-                        &labels,
-                        Some(&close),
-                        None,
-                        None,
-                    )
-                    .unwrap();
-                    canvas
-                };
-                let badged = badged_tab_label(Some("?2"), label, maximum_cells);
-                assert!(badged.starts_with("?2"), "{badged:?}");
-                let plain = paint(&badged_tab_label(None, label, maximum_cells));
-                let with_badge = paint(&badged);
-                let badge_only = paint("?2");
-                let label_rect = App::buffer_rect(tab.label_rect, scale).unwrap();
-                let cell = ChromeText::load("?", scale).unwrap().pixel_width();
-                let badge_cells = Rect {
-                    width: (2 * cell).min(label_rect.width),
-                    ..label_rect
-                };
-                let mut badge_pixels = 0;
-                for (index, ((badged_pixel, plain_pixel), badge_pixel)) in with_badge
-                    .chunks_exact(4)
-                    .zip(plain.chunks_exact(4))
-                    .zip(badge_only.chunks_exact(4))
-                    .enumerate()
-                {
-                    let x = u32::try_from(index).unwrap() % width;
-                    let y = u32::try_from(index).unwrap() / width;
-                    let position = (f64::from(x), f64::from(y));
-                    if badged_pixel != plain_pixel {
-                        // The badge takes width from the label, never the close control.
+        let mut counted = ChromeSource::default();
+        counted.push_icon(ChromeIcon::MessageQuestion).push_str("2");
+        let mut stale = ChromeSource::default();
+        stale
+            .push_icon(ChromeIcon::Loader2)
+            .push_icon(ChromeIcon::Clock);
+        let ascii = ChromeSource::from("?2");
+        for badge in [&counted, &stale, &ascii] {
+            for scale in [120, 150, 180, 240] {
+                for logical_width in [420, 140, 60] {
+                    let dojo = DojoId::new();
+                    let layout = tab_strip_layout(logical_width, &[dojo], 0).unwrap();
+                    let tab = &layout.tabs[0];
+                    let maximum_cells = usize::try_from((tab.label_rect.width / 8).max(1)).unwrap();
+                    let width = super::logical_extent_to_buffer(logical_width, scale).unwrap();
+                    let height =
+                        super::logical_extent_to_buffer(TAB_STRIP_LOGICAL_HEIGHT, scale).unwrap();
+                    let paint = |source: &ChromeSource| {
+                        let text =
+                            ChromeText::load_source_styled(source, scale, ChromeTextStyle::Bold)
+                                .unwrap();
+                        let labels = HashMap::from([(
+                            dojo,
+                            CachedFrameTitle {
+                                source: source.clone(),
+                                maximum_cells: 0,
+                                scale_120: scale,
+                                bold: true,
+                                text,
+                            },
+                        )]);
+                        let close = ChromeText::load("×", scale).unwrap();
+                        let mut canvas = vec![0; (width * height * 4) as usize];
+                        App::paint_tab_strip(
+                            &mut canvas,
+                            width,
+                            height,
+                            &layout,
+                            scale,
+                            ResolvedTheme::default(),
+                            dojo,
+                            &labels,
+                            Some(&close),
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                        canvas
+                    };
+                    let badged = badged_tab_label(Some(badge), label, maximum_cells);
+                    assert!(badged.text().starts_with(badge.text()), "{badged:?}");
+                    assert_eq!(badged.icons(), badge.icons());
+                    let plain = paint(&badged_tab_label(None, label, maximum_cells));
+                    let with_badge = paint(&badged);
+                    let badge_only = paint(badge);
+                    let label_rect = App::buffer_rect(tab.label_rect, scale).unwrap();
+                    let close_rect = App::buffer_rect(tab.close_rect, scale).unwrap();
+                    let cell = ChromeText::load("?", scale).unwrap().pixel_width();
+                    let badge_width = u32::try_from(badge.cells()).unwrap() * cell;
+                    let badge_cells = Rect {
+                        width: badge_width.min(label_rect.width),
+                        ..label_rect
+                    };
+                    let mut badge_pixels = 0;
+                    for (index, ((badged_pixel, plain_pixel), badge_pixel)) in with_badge
+                        .chunks_exact(4)
+                        .zip(plain.chunks_exact(4))
+                        .zip(badge_only.chunks_exact(4))
+                        .enumerate()
+                    {
+                        let x = u32::try_from(index).unwrap() % width;
+                        let y = u32::try_from(index).unwrap() / width;
+                        let position = (f64::from(x), f64::from(y));
+                        if badged_pixel != plain_pixel || badge_pixel != plain_pixel {
+                            // Badge icons take width from the label, never the close control.
+                            assert!(
+                                super::rect_contains(label_rect, position)
+                                    && !super::rect_contains(close_rect, position),
+                                "badge {badge:?} changed {x},{y} outside the label at scale {scale}, width {logical_width}"
+                            );
+                        }
+                        if super::rect_contains(badge_cells, position) {
+                            assert_eq!(badged_pixel, badge_pixel, "badge cells at {x},{y}");
+                            badge_pixels += usize::from(badge_pixel != plain_pixel);
+                        }
+                    }
+                    if label_rect.width >= badge_width {
                         assert!(
-                            super::rect_contains(label_rect, position),
-                            "badge changed {x},{y} outside the label at scale {scale}, width {logical_width}"
+                            badge_pixels > 0,
+                            "badge {badge:?} is visible at width {logical_width}"
                         );
                     }
-                    if super::rect_contains(badge_cells, position) {
-                        assert_eq!(badged_pixel, badge_pixel, "badge cells at {x},{y}");
-                        badge_pixels += usize::from(badge_pixel != plain_pixel);
-                    }
-                }
-                if label_rect.width >= 2 * cell {
-                    assert!(
-                        badge_pixels > 0,
-                        "badge is visible at width {logical_width}"
-                    );
                 }
             }
         }

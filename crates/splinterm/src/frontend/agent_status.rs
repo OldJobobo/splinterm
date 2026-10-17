@@ -1,9 +1,9 @@
 //! Pure presentation of explicitly reported agent status.
 //!
-//! Status is display data from the daemon, never inferred from terminal
-//! content and never authority. Every state is distinguishable by glyph shape
-//! and by text alone; nothing here animates. The free-text detail is
-//! Explorer-only and never reaches Dojo tabs.
+//! Status is display data from the daemon, never authority and never inferred
+//! from terminal content. Every state is distinguishable by icon shape and by
+//! text alone; nothing here animates. The free-text detail is Explorer-only
+//! and never reaches Dojo tabs.
 
 use std::fmt::Write as _;
 
@@ -11,6 +11,7 @@ use splinterm_protocol::AgentState;
 use unicode_width::UnicodeWidthChar;
 
 use crate::navigation_projection::NavigationAgentStatus;
+use crate::renderer::{ChromeIcon, ChromeSource};
 
 /// Display priority, highest first. Stale statuses rank below every fresh one.
 const PRIORITY: [AgentState; 5] = [
@@ -21,59 +22,100 @@ const PRIORITY: [AgentState; 5] = [
     AgentState::Idle,
 ];
 
-/// Marker appended to a stale badge.
-pub(crate) const STALE_MARKER: &str = "~";
+/// Marker after an ASCII glyph for a stale status.
+pub(crate) const ASCII_STALE_MARKER: &str = "~";
 
 /// Explorer and accessibility text when endpoint data is stale or disconnected.
 pub(crate) const UNAVAILABLE_TEXT: &str = "Agent status unavailable";
 
-/// Status glyphs resolved against the UI font. `?` and `!` are ASCII already.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct AgentGlyphs {
-    working: &'static str,
-    done: &'static str,
-    idle: &'static str,
-}
-
-impl Default for AgentGlyphs {
-    fn default() -> Self {
-        Self::UNICODE
-    }
+/// How status is drawn. Both styles are visual only: accessible text and
+/// search always use state words.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AgentGlyphs {
+    /// Embedded Tabler icons, two cells each; a clock icon marks stale.
+    #[default]
+    Icons,
+    /// One ASCII character per state; `~` marks stale. Used when the
+    /// embedded icon face cannot be loaded, never a replacement glyph.
+    Ascii,
 }
 
 impl AgentGlyphs {
-    pub(crate) const UNICODE: Self = Self {
-        working: "▸",
-        done: "✓",
-        idle: "·",
-    };
-    pub(crate) const ASCII: Self = Self {
-        working: ">",
-        done: "+",
-        idle: "-",
-    };
-
-    /// Chooses each glyph's ASCII fallback when the font lacks coverage, so
-    /// shape never depends on a missing glyph.
-    pub(crate) fn with_coverage(covers: impl Fn(&str) -> bool) -> Self {
-        let pick = |unicode: &'static str, ascii: &'static str| {
-            if covers(unicode) { unicode } else { ascii }
-        };
-        Self {
-            working: pick(Self::UNICODE.working, Self::ASCII.working),
-            done: pick(Self::UNICODE.done, Self::ASCII.done),
-            idle: pick(Self::UNICODE.idle, Self::ASCII.idle),
+    pub(crate) const fn select(icons_available: bool) -> Self {
+        if icons_available {
+            Self::Icons
+        } else {
+            Self::Ascii
         }
     }
 
-    pub(crate) const fn glyph(self, state: AgentState) -> &'static str {
+    pub(crate) const fn icon(state: AgentState) -> ChromeIcon {
         match state {
-            AgentState::Working => self.working,
-            AgentState::NeedsInput => "?",
-            AgentState::Done => self.done,
-            AgentState::Error => "!",
-            AgentState::Idle => self.idle,
+            AgentState::Working => ChromeIcon::Loader2,
+            AgentState::NeedsInput => ChromeIcon::MessageQuestion,
+            AgentState::Done => ChromeIcon::CircleCheck,
+            AgentState::Error => ChromeIcon::AlertCircle,
+            AgentState::Idle => ChromeIcon::Point,
         }
+    }
+
+    pub(crate) const fn ascii(state: AgentState) -> &'static str {
+        match state {
+            AgentState::Working => ">",
+            AgentState::NeedsInput => "?",
+            AgentState::Done => "+",
+            AgentState::Error => "!",
+            AgentState::Idle => "-",
+        }
+    }
+
+    /// Cells of the stale marker slot.
+    const fn stale_cells(self) -> usize {
+        match self {
+            Self::Icons => ChromeIcon::CELLS as usize,
+            Self::Ascii => 1,
+        }
+    }
+
+    /// Cells of the fixed Explorer column: the glyph and the stale slot.
+    pub(crate) const fn column_cells(self) -> usize {
+        match self {
+            Self::Icons => 2 * ChromeIcon::CELLS as usize,
+            Self::Ascii => 2,
+        }
+    }
+
+    fn push_glyph(self, source: &mut ChromeSource, state: AgentState) {
+        match self {
+            Self::Icons => source.push_icon(Self::icon(state)),
+            Self::Ascii => source.push_str(Self::ascii(state)),
+        };
+    }
+
+    fn push_stale(self, source: &mut ChromeSource) {
+        match self {
+            Self::Icons => source.push_icon(ChromeIcon::Clock),
+            Self::Ascii => source.push_str(ASCII_STALE_MARKER),
+        };
+    }
+
+    /// The fixed-width column for one state, or blank cells without one.
+    fn column(self, state: Option<(AgentState, bool)>) -> ChromeSource {
+        let mut column = ChromeSource::default();
+        match state {
+            None => {
+                column.push_str(&" ".repeat(self.column_cells()));
+            }
+            Some((state, is_stale)) => {
+                self.push_glyph(&mut column, state);
+                if is_stale {
+                    self.push_stale(&mut column);
+                } else {
+                    column.push_str(&" ".repeat(self.stale_cells()));
+                }
+            }
+        }
+        column
     }
 }
 
@@ -128,17 +170,11 @@ pub(crate) fn search_terms(status: &NavigationAgentStatus) -> String {
 }
 
 /// Fixed-width Explorer glyph column: the glyph and a stale marker slot.
-pub(crate) fn glyph_column(status: Option<&NavigationAgentStatus>, glyphs: AgentGlyphs) -> String {
-    status.map_or_else(
-        || "  ".to_owned(),
-        |status| {
-            format!(
-                "{}{}",
-                glyphs.glyph(status.state),
-                if status.stale { STALE_MARKER } else { " " }
-            )
-        },
-    )
+pub(crate) fn glyph_column(
+    status: Option<&NavigationAgentStatus>,
+    glyphs: AgentGlyphs,
+) -> ChromeSource {
+    glyphs.column(status.map(|status| (status.state, status.stale)))
 }
 
 /// Status counts of a set of Splints, ordered by display priority.
@@ -180,36 +216,13 @@ impl AgentAggregate {
         self.groups.first().copied()
     }
 
-    /// Explorer glyph column for a Dojo or Lair row.
-    pub(crate) fn glyph_column(&self, glyphs: AgentGlyphs) -> String {
-        self.top().map_or_else(
-            || "  ".to_owned(),
-            |(state, is_stale, _)| {
-                format!(
-                    "{}{}",
-                    glyphs.glyph(state),
-                    if is_stale { STALE_MARKER } else { " " }
-                )
-            },
-        )
+    /// Explorer glyph column for a Dojo or Lair row: the most urgent state.
+    pub(crate) fn glyph_column(&self, glyphs: AgentGlyphs) -> ChromeSource {
+        glyphs.column(self.top().map(|(state, is_stale, _)| (state, is_stale)))
     }
 
-    /// Visible counts for a Dojo or Lair row, e.g. "? 1, ▸ 2".
-    pub(crate) fn counts_text(&self, glyphs: AgentGlyphs) -> String {
-        self.groups
-            .iter()
-            .map(|(state, is_stale, count)| {
-                format!(
-                    "{}{} {count}",
-                    glyphs.glyph(*state),
-                    if *is_stale { STALE_MARKER } else { "" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    /// Accessible counts in words, e.g. "1 needs input, 2 working".
+    /// Counts in words for the Explorer status line and accessibility, e.g.
+    /// "1 needs input, 2 working".
     pub(crate) fn counts_words(&self) -> String {
         self.groups
             .iter()
@@ -225,15 +238,17 @@ impl AgentAggregate {
     }
 
     /// One Dojo tab badge: the aggregate glyph, a count when more than one
-    /// Splint shares the top state, and the stale marker, e.g. `?2` or `▸~`.
-    pub(crate) fn tab_badge(&self, glyphs: AgentGlyphs) -> Option<String> {
+    /// Splint shares the top state, and the stale marker, e.g.
+    /// `[message-question]2` or `[loader-2][clock]`; ASCII `?2` or `>~`.
+    pub(crate) fn tab_badge(&self, glyphs: AgentGlyphs) -> Option<ChromeSource> {
         let (top_state, is_stale, count) = self.top()?;
-        let mut badge = glyphs.glyph(top_state).to_owned();
+        let mut badge = ChromeSource::default();
+        glyphs.push_glyph(&mut badge, top_state);
         if count > 1 {
             badge.push_str(&count.min(99).to_string());
         }
         if is_stale {
-            badge.push_str(STALE_MARKER);
+            glyphs.push_stale(&mut badge);
         }
         Some(badge)
     }
@@ -248,30 +263,36 @@ fn cells(text: &str) -> usize {
 /// Composes a Dojo tab label within `maximum_cells`. The badge comes first and
 /// the label text gives up width before it, so on a narrow tab the badge is
 /// the last thing dropped. Without a badge the label is returned unchanged.
-pub(crate) fn badged_tab_label(badge: Option<&str>, label: &str, maximum_cells: usize) -> String {
+pub(crate) fn badged_tab_label(
+    badge: Option<&ChromeSource>,
+    label: &str,
+    maximum_cells: usize,
+) -> ChromeSource {
     let Some(badge) = badge else {
-        return label.to_owned();
+        return ChromeSource::from(label);
     };
-    let badge_cells = cells(badge);
+    let mut composed = badge.clone();
     // One separating space, then at least one label cell and an ellipsis.
-    let label_budget = maximum_cells.saturating_sub(badge_cells.saturating_add(1));
+    let label_budget = maximum_cells.saturating_sub(badge.cells().saturating_add(1));
     if label.is_empty() || label_budget < 2 {
-        return badge.to_owned();
+        return composed;
     }
+    composed.push_str(" ");
     if cells(label) <= label_budget {
-        return format!("{badge} {label}");
+        composed.push_str(label);
+        return composed;
     }
-    let mut truncated = String::new();
     let mut used = 0_usize;
     for character in label.chars() {
         let width = character.width().unwrap_or(0).min(2);
         if used.saturating_add(width) > label_budget - 1 {
             break;
         }
-        truncated.push(character);
+        composed.push_str(character.encode_utf8(&mut [0; 4]));
         used = used.saturating_add(width);
     }
-    format!("{badge} {truncated}…")
+    composed.push_str("…");
+    composed
 }
 
 #[cfg(test)]
@@ -287,43 +308,57 @@ mod tests {
         }
     }
 
-    #[test]
-    fn glyph_and_text_tables_cover_every_state_with_ascii_fallbacks() {
-        let table = [
-            (AgentState::Working, "▸", ">", "Working"),
-            (AgentState::NeedsInput, "?", "?", "Needs input"),
-            (AgentState::Done, "✓", "+", "Done"),
-            (AgentState::Error, "!", "!", "Error"),
-            (AgentState::Idle, "·", "-", "Idle"),
-        ];
-        for (state, unicode, ascii, text) in table {
-            assert_eq!(AgentGlyphs::UNICODE.glyph(state), unicode);
-            assert_eq!(AgentGlyphs::ASCII.glyph(state), ascii);
-            assert!(ascii.is_ascii());
-            assert_eq!(state_text(state), text);
-        }
-        // Shape alone distinguishes every state in both glyph sets.
-        for glyphs in [AgentGlyphs::UNICODE, AgentGlyphs::ASCII] {
-            let mut shapes = PRIORITY.map(|state| glyphs.glyph(state)).to_vec();
-            shapes.sort_unstable();
-            shapes.dedup();
-            assert_eq!(shapes.len(), PRIORITY.len());
-            assert!(
-                PRIORITY
-                    .iter()
-                    .all(|state| glyphs.glyph(*state).chars().all(|c| c.width() == Some(1)))
-            );
-        }
+    fn describe(source: &ChromeSource) -> String {
+        source.describe()
     }
 
     #[test]
-    fn missing_coverage_selects_each_ascii_fallback_independently() {
-        assert_eq!(AgentGlyphs::with_coverage(|_| true), AgentGlyphs::UNICODE);
-        assert_eq!(AgentGlyphs::with_coverage(|_| false), AgentGlyphs::ASCII);
-        let partial = AgentGlyphs::with_coverage(|glyph| glyph != "✓");
-        assert_eq!(partial.glyph(AgentState::Working), "▸");
-        assert_eq!(partial.glyph(AgentState::Done), "+");
-        assert_eq!(partial.glyph(AgentState::Idle), "·");
+    fn icon_and_text_tables_cover_every_state_with_ascii_fallbacks() {
+        let table = [
+            (AgentState::Working, ChromeIcon::Loader2, ">", "Working"),
+            (
+                AgentState::NeedsInput,
+                ChromeIcon::MessageQuestion,
+                "?",
+                "Needs input",
+            ),
+            (AgentState::Done, ChromeIcon::CircleCheck, "+", "Done"),
+            (AgentState::Error, ChromeIcon::AlertCircle, "!", "Error"),
+            (AgentState::Idle, ChromeIcon::Point, "-", "Idle"),
+        ];
+        for (state, icon, ascii, text) in table {
+            assert_eq!(AgentGlyphs::icon(state), icon);
+            assert_eq!(AgentGlyphs::ascii(state), ascii);
+            assert!(ascii.is_ascii() && cells(ascii) == 1);
+            assert_eq!(state_text(state), text);
+        }
+        // Shape alone distinguishes every state in both styles, and the stale
+        // marker is distinct from every state.
+        let mut icons = PRIORITY.map(AgentGlyphs::icon).to_vec();
+        icons.push(ChromeIcon::Clock);
+        icons.sort_unstable();
+        icons.dedup();
+        assert_eq!(icons.len(), PRIORITY.len() + 1);
+        let mut ascii = PRIORITY.map(AgentGlyphs::ascii).to_vec();
+        ascii.push(ASCII_STALE_MARKER);
+        ascii.sort_unstable();
+        ascii.dedup();
+        assert_eq!(ascii.len(), PRIORITY.len() + 1);
+    }
+
+    #[test]
+    fn ascii_is_used_only_when_icons_are_unavailable() {
+        assert_eq!(AgentGlyphs::default(), AgentGlyphs::Icons);
+        assert_eq!(AgentGlyphs::select(true), AgentGlyphs::Icons);
+        assert_eq!(AgentGlyphs::select(false), AgentGlyphs::Ascii);
+        let blocked = [status(AgentState::NeedsInput, true)];
+        let aggregate = AgentAggregate::from_statuses(&blocked);
+        let ascii = aggregate.tab_badge(AgentGlyphs::Ascii).unwrap();
+        assert_eq!(ascii.text(), "?~");
+        assert!(ascii.icons().is_empty());
+        let column = glyph_column(Some(&blocked[0]), AgentGlyphs::Ascii);
+        assert_eq!(column.text(), "?~");
+        assert!(column.icons().is_empty());
     }
 
     #[test]
@@ -339,10 +374,6 @@ mod tests {
         ];
         let aggregate = AgentAggregate::from_statuses(&statuses);
         assert_eq!(aggregate.top(), Some((AgentState::NeedsInput, false, 1)));
-        assert_eq!(
-            aggregate.counts_text(AgentGlyphs::UNICODE),
-            "? 1, ! 1, ▸ 2, ✓ 1, · 1, ?~ 1"
-        );
         assert_eq!(
             aggregate.counts_words(),
             "1 needs input, 1 error, 2 working, 1 done, 1 idle, 1 needs input (stale)"
@@ -361,36 +392,40 @@ mod tests {
         }
         assert!(AgentAggregate::from_statuses(&[]).is_empty());
         assert_eq!(
-            AgentAggregate::default().tab_badge(AgentGlyphs::UNICODE),
+            AgentAggregate::default().tab_badge(AgentGlyphs::Icons),
             None
         );
     }
 
     #[test]
     fn tab_badge_counts_only_the_top_state_and_marks_stale() {
+        let badge = |statuses: &[NavigationAgentStatus], glyphs| {
+            describe(
+                &AgentAggregate::from_statuses(statuses)
+                    .tab_badge(glyphs)
+                    .unwrap(),
+            )
+        };
         let two_blocked = [
             status(AgentState::NeedsInput, false),
             status(AgentState::NeedsInput, false),
             status(AgentState::Working, false),
         ];
         assert_eq!(
-            AgentAggregate::from_statuses(&two_blocked).tab_badge(AgentGlyphs::UNICODE),
-            Some("?2".to_owned())
+            badge(&two_blocked, AgentGlyphs::Icons),
+            "[message-question]2"
         );
+        assert_eq!(badge(&two_blocked, AgentGlyphs::Ascii), "?2");
         let stale = [status(AgentState::Working, true)];
-        assert_eq!(
-            AgentAggregate::from_statuses(&stale).tab_badge(AgentGlyphs::UNICODE),
-            Some("▸~".to_owned())
-        );
-        assert_eq!(
-            AgentAggregate::from_statuses(&stale).tab_badge(AgentGlyphs::ASCII),
-            Some(">~".to_owned())
-        );
+        assert_eq!(badge(&stale, AgentGlyphs::Icons), "[loader-2][clock]");
+        assert_eq!(badge(&stale, AgentGlyphs::Ascii), ">~");
         let many = vec![status(AgentState::Done, false); 120];
-        assert_eq!(
-            AgentAggregate::from_statuses(&many).tab_badge(AgentGlyphs::UNICODE),
-            Some("✓99".to_owned())
-        );
+        assert_eq!(badge(&many, AgentGlyphs::Icons), "[circle-check]99");
+        let source = AgentAggregate::from_statuses(&many)
+            .tab_badge(AgentGlyphs::Icons)
+            .unwrap();
+        assert_eq!(source.cells(), 4);
+        assert_eq!(source.icons(), &[(0, ChromeIcon::CircleCheck)]);
     }
 
     #[test]
@@ -411,37 +446,73 @@ mod tests {
     }
 
     #[test]
-    fn glyph_column_has_a_fixed_width() {
-        let columns = [
-            glyph_column(None, AgentGlyphs::UNICODE),
-            glyph_column(
-                Some(&status(AgentState::Working, false)),
-                AgentGlyphs::UNICODE,
-            ),
-            glyph_column(Some(&status(AgentState::Done, true)), AgentGlyphs::ASCII),
-            AgentAggregate::default().glyph_column(AgentGlyphs::UNICODE),
-            AgentAggregate::from_statuses(&[status(AgentState::Error, false)])
-                .glyph_column(AgentGlyphs::UNICODE),
-        ];
-        assert!(columns.iter().all(|column| cells(column) == 2));
-        assert_eq!(columns[2], "+~");
+    fn glyph_column_has_a_fixed_width_per_style() {
+        for glyphs in [AgentGlyphs::Icons, AgentGlyphs::Ascii] {
+            let columns = [
+                glyph_column(None, glyphs),
+                glyph_column(Some(&status(AgentState::Working, false)), glyphs),
+                glyph_column(Some(&status(AgentState::Done, true)), glyphs),
+                AgentAggregate::default().glyph_column(glyphs),
+                AgentAggregate::from_statuses(&[status(AgentState::Error, false)])
+                    .glyph_column(glyphs),
+            ];
+            assert!(
+                columns
+                    .iter()
+                    .all(|column| column.cells() == glyphs.column_cells())
+            );
+        }
+        assert_eq!(AgentGlyphs::Icons.column_cells(), 4);
+        assert_eq!(
+            describe(&glyph_column(
+                Some(&status(AgentState::Done, true)),
+                AgentGlyphs::Icons
+            )),
+            "[circle-check][clock]"
+        );
+        assert_eq!(
+            describe(&glyph_column(
+                Some(&status(AgentState::NeedsInput, false)),
+                AgentGlyphs::Icons
+            )),
+            "[message-question]  "
+        );
+        assert_eq!(
+            glyph_column(Some(&status(AgentState::Done, true)), AgentGlyphs::Ascii).text(),
+            "+~"
+        );
     }
 
     #[test]
     fn tab_label_width_budget_drops_label_text_before_the_badge() {
-        assert_eq!(badged_tab_label(None, "editor", 3), "editor");
-        assert_eq!(badged_tab_label(Some("?"), "editor", 20), "? editor");
-        assert_eq!(badged_tab_label(Some("?2"), "editor", 9), "?2 editor");
-        assert_eq!(badged_tab_label(Some("?2"), "editor", 8), "?2 edit…");
-        assert_eq!(badged_tab_label(Some("?2"), "editor", 7), "?2 edi…");
-        assert_eq!(badged_tab_label(Some("?2"), "editor", 5), "?2 e…");
-        assert_eq!(badged_tab_label(Some("?2"), "editor", 4), "?2");
-        assert_eq!(badged_tab_label(Some("?2"), "editor", 1), "?2");
-        assert_eq!(badged_tab_label(Some("▸~"), "日本語", 6), "▸~ 日…");
+        let label = |badge: Option<&str>, text: &str, maximum: usize| {
+            badged_tab_label(badge.map(ChromeSource::from).as_ref(), text, maximum)
+                .text()
+                .to_owned()
+        };
+        assert_eq!(label(None, "editor", 3), "editor");
+        assert_eq!(label(Some("?"), "editor", 20), "? editor");
+        assert_eq!(label(Some("?2"), "editor", 9), "?2 editor");
+        assert_eq!(label(Some("?2"), "editor", 8), "?2 edit…");
+        assert_eq!(label(Some("?2"), "editor", 7), "?2 edi…");
+        assert_eq!(label(Some("?2"), "editor", 5), "?2 e…");
+        assert_eq!(label(Some("?2"), "editor", 4), "?2");
+        assert_eq!(label(Some("?2"), "editor", 1), "?2");
+        assert_eq!(label(Some(">~"), "日本語", 6), ">~ 日…");
+        let mut icon_badge = ChromeSource::default();
+        icon_badge.push_icon(ChromeIcon::CircleCheck).push_str("3");
+        icon_badge.push_icon(ChromeIcon::Clock);
         for maximum in 0..24 {
-            let label = badged_tab_label(Some("✓3~"), "a long Dojo name", maximum);
-            assert!(label.starts_with("✓3~"));
-            assert!(cells(&label) <= maximum.max(3));
+            let composed = badged_tab_label(Some(&icon_badge), "a long Dojo name", maximum);
+            assert!(composed.describe().starts_with("[circle-check]3[clock]"));
+            assert_eq!(composed.icons(), icon_badge.icons());
+            assert!(composed.cells() <= maximum.max(5));
         }
+        assert_eq!(
+            badged_tab_label(Some(&icon_badge), "editor", 12).describe(),
+            "[circle-check]3[clock] editor"
+        );
+        // A label never contributes icons, even with icon codepoints in it.
+        assert!(badged_tab_label(Some(&icon_badge), "\u{ea05}x", 20).icons() == icon_badge.icons());
     }
 }

@@ -1,22 +1,19 @@
 //! Window-local agent status for Dojo tab badges and the palette clear.
 //!
 //! Status is display data from the daemon, never authority and never inferred
-//! from terminal content. Tabs show one static glyph badge per Dojo and never
+//! from terminal content. Tabs show one static icon badge per Dojo and never
 //! the free-text detail. Nothing here animates, so reduced motion has nothing
 //! further to suppress.
 
 use super::{App, DojoId, SplintId};
 use crate::frontend::{AgentAggregate, AgentGlyphs};
 use crate::navigation_projection::WindowAgentStatus;
-use crate::renderer::chrome_text_covered;
+use crate::renderer::{ChromeSource, chrome_icons_available};
 
 pub(super) struct TabAgentStatus {
     status: WindowAgentStatus,
     enabled: bool,
     glyphs: AgentGlyphs,
-    /// Whether glyphs were resolved, and against which font generation.
-    glyphs_resolved: bool,
-    glyph_generation: Option<u64>,
 }
 
 impl TabAgentStatus {
@@ -24,18 +21,22 @@ impl TabAgentStatus {
         Self {
             status: WindowAgentStatus::default(),
             enabled,
-            glyphs: AgentGlyphs::default(),
-            glyphs_resolved: false,
-            glyph_generation: None,
+            glyphs: AgentGlyphs::select(chrome_icons_available()),
         }
     }
 
-    /// One tab badge: the aggregate glyph of the Dojo's Splints.
-    pub(super) fn badge(&self, dojo_id: DojoId) -> Option<String> {
+    /// One tab badge: the aggregate icon of the Dojo's Splints.
+    pub(super) fn badge(&self, dojo_id: DojoId) -> Option<ChromeSource> {
         if !self.enabled {
             return None;
         }
         AgentAggregate::from_statuses(self.status.dojo_statuses(dojo_id)).tab_badge(self.glyphs)
+    }
+
+    /// Icons, or ASCII when the embedded icon face is unavailable; shared
+    /// with the Explorer at startup.
+    pub(super) const fn glyphs(&self) -> AgentGlyphs {
+        self.glyphs
     }
 
     /// Live incarnation of a Splint that currently shows a status, which the
@@ -49,23 +50,6 @@ impl TabAgentStatus {
 }
 
 impl App {
-    /// Resolves status glyphs against the current UI font and its fallbacks
-    /// once per font generation; uncovered glyphs use ASCII fallbacks.
-    pub(super) fn sync_agent_status_glyphs(&mut self) {
-        let generation = self.presentation.render_context.font_generation_id();
-        if self.tab_state.agent.glyphs_resolved
-            && self.tab_state.agent.glyph_generation == generation
-        {
-            return;
-        }
-        let context = &self.presentation.render_context;
-        let glyphs = AgentGlyphs::with_coverage(|glyph| chrome_text_covered(glyph, context));
-        self.tab_state.agent.glyphs_resolved = true;
-        self.tab_state.agent.glyph_generation = generation;
-        self.tab_state.agent.glyphs = glyphs;
-        self.explorer.set_agent_glyphs(glyphs);
-    }
-
     pub(super) fn set_agent_status_presentation(&mut self, enabled: bool) -> bool {
         let explorer_changed = self.explorer.set_agent_status_enabled(enabled);
         let tabs_changed = self.tab_state.agent.enabled != enabled;
@@ -132,20 +116,25 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert_eq!(agent.badge(first).as_deref(), Some("?"));
-        assert_eq!(agent.badge(second).as_deref(), Some("✓"));
+        let badge = |agent: &TabAgentStatus, dojo| agent.badge(dojo).map(|badge| badge.describe());
+        // The embedded icon face is always available in tests.
+        assert_eq!(agent.glyphs(), AgentGlyphs::Icons);
+        assert_eq!(badge(&agent, first).as_deref(), Some("[message-question]"));
+        assert_eq!(badge(&agent, second).as_deref(), Some("[circle-check]"));
         assert_eq!(agent.badge(DojoId::new()), None);
         assert!(
             [first, second]
                 .into_iter()
                 .filter_map(|dojo| agent.badge(dojo))
-                .all(|badge| !badge.contains("shown"))
+                .all(|badge| !badge.text().contains("shown"))
         );
         assert_eq!(agent.clearable_incarnation(blocked), Some(3));
         assert_eq!(agent.clearable_incarnation(SplintId::new()), None);
 
         assert!(agent.status.apply_change(blocked, 3, None));
-        assert_eq!(agent.badge(first).as_deref(), Some("▸"));
+        assert_eq!(badge(&agent, first).as_deref(), Some("[loader-2]"));
+        agent.glyphs = AgentGlyphs::Ascii;
+        assert_eq!(badge(&agent, first).as_deref(), Some(">"));
 
         agent.enabled = false;
         assert_eq!(agent.badge(second), None);

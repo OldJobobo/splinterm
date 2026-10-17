@@ -39,6 +39,7 @@ mod decorations;
 mod evidence;
 mod fonts;
 mod frame;
+mod icons;
 mod images;
 mod overlays;
 mod raster;
@@ -79,6 +80,7 @@ use frame::{
     cell_is_renderable, default_background, default_foreground, leader_span, primary_face_index,
     rendition_colors,
 };
+pub(crate) use icons::{ChromeIcon, chrome_icons_available};
 #[cfg(test)]
 use images::{KITTY_BACKGROUND_Z_THRESHOLD, SnapshotImage, compare_snapshot_images, image_tier};
 pub(crate) use overlays::actions::{
@@ -116,7 +118,7 @@ use settings::{
 pub use settings::{
     RenderContext, RendererOptions, RendererResources, configure, effective_font_resolution,
 };
-pub(crate) use text::{ChromeText, ChromeTextStyle, chrome_text_covered};
+pub(crate) use text::{ChromeSource, ChromeText, ChromeTextStyle};
 
 pub(crate) fn premultiplied_theme_rgba(color: u32, alpha: u16) -> [u8; 4] {
     premultiplied_rgba(

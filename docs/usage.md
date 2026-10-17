@@ -180,6 +180,8 @@ only stopped or unavailable Splints is not live. **Saved** keeps saved and pinne
 including any live work inside them. These filters preserve the authoritative
 Lair → Dojo → Splint order; pinning adds a status marker, not refresh-driven
 sorting. Branches begin collapsed, and refreshing preserves disclosure choices.
+A chevron icon before each Lair and Dojo points right when collapsed and down
+when expanded, and a dot marks the current row.
 Label search operates within the chosen filter. The accessibility status names
 the active filter and announces the keyboard shortcut.
 
@@ -221,37 +223,43 @@ finished, through `splinterm agent-status`, the MCP tool, or an agent hook (see
 explicitly reported. It never guesses from terminal text, titles, prompts, or
 output, and a status is display data: it cannot approve, type, or take control.
 
-| State | Glyph | Text |
-| --- | --- | --- |
-| working | `▸` | Working |
-| needs input | `?` | Needs input |
-| done | `✓` | Done |
-| error | `!` | Error |
-| idle | `·` | Idle |
+| State | Icon | ASCII fallback | Text |
+| --- | --- | --- | --- |
+| working | `loader-2` (an open circle) | `>` | Working |
+| needs input | `message-question` (a speech bubble with `?`) | `?` | Needs input |
+| done | `circle-check` | `+` | Done |
+| error | `alert-circle` (a circle with `!`) | `!` | Error |
+| idle | `point` (a small ring) | `-` | Idle |
+| stale marker | `clock` | `~` | stale (no report for N min) |
 
-Every state differs by glyph shape and by text, never by colour or motion alone.
-Glyphs are static: there is no spinner or other animation. When the interface
-font and its fallbacks lack `▸`, `✓`, or `·`, that glyph falls back to `>`,
-`+`, or `-`.
+The icons are a small subset of [Tabler Icons](https://tabler.io/icons) (MIT)
+built into Splinterm, drawn in the row's text colour at the interface font's
+ascender height. Every state differs by icon shape and by text, never by colour
+or motion alone. Icons are static: the working icon never spins, and nothing
+else animates. They do not depend on the interface font; if the built-in icon
+data could not be loaded, Splinterm would show the ASCII fallbacks instead of a
+missing-glyph box. Icons are visual only: accessible text and search use the
+state words.
 
-- **Splint rows** show the glyph in a fixed-width column before the name and add
+- **Splint rows** show the icon in a fixed-width column before the name and add
   the state to the status line, for example *Running · Needs input · waiting for
   approval*. The agent's free-text detail appears only here, ellipsized to the
   row width.
-- **Dojo and Lair rows** show the most urgent glyph of the Splints inside them,
-  and the status line counts each state, for example *? 1, ▸ 2*. Priority is
-  needs input, then error, working, done, and idle; stale statuses rank last.
-  The glyph column appears while any Splint in the Explorer has a status.
-- **Dojo tabs** show one badge before the label: the most urgent glyph, with a
-  count when several Splints share it (`?2`). The badge takes space from the
-  label, never from the close control, so on a narrow tab the label is
-  shortened first and the badge is the last thing dropped. Tabs never show the
-  detail text.
+- **Dojo and Lair rows** show the most urgent icon of the Splints inside them,
+  and the status line counts each state in words, joined with ", ", for example
+  *Running · Current · 1 needs input, 2 working*. Priority is needs input, then
+  error, working, done, and idle; stale statuses rank last. The icon column
+  appears while any Splint in the Explorer has a status.
+- **Dojo tabs** show one badge before the label: the most urgent icon, with a
+  count when several Splints share it (the needs-input icon followed by `2`).
+  The badge takes space from the label, never from the close control, so on a
+  narrow tab the label is shortened first and the badge is the last thing
+  dropped. Tabs never show the detail text.
 - **Stale.** `working` and `needs input` expire unless the agent reports again,
-  after two minutes by default. Splinterm then keeps the last glyph and marks it
-  stale: a trailing `~` in the glyph column and tab badge (`▸~`), and *Working ·
-  stale (no report for 2 min)* in the Explorer. A stale status is dropped after
-  15 more minutes.
+  after two minutes by default. Splinterm then keeps the last icon and adds the
+  clock icon after it in the Explorer column and the tab badge, and the
+  Explorer status reads *Working · stale (no report for 2 min)*. A stale status
+  is dropped after 15 more minutes.
 - **Unavailable.** While the Explorer's view of the daemon is stale or
   disconnected, rows show *Agent status unavailable* instead of the last value.
 - **Search.** Explorer search also matches state words, so `needs input` (or

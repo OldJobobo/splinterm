@@ -11,9 +11,12 @@ use crate::{
 };
 
 use super::{
-    super::{ChromeTextStyle, RenderContext, fill_rect},
+    super::{
+        ChromeIcon, ChromeSource, ChromeTextStyle, RenderContext, chrome_icons_available, fill_rect,
+    },
     picker::{
-        PickerTextAlignment, SessionPickerPalette, SessionPickerTextCache, paint_picker_text,
+        PickerTextAlignment, SessionPickerPalette, SessionPickerTextCache, paint_picker_source,
+        paint_picker_text,
     },
 };
 
@@ -237,6 +240,43 @@ pub(crate) fn lair_explorer_disclosure_hit_test(
         })
 }
 
+/// A row's label line: a current-row dot, a two-cell disclosure slot, the
+/// optional agent status column, and the label. The disclosure chevrons are
+/// icons; ASCII `>` and `v` stand in only if the embedded icon face fails.
+fn row_label_source(row: &LairExplorerRow, icons: bool) -> ChromeSource {
+    let mut source = ChromeSource::default();
+    if row.pending {
+        source.push_str("  …");
+    } else {
+        source.push_str(if row.current && row.expanded.is_some() {
+            "●"
+        } else {
+            " "
+        });
+        match (row.expanded, icons) {
+            (Some(expanded), true) => {
+                source.push_icon(if expanded {
+                    ChromeIcon::ChevronDown
+                } else {
+                    ChromeIcon::ChevronRight
+                });
+            }
+            (Some(expanded), false) => {
+                source.push_str(if expanded { " v" } else { " >" });
+            }
+            // A Splint has no disclosure; its current dot sits in the slot.
+            (None, _) => {
+                source.push_str(if row.current { " ●" } else { "  " });
+            }
+        }
+    }
+    if let Some(column) = &row.agent_column {
+        source.push_str(" ").push_source(column);
+    }
+    source.push_str(" ").push_str(&row.label);
+    source
+}
+
 // Give the name and status independent full-width lines rather than squeezing
 // both into a 60/40 split. Bound insets even on a one-pixel drawer.
 fn row_text_clips(rect: Rect, level: usize, inset: u32) -> (Rect, Rect) {
@@ -439,6 +479,7 @@ pub(crate) fn paint_lair_explorer(
         )?;
     }
 
+    let icons = chrome_icons_available();
     for (layout_row, row) in layout
         .rows
         .iter()
@@ -472,22 +513,7 @@ pub(crate) fn paint_lair_explorer(
                 rgba(palette.selected_rail),
             );
         }
-        let marker = if row.pending {
-            "  …"
-        } else {
-            match (row.expanded, row.current) {
-                (Some(true), true) => "● ▾",
-                (Some(false), true) => "● ▸",
-                (Some(true), false) => "  ▾",
-                (Some(false), false) => "  ▸",
-                (None, true) => "  ●",
-                (None, false) => "   ",
-            }
-        };
-        let source = row.agent_column.as_ref().map_or_else(
-            || format!("{marker} {}", row.label),
-            |column| format!("{marker} {column} {}", row.label),
-        );
+        let source = row_label_source(row, icons);
         let (label_clip, status_clip) = row_text_clips(rect, row.level, inset);
         let primary = if selected == Some(row.id) {
             if row.enabled {
@@ -505,7 +531,7 @@ pub(crate) fn paint_lair_explorer(
         } else {
             palette.secondary
         };
-        paint_picker_text(
+        paint_picker_source(
             cache,
             context,
             &mut used,
@@ -866,19 +892,16 @@ mod tests {
         );
     }
 
-    /// Paints one unselected Lair row and returns the canvas and its label clip.
-    fn paint_agent_row(
+    /// Paints one unselected row and returns the canvas and its label clip.
+    fn paint_row(
         context: &RenderContext,
-        agent_column: Option<&str>,
+        painted: LairExplorerRow,
         scale: u32,
     ) -> (Vec<u8>, u32, Rect) {
         use super::super::picker::session_picker_palette;
         use crate::config::ResolvedTheme;
 
-        let id = NavigationNodeId::Lair(LairId::new());
-        let mut agent_row = row(id);
-        agent_row.agent_column = agent_column.map(str::to_owned);
-        let rows = [agent_row];
+        let rows = [painted];
         let surface = Rect {
             x: 0,
             y: 0,
@@ -914,44 +937,175 @@ mod tests {
         (canvas, canvas_width, label)
     }
 
+    /// Paints one unselected Lair row with an agent column.
+    fn paint_agent_row(
+        context: &RenderContext,
+        agent_column: Option<ChromeSource>,
+        scale: u32,
+    ) -> (Vec<u8>, u32, Rect) {
+        let mut agent_row = row(NavigationNodeId::Lair(LairId::new()));
+        agent_row.agent_column = agent_column;
+        paint_row(context, agent_row, scale)
+    }
+
+    /// Asserts that `painted` differs from `blank` only inside label cells
+    /// `cells` and the label line, and returns how many pixels differ.
+    fn changed_only_in_cells(
+        painted: &[u8],
+        blank: &[u8],
+        width: u32,
+        label: Rect,
+        cell: u32,
+        cells: std::ops::Range<u32>,
+        what: &str,
+    ) -> usize {
+        let left = label.x + cells.start * cell;
+        let right = label.x + cells.end * cell;
+        let mut changed = 0;
+        for (index, (a, b)) in painted
+            .chunks_exact(4)
+            .zip(blank.chunks_exact(4))
+            .enumerate()
+        {
+            if a == b {
+                continue;
+            }
+            changed += 1;
+            let x = u32::try_from(index).unwrap() % width;
+            let y = u32::try_from(index).unwrap() / width;
+            assert!(
+                (left..right).contains(&x) && (label.y..label.y + label.height).contains(&y),
+                "{what} painted outside cells {cells:?} at {x},{y}"
+            );
+        }
+        changed
+    }
+
+    fn chrome_cell_width(context: &RenderContext, scale: u32) -> u32 {
+        super::super::super::ChromeText::load_with_context(" ", scale, context)
+            .unwrap()
+            .frame
+            .cell_width
+    }
+
     #[test]
-    fn agent_glyph_column_paints_only_its_fixed_cells_and_keeps_labels_aligned() {
+    fn agent_icon_column_paints_only_its_fixed_slots_and_keeps_labels_aligned() {
+        use crate::frontend::AgentGlyphs;
+        use splinterm_protocol::AgentState;
+
+        assert!(super::super::super::chrome_icons_available());
         let context = RenderContext::new(u16::MAX);
+        let states = [
+            AgentState::NeedsInput,
+            AgentState::Error,
+            AgentState::Working,
+            AgentState::Done,
+            AgentState::Idle,
+        ];
         for scale in [120, 150, 180, 240] {
-            let cell = super::super::super::ChromeText::load_with_context(" ", scale, &context)
-                .unwrap()
-                .frame
-                .cell_width;
-            let (blank, width, label) = paint_agent_row(&context, Some("  "), scale);
-            // The label line is "{marker} {column} {label}": the column occupies
-            // cells four and five after a three-cell marker and a space.
-            let column_left = label.x + 4 * cell;
-            let column_right = label.x + 6 * cell;
-            for column in ["? ", "! ", "▸~", "✓ ", "· ", "> ", "+~", "- "] {
-                let (painted, _, _) = paint_agent_row(&context, Some(column), scale);
-                let mut changed = 0;
-                for (index, (a, b)) in painted
-                    .chunks_exact(4)
-                    .zip(blank.chunks_exact(4))
-                    .enumerate()
-                {
-                    if a == b {
-                        continue;
+            let cell = chrome_cell_width(&context, scale);
+            // The label line is "{dot}{disclosure slot} {column} {label}": the
+            // column starts at cell four, after a three-cell marker and a space.
+            let (blank, width, label) =
+                paint_agent_row(&context, Some(ChromeSource::from("    ")), scale);
+            let mut icons = Vec::new();
+            for state in states {
+                for is_stale in [false, true] {
+                    let mut column = ChromeSource::default();
+                    column.push_icon(AgentGlyphs::icon(state));
+                    if is_stale {
+                        column.push_icon(ChromeIcon::Clock);
+                    } else {
+                        column.push_str("  ");
                     }
-                    changed += 1;
-                    let x = u32::try_from(index).unwrap() % width;
-                    let y = u32::try_from(index).unwrap() / width;
-                    assert!(
-                        (column_left..column_right).contains(&x)
-                            && (label.y..label.y + label.height).contains(&y),
-                        "{column:?} painted outside its column at {x},{y}, scale {scale}"
-                    );
+                    let (painted, _, _) = paint_agent_row(&context, Some(column), scale);
+                    // A fresh icon stays in its two-cell slot; the stale clock
+                    // takes the next slot and never reaches the label.
+                    let slots = if is_stale { 4..8 } else { 4..6 };
+                    let what = format!("{state:?} stale={is_stale} at scale {scale}");
+                    let changed =
+                        changed_only_in_cells(&painted, &blank, width, label, cell, slots, &what);
+                    assert!(changed > 0, "{what} painted nothing");
+                    if !is_stale {
+                        icons.push(painted);
+                    }
                 }
-                assert!(changed > 0, "{column:?} painted nothing at scale {scale}");
+            }
+            // Every state paints a distinct shape.
+            for (index, icon) in icons.iter().enumerate() {
+                assert!(icons[index + 1..].iter().all(|other| other != icon));
+            }
+            // ASCII fallback columns stay within their two text cells.
+            let (ascii_blank, _, _) =
+                paint_agent_row(&context, Some(ChromeSource::from("  ")), scale);
+            for column in ["? ", "! ", "> ", "+~", "- "] {
+                let (painted, _, _) =
+                    paint_agent_row(&context, Some(ChromeSource::from(column)), scale);
+                let what = format!("{column:?} at scale {scale}");
+                let changed =
+                    changed_only_in_cells(&painted, &ascii_blank, width, label, cell, 4..6, &what);
+                assert!(changed > 0, "{what} painted nothing");
             }
             // Without any status in view there is no column and the label moves left.
             let (without, _, _) = paint_agent_row(&context, None, scale);
             assert_ne!(without, blank);
+        }
+    }
+
+    #[test]
+    fn disclosure_chevrons_are_distinct_icons_inside_their_slot() {
+        let context = RenderContext::new(u16::MAX);
+        for scale in [120, 150, 180, 240] {
+            let cell = chrome_cell_width(&context, scale);
+            let base = row(NavigationNodeId::Lair(LairId::new()));
+            let (blank, width, label) = paint_row(
+                &context,
+                LairExplorerRow {
+                    expanded: None,
+                    ..base.clone()
+                },
+                scale,
+            );
+            let mut chevrons = Vec::new();
+            for expanded in [false, true] {
+                let (painted, _, _) = paint_row(
+                    &context,
+                    LairExplorerRow {
+                        expanded: Some(expanded),
+                        ..base.clone()
+                    },
+                    scale,
+                );
+                let what = format!("expanded={expanded} at scale {scale}");
+                let changed =
+                    changed_only_in_cells(&painted, &blank, width, label, cell, 1..3, &what);
+                assert!(changed > 0, "{what} painted nothing");
+                chevrons.push(painted);
+            }
+            assert_ne!(chevrons[0], chevrons[1]);
+            // The current-row dot keeps the cell before the chevron: its edge
+            // antialiasing may reach the slot, but never the chevron's ink.
+            let (current, _, _) = paint_row(
+                &context,
+                LairExplorerRow {
+                    current: true,
+                    ..base.clone()
+                },
+                scale,
+            );
+            let what = format!("current dot at scale {scale}");
+            let changed =
+                changed_only_in_cells(&current, &chevrons[0], width, label, cell, 0..2, &what);
+            assert!(changed > 0, "{what} painted nothing");
+            for ((dot, chevron), plain) in current
+                .chunks_exact(4)
+                .zip(chevrons[0].chunks_exact(4))
+                .zip(blank.chunks_exact(4))
+            {
+                if chevron != plain {
+                    assert_eq!(dot, chevron, "{what} overlaps the chevron");
+                }
+            }
         }
     }
 }

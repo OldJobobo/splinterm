@@ -14,6 +14,7 @@ use crate::navigation_projection::{
     NavigationExplorerSplint, NavigationExplorerSplintTarget, NavigationExplorerTarget,
     NavigationExplorerView, NavigationLifecycle, NavigationNodeId, WindowAttachment,
 };
+use crate::renderer::ChromeSource;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum LairExplorerFilter {
@@ -55,11 +56,12 @@ pub(crate) struct LairExplorerRow {
     pub(crate) id: NavigationNodeId,
     pub(crate) kind: LairExplorerRowKind,
     pub(crate) label: String,
-    /// Fixed-width agent status glyph column, present while any Splint in the
+    /// Fixed-width agent status icon column, present while any Splint in the
     /// view has a reported status and presentation is enabled.
-    pub(crate) agent_column: Option<String>,
+    pub(crate) agent_column: Option<ChromeSource>,
     pub(crate) status: String,
-    /// The status in words for assistive technology; glyph counts become text.
+    /// The status in words for assistive technology. Icons are visual only, so
+    /// this matches `status`, which already counts states in words.
     pub(crate) accessible_status: String,
     pub(crate) level: usize,
     pub(crate) expanded: Option<bool>,
@@ -262,7 +264,7 @@ impl LairExplorerUi {
         true
     }
 
-    /// Glyphs resolved against the current UI font.
+    /// Icons, or ASCII when the embedded icon face is unavailable.
     pub(crate) fn set_agent_glyphs(&mut self, glyphs: AgentGlyphs) -> bool {
         let changed = self.agent_glyphs != glyphs;
         self.agent_glyphs = glyphs;
@@ -312,18 +314,15 @@ impl LairExplorerUi {
         }
     }
 
-    /// Appends aggregate agent status to a parent row's visual and spoken text.
-    fn aggregate_suffix(&self, aggregate: &AgentAggregate) -> (String, String) {
+    /// Appends aggregate agent status to a parent row's text, counting states
+    /// in words; the icon column carries the most urgent state visually.
+    fn aggregate_suffix(&self, aggregate: &AgentAggregate) -> String {
         if !self.agent_status_enabled || aggregate.is_empty() {
-            (String::new(), String::new())
+            String::new()
         } else if self.agent_status_available() {
-            (
-                format!(" · {}", aggregate.counts_text(self.agent_glyphs)),
-                format!(" · {}", aggregate.counts_words()),
-            )
+            format!(" · {}", aggregate.counts_words())
         } else {
-            let text = format!(" · {}", agent_status::UNAVAILABLE_TEXT);
-            (text.clone(), text)
+            format!(" · {}", agent_status::UNAVAILABLE_TEXT)
         }
     }
 
@@ -346,7 +345,7 @@ impl LairExplorerUi {
     }
 
     /// The glyph column hides last values while status is unavailable.
-    fn aggregate_column(&self, aggregate: &AgentAggregate) -> Option<String> {
+    fn aggregate_column(&self, aggregate: &AgentAggregate) -> Option<ChromeSource> {
         self.agent_column_visible().then(|| {
             if self.agent_status_available() {
                 aggregate.glyph_column(self.agent_glyphs)
@@ -705,19 +704,19 @@ impl LairExplorerUi {
                     .flat_map(|dojo| &dojo.splints)
                     .filter_map(|splint| splint.agent_status.as_ref()),
             );
-            let (agent_text, agent_words) = self.aggregate_suffix(&aggregate);
-            let base = format!(
-                "{} · {}",
+            let status = format!(
+                "{} · {}{}",
                 lifecycle_label(lair.lifecycle()),
-                retention_label(lair.retention)
+                retention_label(lair.retention),
+                self.aggregate_suffix(&aggregate)
             );
             rows.push(LairExplorerRow {
                 id: lair.id,
                 kind: LairExplorerRowKind::Lair,
                 label: lair.label.clone(),
                 agent_column: self.aggregate_column(&aggregate),
-                status: format!("{base}{agent_text}"),
-                accessible_status: format!("{base}{agent_words}"),
+                accessible_status: status.clone(),
+                status,
                 level: 1,
                 expanded: Some(lair_expanded),
                 current: lair.current_here,
@@ -765,15 +764,19 @@ impl LairExplorerUi {
                 .iter()
                 .filter_map(|splint| splint.agent_status.as_ref()),
         );
-        let (agent_text, agent_words) = self.aggregate_suffix(&aggregate);
         let base = format!("{} · {attachment}", lifecycle_label(dojo.lifecycle()));
+        let status = row_status(
+            pending,
+            &format!("{base}{}", self.aggregate_suffix(&aggregate)),
+            blocker,
+        );
         rows.push(LairExplorerRow {
             id: dojo.id,
             kind: LairExplorerRowKind::Dojo,
             label: dojo.label.clone(),
             agent_column: self.aggregate_column(&aggregate),
-            status: row_status(pending, &format!("{base}{agent_text}"), blocker),
-            accessible_status: row_status(pending, &format!("{base}{agent_words}"), blocker),
+            accessible_status: status.clone(),
+            status,
             level: 2,
             expanded: Some(dojo_expanded),
             current: dojo.active_here,
@@ -1953,6 +1956,11 @@ pub(super) mod tests {
         explorer.rows()
     }
 
+    /// The row's icon column with each icon written as `[name]`.
+    fn column(row: &LairExplorerRow) -> Option<String> {
+        row.agent_column.as_ref().map(ChromeSource::describe)
+    }
+
     #[test]
     fn rows_show_glyph_column_state_text_and_priority_aggregates() {
         use splinterm_protocol::AgentState;
@@ -1967,20 +1975,25 @@ pub(super) mod tests {
             .map(|row| row.label.as_str())
             .collect::<Vec<_>>();
         assert_eq!(labels, ["work", "editor", "shell", "agent", "notes"]);
-        let columns = rows
-            .iter()
-            .map(|row| row.agent_column.as_deref())
-            .collect::<Vec<_>>();
+        let columns = rows.iter().map(column).collect::<Vec<_>>();
+        let blocked = Some("[message-question]  ".to_owned());
         assert_eq!(
             columns,
-            [Some("? "), Some("? "), Some("▸ "), Some("? "), Some("  ")]
+            [
+                blocked.clone(),
+                blocked.clone(),
+                Some("[loader-2]  ".to_owned()),
+                blocked,
+                Some("    ".to_owned())
+            ]
         );
-        assert_eq!(rows[0].status, "Running · Saved · ? 1, ▸ 1");
+        // Parent rows count states in words, visually and for accessibility.
+        assert_eq!(rows[0].status, "Running · Saved · 1 needs input, 1 working");
+        assert_eq!(rows[0].accessible_status, rows[0].status);
         assert_eq!(
-            rows[0].accessible_status,
-            "Running · Saved · 1 needs input, 1 working"
+            rows[1].status,
+            "Running · Current · 1 needs input, 1 working"
         );
-        assert_eq!(rows[1].status, "Running · Current · ? 1, ▸ 1");
         assert_eq!(
             rows[3].status,
             "Running · Needs input · waiting for approval"
@@ -1988,8 +2001,12 @@ pub(super) mod tests {
         assert_eq!(rows[3].accessible_status, rows[3].status);
         assert_eq!(rows[4].status, "Unavailable · Pinned");
 
-        explorer.set_agent_glyphs(AgentGlyphs::ASCII);
-        assert_eq!(explorer.rows()[2].agent_column.as_deref(), Some("> "));
+        // Without the icon face the column falls back to ASCII text.
+        assert!(explorer.set_agent_glyphs(AgentGlyphs::Ascii));
+        let rows = explorer.rows();
+        assert_eq!(column(&rows[2]).as_deref(), Some("> "));
+        assert!(rows[2].agent_column.as_ref().unwrap().icons().is_empty());
+        assert_eq!(column(&rows[4]).as_deref(), Some("  "));
     }
 
     #[test]
@@ -1998,18 +2015,15 @@ pub(super) mod tests {
         let mut explorer = LairExplorerUi::default();
         explorer.set_view(agent_view([Some(agent(AgentState::Working, true)), None]));
         let rows = expanded_rows(&mut explorer);
-        assert_eq!(rows[2].agent_column.as_deref(), Some("▸~"));
+        assert_eq!(column(&rows[2]).as_deref(), Some("[loader-2][clock]"));
         assert_eq!(
             rows[2].status,
             "Running · Working · stale (no report for 2 min) · waiting for approval"
         );
-        assert_eq!(rows[3].agent_column.as_deref(), Some("  "));
+        assert_eq!(column(&rows[3]).as_deref(), Some("    "));
         assert_eq!(rows[3].status, "Running");
-        assert_eq!(rows[1].status, "Running · Current · ▸~ 1");
-        assert_eq!(
-            rows[1].accessible_status,
-            "Running · Current · 1 working (stale)"
-        );
+        assert_eq!(rows[1].status, "Running · Current · 1 working (stale)");
+        assert_eq!(rows[1].accessible_status, rows[1].status);
     }
 
     #[test]
@@ -2030,8 +2044,8 @@ pub(super) mod tests {
             rows[2].status,
             "Running · Agent status unavailable · Endpoint is disconnected"
         );
-        assert_eq!(rows[2].agent_column.as_deref(), Some("  "));
-        assert_eq!(rows[1].agent_column.as_deref(), Some("  "));
+        assert_eq!(column(&rows[2]).as_deref(), Some("    "));
+        assert_eq!(column(&rows[1]).as_deref(), Some("    "));
         assert!(rows[1].status.contains("Agent status unavailable"));
         assert!(rows.iter().all(|row| !row.status.contains("Error")));
 

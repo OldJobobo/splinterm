@@ -152,11 +152,11 @@ use crate::pane::{
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
-    ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
-    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, LairExplorerPresentationMode,
-    PickerHitTarget, RenderContext, SessionPickerOverlayLayout, SessionPickerPurpose,
-    SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame, SnapshotOverlays,
-    TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    ChromeSource, ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache,
+    CursorPresentation, DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout,
+    LairExplorerPresentationMode, PickerHitTarget, RenderContext, SessionPickerOverlayLayout,
+    SessionPickerPurpose, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
+    SnapshotOverlays, TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
     command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
     fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
     lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
@@ -1033,6 +1033,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     };
     app.explorer
         .set_agent_status_enabled(options.agent_status_presentation);
+    app.explorer.set_agent_glyphs(app.tab_state.agent.glyphs());
 
     let event_loop_result: Result<()> = (|| {
         while !app.scheduling.exit {
@@ -1906,7 +1907,7 @@ struct PreparedTabFontFrames {
 }
 
 struct CachedFrameTitle {
-    source: String,
+    source: ChromeSource,
     maximum_cells: u32,
     scale_120: u32,
     bold: bool,
@@ -3796,6 +3797,7 @@ impl App {
             .frame_titles
             .retain(|splint_id, _| requested_ids.contains(splint_id));
         for (splint_id, source, maximum_cells) in requested {
+            let source = ChromeSource::from(source);
             let current = self
                 .presentation
                 .frame_titles
@@ -3810,7 +3812,7 @@ impl App {
                     splint_id,
                     CachedFrameTitle {
                         text: ChromeText::load_with_context(
-                            &source,
+                            source.text(),
                             self.surface.scale_120,
                             &self.presentation.render_context,
                         )?,
@@ -10369,7 +10371,6 @@ impl App {
         } else {
             None
         };
-        self.sync_agent_status_glyphs();
         self.prepare_remote_host_text()?;
         let tab_layout = self.current_tab_strip_layout();
         let content_rect = self.content_rect();
