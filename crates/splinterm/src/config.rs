@@ -11,7 +11,9 @@
 
 use std::{
     collections::HashMap,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
@@ -196,7 +198,7 @@ pub struct ConfigLoad {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ThemeSource {
-    Omarchy(PathBuf),
+    Omarchy(OmarchyThemeRoots),
     Json(PathBuf),
 }
 
@@ -204,9 +206,129 @@ impl AppConfig {
     #[must_use]
     pub fn theme_source(&self) -> ThemeSource {
         self.theme_path.clone().map_or_else(
-            || ThemeSource::Omarchy(default_omarchy_theme_dir()),
+            || ThemeSource::Omarchy(OmarchyThemeRoots::from_environment()),
             ThemeSource::Json,
         )
+    }
+}
+
+/// The active Omarchy theme directories Splinterm may read, highest priority
+/// first:
+///
+/// 1. `${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme`;
+/// 2. `$HOME/.local/state/omarchy/current/theme`, where Omarchy 4 hard-codes
+///    its writes, when `XDG_STATE_HOME` names a different directory;
+/// 3. Omarchy 3.x `$HOME/.config/omarchy/current/theme`, read-only.
+///
+/// A candidate is *claimed* while its theme directory, or the theme Omarchy
+/// stages beside it as `current/next-theme`, exists. A theme switch stages the
+/// next theme before it removes the current one, so a claimed root with a
+/// missing theme is a transient gap, not a reason to fall through to a stale
+/// lower-priority root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OmarchyThemeRoots {
+    candidates: Vec<PathBuf>,
+}
+
+/// Consecutive polls a live watcher keeps its last good root while the walk
+/// lands on a lower-priority root, so a brief whole-`current` gap cannot flap
+/// to an Omarchy 3.x leftover. A sustained demotion is then accepted.
+pub const OMARCHY_ROOT_DEMOTION_GRACE_POLLS: u32 = 4;
+
+impl OmarchyThemeRoots {
+    /// One fixed theme directory, for tests and explicit callers.
+    #[must_use]
+    pub fn fixed(theme_dir: PathBuf) -> Self {
+        Self {
+            candidates: vec![theme_dir],
+        }
+    }
+
+    /// Explicit candidates, highest priority first; `None` when empty.
+    #[must_use]
+    pub fn ordered(candidates: Vec<PathBuf>) -> Option<Self> {
+        (!candidates.is_empty()).then_some(Self { candidates })
+    }
+
+    #[must_use]
+    pub fn from_environment() -> Self {
+        Self::from_values(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
+    }
+
+    fn from_values(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Self {
+        let home = home
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let home_state = home.join(".local/state/omarchy/current/theme");
+        let xdg_state = xdg_state_home
+            .filter(|value| !value.is_empty())
+            .map(|value| PathBuf::from(value).join("omarchy/current/theme"));
+        let mut candidates = Vec::with_capacity(3);
+        if let Some(xdg_state) = xdg_state.filter(|path| *path != home_state) {
+            candidates.push(xdg_state);
+        }
+        candidates.push(home_state);
+        candidates.push(home.join(".config/omarchy/current/theme"));
+        Self { candidates }
+    }
+
+    #[must_use]
+    pub fn candidates(&self) -> &[PathBuf] {
+        &self.candidates
+    }
+
+    /// A root is claimed while its theme directory or the theme Omarchy is
+    /// staging next to it exists. `omarchy-theme-set` writes
+    /// `current/next-theme` before it removes `current/theme`, so one of the two
+    /// exists throughout a switch, while a stale empty `current` left in a
+    /// higher root never shadows the live theme.
+    fn claimed(&self) -> Option<usize> {
+        self.candidates.iter().position(|theme_dir| {
+            theme_dir.is_dir() || theme_dir.with_file_name("next-theme").is_dir()
+        })
+    }
+
+    /// The stateless choice for one-shot reads: the first claimed root,
+    /// otherwise the highest-priority root.
+    #[must_use]
+    pub fn select(&self) -> &Path {
+        &self.candidates[self.claimed().unwrap_or(0)]
+    }
+}
+
+/// Live root selection. It prefers the last root that loaded successfully
+/// while the walk briefly lands on a lower-priority root.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OmarchyThemeSelection {
+    last_good: Option<usize>,
+    demotion_polls: u32,
+}
+
+impl OmarchyThemeSelection {
+    /// Chooses the candidate index for one poll.
+    pub fn select(&mut self, roots: &OmarchyThemeRoots) -> usize {
+        match (roots.claimed(), self.last_good) {
+            (Some(claimed), Some(last_good)) if claimed > last_good => {
+                self.demotion_polls = self.demotion_polls.saturating_add(1);
+                if self.demotion_polls <= OMARCHY_ROOT_DEMOTION_GRACE_POLLS {
+                    last_good
+                } else {
+                    claimed
+                }
+            }
+            (None, Some(last_good)) => last_good,
+            (Some(claimed), _) => {
+                self.demotion_polls = 0;
+                claimed
+            }
+            (None, None) => 0,
+        }
+    }
+
+    /// Records that the candidate at `index` produced a coherent theme.
+    pub fn accepted(&mut self, index: usize) {
+        self.last_good = Some(index);
+        self.demotion_polls = 0;
     }
 }
 
@@ -221,19 +343,6 @@ pub fn default_config_dir() -> PathBuf {
             PathBuf::from,
         )
         .join("splinterm")
-}
-
-pub fn default_omarchy_theme_dir() -> PathBuf {
-    env::var_os("XDG_STATE_HOME")
-        .map_or_else(
-            || {
-                env::var_os("HOME")
-                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
-                    .join(".local/state")
-            },
-            PathBuf::from,
-        )
-        .join("omarchy/current/theme")
 }
 
 /// Loads the supported configuration from the standard or overridden path.
@@ -924,10 +1033,46 @@ fn omarchy_color_values(raw: &str) -> HashMap<String, String> {
     colors
 }
 
+/// Resolves the first non-empty `colors.toml` value among `keys`, which list a
+/// canonical Omarchy 4 name before its legacy aliases, as in Omarchy's
+/// `omarchy-theme-color` cascade.
+fn omarchy_role(colors: &HashMap<String, String>, keys: &[&str]) -> Result<Option<u32>> {
+    let Some((key, value)) = keys.iter().find_map(|key| {
+        colors
+            .get(*key)
+            .filter(|value| !value.is_empty())
+            .map(|value| (*key, value))
+    }) else {
+        return Ok(None);
+    };
+    parse_color(value)
+        .map(Some)
+        .with_context(|| format!("active Omarchy colors.toml has invalid {key}"))
+}
+
+/// Selected-Dojo-tab body: canonical `lighter_background`, then the legacy
+/// short name. Omarchy's last resort, `color0`/`background`, is the terminal
+/// background itself and would hide the selected tab, so Splinterm keeps its
+/// Foot `bright0` ramp instead.
+const OMARCHY_LIGHTER_BACKGROUND_KEYS: [&str; 2] = ["lighter_background", "lighter_bg"];
+/// Inactive-tab text: `muted`, then Omarchy's `color8` and `dark_foreground`
+/// (legacy `dark_fg`) fallbacks, then Foot `bright0`, which Omarchy's stock
+/// template renders from the same resolved `muted`.
+const OMARCHY_MUTED_KEYS: [&str; 4] = ["muted", "color8", "dark_foreground", "dark_fg"];
+/// Application accent: `accent`, a legacy `cursor`, then `blue` before its
+/// ANSI `color4` alias.
+const OMARCHY_ACCENT_KEYS: [&str; 4] = ["accent", "cursor", "blue", "color4"];
+
+/// Returns the effective Foot palette for the selected color theme.
+///
+/// Foot 1.27.0 parses the deprecated `[colors]` section into the same dark
+/// theme as `[colors-dark]` and `[colors2]` into the light theme, one key at a
+/// time in file order, so the sections merge and the last assignment wins.
 fn foot_color_values(raw: &str) -> Result<HashMap<String, String>> {
-    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut main = HashMap::new();
+    let mut dark = HashMap::new();
+    let mut light = HashMap::new();
     let mut section = String::new();
-    let mut colors_dark_seen = false;
     for raw_line in raw.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -935,38 +1080,27 @@ fn foot_color_values(raw: &str) -> Result<HashMap<String, String>> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             section = line[1..line.len() - 1].trim().to_ascii_lowercase();
-            colors_dark_seen |= section == "colors-dark";
             continue;
         }
-        if !matches!(
-            section.as_str(),
-            "" | "main" | "colors" | "colors-dark" | "colors-light"
-        ) {
-            continue;
-        }
+        let values = match section.as_str() {
+            "" | "main" => &mut main,
+            "colors" | "colors-dark" => &mut dark,
+            "colors2" | "colors-light" => &mut light,
+            _ => continue,
+        };
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        sections
-            .entry(if section.is_empty() {
-                "main".to_owned()
-            } else {
-                section.clone()
-            })
-            .or_default()
-            .insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+        values.insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
     }
-    let initial = sections
-        .get("main")
-        .and_then(|values| values.get("initial-color-theme"))
-        .map_or("dark", String::as_str);
-    let selected = match initial {
-        "light" => "colors-light",
-        "dark" if colors_dark_seen => "colors-dark",
-        "dark" => "colors",
+    match main
+        .get("initial-color-theme")
+        .map_or("dark", String::as_str)
+    {
+        "light" => Ok(light),
+        "dark" => Ok(dark),
         _ => bail!("active Omarchy foot.ini initial-color-theme must be dark or light"),
-    };
-    Ok(sections.remove(selected).unwrap_or_default())
+    }
 }
 
 fn foot_theme_color(values: &HashMap<String, String>, key: &str) -> Result<u32> {
@@ -1014,28 +1148,13 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         .transpose()
         .context("active Omarchy foot.ini has invalid cursor")?
         .unwrap_or(foreground);
-    let active_tab_background = colors
-        .get("lighter_bg")
-        .map(|value| parse_color(value))
-        .transpose()
-        .context("active Omarchy colors.toml has invalid lighter_bg")?
-        .unwrap_or(ansi[8]);
+    let active_tab_background =
+        omarchy_role(&colors, &OMARCHY_LIGHTER_BACKGROUND_KEYS)?.unwrap_or(ansi[8]);
     let active_tab_foreground =
         active_tab_foreground_fallback(background, foreground, active_tab_background);
-    let muted = colors
-        .get("muted")
-        .map(|value| parse_color(value))
-        .transpose()
-        .context("active Omarchy colors.toml has invalid muted")?
-        .unwrap_or(ansi[8]);
+    let muted = omarchy_role(&colors, &OMARCHY_MUTED_KEYS)?.unwrap_or(ansi[8]);
     let inactive_tab_foreground = inactive_tab_foreground_fallback(background, foreground, muted);
-    let ui_accent = ["accent", "cursor", "color4", "blue"]
-        .iter()
-        .find_map(|key| colors.get(*key))
-        .map(|value| parse_color(value))
-        .transpose()
-        .context("active Omarchy colors.toml has invalid accent")?
-        .unwrap_or(cursor);
+    let ui_accent = omarchy_role(&colors, &OMARCHY_ACCENT_KEYS)?.unwrap_or(cursor);
     let alpha = foot.get("alpha").map_or(Ok(1.0), |value| {
         value
             .parse::<f32>()
@@ -1142,7 +1261,13 @@ pub fn load_omarchy_theme(theme_dir: &Path) -> Result<ResolvedTheme> {
     load_omarchy_theme_with(theme_dir, MissingOmarchyTheme::UseFallback, || {}, || {})
 }
 
-fn load_live_omarchy_theme(theme_dir: &Path) -> Result<ResolvedTheme> {
+/// Loads one live Omarchy theme directory without converting transient
+/// absence into the startup fallback palette.
+///
+/// # Errors
+/// Returns an error when the theme is absent, incomplete, changing, or
+/// malformed.
+pub fn load_live_omarchy_theme(theme_dir: &Path) -> Result<ResolvedTheme> {
     load_omarchy_theme_with(theme_dir, MissingOmarchyTheme::Reject, || {}, || {})
 }
 
@@ -1166,20 +1291,7 @@ pub fn load_theme(path: &Path) -> Result<ResolvedTheme> {
 /// Returns an error when the selected source exists but is malformed.
 pub fn load_theme_source(source: &ThemeSource) -> Result<ResolvedTheme> {
     match source {
-        ThemeSource::Omarchy(theme_dir) => load_omarchy_theme(theme_dir),
-        ThemeSource::Json(path) => load_theme(path),
-    }
-}
-
-/// Resolves a live source without converting transient native-theme absence
-/// into the startup fallback palette.
-///
-/// # Errors
-/// Returns an error when a native theme is absent, incomplete, changing, or
-/// malformed, or when an explicit JSON override is invalid.
-pub fn load_live_theme_source(source: &ThemeSource) -> Result<ResolvedTheme> {
-    match source {
-        ThemeSource::Omarchy(theme_dir) => load_live_omarchy_theme(theme_dir),
+        ThemeSource::Omarchy(roots) => load_omarchy_theme(roots.select()),
         ThemeSource::Json(path) => load_theme(path),
     }
 }
@@ -1787,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn native_omarchy_theme_prefers_colors_dark_and_rejects_incomplete_input() {
+    fn native_omarchy_theme_merges_colors_into_colors_dark_and_rejects_incomplete_input() {
         let complete = |background: &str| {
             format!(
                 "foreground=000003\nbackground={background}\nregular0=000000\nregular1=000001\nregular2=000002\nregular3=000003\nregular4=000004\nregular5=000005\nregular6=000006\nregular7=000007\nbright0=000008\nbright1=000009\nbright2=00000a\nbright3=00000b\nbright4=00000c\nbright5=00000d\nbright6=00000e\nbright7=00000f\n"
@@ -1808,13 +1920,230 @@ mod tests {
                 .to_string()
                 .contains("missing regular0")
         );
+        // Foot parses [colors] into the dark theme, so an empty [colors-dark]
+        // keeps the [colors] palette, a later key overrides one key, and file
+        // order decides between the two headers.
         let empty_dark = format!("[colors]\n{}[colors-dark]\n", complete("000001"));
-        assert!(
+        assert_eq!(
             resolve_omarchy_theme("accent=\"#000006\"", &empty_dark)
+                .unwrap()
+                .background,
+            1
+        );
+        let one_key = format!(
+            "[colors]\n{}[colors-dark]\nforeground=000009\n",
+            complete("000001")
+        );
+        let one_key = resolve_omarchy_theme("", &one_key).unwrap();
+        assert_eq!((one_key.background, one_key.foreground), (1, 9));
+        let dark_first = format!(
+            "[colors-dark]\n{}[colors]\nbackground=000005\n",
+            complete("000002")
+        );
+        assert_eq!(
+            resolve_omarchy_theme("", &dark_first).unwrap().background,
+            5
+        );
+        // [colors2] is Foot's deprecated light section.
+        let colors2 = format!(
+            "initial-color-theme=light\n[colors2]\n{}[colors-dark]\n{}",
+            complete("000007"),
+            complete("000002")
+        );
+        assert_eq!(resolve_omarchy_theme("", &colors2).unwrap().background, 7);
+        assert!(
+            resolve_omarchy_theme("accent=\"#000006\"", "[colors-light]\n")
                 .unwrap_err()
                 .to_string()
                 .contains("no palette for the selected initial-color-theme")
         );
+    }
+
+    /// Verbatim stock Omarchy 4 `colors.toml` files (`4a9c83de`): tokyo-night,
+    /// the light flexoki-light, and last-horizon with its gradient and extra
+    /// keys; gruvbox from before the canonical rename (`afa2839a^`); and kanagawa
+    /// converted by `omarchy-theme-colors-from-alacritty`. Each `foot.ini` is the
+    /// stock `foot.ini.tpl` rendered with `omarchy-theme-color --all`.
+    const OMARCHY4_FIXTURES: [(&str, &str, &str); 5] = [
+        (
+            "tokyo-night",
+            include_str!("../tests/fixtures/omarchy4/tokyo-night/colors.toml"),
+            include_str!("../tests/fixtures/omarchy4/tokyo-night/foot.ini"),
+        ),
+        (
+            "flexoki-light",
+            include_str!("../tests/fixtures/omarchy4/flexoki-light/colors.toml"),
+            include_str!("../tests/fixtures/omarchy4/flexoki-light/foot.ini"),
+        ),
+        (
+            "last-horizon",
+            include_str!("../tests/fixtures/omarchy4/last-horizon/colors.toml"),
+            include_str!("../tests/fixtures/omarchy4/last-horizon/foot.ini"),
+        ),
+        (
+            "legacy-gruvbox",
+            include_str!("../tests/fixtures/omarchy4/legacy-gruvbox/colors.toml"),
+            include_str!("../tests/fixtures/omarchy4/legacy-gruvbox/foot.ini"),
+        ),
+        (
+            "alacritty-kanagawa",
+            include_str!("../tests/fixtures/omarchy4/alacritty-kanagawa/colors.toml"),
+            include_str!("../tests/fixtures/omarchy4/alacritty-kanagawa/foot.ini"),
+        ),
+    ];
+
+    #[test]
+    fn stock_omarchy_4_themes_drive_the_selected_tab_from_lighter_background() {
+        // (fixture, selected tab, accent, muted, terminal background)
+        let expected = [
+            ("tokyo-night", 0x24283b, 0x7aa2f7, 0x414868, 0x1a1b26),
+            ("flexoki-light", 0xe6e4d9, 0x205ea6, 0xb7b5ac, 0xfffcf0),
+            ("last-horizon", 0x0c0b0c, 0xb59790, 0x584e51, 0x0c0b0c),
+            ("legacy-gruvbox", 0x3c3836, 0x7daea3, 0x665c54, 0x282828),
+            // No lighter_background or lighter_bg: Foot bright0 (color8).
+            ("alacritty-kanagawa", 0x727169, 0x7e9cd8, 0x727169, 0x1f1f28),
+        ];
+        for ((name, colors, foot), (expected_name, tab, accent, muted, background)) in
+            OMARCHY4_FIXTURES.iter().zip(expected)
+        {
+            assert_eq!(*name, expected_name);
+            let theme = resolve_omarchy_theme(colors, foot).unwrap();
+            assert_eq!(theme.active_tab_background, tab, "{name} selected tab");
+            assert_eq!(theme.ui_accent, accent, "{name} accent");
+            assert_eq!(theme.pane_border_active, accent, "{name} active border");
+            assert_eq!(theme.background, background, "{name} background");
+            assert_eq!(
+                theme.inactive_tab_foreground,
+                inactive_tab_foreground_fallback(theme.background, theme.foreground, muted),
+                "{name} inactive tab"
+            );
+            assert_eq!(
+                theme.active_tab_foreground,
+                active_tab_foreground_fallback(theme.background, theme.foreground, tab),
+                "{name} selected tab label"
+            );
+            // The stock template sets blur=yes and no alpha.
+            assert_eq!(theme.background_alpha, u16::MAX, "{name} alpha");
+            assert!(theme.background_blur, "{name} blur");
+        }
+        // last-horizon's own active_tab_background extension stays ignored.
+        assert!(
+            OMARCHY4_FIXTURES[2]
+                .1
+                .contains("active_tab_background = \"#a5a0b6\"")
+        );
+    }
+
+    #[test]
+    fn omarchy_roles_read_canonical_names_before_legacy_aliases() {
+        let foot = complete_foot_palette("101112", "d0d1d2", "f0e0d0", "c0b0a0");
+        let both = resolve_omarchy_theme(
+            "lighter_bg = \"#111111\"\nlighter_background = \"#222222\"\nmuted = \"\"\ncolor8 = \"#333333\"\ncolor4 = \"#555555\"\nblue = \"#444444\"\n",
+            &foot,
+        )
+        .unwrap();
+        assert_eq!(both.active_tab_background, 0x22_22_22);
+        assert_eq!(
+            both.inactive_tab_foreground,
+            inactive_tab_foreground_fallback(both.background, both.foreground, 0x33_33_33)
+        );
+        assert_eq!(both.ui_accent, 0x44_44_44);
+
+        let legacy =
+            resolve_omarchy_theme("lighter_bg=\"#111111\"\ndark_fg=\"#666666\"\n", &foot).unwrap();
+        assert_eq!(legacy.active_tab_background, 0x11_11_11);
+        assert_eq!(
+            legacy.inactive_tab_foreground,
+            inactive_tab_foreground_fallback(legacy.background, legacy.foreground, 0x66_66_66)
+        );
+        assert_eq!(legacy.ui_accent, legacy.cursor);
+
+        let error = resolve_omarchy_theme("lighter_background=\"rgba(1,2,3)\"\n", &foot)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid lighter_background"), "{error}");
+    }
+
+    #[test]
+    fn legacy_colors_only_theme_keeps_its_palette_under_an_appended_glass_block() {
+        // Produced by Omarchy's omarchy-theme-set-glass (4a9c83de) with
+        // Glassy Windows on: the file has no [colors-dark] header, so the
+        // script appends a [colors-dark] section holding only alpha and blur.
+        let plain = include_str!("../tests/fixtures/omarchy4/glass/legacy-colors.foot.ini");
+        let glassy = include_str!("../tests/fixtures/omarchy4/glass/legacy-colors.glassy.foot.ini");
+        assert!(plain.starts_with("[colors]\n") && !plain.contains("[colors-dark]"));
+        assert!(glassy.ends_with(
+            "# omarchy-glass begin\n[colors-dark]\nalpha=0.65\nblur=yes\n# omarchy-glass end\n"
+        ));
+        let colors = OMARCHY4_FIXTURES[0].1;
+        let plain = resolve_omarchy_theme(colors, plain).unwrap();
+        let glassy = resolve_omarchy_theme(colors, glassy).unwrap();
+        assert_eq!(plain.background, 0x1a_1b_26);
+        assert_eq!(
+            (plain.background_alpha, plain.background_blur),
+            (u16::MAX, false)
+        );
+        assert_eq!(
+            (glassy.background_alpha, glassy.background_blur),
+            (foot_alpha(0.65), true)
+        );
+        assert_eq!(
+            glassy.with_color_overrides(Some(u16::MAX), Some(false)),
+            plain
+        );
+    }
+
+    #[test]
+    fn omarchy_theme_roots_prefer_xdg_then_home_state_then_omarchy_3() {
+        let home = || Some(OsString::from("/home/test"));
+        let state = PathBuf::from("/home/test/.local/state/omarchy/current/theme");
+        let legacy = PathBuf::from("/home/test/.config/omarchy/current/theme");
+        for xdg in [None, Some(""), Some("/home/test/.local/state")] {
+            let roots = OmarchyThemeRoots::from_values(xdg.map(OsString::from), home());
+            assert_eq!(
+                roots.candidates(),
+                [state.clone(), legacy.clone()],
+                "{xdg:?}"
+            );
+        }
+        let roots = OmarchyThemeRoots::from_values(Some(OsString::from("/srv/state")), home());
+        assert_eq!(
+            roots.candidates(),
+            [
+                PathBuf::from("/srv/state/omarchy/current/theme"),
+                state.clone(),
+                legacy.clone()
+            ]
+        );
+        assert!(OmarchyThemeRoots::ordered(Vec::new()).is_none());
+
+        // The stateless walk takes the first claimed root: one whose theme, or
+        // the theme Omarchy stages as current/next-theme, exists. A stale
+        // empty current in a higher root never shadows the live theme.
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-omarchy-theme-roots-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let roots = OmarchyThemeRoots::from_values(
+            Some(root.join("xdg").into_os_string()),
+            Some(root.join("home").into_os_string()),
+        );
+        let [xdg, state, legacy] = roots.candidates() else {
+            panic!("three candidates");
+        };
+        assert_eq!(roots.select(), xdg);
+        fs::create_dir_all(legacy).unwrap();
+        assert_eq!(roots.select(), legacy);
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        assert_eq!(roots.select(), legacy, "an empty current claims nothing");
+        fs::create_dir_all(state.with_file_name("next-theme")).unwrap();
+        assert_eq!(roots.select(), state, "a staged theme claims its root");
+        fs::create_dir_all(xdg.parent().unwrap()).unwrap();
+        assert_eq!(roots.select(), state, "a stale empty current never shadows");
+        fs::create_dir_all(xdg).unwrap();
+        assert_eq!(roots.select(), xdg);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

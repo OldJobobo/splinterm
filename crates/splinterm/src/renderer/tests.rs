@@ -1620,6 +1620,96 @@ fn snapshot_framebuffer_paints_background_wide_composed_glyphs_and_cursor() {
     assert_eq!(pixel(6, 2), [3, 2, 1, 0xff]);
 }
 
+#[test]
+fn glassy_alpha_makes_only_the_default_background_translucent() {
+    // Omarchy Glassy Windows writes alpha=0.65; Foot and Splinterm store it as
+    // 0.65 * 65535, truncated.
+    let glassy_alpha = 42_597;
+    let key = GlyphKey { face: 0, glyph: 1 };
+    let metrics = DecorationMetrics {
+        underline_position: -1,
+        underline_thickness: 1,
+        strike_position: 1,
+        strike_thickness: 1,
+    };
+    let frame = SnapshotFrame {
+        font_ligatures: crate::font_shaping::FontLigatures::Off,
+        font_features: crate::font_shaping::FeatureSettings::default(),
+        font_size: BASE_FONT_SIZE,
+        font_generation: Arc::clone(snapshot_font_generation().unwrap()),
+        glyphs: vec![SnapshotGlyph {
+            key,
+            column: 0,
+            row: 0,
+            cells: 1,
+            cluster_advance: 1.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            foreground: [200, 100, 50],
+        }],
+        decorations: Vec::new(),
+        cache: HashMap::from([(
+            key,
+            Arc::new(CachedGlyph {
+                content: Content::Mask,
+                left: 0,
+                top: 1,
+                width: 1,
+                height: 1,
+                data: vec![0xff],
+            }),
+        )]),
+        // A default background, an explicit cell background, and a default
+        // background under the block cursor.
+        backgrounds: vec![[14, 18, 22], [200, 10, 10], [14, 18, 22]],
+        default_backgrounds: vec![true, false, true],
+        foregrounds: vec![[200, 100, 50]; 3],
+        cell_metrics: vec![metrics; 3],
+        primary_metrics: [metrics; 4],
+        cell_spans: vec![1; 3],
+        columns: 3,
+        rows: 1,
+        cell_width: 4,
+        cell_height: 4,
+        ascent: 2,
+        descent: 2,
+        baseline: 2,
+        underline_position: -1,
+        underline_thickness: 1,
+        strike_position: 1,
+        strike_thickness: 1,
+        padding: TerminalPadding::uniform(2),
+        cursor: Some((2, 0)),
+        canvas_background: [14, 18, 22],
+        background_alpha: glassy_alpha,
+        cursor_color: [0xeb, 0xeb, 0xeb],
+        images: Vec::new(),
+        scale_120: 120,
+    };
+    let geometry = frame.tight_geometry().unwrap();
+    let (width, height) = (16, 8);
+    let mut canvas = vec![0; width * height * 4];
+    paint_snapshot(
+        &mut canvas,
+        u32::try_from(width).unwrap(),
+        u32::try_from(height).unwrap(),
+        &frame,
+        &geometry,
+        true,
+        CursorStyle::Block,
+    );
+    let pixel = |x: usize, y: usize| &canvas[(y * width + x) * 4..(y * width + x + 1) * 4];
+    let translucent = background_bgra([14, 18, 22], glassy_alpha);
+    assert_eq!(translucent, [14, 12, 9, 165], "premultiplied BGRA");
+    // Padding and default-background cells carry the glass alpha.
+    assert_eq!(pixel(0, 0), translucent);
+    assert_eq!(pixel(4, 4), translucent);
+    // Text ink, explicit cell backgrounds, and the cursor stay opaque.
+    assert_eq!(pixel(2, 3), [50, 100, 200, 0xff]);
+    assert_eq!(pixel(8, 4), [10, 10, 200, 0xff]);
+    assert_eq!(pixel(12, 4), [0xeb, 0xeb, 0xeb, 0xff]);
+}
+
 fn damage_test_frame() -> SnapshotFrame {
     SnapshotFrame {
         font_ligatures: crate::font_shaping::FontLigatures::Off,

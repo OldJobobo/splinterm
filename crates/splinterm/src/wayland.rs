@@ -11979,6 +11979,69 @@ mod tests {
     }
 
     #[test]
+    fn omarchy_glassy_windows_toggle_changes_only_the_background_effect() {
+        // Each glassy fixture is the plain one after Omarchy's
+        // omarchy-theme-set-glass (4a9c83de) with Glassy Windows on.
+        let fixtures = [
+            (
+                "stock-template",
+                include_str!("../tests/fixtures/omarchy4/glass/stock-template.foot.ini"),
+                include_str!("../tests/fixtures/omarchy4/glass/stock-template.glassy.foot.ini"),
+                false,
+            ),
+            (
+                "user-template",
+                include_str!("../tests/fixtures/omarchy4/glass/user-template.foot.ini"),
+                include_str!("../tests/fixtures/omarchy4/glass/user-template.glassy.foot.ini"),
+                false,
+            ),
+            // The theme's own alpha=0.9 is kept; glass adds only blur.
+            (
+                "theme-alpha",
+                include_str!("../tests/fixtures/omarchy4/glass/theme-alpha.foot.ini"),
+                include_str!("../tests/fixtures/omarchy4/glass/theme-alpha.glassy.foot.ini"),
+                true,
+            ),
+        ];
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-glass-classification-{}",
+            std::process::id()
+        ));
+        let load = |name: &str, foot: &str| {
+            let theme = root.join(name);
+            std::fs::create_dir_all(&theme).unwrap();
+            std::fs::write(
+                theme.join("colors.toml"),
+                include_str!("../tests/fixtures/omarchy4/tokyo-night/colors.toml"),
+            )
+            .unwrap();
+            std::fs::write(theme.join("foot.ini"), foot).unwrap();
+            crate::config::load_omarchy_theme(&theme).unwrap()
+        };
+        for (name, plain, glassy, effect_only) in fixtures {
+            let plain = load(&format!("{name}-plain"), plain);
+            let glassy = load(&format!("{name}-glassy"), glassy);
+            assert_ne!(plain, glassy, "{name}");
+            assert_eq!(
+                glassy.with_color_overrides(
+                    Some(plain.background_alpha),
+                    Some(plain.background_blur)
+                ),
+                plain,
+                "{name}: glass must not change the palette"
+            );
+            for (from, to) in [(plain, glassy), (glassy, plain)] {
+                let impact = classify_theme_update(from, to);
+                assert!(impact.reconcile_effect, "{name}");
+                // Only an alpha change repaints the premultiplied default
+                // background; a blur-only change is effect-only.
+                assert_eq!(impact.rebuild_pixels, !effect_only, "{name}");
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn draw_bound_effect_reconciliation_survives_later_updates_and_capabilities() {
         let mut schedule = BackgroundEffectReconcileSchedule::default();
         assert!(!schedule.queue_update(true, true, true));
