@@ -3663,6 +3663,7 @@ impl LiveSplintRuntime {
         // The session still owns its unreaped std::process::Child here; the
         // actor that can reap it has not started. Capture identity before spawn.
         let child_pidfd = capture_child_pidfd(child_pid).map(Arc::new);
+        let use_latch = Arc::<UseLatch>::default();
         let handle = LiveSplintHandle {
             splint_id,
             incarnation,
@@ -3674,7 +3675,7 @@ impl LiveSplintRuntime {
             max_input_message_bytes: config.maximum_input_message_bytes(),
             metrics: Arc::clone(&metrics),
             exit,
-            use_latch: Arc::default(),
+            use_latch: Arc::clone(&use_latch),
         };
         let task = tokio::spawn(async move {
             let result = Box::pin(run_actor(
@@ -3687,6 +3688,7 @@ impl LiveSplintRuntime {
                 config,
                 publication_memory_metrics,
                 metrics,
+                use_latch,
                 exit_sender,
             ))
             .await;
@@ -3939,6 +3941,7 @@ async fn run_actor(
     config: LiveSplintConfig,
     publication_memory_metrics: bool,
     metrics: Arc<RuntimeMetrics>,
+    use_latch: Arc<UseLatch>,
     exit_sender: watch::Sender<Option<ProcessExit>>,
 ) -> Result<ProcessExit, LiveError> {
     let mut session = Some(session);
@@ -3952,6 +3955,7 @@ async fn run_actor(
         config,
         publication_memory_metrics,
         &metrics,
+        &use_latch,
     )
     .await;
     let forced_status = if result.is_err() {
@@ -3984,6 +3988,7 @@ async fn run_actor_body(
     config: LiveSplintConfig,
     publication_memory_metrics: bool,
     metrics: &Arc<RuntimeMetrics>,
+    use_latch: &UseLatch,
 ) -> Result<ProcessExit, LiveError> {
     let mut subscribers = Vec::<Subscriber>::new();
     let mut publication = SynchronizedPublication::new(terminal.revision());
@@ -4019,8 +4024,10 @@ async fn run_actor_body(
                 .take()
                 .expect("pending PTY handoff checked as present");
             // A shutdown in progress owns escalation and waiting replies that a
-            // checkpoint cannot carry.
+            // checkpoint cannot carry. A Splint claimed by an unused close is
+            // already retiring and is never captured as live.
             if child_exit.is_some()
+                || use_latch.is_claimed()
                 || eof
                 || shutdown.is_some()
                 || publication.active
@@ -9217,6 +9224,38 @@ mod tests {
         time::sleep(SYNCHRONIZED_UPDATE_TIMEOUT + Duration::from_millis(100)).await;
         let prepared = handle.prepare_pty_handoff().await.unwrap();
         assert!(!prepared.evidence().synchronized_publication_active);
+        prepared.resume().await.unwrap();
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_splint_claimed_by_an_unused_close_is_never_captured() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell("printf ready; sleep 2"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::timeout(Duration::from_secs(1), async {
+            while !snapshot_text(&handle.snapshot().await.unwrap()).contains("ready") {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // A claimed Splint is retiring even before it leaves the registry.
+        assert!(handle.claim_unused());
+        assert!(matches!(
+            handle.prepare_pty_handoff().await,
+            Err(LiveError::HandoffStateUnsupported)
+        ));
+        // An abandoned close releases the claim, and the Splint is live again.
+        handle.release_unused_claim();
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
         prepared.resume().await.unwrap();
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
     }
