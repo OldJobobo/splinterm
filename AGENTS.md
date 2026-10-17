@@ -190,6 +190,37 @@ reviewer yet.
 * Report a false-positive watchdog warning as such and continue only within the
   authorization actually granted.
 
+### 1.9 Remote CLI Delegation
+
+Claude Code and Pi use the same repository runner and contract in
+[`docs/agent-delegation.md`](docs/agent-delegation.md). Remote placement grants no
+additional authority and does not bypass Sections 0–3.
+
+* The parent remains the coordinator and owns task scope, approval, acceptance,
+  and publication. A remote child receives a bounded task, exact source commit,
+  role, read/edit boundary, acceptance criteria, and runtime limit.
+* One-writer ownership applies across machines and parent tools. An authorized
+  remote worker may be the single writer; the parent must not edit that task
+  concurrently. Additional concurrent writers still require approval.
+* Children do not recursively delegate or escalate their own permissions. Return
+  a blocker when a product decision, unavailable capability, or approval is needed.
+* Use a private, job-owned checkout and durable job identity. Never repurpose,
+  clean, or synchronize an existing checkout whose changes are not owned.
+* After a disconnect, query the original job before retrying. Submission or a
+  zero process exit is not proof of successful execution or accepted work.
+* Announce the remote role, bounded scope, source, and validation plan. Record
+  the result and limitations; completion still requires validation and review.
+* Scouts/reviewers remain read-only. Validator jobs may execute only the
+  coordinator-declared Cargo checks in the runner's build sandbox under an
+  explicitly configured restricted UID. Pi receives no shell or write tools.
+  Preserve command exit codes independently of the model's report.
+* The build sandbox does not grant VM access. VM credentials and graphical
+  operations stay coordinator-owned and retain Section 3's explicit approval,
+  exact guest-window targeting, and cleanup requirements. Do not give a child
+  unrestricted SSH, QMP, desktop sockets, or sudo to bypass that boundary.
+* Pi's read tools are not a filesystem sandbox. Build-command isolation does
+  not make the credential-bearing model process safe for hostile tasks.
+
 ## 2. Implementation Stop-Loss
 
 ### 2.1 Milestones and Validation

@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Shared entry point for humans, Claude, and Pi; no shell prompt interpolation.
+exec python3 "$(dirname "$0")/remote.py" "$@"

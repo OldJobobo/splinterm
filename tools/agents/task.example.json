@@ -1,0 +1,11 @@
+{
+  "id": "remote-access-scout-01",
+  "coordinator": "REPLACE_WITH_PARENT_TOOL_AND_SESSION_ID",
+  "role": "scout",
+  "base_commit": "REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA",
+  "authority": "main",
+  "objective": "Explain the documented SSH relay authority boundary. Do not edit files or execute commands.",
+  "read_paths": ["AGENTS.md", "docs/remote.md"],
+  "acceptance": "Return a concise explanation with file locations, evidence, and unresolved questions. Do not claim test coverage.",
+  "timeout_seconds": 300
+}
