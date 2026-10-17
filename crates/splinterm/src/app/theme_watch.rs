@@ -1,12 +1,16 @@
 use std::{
     os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::Result;
 use splinterm::{
     ThemeUpdate, WindowTopologyUpdate, WindowUpdate,
-    config::{AppConfig, ResolvedTheme, ThemeSource, load_live_theme_source, load_theme_source},
+    config::{
+        AppConfig, OmarchyThemeSelection, ResolvedTheme, ThemeSource, load_live_omarchy_theme,
+        load_theme, load_theme_source,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -14,7 +18,31 @@ static NEXT_THEME_UPDATE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 type ThemeFileFingerprint = (u64, u64, u64, i64, i64);
 
-fn theme_file_fingerprint(path: &std::path::Path) -> Option<ThemeFileFingerprint> {
+/// The concrete files one poll reads. Omarchy sources pick one of their
+/// ordered roots per poll, so a migration or root change is followed live.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveThemeSource<'a> {
+    Omarchy { index: usize, theme_dir: &'a Path },
+    Json(&'a Path),
+}
+
+fn active_theme_source<'a>(
+    source: &'a ThemeSource,
+    selection: &mut OmarchyThemeSelection,
+) -> ActiveThemeSource<'a> {
+    match source {
+        ThemeSource::Omarchy(roots) => {
+            let index = selection.select(roots);
+            ActiveThemeSource::Omarchy {
+                index,
+                theme_dir: &roots.candidates()[index],
+            }
+        }
+        ThemeSource::Json(path) => ActiveThemeSource::Json(path),
+    }
+}
+
+fn theme_file_fingerprint(path: &Path) -> Option<ThemeFileFingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((
         metadata.dev(),
@@ -28,6 +56,7 @@ fn theme_file_fingerprint(path: &std::path::Path) -> Option<ThemeFileFingerprint
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ThemeSourceFingerprint {
     Omarchy {
+        root: PathBuf,
         directory: Option<ThemeFileFingerprint>,
         colors: Option<ThemeFileFingerprint>,
         foot: Option<ThemeFileFingerprint>,
@@ -35,14 +64,15 @@ enum ThemeSourceFingerprint {
     Json(Option<ThemeFileFingerprint>),
 }
 
-fn theme_source_fingerprint(source: &ThemeSource) -> ThemeSourceFingerprint {
+fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerprint {
     match source {
-        ThemeSource::Omarchy(theme_dir) => ThemeSourceFingerprint::Omarchy {
+        ActiveThemeSource::Omarchy { theme_dir, .. } => ThemeSourceFingerprint::Omarchy {
+            root: theme_dir.to_path_buf(),
             directory: theme_file_fingerprint(theme_dir),
             colors: theme_file_fingerprint(&theme_dir.join("colors.toml")),
             foot: theme_file_fingerprint(&theme_dir.join("foot.ini")),
         },
-        ThemeSource::Json(path) => ThemeSourceFingerprint::Json(theme_file_fingerprint(path)),
+        ActiveThemeSource::Json(path) => ThemeSourceFingerprint::Json(theme_file_fingerprint(path)),
     }
 }
 
@@ -97,13 +127,24 @@ pub(in crate::app) fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
     load_startup_theme_with_reporter(config, |diagnostic| eprintln!("{diagnostic}"))
 }
 
+/// Loads the active source. A coherent Omarchy load records its root as the
+/// last good one, which `OmarchyThemeSelection` holds through transient gaps.
 fn resolve_live_theme_update(
-    source: &ThemeSource,
+    source: ActiveThemeSource<'_>,
+    selection: &mut OmarchyThemeSelection,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
     current: ResolvedTheme,
 ) -> Result<Option<ResolvedTheme>> {
-    let next = load_live_theme_source(source)?.with_color_overrides(alpha_override, blur_override);
+    let next = match source {
+        ActiveThemeSource::Omarchy { index, theme_dir } => {
+            let theme = load_live_omarchy_theme(theme_dir)?;
+            selection.accepted(index);
+            theme
+        }
+        ActiveThemeSource::Json(path) => load_theme(path)?,
+    }
+    .with_color_overrides(alpha_override, blur_override);
     Ok((next != current).then_some(next))
 }
 
@@ -139,17 +180,25 @@ pub(in crate::app) async fn watch_theme(
     sink: ThemeUpdateSink,
 ) {
     let mut observed = None;
+    let mut selection = OmarchyThemeSelection::default();
     let mut diagnostics = ThemeReloadDiagnostics::default();
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         poll.tick().await;
-        let next_fingerprint = theme_source_fingerprint(&source);
+        let active = active_theme_source(&source, &mut selection);
+        let next_fingerprint = theme_source_fingerprint(active);
         if observed.as_ref() == Some(&next_fingerprint) {
             continue;
         }
         observed = Some(next_fingerprint);
-        match resolve_live_theme_update(&source, alpha_override, blur_override, current) {
+        match resolve_live_theme_update(
+            active,
+            &mut selection,
+            alpha_override,
+            blur_override,
+            current,
+        ) {
             Ok(Some(next)) => {
                 current = next;
                 diagnostics.accepted();
@@ -187,6 +236,284 @@ pub(in crate::app) async fn watch_theme(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use splinterm::config::{OMARCHY_ROOT_DEMOTION_GRACE_POLLS, OmarchyThemeRoots};
+
+    fn fingerprint(source: &ThemeSource) -> ThemeSourceFingerprint {
+        theme_source_fingerprint(active_theme_source(
+            source,
+            &mut OmarchyThemeSelection::default(),
+        ))
+    }
+
+    fn live_update(
+        source: &ThemeSource,
+        alpha_override: Option<u16>,
+        blur_override: Option<bool>,
+        current: ResolvedTheme,
+    ) -> Result<Option<ResolvedTheme>> {
+        let mut selection = OmarchyThemeSelection::default();
+        resolve_live_theme_update(
+            active_theme_source(source, &mut selection),
+            &mut selection,
+            alpha_override,
+            blur_override,
+            current,
+        )
+    }
+
+    fn write_theme(theme_dir: &Path, background: u32) {
+        use std::fmt::Write as _;
+
+        std::fs::create_dir_all(theme_dir).unwrap();
+        std::fs::write(theme_dir.join("colors.toml"), "accent=\"#010203\"\n").unwrap();
+        let mut foot = format!("[colors-dark]\nbackground={background:06x}\nforeground=e0e1e2\n");
+        for index in 0..8 {
+            write!(
+                foot,
+                "regular{index}={index:06x}\nbright{index}={:06x}\n",
+                index + 8
+            )
+            .unwrap();
+        }
+        std::fs::write(theme_dir.join("foot.ini"), foot).unwrap();
+    }
+
+    /// `None` marks a rejected read, which keeps the last published palette.
+    fn poll(source: &ThemeSource, selection: &mut OmarchyThemeSelection) -> (PathBuf, Option<u32>) {
+        let active = active_theme_source(source, selection);
+        let ActiveThemeSource::Omarchy { theme_dir, .. } = active else {
+            unreachable!("Omarchy source");
+        };
+        let loaded =
+            resolve_live_theme_update(active, selection, None, None, ResolvedTheme::default())
+                .map(|theme| {
+                    theme.map_or(ResolvedTheme::default().background, |theme| {
+                        theme.background
+                    })
+                })
+                .ok();
+        (theme_dir.to_path_buf(), loaded)
+    }
+
+    #[test]
+    fn omarchy_roots_follow_xdg_then_home_then_omarchy_3_and_migrations_live() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-omarchy-root-order-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let xdg = root.join("xdg/omarchy/current/theme");
+        let home_state = root.join("home/.local/state/omarchy/current/theme");
+        let legacy = root.join("home/.config/omarchy/current/theme");
+        let source = ThemeSource::Omarchy(
+            OmarchyThemeRoots::ordered(vec![xdg.clone(), home_state.clone(), legacy.clone()])
+                .unwrap(),
+        );
+        let mut selection = OmarchyThemeSelection::default();
+
+        // Omarchy 3.x only: the read-only fallback is used.
+        write_theme(&legacy, 0x30_30_30);
+        assert_eq!(
+            poll(&source, &mut selection),
+            (legacy.clone(), Some(0x30_30_30))
+        );
+
+        // The Omarchy 4 migration moves current/ to ~/.local/state; a higher
+        // root is followed immediately.
+        write_theme(&home_state, 0x40_40_40);
+        assert_eq!(
+            poll(&source, &mut selection),
+            (home_state.clone(), Some(0x40_40_40))
+        );
+
+        // XDG_STATE_HOME outranks Omarchy's hard-coded $HOME path.
+        write_theme(&xdg, 0x50_50_50);
+        assert_eq!(
+            poll(&source, &mut selection),
+            (xdg.clone(), Some(0x50_50_50))
+        );
+        std::fs::remove_dir_all(root.join("xdg")).unwrap();
+        for _ in 0..OMARCHY_ROOT_DEMOTION_GRACE_POLLS {
+            let (selected, loaded) = poll(&source, &mut selection);
+            assert_eq!(selected, xdg);
+            assert!(loaded.is_none());
+        }
+        assert_eq!(
+            poll(&source, &mut selection),
+            (home_state.clone(), Some(0x40_40_40))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn glassy_windows_on_off_on_is_followed_live_through_in_place_edits() {
+        // Each glassy fixture is the plain one after Omarchy's
+        // omarchy-theme-set-glass (4a9c83de) with Glassy Windows on; turning
+        // it off restores the plain file byte for byte.
+        let glass_alpha = splinterm::config::parse("[colors]\nalpha=0.65\n")
+            .unwrap()
+            .config
+            .background_alpha
+            .unwrap();
+        let theme_alpha = splinterm::config::parse("[colors]\nalpha=0.9\n")
+            .unwrap()
+            .config
+            .background_alpha
+            .unwrap();
+        // (fixture, plain foot.ini, glassy foot.ini, plain alpha/blur, glassy alpha/blur)
+        let cases = [
+            (
+                "stock-template",
+                include_str!("../../tests/fixtures/omarchy4/glass/stock-template.foot.ini"),
+                include_str!("../../tests/fixtures/omarchy4/glass/stock-template.glassy.foot.ini"),
+                (u16::MAX, true),
+                (glass_alpha, true),
+            ),
+            (
+                "user-template",
+                include_str!("../../tests/fixtures/omarchy4/glass/user-template.foot.ini"),
+                include_str!("../../tests/fixtures/omarchy4/glass/user-template.glassy.foot.ini"),
+                (u16::MAX, false),
+                (glass_alpha, true),
+            ),
+            (
+                "theme-alpha",
+                include_str!("../../tests/fixtures/omarchy4/glass/theme-alpha.foot.ini"),
+                include_str!("../../tests/fixtures/omarchy4/glass/theme-alpha.glassy.foot.ini"),
+                (theme_alpha, false),
+                (theme_alpha, true),
+            ),
+        ];
+        let root =
+            std::env::temp_dir().join(format!("splinterm-glass-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (name, plain, glassy, plain_effect, glassy_effect) in cases {
+            let theme = root.join(name);
+            std::fs::create_dir_all(&theme).unwrap();
+            std::fs::write(
+                theme.join("colors.toml"),
+                include_str!("../../tests/fixtures/omarchy4/tokyo-night/colors.toml"),
+            )
+            .unwrap();
+            std::fs::write(theme.join("foot.ini"), plain).unwrap();
+            let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+            let mut selection = OmarchyThemeSelection::default();
+            let mut observed = fingerprint(&source);
+            let mut current = live_update(&source, None, None, ResolvedTheme::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (current.background_alpha, current.background_blur),
+                plain_effect,
+                "{name}"
+            );
+            let palette = current;
+            for (step, (contents, effect)) in [
+                (glassy, glassy_effect),
+                (plain, plain_effect),
+                (glassy, glassy_effect),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let foot = theme.join("foot.ini");
+                if step == 1 {
+                    // Truncate and rewrite the same inode.
+                    std::fs::write(&foot, contents).unwrap();
+                } else {
+                    // sed -i, as omarchy-theme-set-glass uses: a new inode.
+                    let staged = theme.join("foot.ini.sed");
+                    std::fs::write(&staged, contents).unwrap();
+                    std::fs::rename(&staged, &foot).unwrap();
+                }
+                let next_fingerprint = fingerprint(&source);
+                assert_ne!(next_fingerprint, observed, "{name} step {step}");
+                observed = next_fingerprint;
+                let active = active_theme_source(&source, &mut selection);
+                let next = resolve_live_theme_update(active, &mut selection, None, None, current)
+                    .unwrap()
+                    .expect("a glass toggle publishes a theme update");
+                assert_eq!(
+                    (next.background_alpha, next.background_blur),
+                    effect,
+                    "{name} step {step}"
+                );
+                assert_eq!(
+                    next.with_color_overrides(
+                        Some(palette.background_alpha),
+                        Some(palette.background_blur)
+                    ),
+                    palette,
+                    "{name} step {step}: only the background effect changes"
+                );
+                current = next;
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn omarchy_theme_switch_gap_never_flaps_to_a_stale_omarchy_3_root() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-omarchy-root-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state_current = root.join("home/.local/state/omarchy/current");
+        let home_state = state_current.join("theme");
+        let legacy = root.join("home/.config/omarchy/current/theme");
+        let source = ThemeSource::Omarchy(
+            OmarchyThemeRoots::ordered(vec![home_state.clone(), legacy.clone()]).unwrap(),
+        );
+        let mut selection = OmarchyThemeSelection::default();
+        write_theme(&legacy, 0x30_30_30);
+        write_theme(&home_state, 0x40_40_40);
+        assert_eq!(
+            poll(&source, &mut selection),
+            (home_state.clone(), Some(0x40_40_40))
+        );
+
+        // omarchy-theme-set stages current/next-theme, then runs
+        // rm -rf current/theme; mv current/next-theme current/theme. The staged
+        // theme keeps the root claimed for as long as the gap lasts, and each
+        // read is rejected.
+        write_theme(&state_current.join("next-theme"), 0x41_41_41);
+        std::fs::remove_dir_all(&home_state).unwrap();
+        for _ in 0..=OMARCHY_ROOT_DEMOTION_GRACE_POLLS * 2 {
+            let (selected, loaded) = poll(&source, &mut selection);
+            assert_eq!(selected, home_state);
+            assert!(loaded.is_none());
+        }
+        std::fs::rename(state_current.join("next-theme"), &home_state).unwrap();
+        assert_eq!(
+            poll(&source, &mut selection),
+            (home_state.clone(), Some(0x41_41_41))
+        );
+
+        // A whole-current replacement keeps the last good root through the
+        // bounded grace window.
+        let displaced = root.join("displaced-current");
+        std::fs::rename(&state_current, &displaced).unwrap();
+        for _ in 0..OMARCHY_ROOT_DEMOTION_GRACE_POLLS {
+            let (selected, loaded) = poll(&source, &mut selection);
+            assert_eq!(selected, home_state);
+            assert!(loaded.is_none());
+        }
+        std::fs::rename(&displaced, &state_current).unwrap();
+        assert_eq!(
+            poll(&source, &mut selection),
+            (home_state.clone(), Some(0x41_41_41))
+        );
+
+        // A sustained removal, such as a downgrade, is accepted after it.
+        std::fs::rename(&state_current, &displaced).unwrap();
+        for _ in 0..OMARCHY_ROOT_DEMOTION_GRACE_POLLS {
+            assert_eq!(poll(&source, &mut selection).0, home_state);
+        }
+        assert_eq!(
+            poll(&source, &mut selection),
+            (legacy.clone(), Some(0x30_30_30))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_theme_reload_switches_dark_light_dark() {
@@ -198,16 +525,16 @@ mod tests {
         ));
         let theme = root.join("theme");
         std::fs::create_dir_all(&theme).unwrap();
-        let source = ThemeSource::Omarchy(theme.clone());
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
         let mut current = ResolvedTheme::default();
         for (generation, mode, background, foreground) in [
             (0, "dark", 0x10_11_12, 0xe0_e1_e2),
             (1, "light", 0xf8_f9_fa, 0x20_21_22),
             (2, "dark", 0x10_11_12, 0xe0_e1_e2),
         ] {
-            let before = theme_source_fingerprint(&source);
+            let before = fingerprint(&source);
             std::fs::rename(&theme, root.join(format!("previous-{generation}"))).unwrap();
-            assert!(resolve_live_theme_update(&source, None, None, current).is_err());
+            assert!(live_update(&source, None, None, current).is_err());
             std::fs::create_dir(&theme).unwrap();
             std::fs::write(theme.join("colors.toml"), "accent=\"#010203\"\n").unwrap();
             let mut foot = format!(
@@ -222,8 +549,8 @@ mod tests {
                 .unwrap();
             }
             std::fs::write(theme.join("foot.ini"), foot).unwrap();
-            assert_ne!(theme_source_fingerprint(&source), before);
-            let next = resolve_live_theme_update(&source, Some(4321), Some(false), current)
+            assert_ne!(fingerprint(&source), before);
+            let next = live_update(&source, Some(4321), Some(false), current)
                 .unwrap()
                 .expect("theme switch must publish a palette");
             assert_eq!(next.background, background);
@@ -232,7 +559,7 @@ mod tests {
             assert!(!next.background_blur);
             assert_eq!(load_theme_source(&source).unwrap().background, background);
             assert!(
-                resolve_live_theme_update(&source, Some(4321), Some(false), next)
+                live_update(&source, Some(4321), Some(false), next)
                     .unwrap()
                     .is_none()
             );
@@ -252,15 +579,15 @@ mod tests {
         std::fs::create_dir_all(&theme).unwrap();
         std::fs::write(theme.join("colors.toml"), b"accent = \"#010203\"\n").unwrap();
         std::fs::write(theme.join("foot.ini"), b"[colors-dark]\n").unwrap();
-        let source = ThemeSource::Omarchy(theme.clone());
-        let first = theme_source_fingerprint(&source);
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+        let first = fingerprint(&source);
 
         std::fs::rename(&theme, &previous).unwrap();
-        assert!(resolve_live_theme_update(&source, None, None, ResolvedTheme::default()).is_err());
+        assert!(live_update(&source, None, None, ResolvedTheme::default()).is_err());
         std::fs::create_dir(&theme).unwrap();
         std::fs::write(theme.join("colors.toml"), b"accent = \"#010203\"\n").unwrap();
         std::fs::write(theme.join("foot.ini"), b"[colors-dark]\n").unwrap();
-        assert_ne!(theme_source_fingerprint(&source), first);
+        assert_ne!(fingerprint(&source), first);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -317,7 +644,7 @@ mod tests {
 
         std::fs::write(&path, b"{}").unwrap();
         let source = ThemeSource::Json(path.clone());
-        let error = resolve_live_theme_update(&source, None, None, current).unwrap_err();
+        let error = live_update(&source, None, None, current).unwrap_err();
         assert_eq!(current, preserved);
 
         let mut diagnostics = ThemeReloadDiagnostics::default();
@@ -327,7 +654,7 @@ mod tests {
         assert!(diagnostics.rejected(&error).is_some());
 
         std::fs::write(&path, valid_theme_json(0.5, true)).unwrap();
-        let next = resolve_live_theme_update(&source, Some(2468), Some(false), current)
+        let next = live_update(&source, Some(2468), Some(false), current)
             .unwrap()
             .unwrap();
         assert_eq!(next.background_alpha, 2468);

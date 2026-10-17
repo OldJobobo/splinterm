@@ -97,11 +97,21 @@ The default `main.font-sizing-policy=output-scale` follows Wayland compositor ou
 
 ## Omarchy theme integration
 
-With `main.theme` unset, Splinterm reads the active Omarchy theme from `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`. The effective `foot.ini` supplies terminal colors, selection, alpha, and blur; `colors.toml` supplies standard Omarchy accent and background-ramp roles. The active-tab body uses `lighter_bg`, then Foot `bright0`, rather than terminal selection color. Inactive tab labels use the theme's `muted` role (or Foot `bright0`) when it reaches 4.5:1 contrast against the tab strip without being louder than the foreground; otherwise they use the first qualifying 25/50/75 % mix with the foreground, or the plain foreground. JSON themes may set `inactive_tab_foreground` explicitly.
+With `main.theme` unset, Splinterm reads the active Omarchy theme from the first of these directories that exists, or whose theme Omarchy is staging as `current/next-theme`:
+
+1. `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`.
+2. `~/.local/state/omarchy/current/theme/`, where Omarchy 4 always writes, when `XDG_STATE_HOME` points elsewhere.
+3. Omarchy 3.x's `~/.config/omarchy/current/theme/`, read-only.
+
+Splinterm re-checks the choice on every poll, so it follows the Omarchy 4 migration live. During a theme switch it keeps the directory it was reading rather than falling back to an old Omarchy 3.x copy, and an empty `omarchy/current` left in a higher-priority root never hides the live theme.
+
+The effective `foot.ini` supplies terminal colors, selection, alpha, and blur. As in Foot, `[colors]` and `[colors-dark]` merge key by key into the dark palette. `colors.toml` supplies standard Omarchy roles, with the canonical Omarchy 4 name read before the legacy alias. The active-tab body uses `lighter_background`, then `lighter_bg`, then Foot `bright0`, rather than the terminal selection color. Inactive tab labels start from `muted`, then `color8`, `dark_foreground`, `dark_fg`, or Foot `bright0`. They keep that colour when it reaches 4.5:1 contrast against the tab strip without being louder than the foreground. Otherwise they use the first qualifying 25/50/75 % mix with the foreground, or the plain foreground. The accent comes from `accent`, `cursor`, `blue`, or `color4`. JSON themes may set `inactive_tab_foreground` explicitly.
 
 Active tab text is independent from terminal selection text. Splinterm chooses whichever effective terminal background or foreground has higher WCAG contrast against the resolved active-tab body, preferring foreground on a tie. Native Omarchy themes need no Splinterm-specific roles. Explicit JSON themes may override the active-tab roles and use the same fallback rule against their own background and foreground roles.
 
 Valid theme changes reload without restarting the daemon, shell, or window. A malformed or incomplete replacement retains the last valid palette.
+
+Omarchy's Glassy Windows works through the theme's `foot.ini`, as it does for Foot. Turning it on adds `alpha=0.65` and `blur=yes` under `[colors-dark]` unless the theme already sets them, and turning it off removes them again. Splinterm applies each change within half a second. Only the default terminal background, padding, and tab strip become translucent; text, explicit cell backgrounds, and the cursor stay opaque and crisp. An explicit `[colors] alpha` or `blur` in Splinterm's own configuration overrides the theme and Glassy Windows.
 
 Set an explicit JSON palette only to opt out of native discovery:
 

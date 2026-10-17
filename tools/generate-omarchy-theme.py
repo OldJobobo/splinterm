@@ -10,28 +10,62 @@ from pathlib import Path
 import tempfile
 import tomllib
 
+# Each role lists the canonical Omarchy 4 colors.toml name first, then the
+# legacy short name and ANSI aliases in the order omarchy-theme-color resolves
+# them. The selected-tab role keeps Splinterm's color8 ramp rather than
+# Omarchy's color0/background last resort, which would hide the selected tab.
 ROLE_ALIASES = {
-    "accent": ("accent", "cursor"),
-    "bg": ("bg", "background"),
-    "darker_bg": ("darker_bg", "color0"),
-    "lighter_bg": ("lighter_bg", "color8"),
-    "selection": ("selection", "selection_background"),
-    "muted": ("muted", "color8"),
-    "fg": ("fg", "foreground"),
-    "bright_fg": ("bright_fg", "color15"),
+    "accent": ("accent", "cursor", "blue", "color4"),
+    "bg": ("background", "bg", "color0"),
+    "darker_bg": ("darker_background", "darker_bg", "color0"),
+    "lighter_bg": ("lighter_background", "lighter_bg", "color8"),
+    "selection": (
+        "selection", "selection_background", "color8", "color0", "background", "bg",
+    ),
+    "muted": ("muted", "color8", "dark_foreground", "dark_fg"),
+    "fg": ("foreground", "fg", "color7"),
+    "bright_fg": ("bright_foreground", "bright_fg", "color15", "foreground", "fg"),
     "red": ("red", "color1"),
     "green": ("green", "color2"),
     "yellow": ("yellow", "color3"),
     "blue": ("blue", "color4"),
-    "magenta": ("magenta", "color5"),
+    "magenta": ("magenta", "color5", "purple"),
     "cyan": ("cyan", "color6"),
     "bright_red": ("bright_red", "color9"),
     "bright_green": ("bright_green", "color10"),
     "bright_yellow": ("bright_yellow", "color11"),
     "bright_blue": ("bright_blue", "color12"),
-    "bright_magenta": ("bright_magenta", "color13"),
+    "bright_magenta": ("bright_magenta", "color13", "bright_purple"),
     "bright_cyan": ("bright_cyan", "color14"),
 }
+
+# Omarchy derives a missing bright accent by mixing its base 20% toward white.
+DERIVED_BRIGHT_ROLES = {
+    "bright_red": "red",
+    "bright_green": "green",
+    "bright_yellow": "yellow",
+    "bright_blue": "blue",
+    "bright_magenta": "magenta",
+    "bright_cyan": "cyan",
+}
+
+
+def resolve_role(colors: dict[str, object], aliases: tuple[str, ...]) -> object:
+    """Returns the first non-empty alias, as omarchy-theme-color does."""
+    return next(
+        (colors[key] for key in aliases if key in colors and colors[key] != ""),
+        None,
+    )
+
+
+def mix_color(start: str, end: str, amount: float) -> str:
+    """Mixes two #RRGGBB colors exactly like omarchy-theme-color's mix_color."""
+    channels = []
+    for index in (1, 3, 5):
+        first = int(start[index : index + 2], 16)
+        second = int(end[index : index + 2], 16)
+        channels.append(int(first * (1 - amount) + second * amount + 0.5))
+    return "#{:02x}{:02x}{:02x}".format(*channels)
 
 
 def parse_foot_bool(value: str) -> bool:
@@ -48,36 +82,34 @@ def theme_settings(theme_dir: Path) -> tuple[float, bool]:
     if not foot.is_file():
         return 1.0, False
 
-    assignments: dict[str, dict[str, str]] = {
-        "colors": {},
-        "colors-dark": {},
-        "colors-light": {},
-        "main": {},
+    # Foot 1.27.0 parses the deprecated [colors] into the same dark theme as
+    # [colors-dark], and [colors2] into [colors-light], key by key in file
+    # order, so the sections merge and the last assignment wins.
+    themes: dict[str, dict[str, str]] = {"main": {}, "dark": {}, "light": {}}
+    section_theme = {
+        "main": "main",
+        "colors": "dark",
+        "colors-dark": "dark",
+        "colors2": "light",
+        "colors-light": "light",
     }
-    sections_seen: set[str] = set()
     section = "main"
     for raw_line in foot.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1].strip().lower()
-            if section in assignments:
-                sections_seen.add(section)
             continue
-        if section not in assignments:
+        if section not in section_theme:
             continue
         key, separator, value = line.partition("=")
         normalized_key = key.strip().lower()
         if separator and normalized_key in {"alpha", "blur", "initial-color-theme"}:
-            assignments[section][normalized_key] = value.strip()
+            themes[section_theme[section]][normalized_key] = value.strip()
 
-    initial = assignments["main"].get("initial-color-theme", "dark")
+    initial = themes["main"].get("initial-color-theme", "dark")
     if initial not in {"dark", "light"}:
         raise ValueError("foot.ini initial-color-theme must be dark or light")
-    selected = (
-        "colors-light" if initial == "light"
-        else "colors-dark" if "colors-dark" in sections_seen else "colors"
-    )
-    values = assignments[selected]
+    values = themes[initial]
     try:
         alpha = float(values.get("alpha", "1.0"))
     except ValueError as error:
@@ -130,11 +162,15 @@ def generate(
     colors: dict[str, object], alpha: float = 1.0, blur: bool = False
 ) -> dict[str, object]:
     roles = {
-        role: next((colors[key] for key in aliases if key in colors), None)
-        for role, aliases in ROLE_ALIASES.items()
+        role: resolve_role(colors, aliases) for role, aliases in ROLE_ALIASES.items()
     }
-    roles["selection_foreground"] = colors.get(
-        "selection_foreground", roles["fg"]
+    for bright, base in DERIVED_BRIGHT_ROLES.items():
+        if roles[bright] is None and roles[base] is not None:
+            validate_role(base, roles[base])
+            roles[bright] = mix_color(str(roles[base]), "#ffffff", 0.2)
+    selection_foreground = resolve_role(colors, ("selection_foreground",))
+    roles["selection_foreground"] = (
+        roles["bright_fg"] if selection_foreground is None else selection_foreground
     )
     roles["active_tab_background"] = roles["lighter_bg"]
     missing = [name for name, value in roles.items() if value is None]
