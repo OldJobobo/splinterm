@@ -350,6 +350,13 @@ impl RemoteCatalog {
     }
 }
 
+/// Returns whether `name` satisfies the profile-name rule, so it is safe to
+/// display even when no such profile is configured.
+#[must_use]
+pub fn is_valid_profile_name(name: &str) -> bool {
+    validate_profile_name(name).is_ok()
+}
+
 fn has_unsafe_text(value: &str) -> bool {
     value.chars().any(|character| {
         character.is_control()

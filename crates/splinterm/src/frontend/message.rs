@@ -73,6 +73,10 @@ pub struct FontUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowCommand {
     Input(Vec<u8>),
+    /// A DECSET 1004 focus in (`true`) or out report this Window generated.
+    /// Kept apart from [`WindowCommand::Input`] so the daemon can tell it
+    /// from identical bytes the user typed or pasted.
+    FocusReport(bool),
     Resynchronize,
     Resize {
         columns: u16,

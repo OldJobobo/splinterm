@@ -23,11 +23,12 @@ pub use live::{
 };
 pub use splinterm_policy::{executable_identity, inspect_policy_file, policy};
 
-/// Ceiling on live Splint runtimes, persistent and transient together.
+/// Ceiling on Splint processes one daemon owns: registered runtimes, persistent
+/// and transient, plus runtimes still retiring and slots reserved for launches.
 ///
-/// The daemon runtime registry refuses every insertion past this bound, so no
-/// daemon generation can own more live Splints than this; handoff manifests
-/// carry only live Splints and are bounded by it.
+/// The runtime registry refuses every launch at this bound. Handoff manifests
+/// carry only registered live Splints, a subset, so they are bounded by it too.
+/// A retiring Splint has left the registry and is never captured as live.
 pub const MAX_LIVE_SPLINTS: usize = 256;
 // A full persisted topology must be able to run entirely live.
 const _: () = assert!(MAX_LIVE_SPLINTS >= splinterm_core::MAX_SPLINTS);

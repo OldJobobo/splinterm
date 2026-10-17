@@ -21,6 +21,8 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         configured: bool = True,
         remote_root: str = "/home/omarchy/Projects/splinterm-testbed-review",
         root_override: str | None = None,
+        input_text: str | None = None,
+        locale: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -59,6 +61,8 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         environment.pop("SPLINTERM_TESTBED_REMOTE_ROOT", None)
         if root_override is not None:
             environment["SPLINTERM_TESTBED_REMOTE_ROOT"] = root_override
+        if locale is not None:
+            environment.update({"LANG": locale, "LC_ALL": locale})
         environment.update(
             {
                 "CALL_LOG": str(log),
@@ -71,6 +75,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             cwd=ROOT,
             env=environment,
             text=True,
+            input=input_text,
             capture_output=True,
             check=False,
         )
@@ -275,9 +280,9 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             runner,
         )
         self.assertIn("expected exactly one Hyprland instance", runner)
-        self.assertEqual(runner.count('--client-pid "$client_pid"'), 2)
-        self.assertEqual(runner.count('--client-token "$client_token"'), 2)
-        self.assertEqual(runner.count('SPLINTERM_TEST_WINDOW_TOKEN="$client_token"'), 2)
+        self.assertEqual(runner.count('--client-pid "$client_pid"'), 3)
+        self.assertEqual(runner.count('--client-token "$client_token"'), 3)
+        self.assertEqual(runner.count('SPLINTERM_TEST_WINDOW_TOKEN="$client_token"'), 3)
         development_launch = runner.split("  launch)", 1)[1].split("  stop)", 1)[0]
         build = development_launch.index("case ${SPLINTERM_TEST_PROFILE:-release} in")
         prepare = development_launch.index("guest-window.py prepare")
@@ -384,6 +389,256 @@ class OmarchyVmRunnerTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("must be", result.stderr)
                 self.assertFalse(log.exists())
+
+    def action(self, name: str) -> str:
+        runner = RUNNER.read_text(encoding="utf-8")
+        return runner.split(f"  {name})", 1)[1].split("\n    ;;\n", 1)[0]
+
+    def test_package_config_rejects_unsafe_paths_before_remote_commands(self) -> None:
+        for relpath in (
+            "../escape",
+            "splinterm/../escape",
+            "/etc/fonts/fonts.conf",
+            "other/config.ini",
+            "splinterm",
+            "splinterm/.hidden",
+            "fontconfig/a//b",
+            "splinterm/" + "x" * 130,
+            "splinterm/caf\u00e9.ini",
+        ):
+            with self.subTest(relpath=relpath):
+                result, log = self.run_runner(
+                    "package-config", relpath, input_text="x", locale="en_US.UTF-8"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(log.exists())
+        result, log = self.run_runner("package-config")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(log.exists())
+
+    def test_package_config_sends_content_on_stdin_and_script_as_argument(self) -> None:
+        result, log = self.run_runner(
+            "package-config", "fontconfig/fonts.conf", input_text="<fontconfig/>\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = log.read_text()
+        self.assertIn("SPLINTERM_TESTBED_CONFIG_PATH=fontconfig/fonts.conf", call)
+        self.assertIn(
+            "SPLINTERM_TESTBED_PACKAGE_ROOT=/home/omarchy/Projects/"
+            "splinterm-testbed-review/.testbed-package",
+            call,
+        )
+        self.assertIn("bash -c", call)
+        result, log = self.run_runner("package-config", "--clear")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SPLINTERM_TESTBED_PACKAGE_ROOT=", log.read_text())
+
+    def test_package_config_script_seeds_bounded_private_files(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        script = runner.split("remote_script=$(cat <<'REMOTE'\n", 1)[1].split(
+            "\nREMOTE\n)", 1
+        )[0]
+        # The live config is written only for a session this checkout owns.
+        self.assertLess(script.index('$(<"$owner") == "$package_root"'), script.rindex(
+            'write_into "$config"'
+        ))
+        with tempfile.TemporaryDirectory() as temporary:
+            package_root = Path(temporary) / "package"
+            package_root.mkdir()
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "SPLINTERM_TESTBED_PACKAGE_ROOT": str(package_root),
+                    "SPLINTERM_TESTBED_RUNTIME_LEAF": "splinterm-testbed-unit-absent",
+                    "SPLINTERM_TESTBED_CONFIG_PATH": "splinterm/config.ini",
+                }
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env=environment,
+                input="[main]\nstartup=dojo-picker\n",
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            seeded = package_root / "acceptance-seed/splinterm/config.ini"
+            self.assertEqual(seeded.read_text(), "[main]\nstartup=dojo-picker\n")
+            self.assertEqual(seeded.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((package_root / "acceptance-config").exists())
+            self.assertEqual(list(package_root.glob(".config-content.*")), [])
+            self.assertEqual(list(seeded.parent.glob(".package-config.*")), [])
+
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env=environment,
+                input="x" * 65537,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exceeds 64 KiB", result.stderr)
+            self.assertEqual(seeded.read_text(), "[main]\nstartup=dojo-picker\n")
+
+    def test_package_launch_copies_the_seed_before_any_process_starts(self) -> None:
+        launch = self.action("package-launch")
+        seed_copy = launch.index('cp -R -- "$seed/." "$config/"')
+        self.assertLess(launch.index("created_config=true"), seed_copy)
+        self.assertLess(seed_copy, launch.index("nohup /usr/bin/splinterd"))
+        self.assertIn("[[ -d $seed && ! -L $seed ]]", launch)
+        stop = self.action("package-stop")
+        self.assertIn('"$SPLINTERM_TESTBED_PACKAGE_ROOT/font-fixtures"', stop)
+        self.assertNotIn("acceptance-seed", stop)
+
+    def test_package_launch_extra_requires_a_program_and_quotes_arguments(self) -> None:
+        for arguments in ((), ("bogus",), ("--picker",)):
+            with self.subTest(arguments=arguments):
+                result, log = self.run_runner("package-launch-extra", *arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(log.exists())
+        result, log = self.run_runner("package-launch-extra", "launch", "--picker", "two words")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = log.read_text()
+        self.assertIn("SPLINTERM_TESTBED_EXTRA_PROGRAM=launch", call)
+        self.assertIn("SPLINTERM_TESTBED_EXTRA_ARGUMENTS=", call)
+        self.assertIn("--picker", call)
+        self.assertIn("two", call)
+
+    def test_package_launch_extra_is_guarded_by_the_owned_session(self) -> None:
+        extra = self.action("package-launch-extra")
+        owner_check = extra.index('$(<"$owner") == "$package_root"')
+        allocate = extra.index('mkdir -m 700 "$runtime/extra-$index"')
+        prepare = extra.index('guest-window.py" prepare')
+        launch = extra.index('nohup "${program[@]}"')
+        place = extra.index('guest-window.py" place')
+        self.assertLess(owner_check, allocate)
+        self.assertLess(allocate, prepare)
+        self.assertLess(prepare, launch)
+        self.assertLess(launch, place)
+        trap = extra.index("trap cleanup_failed_extra ERR")
+        self.assertLess(extra.index("instance=$(hyprctl instances -j"), trap)
+        self.assertLess(trap, allocate)
+        self.assertIn("[[ -n $extra ]] || return 0", extra)
+        self.assertIn('--owner-state "$window_state"', extra)
+        self.assertIn('SPLINTERM_SOCKET="$socket"', extra)
+        self.assertIn('XDG_CONFIG_HOME="$config"', extra)
+        self.assertIn("for index in 1 2 3 4; do", extra)
+        self.assertIn("(/usr/bin/splinterm launch)", extra)
+        self.assertIn("(/usr/bin/splinterm-xdg-terminal-exec)", extra)
+
+    def test_package_close_extra_stops_only_its_own_token_and_restores(self) -> None:
+        for identifier in ("0", "5", "x", "1 2"):
+            with self.subTest(identifier=identifier):
+                result, log = self.run_runner("package-close-extra", identifier)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(log.exists())
+        result, log = self.run_runner("package-close-extra", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SPLINTERM_TESTBED_EXTRA_ID=2", log.read_text())
+        close = self.action("package-close-extra")
+        self.assertIn('grep -Fqx "SPLINTERM_TEST_WINDOW_TOKEN=$token"', close)
+        token_check = close.index("if [[ $token =~ ^[0-9a-f]{32}$ ]]; then")
+        self.assertLess(token_check, close.index('kill "${process##*/}"'))
+        self.assertIn("[[ -f $extra/client-token && ! -L $extra/client-token ]]", close)
+        self.assertIn('grep -Fqx "SPLINTERM_SOCKET=$socket"', close)
+        self.assertLess(close.index('kill "${process##*/}"'), close.index('guest-window.py" restore'))
+        self.assertLess(close.index('guest-window.py" restore'), close.index('rm -rf -- "$extra"'))
+
+    def test_font_fixture_action_builds_in_the_package_root(self) -> None:
+        for arguments in ((), ("other",), ("invalid-candidate", "--force")):
+            with self.subTest(arguments=arguments):
+                result, log = self.run_runner("font-fixture", *arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(log.exists())
+        result, log = self.run_runner("font-fixture", "invalid-candidate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SPLINTERM_TESTBED_INSTALL_FIXTURE=false", log.read_text())
+        result, log = self.run_runner("font-fixture", "invalid-candidate", "--install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SPLINTERM_TESTBED_INSTALL_FIXTURE=true", log.read_text())
+        fixture = self.action("font-fixture")
+        self.assertIn("tools/testbed/font-fixture.py\" invalid-candidate", fixture)
+        self.assertLess(
+            fixture.index('$(<"$owner") == "$package_root"'),
+            fixture.index('install -m 600 -- "$output/fonts.conf" "$staged"'),
+        )
+        self.assertIn('"$destination.before-fixture"', fixture)
+        self.assertIn('mv -f -- "$staged" "$destination"', fixture)
+        self.assertIn('generation=$(mktemp -d "$fixtures/invalid-candidate.XXXXXX")', fixture)
+        self.assertNotIn('rm -rf -- "$output"', fixture)
+        self.assertLess(
+            fixture.index("font-fixture.py\" invalid-candidate"), fixture.index("built=true")
+        )
+
+    def test_font_fixture_rebuilds_beside_the_live_generation(self) -> None:
+        fixture = self.action("font-fixture")
+        script = fixture.split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            package_root = base / "package"
+            (package_root / "source/.git").mkdir(parents=True)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            # Stands in for font-fixture.py: a fixture names its own directory.
+            python = fake_bin / "python"
+            python.write_text(
+                "#!/bin/sh\n"
+                '[ -z "$FAKE_FIXTURE_FAIL" ] || exit 1\n'
+                'mkdir -p "$4/fonts"\n'
+                "printf '<dir>%s/fonts</dir>\\n' \"$4\" >\"$4/fonts.conf\"\n"
+            )
+            python.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "SPLINTERM_TESTBED_PACKAGE_ROOT": str(package_root),
+                    "SPLINTERM_TESTBED_RUNTIME_LEAF": "splinterm-testbed-unit-absent",
+                    "SPLINTERM_TESTBED_INSTALL_FIXTURE": "false",
+                }
+            )
+
+            def build(fail: bool = False) -> subprocess.CompletedProcess[str]:
+                env = dict(environment)
+                if fail:
+                    env["FAKE_FIXTURE_FAIL"] = "1"
+                return subprocess.run(
+                    ["bash", "-c", script], env=env, text=True, capture_output=True, check=False
+                )
+
+            fixtures = package_root / "font-fixtures"
+            result = build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            (live,) = fixtures.glob("invalid-candidate.*")
+            # Point the session's fonts.conf at that generation, as --install does.
+            destination = package_root / "acceptance-config/fontconfig/fonts.conf"
+            destination.parent.mkdir(parents=True)
+            destination.write_text((live / "fixture/fonts.conf").read_text())
+
+            # A failed rebuild leaves the live generation and discards its own.
+            result = build(fail=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(fixtures.glob("invalid-candidate.*")), [live])
+            self.assertTrue((live / "fixture/fonts").is_dir())
+
+            # A rebuild never deletes the generation the live config names.
+            result = build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generations = set(fixtures.glob("invalid-candidate.*"))
+            self.assertEqual(len(generations), 2)
+            self.assertIn(live, generations)
+            (fresh,) = generations - {live}
+            self.assertIn(str(fresh / "fixture"), result.stdout)
+
+            # Once the live config moves on, unreferenced generations are pruned.
+            destination.write_text((fresh / "fixture/fonts.conf").read_text())
+            result = build()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generations = set(fixtures.glob("invalid-candidate.*"))
+            self.assertEqual(len(generations), 2)
+            self.assertIn(fresh, generations)
+            self.assertNotIn(live, generations)
 
 
 if __name__ == "__main__":

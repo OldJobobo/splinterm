@@ -1102,6 +1102,7 @@ pub(crate) enum BuiltInCommandId {
     ReloadConfiguration,
     RecentSessions,
     NewSession,
+    OpenRemote,
     RenameCurrentTab,
     NewDojo,
     ChooseDojo,
@@ -1161,6 +1162,7 @@ impl BuiltInCommandId {
         Self::ReloadConfiguration,
         Self::RecentSessions,
         Self::NewSession,
+        Self::OpenRemote,
         Self::RenameCurrentTab,
         Self::NewDojo,
         Self::ChooseDojo,
@@ -1366,6 +1368,7 @@ pub(crate) enum BuiltInCommandDispatch {
     Rename(DojoActionTarget),
     ConfirmTermination(DojoActionTarget),
     RecentSessions,
+    OpenRemoteChooser,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1481,6 +1484,15 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         title: "New terminal",
         keywords: &["new", "terminal", "dojo", "session", "lair", "window"],
         shortcut_action: Some(ActionId::NewSession),
+    },
+    BuiltInCommandDescriptor {
+        id: BuiltInCommandId::OpenRemote,
+        category: CommandCategory::Dojos,
+        title: "Open Remote…",
+        keywords: &[
+            "open", "remote", "ssh", "host", "server", "connect", "window",
+        ],
+        shortcut_action: None,
     },
     BuiltInCommandDescriptor {
         id: BuiltInCommandId::RenameCurrentTab,
@@ -1891,6 +1903,7 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         BuiltInCommandId::ShowKeybindings
         | BuiltInCommandId::ReloadConfiguration
         | BuiltInCommandId::RecentSessions
+        | BuiltInCommandId::OpenRemote
         | BuiltInCommandId::NewSession
         | BuiltInCommandId::RenameCurrentTab
         | BuiltInCommandId::NewDojo
@@ -2144,6 +2157,7 @@ pub(crate) fn command_dispatch(
         BuiltInCommandId::ShowKeybindings => BuiltInCommandDispatch::ShowKeybindings,
         BuiltInCommandId::ReloadConfiguration => BuiltInCommandDispatch::ReloadConfiguration,
         BuiltInCommandId::RecentSessions => BuiltInCommandDispatch::RecentSessions,
+        BuiltInCommandId::OpenRemote => BuiltInCommandDispatch::OpenRemoteChooser,
         BuiltInCommandId::NewSession => {
             BuiltInCommandDispatch::Topology(WindowTopologyCommand::NewLair {
                 source_splint_id: context.splint_id,
@@ -3387,5 +3401,28 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn open_remote_is_an_always_available_palette_command_without_a_chord() {
+        let context = palette().context();
+        let id = BuiltInCommandId::OpenRemote;
+        assert!(BuiltInCommandId::ALL.contains(&id));
+        assert!(command_enabled(id, &context));
+        assert_eq!(
+            command_dispatch(id, &context),
+            Some(BuiltInCommandDispatch::OpenRemoteChooser)
+        );
+        let descriptor = command_descriptor(id);
+        assert_eq!(descriptor.title, "Open Remote…");
+        assert_eq!(descriptor.shortcut(&ResolvedKeymap::default()), "");
+        for query in ["remote", "SSH", "open rem", "host"] {
+            let mut ui = palette();
+            assert!(ui.append_text(query));
+            assert!(ui.filtered().contains(&id), "query {query:?}");
+        }
+        let mut ui = palette();
+        assert!(ui.append_text("ssh"));
+        assert_eq!(ui.filtered(), &[id]);
     }
 }
