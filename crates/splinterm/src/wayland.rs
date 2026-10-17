@@ -152,11 +152,11 @@ use crate::pane::{
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
-    ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache, CursorPresentation,
-    DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout, LairExplorerPresentationMode,
-    PickerHitTarget, RenderContext, SessionPickerOverlayLayout, SessionPickerPurpose,
-    SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame, SnapshotOverlays,
-    TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    ChromeSource, ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache,
+    CursorPresentation, DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout,
+    LairExplorerPresentationMode, PickerHitTarget, RenderContext, SessionPickerOverlayLayout,
+    SessionPickerPurpose, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
+    SnapshotOverlays, TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
     command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
     fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
     lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
@@ -173,6 +173,7 @@ use crate::{
     viewport::ScrollbackViewport,
 };
 
+mod agent_status;
 mod chrome;
 mod clipboard;
 mod clipboard_image;
@@ -984,6 +985,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             topology_commands: options.topology_commands,
             session_switch_pending: false,
             deferred_topology_updates: Vec::new(),
+            agent: agent_status::TabAgentStatus::new(options.agent_status_presentation),
         },
         modal: ModalState {
             trusted_consent,
@@ -1035,6 +1037,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             pending_frame_trace: None,
         },
     };
+    app.explorer
+        .set_agent_status_enabled(options.agent_status_presentation);
+    app.explorer.set_agent_glyphs(app.tab_state.agent.glyphs());
 
     let event_loop_result: Result<()> = (|| {
         while !app.scheduling.exit {
@@ -1908,7 +1913,7 @@ struct PreparedTabFontFrames {
 }
 
 struct CachedFrameTitle {
-    source: String,
+    source: ChromeSource,
     maximum_cells: u32,
     scale_120: u32,
     bold: bool,
@@ -3798,6 +3803,7 @@ impl App {
             .frame_titles
             .retain(|splint_id, _| requested_ids.contains(splint_id));
         for (splint_id, source, maximum_cells) in requested {
+            let source = ChromeSource::from(source);
             let current = self
                 .presentation
                 .frame_titles
@@ -3812,7 +3818,7 @@ impl App {
                     splint_id,
                     CachedFrameTitle {
                         text: ChromeText::load_with_context(
-                            &source,
+                            source.text(),
                             self.surface.scale_120,
                             &self.presentation.render_context,
                         )?,
@@ -5369,6 +5375,7 @@ impl App {
                 .map(|(id, _)| *id)
                 .collect(),
             pending_transfer_id: self.panes.pane.pending_control_transfer,
+            agent_status_incarnation: self.tab_state.agent.clearable_incarnation(splint_id),
         }));
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
@@ -5399,6 +5406,9 @@ impl App {
                 self.input.prefix_timeout =
                     std::time::Duration::from_millis(loaded.config.prefix_timeout_ms);
                 self.input.prefix_state.clear();
+                if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
+                    self.presentation.full_redraw = true;
+                }
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
                 }
@@ -8895,6 +8905,21 @@ impl App {
                     changed = true;
                 }
                 WindowTopologyUpdate::LairExplorerInvalidated => {}
+                WindowTopologyUpdate::AgentStatus(status) => {
+                    if self.apply_window_agent_status(status) {
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
+                }
+                WindowTopologyUpdate::AgentStatusCleared {
+                    splint_id,
+                    incarnation,
+                } => {
+                    if self.apply_agent_status_cleared(splint_id, incarnation) {
+                        self.presentation.full_redraw = true;
+                        changed = true;
+                    }
+                }
                 WindowTopologyUpdate::LairExplorerFailed(message) => {
                     self.explorer.mark_disconnected();
                     self.explorer

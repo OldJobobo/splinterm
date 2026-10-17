@@ -168,6 +168,7 @@ async fn close_second_tab(config: AppConfig, replies: Vec<Reply>) -> (Vec<(Reque
         let mut state = TopologyManagerState {
             tabs: WindowTabSet::new(managed_tab(HashMap::new())),
             transient_owners: HashMap::new(),
+            agent_status_republish: false,
         };
         state.tabs.open_or_activate(target).unwrap();
         let (updates, receiver) = mpsc::channel(16);
@@ -258,6 +259,7 @@ async fn close_transient_tab(lair_removed: bool) -> bool {
         let mut state = TopologyManagerState {
             tabs: WindowTabSet::new(managed_tab(HashMap::new())),
             transient_owners: HashMap::from([(target_lair, owner)]),
+            agent_status_republish: false,
         };
         state.tabs.open_or_activate(target).unwrap();
         let (updates, receiver) = mpsc::channel(16);
@@ -355,6 +357,7 @@ async fn window_close_asks_only_for_single_pane_tabs() {
         let mut state = TopologyManagerState {
             tabs: WindowTabSet::new(split),
             transient_owners: HashMap::new(),
+            agent_status_republish: false,
         };
         state.tabs.open_or_activate(single).unwrap();
         close_unused_tabs_on_exit(&mut connection, &close_unused_config(true), &mut state).await;
