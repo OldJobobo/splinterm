@@ -5,10 +5,13 @@
 //! last-column flag (`lcf`). Splinterm names that flag `deferred_wrap` to state
 //! the behavior it records.
 
+use serde::{Deserialize, Serialize};
+
 use crate::Coordinate;
 
 /// Cursor position and deferred soft-wrap state.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cursor {
     position: Coordinate,
     deferred_wrap: bool,

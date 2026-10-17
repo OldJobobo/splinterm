@@ -45,7 +45,9 @@ pub use snapshot::{
     RowSnapshot, ScrollbackPage, ScrollbackSnapshot, SearchMatch, SearchPage, SnapshotRequest,
     TerminalSnapshot,
 };
-pub use terminal::Terminal;
+pub use terminal::{
+    CheckpointError, MAX_TERMINAL_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1, Terminal,
+};
 pub(crate) use update::ChangeSet;
 pub use update::{
     ResnapshotRequired, TerminalDamage, TerminalRevision, TerminalUpdate, UpdateBatch,

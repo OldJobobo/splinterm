@@ -4,6 +4,12 @@
 //! `csi.c`, and `osc.c` at commit
 //! `3c5b584b0eafa772eb4376fb6eaf6643399e190e`.
 
+mod checkpoint;
+
+pub use checkpoint::{
+    CheckpointError, MAX_TERMINAL_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1,
+};
+
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     time::{Duration, Instant},
@@ -173,7 +179,8 @@ struct ActionBaseline {
     scrollback_rows: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 enum SixelPaletteMode {
     Private,
     Shared,

@@ -62,6 +62,11 @@ impl SharedKittyUploadBudget {
     }
 
     #[must_use]
+    pub fn limit(&self) -> usize {
+        self.0.limit
+    }
+
+    #[must_use]
     pub fn metrics(&self) -> SharedKittyUploadBudgetMetrics {
         SharedKittyUploadBudgetMetrics {
             reserved_bytes: self.0.reserved_bytes.load(Ordering::Acquire),
@@ -159,6 +164,11 @@ impl SharedImageBudget {
             content_bytes: AtomicUsize::new(0),
             high_water_content_bytes: AtomicUsize::new(0),
         }))
+    }
+
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.0.limit
     }
 
     #[must_use]

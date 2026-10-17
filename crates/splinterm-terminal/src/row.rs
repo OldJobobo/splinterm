@@ -8,12 +8,32 @@
 
 use std::ops::{Index, IndexMut, Range};
 
-use crate::{Attributes, Cell, CellContent, Color};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::{Attributes, Cell, CellContent, Color, cell::CHECKPOINT_CELL_BYTES};
+
+pub(crate) const MAX_CHECKPOINT_COLUMNS: usize = 1 << 16;
+
+/// Cells one checkpoint may expand across every row of both grids.
+///
+/// A packed row stores a trailing run once, so a few bytes can name a full
+/// row. Restore sums the declared row widths before decoding any cell, so this
+/// aggregate bound keeps allocation independent of that compression. 64 Mi
+/// cells covers 100,000 history rows at 480 columns or the 1,000,000-row
+/// protocol maximum at 60 columns. Capture refuses larger terminals so encode
+/// never emits a checkpoint restore would refuse.
+pub(crate) const MAX_CHECKPOINT_CELLS: usize = 1 << 26;
 
 /// A terminal row and the metadata needed to distinguish hard line endings
 /// from soft wrapping.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Row {
+    #[serde(
+        serialize_with = "serialize_cells",
+        deserialize_with = "deserialize_cells"
+    )]
     cells: Vec<Cell>,
     dirty: bool,
     linebreak: bool,
@@ -325,6 +345,19 @@ impl Row {
         self.linebreak = true;
     }
 
+    pub(crate) fn checkpoint_is_valid(&self, composed_entries: usize) -> bool {
+        if !self
+            .cells
+            .iter()
+            .all(|cell| cell.checkpoint_is_valid(composed_entries))
+        {
+            return false;
+        }
+        let mut repaired = self.clone();
+        repaired.repair_wide_cells();
+        repaired == *self
+    }
+
     fn mark_cells_clean(&mut self) {
         for cell in &mut self.cells {
             cell.attributes_mut().set_clean(true);
@@ -351,14 +384,18 @@ impl Row {
             let expected_width = usize::try_from(remaining)
                 .unwrap_or(usize::MAX)
                 .saturating_add(1);
+            let end = leader
+                .checked_add(expected_width)
+                .filter(|end| *end <= self.cells.len());
             let valid = leader < column
-                && leader + expected_width <= self.cells.len()
-                && (1..expected_width).all(|offset| {
-                    self.cells[leader + offset].content()
-                        == CellContent::Spacer(u32::try_from(expected_width - offset).unwrap())
+                && end.is_some_and(|end| {
+                    (1..end - leader).all(|offset| {
+                        self.cells[leader + offset].content()
+                            == CellContent::Spacer(u32::try_from(expected_width - offset).unwrap())
+                    })
                 });
             if valid {
-                column = leader + expected_width;
+                column = end.expect("validated wide-cell end");
             } else {
                 self.cells[column].set_content(CellContent::Empty);
                 column += 1;
@@ -372,6 +409,59 @@ impl Row {
             "cell range must fit within the row"
         );
     }
+}
+
+/// Rows checkpoint as `[columns, base64]`: packed fixed-width cells. A trailing
+/// run of cells equal to the last one is stored once and repeated on restore,
+/// so blank, short and erased rows stay small.
+fn serialize_cells<S>(cells: &[Cell], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let used = cells.last().map_or(0, |last| {
+        cells
+            .iter()
+            .rposition(|cell| cell != last)
+            .map_or(1, |differs| differs + 2)
+    });
+    let mut packed = Vec::with_capacity(used * CHECKPOINT_CELL_BYTES);
+    for cell in &cells[..used] {
+        cell.write_checkpoint(&mut packed);
+    }
+    (cells.len(), BASE64_STANDARD.encode(packed)).serialize(serializer)
+}
+
+fn deserialize_cells<'de, D>(deserializer: D) -> Result<Vec<Cell>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let (columns, encoded) = <(usize, String)>::deserialize(deserializer)?;
+    let maximum_encoded = (MAX_CHECKPOINT_COLUMNS * CHECKPOINT_CELL_BYTES).div_ceil(3) * 4;
+    if columns > MAX_CHECKPOINT_COLUMNS || encoded.len() > maximum_encoded {
+        return Err(serde::de::Error::custom(
+            "terminal row exceeds checkpoint bound",
+        ));
+    }
+    let packed = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| serde::de::Error::custom("terminal row is not canonical base64"))?;
+    let (chunks, remainder) = packed.as_chunks::<CHECKPOINT_CELL_BYTES>();
+    if !remainder.is_empty() || chunks.len() > columns || chunks.is_empty() != (columns == 0) {
+        return Err(serde::de::Error::custom(
+            "terminal row cells do not fit its width",
+        ));
+    }
+    let mut cells = Vec::with_capacity(columns);
+    for chunk in chunks {
+        cells.push(
+            Cell::read_checkpoint(chunk)
+                .ok_or_else(|| serde::de::Error::custom("terminal cell is malformed"))?,
+        );
+    }
+    if let Some(&last) = cells.last() {
+        cells.resize(columns, last);
+    }
+    Ok(cells)
 }
 
 impl Index<usize> for Row {
@@ -392,6 +482,44 @@ impl IndexMut<usize> for Row {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packed_checkpoint_rows_round_trip_and_reject_malformed_cells() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+        use serde_json::json;
+
+        use crate::cell::CHECKPOINT_CELL_BYTES;
+
+        let mut row = Row::new(6);
+        row[1] = Cell::new(CellContent::Scalar('A'));
+        let encoded = serde_json::to_value(&row).unwrap();
+        // The trailing run of clean blanks is stored once.
+        let packed = BASE64_STANDARD
+            .decode(encoded["cells"][1].as_str().unwrap())
+            .unwrap();
+        assert_eq!(encoded["cells"][0], json!(6));
+        assert_eq!(packed.len(), 3 * CHECKPOINT_CELL_BYTES);
+        assert_eq!(serde_json::from_value::<Row>(encoded).unwrap(), row);
+
+        let cell = |offset: usize, byte: u8| {
+            let mut cell = [0_u8; CHECKPOINT_CELL_BYTES];
+            cell[offset] = byte;
+            cell
+        };
+        let malformed = [
+            json!([4, BASE64_STANDARD.encode(cell(12, 6))]),
+            json!([4, BASE64_STANDARD.encode(cell(13, 4))]),
+            json!([4, BASE64_STANDARD.encode([0_u8; CHECKPOINT_CELL_BYTES - 1])]),
+            json!([1, BASE64_STANDARD.encode([1_u8; 2 * CHECKPOINT_CELL_BYTES])]),
+            json!([MAX_CHECKPOINT_COLUMNS + 1, ""]),
+            json!([3, ""]),
+            json!([4, "not base64!"]),
+        ];
+        for cells in malformed {
+            let value = json!({"cells": cells, "dirty": false, "linebreak": true});
+            assert!(serde_json::from_value::<Row>(value).is_err());
+        }
+    }
+
     use super::*;
     use crate::{CellContent, Color};
 
