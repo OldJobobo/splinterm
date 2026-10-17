@@ -262,6 +262,13 @@ const DEFINITIONS: &[ToolDefinition] = &[
         false,
         true
     ),
+    tool_definition!(
+        "report_agent_status",
+        "Reports this agent's explicit display status (working, needs_input, done, error, or idle; null clears) for its own Splint, defaulting to the adapter's Splint environment. Display data only, never authority.",
+        false,
+        false,
+        false
+    ),
 ];
 
 const COMMON_SCHEMA: &str = include_str!("../../../dist/schemas/mcp/v2/common.schema.json");
@@ -275,6 +282,7 @@ const CONTROL_RESOURCE_SCHEMA: &str =
 const MAXIMUM_SCHEMA_DEPTH: usize = 32;
 const MAXIMUM_ARGV_ENCODED_BYTES: usize = 65_536;
 const MAXIMUM_INPUT_TEXT_BYTES: usize = 65_536;
+const AGENT_STATUS_DETAIL_PATTERN: &str = "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\u2028\\u2029]+$";
 
 struct Catalog {
     tools: Vec<Tool>,
@@ -662,6 +670,11 @@ fn matches_frozen_pattern(pattern: &str, value: &str) -> bool {
         "^cur_[A-Za-z0-9_-]{16,256}$" => bounded_handle(value, "cur_"),
         "^ctl_[A-Za-z0-9_-]{16,256}$" => bounded_handle(value, "ctl_"),
         "^xfer_[A-Za-z0-9_-]{16,256}$" => bounded_handle(value, "xfer_"),
+        // The daemon's own detail validator also enforces the 240-byte cap
+        // that JSON Schema cannot express.
+        AGENT_STATUS_DETAIL_PATTERN => {
+            splinterm_protocol::validate_agent_status_detail(value).is_ok()
+        }
         "^splinterm://splints/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/terminal$" => {
             resource_uri(value, "terminal")
         }
@@ -711,7 +724,7 @@ mod tests {
     #[test]
     fn catalog_is_exact_and_closed() {
         let tools = catalog();
-        assert_eq!(tools.len(), 33);
+        assert_eq!(tools.len(), 34);
         assert!(tools.iter().all(|tool| tool.name.starts_with("splinterm.")));
         assert_eq!(
             tools
@@ -998,5 +1011,36 @@ mod tests {
         assert!(!canonical_uuid("11111111-2222-6333-8444-555555555555"));
         assert!(!canonical_uuid("11111111-2222-4333-c444-555555555555"));
         assert!(!canonical_uuid("11111111-2222-4333-8444-55555555555A"));
+    }
+
+    // The daemon accepts a clear that is the first report for an incarnation
+    // as a no-op with sequence 0; the MCP output contract must accept it.
+    #[test]
+    fn report_agent_status_output_accepts_a_first_clear_with_sequence_zero() {
+        let output = |sequence: i64| {
+            json!({
+                "schema": "splinterm.mcp.v2",
+                "tool": "splinterm.report_agent_status",
+                "ok": true,
+                "resource": {
+                    "kind": "agent_status",
+                    "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+                    "incarnation": 2,
+                },
+                "data": {
+                    "committed": true,
+                    "state": null,
+                    "sequence": sequence,
+                    "expires_at_ms": null,
+                },
+                "truncated": false,
+                "content_trust": "trusted_metadata",
+            })
+        };
+        assert_eq!(
+            validate_output("splinterm.report_agent_status", &output(0)),
+            Ok(())
+        );
+        assert!(validate_output("splinterm.report_agent_status", &output(-1)).is_err());
     }
 }

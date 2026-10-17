@@ -1,0 +1,8 @@
+{
+  "$schema_file": "tools/report_agent_status.input.schema.json",
+  "$expected_keyword": "pattern",
+  "document": {
+    "state": "error",
+    "detail": "build failed\n$ rm -rf"
+  }
+}

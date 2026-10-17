@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use splinterm_core::{Axis, DojoId, LairId, SplintId, SplitSide};
+use splinterm_protocol::{AgentState, validate_agent_status_detail};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Splinterm terminal client")]
@@ -353,9 +354,94 @@ pub(in crate::app) enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Report, clear, or read the explicitly reported agent status of a Splint.
+    AgentStatus {
+        #[command(subcommand)]
+        command: AgentStatusCommand,
+    },
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+}
+
+/// Closed vocabulary of explicitly reported agent display states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(in crate::app) enum AgentStateArg {
+    /// The agent is acting and needs nothing.
+    Working,
+    /// The agent is blocked on the person.
+    #[value(name = "needs_input", alias = "needs-input")]
+    NeedsInput,
+    /// The agent finished its task.
+    Done,
+    /// The agent stopped on a failure it reported.
+    Error,
+    /// The agent is present and has no task.
+    Idle,
+}
+
+impl From<AgentStateArg> for AgentState {
+    fn from(value: AgentStateArg) -> Self {
+        match value {
+            AgentStateArg::Working => Self::Working,
+            AgentStateArg::NeedsInput => Self::NeedsInput,
+            AgentStateArg::Done => Self::Done,
+            AgentStateArg::Error => Self::Error,
+            AgentStateArg::Idle => Self::Idle,
+        }
+    }
+}
+
+/// An explicit report target; both halves are required together.
+#[derive(Debug, Clone, Copy, clap::Args)]
+pub(in crate::app) struct AgentStatusTarget {
+    /// Report for this Splint instead of `$SPLINTERM_SPLINT_ID`.
+    #[arg(long = "splint", value_name = "ID", requires = "incarnation")]
+    pub(in crate::app) splint: Option<SplintId>,
+    /// The Splint's live incarnation instead of `$SPLINTERM_SPLINT_INCARNATION`.
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "splint",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub(in crate::app) incarnation: Option<u64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::app) enum AgentStatusCommand {
+    /// Report a display state for the current Splint (inside a Splint by default).
+    Set {
+        #[arg(value_enum)]
+        state: AgentStateArg,
+        /// Bounded display detail: at most 80 characters and 240 bytes, no
+        /// control, bidi-formatting, or line-break characters.
+        #[arg(long, value_parser = parse_agent_status_detail)]
+        detail: Option<String>,
+        /// Seconds until an unrefreshed report turns stale (10..=900; active
+        /// states default to 120, resting states do not expire).
+        #[arg(
+            long = "ttl",
+            value_name = "SECONDS",
+            value_parser = clap::value_parser!(u32).range(10..=900)
+        )]
+        ttl_seconds: Option<u32>,
+        #[command(flatten)]
+        target: AgentStatusTarget,
+    },
+    /// Clear the current Splint's reported status.
+    Clear {
+        #[command(flatten)]
+        target: AgentStatusTarget,
+    },
+    /// Read one Splint's reported status (default `$SPLINTERM_SPLINT_ID`).
+    Get { splint_id: Option<SplintId> },
+}
+
+fn parse_agent_status_detail(value: &str) -> Result<String, String> {
+    validate_agent_status_detail(value)
+        .map(|()| value.to_owned())
+        .map_err(|error| error.message)
 }
 
 pub(super) fn parse_xdg_app_id(value: &str) -> Result<String, String> {

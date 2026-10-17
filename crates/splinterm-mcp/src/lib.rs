@@ -2,7 +2,7 @@
 
 //! Bounded stdio MCP adapter for Splinterm.
 //!
-//! Provides the reviewed 32-tool catalog and three bounded resource forms over
+//! Provides the reviewed 34-tool catalog and three bounded resource forms over
 //! policy-scoped daemon connections. Adversarial behavior and packaging remain
 //! regression-covered by the adapter and package test suites.
 
