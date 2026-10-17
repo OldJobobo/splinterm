@@ -4109,6 +4109,15 @@ async fn run_actor_body(
                     continue;
                 }
             }
+            // An unused close may claim this Splint while the checkpoint is
+            // sealed. Counting it as used here closes that race atomically: a
+            // claim that already won abandons the attempt, and no claim can
+            // win once the master is exposed. A Splint captured for handoff
+            // is no longer closed as unused, even if the attempt is abandoned.
+            if !use_latch.record_input(true) {
+                let _ = reply.send(Err(LiveError::HandoffStateUnsupported));
+                continue;
+            }
             let evidence = ActorHandoffEvidence {
                 splint_id,
                 incarnation,
@@ -9261,6 +9270,47 @@ mod tests {
             Err(LiveError::HandoffStateUnsupported)
         ));
         // An abandoned close releases the claim, and the Splint is live again.
+        handle.release_unused_claim();
+        let prepared = handle.prepare_pty_handoff().await.unwrap();
+        // A captured Splint counts as used, so no close can claim it now.
+        assert!(!handle.claim_unused());
+        prepared.resume().await.unwrap();
+        assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unused_close_claim_while_sealing_abandons_the_capture() {
+        let splint_id = SplintId::new();
+        let runtime = LiveSplintRuntime::spawn(
+            splint_id,
+            backend(),
+            shell("printf ready; sleep 2"),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        time::timeout(Duration::from_secs(1), async {
+            while !snapshot_text(&handle.snapshot().await.unwrap()).contains("ready") {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // A close claims the Splint after the first check, while the
+        // checkpoint is being sealed.
+        let claimer = handle.clone();
+        super::CHECKPOINT_SEALED_HOOKS.lock().unwrap().push((
+            splint_id,
+            Box::new(move |_: &mut LinuxPtySession| {
+                assert!(claimer.claim_unused());
+            }),
+        ));
+        assert!(matches!(
+            handle.prepare_pty_handoff().await,
+            Err(LiveError::HandoffStateUnsupported)
+        ));
+        assert!(handle.is_claimed_unused(), "the close keeps its claim");
         handle.release_unused_claim();
         let prepared = handle.prepare_pty_handoff().await.unwrap();
         prepared.resume().await.unwrap();
