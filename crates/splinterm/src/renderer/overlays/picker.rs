@@ -10,7 +10,9 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{config::ResolvedTheme, frontend::PickerHitTarget, geometry::Rect};
 
-use super::super::{ChromeText, ChromeTextStyle, RenderContext, blend_rect, fill_rect};
+use super::super::{
+    ChromeSource, ChromeText, ChromeTextStyle, RenderContext, blend_rect, fill_rect,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionPickerPresentationMode {
@@ -519,7 +521,7 @@ pub(crate) struct SessionPickerTextItem<'a> {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct SessionPickerTextKey {
-    source: String,
+    source: ChromeSource,
     constrained_width: u32,
     style: ChromeTextStyle,
     scale_120: u32,
@@ -629,6 +631,15 @@ fn truncate_picker_text(source: &str, maximum_cells: usize) -> String {
     truncated
 }
 
+/// Truncates like [`truncate_picker_text`], dropping icons cut by the ellipsis.
+fn truncate_picker_source(source: &ChromeSource, maximum_cells: usize) -> ChromeSource {
+    if source.cells() <= maximum_cells {
+        return source.clone();
+    }
+    let text = truncate_picker_text(source.text(), maximum_cells);
+    source.with_prefix_text(text, maximum_cells.saturating_sub(1))
+}
+
 fn editable_search_text(query: &str, maximum_cells: usize) -> String {
     let width = |source: &str| {
         source
@@ -696,23 +707,62 @@ pub(super) fn paint_picker_text(
     alignment: PickerTextAlignment,
     color: u32,
 ) -> Result<()> {
+    if source.is_empty() {
+        return Ok(());
+    }
+    paint_picker_source(
+        cache,
+        context,
+        used,
+        canvas,
+        canvas_width,
+        canvas_height,
+        &ChromeSource::from(source),
+        style,
+        scale_120,
+        renderer_generation,
+        clip,
+        alignment,
+        color,
+    )
+}
+
+/// Paints trusted chrome text that may hold icons.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_picker_source(
+    cache: &mut SessionPickerTextCache,
+    context: &RenderContext,
+    used: &mut HashSet<SessionPickerTextKey>,
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    source: &ChromeSource,
+    style: ChromeTextStyle,
+    scale_120: u32,
+    renderer_generation: u64,
+    clip: Rect,
+    alignment: PickerTextAlignment,
+    color: u32,
+) -> Result<()> {
     if source.is_empty() || clip.width == 0 || clip.height == 0 {
         return Ok(());
     }
     let key = SessionPickerTextKey {
-        source: source.to_owned(),
+        source: source.clone(),
         constrained_width: clip.width,
         style,
         scale_120,
         renderer_generation,
     };
     if !cache.entries.contains_key(&key) {
-        let mut text = ChromeText::load_styled_with_context(source, scale_120, style, context)?;
+        let mut text =
+            ChromeText::load_source_styled_with_context(source, scale_120, style, context)?;
         if text.pixel_width() > clip.width {
             let maximum_cells =
                 usize::try_from(clip.width / text.frame.cell_width.max(1)).unwrap_or(usize::MAX);
-            let truncated = truncate_picker_text(source, maximum_cells);
-            text = ChromeText::load_styled_with_context(&truncated, scale_120, style, context)?;
+            let truncated = truncate_picker_source(source, maximum_cells);
+            text =
+                ChromeText::load_source_styled_with_context(&truncated, scale_120, style, context)?;
         }
         cache.entries.insert(key.clone(), text);
     }
@@ -1523,7 +1573,7 @@ mod tests {
             cache
                 .entries
                 .keys()
-                .all(|key| key.source.len() <= 270 && !key.source.contains('\n'))
+                .all(|key| key.source.text().len() <= 270 && !key.source.text().contains('\n'))
         );
         assert!(cache.len() <= 2);
     }
@@ -1564,6 +1614,29 @@ mod tests {
             "e\u{301}e\u{301}…"
         );
         assert_eq!(truncate_picker_text("anything", 0), "");
+    }
+
+    #[test]
+    fn picker_source_truncation_drops_only_icons_the_ellipsis_cuts() {
+        use super::super::super::ChromeIcon;
+
+        let mut source = ChromeSource::default();
+        source
+            .push_icon(ChromeIcon::ChevronDown)
+            .push_str(" ")
+            .push_icon(ChromeIcon::MessageQuestion)
+            .push_str(" long label");
+        assert_eq!(source.cells(), 16);
+        assert_eq!(truncate_picker_source(&source, 16), source);
+        let cut = truncate_picker_source(&source, 8);
+        assert_eq!(cut.describe(), "[chevron-down] [message-question] l…");
+        let split = truncate_picker_source(&source, 5);
+        assert_eq!(split.describe(), "[chevron-down]  …");
+        assert_eq!(split.icons(), &[(0, ChromeIcon::ChevronDown)]);
+        assert!(truncate_picker_source(&source, 0).is_empty());
+        // Labels never become icons, even when they contain icon codepoints.
+        let spoof = ChromeSource::from("\u{f98b} label");
+        assert!(spoof.icons().is_empty());
     }
 
     #[test]
@@ -1947,7 +2020,7 @@ mod tests {
                 cache
                     .entries
                     .keys()
-                    .any(|key| key.source == "No matches   Esc clear")
+                    .any(|key| key.source.text() == "No matches   Esc clear")
             );
         }
     }

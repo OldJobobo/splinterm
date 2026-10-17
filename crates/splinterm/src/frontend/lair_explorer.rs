@@ -4,12 +4,17 @@ use std::collections::HashSet;
 
 use splinterm_core::{LairRetention, SplintId};
 
-use super::{text_edit::BoundedTextEditor, topology::LairExplorerActivationTarget};
-use crate::navigation_projection::{
-    EndpointFreshness, NavigationAvailability, NavigationExplorerDojo,
-    NavigationExplorerSplintTarget, NavigationExplorerTarget, NavigationExplorerView,
-    NavigationLifecycle, NavigationNodeId, WindowAttachment,
+use super::{
+    agent_status::{self, AgentAggregate, AgentGlyphs},
+    text_edit::BoundedTextEditor,
+    topology::LairExplorerActivationTarget,
 };
+use crate::navigation_projection::{
+    EndpointFreshness, NavigationAgentStatus, NavigationAvailability, NavigationExplorerDojo,
+    NavigationExplorerSplint, NavigationExplorerSplintTarget, NavigationExplorerTarget,
+    NavigationExplorerView, NavigationLifecycle, NavigationNodeId, WindowAttachment,
+};
+use crate::renderer::ChromeSource;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum LairExplorerFilter {
@@ -51,7 +56,13 @@ pub(crate) struct LairExplorerRow {
     pub(crate) id: NavigationNodeId,
     pub(crate) kind: LairExplorerRowKind,
     pub(crate) label: String,
+    /// Fixed-width agent status icon column, present while any Splint in the
+    /// view has a reported status and presentation is enabled.
+    pub(crate) agent_column: Option<ChromeSource>,
     pub(crate) status: String,
+    /// The status in words for assistive technology. Icons are visual only, so
+    /// this matches `status`, which already counts states in words.
+    pub(crate) accessible_status: String,
     pub(crate) level: usize,
     pub(crate) expanded: Option<bool>,
     pub(crate) current: bool,
@@ -112,6 +123,10 @@ enum ExplorerLoadState {
 }
 
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent visibility, focus, search, and presentation axes, not one UI mode"
+)]
 pub(crate) struct LairExplorerUi {
     visible: bool,
     focused: bool,
@@ -125,6 +140,8 @@ pub(crate) struct LairExplorerUi {
     load_state: ExplorerLoadState,
     notice: Option<String>,
     context_pressed: Option<(NavigationNodeId, splinterm_core::TopologyRevision)>,
+    agent_status_enabled: bool,
+    agent_glyphs: AgentGlyphs,
 }
 
 impl Default for LairExplorerUi {
@@ -142,6 +159,8 @@ impl Default for LairExplorerUi {
             load_state: ExplorerLoadState::Waiting,
             notice: None,
             context_pressed: None,
+            agent_status_enabled: true,
+            agent_glyphs: AgentGlyphs::default(),
         }
     }
 }
@@ -233,6 +252,107 @@ impl LairExplorerUi {
 
     pub(crate) fn view(&self) -> Option<&NavigationExplorerView> {
         self.view.as_ref()
+    }
+
+    /// `[explorer] agent-status`: hides all agent status presentation.
+    pub(crate) fn set_agent_status_enabled(&mut self, enabled: bool) -> bool {
+        if self.agent_status_enabled == enabled {
+            return false;
+        }
+        self.agent_status_enabled = enabled;
+        self.ensure_selection_visible();
+        true
+    }
+
+    /// Icons, or ASCII when the embedded icon face is unavailable.
+    pub(crate) fn set_agent_glyphs(&mut self, glyphs: AgentGlyphs) -> bool {
+        let changed = self.agent_glyphs != glyphs;
+        self.agent_glyphs = glyphs;
+        changed
+    }
+
+    /// Whether agent status may be shown from the current view: endpoint
+    /// freshness wins, so stale or disconnected data renders as unavailable.
+    pub(crate) fn agent_status_available(&self) -> bool {
+        self.agent_status_enabled
+            && self.view.as_ref().is_some_and(|view| {
+                matches!(
+                    view.freshness,
+                    EndpointFreshness::Current | EndpointFreshness::Refreshing
+                )
+            })
+    }
+
+    /// Applies one status change to the matching live incarnation only.
+    pub(crate) fn apply_agent_status(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<NavigationAgentStatus>,
+    ) -> bool {
+        let changed = self
+            .view
+            .as_mut()
+            .is_some_and(|view| view.apply_agent_status(splint_id, incarnation, status));
+        if changed {
+            self.ensure_selection_visible();
+        }
+        changed
+    }
+
+    fn splint_matches(&self, splint: &NavigationExplorerSplint, query: &[String]) -> bool {
+        match splint
+            .agent_status
+            .as_ref()
+            .filter(|_| self.agent_status_available())
+        {
+            Some(status) => matches_query(
+                &format!("{} {}", splint.label, agent_status::search_terms(status)),
+                query,
+            ),
+            None => matches_query(&splint.label, query),
+        }
+    }
+
+    /// Appends aggregate agent status to a parent row's text, counting states
+    /// in words; the icon column carries the most urgent state visually.
+    fn aggregate_suffix(&self, aggregate: &AgentAggregate) -> String {
+        if !self.agent_status_enabled || aggregate.is_empty() {
+            String::new()
+        } else if self.agent_status_available() {
+            format!(" · {}", aggregate.counts_words())
+        } else {
+            format!(" · {}", agent_status::UNAVAILABLE_TEXT)
+        }
+    }
+
+    fn splint_suffix(&self, status: Option<&NavigationAgentStatus>) -> String {
+        match status.filter(|_| self.agent_status_enabled) {
+            None => String::new(),
+            Some(status) if self.agent_status_available() => {
+                format!(" · {}", agent_status::splint_text(status))
+            }
+            Some(_) => format!(" · {}", agent_status::UNAVAILABLE_TEXT),
+        }
+    }
+
+    fn agent_column_visible(&self) -> bool {
+        self.agent_status_enabled
+            && self
+                .view
+                .as_ref()
+                .is_some_and(NavigationExplorerView::has_agent_status)
+    }
+
+    /// The glyph column hides last values while status is unavailable.
+    fn aggregate_column(&self, aggregate: &AgentAggregate) -> Option<ChromeSource> {
+        self.agent_column_visible().then(|| {
+            if self.agent_status_available() {
+                aggregate.glyph_column(self.agent_glyphs)
+            } else {
+                AgentAggregate::default().glyph_column(self.agent_glyphs)
+            }
+        })
     }
 
     pub(crate) fn set_search(&mut self, query: String) {
@@ -571,22 +691,32 @@ impl LairExplorerUi {
                     matches_query(&dojo.label, &query)
                         || dojo.splints.iter().any(|splint| {
                             self.includes_lifecycle(splint.lifecycle)
-                                && matches_query(&splint.label, &query)
+                                && self.splint_matches(splint, &query)
                         })
                 });
             if searching && !lair_matches && !lair_has_descendant_match {
                 continue;
             }
             let lair_expanded = self.expanded.contains(&lair.id);
+            let aggregate = AgentAggregate::from_statuses(
+                lair.dojos
+                    .iter()
+                    .flat_map(|dojo| &dojo.splints)
+                    .filter_map(|splint| splint.agent_status.as_ref()),
+            );
+            let status = format!(
+                "{} · {}{}",
+                lifecycle_label(lair.lifecycle()),
+                retention_label(lair.retention),
+                self.aggregate_suffix(&aggregate)
+            );
             rows.push(LairExplorerRow {
                 id: lair.id,
                 kind: LairExplorerRowKind::Lair,
                 label: lair.label.clone(),
-                status: format!(
-                    "{} · {}",
-                    lifecycle_label(lair.lifecycle()),
-                    retention_label(lair.retention)
-                ),
+                agent_column: self.aggregate_column(&aggregate),
+                accessible_status: status.clone(),
+                status,
                 level: 1,
                 expanded: Some(lair_expanded),
                 current: lair.current_here,
@@ -616,7 +746,7 @@ impl LairExplorerUi {
         }
         let dojo_matches = matches_query(&dojo.label, query);
         let descendant_matches = dojo.splints.iter().any(|splint| {
-            self.includes_lifecycle(splint.lifecycle) && matches_query(&splint.label, query)
+            self.includes_lifecycle(splint.lifecycle) && self.splint_matches(splint, query)
         });
         if searching && !lair_matches && !dojo_matches && !descendant_matches {
             return;
@@ -629,15 +759,24 @@ impl LairExplorerUi {
         };
         let dojo_expanded = self.expanded.contains(&dojo.id);
         let pending = self.pending.is_some_and(|pending| pending.id() == dojo.id);
+        let aggregate = AgentAggregate::from_statuses(
+            dojo.splints
+                .iter()
+                .filter_map(|splint| splint.agent_status.as_ref()),
+        );
+        let base = format!("{} · {attachment}", lifecycle_label(dojo.lifecycle()));
+        let status = row_status(
+            pending,
+            &format!("{base}{}", self.aggregate_suffix(&aggregate)),
+            blocker,
+        );
         rows.push(LairExplorerRow {
             id: dojo.id,
             kind: LairExplorerRowKind::Dojo,
             label: dojo.label.clone(),
-            status: row_status(
-                pending,
-                &format!("{} · {attachment}", lifecycle_label(dojo.lifecycle())),
-                blocker,
-            ),
+            agent_column: self.aggregate_column(&aggregate),
+            accessible_status: status.clone(),
+            status,
             level: 2,
             expanded: Some(dojo_expanded),
             current: dojo.active_here,
@@ -647,23 +786,37 @@ impl LairExplorerUi {
         if !dojo_expanded && !searching {
             return;
         }
+        let column_visible = self.agent_column_visible();
+        let available = self.agent_status_available();
         for splint in &dojo.splints {
             if !self.includes_lifecycle(splint.lifecycle) {
                 continue;
             }
-            if searching && !lair_matches && !dojo_matches && !matches_query(&splint.label, query) {
+            if searching && !lair_matches && !dojo_matches && !self.splint_matches(splint, query) {
                 continue;
             }
             let (enabled, blocker) = availability(splint.target.capability.availability);
-            let lifecycle = lifecycle_label(splint.lifecycle);
+            let state = format!(
+                "{}{}",
+                lifecycle_label(splint.lifecycle),
+                self.splint_suffix(splint.agent_status.as_ref())
+            );
             let pending = self
                 .pending
                 .is_some_and(|pending| pending.id() == splint.id);
+            let status = row_status(pending, &state, blocker);
             rows.push(LairExplorerRow {
                 id: splint.id,
                 kind: LairExplorerRowKind::Splint,
                 label: splint.label.clone(),
-                status: row_status(pending, lifecycle, blocker),
+                agent_column: column_visible.then(|| {
+                    agent_status::glyph_column(
+                        splint.agent_status.as_ref().filter(|_| available),
+                        self.agent_glyphs,
+                    )
+                }),
+                accessible_status: status.clone(),
+                status,
                 level: 3,
                 expanded: None,
                 current: splint.focused_here,
@@ -1152,6 +1305,7 @@ pub(super) mod tests {
                                     availability: NavigationAvailability::Enabled,
                                 },
                             },
+                            agent_status: None,
                         }],
                     }],
                 },
@@ -1765,5 +1919,210 @@ pub(super) mod tests {
             explorer.decision(),
             Some(LairExplorerDecision::FocusSplint(target))
         );
+    }
+
+    fn agent(state: splinterm_protocol::AgentState, is_stale: bool) -> NavigationAgentStatus {
+        NavigationAgentStatus {
+            state,
+            detail: Some("waiting for approval".to_owned()),
+            stale: is_stale,
+            stale_minutes: is_stale.then_some(2),
+        }
+    }
+
+    /// The fixture view with a second Splint so Dojo aggregates have counts.
+    fn agent_view(statuses: [Option<NavigationAgentStatus>; 2]) -> NavigationExplorerView {
+        let mut view = view();
+        let dojo = &mut view.lairs[0].dojos[0];
+        let mut second = dojo.splints[0].clone();
+        let splint_id = SplintId::new();
+        second.id = NavigationNodeId::Splint {
+            lair_id: second.target.lair_id,
+            dojo_id: second.target.dojo_id,
+            splint_id,
+        };
+        second.target.splint_id = splint_id;
+        second.label = "agent".into();
+        second.focused_here = false;
+        dojo.splints.push(second);
+        for (splint, status) in dojo.splints.iter_mut().zip(statuses) {
+            splint.agent_status = status;
+        }
+        view
+    }
+
+    fn expanded_rows(explorer: &mut LairExplorerUi) -> Vec<LairExplorerRow> {
+        explorer.reveal_current();
+        explorer.rows()
+    }
+
+    /// The row's icon column with each icon written as `[name]`.
+    fn column(row: &LairExplorerRow) -> Option<String> {
+        row.agent_column.as_ref().map(ChromeSource::describe)
+    }
+
+    #[test]
+    fn rows_show_glyph_column_state_text_and_priority_aggregates() {
+        use splinterm_protocol::AgentState;
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(agent_view([
+            Some(agent(AgentState::Working, false)),
+            Some(agent(AgentState::NeedsInput, false)),
+        ]));
+        let rows = expanded_rows(&mut explorer);
+        let labels = rows
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["work", "editor", "shell", "agent", "notes"]);
+        let columns = rows.iter().map(column).collect::<Vec<_>>();
+        let blocked = Some("[message-question]  ".to_owned());
+        assert_eq!(
+            columns,
+            [
+                blocked.clone(),
+                blocked.clone(),
+                Some("[loader-2]  ".to_owned()),
+                blocked,
+                Some("    ".to_owned())
+            ]
+        );
+        // Parent rows count states in words, visually and for accessibility.
+        assert_eq!(rows[0].status, "Running · Saved · 1 needs input, 1 working");
+        assert_eq!(rows[0].accessible_status, rows[0].status);
+        assert_eq!(
+            rows[1].status,
+            "Running · Current · 1 needs input, 1 working"
+        );
+        assert_eq!(
+            rows[3].status,
+            "Running · Needs input · waiting for approval"
+        );
+        assert_eq!(rows[3].accessible_status, rows[3].status);
+        assert_eq!(rows[4].status, "Unavailable · Pinned");
+
+        // Without the icon face the column falls back to ASCII text.
+        assert!(explorer.set_agent_glyphs(AgentGlyphs::Ascii));
+        let rows = explorer.rows();
+        assert_eq!(column(&rows[2]).as_deref(), Some("> "));
+        assert!(rows[2].agent_column.as_ref().unwrap().icons().is_empty());
+        assert_eq!(column(&rows[4]).as_deref(), Some("  "));
+    }
+
+    #[test]
+    fn stale_status_keeps_last_glyph_with_marker_and_age() {
+        use splinterm_protocol::AgentState;
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(agent_view([Some(agent(AgentState::Working, true)), None]));
+        let rows = expanded_rows(&mut explorer);
+        assert_eq!(column(&rows[2]).as_deref(), Some("[loader-2][clock]"));
+        assert_eq!(
+            rows[2].status,
+            "Running · Working · stale (no report for 2 min) · waiting for approval"
+        );
+        assert_eq!(column(&rows[3]).as_deref(), Some("    "));
+        assert_eq!(rows[3].status, "Running");
+        assert_eq!(rows[1].status, "Running · Current · 1 working (stale)");
+        assert_eq!(rows[1].accessible_status, rows[1].status);
+    }
+
+    #[test]
+    fn endpoint_freshness_wins_over_the_last_agent_status() {
+        use splinterm_protocol::AgentState;
+        let mut explorer = LairExplorerUi::default();
+        let base = agent_view([Some(agent(AgentState::Error, false)), None]);
+        explorer.set_view(base.clone());
+        explorer.reveal_current();
+        explorer.begin_refresh();
+        assert_eq!(
+            explorer.rows()[2].status,
+            "Running · Error · waiting for approval · Refreshing topology"
+        );
+        explorer.mark_disconnected();
+        let rows = explorer.rows();
+        assert_eq!(
+            rows[2].status,
+            "Running · Agent status unavailable · Endpoint is disconnected"
+        );
+        assert_eq!(column(&rows[2]).as_deref(), Some("    "));
+        assert_eq!(column(&rows[1]).as_deref(), Some("    "));
+        assert!(rows[1].status.contains("Agent status unavailable"));
+        assert!(rows.iter().all(|row| !row.status.contains("Error")));
+
+        let mut stale = base;
+        stale.freshness = EndpointFreshness::Stale;
+        explorer.set_view(stale);
+        assert!(
+            explorer.rows()[2]
+                .status
+                .contains("Agent status unavailable")
+        );
+    }
+
+    #[test]
+    fn search_matches_state_words_only_while_status_is_available() {
+        use splinterm_protocol::AgentState;
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(agent_view([
+            Some(agent(AgentState::Working, false)),
+            Some(agent(AgentState::NeedsInput, false)),
+        ]));
+        explorer.begin_search();
+        assert!(explorer.append_search("needs input"));
+        let labels = explorer
+            .rows()
+            .iter()
+            .map(|row| row.label.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["work", "editor", "agent"]);
+        explorer.set_search("needs_input".into());
+        assert_eq!(explorer.rows().last().unwrap().label, "agent");
+        explorer.set_search("working".into());
+        assert_eq!(explorer.rows().last().unwrap().label, "shell");
+        // Free-text detail is not a search term.
+        explorer.set_search("approval".into());
+        assert!(explorer.rows().is_empty());
+        explorer.set_search("needs input".into());
+        explorer.mark_disconnected();
+        assert!(explorer.rows().is_empty());
+    }
+
+    #[test]
+    fn disabled_presentation_hides_every_agent_status_trace() {
+        use splinterm_protocol::AgentState;
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(agent_view([
+            Some(agent(AgentState::NeedsInput, true)),
+            Some(agent(AgentState::Done, false)),
+        ]));
+        assert!(explorer.set_agent_status_enabled(false));
+        assert!(!explorer.set_agent_status_enabled(false));
+        let rows = expanded_rows(&mut explorer);
+        assert!(rows.iter().all(|row| row.agent_column.is_none()));
+        assert_eq!(rows[2].status, "Running");
+        assert_eq!(rows[1].status, "Running · Current");
+        explorer.begin_search();
+        explorer.set_search("done".into());
+        assert!(explorer.rows().is_empty());
+    }
+
+    #[test]
+    fn glyph_column_appears_only_while_any_status_exists_and_clears_apply_by_incarnation() {
+        use splinterm_protocol::AgentState;
+        let mut explorer = LairExplorerUi::default();
+        explorer.set_view(view());
+        assert!(
+            expanded_rows(&mut explorer)
+                .iter()
+                .all(|row| row.agent_column.is_none())
+        );
+        explorer.set_view(agent_view([Some(agent(AgentState::Done, false)), None]));
+        let splint_id = explorer.view().unwrap().lairs[0].dojos[0].splints[0]
+            .target
+            .splint_id;
+        assert!(!explorer.apply_agent_status(splint_id, 4, None));
+        assert!(expanded_rows(&mut explorer)[2].agent_column.is_some());
+        assert!(explorer.apply_agent_status(splint_id, 3, None));
+        assert!(explorer.rows().iter().all(|row| row.agent_column.is_none()));
     }
 }

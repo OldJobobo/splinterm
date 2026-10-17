@@ -14,6 +14,13 @@ read-only tree. The adapter exposes:
   the current Lair and Dojo can both contain the current Splint;
 - a search field, visible-row result count, and bounded loading, empty, stale,
   or unavailable status, with polite announcements when status changes;
+- explicitly reported agent status in item states, in words (for example
+  "Running · Needs input · waiting for approval" or "Running · Current · 1 needs
+  input, 2 working"), and a polite announcement such as "shell: Needs input"
+  only when a Splint enters needs input, error, or done, or stops being stale;
+  changes to and from working, statuses present when the Explorer first loads,
+  and changes while the Explorer is hidden or its data is unavailable are not
+  announced;
 - distinct focus, expand/collapse, and activate actions, plus search-value edits.
 
 Actions use the same Explorer decisions as local navigation. Restorable Splints
@@ -25,6 +32,8 @@ disclosure, selection, and return-to-terminal focus remain available. Modal surf
 hidden Explorers, observer-only Windows, stale targets, and lost keyboard focus
 cannot be bypassed by queued accessibility requests. Modal dialogs and other
 navigation surfaces do not yet have semantic coverage.
+Dojo tab agent badges have no accessible description yet, because tabs have no
+semantic coverage; the same status is available from the Explorer items.
 
 ## Identity and privacy
 
@@ -38,7 +47,8 @@ revision, parent identity, capabilities, and modal/pending state before dispatch
 An outdated callback may therefore be rejected even if its target is still
 visible; assistive clients should query the current state again.
 
-The tree contains only bounded navigation names, lifecycle/status labels, and
+The tree contains only bounded navigation names, lifecycle/status labels
+(including explicitly reported agent status and its sanitized detail), and
 the navigation search query. Names/status are limited to 256 characters and
 search to 64 characters, with control and bidi-formatting characters excluded.
 At most 4096 items are exposed. No terminal cells, scrollback, parser state,

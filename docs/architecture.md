@@ -141,7 +141,10 @@ failure closes the complete session.
 argv. `remote_session.rs` owns one SSH child, separate bounded stderr drain,
 outer negotiation, cloneable logical-channel creation, shutdown/kill/reap, and
 categorized transport failures. It never reads key material or stores password
-or passphrase values.
+or passphrase values. `remote_askpass.rs` owns the native fallback prompt: a
+per-attempt private socket and token that the client binary, run by OpenSSH as
+`SSH_ASKPASS`, uses to ask the launching status Window, plus the wiped,
+non-reallocating buffers that carry the answer to OpenSSH.
 
 `endpoint.rs` defines the behavior carried with a clonable connection factory:
 local uses `TrustedUi`, trusted local image content, focus publication, local
