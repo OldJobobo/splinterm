@@ -317,7 +317,8 @@ Splinterm's prompt is a fallback with fixed limits:
   OpenSSH child and presents that attempt's token. It shows one prompt at a
   time. The socket and its directory are removed when negotiation ends, and a
   retry gets a new socket and token.
-- OpenSSH's prompt text is shown as quoted text under "OpenSSH's prompt", with
+- OpenSSH's prompt text is shown as quoted text under a header naming the
+  destination being connected to (the prompt itself may come from a jump host), with
   control, bidirectional, and zero-width characters removed and at most 8
   lines of 100 characters, because keyboard-interactive servers can choose it.
 - The field never echoes: the screen, Window title, and accessibility text say
@@ -338,6 +339,9 @@ Splinterm's prompt is a fallback with fixed limits:
   asked) before the prompt closes. This is reported as an authentication
   failure with Retry. A yes/no question needs an explicit Y or N, and N is
   passed to OpenSSH as "no".
+- If the client itself dies during a password prompt (a signal, crash, or
+  out-of-memory kill), the helper finds no answer and kills the OpenSSH that
+  started it rather than letting it send an empty password.
 
 Splinterm never places a password or passphrase in argv, TOML, relay frames,
 diagnostics, or application storage. Post-connect SSH authentication and relay

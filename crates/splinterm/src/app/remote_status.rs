@@ -1020,7 +1020,9 @@ mod tests {
         let shown = next_snapshot(&mut harness).await;
         assert_eq!(shown.title, "Authenticating to wintermute");
         let screen = text(&shown);
-        assert!(screen.contains("OpenSSH is asking for a credential for case@wintermute."));
+        assert!(
+            screen.contains("OpenSSH, connecting to case@wintermute, is asking for a credential.")
+        );
         assert!(screen.contains("│ case@wintermute's password:"));
         assert!(screen.contains("Password field: empty"));
 
@@ -1299,7 +1301,7 @@ mod tests {
             AskpassRequest::for_test(AskpassKind::Notice, b"Confirm user presence for key");
         prompt_sender.send(request).await.unwrap();
         let shown = text(&next_snapshot(&mut harness).await);
-        assert!(shown.contains("OpenSSH says, for case@wintermute:"));
+        assert!(shown.contains("OpenSSH, connecting to case@wintermute, says:"));
         input(&harness, b"c").await;
         assert_eq!(
             flow.await.unwrap(),

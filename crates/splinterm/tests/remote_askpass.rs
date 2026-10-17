@@ -4,7 +4,7 @@
 use std::{
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt as _,
+    os::unix::{fs::PermissionsExt as _, process::ExitStatusExt as _},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -279,6 +279,24 @@ async fn run_helper_binary(
         .unwrap()
 }
 
+/// Runs the helper as the child of a shell that stands in for OpenSSH.
+async fn run_helper_binary_under_shell(
+    environment: &[(&'static str, OsString)],
+    arguments: &[&str],
+) -> std::process::Output {
+    tokio::process::Command::new("sh")
+        .args(["-c", "\"$0\" \"$@\"; exit $?", CLIENT])
+        .args(arguments)
+        .envs(environment.iter().cloned())
+        .env_remove("SSH_ASKPASS_PROMPT")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn the_client_binary_helper_prints_only_the_answer_and_refuses_bad_tokens() {
     let (prompt, mut prompts) = native_prompt();
@@ -309,8 +327,10 @@ async fn the_client_binary_helper_prints_only_the_answer_and_refuses_bad_tokens(
             *value = OsString::from("0".repeat(64));
         }
     }
-    let output = run_helper_binary(&wrong, &["password:"]).await;
-    assert_eq!(output.status.code(), Some(1));
+    // A secret the broker never answers fails closed: the helper kills its
+    // parent, here a stand-in shell, so OpenSSH could not send it empty.
+    let output = run_helper_binary_under_shell(&wrong, &["password:"]).await;
+    assert_eq!(output.status.signal(), Some(9));
     assert!(output.stdout.is_empty());
     assert!(prompts.try_recv().is_err(), "a wrong token shows no prompt");
 

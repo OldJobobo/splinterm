@@ -1154,9 +1154,25 @@ impl HelperParent {
     }
 }
 
+/// How the broker ended one helper exchange.
+enum HelperReply {
+    Answered,
+    Refused,
+    Aborted,
+    /// Closed or timed out before a reply.
+    Unanswered,
+}
+
 /// The helper side of one prompt. Writes the answer and a newline to `output`
 /// and returns 0, or returns 1 when the prompt was refused. On an abort it
 /// kills `parent` first, then returns 1 without writing anything.
+///
+/// A secret prompt also fails closed when the broker is gone without an
+/// abort: it exited without running destructors (a signal, crash, or OOM
+/// kill), left its socket behind, or cut its reply short. OpenSSH would send
+/// any helper failure as an empty answer, so the helper kills `parent` then
+/// too. A missing socket means the broker released it cleanly after ending
+/// the attempt, and confirmations and notices keep failing plainly.
 ///
 /// # Errors
 ///
@@ -1180,9 +1196,48 @@ pub fn run_helper(
     }
     let prompt = prompt.as_bytes();
     let prompt = &prompt[..prompt.len().min(MAX_PROMPT_BYTES)];
-    let mut stream = StdUnixStream::connect(socket)
-        .map_err(|_| anyhow::anyhow!("the Splinterm prompt is unavailable"))?;
-    let server = rustix::net::sockopt::socket_peercred(&stream)
+    // Classified from the same bytes the broker receives.
+    let secret = classify_prompt(hint, &String::from_utf8_lossy(prompt)) == AskpassKind::Secret;
+    let mut stream = match StdUnixStream::connect(socket) {
+        Ok(stream) => stream,
+        Err(error) => {
+            if secret && error.kind() == std::io::ErrorKind::ConnectionRefused {
+                parent.kill();
+            }
+            bail!("the Splinterm prompt is unavailable");
+        }
+    };
+    match exchange(&mut stream, token, prompt, hint, output) {
+        Ok(HelperReply::Answered) => Ok(0),
+        Ok(HelperReply::Refused) => Ok(1),
+        Ok(HelperReply::Aborted) => {
+            parent.kill();
+            Ok(1)
+        }
+        Ok(HelperReply::Unanswered) => {
+            if secret {
+                parent.kill();
+            }
+            Ok(1)
+        }
+        Err(error) => {
+            if secret {
+                parent.kill();
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Sends one prompt over a connected broker socket and reads its reply.
+fn exchange(
+    stream: &mut StdUnixStream,
+    token: &[u8],
+    prompt: &[u8],
+    hint: AskpassHint,
+    output: &mut impl Write,
+) -> Result<HelperReply> {
+    let server = rustix::net::sockopt::socket_peercred(&*stream)
         .map_err(|_| anyhow::anyhow!("cannot identify the Splinterm prompt"))?;
     if server.uid != rustix::process::geteuid() {
         bail!("the Splinterm prompt belongs to another user");
@@ -1202,8 +1257,9 @@ pub fn run_helper(
         .map_err(|_| anyhow::anyhow!("the Splinterm prompt is unavailable"))?;
     let mut header = [0_u8; REPLY_HEADER_BYTES];
     if stream.read_exact(&mut header).is_err() {
-        // Closed without an answer: abandoned, timed out, or a notice ended.
-        return Ok(1);
+        // Closed without an answer: abandoned, timed out, a notice ended, or
+        // the broker is gone.
+        return Ok(HelperReply::Unanswered);
     }
     if header[..4] != MAGIC || header[4] != VERSION {
         bail!("the Splinterm prompt replied with the wrong version");
@@ -1213,7 +1269,7 @@ pub fn run_helper(
         REPLY_ANSWER => {
             let mut answer = Secret::new();
             answer
-                .read_exact_from(&mut stream, length)
+                .read_exact_from(stream, length)
                 .map_err(|_| anyhow::anyhow!("the Splinterm prompt reply was cut short"))?;
             // Capacity reserves room for the newline OpenSSH expects.
             answer.bytes.push(b'\n');
@@ -1222,13 +1278,10 @@ pub fn run_helper(
                 .and_then(|()| output.flush());
             drop(answer);
             written.map_err(|_| anyhow::anyhow!("cannot hand the answer to OpenSSH"))?;
-            Ok(0)
+            Ok(HelperReply::Answered)
         }
-        REPLY_REFUSED => Ok(1),
-        REPLY_ABORTED => {
-            parent.kill();
-            Ok(1)
-        }
+        REPLY_REFUSED => Ok(HelperReply::Refused),
+        REPLY_ABORTED => Ok(HelperReply::Aborted),
         _ => bail!("the Splinterm prompt reply is invalid"),
     }
 }
@@ -1861,7 +1914,27 @@ mod tests {
         command.spawn().unwrap()
     }
 
-    async fn assert_helper_killed_its_parent(mut parent: tokio::process::Child, result: &Path) {
+    /// Starts a stand-in nested OpenSSH whose helper talks to `socket`, which
+    /// no real broker serves.
+    fn spawn_nested_helper_at(socket: &Path, result: &Path) -> tokio::process::Child {
+        let mut command = tokio::process::Command::from(reexec("parent"));
+        command
+            .env(SOCKET_ENV, socket)
+            .env(TOKEN_ENV, "0".repeat(TOKEN_HEX_BYTES))
+            .env(HELPER_RESULT_ENV, result)
+            .kill_on_drop(true);
+        command.spawn().unwrap()
+    }
+
+    async fn assert_helper_killed_its_parent(parent: tokio::process::Child, result: &Path) {
+        assert_helper_killed_its_parent_recording(parent, result, "1 0").await;
+    }
+
+    async fn assert_helper_killed_its_parent_recording(
+        mut parent: tokio::process::Child,
+        result: &Path,
+        expected: &str,
+    ) {
         use std::os::unix::process::ExitStatusExt as _;
         let status = tokio::time::timeout(Duration::from_secs(10), parent.wait())
             .await
@@ -1881,7 +1954,44 @@ mod tests {
         })
         .await
         .expect("the helper recorded its result");
-        assert_eq!(recorded, "1 0", "exit 1 and nothing written for OpenSSH");
+        assert_eq!(recorded, expected, "failed and wrote nothing for OpenSSH");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_broker_gone_without_an_abort_still_fails_a_secret_closed() {
+        let directory = std::env::temp_dir().join(format!(
+            "splinterm-askpass-gone-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+
+        // A broker that exited without destructors: the connection closes
+        // after the request, with no reply and no abort.
+        let socket = directory.join("closed.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let result = directory.join("closed-result");
+        let parent = spawn_nested_helper_at(&socket, &result);
+        tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = vec![0; REQUEST_HEADER_BYTES + b"password:".len()];
+            stream.read_exact(&mut request).unwrap();
+        })
+        .await
+        .unwrap();
+        assert_helper_killed_its_parent(parent, &result).await;
+
+        // Its socket is left behind with nothing listening.
+        let socket = directory.join("refused.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let result = directory.join("refused-result");
+        let parent = spawn_nested_helper_at(&socket, &result);
+        assert_helper_killed_its_parent_recording(parent, &result, "error 0").await;
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     fn result_path(broker: &Broker) -> PathBuf {

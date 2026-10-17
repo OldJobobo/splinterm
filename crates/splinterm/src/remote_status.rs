@@ -535,11 +535,13 @@ impl RemoteStatus {
         let quoted = prompt.lines.iter().map(|line| format!("  │ {line}"));
         match prompt.kind {
             AskpassKind::Secret => {
+                // A ProxyJump hop prompts too, so the destination is only
+                // context; OpenSSH's own text names who is asking.
                 lines.push(format!(
-                    "OpenSSH is asking for a credential for {}.",
+                    "OpenSSH, connecting to {}, is asking for a credential.",
                     self.destination
                 ));
-                lines.push("OpenSSH's prompt:".to_owned());
+                lines.push("Its prompt names who it is for; it may be a jump host:".to_owned());
                 lines.extend(quoted);
                 lines.push(String::new());
                 lines.push(if prompt.has_input {
@@ -553,7 +555,7 @@ impl RemoteStatus {
             }
             AskpassKind::Confirm => {
                 lines.push(format!(
-                    "OpenSSH asks you to confirm, for {}:",
+                    "OpenSSH, connecting to {}, asks you to confirm:",
                     self.destination
                 ));
                 lines.extend(quoted);
@@ -561,7 +563,10 @@ impl RemoteStatus {
                 lines.push("Y: yes          N / Esc: no".to_owned());
             }
             AskpassKind::Notice => {
-                lines.push(format!("OpenSSH says, for {}:", self.destination));
+                lines.push(format!(
+                    "OpenSSH, connecting to {}, says:",
+                    self.destination
+                ));
                 lines.extend(quoted);
                 lines.push(String::new());
                 lines.push("C / Esc: cancel".to_owned());
@@ -924,9 +929,9 @@ mod tests {
         ));
         assert_eq!(status.title(), "Authenticating to wintermute");
         let screen = status.lines();
-        assert!(
-            screen.contains(&"OpenSSH is asking for a credential for case@wintermute.".to_owned())
-        );
+        assert!(screen.contains(
+            &"OpenSSH, connecting to case@wintermute, is asking for a credential.".to_owned()
+        ));
         assert!(screen.contains(&"  │ case@wintermute's password:".to_owned()));
         assert!(screen.contains(&"Password field: empty".to_owned()));
         assert!(screen.contains(&SECRET_HANDLING_NOTE.to_owned()));
