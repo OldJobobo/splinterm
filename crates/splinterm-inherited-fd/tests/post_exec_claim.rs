@@ -125,6 +125,10 @@ fn replacement_generation(stage: &str) {
             assert!(claimed.matches_raw_fds(&expected));
             assert!(claimed.closed_unexpected() >= 1);
             assert!(!is_open(unknown));
+            // Standard descriptors are never claimed or closed.
+            for fd in 0..3 {
+                assert!(is_open(fd), "standard descriptor {fd} was closed");
+            }
             assert_eq!(inheritable_descriptors(), Vec::<i32>::new());
             let mut owners = claimed.into_descriptors();
             for (owner, expected_fd) in owners.iter().zip(&expected) {

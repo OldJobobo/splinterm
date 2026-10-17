@@ -106,7 +106,7 @@ impl ClaimedInheritedDescriptors {
 pub enum InheritedFdError {
     #[error("inherited descriptor count exceeds {MAX_INHERITED_DESCRIPTORS}")]
     TooMany,
-    #[error("standard descriptor {0} cannot be claimed")]
+    #[error("descriptor {0} cannot be claimed: standard or negative")]
     StandardDescriptor(RawFd),
     #[error("inherited descriptor {0} is duplicated")]
     DuplicateDescriptor(RawFd),
@@ -133,8 +133,8 @@ pub enum InheritedFdError {
 /// Claims one completely validated post-exec descriptor set.
 ///
 /// The input order is preserved so the daemon can zip the result back to its
-/// already-validated typed manifest entries. The function first rejects a
-/// process with more than one thread, then performs a mutation-free
+/// already-validated typed manifest entries. After pure input validation, the
+/// function rejects a process with more than one thread, then performs a mutation-free
 /// `/proc/self/fd` pass. Every expected descriptor must be open, non-standard,
 /// unique, and intentionally inherited with `FD_CLOEXEC` clear. Only after all
 /// expected entries validate does it take ownership, restore `FD_CLOEXEC`, and
