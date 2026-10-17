@@ -1,0 +1,30 @@
+[package]
+name = "splinterm-inherited-fd"
+description = "Audited post-exec inherited descriptor ownership boundary for Splinterm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Exposes the safe owned-descriptor constructor used by daemon unit tests. Normal
+# builds can obtain claimed descriptors only through the post-exec claim.
+test-support = []
+
+[dependencies]
+rustix.workspace = true
+thiserror.workspace = true
+
+# The post-exec claim requires a single-threaded process, which the libtest
+# harness never provides: it runs each test on a spawned thread.
+[[test]]
+name = "post_exec_claim"
+harness = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

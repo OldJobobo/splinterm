@@ -1,13 +1,15 @@
 //! Bounded pre-exec descriptor inheritance for daemon handoff.
 //!
-//! This module prepares descriptors in the old daemon generation. Candidate-side
-//! manifest validation, descriptor claiming, and closure of unclaimed inherited
-//! slots belong to the later handoff ABI boundary.
+//! The old generation prepares one typed inheritance set. After exec, the
+//! candidate validates the complete manifest before crossing the audited raw-FD
+//! boundary in `splinterm-inherited-fd`, which restores close-on-exec and closes
+//! unexpected inherited descriptors. `CandidateDescriptorClaims` then owns
+//! every typed slot until an adopting subsystem claims it.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
-    os::fd::{AsRawFd, BorrowedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
     path::Path,
 };
 
@@ -18,8 +20,11 @@ use rustix::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::handoff_manifest::{HandoffManifestV1, validate_manifest};
+
 /// Maximum number of descriptors one handoff preparation may expose.
 pub const MAX_HANDOFF_DESCRIPTORS: usize = 1024;
+const _: () = assert!(MAX_HANDOFF_DESCRIPTORS == splinterm_inherited_fd::MAX_INHERITED_DESCRIPTORS);
 
 /// Closed set of descriptor roles understood by the pre-exec boundary.
 ///
@@ -102,6 +107,10 @@ pub enum DescriptorHandoffError {
         #[source]
         source: io::Error,
     },
+    #[error("candidate handoff manifest is invalid")]
+    InvalidManifest,
+    #[error("candidate descriptor ownership does not match the validated manifest")]
+    CandidateClaimMismatch,
 }
 
 /// Prepared old-generation inheritance state.
@@ -219,6 +228,97 @@ impl Drop for PreparedDescriptorInheritance<'_> {
     }
 }
 
+/// Candidate-owned descriptors rebound to exact validated manifest roles.
+///
+/// Every retained descriptor is close-on-exec. [`Self::take`] transfers one
+/// role to its adopting subsystem; all entries left in the table close on drop.
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "candidate claims land before the internal bootstrap adoption slice"
+)]
+pub(crate) struct CandidateDescriptorClaims {
+    descriptors: BTreeMap<HandoffDescriptorSlot, OwnedFd>,
+    closed_unexpected: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "candidate claims land before the internal bootstrap adoption slice"
+)]
+impl CandidateDescriptorClaims {
+    /// Rebinds already-claimed owners to the complete validated manifest.
+    ///
+    /// Raw post-exec ownership is the caller's explicit unsafe bootstrap step in
+    /// `splinterm-inherited-fd`. This safe layer requires the claimed owners to
+    /// be exactly the manifest's descriptor numbers in manifest order, so every
+    /// role binds to the descriptor the old generation assigned it.
+    ///
+    /// # Errors
+    /// Rejects an invalid manifest or any count, number, or order mismatch. A
+    /// rejected claim set is dropped, closing every owner.
+    pub(crate) fn bind(
+        manifest: &HandoffManifestV1,
+        claimed: splinterm_inherited_fd::ClaimedInheritedDescriptors,
+    ) -> Result<Self, DescriptorHandoffError> {
+        validate_manifest(manifest).map_err(|_| DescriptorHandoffError::InvalidManifest)?;
+        let expected = manifest
+            .descriptors
+            .iter()
+            .map(|entry| {
+                RawFd::try_from(entry.inherited_fd)
+                    .map_err(|_| DescriptorHandoffError::InvalidManifest)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !claimed.matches_raw_fds(&expected) {
+            return Err(DescriptorHandoffError::CandidateClaimMismatch);
+        }
+        let closed_unexpected = claimed.closed_unexpected();
+        let descriptors = manifest
+            .descriptors
+            .iter()
+            .map(|entry| entry.slot)
+            .zip(claimed.into_descriptors())
+            .collect();
+        Ok(Self {
+            descriptors,
+            closed_unexpected,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.descriptors.len()
+    }
+
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.descriptors.is_empty()
+    }
+
+    #[must_use]
+    pub(crate) fn contains(&self, slot: HandoffDescriptorSlot) -> bool {
+        self.descriptors.contains_key(&slot)
+    }
+
+    #[must_use]
+    pub(crate) fn descriptor(&self, slot: HandoffDescriptorSlot) -> Option<BorrowedFd<'_>> {
+        self.descriptors.get(&slot).map(OwnedFd::as_fd)
+    }
+
+    /// Transfers unique ownership of one validated role.
+    #[must_use]
+    pub(crate) fn take(&mut self, slot: HandoffDescriptorSlot) -> Option<OwnedFd> {
+        self.descriptors.remove(&slot)
+    }
+
+    /// Number of unmanifested inherited descriptors the raw claim closed.
+    #[must_use]
+    pub(crate) const fn closed_unexpected(&self) -> usize {
+        self.closed_unexpected
+    }
+}
+
 fn validate_allowlist(descriptors: &[HandoffDescriptor<'_>]) -> Result<(), DescriptorHandoffError> {
     if descriptors.len() > MAX_HANDOFF_DESCRIPTORS {
         return Err(DescriptorHandoffError::TooManyDescriptors);
@@ -306,9 +406,33 @@ fn descriptor_is_close_on_exec(fd: RawFd) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, os::fd::AsFd};
+    use std::{
+        fs::File,
+        io::{PipeWriter, Write},
+        os::fd::AsFd,
+    };
+
+    use splinterm_inherited_fd::ClaimedInheritedDescriptors;
 
     use super::*;
+    use crate::{
+        executable_snapshot::REQUIRED_EXECUTABLE_SEALS,
+        handoff_manifest::{
+            ExecutablePairSetEvidence, GenerationEvidence, HandoffId, ManifestBuildVersion,
+            ManifestDescriptor, ManifestExecutableImage, ManifestExecutablePair, ManifestKind,
+        },
+    };
+
+    /// Descriptor roles of an idle daemon, in canonical manifest order.
+    const CLAIM_ROLES: [HandoffDescriptorSlot; 7] = [
+        HandoffDescriptorSlot::Listener,
+        HandoffDescriptorSlot::ImageListener,
+        HandoffDescriptorSlot::CheckpointManifest,
+        HandoffDescriptorSlot::RollbackManifest,
+        HandoffDescriptorSlot::ForwardClient,
+        HandoffDescriptorSlot::RollbackDaemon,
+        HandoffDescriptorSlot::RollbackClient,
+    ];
 
     fn null_descriptor() -> File {
         File::open("/dev/null").expect("open null descriptor")
@@ -431,5 +555,177 @@ mod tests {
             excess,
             Err(DescriptorHandoffError::TooManyDescriptors)
         ));
+    }
+
+    fn claim_generation(patch: u16) -> GenerationEvidence {
+        GenerationEvidence {
+            build_identity: [u8::try_from(patch).unwrap(); 32],
+            build_version: ManifestBuildVersion {
+                major: 0,
+                minor: 2,
+                patch,
+            },
+        }
+    }
+
+    fn claim_image(byte: u8) -> ManifestExecutableImage {
+        ManifestExecutableImage {
+            source_device: u64::from(byte),
+            source_inode: u64::from(byte) + 10,
+            source_owner_uid: 0,
+            source_mode: 0o100_755,
+            source_size: 1024,
+            source_sha256: [byte; 32],
+            snapshot_device: u64::from(byte) + 20,
+            snapshot_inode: u64::from(byte) + 30,
+            snapshot_size: 1024,
+            snapshot_sha256: [byte; 32],
+            snapshot_seals: REQUIRED_EXECUTABLE_SEALS.bits(),
+        }
+    }
+
+    /// One valid idle-daemon forward manifest naming `raw_fds` in role order.
+    fn claim_manifest(raw_fds: &[RawFd]) -> HandoffManifestV1 {
+        assert_eq!(raw_fds.len(), CLAIM_ROLES.len());
+        let source = claim_generation(1);
+        let target = claim_generation(2);
+        let manifest = HandoffManifestV1 {
+            schema: 1,
+            kind: ManifestKind::Forward,
+            handoff_id: HandoffId::new([9; 16]).unwrap(),
+            source_generation: source,
+            target_generation: target,
+            topology_revision: 0,
+            durable_state_generation: 0,
+            private_protocol: splinterm_protocol::PROTOCOL_VERSION,
+            handoff_protocol: 1,
+            terminal_checkpoint_schema: 2,
+            descriptor_manifest_schema: 1,
+            executable_pairs: ExecutablePairSetEvidence {
+                forward: ManifestExecutablePair {
+                    daemon: claim_image(2),
+                    client: claim_image(3),
+                    generation: target,
+                },
+                rollback: ManifestExecutablePair {
+                    daemon: claim_image(4),
+                    client: claim_image(5),
+                    generation: source,
+                },
+            },
+            counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
+            splints: Vec::new(),
+            descriptors: CLAIM_ROLES
+                .into_iter()
+                .zip(raw_fds)
+                .map(|(slot, fd)| ManifestDescriptor {
+                    slot,
+                    inherited_fd: u32::try_from(*fd).unwrap(),
+                })
+                .collect(),
+        };
+        validate_manifest(&manifest).unwrap();
+        manifest
+    }
+
+    fn null_owners(count: usize) -> Vec<OwnedFd> {
+        (0..count)
+            .map(|_| OwnedFd::from(null_descriptor()))
+            .collect()
+    }
+
+    /// Pipe read ends as owners, with write ends that observe their closure
+    /// independently of descriptor-number reuse by concurrent tests.
+    fn pipe_owners(count: usize) -> (Vec<OwnedFd>, Vec<PipeWriter>) {
+        (0..count)
+            .map(|_| {
+                let (reader, writer) = std::io::pipe().unwrap();
+                (OwnedFd::from(reader), writer)
+            })
+            .unzip()
+    }
+
+    fn reader_closed(writer: &mut PipeWriter) -> bool {
+        match writer.write_all(b"x") {
+            Ok(()) => false,
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => true,
+            Err(error) => panic!("cannot probe pipe reader: {error}"),
+        }
+    }
+
+    fn raw_fds(owners: &[OwnedFd]) -> Vec<RawFd> {
+        owners.iter().map(AsRawFd::as_raw_fd).collect()
+    }
+
+    #[test]
+    fn candidate_bind_rejects_reordered_short_unrelated_and_invalid_claims() {
+        let (mut reordered_owners, mut reordered_writers) = pipe_owners(CLAIM_ROLES.len());
+        let reordered_manifest = claim_manifest(&raw_fds(&reordered_owners));
+        reordered_owners.swap(0, 1);
+        let reordered = ClaimedInheritedDescriptors::from_owned(reordered_owners).unwrap();
+        assert!(matches!(
+            CandidateDescriptorClaims::bind(&reordered_manifest, reordered),
+            Err(DescriptorHandoffError::CandidateClaimMismatch)
+        ));
+        assert!(reordered_writers.iter_mut().all(reader_closed));
+
+        let (owners, mut writers) = pipe_owners(CLAIM_ROLES.len());
+        let manifest = claim_manifest(&raw_fds(&owners));
+        let short =
+            ClaimedInheritedDescriptors::from_owned(null_owners(CLAIM_ROLES.len() - 1)).unwrap();
+        assert!(matches!(
+            CandidateDescriptorClaims::bind(&manifest, short),
+            Err(DescriptorHandoffError::CandidateClaimMismatch)
+        ));
+        let unrelated =
+            ClaimedInheritedDescriptors::from_owned(null_owners(CLAIM_ROLES.len())).unwrap();
+        assert!(matches!(
+            CandidateDescriptorClaims::bind(&manifest, unrelated),
+            Err(DescriptorHandoffError::CandidateClaimMismatch)
+        ));
+        assert!(!writers.iter_mut().any(reader_closed));
+
+        let mut invalid = manifest.clone();
+        invalid.descriptors.pop();
+        let claimed = ClaimedInheritedDescriptors::from_owned(owners).unwrap();
+        assert!(matches!(
+            CandidateDescriptorClaims::bind(&invalid, claimed),
+            Err(DescriptorHandoffError::InvalidManifest)
+        ));
+        assert!(writers.iter_mut().all(reader_closed));
+    }
+
+    #[test]
+    fn candidate_rebinds_every_typed_role_and_drop_closes_only_unclaimed_owners() {
+        let (owners, mut writers) = pipe_owners(CLAIM_ROLES.len());
+        let raw_fds = raw_fds(&owners);
+        let manifest = claim_manifest(&raw_fds);
+
+        let claimed = ClaimedInheritedDescriptors::from_owned(owners).unwrap();
+        let mut claims = CandidateDescriptorClaims::bind(&manifest, claimed).unwrap();
+        assert_eq!(claims.len(), CLAIM_ROLES.len());
+        assert!(!claims.is_empty());
+        assert_eq!(claims.closed_unexpected(), 0);
+        for entry in &manifest.descriptors {
+            let descriptor = claims.descriptor(entry.slot).unwrap();
+            assert_eq!(
+                descriptor.as_raw_fd(),
+                RawFd::try_from(entry.inherited_fd).unwrap()
+            );
+            assert!(fcntl_getfd(descriptor).unwrap().contains(FdFlags::CLOEXEC));
+        }
+
+        let listener = claims.take(HandoffDescriptorSlot::Listener).unwrap();
+        assert_eq!(listener.as_raw_fd(), raw_fds[0]);
+        assert!(claims.take(HandoffDescriptorSlot::Listener).is_none());
+        assert!(!claims.contains(HandoffDescriptorSlot::Listener));
+        assert!(claims.descriptor(HandoffDescriptorSlot::Listener).is_none());
+        drop(claims);
+
+        let (listener_writer, unclaimed_writers) = writers.split_first_mut().unwrap();
+        assert!(!reader_closed(listener_writer));
+        assert!(unclaimed_writers.iter_mut().all(reader_closed));
+        drop(listener);
+        assert!(reader_closed(listener_writer));
     }
 }

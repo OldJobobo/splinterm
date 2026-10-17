@@ -14,6 +14,7 @@ members = [
     "crates/splinterm-filemap",
     "crates/splinterm-mcp",
     "crates/splinterm-policy",
+    "crates/splinterm-inherited-fd",
 ]
 resolver = "3"
 

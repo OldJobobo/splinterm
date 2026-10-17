@@ -1468,6 +1468,7 @@ dependencies = [
  "splinterm-automation-client",
  "splinterm-core",
  "splinterm-filemap",
+ "splinterm-inherited-fd",
  "splinterm-mcp",
  "splinterm-policy",
  "splinterm-protocol",
@@ -1570,6 +1571,14 @@ dependencies = [
  "anyhow",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "splinterm-inherited-fd"
+version = "0.2.0-dev"
+dependencies = [
+ "rustix",
+ "thiserror",
 ]
 
 [[package]]
