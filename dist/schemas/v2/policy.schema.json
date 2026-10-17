@@ -45,7 +45,8 @@
         "topology_name_mutate",
         "authorization_inspect",
         "authorization_revoke",
-        "audit_inspect"
+        "audit_inspect",
+        "agent_status_report"
       ]
     },
     "selector": {
@@ -205,7 +206,7 @@
         "scopes": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 18,
+          "maxItems": 19,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/scope"

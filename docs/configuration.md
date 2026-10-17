@@ -122,6 +122,9 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
 | `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically | yes |
+| `multiplexer.new-dojo-directory` | where a Dojo or Lair created inside a Window starts: `inherit`, `home`, an absolute path, or `~/path` | home |
+| `multiplexer.new-splint-directory` | where a Splint split inside a Dojo starts; same values | inherit |
+| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it | no |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 
@@ -289,18 +292,32 @@ transactional config reload, and current-Lair lifecycle bindings:
 `Prefix Shift+S` saves, `Prefix Shift+F` toggles pinned state,
 `Prefix Shift+V` previews, and `Prefix Shift+O` opens the existing restore
 confirmation path. These are Splinterm additions; the checked stock Omarchy tmux
-profile defines no actions on those four shifted prefix keys. New Splints, Dojos,
-and Lairs created within a Window
-inherit the exact focused/source Splint's live root-process working directory
-(normally its shell), resolved on that Splint's owning daemon, including remote
-sessions. Foreground descendants and terminal text are not consulted. If that
-cwd is deleted, inaccessible, or unavailable, creation uses the same source's
-valid saved launch directory, then the daemon owner's valid home directory;
-otherwise it reports that the source working directory is unavailable. A missing
-source is rejected rather than replaced by another Window's focus. This is a
-point-in-time default: the shell can change directory again before launch.
-Explicit `--cwd` takes precedence; shell, login-shell, scrollback, and command
-settings are unchanged. Saved layouts retain their durable launch directories.
+profile defines no actions on those four shifted prefix keys.
+
+Where a Splint, Dojo, or Lair created within a Window starts is configurable.
+`[multiplexer] new-splint-directory` applies to splits inside a Dojo and defaults
+to `inherit`; `new-dojo-directory` applies to new Dojos **and new Lairs** and
+defaults to `home`. Each accepts:
+
+- `inherit`: the exact focused/source Splint's live root-process working
+  directory (normally its shell). Foreground descendants and terminal text are
+  not consulted. If that cwd is deleted, inaccessible, or unavailable, creation
+  uses the same source's valid saved launch directory, then the daemon owner's
+  valid home directory.
+- `home`: the daemon owner's home directory.
+- an absolute path, or `~/path` below the daemon owner's home. An unusable path
+  falls back to that home directory.
+
+Every choice is resolved on the daemon that owns the source Splint, so a remote
+Window uses remote paths and the remote owner's home; `~` is never expanded on
+the client. When nothing usable remains, creation fails with "source working
+directory is unavailable" for `inherit`, or "configured launch directory and
+home directory are unavailable" for the other choices. A missing source is
+rejected rather than replaced by another Window's focus. This is a point-in-time
+default: the shell can change directory again before launch. The settings are
+read when a Window starts.
+Explicit `--cwd`, fresh desktop and CLI launches, presets, and saved layouts are
+unchanged; shell, login-shell, scrollback, and command settings are unchanged.
 
 `Prefix+[` enters copy mode at the live cursor or current history viewport.
 `h/j/k/l` and arrows move over visible and loaded historical rows; `w`, `b`, and
@@ -551,8 +568,46 @@ explicitly naming/renaming a Dojo atomically promotes the complete transient
 Lair before the tab mutation commits. Promotion is permanent: closing the
 Window afterward detaches instead of terminating it. With `no`, organized and
 multi-tab Lairs remain Window-owned and are removed together when that Window
-closes. Unpromoted transient Dojos never enter Recent Dojos. Dojo reopening is
-deliberately separate:
+closes. Unpromoted transient Dojos never enter Recent Dojos.
+
+With `multiplexer.close-unused=yes`, **Close Tab** (including closing the other
+tabs) and closing the Window from the compositor terminate a Dojo that was
+never used, instead of detaching from it. The daemon decides at the moment of
+the close. A Dojo counts as unused only while all of these hold:
+
+- it still holds only the Splint it was created with; a split counts as use,
+  even after the extra pane is closed again;
+- that Splint never received client input: keys, paste, or mouse. Focus
+  reports the graphical client marks as its own and other replies the
+  terminal generates do not count; the same bytes sent by automation or
+  pasted do;
+- it started as a plain default-shell terminal in the running daemon.
+  Command-bearing launches, presets, restored or relaunched Splints, and Dojos
+  from before the daemon last started count as used. The Lair's name does not
+  matter: Dojos in explicitly named Lairs qualify too;
+- the Dojo was never named: a name chosen when creating it (even one equal to
+  the default label), or renaming the Dojo or its Splint later, counts as use.
+  The client tells the daemon whether Splinterm generated the name;
+- no other Window is attached to it;
+- the shell itself holds the terminal foreground, so a program started from a
+  shell startup file counts as use.
+
+Input that races the close either reaches the shell, which keeps the Dojo, or
+is refused because the close won. Likewise a Window attaching during the close
+either attaches first and keeps the Dojo, or is refused. A used Dojo is
+detached as before, and so is every Dojo when the daemon gives no answer.
+**Detach Window** (`window.detach`) always detaches.
+
+When the closed Dojo was the last one in a Lair the user never named, the Lair
+is removed in the same step. Such a Lair was created in the running daemon
+under a name Splinterm generated for a graphical launch (for example
+`terminal-1787899189123456789-4132`), as the client records when it creates the
+Lair, and was never renamed since. The name's shape alone never decides: a
+Lair with a name the user chose stays, even one that looks generated, and stays
+empty, as it does when its last Dojo is closed explicitly. A remote Window gets
+the same decision from the remote daemon.
+
+Dojo reopening is deliberately separate:
 
 ```text
 splinterm-dojos     → native Recent Dojos picker

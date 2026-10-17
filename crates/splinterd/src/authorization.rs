@@ -22,6 +22,11 @@ pub enum ConditionalRequirement {
     AttachScrollback,
     LiveProcessTermination,
     ExpandedLiveProcessTermination,
+    /// A process inside the target Splint's live session or ancestry may
+    /// report without a grant and without per-update audit. Other peers need
+    /// `agent_status_report` from policy or a grant; the trusted UI may only
+    /// clear.
+    AgentStatusSelfReportOrGrant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +106,10 @@ const fn preflight_authorization(
 }
 
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "every request maps to its authorization in one exhaustive, reviewable table"
+)]
 pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
 
@@ -131,7 +140,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         | Request::SplitSplint { .. }
         | Request::SplitSplintAutomation { .. }
         | Request::NewDojo { .. }
-        | Request::NewDojoAutomation { .. } => {
+        | Request::NewDojoAutomation { .. }
+        // Resolving prepares a creation, and its answer reveals whether
+        // daemon-host paths exist and are usable.
+        | Request::ResolveLaunchDirectory { .. } => {
             RequestAuthorization::policy(&[Scope::ProcessSpawn, Scope::TopologyLayoutMutate])
         }
         Request::RelaunchSplint { .. } | Request::RelaunchSplintAutomation { .. } => {
@@ -149,6 +161,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
                 base: &[Scope::TopologyLayoutMutate],
                 requirement: ConditionalRequirement::ExpandedLiveProcessTermination,
             }
+        }
+        // It terminates a live process whenever it succeeds.
+        Request::CloseUnusedDojo { .. } => {
+            RequestAuthorization::policy(&[Scope::TopologyLayoutMutate, Scope::ProcessTerminate])
         }
         Request::SetSplitRatio { .. }
         | Request::SetDojoDefaultFocus { .. }
@@ -202,6 +218,10 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::Detach { .. } => RequestAuthorization::Owned(OwnedAuthority::Subscription),
         Request::KillSplint { .. } => RequestAuthorization::policy(&[Scope::ProcessTerminate]),
         Request::AuditInspect { .. } => RequestAuthorization::policy(&[Scope::AuditInspect]),
+        Request::ReportAgentStatus { .. } => RequestAuthorization::Conditional {
+            base: &[Scope::AgentStatusReport],
+            requirement: ConditionalRequirement::AgentStatusSelfReportOrGrant,
+        },
     }
 }
 
@@ -234,6 +254,7 @@ mod tests {
             OperationScope::AuthorizationInspect,
             OperationScope::AuthorizationRevoke,
             OperationScope::AuditInspect,
+            OperationScope::AgentStatusReport,
         ];
         let json = serde_json::to_value(scopes).unwrap();
         let values = json.as_array().unwrap();
@@ -241,10 +262,11 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap())
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(values.len(), 18);
+        assert_eq!(values.len(), 19);
         assert_eq!(unique.len(), values.len());
         assert_eq!(values[0], "topology_metadata_read");
         assert_eq!(values[17], "audit_inspect");
+        assert_eq!(values[18], "agent_status_report");
     }
 
     #[test]
@@ -260,6 +282,7 @@ mod tests {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             }),
             RequestAuthorization::TrustedUi
         );
@@ -286,6 +309,33 @@ mod tests {
         assert_eq!(
             for_request(&Request::ReadGraphicalFocus),
             RequestAuthorization::Authenticated
+        );
+        // Resolving probes daemon-host paths, so metadata read is not enough.
+        assert_eq!(
+            for_request(&Request::ResolveLaunchDirectory {
+                source_splint_id: splint_id,
+                directory: splinterm_protocol::LaunchDirectory::Home,
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::ProcessSpawn,
+                    OperationScope::TopologyLayoutMutate,
+                ],
+                any_of: &[],
+            }
+        );
+        // A conditional close always terminates the process when it closes.
+        assert_eq!(
+            for_request(&Request::CloseUnusedDojo {
+                dojo_id: splinterm_core::DojoId::new(),
+            }),
+            RequestAuthorization::Policy {
+                required: &[
+                    OperationScope::TopologyLayoutMutate,
+                    OperationScope::ProcessTerminate,
+                ],
+                any_of: &[],
+            }
         );
         assert_eq!(
             for_request(&Request::PublishGraphicalFocus {
@@ -366,10 +416,22 @@ mod tests {
                 splint_id,
                 incarnation: 1,
                 bytes: vec![],
+                focus_report: false,
             }),
             RequestAuthorization::PolicyAndOwned {
                 required: &[OperationScope::Input],
                 owned: OwnedAuthority::Controller,
+            }
+        );
+        assert_eq!(
+            for_request(&Request::ReportAgentStatus {
+                splint_id,
+                incarnation: 1,
+                status: None,
+            }),
+            RequestAuthorization::Conditional {
+                base: &[OperationScope::AgentStatusReport],
+                requirement: ConditionalRequirement::AgentStatusSelfReportOrGrant,
             }
         );
         assert_eq!(

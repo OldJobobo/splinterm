@@ -16,12 +16,12 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessScope, ActiveScreen, AutomationLaunch, ClientFrame, ClientRole, ColorSource, ControlMode,
-    ControlTransferDecision, ControlTransferOutcome, ErrorCode, HistoryTransition,
+    ControlTransferDecision, ControlTransferOutcome, DojoUse, ErrorCode, HistoryTransition,
     LaunchParameters, MAX_FRAME_BYTES, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
     MouseTracking, MutationPreflight, MutationTarget, PROTOCOL_VERSION, ProtocolError, Request,
     Response, ServerFrame, SplintLifecycle, SubscriptionEvent, TerminalInputModes,
     TerminalProvenance, TerminalRow, TerminalScrollbackUpdate, TerminalSnapshot, TerminalUpdate,
-    TopologyChangeKind, encode_frame,
+    TopologyChangeKind, UnusedDojoCloseOutcome, encode_frame,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -300,6 +300,13 @@ impl Connection {
         snapshot.revision
     }
 
+    async fn topology(&mut self) -> splinterm_core::Topology {
+        let Response::Topology { snapshot } = self.request(Request::InspectTopology).await else {
+            panic!("topology response was not returned");
+        };
+        snapshot.topology
+    }
+
     async fn request_result(&mut self, request: Request) -> Result<Response, ProtocolError> {
         let request_id = self.request_id;
         self.request_id += 1;
@@ -398,6 +405,21 @@ impl Connection {
     }
 
     async fn input(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        self.send_input(splint_id, incarnation, bytes, false).await;
+    }
+
+    /// Sends bytes the way the graphical client sends its focus reports.
+    async fn focus_report(&mut self, splint_id: SplintId, incarnation: u64, bytes: &[u8]) {
+        self.send_input(splint_id, incarnation, bytes, true).await;
+    }
+
+    async fn send_input(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        bytes: &[u8],
+        focus_report: bool,
+    ) {
         let controller_id = self.acquire_control(splint_id, incarnation).await;
         assert!(matches!(
             self.request(Request::Input {
@@ -405,6 +427,7 @@ impl Connection {
                 splint_id,
                 incarnation,
                 bytes: bytes.to_vec(),
+                focus_report,
             })
             .await,
             Response::TerminalActionAcknowledged {
@@ -980,6 +1003,7 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
                     login_shell: false,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             })
             .await
             .unwrap_err();
@@ -1036,6 +1060,7 @@ async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1253,6 +1278,7 @@ async fn runtime_relaunch_and_restore_preserve_topology_revision() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1357,6 +1383,7 @@ async fn mcp_controller_registry_owns_handled_and_atomic_actions() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1421,6 +1448,7 @@ async fn first_history_pages_need_no_topology_or_subscription_scope() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1784,6 +1812,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -1821,6 +1850,7 @@ async fn scoped_authorization_status_needs_no_topology_permission() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2206,6 +2236,7 @@ async fn headless_policy_reload_fails_closed_and_cleans_up() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2438,6 +2469,7 @@ async fn parent_policy_snapshot_excludes_new_splint_until_reload() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2545,6 +2577,7 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2611,6 +2644,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2648,6 +2682,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2687,6 +2722,7 @@ hl.env("GUM_CHOOSE_SELECTED_BACKGROUND", "#d4bda2")
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -2763,6 +2799,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "context-lifecycle".into(),
                 launch: context_launch(&restored_marker),
+                generated_name: false,
             })
             .await
         else {
@@ -2827,6 +2864,7 @@ async fn new_dojo_and_restore_inject_exact_current_context() {
                 name: "context-dojo".into(),
                 launch: context_launch(&dojo_marker),
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -2868,6 +2906,7 @@ async fn restart_restores_ids_without_running_saved_commands() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "durable".into(),
                 launch,
+                generated_name: false,
             })
             .await
         else {
@@ -2967,6 +3006,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "restore-scopes".into(),
                 launch: launch.clone(),
+                generated_name: false,
             })
             .await
         else {
@@ -3007,6 +3047,7 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
                 name: "second".into(),
                 launch,
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -3130,11 +3171,13 @@ async fn topology_cas_stream_and_complete_edits() {
             expected_topology_revision: snapshot.revision,
             name: "race-first".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let second_request = Request::CreateLair {
             expected_topology_revision: snapshot.revision,
             name: "race-second".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let (first_result, second_result) = tokio::join!(
             first.request_result(first_request),
@@ -3241,6 +3284,7 @@ async fn topology_cas_stream_and_complete_edits() {
                 name: "extra-dojo".into(),
                 launch,
                 promote_transient_lair: false,
+                generated_name: false,
             })
             .await
         else {
@@ -3341,6 +3385,7 @@ async fn atomic_lair_termination_rejects_drift_and_removes_exact_runtime_set() {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "terminate-exact".into(),
                 launch,
+                generated_name: false,
             })
             .await
         else {
@@ -3420,6 +3465,7 @@ async fn killed_splint_still_notifies_subscribers_after_its_dojo_closes() {
             .request(Request::CreateLair {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "terminate-dojo".into(),
+                generated_name: false,
                 launch: LaunchParameters {
                     cwd,
                     command: vec!["/bin/sh".into()],
@@ -3508,6 +3554,7 @@ async fn termination_waiting_on_a_resistant_process_does_not_block_topology_chan
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3554,6 +3601,7 @@ async fn termination_waiting_on_a_resistant_process_does_not_block_topology_chan
                         login_shell: false,
                         scrollback_lines: 100,
                     },
+                    generated_name: false,
                 })
                 .await,
             Response::LairCreated { .. }
@@ -3590,6 +3638,7 @@ async fn bounded_scrollback_search_pages_and_invalidates_stale_cursors() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3668,6 +3717,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         else {
@@ -3773,6 +3823,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                 splint_id,
                 incarnation,
                 bytes: b"stale".to_vec(),
+                focus_report: false,
             })
             .await
             .unwrap_err();
@@ -3784,6 +3835,7 @@ async fn simultaneous_clients_transfer_control_explicitly() {
                     splint_id,
                     incarnation,
                     bytes: b"printf 'transferred-control\\n'\n".to_vec(),
+                    focus_report: false,
                 })
                 .await,
             Response::TerminalActionAcknowledged {
@@ -3826,6 +3878,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                 expected_topology_revision: splinterm_core::TopologyRevision::default(),
                 name: "multiplex".into(),
                 launch: shell_launch(),
+                generated_name: false,
             })
             .await
         else {
@@ -4002,6 +4055,7 @@ async fn two_splints_spawn_and_preserve_independent_output() {
                 splint_id: first_id,
                 incarnation: first_incarnation,
                 bytes: b"stale".to_vec(),
+                focus_report: false,
             })
             .await
             .unwrap_err();
@@ -4168,6 +4222,7 @@ async fn mixed_clear_subscription_reconstructs_exact_final_snapshot_without_resy
                     login_shell: false,
                     scrollback_lines: 100,
                 },
+                generated_name: false,
             })
             .await
         {
@@ -4291,6 +4346,7 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
                     login_shell: true,
                     scrollback_lines: 1_000,
                 },
+                generated_name: false,
             })
             .await
         {
@@ -4665,4 +4721,1820 @@ async fn phase8_detach_reattach_overflow_resync_and_cleanup() {
     })
     .await
     .expect("Phase 8 scenario timed out");
+}
+
+const AGENT_STATUS_HELPER_RESULTS: &str = "SPLINTERM_E2E_AGENT_STATUS_RESULTS";
+const AGENT_STATUS_HELPER_SETSID: &str = "SPLINTERM_E2E_AGENT_STATUS_SETSID";
+
+fn agent_status_policy(reporter: Option<SplintId>) -> String {
+    let (executable, sha256) = policy_executable_identity();
+    let mut rules = vec![serde_json::json!({
+        "id": "agent-status-test",
+        "executable": {"path": executable, "sha256": sha256},
+        "scopes": [
+            "topology_metadata_read",
+            "topology_subscribe",
+            "process_spawn",
+            "topology_layout_mutate",
+            "audit_inspect"
+        ],
+        "resources": [{"kind": "daemon"}],
+        "limits": {
+            "max_spawn_count": 4,
+            "max_results": 64,
+            "max_live_subscriptions": 2
+        }
+    })];
+    if let Some(splint_id) = reporter {
+        rules.push(serde_json::json!({
+            "id": "status-reporter",
+            "executable": {"path": executable, "sha256": sha256},
+            "scopes": ["agent_status_report", "process_spawn"],
+            "resources": [{
+                "kind": "splint",
+                "splint_id": splint_id,
+                "incarnation": "current"
+            }],
+            "limits": {"max_spawn_count": 2}
+        }));
+    }
+    serde_json::json!({"schema": "splinterm.policy.v2", "rules": rules}).to_string()
+}
+
+/// Runs this test binary's in-Splint reporter as the Splint's own process.
+/// With `leave_session`, the reporter is a forked child that calls `setsid`,
+/// so only the bounded `/proc` ancestry walk can attribute it.
+fn agent_status_helper_launch(results: &Path, leave_session: bool) -> LaunchParameters {
+    let program = std::env::current_exe().unwrap();
+    let script = if leave_session {
+        format!(
+            "{AGENT_STATUS_HELPER_RESULTS}=\"$1\" {AGENT_STATUS_HELPER_SETSID}=1 \"$0\" \
+             --exact agent_status_in_splint_reporter --test-threads=1 -q; exit $?"
+        )
+    } else {
+        format!(
+            "{AGENT_STATUS_HELPER_RESULTS}=\"$1\" exec \"$0\" \
+             --exact agent_status_in_splint_reporter --test-threads=1 -q"
+        )
+    };
+    LaunchParameters {
+        cwd: std::env::current_dir().unwrap(),
+        command: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            script,
+            program.to_string_lossy().into_owned(),
+            results.to_string_lossy().into_owned(),
+        ],
+        shell: None,
+        login_shell: false,
+        scrollback_lines: 100,
+    }
+}
+
+fn process_group_members(process_group: u32) -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            // The comm field may contain spaces, so parse after its closing paren.
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let fields = stat.rsplit_once(')')?.1.split_whitespace().nth(2)?;
+                    fields.parse::<u32>().ok()
+                })
+                == Some(process_group)
+        })
+        .collect()
+}
+
+/// SIGKILLs a signal-ignoring test process group when a test exits early.
+///
+/// A timeout or panic drops the test future, and with it this guard; without
+/// it, a resistant shell orphaned by the killed daemon would loop forever.
+/// Tests disarm the guard once they have proven the group is gone.
+struct ProcessGroupGuard {
+    group: u32,
+    armed: bool,
+}
+
+impl ProcessGroupGuard {
+    fn new(group: u32) -> Self {
+        Self { group, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if !self.armed || process_group_members(self.group).is_empty() {
+            return;
+        }
+        if let Some(group) = i32::try_from(self.group)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// Asserts that a killed resistant process group exits promptly, then
+/// disarms its guard.
+async fn wait_for_process_group_exit(group: ProcessGroupGuard) {
+    let pid = group.group;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process_group_members(pid).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "process group {pid} survived its kill: {:?}",
+            process_group_members(pid)
+        );
+        time::sleep(Duration::from_millis(20)).await;
+    }
+    group.disarm();
+}
+
+// A direct command that ignores hangup, termination and interrupt must still
+// be killed with its whole process group, children included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kill_splint_reaps_a_signal_ignoring_process_group() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let (
+            MutationTarget {
+                splint_id,
+                incarnation,
+                ..
+            },
+            group,
+        ) = create_resistant_lair(&daemon, &mut admin, "resistant").await;
+        let pid = group.group;
+        assert!(!process_group_members(pid).is_empty());
+
+        let Response::SplintKilled { exit_status, .. } = admin
+            .request(Request::KillSplint {
+                splint_id,
+                incarnation,
+            })
+            .await
+        else {
+            panic!("daemon did not kill the Splint");
+        };
+        assert_eq!(exit_status.signal, Some(9));
+        wait_for_process_group_exit(group).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("resistant KillSplint scenario timed out");
+}
+
+/// Creates a Lair whose shell ignores hangup, termination and interrupt, and
+/// returns a guard that kills its process group if the test exits early.
+async fn create_resistant_lair(
+    daemon: &Daemon,
+    admin: &mut Connection,
+    name: &str,
+) -> (MutationTarget, ProcessGroupGuard) {
+    let marker = daemon.runtime.join(format!("{name}-resistant-pid"));
+    let expected_topology_revision = admin.topology_revision().await;
+    let Response::LairCreated { lair, .. } = admin
+        .request(Request::CreateLair {
+            expected_topology_revision,
+            name: name.into(),
+            launch: LaunchParameters {
+                cwd: std::env::current_dir().unwrap(),
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!(
+                        "trap '' HUP TERM INT; echo $$ > '{}'; while :; do sleep 1; done",
+                        marker.display()
+                    ),
+                ],
+                shell: None,
+                login_shell: false,
+                scrollback_lines: 100,
+            },
+            generated_name: false,
+        })
+        .await
+    else {
+        panic!("daemon did not create the Lair");
+    };
+    let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+        panic!("new Dojo was not a leaf");
+    };
+    // The shell leads its own process group, so its PID names the group.
+    let group = ProcessGroupGuard::new(wait_for_pid_marker(&marker, "resistant shell").await);
+    let incarnation = admin.live_incarnation(splint.id).await;
+    // Let the loop start a child so the group has more than its leader.
+    time::sleep(Duration::from_millis(200)).await;
+    (
+        MutationTarget {
+            lair_id: lair.id,
+            dojo_id: lair.dojos[0].id,
+            splint_id: splint.id,
+            incarnation,
+        },
+        group,
+    )
+}
+
+// Killing a process that ignores hangup and termination waits through the
+// whole shutdown grace. That wait must not hold the topology transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_kill_splint_does_not_block_topology_changes() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let (
+            MutationTarget {
+                splint_id,
+                incarnation,
+                ..
+            },
+            group,
+        ) = create_resistant_lair(&daemon, &mut admin, "resistant").await;
+        let mut kill_client = daemon.connect().await;
+        let kill = tokio::spawn(async move {
+            kill_client
+                .request(Request::KillSplint {
+                    splint_id,
+                    incarnation,
+                })
+                .await
+        });
+        time::sleep(Duration::from_millis(100)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let response = admin
+            .request(Request::CreateLair {
+                expected_topology_revision,
+                name: "unrelated".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+                generated_name: false,
+            })
+            .await;
+        assert!(matches!(response, Response::LairCreated { .. }));
+        // The kill escalates through two test graces before SIGKILL.
+        assert!(
+            !kill.is_finished(),
+            "the unrelated change waited for the kill"
+        );
+        let kill_response = kill.await.unwrap();
+        let Response::SplintKilled { exit_status, .. } = kill_response else {
+            panic!("daemon did not kill the Splint: {kill_response:?}");
+        };
+        assert_eq!(exit_status.signal, Some(9));
+        let splint = admin
+            .topology()
+            .await
+            .find_splint(splint_id)
+            .cloned()
+            .expect("killed Splint remains in the topology");
+        assert_eq!(splint.state, splinterm_core::SplintState::Exited(137));
+        wait_for_process_group_exit(group).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("pending KillSplint scenario timed out");
+}
+
+// A Lair termination can race a pending kill of one of its Splints; both must
+// succeed and the process is reaped once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminate_lair_during_pending_kill_splint_succeeds() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let (target, group) = create_resistant_lair(&daemon, &mut admin, "resistant").await;
+        let mut kill_client = daemon.connect().await;
+        let (kill_response, terminated) = tokio::join!(
+            kill_client.request(Request::KillSplint {
+                splint_id: target.splint_id,
+                incarnation: target.incarnation,
+            }),
+            async {
+                time::sleep(Duration::from_millis(100)).await;
+                let expected_topology_revision = admin.topology_revision().await;
+                admin
+                    .request(Request::TerminateLair {
+                        expected_topology_revision,
+                        lair_id: target.lair_id,
+                        targets: vec![target.clone()],
+                    })
+                    .await
+            }
+        );
+        assert!(
+            matches!(kill_response, Response::SplintKilled { .. }),
+            "kill failed: {kill_response:?}"
+        );
+        assert!(
+            matches!(terminated, Response::TopologyCommitted { .. }),
+            "termination failed: {terminated:?}"
+        );
+        assert!(
+            admin
+                .topology()
+                .await
+                .find_splint(target.splint_id)
+                .is_none()
+        );
+        wait_for_process_group_exit(group).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("Lair termination during KillSplint scenario timed out");
+}
+
+/// Writes an executable stand-in for a login shell into the daemon runtime.
+fn shell_script(daemon: &Daemon, name: &str, body: &str) -> PathBuf {
+    let path = daemon.runtime.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn plain_shell_launch(shell: &Path) -> LaunchParameters {
+    LaunchParameters {
+        cwd: std::env::current_dir().unwrap(),
+        command: Vec::new(),
+        shell: Some(shell.display().to_string()),
+        login_shell: false,
+        scrollback_lines: 100,
+    }
+}
+
+async fn wait_for_agent_status_results(results: &Path) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(contents) = fs::read(results) {
+            return serde_json::from_slice(&contents).unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "in-Splint agent status reporter did not finish"
+        );
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn agent_status_report(
+    splint_id: SplintId,
+    incarnation: u64,
+    state: splinterm_protocol::AgentState,
+    detail: Option<&str>,
+) -> Request {
+    Request::ReportAgentStatus {
+        splint_id,
+        incarnation,
+        status: Some(splinterm_protocol::AgentStatusReport {
+            state,
+            detail: detail.map(str::to_owned),
+            ttl_seconds: None,
+        }),
+    }
+}
+
+fn agent_status_outcome(result: Result<Response, ProtocolError>) -> serde_json::Value {
+    match result {
+        Ok(Response::AgentStatusAccepted {
+            sequence,
+            expires_at_ms,
+        }) => serde_json::json!({
+            "accepted": true,
+            "sequence": sequence,
+            "expires": expires_at_ms.is_some()
+        }),
+        Ok(response) => serde_json::json!({"unexpected": format!("{response:?}")}),
+        Err(error) => serde_json::json!({"accepted": false, "code": error.code}),
+    }
+}
+
+/// Not a scenario of its own: the agent status scenarios re-execute this test
+/// binary inside a Splint, where it reports through its own connection.
+#[tokio::test(flavor = "current_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the in-Splint reporter's scripted sequence is reviewed as one transcript"
+)]
+async fn agent_status_in_splint_reporter() {
+    use splinterm_protocol::AgentState;
+
+    let Some(results) = std::env::var_os(AGENT_STATUS_HELPER_RESULTS) else {
+        return;
+    };
+    let results = PathBuf::from(results);
+    if std::env::var_os(AGENT_STATUS_HELPER_SETSID).is_some() {
+        rustix::process::setsid().expect("reporter leaves the Splint session");
+    }
+    let own_session_leader = rustix::process::getsid(None).unwrap() == rustix::process::getpid();
+    // In the setsid variant the parent is the Splint's shell, which still
+    // leads the Splint session this reporter has left.
+    let parent = rustix::process::getppid().expect("reporter has a parent");
+    let parent_leads_other_session = rustix::process::getsid(Some(parent)).ok() == Some(parent)
+        && rustix::process::getsid(None).unwrap() != parent;
+    let splint_id: SplintId = std::env::var("SPLINTERM_SPLINT_ID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let incarnation: u64 = std::env::var("SPLINTERM_SPLINT_INCARNATION")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let socket = PathBuf::from(std::env::var_os("SPLINTERM_SOCKET").unwrap());
+    let mut connection = Connection::connect(&socket).await;
+    let mut report = async |request| agent_status_outcome(connection.request_result(request).await);
+    let working = report(agent_status_report(
+        splint_id,
+        incarnation,
+        AgentState::Working,
+        Some("compiling"),
+    ))
+    .await;
+    let refresh = report(agent_status_report(
+        splint_id,
+        incarnation,
+        AgentState::Working,
+        Some("compiling"),
+    ))
+    .await;
+    let wrong_incarnation = report(agent_status_report(
+        splint_id,
+        incarnation + 1,
+        AgentState::Done,
+        None,
+    ))
+    .await;
+    let invalid_detail = report(agent_status_report(
+        splint_id,
+        incarnation,
+        AgentState::Error,
+        Some("two\nlines"),
+    ))
+    .await;
+    let mut burst = Vec::new();
+    for index in 0..12 {
+        let state = if index % 2 == 0 {
+            AgentState::Idle
+        } else {
+            AgentState::Working
+        };
+        let outcome = report(agent_status_report(splint_id, incarnation, state, None)).await;
+        let limited = outcome["code"] == "rate_limited";
+        burst.push(outcome);
+        if limited {
+            break;
+        }
+    }
+    let mut refused_again = Vec::new();
+    for _ in 0..2 {
+        refused_again.push(
+            report(agent_status_report(
+                splint_id,
+                incarnation,
+                AgentState::Done,
+                None,
+            ))
+            .await,
+        );
+    }
+    time::sleep(Duration::from_millis(1_100)).await;
+    let needs_input = report(agent_status_report(
+        splint_id,
+        incarnation,
+        AgentState::NeedsInput,
+        Some("waiting for approval"),
+    ))
+    .await;
+    drop(connection);
+    let document = serde_json::json!({
+        "own_session_leader": own_session_leader,
+        "parent_leads_other_session": parent_leads_other_session,
+        "working": working,
+        "refresh": refresh,
+        "wrong_incarnation": wrong_incarnation,
+        "invalid_detail": invalid_detail,
+        "burst": burst,
+        "refused_again": refused_again,
+        "needs_input": needs_input,
+    });
+    let pending = results.with_extension("pending");
+    fs::write(&pending, serde_json::to_vec(&document).unwrap()).unwrap();
+    fs::rename(&pending, &results).unwrap();
+    let release = results.with_extension("release");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !release.exists() && Instant::now() < deadline {
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn assert_in_splint_reporter_results(document: &serde_json::Value) {
+    assert_eq!(document["working"]["accepted"], true, "{document}");
+    assert_eq!(document["working"]["expires"], true, "active states expire");
+    assert_eq!(document["refresh"]["accepted"], true);
+    assert_eq!(
+        document["refresh"]["sequence"], document["working"]["sequence"],
+        "an identical report refreshes without a new sequence"
+    );
+    assert_eq!(document["wrong_incarnation"]["code"], "stale_incarnation");
+    assert_eq!(document["invalid_detail"]["code"], "invalid_argument");
+    let burst = document["burst"].as_array().unwrap();
+    // Two reports were admitted before the burst; the eleventh is refused.
+    assert_eq!(burst.len(), 9, "{document}");
+    assert!(burst[..8].iter().all(|outcome| outcome["accepted"] == true));
+    assert_eq!(burst[8]["code"], "rate_limited");
+    assert!(
+        document["refused_again"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|outcome| outcome["code"] == "rate_limited")
+    );
+    assert_eq!(document["needs_input"]["accepted"], true, "{document}");
+}
+
+async fn audit_records(
+    connection: &mut Connection,
+    operation: splinterm_protocol::AuditOperation,
+) -> Vec<splinterm_protocol::AuditRecord> {
+    let Response::AuditPage { page } = connection
+        .request(Request::AuditInspect {
+            after_audit_id: None,
+            max_records: 64,
+        })
+        .await
+    else {
+        panic!("audit page was not returned");
+    };
+    page.records
+        .into_iter()
+        .filter(|record| record.operation == operation)
+        .collect()
+}
+
+async fn splint_runtime(
+    connection: &mut Connection,
+    splint_id: SplintId,
+) -> (TopologyRevision, splinterm_protocol::SplintRuntimeSummary) {
+    let Response::Topology { snapshot } = connection.request(Request::InspectTopology).await else {
+        panic!("topology was not returned");
+    };
+    snapshot.validate().unwrap();
+    let runtime = snapshot
+        .runtimes
+        .into_iter()
+        .find(|runtime| runtime.splint_id == splint_id)
+        .expect("Splint runtime summary");
+    (snapshot.revision, runtime)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real in-Splint reporter proves authority, delivery, audit, and exit clearing"
+)]
+async fn agent_status_self_report_from_inside_the_splint() {
+    use splinterm_protocol::{AgentState, AuditDecision, AuditOperation};
+
+    time::timeout(Duration::from_secs(90), async {
+        let daemon = Daemon::start_with_policy(&agent_status_policy(None)).await;
+        let results = daemon.runtime.join("agent-status-self.json");
+        let mut subscriber = daemon.connect().await;
+        let Response::TopologySubscribed {
+            subscription_id, ..
+        } = subscriber.request(Request::SubscribeTopology).await
+        else {
+            panic!("topology subscription was not created");
+        };
+        let mut client = daemon.connect().await;
+        let revision = client.topology_revision().await;
+        let Response::LairCreated {
+            lair,
+            incarnation,
+            topology_revision: created,
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "agent-status".into(),
+                launch: agent_status_helper_launch(&results, false),
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("agent status Lair was not created");
+        };
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("agent status Lair was not a leaf");
+        };
+        let splint_id = splint.id;
+
+        let document = wait_for_agent_status_results(&results).await;
+        assert_in_splint_reporter_results(&document);
+        assert_eq!(
+            document["own_session_leader"], true,
+            "the reporter is the Splint's session leader"
+        );
+
+        let (current_revision, runtime) = splint_runtime(&mut client, splint_id).await;
+        assert_eq!(
+            current_revision, created,
+            "agent status reports never bump the topology revision"
+        );
+        let status = runtime.agent_status.expect("summary carries agent status");
+        assert_eq!(status.state, AgentState::NeedsInput);
+        assert_eq!(status.detail.as_deref(), Some("waiting for approval"));
+        assert!(!status.stale);
+        assert_eq!(
+            serde_json::json!(status.sequence),
+            document["needs_input"]["sequence"]
+        );
+
+        // Status events ride the topology subscription without a snapshot,
+        // coalesced to fewer events than accepted visible changes.
+        let mut status_events = 0;
+        let mut last_sequence = 0;
+        loop {
+            let (_, event) = subscriber.next_event(subscription_id).await;
+            match event {
+                SubscriptionEvent::TopologyChanged { change } => {
+                    assert_eq!(
+                        change.revision, created,
+                        "no topology change follows the creation"
+                    );
+                    assert_eq!(status_events, 0, "no snapshot is published for a report");
+                }
+                SubscriptionEvent::AgentStatusChanged {
+                    splint_id: event_splint,
+                    incarnation: event_incarnation,
+                    status,
+                    sequence,
+                } => {
+                    assert_eq!(event_splint, splint_id);
+                    assert_eq!(event_incarnation, incarnation);
+                    assert!(sequence > last_sequence);
+                    last_sequence = sequence;
+                    status_events += 1;
+                    let status = status.expect("reports set a status");
+                    assert!(status.validate());
+                    if status.state == AgentState::NeedsInput {
+                        assert_eq!(status.sequence, sequence);
+                        break;
+                    }
+                }
+                event => panic!("unexpected topology subscription event: {event:?}"),
+            }
+        }
+        // One working change, eight burst changes, and the final change.
+        assert!(
+            (2..10).contains(&status_events),
+            "expected coalesced status events, saw {status_events}"
+        );
+
+        let outside = client
+            .request_result(agent_status_report(
+                splint_id,
+                incarnation,
+                AgentState::Done,
+                None,
+            ))
+            .await
+            .expect_err("a process outside the Splint needs a grant");
+        assert_eq!(outside.code, ErrorCode::Unauthorized);
+        let records = audit_records(&mut client, AuditOperation::AgentStatusReport).await;
+        assert_eq!(
+            records.len(),
+            2,
+            "self-reports are not audited per update: {records:?}"
+        );
+        assert!(records.iter().all(|record| {
+            record
+                .resource
+                .as_ref()
+                .and_then(|resource| resource.splint_id)
+                == Some(splint_id)
+                && record.outcome == Some(splinterm_protocol::AuditOutcome::Failed)
+        }));
+        assert_eq!(records[0].decision, AuditDecision::Rejected);
+        assert_eq!(records[0].reason, "self_report_rate_limited");
+        assert_eq!(records[1].decision, AuditDecision::Denied);
+        assert_eq!(
+            records[1].requested_scopes,
+            vec![splinterm_protocol::AutomationScope::AgentStatusReport]
+        );
+
+        fs::write(results.with_extension("release"), b"").unwrap();
+        loop {
+            let (_, event) = subscriber.next_event(subscription_id).await;
+            if let SubscriptionEvent::TopologyChanged { change } = event {
+                change.validate().unwrap();
+                let runtime = change
+                    .snapshot
+                    .runtimes
+                    .iter()
+                    .find(|runtime| runtime.splint_id == splint_id)
+                    .unwrap();
+                if runtime.lifecycle == SplintLifecycle::Exited {
+                    assert_eq!(
+                        runtime.agent_status, None,
+                        "the exit snapshot drops the incarnation's status"
+                    );
+                    break;
+                }
+            }
+        }
+        let (_, runtime) = splint_runtime(&mut client, splint_id).await;
+        assert_eq!(runtime.agent_status, None);
+        daemon.shutdown();
+    })
+    .await
+    .expect("agent status self-report scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one daemon proves ancestry attribution, granted reports, and relaunch binding"
+)]
+async fn agent_status_ancestry_grant_and_relaunch_binding() {
+    use splinterm_protocol::{AgentState, AuditDecision, AuditOperation};
+
+    time::timeout(Duration::from_secs(90), async {
+        let daemon = Daemon::start_with_policy(&agent_status_policy(None)).await;
+        let results = daemon.runtime.join("agent-status-ancestry.json");
+        let mut client = daemon.connect().await;
+        let revision = client.topology_revision().await;
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "agent-status-ancestry".into(),
+                launch: agent_status_helper_launch(&results, true),
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("agent status Lair was not created");
+        };
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("agent status Lair was not a leaf");
+        };
+        let splint_id = splint.id;
+        let document = wait_for_agent_status_results(&results).await;
+        assert_eq!(
+            document["parent_leads_other_session"], true,
+            "the reporter left the Splint session led by its parent shell"
+        );
+        assert_in_splint_reporter_results(&document);
+
+        // A policy grant lets a process outside the Splint report for it.
+        let policy = daemon.policy.as_ref().unwrap();
+        fs::write(policy, agent_status_policy(Some(splint_id))).unwrap();
+        fs::set_permissions(policy, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.reload_policy();
+        assert_connection_closed(&mut client, "agent status policy reload").await;
+        let mut client = daemon.connect().await;
+        let Response::AgentStatusAccepted {
+            sequence,
+            expires_at_ms,
+        } = client
+            .request(agent_status_report(
+                splint_id,
+                incarnation,
+                AgentState::Done,
+                Some("merged"),
+            ))
+            .await
+        else {
+            panic!("granted report was not accepted");
+        };
+        assert_eq!(expires_at_ms, None, "resting states are untimed");
+        let (_, runtime) = splint_runtime(&mut client, splint_id).await;
+        let status = runtime.agent_status.expect("granted status is visible");
+        assert_eq!(status.state, AgentState::Done);
+        assert_eq!(status.detail.as_deref(), Some("merged"));
+        assert_eq!(status.sequence, sequence);
+        let stale = client
+            .request_result(agent_status_report(
+                splint_id,
+                incarnation + 1,
+                AgentState::Done,
+                None,
+            ))
+            .await
+            .expect_err("a granted report for another incarnation is stale");
+        assert_eq!(stale.code, ErrorCode::StaleIncarnation);
+        let records = audit_records(&mut client, AuditOperation::AgentStatusReport).await;
+        let granted = records
+            .iter()
+            .find(|record| record.decision == AuditDecision::Matched)
+            .expect("granted reports are audited");
+        assert_eq!(granted.policy_rule_id.as_deref(), Some("status-reporter"));
+        assert_eq!(
+            granted.outcome,
+            Some(splinterm_protocol::AuditOutcome::Succeeded)
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.argument_count.is_none()
+                    && record.executable_basename.is_none()),
+            "audit records carry outcome metadata only"
+        );
+
+        // Exit clears the status; a relaunch starts a new incarnation without one.
+        fs::write(results.with_extension("release"), b"").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let exited_revision = loop {
+            let (revision, runtime) = splint_runtime(&mut client, splint_id).await;
+            if runtime.live_incarnation.is_none() {
+                assert_eq!(runtime.agent_status, None);
+                break revision;
+            }
+            assert!(Instant::now() < deadline, "reporter Splint did not exit");
+            time::sleep(Duration::from_millis(20)).await;
+        };
+        let exited = client
+            .request_result(agent_status_report(
+                splint_id,
+                incarnation,
+                AgentState::Idle,
+                None,
+            ))
+            .await
+            .expect_err("an exited incarnation cannot report");
+        assert_eq!(exited.code, ErrorCode::StaleIncarnation);
+        let Response::SplintStarted {
+            incarnation: relaunched,
+            ..
+        } = client
+            .request(Request::RelaunchSplint {
+                expected_topology_revision: exited_revision,
+                splint_id,
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+            })
+            .await
+        else {
+            panic!("reporter Splint was not relaunched");
+        };
+        assert!(relaunched > incarnation);
+        let (_, runtime) = splint_runtime(&mut client, splint_id).await;
+        assert_eq!(runtime.live_incarnation, Some(relaunched));
+        assert_eq!(
+            runtime.agent_status, None,
+            "a relaunch starts without status"
+        );
+        assert!(matches!(
+            client
+                .request(agent_status_report(
+                    splint_id,
+                    relaunched,
+                    AgentState::Working,
+                    None,
+                ))
+                .await,
+            Response::AgentStatusAccepted {
+                expires_at_ms: Some(_),
+                ..
+            }
+        ));
+        let clear = client
+            .request(Request::ReportAgentStatus {
+                splint_id,
+                incarnation: relaunched,
+                status: None,
+            })
+            .await;
+        assert!(matches!(clear, Response::AgentStatusAccepted { .. }));
+        let (_, runtime) = splint_runtime(&mut client, splint_id).await;
+        assert_eq!(runtime.agent_status, None, "a clear removes the status");
+        daemon.shutdown();
+    })
+    .await
+    .expect("agent status ancestry and grant scenario timed out");
+}
+
+const AGENT_STATUS_MCP_RESULTS: &str = "SPLINTERM_E2E_AGENT_STATUS_MCP_RESULTS";
+const AGENT_STATUS_MCP_OTHER_SPLINT: &str = "SPLINTERM_E2E_AGENT_STATUS_OTHER_SPLINT";
+const AGENT_STATUS_MCP_OTHER_INCARNATION: &str = "SPLINTERM_E2E_AGENT_STATUS_OTHER_INCARNATION";
+
+async fn wait_for_signal_file(path: &Path, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "{label} was not signalled");
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn create_lair_with(admin: &mut Connection, launch: LaunchParameters) -> MutationTarget {
+    let name = format!("unused {}", admin.topology().await.lairs().count());
+    create_named_lair(admin, name, false, launch).await
+}
+
+async fn create_named_lair(
+    admin: &mut Connection,
+    name: String,
+    generated_name: bool,
+    launch: LaunchParameters,
+) -> MutationTarget {
+    let expected_topology_revision = admin.topology_revision().await;
+    let Response::LairCreated { lair, .. } = admin
+        .request(Request::CreateLair {
+            expected_topology_revision,
+            name,
+            launch,
+            generated_name,
+        })
+        .await
+    else {
+        panic!("daemon did not create the Lair");
+    };
+    let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+        panic!("new Dojo was not a leaf");
+    };
+    let incarnation = admin.live_incarnation(splint.id).await;
+    MutationTarget {
+        lair_id: lair.id,
+        dojo_id: lair.dojos[0].id,
+        splint_id: splint.id,
+        incarnation,
+    }
+}
+
+async fn close_unused(connection: &mut Connection, dojo_id: DojoId) -> UnusedDojoCloseOutcome {
+    match connection
+        .request(Request::CloseUnusedDojo { dojo_id })
+        .await
+    {
+        Response::UnusedDojoClose {
+            dojo_id: closed,
+            outcome,
+        } if closed == dojo_id => outcome,
+        response => panic!("unexpected unused Dojo close response: {response:?}"),
+    }
+}
+
+async fn assert_dojo_used(connection: &mut Connection, dojo_id: DojoId, reason: DojoUse) {
+    assert_eq!(
+        close_unused(connection, dojo_id).await,
+        UnusedDojoCloseOutcome::Used { reason }
+    );
+    assert!(
+        connection.topology().await.find_dojo(dojo_id).is_some(),
+        "a used Dojo must stay"
+    );
+}
+
+async fn wait_for_pid_file(path: &Path) -> u32 {
+    loop {
+        if let Some(pid) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            return pid;
+        }
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn write_results_atomically(path: &Path, document: &serde_json::Value) {
+    let pending = path.with_extension("pending");
+    fs::write(&pending, serde_json::to_vec(document).unwrap()).unwrap();
+    fs::rename(&pending, path).unwrap();
+}
+
+/// Not a scenario of its own: the MCP agent status scenario re-executes this
+/// test binary inside a Splint, where the MCP adapter projection fills its
+/// target from the inherited Splint environment and self-reports.
+#[tokio::test(flavor = "current_thread")]
+async fn agent_status_mcp_in_splint_reporter() {
+    let Some(results) = std::env::var_os(AGENT_STATUS_MCP_RESULTS) else {
+        return;
+    };
+    let results = PathBuf::from(results);
+    let socket = PathBuf::from(std::env::var_os("SPLINTERM_SOCKET").unwrap());
+    let outcome = |result: anyhow::Result<serde_json::Value>| match result {
+        Ok(value) => value,
+        Err(error) => serde_json::json!({"error": error.to_string()}),
+    };
+    let reported = outcome(
+        splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.report_agent_status",
+            &serde_json::json!({"state": "needs_input", "detail": "waiting for approval"}),
+            &socket,
+        )
+        .await,
+    );
+    // Self-report authority covers only the reporter's own Splint: another
+    // live Splint in the same daemon needs a grant this policy lacks.
+    let other_splint = std::env::var(AGENT_STATUS_MCP_OTHER_SPLINT).unwrap();
+    let other_incarnation: u64 = std::env::var(AGENT_STATUS_MCP_OTHER_INCARNATION)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let elsewhere = outcome(
+        splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.report_agent_status",
+            &serde_json::json!({
+                "state": "done",
+                "splint_id": other_splint,
+                "incarnation": other_incarnation
+            }),
+            &socket,
+        )
+        .await,
+    );
+    write_results_atomically(
+        &results,
+        &serde_json::json!({
+            "environment_splint_id": std::env::var("SPLINTERM_SPLINT_ID").unwrap(),
+            "environment_incarnation": std::env::var("SPLINTERM_SPLINT_INCARNATION").unwrap(),
+            "reported": reported,
+            "elsewhere": elsewhere,
+        }),
+    );
+    wait_for_signal_file(&results.with_extension("clear"), "MCP clear").await;
+    let cleared = outcome(
+        splinterm_mcp::dispatch_mutation_for_integration_test(
+            "splinterm.report_agent_status",
+            &serde_json::json!({"state": null}),
+            &socket,
+        )
+        .await,
+    );
+    write_results_atomically(
+        &results.with_extension("cleared"),
+        &serde_json::json!({"cleared": cleared}),
+    );
+    wait_for_signal_file(&results.with_extension("release"), "MCP reporter release").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real in-Splint MCP reporter proves env defaults, authority, projection, and clear"
+)]
+async fn agent_status_mcp_adapter_reports_from_inside_the_splint() {
+    use splinterm_protocol::AgentState;
+
+    time::timeout(Duration::from_secs(90), async {
+        // No policy rule grants agent_status_report: authority is self-report.
+        let daemon = Daemon::start_with_policy(&agent_status_policy(None)).await;
+        let results = daemon.runtime.join("agent-status-mcp.json");
+        let program = std::env::current_exe().unwrap();
+        let mut client = daemon.connect().await;
+        let revision = client.topology_revision().await;
+        // A second live Splint the in-Splint reporter must not be able to target.
+        let Response::LairCreated {
+            lair: other_lair,
+            incarnation: other_incarnation,
+            topology_revision: revision,
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "agent-status-mcp-other".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 60".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("second agent status Lair was not created");
+        };
+        let LayoutNode::Leaf(other_splint) = &other_lair.dojos[0].root else {
+            panic!("second agent status Lair was not a leaf");
+        };
+        let other_splint_id = other_splint.id;
+        let Response::LairCreated {
+            lair,
+            incarnation,
+            topology_revision: created,
+        } = client
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "agent-status-mcp".into(),
+                launch: LaunchParameters {
+                    cwd: std::env::current_dir().unwrap(),
+                    command: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        format!(
+                            "{AGENT_STATUS_MCP_RESULTS}=\"$1\" \
+                             {AGENT_STATUS_MCP_OTHER_SPLINT}=\"$2\" \
+                             {AGENT_STATUS_MCP_OTHER_INCARNATION}=\"$3\" exec \"$0\" \
+                             --exact agent_status_mcp_in_splint_reporter --test-threads=1 -q"
+                        ),
+                        program.to_string_lossy().into_owned(),
+                        results.to_string_lossy().into_owned(),
+                        other_splint_id.to_string(),
+                        other_incarnation.to_string(),
+                    ],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("MCP agent status Lair was not created");
+        };
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("MCP agent status Lair was not a leaf");
+        };
+        let splint_id = splint.id;
+        let document = wait_for_agent_status_results(&results).await;
+        assert_eq!(document["environment_splint_id"], splint_id.to_string());
+        assert_eq!(document["environment_incarnation"], incarnation.to_string());
+        let reported = &document["reported"];
+        assert_eq!(
+            reported["tool"], "splinterm.report_agent_status",
+            "{document}"
+        );
+        assert_eq!(
+            reported["resource"],
+            serde_json::json!({
+                "kind": "agent_status",
+                "splint_id": splint_id.to_string(),
+                "incarnation": incarnation
+            })
+        );
+        assert_eq!(reported["data"]["committed"], true);
+        assert_eq!(reported["data"]["state"], "needs_input");
+        assert!(reported["data"]["expires_at_ms"].as_u64().is_some());
+        assert!(!reported.to_string().contains("waiting for approval"));
+        assert_eq!(
+            document["elsewhere"]["error"], "the exact policy scope or resource is not authorized",
+            "a Splint process cannot report for another live Splint without a grant: {document}"
+        );
+
+        let Response::Topology { snapshot } = client.request(Request::InspectTopology).await else {
+            panic!("topology was not returned");
+        };
+        assert_eq!(
+            snapshot.revision, created,
+            "reports never bump the revision"
+        );
+        let runtime = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.splint_id == splint_id)
+            .unwrap();
+        let status = runtime
+            .agent_status
+            .as_ref()
+            .expect("MCP status is visible");
+        assert_eq!(status.state, AgentState::NeedsInput);
+        assert_eq!(status.detail.as_deref(), Some("waiting for approval"));
+        let other_runtime = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.splint_id == other_splint_id)
+            .unwrap();
+        assert_eq!(other_runtime.live_incarnation, Some(other_incarnation));
+        assert_eq!(
+            other_runtime.agent_status, None,
+            "the refused report left no status"
+        );
+        // The CLI v2 projections carry the same status.
+        let inspected = serde_json::to_value(
+            splinterm_automation_client::inspect_splint_envelope(&snapshot, splint_id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inspected["data"]["agent_status"]["state"], "needs_input");
+        assert_eq!(
+            inspected["data"]["agent_status"]["detail"],
+            "waiting for approval"
+        );
+        let get = serde_json::to_value(
+            splinterm_automation_client::agent_status_get_envelope(&snapshot, splint_id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(get["data"]["current_incarnation"], incarnation);
+        assert_eq!(get["data"]["agent_status"]["stale"], false);
+
+        fs::write(results.with_extension("clear"), b"").unwrap();
+        let cleared = wait_for_agent_status_results(&results.with_extension("cleared")).await;
+        assert_eq!(
+            cleared["cleared"]["data"]["state"],
+            serde_json::Value::Null,
+            "{cleared}"
+        );
+        assert_eq!(cleared["cleared"]["data"]["committed"], true);
+        let (_, runtime) = splint_runtime(&mut client, splint_id).await;
+        assert_eq!(runtime.live_incarnation, Some(incarnation));
+        assert_eq!(
+            runtime.agent_status, None,
+            "the MCP clear removed the status"
+        );
+        fs::write(results.with_extension("release"), b"").unwrap();
+        daemon.shutdown();
+    })
+    .await
+    .expect("MCP agent status scenario timed out");
+}
+
+fn foreground_group(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(5)?
+        .parse()
+        .ok()
+}
+
+async fn wait_for_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(Instant::now() < deadline, "process {pid} was never reaped");
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unused_dojo_closes_and_its_shell_is_reaped() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let pid_file = daemon.runtime.join("shell.pid");
+        let shell = shell_script(
+            &daemon,
+            "pid-shell",
+            &format!("echo $$ > '{}'\nexec /bin/sh\n", pid_file.display()),
+        );
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let pid = wait_for_pid_file(&pid_file).await;
+        // Focus reports the client generates leave it unused.
+        admin
+            .focus_report(target.splint_id, target.incarnation, b"\x1b[I\x1b[O")
+            .await;
+        admin.release_control().await;
+        let UnusedDojoCloseOutcome::Closed {
+            topology_revision,
+            lair_removed,
+        } = close_unused(&mut admin, target.dojo_id).await
+        else {
+            panic!("an unused Dojo was kept");
+        };
+        // The Lair has a name the user chose, so it stays, empty.
+        assert!(!lair_removed);
+        let topology = admin.topology().await;
+        assert_eq!(topology.revision(), topology_revision);
+        assert!(topology.find_dojo(target.dojo_id).is_none());
+        assert!(topology.find_splint(target.splint_id).is_none());
+        let lair = topology.find_lair(target.lair_id).expect("its Lair stays");
+        assert!(lair.dojos.is_empty());
+        wait_for_exit(pid).await;
+        // A second request finds nothing to close.
+        let error = admin
+            .request_result(Request::CloseUnusedDojo {
+                dojo_id: target.dojo_id,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        daemon.shutdown();
+    })
+    .await
+    .expect("unused Dojo close scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_split_dojo_counts_as_used() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+
+        let split = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id: added, ..
+        } = admin
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: split.splint_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: plain_shell_launch(&shell),
+            })
+            .await
+        else {
+            panic!("daemon did not split the Splint");
+        };
+        assert_dojo_used(&mut admin, split.dojo_id, DojoUse::Split).await;
+        // Closing the original leaves a single Splint, but not the original.
+        let killed = admin
+            .request(Request::KillSplint {
+                splint_id: split.splint_id,
+                incarnation: split.incarnation,
+            })
+            .await;
+        assert!(matches!(killed, Response::SplintKilled { .. }));
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::CloseSplint {
+                expected_topology_revision,
+                splint_id: split.splint_id,
+            })
+            .await;
+        assert!(admin.topology().await.find_splint(added).is_some());
+        assert_dojo_used(&mut admin, split.dojo_id, DojoUse::Split).await;
+
+        // A split stays a user action after its extra pane closes again.
+        let reverted = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id: extra,
+            incarnation: extra_incarnation,
+            ..
+        } = admin
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: reverted.splint_id,
+                axis: Axis::Vertical,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch: plain_shell_launch(&shell),
+            })
+            .await
+        else {
+            panic!("daemon did not split the Splint");
+        };
+        admin
+            .request(Request::KillSplint {
+                splint_id: extra,
+                incarnation: extra_incarnation,
+            })
+            .await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::CloseSplint {
+                expected_topology_revision,
+                splint_id: extra,
+            })
+            .await;
+        let topology = admin.topology().await;
+        let dojo = topology.find_dojo(reverted.dojo_id).unwrap();
+        assert!(matches!(&dojo.root, LayoutNode::Leaf(splint) if splint.id == reverted.splint_id));
+        assert_dojo_used(&mut admin, reverted.dojo_id, DojoUse::Split).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("split Dojo scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dojos_count_as_used_after_input_or_rename() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let typed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin.input(typed.splint_id, typed.incarnation, b"x").await;
+        admin.release_control().await;
+        assert_dojo_used(&mut admin, typed.dojo_id, DojoUse::Input).await;
+
+        // Focus-shaped bytes the client did not flag, from automation or an
+        // unbracketed paste, reached the shell and count as input.
+        let pasted = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin
+            .input(pasted.splint_id, pasted.incarnation, b"\x1b[I\x1b[O")
+            .await;
+        admin.release_control().await;
+        assert_dojo_used(&mut admin, pasted.dojo_id, DojoUse::Input).await;
+
+        let renamed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameDojo {
+                expected_topology_revision,
+                dojo_id: renamed.dojo_id,
+                name: "kept".into(),
+                promote_transient_lair: false,
+            })
+            .await;
+        assert_dojo_used(&mut admin, renamed.dojo_id, DojoUse::Renamed).await;
+
+        let pane_renamed = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameSplint {
+                expected_topology_revision,
+                splint_id: pane_renamed.splint_id,
+                title: "kept".into(),
+            })
+            .await;
+        assert_dojo_used(&mut admin, pane_renamed.dojo_id, DojoUse::Renamed).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("used Dojo scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_plain_default_shell_dojos_can_be_unused() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+
+        let mut command_bearing = plain_shell_launch(&shell);
+        command_bearing.command = vec!["/bin/sh".into()];
+        let command = create_lair_with(&mut admin, command_bearing).await;
+        assert_dojo_used(&mut admin, command.dojo_id, DojoUse::Launch).await;
+
+        // A new Dojo whose name Splinterm generated qualifies; a name the user
+        // chose is use, even one equal to the default label.
+        let host = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        for (name, generated_name, used) in [
+            ("Dojo 2", true, None),
+            ("Dojo 2", false, Some(DojoUse::Renamed)),
+            ("chosen", false, Some(DojoUse::Renamed)),
+        ] {
+            let expected_topology_revision = admin.topology_revision().await;
+            let Response::DojoStarted { dojo_id, .. } = admin
+                .request(Request::NewDojo {
+                    expected_topology_revision,
+                    lair_id: host.lair_id,
+                    name: name.into(),
+                    launch: plain_shell_launch(&shell),
+                    promote_transient_lair: false,
+                    generated_name,
+                })
+                .await
+            else {
+                panic!("daemon did not create the Dojo");
+            };
+            match used {
+                Some(reason) => assert_dojo_used(&mut admin, dojo_id, reason).await,
+                None => assert!(matches!(
+                    close_unused(&mut admin, dojo_id).await,
+                    UnusedDojoCloseOutcome::Closed { .. }
+                )),
+            }
+        }
+
+        // A relaunched Splint is no longer the original incarnation.
+        let relaunched = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        admin
+            .request(Request::KillSplint {
+                splint_id: relaunched.splint_id,
+                incarnation: relaunched.incarnation,
+            })
+            .await;
+        assert_dojo_used(&mut admin, relaunched.dojo_id, DojoUse::NotRunning).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RelaunchSplint {
+                expected_topology_revision,
+                splint_id: relaunched.splint_id,
+                launch: plain_shell_launch(&shell),
+            })
+            .await;
+        assert_dojo_used(&mut admin, relaunched.dojo_id, DojoUse::Launch).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("plain launch scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attached_window_keeps_the_dojo_until_it_detaches() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(Path::new("/bin/sh"))).await;
+        let mut window = daemon.connect().await;
+        let (subscription_id, _) = window.attach(target.splint_id, target.incarnation).await;
+        assert_dojo_used(&mut admin, target.dojo_id, DojoUse::Attached).await;
+        assert_eq!(
+            window.request(Request::Detach { subscription_id }).await,
+            Response::Acknowledged
+        );
+        // An explicit detach is released before its acknowledgement.
+        assert!(matches!(
+            close_unused(&mut admin, target.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed { .. }
+        ));
+        daemon.shutdown();
+    })
+    .await
+    .expect("attached Window scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_in_the_foreground_counts_as_use() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let pid_file = daemon.runtime.join("startup.pid");
+        // Job control gives the startup program its own foreground group,
+        // as an interactive shell does for a program run from its rc file.
+        let shell = shell_script(
+            &daemon,
+            "startup-shell",
+            &format!(
+                "echo $$ > '{}'\nset -m\nsleep 30\nexec /bin/sh\n",
+                pid_file.display()
+            ),
+        );
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let pid = wait_for_pid_file(&pid_file).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while foreground_group(pid).is_none_or(|group| group == pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the startup program never took the foreground"
+            );
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_dojo_used(&mut admin, target.dojo_id, DojoUse::Foreground).await;
+        daemon.shutdown();
+    })
+    .await
+    .expect("foreground program scenario timed out");
+}
+
+enum InputOutcome {
+    Delivered,
+    Rejected,
+    Disconnected,
+}
+
+/// Sends input, tolerating the controller revocation that ends the
+/// connection when the Dojo closes first.
+async fn racing_input(
+    connection: &mut Connection,
+    target: &MutationTarget,
+    controller_id: u64,
+) -> InputOutcome {
+    let request_id = connection.request_id;
+    connection.request_id += 1;
+    let frame = ClientFrame::Request {
+        request_id,
+        diagnostic_correlation: None,
+        request: Request::Input {
+            controller_id,
+            splint_id: target.splint_id,
+            incarnation: target.incarnation,
+            bytes: b"x".to_vec(),
+            focus_report: false,
+        },
+    };
+    if connection
+        .stream
+        .write_all(&encode_frame(&frame).unwrap())
+        .await
+        .is_err()
+    {
+        return InputOutcome::Disconnected;
+    }
+    loop {
+        let mut length = [0_u8; 4];
+        if connection.stream.read_exact(&mut length).await.is_err() {
+            return InputOutcome::Disconnected;
+        }
+        let mut body = vec![0_u8; u32::from_be_bytes(length) as usize];
+        if connection.stream.read_exact(&mut body).await.is_err() {
+            return InputOutcome::Disconnected;
+        }
+        match serde_json::from_slice::<ServerFrame>(&body).unwrap() {
+            ServerFrame::Response {
+                request_id: id,
+                result: Response::TerminalActionAcknowledged { .. },
+            } if id == request_id => return InputOutcome::Delivered,
+            ServerFrame::Error {
+                request_id: Some(id),
+                ..
+            } if id == request_id => return InputOutcome::Rejected,
+            ServerFrame::Error {
+                request_id: None, ..
+            } => return InputOutcome::Disconnected,
+            ServerFrame::Event { .. } => {}
+            frame => panic!("unexpected input frame: {frame:?}"),
+        }
+    }
+}
+
+// Input racing the close either lands, keeping the Dojo, or is refused because
+// the close won. It never reaches a shell that the close then ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_racing_an_unused_close_never_reaches_a_closed_shell() {
+    time::timeout(Duration::from_secs(60), async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let (mut kept, mut closed) = (0, 0);
+        for round in 0..12_u64 {
+            let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+            let mut typist = daemon.connect().await;
+            let controller_id = typist
+                .acquire_control(target.splint_id, target.incarnation)
+                .await;
+            // Delay alternate inputs so each order occurs: immediate input lands
+            // first, a delayed one finds the close holding the Splint.
+            let (typed, outcome) = tokio::join!(
+                async {
+                    if round % 2 == 1 {
+                        time::sleep(Duration::from_millis(1)).await;
+                    }
+                    racing_input(&mut typist, &target, controller_id).await
+                },
+                close_unused(&mut admin, target.dojo_id),
+            );
+            let present = admin.topology().await.find_dojo(target.dojo_id).is_some();
+            match (typed, outcome) {
+                (
+                    InputOutcome::Delivered,
+                    UnusedDojoCloseOutcome::Used {
+                        reason: DojoUse::Input,
+                    },
+                ) if present => kept += 1,
+                (
+                    InputOutcome::Rejected | InputOutcome::Disconnected,
+                    UnusedDojoCloseOutcome::Closed { .. },
+                ) if !present => closed += 1,
+                (_, outcome) => panic!("input and close disagreed: {outcome:?}, present={present}"),
+            }
+        }
+        assert_eq!(kept + closed, 12);
+        daemon.shutdown();
+    })
+    .await
+    .expect("input race scenario timed out");
+}
+
+// Ending a shell that ignores hangup takes the whole shutdown grace. The close
+// must answer, and unrelated topology changes proceed, while it retires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unused_close_does_not_wait_for_the_shell_under_the_transaction() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let pid_file = daemon.runtime.join("resistant.pid");
+        let shell = shell_script(
+            &daemon,
+            "resistant-shell",
+            &format!(
+                "echo $$ > '{}'\ntrap '' HUP TERM INT\nwhile :; do sleep 1; done\n",
+                pid_file.display()
+            ),
+        );
+        let mut admin = daemon.connect().await;
+        let target = create_lair_with(&mut admin, plain_shell_launch(&shell)).await;
+        let pid = wait_for_pid_file(&pid_file).await;
+        let group = ProcessGroupGuard::new(pid);
+        time::sleep(Duration::from_millis(200)).await;
+        let started = Instant::now();
+        assert!(matches!(
+            close_unused(&mut admin, target.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed { .. }
+        ));
+        let expected_topology_revision = admin.topology_revision().await;
+        let created = admin
+            .request(Request::CreateLair {
+                expected_topology_revision,
+                name: "unrelated".into(),
+                launch: plain_shell_launch(Path::new("/bin/sh")),
+                generated_name: false,
+            })
+            .await;
+        assert!(matches!(created, Response::LairCreated { .. }));
+        // Hangup then termination each wait one test grace before SIGKILL.
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "the close or the unrelated change waited for the shell"
+        );
+        assert!(
+            Path::new(&format!("/proc/{pid}")).exists(),
+            "the resistant shell should still be retiring"
+        );
+        wait_for_exit(pid).await;
+        group.disarm();
+        daemon.shutdown();
+    })
+    .await
+    .expect("retiring unused Dojo scenario timed out");
+}
+
+// A Lair the user never named goes with its last unused Dojo. A Lair that
+// still holds another Dojo, or that was renamed, stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unused_close_removes_an_empty_unnamed_lair() {
+    time::timeout(TEST_TIMEOUT, async {
+        let daemon = Daemon::start().await;
+        let shell = PathBuf::from("/bin/sh");
+        let mut admin = daemon.connect().await;
+        let generated =
+            |index: u128| splinterm_core::generated_lair_name(1_787_899_189_000 + index, 42);
+
+        let unnamed =
+            create_named_lair(&mut admin, generated(1), true, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        let Response::DojoStarted {
+            dojo_id: second, ..
+        } = admin
+            .request(Request::NewDojo {
+                expected_topology_revision,
+                lair_id: unnamed.lair_id,
+                name: "Dojo 2".into(),
+                launch: plain_shell_launch(&shell),
+                promote_transient_lair: false,
+                generated_name: true,
+            })
+            .await
+        else {
+            panic!("daemon did not create the Dojo");
+        };
+        // With another Dojo left, the Lair stays.
+        assert!(matches!(
+            close_unused(&mut admin, second).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        assert!(admin.topology().await.find_lair(unnamed.lair_id).is_some());
+        // Its last Dojo takes it along, in one topology revision.
+        let before = admin.topology_revision().await;
+        let UnusedDojoCloseOutcome::Closed {
+            topology_revision,
+            lair_removed: true,
+        } = close_unused(&mut admin, unnamed.dojo_id).await
+        else {
+            panic!("the empty unnamed Lair was kept");
+        };
+        let topology = admin.topology().await;
+        assert!(topology.find_lair(unnamed.lair_id).is_none());
+        assert_eq!(topology.revision(), topology_revision);
+        assert!(topology_revision > before);
+
+        // Renaming names it.
+        let renamed =
+            create_named_lair(&mut admin, generated(2), true, plain_shell_launch(&shell)).await;
+        let expected_topology_revision = admin.topology_revision().await;
+        admin
+            .request(Request::RenameLair {
+                expected_topology_revision,
+                lair_id: renamed.lair_id,
+                name: "kept".into(),
+            })
+            .await;
+        assert!(matches!(
+            close_unused(&mut admin, renamed.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        let kept = admin.topology().await;
+        assert!(kept.find_lair(renamed.lair_id).unwrap().dojos.is_empty());
+
+        // A name the user chose stays, even one shaped like a generated name.
+        let lookalike =
+            create_named_lair(&mut admin, generated(3), false, plain_shell_launch(&shell)).await;
+        assert!(matches!(
+            close_unused(&mut admin, lookalike.dojo_id).await,
+            UnusedDojoCloseOutcome::Closed {
+                lair_removed: false,
+                ..
+            }
+        ));
+        assert!(
+            admin
+                .topology()
+                .await
+                .find_lair(lookalike.lair_id)
+                .is_some()
+        );
+        daemon.shutdown();
+    })
+    .await
+    .expect("unnamed Lair scenario timed out");
 }

@@ -1,3 +1,4 @@
+mod agent_status;
 mod audit;
 mod cgroup;
 mod consent;
@@ -17,7 +18,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -43,9 +44,9 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES,
-    MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
-    MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    DojoUse, ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES,
+    MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS,
+    MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
     MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
     MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch, PresetLayoutLaunch,
     PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError, Request, Response,
@@ -55,7 +56,7 @@ use splinterm_protocol::{
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
     TerminalRow, TerminalRowPatch, TerminalScroll, TerminalScrollbackUpdate, TerminalSnapshot,
     TerminalUpdate as WireTerminalUpdate, TopologyChange, TopologyChangeKind, TopologySnapshot,
-    UnderlineStyle as WireUnderlineStyle, encode_server_frame_transaction,
+    UnderlineStyle as WireUnderlineStyle, UnusedDojoCloseOutcome, encode_server_frame_transaction,
     image_content_socket_path,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
@@ -644,18 +645,67 @@ impl Drop for TransientLeaseReservation {
     }
 }
 
-#[derive(Default)]
 struct RuntimeRegistry {
     entries: HashMap<SplintId, LiveSplintRuntime>,
+    retiring: RetiringRuntimes,
+    reserved: Arc<AtomicUsize>,
 }
 
+/// A live-registry slot held from before a process is spawned until the
+/// process is admitted or retired.
+///
+/// Reserving before spawning means a request the registry would reject never
+/// creates a process, so rejected requests cannot grow the process count.
+struct LaunchSlot(Arc<AtomicUsize>);
+
+impl Drop for LaunchSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A runtime the registry refused, returned with its slot. Retire the runtime
+/// before dropping the slot so the process is never left uncounted.
+type RejectedRuntime = (LiveSplintRuntime, LaunchSlot);
+
 impl RuntimeRegistry {
-    fn insert(&mut self, runtime: LiveSplintRuntime) -> Result<(), LiveSplintRuntime> {
+    fn new(retiring: RetiringRuntimes) -> Self {
+        Self {
+            entries: HashMap::new(),
+            retiring,
+            reserved: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Retiring processes still exist and reserved slots are about to spawn
+    /// one, so both count toward the live limit.
+    fn at_capacity(&self) -> bool {
+        self.entries.len() + self.retiring.count() + self.reserved.load(Ordering::Acquire)
+            >= MAX_LIVE_SPLINTS
+    }
+
+    /// Reserves a slot for a process about to be spawned, or `None` at
+    /// capacity. Every launch reserves before spawning.
+    fn reserve(&mut self) -> Option<LaunchSlot> {
+        if self.at_capacity() {
+            return None;
+        }
+        self.reserved.fetch_add(1, Ordering::AcqRel);
+        Some(LaunchSlot(Arc::clone(&self.reserved)))
+    }
+
+    /// Admits a runtime into the slot reserved for it.
+    fn insert(
+        &mut self,
+        runtime: LiveSplintRuntime,
+        slot: LaunchSlot,
+    ) -> Result<(), RejectedRuntime> {
         let id = runtime.handle().splint_id;
-        if self.entries.len() >= MAX_LIVE_SPLINTS || self.entries.contains_key(&id) {
-            return Err(runtime);
+        if self.entries.contains_key(&id) {
+            return Err((runtime, slot));
         }
         self.entries.insert(id, runtime);
+        drop(slot);
         Ok(())
     }
 
@@ -679,9 +729,144 @@ impl RuntimeRegistry {
     }
 }
 
+/// Ordered topology subscription traffic: snapshots and agent status events
+/// share one queue so a status event never overtakes an older snapshot.
+#[derive(Debug)]
+enum TopologyHubEvent {
+    Change(Arc<TopologyChange>),
+    AgentStatus(Arc<SubscriptionEvent>),
+}
+
+/// Runtimes removed from the registry whose processes are still shutting down.
+///
+/// Shutdown may wait through the whole hangup and termination grace, so it
+/// runs in the background, outside any topology transaction. Daemon shutdown
+/// waits for these tasks.
+#[derive(Clone, Default)]
+struct RetiringRuntimes {
+    count: Arc<AtomicUsize>,
+    tasks: TaskTracker,
+}
+
+impl RetiringRuntimes {
+    fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    fn hold(&self) -> RetiringGuard {
+        self.count.fetch_add(1, Ordering::AcqRel);
+        RetiringGuard(Arc::clone(&self.count))
+    }
+
+    fn spawn(&self, runtime: LiveSplintRuntime) -> RuntimeShutdown {
+        let retiring = self.hold();
+        self.tasks.spawn(async move {
+            let _retiring = retiring;
+            runtime.shutdown().await
+        })
+    }
+}
+
+struct RetiringGuard(Arc<AtomicUsize>);
+
+impl Drop for RetiringGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Terminal attachments per Splint across every connection. A Window that
+/// shows a Splint holds one, so a count shows whether any Window is attached.
+#[derive(Clone, Default)]
+struct AttachmentRegistry(Arc<StdMutex<HashMap<SplintId, usize>>>);
+
+impl AttachmentRegistry {
+    /// Counts a new attachment, unless an unused close has claimed the Splint.
+    ///
+    /// The check and the count happen under the registry lock, which
+    /// [`Self::claim_unattached`] also holds, so either the attachment is
+    /// counted first and the close finds the Dojo attached, or the claim is
+    /// taken first and the attachment is refused. A Window is never told it
+    /// attached to a Dojo that a close is already removing.
+    fn try_attach(&self, handle: &LiveSplintHandle) -> Option<AttachmentGuard> {
+        let mut counts = self.0.lock().unwrap();
+        if handle.is_claimed_unused() {
+            return None;
+        }
+        *counts.entry(handle.splint_id).or_default() += 1;
+        Some(AttachmentGuard {
+            registry: self.clone(),
+            splint_id: handle.splint_id,
+        })
+    }
+
+    fn is_attached(&self, splint_id: SplintId) -> bool {
+        self.0.lock().unwrap().contains_key(&splint_id)
+    }
+
+    /// Claims an unused runtime only while no Window is attached to it; see
+    /// [`Self::try_attach`].
+    fn claim_unattached(&self, handle: LiveSplintHandle) -> Result<UnusedClaim, DojoUse> {
+        let counts = self.0.lock().unwrap();
+        if counts.contains_key(&handle.splint_id) {
+            return Err(DojoUse::Attached);
+        }
+        UnusedClaim::take(handle).ok_or(DojoUse::Input)
+    }
+}
+
+/// Counts a terminal subscription's attachment before its client learns of
+/// it, or refuses it when an unused close has claimed the Splint.
+fn register_attachment(
+    state: &DaemonState,
+    subscription: &PendingSubscription,
+) -> Result<Option<AttachmentGuard>, ProtocolError> {
+    match subscription {
+        PendingSubscription::Terminal { handle, .. } => state
+            .attachments
+            .try_attach(handle)
+            .map(Some)
+            .ok_or_else(|| ProtocolError::new(ErrorCode::NotFound, "Splint is closing")),
+        _ => Ok(None),
+    }
+}
+
+/// Held with its subscription, so a detach or disconnect releases it at once.
+struct AttachmentGuard {
+    registry: AttachmentRegistry,
+    splint_id: SplintId,
+}
+
+impl Drop for AttachmentGuard {
+    fn drop(&mut self) {
+        let mut counts = self.registry.0.lock().unwrap();
+        if let Some(count) = counts.get_mut(&self.splint_id) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.splint_id);
+            }
+        }
+    }
+}
+
+/// The original Splint of a Dojo created as a plain default-shell terminal,
+/// and the first organizing action (a rename or a split) taken on it since.
+#[derive(Clone, Copy)]
+struct PlainDojo {
+    splint_id: SplintId,
+    incarnation: u64,
+    organized: Option<DojoUse>,
+}
+
+/// One subscription owned by a connection.
+struct ConnectionSubscription {
+    _task: AbortOnDrop,
+    _attachment: Option<AttachmentGuard>,
+}
+
 struct TopologySubscriber {
     owner_connection_id: u64,
-    changes: mpsc::Sender<Arc<TopologyChange>>,
+    changes: mpsc::Sender<TopologyHubEvent>,
     resync: tokio::sync::watch::Sender<Option<splinterm_core::TopologyRevision>>,
 }
 
@@ -692,7 +877,7 @@ struct TopologyHub {
 
 #[derive(Debug)]
 struct TopologySubscription {
-    changes: mpsc::Receiver<Arc<TopologyChange>>,
+    changes: mpsc::Receiver<TopologyHubEvent>,
     resync: tokio::sync::watch::Receiver<Option<splinterm_core::TopologyRevision>>,
 }
 
@@ -724,17 +909,39 @@ impl TopologyHub {
     }
 
     fn publish(&mut self, change: &TopologyChange) {
+        let revision = change.revision;
         let change = Arc::new(change.clone());
-        self.subscribers.retain(|_, subscriber| {
-            match subscriber.changes.try_send(Arc::clone(&change)) {
+        self.broadcast(revision, || TopologyHubEvent::Change(Arc::clone(&change)));
+    }
+
+    /// Publishes a status event without a revision bump. A full queue asks
+    /// the subscriber to resynchronize at the current revision, whose
+    /// snapshot carries the latest status.
+    fn publish_agent_status(
+        &mut self,
+        event: SubscriptionEvent,
+        current_revision: splinterm_core::TopologyRevision,
+    ) {
+        let event = Arc::new(event);
+        self.broadcast(current_revision, || {
+            TopologyHubEvent::AgentStatus(Arc::clone(&event))
+        });
+    }
+
+    fn broadcast(
+        &mut self,
+        revision: splinterm_core::TopologyRevision,
+        event: impl Fn() -> TopologyHubEvent,
+    ) {
+        self.subscribers
+            .retain(|_, subscriber| match subscriber.changes.try_send(event()) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    subscriber.resync.send_replace(Some(change.revision));
+                    subscriber.resync.send_replace(Some(revision));
                     true
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
-            }
-        });
+            });
     }
 }
 
@@ -762,6 +969,14 @@ impl From<ServerFrame> for QueuedServerFrame {
 struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
+    retiring: RetiringRuntimes,
+    /// Plain default-shell Dojos created by this daemon, with their original
+    /// Splint and incarnation; see `Request::CloseUnusedDojo`.
+    plain_dojos: StdMutex<HashMap<DojoId, PlainDojo>>,
+    /// Lairs created by this daemon under a generated name and not renamed
+    /// since; an unused close removes one with its last Dojo.
+    generated_lairs: StdMutex<HashSet<LairId>>,
+    attachments: AttachmentRegistry,
     transient_leases: Arc<StdMutex<TransientLeaseRegistry>>,
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
@@ -773,6 +988,8 @@ struct DaemonState {
     metadata: Option<MetadataStore>,
     #[cfg(test)]
     topology_save_failure_countdown: AtomicU64,
+    #[cfg(test)]
+    spawn_attempts: AtomicUsize,
     policy: Mutex<policy::PolicyStore>,
     audit: Mutex<audit::AuditStore>,
     daemon_audit_peer: splinterm_protocol::AuditPeer,
@@ -792,6 +1009,7 @@ struct DaemonState {
     _rollback_handoff: Option<splinterd::handoff_coordinator::RollbackHandoffAuthority>,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
+    agent_status: Arc<agent_status::AgentStatusService>,
 }
 
 /// Read the kernel nodename once for this handshake, without environment or subprocesses.
@@ -954,6 +1172,7 @@ async fn run_daemon(
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let (connection_revocations, _) = broadcast::channel(CONNECTION_LIMIT);
+    let retiring = RetiringRuntimes::default();
     let (policy_reloads, _) = broadcast::channel(1);
     let mut policy = policy::PolicyStore::default();
     let policy_generation = policy.reload(policy::configured_path().as_deref(), &lair);
@@ -962,7 +1181,11 @@ async fn run_daemon(
     }
     let state = Arc::new(DaemonState {
         topology: RwLock::new(lair),
-        runtimes: Mutex::new(RuntimeRegistry::default()),
+        runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
+        retiring,
+        plain_dojos: StdMutex::default(),
+        generated_lairs: StdMutex::default(),
+        attachments: AttachmentRegistry::default(),
         transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
@@ -976,6 +1199,8 @@ async fn run_daemon(
         metadata: Some(metadata),
         #[cfg(test)]
         topology_save_failure_countdown: AtomicU64::new(u64::MAX),
+        #[cfg(test)]
+        spawn_attempts: AtomicUsize::new(0),
         policy: Mutex::new(policy),
         audit: Mutex::new(audit::AuditStore::default()),
         daemon_audit_peer,
@@ -1000,7 +1225,9 @@ async fn run_daemon(
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
+        agent_status: Arc::default(),
     });
+    let _agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
@@ -1171,6 +1398,9 @@ async fn run_daemon(
                 Err(error) => error!(%error, "live Splint shutdown task failed"),
             }
         }
+        // Splints closed before shutdown may still be in their shutdown grace.
+        state.retiring.tasks.close();
+        state.retiring.tasks.wait().await;
         time::timeout(EXIT_OBSERVER_TIMEOUT, state.exit_observers.wait())
             .await
             .context("timed out while reconciling process exits during shutdown")?;
@@ -1599,7 +1829,7 @@ const fn diagnostic_lifecycle_event(
         Request::NewDojo { .. } | Request::NewDojoAutomation { .. } => Some(Event::DojoCreated),
         Request::MaterializePreset { .. } => Some(Event::PresetMaterialized),
         Request::CloseSplint { .. } => Some(Event::SplintClosed),
-        Request::CloseDojo { .. } => Some(Event::DojoClosed),
+        Request::CloseDojo { .. } | Request::CloseUnusedDojo { .. } => Some(Event::DojoClosed),
         Request::TerminateLair { .. } => Some(Event::LairTerminated),
         Request::RenameLair { .. } => Some(Event::LairRenamed),
         Request::RenameDojo { .. } => Some(Event::DojoRenamed),
@@ -1608,6 +1838,17 @@ const fn diagnostic_lifecycle_event(
         | Request::RestoreLair { .. } => Some(Event::TopologyRestored),
         _ => None,
     }
+}
+
+/// An unused-Dojo close that found the Dojo in use changed nothing.
+const fn dojo_kept_in_use(response: &Response) -> bool {
+    matches!(
+        response,
+        Response::UnusedDojoClose {
+            outcome: UnusedDojoCloseOutcome::Used { .. },
+            ..
+        }
+    )
 }
 
 fn trace_diagnostic_lifecycle(
@@ -1779,7 +2020,7 @@ async fn serve_authenticated(
     )
     .await?;
 
-    let mut subscriptions = HashMap::<u64, AbortOnDrop>::new();
+    let mut subscriptions = HashMap::<u64, ConnectionSubscription>::new();
     let mut policy_reloads = state.policy_reloads.subscribe();
     let mut connection_revocations = state.connection_revocations.subscribe();
     let mut last_request_id = 0_u64;
@@ -1976,6 +2217,7 @@ async fn serve_authenticated(
                     }) => {
                         if let (Some(correlation), Some(event)) =
                             (diagnostic_correlation, diagnostic_event)
+                            && !dojo_kept_in_use(&response)
                         {
                             trace_diagnostic_lifecycle(correlation, event, &response);
                         }
@@ -1993,6 +2235,13 @@ async fn serve_authenticated(
                                 .await?;
                                 continue;
                             }
+                            let attachment = match register_attachment(state, &subscription) {
+                                Ok(attachment) => attachment,
+                                Err(error) => {
+                                    send_response(outbound, state, request_id, Err(error)).await?;
+                                    continue;
+                                }
+                            };
                             send_response(outbound, state, request_id, Ok(response)).await?;
                             let (id, task) = match subscription {
                                 PendingSubscription::Terminal {
@@ -2054,7 +2303,13 @@ async fn serve_authenticated(
                                     ),
                                 ),
                             };
-                            subscriptions.insert(id, AbortOnDrop::new(task));
+                            subscriptions.insert(
+                                id,
+                                ConnectionSubscription {
+                                    _task: AbortOnDrop::new(task),
+                                    _attachment: attachment,
+                                },
+                            );
                         } else {
                             send_response(outbound, state, request_id, Ok(response)).await?;
                         }
@@ -2460,6 +2715,153 @@ async fn install_topology(state: &DaemonState, candidate: Topology) {
     *state.topology.write().await = candidate;
 }
 
+/// Records a just-committed Dojo as closable while unused when it runs a
+/// plain default shell; `named` marks a name the user chose. Callers hold the
+/// topology transaction. Entries for Dojos that no longer exist are dropped here.
+async fn record_plain_dojo(
+    state: &DaemonState,
+    dojo_id: DojoId,
+    splint_id: SplintId,
+    incarnation: u64,
+    plain: bool,
+    named: bool,
+) {
+    let topology = state.topology.read().await;
+    state
+        .generated_lairs
+        .lock()
+        .unwrap()
+        .retain(|lair_id| topology.find_lair(*lair_id).is_some());
+    let mut plain_dojos = state.plain_dojos.lock().unwrap();
+    plain_dojos.retain(|dojo_id, _| topology.find_dojo(*dojo_id).is_some());
+    if !plain {
+        return;
+    }
+    plain_dojos.insert(
+        dojo_id,
+        PlainDojo {
+            splint_id,
+            incarnation,
+            organized: named.then_some(DojoUse::Renamed),
+        },
+    );
+}
+
+/// Records a just-committed Lair whose client said Splinterm generated its
+/// name, which an unused close may remove with its last Dojo. The client's
+/// explicit provenance decides, never the name's shape, so a user-chosen name
+/// that happens to look generated is kept. Renaming it removes the mark.
+fn record_generated_lair(state: &DaemonState, lair: &Lair, generated_name: bool) {
+    if generated_name {
+        state.generated_lairs.lock().unwrap().insert(lair.id);
+    }
+}
+
+/// Renaming a Dojo or its Splint, or splitting it, is a user action that keeps
+/// the Dojo even after the split pane closes again.
+fn record_dojo_organized(state: &DaemonState, dojo_id: DojoId, action: DojoUse) {
+    if let Some(plain) = state.plain_dojos.lock().unwrap().get_mut(&dojo_id) {
+        plain.organized.get_or_insert(action);
+    }
+}
+
+/// Decides whether a Dojo is unused and claims its Splint if so.
+///
+/// Callers hold the topology transaction, which orders this against splits,
+/// renames, relaunches, and closes. Client input does not take the
+/// transaction; the claim on the runtime's use latch orders it instead, so
+/// either the input lands and the Dojo counts as used, or the claim wins and
+/// the input fails. Attaches do not take the transaction either; the
+/// attachment registry lock orders them against the claim, so either the
+/// attachment is counted and the Dojo counts as attached, or the claim wins
+/// and the attach is refused. The returned claim releases itself unless
+/// disarmed.
+async fn claim_unused_dojo(
+    state: &DaemonState,
+    topology: &Topology,
+    dojo_id: DojoId,
+) -> Result<Result<UnusedClaim, DojoUse>, ProtocolError> {
+    let dojo = topology.find_dojo(dojo_id).ok_or_else(not_found)?;
+    let LayoutNode::Leaf(splint) = &dojo.root else {
+        return Ok(Err(DojoUse::Split));
+    };
+    let original = state.plain_dojos.lock().unwrap().get(&dojo_id).copied();
+    let Some(original) = original else {
+        return Ok(Err(DojoUse::Launch));
+    };
+    if let Some(action) = original.organized {
+        return Ok(Err(action));
+    }
+    let original_incarnation = original.incarnation;
+    if original.splint_id != splint.id {
+        return Ok(Err(DojoUse::Split));
+    }
+    if !matches!(splint.state, SplintState::Running) {
+        return Ok(Err(DojoUse::NotRunning));
+    }
+    let Some(handle) = state.runtimes.lock().await.handle(splint.id) else {
+        return Ok(Err(DojoUse::NotRunning));
+    };
+    if handle.incarnation.value() != original_incarnation
+        || splint.last_incarnation != Some(original_incarnation)
+    {
+        return Ok(Err(DojoUse::Launch));
+    }
+    if handle.has_received_input() {
+        return Ok(Err(DojoUse::Input));
+    }
+    if state.attachments.is_attached(splint.id) {
+        return Ok(Err(DojoUse::Attached));
+    }
+    if handle.root_holds_foreground().await != Some(true) {
+        return Ok(Err(DojoUse::Foreground));
+    }
+    // An attachment that arrived while the foreground was read keeps the Dojo.
+    // Once the claim is held, new attachments are refused until it is released.
+    Ok(state.attachments.claim_unattached(handle))
+}
+
+/// A held claim on an unused runtime's use latch, during which input fails.
+///
+/// Dropping it before [`Self::disarm`] releases the claim, so an error, or a
+/// request cancelled because its client went away, never leaves the Splint
+/// refusing input.
+struct UnusedClaim {
+    handle: LiveSplintHandle,
+    armed: bool,
+}
+
+impl UnusedClaim {
+    fn take(handle: LiveSplintHandle) -> Option<Self> {
+        // Build the guard only once the claim is held: dropping an armed guard
+        // releases whatever claim the latch carries.
+        if !handle.claim_unused() {
+            return None;
+        }
+        Some(Self {
+            handle,
+            armed: true,
+        })
+    }
+
+    fn identity(&self) -> (SplintId, u64) {
+        (self.handle.splint_id, self.handle.incarnation.value())
+    }
+
+    /// Keeps the claim for good, once the Dojo is gone from the topology.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnusedClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.release_unused_claim();
+        }
+    }
+}
+
 async fn publish_topology(
     state: &DaemonState,
     revision: splinterm_core::TopologyRevision,
@@ -2481,11 +2883,12 @@ type RuntimeShutdown = tokio::task::JoinHandle<Result<ProcessExit, LiveError>>;
 /// The shutdowns run detached and concurrently, so a request cancelled after
 /// the removal still signals and reaps every process.
 fn begin_runtime_shutdowns(
+    retiring: &RetiringRuntimes,
     runtimes: impl IntoIterator<Item = LiveSplintRuntime>,
 ) -> Vec<RuntimeShutdown> {
     runtimes
         .into_iter()
-        .map(|runtime| tokio::spawn(runtime.shutdown()))
+        .map(|runtime| retiring.spawn(runtime))
         .collect()
 }
 
@@ -2536,14 +2939,14 @@ fn splint_launch_context(topology: &Topology, splint_id: SplintId) -> Option<Spl
 
 struct RuntimeCreationGuard {
     runtime: Option<LiveSplintRuntime>,
-    cleanup_tasks: TaskTracker,
+    retiring: RetiringRuntimes,
 }
 
 impl RuntimeCreationGuard {
-    fn new(runtime: LiveSplintRuntime, cleanup_tasks: TaskTracker) -> Self {
+    fn new(runtime: LiveSplintRuntime, retiring: RetiringRuntimes) -> Self {
         Self {
             runtime: Some(runtime),
-            cleanup_tasks,
+            retiring,
         }
     }
 
@@ -2562,28 +2965,46 @@ impl RuntimeCreationGuard {
 impl Drop for RuntimeCreationGuard {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            self.cleanup_tasks.spawn(async move {
-                let _ = runtime.shutdown().await;
-            });
+            drop(self.retiring.spawn(runtime));
         }
     }
 }
 
+/// Reserves a live-registry slot before a launch spawns its process.
+async fn reserve_launch_slot(state: &DaemonState) -> Result<LaunchSlot, ProtocolError> {
+    state
+        .runtimes
+        .lock()
+        .await
+        .reserve()
+        .ok_or_else(registry_full)
+}
+
+fn registry_full() -> ProtocolError {
+    ProtocolError::new(ErrorCode::ResourceLimit, "live Splint registry is full")
+}
+
+/// Spawns a Splint process. The caller's [`LaunchSlot`] proves the registry
+/// had room before the process existed.
 async fn spawn_runtime(
     state: &DaemonState,
+    slot: &LaunchSlot,
     context: SplintLaunchContext,
     launch: &splinterm_protocol::LaunchParameters,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
-    spawn_runtime_with_size(state, context, launch, None).await
+    spawn_runtime_with_size(state, slot, context, launch, None).await
 }
 
 async fn spawn_runtime_with_size(
     state: &DaemonState,
+    _slot: &LaunchSlot,
     context: SplintLaunchContext,
     launch: &splinterm_protocol::LaunchParameters,
     initial_size: Option<(u16, u16)>,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
     launch.validate()?;
+    #[cfg(test)]
+    state.spawn_attempts.fetch_add(1, Ordering::SeqCst);
     let pty_command = if let Some((program, arguments)) = launch.command.split_first() {
         PtyCommand::new(program, launch.cwd.clone())
             .args(arguments.iter())
@@ -2863,7 +3284,8 @@ async fn start_exited_splint(
 
     let context =
         splint_launch_context(&*state.topology.read().await, splint_id).ok_or_else(not_found)?;
-    let runtime = spawn_runtime(state, context, launch).await?;
+    let slot = reserve_launch_slot(state).await?;
+    let runtime = spawn_runtime(state, &slot, context, launch).await?;
     let handle = runtime.handle();
     let incarnation = handle.incarnation.value();
     let previous_topology = state.topology.read().await.clone();
@@ -2880,26 +3302,26 @@ async fn start_exited_splint(
     let (candidate, topology_revision) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
-            let _ = runtime.shutdown().await;
+            drop(state.retiring.spawn(runtime));
             return Err(error);
         }
     };
     let rejected = {
         let mut lair = state.topology.write().await;
         let mut runtimes = state.runtimes.lock().await;
-        match runtimes.insert(runtime) {
+        match runtimes.insert(runtime, slot) {
             Ok(()) => {
                 *lair = candidate;
                 None
             }
-            Err(runtime) => Some(runtime),
+            Err(rejected) => Some(rejected),
         }
     };
-    if let Some(runtime) = rejected {
+    if let Some((runtime, _slot)) = rejected {
         if persist_topology(state, &previous_topology).await.is_err() {
             error!("failed to roll back durable restore after registry rejection");
         }
-        let _ = runtime.shutdown().await;
+        drop(state.retiring.spawn(runtime));
         return Err(ProtocolError::new(
             ErrorCode::ControllerUnavailable,
             "another restore won the Splint runtime race",
@@ -3104,6 +3526,23 @@ async fn retire_transient_lair_under_transaction(
             .collect::<Vec<_>>()
     };
     state.transient_leases.lock().unwrap().remove_lair(lair_id);
+    revoke_retired_identities(state, &splint_ids, &identities, "transient Lair retired").await;
+    // Shutdown may wait through the full grace; it must not hold the transaction.
+    for runtime in runtimes {
+        drop(state.retiring.spawn(runtime));
+    }
+    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
+    true
+}
+
+/// Releases focus, control, and grants held on Splints whose live runtimes a
+/// topology change just removed.
+async fn revoke_retired_identities(
+    state: &DaemonState,
+    splint_ids: &[SplintId],
+    identities: &[(SplintId, u64)],
+    reason: &'static str,
+) {
     {
         let mut focus = state.graphical_focus.lock().await;
         if focus
@@ -3113,7 +3552,7 @@ async fn retire_transient_lair_under_transaction(
             *focus = None;
         }
     }
-    for (splint_id, incarnation) in identities {
+    for &(splint_id, incarnation) in identities {
         let (controller, transfer) = {
             let mut controllers = state.controller.lock().await;
             (
@@ -3139,20 +3578,15 @@ async fn retire_transient_lair_under_transaction(
             );
         }
         publish_control_status(state, splint_id, incarnation).await;
-        let revoked = state.grants.lock().await.revoke_identity(
-            splint_id,
-            incarnation,
-            "transient Lair retired",
-        );
+        let revoked = state
+            .grants
+            .lock()
+            .await
+            .revoke_identity(splint_id, incarnation, reason);
         for grant_id in revoked {
             let _ = state.revocations.send(Revocation { grant_id });
         }
     }
-    for runtime in runtimes {
-        let _ = runtime.shutdown().await;
-    }
-    publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
-    true
 }
 
 async fn retire_transient_lair_for_owner(state: &DaemonState, connection_id: u64) -> bool {
@@ -3321,6 +3755,9 @@ fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
 #[derive(Debug, Default)]
 struct RequestAuthorizationContext {
     policy_match: Option<policy::PolicyMatch>,
+    /// The incarnation of the single Splint resource the policy matched, if
+    /// any; a request that names an incarnation must still name this one.
+    policy_splint_incarnation: Option<u64>,
     ephemeral_grant_id: Option<u64>,
     interactive_bypass: bool,
 }
@@ -3338,6 +3775,10 @@ impl RequestAuthorizationContext {
 
     fn authorized_grant_id(&self) -> Option<u64> {
         self.ephemeral_grant_id
+    }
+
+    fn policy_splint_incarnation(&self) -> Option<u64> {
+        self.policy_splint_incarnation
     }
 
     fn may_manage_authorization(
@@ -3368,6 +3809,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::InspectTopology
             | Request::SubscribeTopology
             | Request::InspectSplint { .. }
+            | Request::ResolveLaunchDirectory { .. }
             | Request::RequestAccess { .. }
             | Request::AuthorizationStatus { .. }
             | Request::RevokeAccess { .. }
@@ -3389,6 +3831,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::NewDojoAutomation { .. }
             | Request::MaterializePreset { .. }
             | Request::CloseDojo { .. }
+            | Request::CloseUnusedDojo { .. }
             | Request::TerminateLair { .. }
             | Request::RenameLair { .. }
             | Request::RenameDojo { .. }
@@ -3410,6 +3853,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::Resize { .. }
             | Request::Detach { .. }
             | Request::KillSplint { .. }
+            | Request::ReportAgentStatus { .. }
     )
 }
 
@@ -3488,6 +3932,7 @@ fn consent_capable_request(request: &Request) -> bool {
             | Request::Input { .. }
             | Request::Resize { .. }
             | Request::KillSplint { .. }
+            | Request::ReportAgentStatus { .. }
     )
 }
 
@@ -3528,6 +3973,7 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                             AccessScope::TopologyName => Scope::TopologyNameMutate,
                             AccessScope::ProcessSpawn => Scope::ProcessSpawn,
                             AccessScope::ProcessRestore => Scope::ProcessRestore,
+                            AccessScope::AgentStatusReport => Scope::AgentStatusReport,
                             AccessScope::ClipboardRead | AccessScope::ClipboardWrite => {
                                 return None;
                             }
@@ -3558,7 +4004,8 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                 }
                 ConditionalRequirement::RequestedControlTakeover
                 | ConditionalRequirement::LiveProcessTermination
-                | ConditionalRequirement::ExpandedLiveProcessTermination => {}
+                | ConditionalRequirement::ExpandedLiveProcessTermination
+                | ConditionalRequirement::AgentStatusSelfReportOrGrant => {}
             }
             scopes
         }
@@ -4056,7 +4503,14 @@ async fn request_policy_resources(
                 }
             }
         }
+        // The report's incarnation is checked after authorization, so an
+        // authorized reporter learns of a stale incarnation explicitly.
         Request::InspectSplint { splint_id }
+        | Request::ReportAgentStatus { splint_id, .. }
+        | Request::ResolveLaunchDirectory {
+            source_splint_id: splint_id,
+            ..
+        }
         | Request::RelaunchSplint { splint_id, .. }
         | Request::RelaunchSplintAutomation { splint_id, .. }
         | Request::RestoreSplint { splint_id, .. }
@@ -4149,9 +4603,9 @@ async fn request_policy_resources(
         | Request::SplitSplintAutomation {
             target_splint_id, ..
         } => vec![splint(*target_splint_id, None)?],
-        Request::RestoreDojo { dojo_id, .. } | Request::CloseDojo { dojo_id, .. } => {
-            dojo(*dojo_id, true)?
-        }
+        Request::RestoreDojo { dojo_id, .. }
+        | Request::CloseDojo { dojo_id, .. }
+        | Request::CloseUnusedDojo { dojo_id } => dojo(*dojo_id, true)?,
         Request::RestoreLair { lair_id, .. } | Request::TerminateLair { lair_id, .. } => {
             lair(*lair_id, true)?
         }
@@ -4225,6 +4679,7 @@ fn ephemeral_access_scopes(required: &[authorization::OperationScope]) -> Option
             Scope::ProcessTerminate => AccessScope::Terminate,
             Scope::TopologyLayoutMutate => AccessScope::TopologyLayout,
             Scope::TopologyNameMutate => AccessScope::TopologyName,
+            Scope::AgentStatusReport => AccessScope::AgentStatusReport,
             Scope::AuthorizationInspect | Scope::AuthorizationRevoke | Scope::AuditInspect => {
                 return None;
             }
@@ -4357,8 +4812,13 @@ async fn authorize_request(
         None
     };
     if let Some(policy_match) = matched {
+        let policy_splint_incarnation = match resources.as_slice() {
+            [policy::PolicyResource::Splint { incarnation, .. }] => *incarnation,
+            _ => None,
+        };
         return Ok(RequestAuthorizationContext {
             policy_match: Some(policy_match),
+            policy_splint_incarnation,
             ..RequestAuthorizationContext::default()
         });
     }
@@ -4557,10 +5017,12 @@ async fn append_request_result_audit(
     } else {
         "trusted_or_owned_authority"
     };
-    let outcome = if result.is_ok() {
-        splinterm_protocol::AuditOutcome::Succeeded
-    } else {
-        splinterm_protocol::AuditOutcome::Failed
+    let outcome = match result {
+        Ok(handled) if dojo_kept_in_use(&handled.response) => {
+            splinterm_protocol::AuditOutcome::Cancelled
+        }
+        Ok(_) => splinterm_protocol::AuditOutcome::Succeeded,
+        Err(_) => splinterm_protocol::AuditOutcome::Failed,
     };
     // A successful scoped preflight establishes no mutation commit. Denials and
     // failed preflights remain auditable; only the final mutation records success.
@@ -4825,9 +5287,11 @@ async fn resolve_automation_mutation(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         } => Request::CreateLair {
             expected_topology_revision,
             name,
+            generated_name,
             launch: resolved_automation_launch(
                 launch,
                 state.owner_home.clone().ok_or_else(|| {
@@ -4880,6 +5344,7 @@ async fn resolve_automation_mutation(
             lair_id,
             name,
             launch,
+            generated_name,
         } => {
             let cwd = match launch.cwd.clone() {
                 Some(cwd) => cwd,
@@ -4891,6 +5356,7 @@ async fn resolve_automation_mutation(
                 name,
                 launch: resolved_automation_launch(launch, cwd)?,
                 promote_transient_lair: false,
+                generated_name,
             }
         }
         request => request,
@@ -4907,6 +5373,14 @@ async fn handle_request(
     remote_interactive_client: bool,
 ) -> Result<Handled, ProtocolError> {
     let request = bind_current_terminal_incarnation(request, state, peer).await?;
+    // Self-reports from inside the Splint need no grant and are not audited
+    // per update; any other peer takes the ordinary authorized path below.
+    if let Some(result) = agent_status::handle_self_report(state, peer, &request).await {
+        return result.map(|response| Handled {
+            response,
+            subscription: None,
+        });
+    }
     let audit_resource = request_policy_resources(&request, state)
         .await
         .unwrap_or_default()
@@ -5076,6 +5550,16 @@ async fn handle_authorized_request(
                 title,
                 topology_revision: snapshot.revision,
                 runtime,
+            }
+        }
+        Request::ResolveLaunchDirectory {
+            source_splint_id,
+            directory,
+        } => {
+            directory.validate()?;
+            Response::LaunchDirectoryResolved {
+                source_splint_id,
+                cwd: resolve_launch_directory(state, source_splint_id, directory).await?,
             }
         }
         Request::RequestAccess {
@@ -5364,6 +5848,7 @@ async fn handle_authorized_request(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5411,8 +5896,9 @@ async fn handle_authorized_request(
                 dojo: dojo_id,
                 splint: splint_id,
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
-            let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+            let slot = reserve_launch_slot(state).await?;
+            let runtime = spawn_runtime(state, &slot, context, &launch).await?;
+            let runtime = RuntimeCreationGuard::new(runtime, state.retiring.clone());
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
@@ -5432,22 +5918,32 @@ async fn handle_authorized_request(
             let rejected = {
                 let mut topology = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
+                match runtimes.insert(runtime, slot) {
                     Ok(()) => {
                         *topology = candidate;
                         None
                     }
-                    Err(runtime) => Some(runtime),
+                    Err(rejected) => Some(rejected),
                 }
             };
-            if let Some(runtime) = rejected {
-                let _ = runtime.shutdown().await;
+            if let Some((runtime, _slot)) = rejected {
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
             }
             reservation.commit();
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                false,
+            )
+            .await;
+            record_generated_lair(state, &lair, generated_name);
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
             Response::LairCreated {
@@ -5460,6 +5956,7 @@ async fn handle_authorized_request(
             expected_topology_revision,
             name,
             launch,
+            generated_name,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5495,13 +5992,15 @@ async fn handle_authorized_request(
                 dojo: dojo_id,
                 splint: splint_id,
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
+            let slot = reserve_launch_slot(state).await?;
+            let runtime = spawn_runtime(state, &slot, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
             splint.state = SplintState::Running;
-            if let Err(runtime) = state.runtimes.lock().await.insert(runtime) {
-                let _ = runtime.shutdown().await;
+            let admitted = state.runtimes.lock().await.insert(runtime, slot);
+            if let Err((runtime, _slot)) = admitted {
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
@@ -5528,7 +6027,7 @@ async fn handle_authorized_request(
                         .await
                         .remove(splint_id)
                         .expect("unpublished persistent runtime remains admitted");
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     return Err(error);
                 }
             };
@@ -5544,6 +6043,16 @@ async fn handle_authorized_request(
                     let _ = state.revocations.send(Revocation { grant_id });
                 }
             }
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                false,
+            )
+            .await;
+            record_generated_lair(state, &dojo, generated_name);
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::LairCreated).await;
             Response::LairCreated {
@@ -5578,12 +6087,7 @@ async fn handle_authorized_request(
                     return Err(not_found());
                 }
             }
-            if state.runtimes.lock().await.entries.len() >= MAX_LIVE_SPLINTS {
-                return Err(ProtocolError::new(
-                    ErrorCode::ResourceLimit,
-                    "live Splint registry is full",
-                ));
-            }
+            let slot = reserve_launch_slot(state).await?;
 
             let mut splint = Splint::shell(launch.cwd.clone());
             splint.command.clone_from(&launch.command);
@@ -5606,7 +6110,8 @@ async fn handle_authorized_request(
             } else {
                 None
             };
-            let runtime = spawn_runtime_with_size(state, context, &launch, initial_size).await?;
+            let runtime =
+                spawn_runtime_with_size(state, &slot, context, &launch, initial_size).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
 
@@ -5627,30 +6132,33 @@ async fn handle_authorized_request(
             let (candidate, topology_revision) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     return Err(error);
                 }
             };
             let rejected = {
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
+                match runtimes.insert(runtime, slot) {
                     Ok(()) => {
                         *lair = candidate;
                         None
                     }
-                    Err(runtime) => Some(runtime),
+                    Err(rejected) => Some(rejected),
                 }
             };
-            if let Some(runtime) = rejected {
+            if let Some((runtime, _slot)) = rejected {
                 if persist_topology(state, &previous).await.is_err() {
                     error!("failed to roll back durable split after runtime registry rejection");
                 }
-                let _ = runtime.shutdown().await;
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
                 ));
+            }
+            if let Some(context) = splint_launch_context(&*state.topology.read().await, splint_id) {
+                record_dojo_organized(state, context.dojo, DojoUse::Split);
             }
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::SplintSplit).await;
@@ -5791,7 +6299,7 @@ async fn handle_authorized_request(
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
                 *lair = candidate;
-                begin_runtime_shutdowns(runtimes.remove(splint_id))
+                begin_runtime_shutdowns(&state.retiring, runtimes.remove(splint_id))
             };
             publish_topology(state, topology_revision, TopologyChangeKind::SplintClosed).await;
             drop(transaction);
@@ -5833,6 +6341,7 @@ async fn handle_authorized_request(
             name,
             launch,
             promote_transient_lair,
+            generated_name,
         } => {
             let _transaction = state
                 .topology_transactions
@@ -5867,7 +6376,8 @@ async fn handle_authorized_request(
                 dojo: dojo_id,
                 splint: splint_id,
             };
-            let runtime = spawn_runtime(state, context, &launch).await?;
+            let slot = reserve_launch_slot(state).await?;
+            let runtime = spawn_runtime(state, &slot, context, &launch).await?;
             let handle = runtime.handle();
             let incarnation = handle.incarnation.value();
             splint.last_incarnation = Some(incarnation);
@@ -5885,26 +6395,26 @@ async fn handle_authorized_request(
             let (candidate, (topology_revision, promoted)) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     return Err(error);
                 }
             };
             let rejected = {
                 let mut lair = state.topology.write().await;
                 let mut runtimes = state.runtimes.lock().await;
-                match runtimes.insert(runtime) {
+                match runtimes.insert(runtime, slot) {
                     Ok(()) => {
                         *lair = candidate;
                         None
                     }
-                    Err(runtime) => Some(runtime),
+                    Err(rejected) => Some(rejected),
                 }
             };
-            if let Some(runtime) = rejected {
+            if let Some((runtime, _slot)) = rejected {
                 if persist_topology(state, &previous).await.is_err() {
                     error!("failed to roll back durable Dojo creation after registry rejection");
                 }
-                let _ = runtime.shutdown().await;
+                drop(state.retiring.spawn(runtime));
                 return Err(ProtocolError::new(
                     ErrorCode::ResourceLimit,
                     "live Splint registry rejected the process",
@@ -5918,6 +6428,17 @@ async fn handle_authorized_request(
                     .remove_lair(lair_id)
                     .expect("authorized transient promotion retains its lease");
             }
+            record_plain_dojo(
+                state,
+                dojo_id,
+                splint_id,
+                incarnation,
+                launch.command.is_empty(),
+                // A name the user chose counts as use, like a rename, even
+                // when it equals the default label.
+                !generated_name,
+            )
+            .await;
             observe_process_exit(state, handle);
             publish_topology(state, topology_revision, TopologyChangeKind::DojoCreated).await;
             Response::DojoStarted {
@@ -5953,6 +6474,13 @@ async fn handle_authorized_request(
                 .iter()
                 .map(|dojo| dojo.id)
                 .collect::<Vec<_>>();
+            let renamed_lair = match &target {
+                PresetTarget::ExistingLair {
+                    lair_id,
+                    rename: Some(_),
+                } => Some(*lair_id),
+                _ => None,
+            };
             let (candidate, (lair_id, topology_revision)) =
                 durable_topology_candidate(state, |topology| match target {
                     PresetTarget::NewLair { name } => topology.materialize_lair_with_provenance_at(
@@ -5972,6 +6500,9 @@ async fn handle_authorized_request(
                 })
                 .await?;
             install_topology(state, candidate).await;
+            if let Some(renamed_lair) = renamed_lair {
+                state.generated_lairs.lock().unwrap().remove(&renamed_lair);
+            }
             publish_topology(
                 state,
                 topology_revision,
@@ -5985,14 +6516,20 @@ async fn handle_authorized_request(
                     dojo: leaf.dojo_id,
                     splint: leaf.splint_id,
                 };
-                let Ok(runtime) = spawn_runtime(state, context, &leaf.launch).await else {
+                // A leaf the registry has no room for fails without spawning.
+                let slot = state.runtimes.lock().await.reserve();
+                let spawned = match &slot {
+                    Some(slot) => spawn_runtime(state, slot, context, &leaf.launch).await.ok(),
+                    None => None,
+                };
+                let (Some(slot), Some(runtime)) = (slot, spawned) else {
                     let revision =
                         mark_materialized_leaf_failed(state, leaf.splint_id, None).await?;
                     publish_topology(state, revision, TopologyChangeKind::RuntimeChanged).await;
                     append_preset_leaf_audit(state, leaf.splint_id, false).await;
                     continue;
                 };
-                let runtime = RuntimeCreationGuard::new(runtime, state.exit_observers.clone());
+                let runtime = RuntimeCreationGuard::new(runtime, state.retiring.clone());
                 let handle = runtime.handle();
                 let incarnation = handle.incarnation.value();
                 let mut running_candidate = state.topology.read().await.clone();
@@ -6008,7 +6545,7 @@ async fn handle_authorized_request(
                         "failed to persist running preset leaf after topology commit"
                     );
                     let runtime = runtime.take();
-                    let _ = runtime.shutdown().await;
+                    drop(state.retiring.spawn(runtime));
                     let revision =
                         mark_materialized_leaf_failed(state, leaf.splint_id, Some(incarnation))
                             .await?;
@@ -6020,16 +6557,16 @@ async fn handle_authorized_request(
                 let rejected = {
                     let mut topology = state.topology.write().await;
                     let mut runtimes = state.runtimes.lock().await;
-                    match runtimes.insert(runtime) {
+                    match runtimes.insert(runtime, slot) {
                         Ok(()) => {
                             *topology = running_candidate;
                             None
                         }
-                        Err(runtime) => Some(runtime),
+                        Err(rejected) => Some(rejected),
                     }
                 };
-                if let Some(runtime) = rejected {
-                    let _ = runtime.shutdown().await;
+                if let Some((runtime, _slot)) = rejected {
+                    drop(state.retiring.spawn(runtime));
                     let revision =
                         mark_materialized_leaf_failed(state, leaf.splint_id, Some(incarnation))
                             .await?;
@@ -6071,12 +6608,96 @@ async fn handle_authorized_request(
                 let mut lair = state.topology.write().await;
                 let mut registry = state.runtimes.lock().await;
                 *lair = candidate;
-                begin_runtime_shutdowns(ids.into_iter().filter_map(|id| registry.remove(id)))
+                begin_runtime_shutdowns(
+                    &state.retiring,
+                    ids.into_iter().filter_map(|id| registry.remove(id)),
+                )
             };
             publish_topology(state, topology_revision, TopologyChangeKind::DojoClosed).await;
             drop(transaction);
             finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
+        }
+        Request::CloseUnusedDojo { dojo_id } => {
+            let transaction = state
+                .topology_transactions
+                .acquire()
+                .await
+                .map_err(|_| internal())?;
+            let topology = state.topology.read().await.clone();
+            match claim_unused_dojo(state, &topology, dojo_id).await? {
+                Err(reason) => Response::UnusedDojoClose {
+                    dojo_id,
+                    outcome: UnusedDojoCloseOutcome::Used { reason },
+                },
+                Ok(claim) => {
+                    let (splint_id, incarnation) = claim.identity();
+                    // A Lair the user never named ends with its last Dojo.
+                    let emptied_lair = topology
+                        .lairs()
+                        .find(|lair| lair.dojos.len() == 1 && lair.dojos[0].id == dojo_id)
+                        .map(|lair| lair.id)
+                        .filter(|lair_id| state.generated_lairs.lock().unwrap().contains(lair_id));
+                    // An error or a cancelled request drops the claim, releasing it.
+                    let (candidate, topology_revision) =
+                        durable_topology_candidate(state, |topology| {
+                            topology.terminate_dojo_at(topology.revision(), dojo_id)?;
+                            if let Some(lair_id) = emptied_lair {
+                                topology.remove_lair(lair_id);
+                            }
+                            Ok(topology.revision())
+                        })
+                        .await?;
+                    let runtime = {
+                        let mut topology = state.topology.write().await;
+                        let mut registry = state.runtimes.lock().await;
+                        *topology = candidate;
+                        registry.remove(splint_id)
+                    };
+                    claim.disarm();
+                    // Retire before any further await, so a cancelled request
+                    // cannot leak the runtime. Shutdown runs in the background
+                    // and never holds the transaction; daemon shutdown waits.
+                    if let Some(runtime) = runtime {
+                        drop(state.retiring.spawn(runtime));
+                    }
+                    state.plain_dojos.lock().unwrap().remove(&dojo_id);
+                    if let Some(lair_id) = emptied_lair {
+                        state.generated_lairs.lock().unwrap().remove(&lair_id);
+                        state.transient_leases.lock().unwrap().remove_lair(lair_id);
+                    }
+                    revoke_retired_identities(
+                        state,
+                        &[splint_id],
+                        &[(splint_id, incarnation)],
+                        "unused Dojo closed",
+                    )
+                    .await;
+                    let change = if let Some(lair_id) = emptied_lair {
+                        let lair_grants = state
+                            .grants
+                            .lock()
+                            .await
+                            .revoke_lair(lair_id, "unused Lair closed");
+                        for grant_id in lair_grants {
+                            revoke_grant_controllers(state, grant_id).await;
+                            let _ = state.revocations.send(Revocation { grant_id });
+                        }
+                        TopologyChangeKind::LairTerminated
+                    } else {
+                        TopologyChangeKind::DojoClosed
+                    };
+                    publish_topology(state, topology_revision, change).await;
+                    drop(transaction);
+                    Response::UnusedDojoClose {
+                        dojo_id,
+                        outcome: UnusedDojoCloseOutcome::Closed {
+                            topology_revision,
+                            lair_removed: emptied_lair.is_some(),
+                        },
+                    }
+                }
+            }
         }
         Request::TerminateLair {
             expected_topology_revision,
@@ -6128,6 +6749,7 @@ async fn handle_authorized_request(
                 let mut registry = state.runtimes.lock().await;
                 *topology = candidate;
                 begin_runtime_shutdowns(
+                    &state.retiring,
                     splint_ids
                         .iter()
                         .filter_map(|splint_id| registry.remove(*splint_id)),
@@ -6207,6 +6829,7 @@ async fn handle_authorized_request(
             })
             .await?;
             install_topology(state, candidate).await;
+            state.generated_lairs.lock().unwrap().remove(&lair_id);
             publish_topology(state, topology_revision, TopologyChangeKind::LairRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -6248,6 +6871,7 @@ async fn handle_authorized_request(
                 })
                 .await?;
             install_topology(state, candidate).await;
+            record_dojo_organized(state, dojo_id, DojoUse::Renamed);
             if promoted {
                 state
                     .transient_leases
@@ -6297,6 +6921,9 @@ async fn handle_authorized_request(
             })
             .await?;
             install_topology(state, candidate).await;
+            if let Some(context) = splint_launch_context(&*state.topology.read().await, splint_id) {
+                record_dojo_organized(state, context.dojo, DojoUse::Renamed);
+            }
             publish_topology(state, topology_revision, TopologyChangeKind::SplintRenamed).await;
             Response::TopologyCommitted { topology_revision }
         }
@@ -6761,6 +7388,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
             bytes,
+            focus_report,
         } => {
             if !authorization.policy_authorized() && authorization.authorized_grant_id().is_none() {
                 let _ = authorize_scope(
@@ -6780,10 +7408,14 @@ async fn handle_authorized_request(
             let handle =
                 controlled_handle(state, connection_id, controller_id, splint_id, incarnation)
                     .await?;
-            handle
-                .input(bytes)
-                .await
-                .map_err(|error| input_error(&error))?;
+            // Only input the client marks as its own focus reports can leave
+            // the Dojo unused; the same bytes from anywhere else are input.
+            let written = if focus_report {
+                handle.focus_report(bytes).await
+            } else {
+                handle.input(bytes).await
+            };
+            written.map_err(|error| input_error(&error))?;
             terminal_action_acknowledgement(state, &handle).await?
         }
         Request::Resize {
@@ -6851,7 +7483,10 @@ async fn handle_authorized_request(
                 )
                 .await?;
             }
-            let _transaction = state
+            // Phase 1: revoke authority under the transaction, then release it.
+            // A resistant process can take the whole shutdown grace to exit, and
+            // unrelated topology changes must not wait behind it.
+            let transaction = state
                 .topology_transactions
                 .acquire()
                 .await
@@ -6882,25 +7517,49 @@ async fn handle_authorized_request(
             for grant_id in revoked {
                 let _ = state.revocations.send(Revocation { grant_id });
             }
-            handle.shutdown().await.map_err(|_| internal())?;
+            drop(transaction);
+
+            // Phase 2: wait for exit. The runtime stays registered, so it still
+            // counts toward the live limit, and the exit observer may finalize it
+            // first if this request is dropped.
+            // The actor stops taking commands once the child exits, so a concurrent
+            // kill or a natural exit can close it first; the exit status decides.
+            let _ = handle.shutdown().await;
             let status = handle.wait_for_exit().await.ok_or_else(internal)?;
             let code = status
                 .code
                 .or_else(|| status.signal.map(|signal| 128 + signal))
                 .unwrap_or(1);
-            if !finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code)
+
+            // Phase 3: finalize unless the exit observer, a close, or transient
+            // retirement got there first. The kill succeeded either way.
+            let transaction = state
+                .topology_transactions
+                .acquire()
                 .await
-            {
-                return Err(internal());
+                .map_err(|_| internal())?;
+            let finalized = state
+                .topology
+                .read()
+                .await
+                .find_splint(splint_id)
+                .is_none_or(|splint| matches!(splint.state, SplintState::Exited(_)));
+            if !finalized {
+                finalize_exit_if_current_under_transaction(state, splint_id, incarnation, code)
+                    .await;
             }
-            let runtime = state
-                .runtimes
-                .lock()
-                .await
-                .remove(splint_id)
-                .ok_or_else(internal)?;
-            let reaped = runtime.wait().await.map_err(|_| internal())?;
-            debug_assert_eq!(reaped, status);
+            let runtime = {
+                let mut runtimes = state.runtimes.lock().await;
+                let current = runtimes
+                    .handle(splint_id)
+                    .is_some_and(|current| current.incarnation.value() == incarnation);
+                current.then(|| runtimes.remove(splint_id)).flatten()
+            };
+            drop(transaction);
+            if let Some(runtime) = runtime {
+                let reaped = runtime.wait().await.map_err(|_| internal())?;
+                debug_assert_eq!(reaped, status);
+            }
             Response::SplintKilled {
                 splint_id,
                 incarnation,
@@ -6915,6 +7574,9 @@ async fn handle_authorized_request(
         | Request::RelaunchSplintAutomation { .. }
         | Request::NewDojoAutomation { .. } => {
             unreachable!("automation launch requests are resolved before dispatch")
+        }
+        request @ Request::ReportAgentStatus { .. } => {
+            agent_status::handle_authorized_report(state, peer, authorization, &request).await?
         }
         Request::AuditInspect {
             after_audit_id,
@@ -6946,7 +7608,8 @@ async fn subscribe_topology(
     let lair_guard = state.topology.read().await;
     let lair = lair_guard.clone();
     let live = state.runtimes.lock().await.handles();
-    let snapshot = topology_snapshot_from(lair, &live);
+    let mut snapshot = topology_snapshot_from(lair, &live);
+    state.agent_status.attach(&mut snapshot);
     let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
     let subscription = state.topology_hub.lock().await.subscribe(id, connection_id);
     drop(lair_guard);
@@ -6965,7 +7628,10 @@ async fn consistent_topology_snapshot(state: &DaemonState) -> TopologySnapshot {
 async fn topology_snapshot(state: &DaemonState) -> TopologySnapshot {
     let lair = state.topology.read().await.clone();
     let live = state.runtimes.lock().await.handles();
-    topology_snapshot_from(lair, &live)
+    let mut snapshot = topology_snapshot_from(lair, &live);
+    // Also drops statuses of retired incarnations in the publishing transaction.
+    state.agent_status.attach(&mut snapshot);
+    snapshot
 }
 
 fn topology_snapshot_from(
@@ -7026,6 +7692,7 @@ fn collect_runtime_summaries(
                 restorable: matches!(splint.state, SplintState::Exited(_)),
                 lifecycle,
                 exit_status,
+                agent_status: None,
             });
         }
         LayoutNode::Branch { first, second, .. } => {
@@ -7069,6 +7736,42 @@ async fn resolve_splint_cwd(
     // A removed source must not turn into a home-directory launch.
     splint_durable_cwd(&*state.topology.read().await, splint_id)?;
     Ok(cwd)
+}
+
+/// Resolves a Window-creation directory on this daemon. Configured paths fall
+/// back to the owner's home; nothing falls back to another Splint's directory.
+async fn resolve_launch_directory(
+    state: &DaemonState,
+    source_splint_id: SplintId,
+    directory: splinterm_protocol::LaunchDirectory,
+) -> Result<Option<PathBuf>, ProtocolError> {
+    use splinterm_protocol::LaunchDirectory;
+
+    // A missing source is rejected before and after resolution, as for inheritance.
+    splint_durable_cwd(&*state.topology.read().await, source_splint_id)?;
+    let home = state.owner_home.clone();
+    let requested = match directory {
+        LaunchDirectory::Inherit => return resolve_splint_cwd(state, source_splint_id).await,
+        LaunchDirectory::Home => None,
+        LaunchDirectory::Absolute(path) => Some(path),
+        LaunchDirectory::HomeRelative(path) => home.as_ref().map(|home| home.join(path)),
+    };
+    let cwd = match requested {
+        Some(path) => match usable_launch_cwd(path).await {
+            Some(cwd) => Some(cwd),
+            None => usable_owner_home(home).await,
+        },
+        None => usable_owner_home(home).await,
+    };
+    splint_durable_cwd(&*state.topology.read().await, source_splint_id)?;
+    Ok(cwd)
+}
+
+async fn usable_owner_home(home: Option<PathBuf>) -> Option<PathBuf> {
+    match home {
+        Some(home) => usable_launch_cwd(home).await,
+        None => None,
+    }
 }
 
 async fn read_splint_root_cwd(
@@ -7332,12 +8035,13 @@ fn spawn_topology_subscription(
                 }
                 change = subscription.changes.recv() => {
                     let Some(change) = change else { break; };
-                    (
-                        SubscriptionEvent::TopologyChanged {
+                    let event = match change {
+                        TopologyHubEvent::Change(change) => SubscriptionEvent::TopologyChanged {
                             change: (*change).clone(),
                         },
-                        false,
-                    )
+                        TopologyHubEvent::AgentStatus(event) => (*event).clone(),
+                    };
+                    (event, false)
                 }
             };
             let frame = ServerFrame::Event {
@@ -8074,6 +8778,7 @@ fn input_error(error: &LiveError) -> ProtocolError {
         LiveError::InputQueueFull => {
             ProtocolError::new(ErrorCode::ResourceLimit, "input queue limit exceeded")
         }
+        LiveError::Retiring => ProtocolError::new(ErrorCode::NotFound, "Splint is closing"),
         _ => internal(),
     }
 }
@@ -8497,6 +9202,11 @@ async fn verify_peer(stream: &UnixStream) -> Result<(PeerIdentity, Option<consen
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
+    // The start time tells this peer from a later process reusing its PID;
+    // agent status self-reports require it to still match.
+    if let Some(start_time) = agent_status::process_start_time(identity.pid) {
+        identity.install_start_time(start_time);
+    }
     let monitor = match consent::PeerMonitor::initialize(stream, identity.pid).await {
         Ok((monitor, executable)) => {
             identity.install_persistent_executable(executable);
@@ -8608,6 +9318,20 @@ fn try_admit_connection(connections: &Arc<Semaphore>) -> Option<tokio::sync::Own
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn retiring_processes_count_toward_the_live_limit_until_reaped() {
+        let retiring = RetiringRuntimes::default();
+        let registry = RuntimeRegistry::new(retiring.clone());
+        assert!(!registry.at_capacity());
+        let mut held: Vec<_> = (0..MAX_LIVE_SPLINTS).map(|_| retiring.hold()).collect();
+        assert!(registry.at_capacity());
+        held.pop();
+        assert_eq!(retiring.count(), MAX_LIVE_SPLINTS - 1);
+        assert!(!registry.at_capacity());
+        drop(held);
+        assert_eq!(retiring.count(), 0);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn failed_accepts_pause_instead_of_ending_the_daemon() {
@@ -9624,10 +10348,15 @@ mod tests {
         metadata: Option<MetadataStore>,
     ) -> Arc<DaemonState> {
         let (revocations, _) = broadcast::channel(32);
+        let retiring = RetiringRuntimes::default();
         let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
         Arc::new(DaemonState {
             topology: RwLock::new(Topology::new()),
-            runtimes: Mutex::new(RuntimeRegistry::default()),
+            runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
+            retiring,
+            plain_dojos: StdMutex::default(),
+            generated_lairs: StdMutex::default(),
+            attachments: AttachmentRegistry::default(),
             transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
@@ -9642,6 +10371,7 @@ mod tests {
             exit_observers: TaskTracker::new(),
             metadata,
             topology_save_failure_countdown: AtomicU64::new(u64::MAX),
+            spawn_attempts: AtomicUsize::new(0),
             policy: Mutex::new(policy::PolicyStore::default()),
             audit: Mutex::new(audit::AuditStore::default()),
             daemon_audit_peer: splinterm_protocol::AuditPeer {
@@ -9669,6 +10399,7 @@ mod tests {
             _rollback_handoff: None,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
+            agent_status: Arc::default(),
         })
     }
 
@@ -9758,6 +10489,7 @@ mod tests {
                 expected_topology_revision: expected,
                 name: "failed-fresh".into(),
                 launch: test_launch(&["/bin/sh", "-c", "true"]),
+                generated_name: false,
             },
         )
         .await
@@ -9777,6 +10509,7 @@ mod tests {
                 expected_topology_revision: expected,
                 name: "fresh".into(),
                 launch: test_launch(&["/bin/sh", "-c", "true"]),
+                generated_name: false,
             },
         )
         .await
@@ -9863,6 +10596,108 @@ mod tests {
         )
         .await
         .map(|handled| handled.response)
+    }
+
+    #[test]
+    fn launch_slots_count_toward_the_live_limit_until_released() {
+        let retiring = RetiringRuntimes::default();
+        let mut registry = RuntimeRegistry::new(retiring.clone());
+        let _held: Vec<_> = (0..MAX_LIVE_SPLINTS - 1).map(|_| retiring.hold()).collect();
+        let slot = registry.reserve().expect("one slot remains");
+        assert!(registry.at_capacity());
+        assert!(registry.reserve().is_none());
+        drop(slot);
+        assert!(!registry.at_capacity());
+        assert!(registry.reserve().is_some());
+    }
+
+    // Every creation path reserves registry capacity before spawning, so a
+    // rejected request at capacity never creates a process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn creations_at_capacity_are_rejected_without_spawning() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let (lair_id, splint_id) = {
+            let mut topology = state.topology.write().await;
+            let lair = topology.create_lair("main", PathBuf::from("/tmp")).unwrap();
+            let ids = (lair.id, lair.dojos[0].default_focus);
+            assert!(topology.set_splint_state(ids.1, SplintState::Exited(0)));
+            ids
+        };
+        let _held: Vec<_> = (0..MAX_LIVE_SPLINTS)
+            .map(|_| state.retiring.hold())
+            .collect();
+        let launch = test_launch(&["/bin/sh", "-c", "sleep 30"]);
+        let requests = |revision| {
+            vec![
+                Request::CreateLair {
+                    expected_topology_revision: revision,
+                    name: "rejected".into(),
+                    launch: launch.clone(),
+                    generated_name: false,
+                },
+                Request::CreateTransientLair {
+                    expected_topology_revision: revision,
+                    name: "rejected".into(),
+                    launch: launch.clone(),
+                    generated_name: false,
+                },
+                Request::NewDojo {
+                    expected_topology_revision: revision,
+                    lair_id,
+                    name: "rejected".into(),
+                    launch: launch.clone(),
+                    promote_transient_lair: false,
+                    generated_name: false,
+                },
+                Request::SplitSplint {
+                    expected_topology_revision: revision,
+                    target_splint_id: splint_id,
+                    axis: splinterm_core::Axis::Horizontal,
+                    side: splinterm_core::SplitSide::Second,
+                    ratio: splinterm_core::SplitRatio::new(500).unwrap(),
+                    launch: launch.clone(),
+                },
+                Request::RelaunchSplint {
+                    expected_topology_revision: revision,
+                    splint_id,
+                    launch: launch.clone(),
+                },
+            ]
+        };
+        let revision = state.topology.read().await.revision();
+        for request in requests(revision) {
+            let label = format!("{request:?}");
+            let error = trusted_request(&state, 81, request)
+                .await
+                .expect_err("creation at capacity succeeded");
+            assert_eq!(error.code, ErrorCode::ResourceLimit, "{label}");
+            assert_eq!(state.spawn_attempts.load(Ordering::SeqCst), 0, "{label}");
+        }
+        let revision = state.topology.read().await.revision();
+        let Response::PresetMaterialized { panes, .. } = trusted_request(
+            &state,
+            81,
+            preset_request(
+                revision,
+                lair_id,
+                Path::new("/tmp"),
+                &["/bin/sh", "-c", "sleep 30"],
+                &["/bin/sh", "-c", "sleep 30"],
+            ),
+        )
+        .await
+        .unwrap() else {
+            panic!("preset materialization response was not returned");
+        };
+        assert_eq!(state.spawn_attempts.load(Ordering::SeqCst), 0);
+        let topology = state.topology.read().await;
+        for pane in panes {
+            assert_eq!(
+                topology.find_splint(pane.splint_id).unwrap().state,
+                SplintState::Exited(127)
+            );
+        }
+        assert!(state.runtimes.lock().await.entries.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10195,6 +11030,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "commandless-transient".into(),
                 launch,
+                generated_name: false,
             },
         )
         .await
@@ -10230,6 +11066,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "promoted-by-tab".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
             },
         )
         .await
@@ -10246,6 +11083,7 @@ mod tests {
                 name: "unowned".into(),
                 launch: test_launch(&["/bin/sh", "-c", "true"]),
                 promote_transient_lair: true,
+                generated_name: false,
             },
         )
         .await
@@ -10262,6 +11100,7 @@ mod tests {
                 name: "organized".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
                 promote_transient_lair: true,
+                generated_name: false,
             },
         )
         .await
@@ -10316,6 +11155,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "promoted-by-name".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
             },
         )
         .await
@@ -10412,6 +11252,420 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    fn plain_shell_launch() -> splinterm_protocol::LaunchParameters {
+        splinterm_protocol::LaunchParameters {
+            shell: Some("/bin/sh".into()),
+            ..test_launch(&[])
+        }
+    }
+
+    async fn reap_all(state: &Arc<DaemonState>) {
+        let runtimes = state.runtimes.lock().await.drain();
+        for runtime in runtimes {
+            let _ = runtime.shutdown().await;
+        }
+        time::timeout(Duration::from_secs(5), async {
+            while state.retiring.count() > 0 {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retiring runtimes were not reaped");
+    }
+
+    async fn create_plain_transient_dojo(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+    ) -> (DojoId, SplintId, u64) {
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            state,
+            connection_id,
+            Request::CreateTransientLair {
+                expected_topology_revision,
+                name: format!("attach {connection_id}"),
+                launch: plain_shell_launch(),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("transient create response was not returned");
+        };
+        (lair.dojos[0].id, lair.dojos[0].default_focus, incarnation)
+    }
+
+    /// Handles an Attach without counting its attachment, as the connection
+    /// loop sees it before registering the subscription.
+    async fn handled_attach(
+        state: &Arc<DaemonState>,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> PendingSubscription {
+        handle_authorized_request(
+            Request::Attach {
+                splint_id,
+                incarnation: Some(incarnation),
+                scrollback_rows: 0,
+            },
+            state,
+            &PeerIdentity::for_test(),
+            90,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+        )
+        .await
+        .unwrap()
+        .subscription
+        .expect("Attach returns a terminal subscription")
+    }
+
+    // An Attach and an unused close never both succeed: an attach counted
+    // first keeps the Dojo, and an attach still in flight when the close
+    // claims the Splint is refused instead of being told it attached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attaches_and_unused_closes_exclude_each_other() {
+        let state = test_state_with_backend(true, test_pty_backend());
+
+        let (attached_dojo, attached_splint, attached_incarnation) =
+            create_plain_transient_dojo(&state, 91).await;
+        let subscription = handled_attach(&state, attached_splint, attached_incarnation).await;
+        let attachment = register_attachment(&state, &subscription)
+            .unwrap()
+            .expect("a terminal subscription counts an attachment");
+        let response = trusted_request(
+            &state,
+            91,
+            Request::CloseUnusedDojo {
+                dojo_id: attached_dojo,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                response,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Used {
+                        reason: DojoUse::Attached
+                    },
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        drop(attachment);
+
+        let (closed_dojo, closed_splint, closed_incarnation) =
+            create_plain_transient_dojo(&state, 92).await;
+        let in_flight = handled_attach(&state, closed_splint, closed_incarnation).await;
+        let response = trusted_request(
+            &state,
+            92,
+            Request::CloseUnusedDojo {
+                dojo_id: closed_dojo,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                response,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Closed { .. },
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+        let refused = register_attachment(&state, &in_flight)
+            .err()
+            .expect("an attach that lost the race is refused");
+        assert_eq!(refused.code, ErrorCode::NotFound);
+        assert!(!state.attachments.is_attached(closed_splint));
+        drop(in_flight);
+        reap_all(&state).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_held_unused_claim_refuses_attaches_until_released() {
+        let registry = AttachmentRegistry::default();
+        let state = test_state_with_backend(false, test_pty_backend());
+        let (_, splint_id, _) = create_plain_transient_dojo(&state, 93).await;
+        let handle = state.runtimes.lock().await.handle(splint_id).unwrap();
+        let claim = registry.claim_unattached(handle.clone()).unwrap();
+        assert!(registry.try_attach(&handle).is_none());
+        drop(claim);
+        let attachment = registry.try_attach(&handle).expect("released claim");
+        assert!(matches!(
+            registry.claim_unattached(handle.clone()),
+            Err(DojoUse::Attached)
+        ));
+        drop(attachment);
+        assert!(registry.claim_unattached(handle).is_ok());
+        reap_all(&state).await;
+    }
+
+    // Only bytes the client flags as its own focus reports leave a runtime
+    // unused; identical bytes from automation or a paste are input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_flagged_focus_reports_leave_a_runtime_unused() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            51,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "focus".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        handle.focus_report(b"\x1b[I\x1b[O".to_vec()).await.unwrap();
+        assert!(!handle.has_received_input(), "flagged focus reports");
+        handle.focus_report(b"\x1b[Ix".to_vec()).await.unwrap();
+        assert!(
+            handle.has_received_input(),
+            "a flag does not excuse other bytes"
+        );
+
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            52,
+            Request::CreateTransientLair {
+                expected_topology_revision,
+                name: "pasted".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        handle.input(b"\x1b[I\x1b[O".to_vec()).await.unwrap();
+        assert!(
+            handle.has_received_input(),
+            "unflagged focus-shaped bytes are input"
+        );
+        reap_all(&state).await;
+    }
+
+    // Status is display data bound to one incarnation. A status report is not
+    // input, so the Dojo stays unused; when an unused close or a two-phase
+    // Lair termination retires the Splint, the same transaction drops its status even
+    // though the process may still be shutting down in the background.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retired_splints_never_keep_their_agent_status() {
+        let state = test_state_with_backend(true, test_pty_backend());
+        let peer = PeerIdentity::for_test();
+        let mut statuses = Vec::new();
+        for connection_id in [71, 72] {
+            let expected_topology_revision = state.topology.read().await.revision();
+            let Response::LairCreated {
+                lair, incarnation, ..
+            } = trusted_request(
+                &state,
+                connection_id,
+                Request::CreateTransientLair {
+                    expected_topology_revision,
+                    name: format!("status {connection_id}"),
+                    launch: plain_shell_launch(),
+                    generated_name: false,
+                },
+            )
+            .await
+            .unwrap()
+            else {
+                panic!("transient create response was not returned");
+            };
+            let splint_id = lair.dojos[0].default_focus;
+            agent_status::handle_authorized_report(
+                &state,
+                &peer,
+                &RequestAuthorizationContext::default(),
+                &Request::ReportAgentStatus {
+                    splint_id,
+                    incarnation,
+                    status: Some(splinterm_protocol::AgentStatusReport {
+                        state: splinterm_protocol::AgentState::Working,
+                        detail: None,
+                        ttl_seconds: None,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            statuses.push(splinterm_protocol::MutationTarget {
+                lair_id: lair.id,
+                dojo_id: lair.dojos[0].id,
+                splint_id,
+                incarnation,
+            });
+        }
+        assert_eq!(state.agent_status.slot_count(), 2);
+
+        let response = trusted_request(
+            &state,
+            71,
+            Request::CloseUnusedDojo {
+                dojo_id: statuses[0].dojo_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                response,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Closed { .. },
+                    ..
+                }
+            ),
+            "a status report is not use: {response:?}"
+        );
+        assert_eq!(state.agent_status.slot_count(), 1);
+
+        let expected_topology_revision = state.topology.read().await.revision();
+        trusted_request(
+            &state,
+            72,
+            Request::TerminateLair {
+                expected_topology_revision,
+                lair_id: statuses[1].lair_id,
+                targets: vec![statuses[1].clone()],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.agent_status.slot_count(), 0);
+        reap_all(&state).await;
+    }
+
+    // A request cancelled between claiming and closing (its client went away,
+    // or the Window's deadline passed) must not leave the Splint refusing input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_unused_close_claim_lets_input_through_again() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            51,
+            Request::CreateTransientLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "claim".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("transient create response was not returned");
+        };
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        let claim = UnusedClaim::take(handle.clone()).expect("an unused runtime is claimed");
+        assert!(UnusedClaim::take(handle.clone()).is_none(), "one claim");
+        let refused = handle.input(b"x".to_vec()).await;
+        assert!(matches!(refused, Err(LiveError::Retiring)), "{refused:?}");
+        drop(claim);
+        handle.input(b"x".to_vec()).await.unwrap();
+        assert!(UnusedClaim::take(handle).is_none(), "input made it used");
+        reap_all(&state).await;
+    }
+
+    // A transient Lair whose name Splinterm generated goes with its last
+    // unused Dojo, and so does its Window-owned lease. A Lair the user named
+    // stays, even under a name shaped like a generated one: the client's
+    // provenance decides, not the name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unused_close_removes_an_empty_unnamed_transient_lair_and_its_lease() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let lookalike = splinterm_core::generated_lair_name(1_787_899_189_000, 8);
+        for (connection_id, name, generated_name) in [
+            (
+                61,
+                splinterm_core::generated_lair_name(1_787_899_189_000, 7),
+                true,
+            ),
+            (62, "named".to_owned(), false),
+            (63, lookalike, false),
+        ] {
+            let removed = generated_name;
+            let expected_topology_revision = state.topology.read().await.revision();
+            let Response::LairCreated { lair, .. } = trusted_request(
+                &state,
+                connection_id,
+                Request::CreateTransientLair {
+                    expected_topology_revision,
+                    name,
+                    launch: plain_shell_launch(),
+                    generated_name,
+                },
+            )
+            .await
+            .unwrap() else {
+                panic!("transient create response was not returned");
+            };
+            let response = trusted_request(
+                &state,
+                connection_id,
+                Request::CloseUnusedDojo {
+                    dojo_id: lair.dojos[0].id,
+                },
+            )
+            .await
+            .unwrap();
+            let Response::UnusedDojoClose {
+                outcome: UnusedDojoCloseOutcome::Closed { lair_removed, .. },
+                ..
+            } = response
+            else {
+                panic!("an unused Dojo was kept: {response:?}");
+            };
+            assert_eq!(lair_removed, removed);
+            assert_eq!(
+                state.topology.read().await.find_lair(lair.id).is_none(),
+                removed
+            );
+            assert_eq!(
+                state
+                    .transient_leases
+                    .lock()
+                    .unwrap()
+                    .for_connection(connection_id)
+                    .is_none(),
+                removed
+            );
+            assert!(!state.generated_lairs.lock().unwrap().contains(&lair.id));
+        }
+        reap_all(&state).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transient_owner_disconnect_reaps_runtime_and_removes_complete_lair() {
         let state = test_state_with_backend(false, test_pty_backend());
@@ -10423,6 +11677,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "transient".into(),
                 launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
             },
         )
         .await
@@ -10453,6 +11708,14 @@ mod tests {
                 .for_connection(connection_id)
                 .is_none()
         );
+        // Retirement reaps in the background, outside the topology transaction.
+        time::timeout(Duration::from_secs(5), async {
+            while state.retiring.count() > 0 {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retired transient runtime was not reaped");
         assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
     }
 
@@ -10473,6 +11736,7 @@ mod tests {
                     expected_topology_revision: TopologyRevision::default(),
                     name: "transient-secondary".into(),
                     launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                    generated_name: false,
                 },
             ),
         )
@@ -10494,6 +11758,7 @@ mod tests {
                     name: "secondary".into(),
                     launch: test_launch(&["/bin/sh", "-c", "true"]),
                     promote_transient_lair: false,
+                    generated_name: false,
                 },
             ),
         )
@@ -10544,6 +11809,7 @@ mod tests {
                     expected_topology_revision: TopologyRevision::default(),
                     name: "transient-exit".into(),
                     launch: test_launch(&["/bin/sh", "-c", "true"]),
+                    generated_name: false,
                 },
             ),
         )
@@ -10609,6 +11875,16 @@ mod tests {
         assert!(interactive_bypass(true, true, false, &retention));
         assert!(interactive_bypass(false, false, true, &retention));
         assert!(!interactive_bypass(false, true, false, &retention));
+        // Windows resolve launch directories without a policy rule; other
+        // clients need the creation scopes.
+        let resolve = Request::ResolveLaunchDirectory {
+            source_splint_id: SplintId::new(),
+            directory: splinterm_protocol::LaunchDirectory::Home,
+        };
+        assert!(interactive_bypass(true, true, false, &resolve));
+        assert!(interactive_bypass(false, false, true, &resolve));
+        assert!(!interactive_bypass(true, false, false, &resolve));
+        assert!(!interactive_bypass(false, true, false, &resolve));
         let terminate_lair = Request::TerminateLair {
             expected_topology_revision: TopologyRevision::new(7),
             lair_id: LairId::new(),
@@ -10618,6 +11894,14 @@ mod tests {
         assert!(interactive_bypass(false, false, true, &terminate_lair));
         assert!(!interactive_bypass(true, false, false, &terminate_lair));
         assert!(!interactive_bypass(false, true, false, &terminate_lair));
+        // Local and remote Windows both close their unused Dojos.
+        let close_unused = Request::CloseUnusedDojo {
+            dojo_id: DojoId::new(),
+        };
+        assert!(interactive_bypass(true, true, false, &close_unused));
+        assert!(interactive_bypass(false, false, true, &close_unused));
+        assert!(!interactive_bypass(true, false, false, &close_unused));
+        assert!(!interactive_bypass(false, true, false, &close_unused));
         assert!(!interactive_bypass(
             false,
             false,
@@ -10727,6 +12011,78 @@ mod tests {
         assert_eq!(error.message, "source working directory is unavailable");
     }
 
+    async fn resolve_launch_directory_with(
+        state: &Arc<DaemonState>,
+        source: SplintId,
+        directory: splinterm_protocol::LaunchDirectory,
+    ) -> Result<Option<PathBuf>, ProtocolError> {
+        let request = Request::ResolveLaunchDirectory {
+            source_splint_id: source,
+            directory,
+        };
+        match trusted_request(state, 41, request).await? {
+            Response::LaunchDirectoryResolved {
+                source_splint_id,
+                cwd,
+            } if source_splint_id == source => Ok(cwd),
+            response => panic!("unexpected response {response:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_directory_resolves_home_and_paths_on_this_daemon() {
+        use splinterm_protocol::LaunchDirectory::{Absolute, Home, HomeRelative, Inherit};
+
+        let base = temp_dir();
+        let home = base.join("home");
+        std::fs::create_dir_all(base.join("durable")).unwrap();
+        std::fs::create_dir_all(home.join("projects")).unwrap();
+        std::fs::create_dir(base.join("elsewhere")).unwrap();
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().owner_home = Some(home.clone());
+        let source = state
+            .topology
+            .write()
+            .await
+            .create_lair("source", base.join("durable"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        for (directory, expected) in [
+            // Inheritance keeps the existing source chain; here the durable directory.
+            (Inherit, Some(base.join("durable"))),
+            (Home, Some(home.clone())),
+            (
+                Absolute(base.join("elsewhere")),
+                Some(base.join("elsewhere")),
+            ),
+            (HomeRelative("projects".into()), Some(home.join("projects"))),
+            // Unusable configured paths fall back to the owner's home, not the source.
+            (Absolute(base.join("missing")), Some(home.clone())),
+            (HomeRelative("missing".into()), Some(home.clone())),
+        ] {
+            let resolved = resolve_launch_directory_with(&state, source, directory.clone()).await;
+            assert_eq!(resolved.unwrap(), expected, "{directory:?}");
+        }
+        Arc::get_mut(&mut state).unwrap().owner_home = Some(base.join("gone"));
+        for (directory, expected) in [
+            (Home, None),
+            (Absolute(base.join("missing")), None),
+            (
+                Absolute(base.join("elsewhere")),
+                Some(base.join("elsewhere")),
+            ),
+        ] {
+            let resolved = resolve_launch_directory_with(&state, source, directory.clone()).await;
+            assert_eq!(resolved.unwrap(), expected, "{directory:?}");
+        }
+        let escape = HomeRelative("../escape".into());
+        let invalid = resolve_launch_directory_with(&state, source, escape).await;
+        assert_eq!(invalid.unwrap_err().code, ErrorCode::InvalidArgument);
+        let missing = resolve_launch_directory_with(&state, SplintId::new(), Home).await;
+        assert_eq!(missing.unwrap_err().code, ErrorCode::NotFound);
+    }
+
     #[tokio::test]
     async fn source_cwd_fallback_is_bounded_and_never_uses_global_focus() {
         let base = temp_dir();
@@ -10827,6 +12183,7 @@ mod tests {
                 expected_topology_revision: TopologyRevision::default(),
                 name: "cwd".into(),
                 launch,
+                generated_name: false,
             },
         )
         .await
@@ -11049,6 +12406,7 @@ mod tests {
                     cwd: None,
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
             Request::SplitSplintAutomation {
                 expected_topology_revision: TopologyRevision::default(),
@@ -11178,6 +12536,7 @@ mod tests {
                 restorable: true,
                 lifecycle: SplintLifecycle::Exited,
                 exit_status: None,
+                agent_status: None,
             }],
         };
         let rename = prepare_mutation(
@@ -11204,6 +12563,7 @@ mod tests {
                     cwd: None,
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
             Request::SplitSplintAutomation {
                 expected_topology_revision: snapshot.revision,
@@ -11232,6 +12592,7 @@ mod tests {
                     cwd: None,
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
         ] {
             let resolved = resolve_automation_mutation(request, &state).await.unwrap();
@@ -11291,6 +12652,7 @@ mod tests {
                     cwd: Some(PathBuf::from("/empty-lair-override")),
                     argv: Vec::new(),
                 },
+                generated_name: false,
             },
             &state,
         )
@@ -12140,5 +13502,327 @@ mod tests {
             "development terminal access is disabled",
         );
         assert_eq!(error.code, ErrorCode::DevelopmentFeatureDisabled);
+    }
+
+    // A reporter holding a Splint grant for the live incarnation learns that
+    // its stale report is stale, as policy and self reporters do; a peer
+    // without a grant still gets Unauthorized and learns nothing. An
+    // identical report that adds a TTL wakes the status timer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_status_stale_granted_reports_are_stale_and_ttl_refreshes_wake_the_timer() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "status".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("Lair creation response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let peer = PeerIdentity::for_test();
+        let ungranted = RequestAuthorizationContext::default();
+        let report = |incarnation, ttl_seconds| Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds,
+            }),
+        };
+        let retired = incarnation + 1;
+
+        let error = agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(retired, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized, "no grant, no liveness");
+
+        state.grants.lock().await.grant(
+            &peer,
+            splint_id,
+            incarnation,
+            vec![AccessScope::AgentStatusReport],
+        );
+        let error = agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(retired, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleIncarnation);
+
+        let _timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
+        let wakes = || {
+            state
+                .agent_status
+                .notified_wakes
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(incarnation, None),
+        )
+        .await
+        .unwrap();
+        // Let the first change publish, leaving the timer on its idle wait.
+        time::sleep(agent_status::PUBLISH_INTERVAL * 2).await;
+        let idle = wakes();
+        assert!(idle >= 1, "a visible change wakes the timer");
+        agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(incarnation, Some(10)),
+        )
+        .await
+        .unwrap();
+        time::timeout(Duration::from_secs(5), async {
+            while wakes() == idle {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an identical report that adds a TTL wakes the idle timer");
+
+        for runtime in state.runtimes.lock().await.drain() {
+            let _ = runtime.shutdown().await;
+        }
+    }
+
+    // A policy rule for exact incarnation N authorizes a report against N. A
+    // relaunch to M after that authorization must not let the cached policy
+    // context accept a report for M; it is stale. The advertised expiry comes
+    // from the acceptance instant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one live Splint proves the policy match, the relaunch race, and the expiry"
+    )]
+    async fn agent_status_policy_authorization_stays_bound_to_the_matched_incarnation() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "policy status".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("Lair creation response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let mut peer = PeerIdentity::for_test();
+        let executable = executable_identity::ExecutableIdentity::from_pid(std::process::id())
+            .expect("snapshot test executable");
+        peer.install_persistent_executable(executable.clone());
+        let directory = temp_dir();
+        fs::create_dir(&directory).await.unwrap();
+        let policy_path = directory.join("policy.json");
+        let policy = serde_json::json!({
+            "schema": "splinterm.policy.v2",
+            "rules": [{
+                "id": "exact-status-reporter",
+                "executable": {"path": executable.path, "sha256": executable.sha256},
+                "scopes": ["agent_status_report"],
+                "resources": [{
+                    "kind": "splint",
+                    "splint_id": splint_id,
+                    "incarnation": incarnation,
+                }],
+                "limits": {"max_results": 1},
+            }],
+        });
+        fs::write(&policy_path, serde_json::to_vec(&policy).unwrap())
+            .await
+            .unwrap();
+        fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        let topology = state.topology.read().await.clone();
+        state
+            .policy
+            .lock()
+            .await
+            .reload(Some(policy_path.as_path()), &topology);
+        let report = |incarnation| Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds: Some(60),
+            }),
+        };
+
+        let authorized = authorize_request(&report(incarnation), &state, &peer, 0, false, false)
+            .await
+            .unwrap();
+        assert!(authorized.policy_authorized());
+        assert_eq!(authorized.policy_splint_incarnation(), Some(incarnation));
+        let before = SystemTime::now();
+        let Response::AgentStatusAccepted { expires_at_ms, .. } =
+            agent_status::handle_authorized_report(
+                &state,
+                &peer,
+                &authorized,
+                &report(incarnation),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("agent status was not accepted");
+        };
+        let millis = |time: SystemTime| {
+            u64::try_from(
+                (time + Duration::from_secs(60))
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap()
+        };
+        let expires_at_ms = expires_at_ms.expect("a TTL advertises an expiry");
+        assert!((millis(before)..=millis(SystemTime::now())).contains(&expires_at_ms));
+
+        // A concurrent relaunch makes a new incarnation current after the
+        // policy matched the old one.
+        let killed = handle_authorized_request(
+            Request::KillSplint {
+                splint_id,
+                incarnation,
+            },
+            &state,
+            &PeerIdentity::for_test(),
+            1,
+            false,
+            true,
+            &RequestAuthorizationContext {
+                interactive_bypass: true,
+                ..RequestAuthorizationContext::default()
+            },
+        )
+        .await
+        .unwrap()
+        .response;
+        assert!(
+            matches!(killed, Response::SplintKilled { .. }),
+            "{killed:?}"
+        );
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::SplintStarted {
+            incarnation: relaunched,
+            ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::RelaunchSplint {
+                expected_topology_revision,
+                splint_id,
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("relaunch response was not returned");
+        };
+        assert_ne!(relaunched, incarnation);
+        let error =
+            agent_status::handle_authorized_report(&state, &peer, &authorized, &report(relaunched))
+                .await
+                .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleIncarnation);
+
+        for runtime in state.runtimes.lock().await.drain() {
+            let _ = runtime.shutdown().await;
+        }
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_status_trusted_ui_may_only_clear_and_other_peers_need_a_grant() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let set = Request::ReportAgentStatus {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds: None,
+            }),
+        };
+        let Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            ..
+        } = set
+        else {
+            unreachable!()
+        };
+        let clear = Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: None,
+        };
+        assert!(trusted_ui_request(&clear));
+        let trusted = RequestAuthorizationContext {
+            interactive_bypass: true,
+            ..RequestAuthorizationContext::default()
+        };
+        let error = agent_status::handle_authorized_report(&state, &peer, &trusted, &set)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        // A clear passes the authority gate and then needs a live target.
+        let error = agent_status::handle_authorized_report(&state, &peer, &trusted, &clear)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        let ungranted = RequestAuthorizationContext::default();
+        let error = agent_status::handle_authorized_report(&state, &peer, &ungranted, &clear)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        assert!(
+            agent_status::handle_self_report(&state, &peer, &set)
+                .await
+                .is_none(),
+            "a peer outside every Splint takes the audited path"
+        );
+        assert_eq!(
+            requested_operation_scopes(&set),
+            Some(vec![authorization::OperationScope::AgentStatusReport])
+        );
+        assert_eq!(
+            ephemeral_access_scopes(&[authorization::OperationScope::AgentStatusReport]),
+            Some(vec![AccessScope::AgentStatusReport])
+        );
     }
 }

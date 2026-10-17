@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 37;
+pub const PROTOCOL_VERSION: u16 = 40;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -64,6 +64,11 @@ pub const MAX_IMAGE_TRANSFERS_PER_SPLINT: usize = 2;
 pub const MAX_IMAGE_TRANSFERS_PER_DAEMON: usize = 4;
 pub const IMAGE_TRANSFER_TOKEN_BYTES: usize = 32;
 pub const IMAGE_TRANSFER_TOKEN_TTL_MILLIS: u32 = 5_000;
+pub const MAX_AGENT_STATUS_DETAIL_SCALARS: usize = 80;
+pub const MAX_AGENT_STATUS_DETAIL_BYTES: usize = 240;
+pub const MIN_AGENT_STATUS_TTL_SECONDS: u32 = 10;
+pub const MAX_AGENT_STATUS_TTL_SECONDS: u32 = 900;
+pub const DEFAULT_AGENT_STATUS_ACTIVE_TTL_SECONDS: u32 = 120;
 
 #[must_use]
 pub fn image_content_socket_path(control_socket: &Path) -> PathBuf {
@@ -441,6 +446,57 @@ pub struct PresetPaneIdentity {
     pub splint_id: SplintId,
 }
 
+/// Where a Splint, Dojo, or Lair created from inside a Window starts.
+///
+/// Every choice is resolved on the daemon that owns the source Splint, so a
+/// remote Window resolves remote paths and the remote owner's home.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
+pub enum LaunchDirectory {
+    /// The source Splint's live root-process directory, then its saved launch
+    /// directory, then the owner's home.
+    Inherit,
+    /// The daemon owner's home directory.
+    Home,
+    /// An absolute directory; falls back to the owner's home when unusable.
+    Absolute(PathBuf),
+    /// A directory below the owner's home; falls back to the home itself.
+    HomeRelative(PathBuf),
+}
+
+impl LaunchDirectory {
+    /// Validates path shape without touching the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` for an empty, oversized, NUL-bearing, or
+    /// wrongly anchored path, or a home-relative path that leaves the home.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let valid = match self {
+            Self::Inherit | Self::Home => true,
+            Self::Absolute(path) => bounded_path(path) && path.is_absolute(),
+            Self::HomeRelative(path) => {
+                bounded_path(path)
+                    && path
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+            }
+        };
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "launch directory is not a bounded absolute or home-relative path",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn bounded_path(path: &std::path::Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    !bytes.is_empty() && !bytes.contains(&0) && bytes.len() <= MAX_CWD_BYTES
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -450,6 +506,12 @@ pub enum Request {
     SubscribeTopology,
     InspectSplint {
         splint_id: SplintId,
+    },
+    /// Resolves where a Window-created Splint, Dojo, or Lair starts, on the
+    /// daemon that owns the source Splint.
+    ResolveLaunchDirectory {
+        source_splint_id: SplintId,
+        directory: LaunchDirectory,
     },
     ReadGraphicalFocus,
     PublishGraphicalFocus {
@@ -478,6 +540,9 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::CreateLair`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplintAutomation {
         expected_topology_revision: TopologyRevision,
@@ -497,16 +562,29 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::NewDojo`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateTransientLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplint {
         expected_topology_revision: TopologyRevision,
@@ -558,6 +636,10 @@ pub enum Request {
         /// Trusted owner request to atomically make a transient Lair durable.
         #[serde(default, skip_serializing_if = "bool_is_false")]
         promote_transient_lair: bool,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; a chosen name keeps the Dojo from an unused close.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     MaterializePreset {
         expected_topology_revision: TopologyRevision,
@@ -567,6 +649,12 @@ pub enum Request {
     },
     CloseDojo {
         expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
+    },
+    /// Terminates the Dojo only when it was never used. The daemon decides and
+    /// applies this atomically against its current state; a used Dojo is left
+    /// unchanged.
+    CloseUnusedDojo {
         dojo_id: DojoId,
     },
     TerminateLair {
@@ -669,6 +757,11 @@ pub enum Request {
         splint_id: SplintId,
         incarnation: u64,
         bytes: Vec<u8>,
+        /// Set only by the graphical client for the focus in and out reports
+        /// it generates under DECSET 1004. Such bytes leave a Dojo unused;
+        /// identical bytes sent without this flag count as use.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        focus_report: bool,
     },
     Resize {
         controller_id: u64,
@@ -689,6 +782,13 @@ pub enum Request {
     AuditInspect {
         after_audit_id: Option<u64>,
         max_records: usize,
+    },
+    /// Explicitly reported display status for one live Splint incarnation.
+    /// `None` clears the status. Never inferred from terminal content.
+    ReportAgentStatus {
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<AgentStatusReport>,
     },
 }
 
@@ -747,6 +847,12 @@ pub enum Response {
         runtime: SplintRuntimeSummary,
         /// Point-in-time launch default resolved on the owning daemon, not durable topology.
         resolved_cwd: Option<PathBuf>,
+    },
+    LaunchDirectoryResolved {
+        source_splint_id: SplintId,
+        /// Point-in-time usable directory, or `None` when neither the requested
+        /// directory nor its fallbacks are usable.
+        cwd: Option<PathBuf>,
     },
     GraphicalFocus {
         focused_splint_id: Option<SplintId>,
@@ -846,6 +952,52 @@ pub enum Response {
         incarnation: u64,
         exit_status: ProcessExitStatus,
     },
+    AgentStatusAccepted {
+        /// Daemon-lifetime status sequence current after this report.
+        sequence: u64,
+        /// Unix milliseconds when an expiring status becomes stale.
+        expires_at_ms: Option<u64>,
+    },
+    UnusedDojoClose {
+        dojo_id: DojoId,
+        outcome: UnusedDojoCloseOutcome,
+    },
+}
+
+/// Result of [`Request::CloseUnusedDojo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum UnusedDojoCloseOutcome {
+    /// The Dojo was removed and its process is shutting down.
+    Closed {
+        topology_revision: TopologyRevision,
+        /// Its Lair, never named by the user, held no other Dojo and went too.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        lair_removed: bool,
+    },
+    /// The Dojo counts as used and was left unchanged.
+    Used { reason: DojoUse },
+}
+
+/// Why a Dojo counts as used, so it is never closed automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DojoUse {
+    /// It no longer holds only its original Splint.
+    Split,
+    /// It did not start in this daemon as a plain default-shell terminal, or
+    /// its Splint was relaunched or restored since.
+    Launch,
+    /// It or its Splint was renamed.
+    Renamed,
+    /// Its Splint received client input.
+    Input,
+    /// Another Window is attached to it.
+    Attached,
+    /// A program other than the shell holds the terminal foreground.
+    Foreground,
+    /// Its Splint is not running.
+    NotRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -883,6 +1035,15 @@ pub enum SubscriptionEvent {
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
+    },
+    /// Delivered on topology subscriptions without a topology revision bump.
+    /// Clients apply it only to a matching live incarnation; the next topology
+    /// snapshot supersedes it.
+    AgentStatusChanged {
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<AgentStatusSummary>,
+        sequence: u64,
     },
 }
 
@@ -1373,12 +1534,20 @@ pub struct SplintRuntimeSummary {
     pub restorable: bool,
     pub lifecycle: SplintLifecycle,
     pub exit_status: Option<ProcessExitStatus>,
+    /// Explicitly reported display status of the live incarnation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<AgentStatusSummary>,
 }
 
 impl SplintRuntimeSummary {
     #[must_use]
     pub fn validate(&self) -> bool {
         let valid_last = self.last_incarnation.is_none_or(|value| value > 0);
+        if let Some(status) = &self.agent_status
+            && (self.live_incarnation.is_none() || !status.validate())
+        {
+            return false;
+        }
         match self.lifecycle {
             SplintLifecycle::Starting => {
                 !self.restorable
@@ -1404,6 +1573,144 @@ pub enum SplintLifecycle {
     Starting,
     Running,
     Exited,
+}
+
+/// Closed vocabulary of explicitly reported agent display states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Working,
+    NeedsInput,
+    Done,
+    Error,
+    Idle,
+}
+
+impl AgentState {
+    /// Active states always expire; resting states last until replaced.
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Working | Self::NeedsInput)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::NeedsInput => "needs_input",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+/// One explicit agent status report. Display data only, never authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStatusReport {
+    pub state: AgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u32>,
+}
+
+impl AgentStatusReport {
+    /// Validates the bounded detail and TTL.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` for an out-of-range TTL or a detail that is
+    /// empty, oversized, or contains control, bidi-formatting, or line-break
+    /// characters. Invalid text is rejected, never stripped.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if let Some(detail) = &self.detail {
+            validate_agent_status_detail(detail)?;
+        }
+        if self.ttl_seconds.is_some_and(|ttl| {
+            !(MIN_AGENT_STATUS_TTL_SECONDS..=MAX_AGENT_STATUS_TTL_SECONDS).contains(&ttl)
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent status TTL is outside 10 to 900 seconds",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The TTL that applies: the reported one, else the active-state default.
+    #[must_use]
+    pub fn effective_ttl_seconds(&self) -> Option<u32> {
+        self.ttl_seconds.or_else(|| {
+            self.state
+                .is_active()
+                .then_some(DEFAULT_AGENT_STATUS_ACTIVE_TTL_SECONDS)
+        })
+    }
+}
+
+fn is_agent_status_forbidden_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'..='\u{2029}'
+        )
+}
+
+/// Validates explicitly reported agent status detail text.
+///
+/// # Errors
+///
+/// Returns `InvalidArgument` unless the detail is nonempty, at most 80 Unicode
+/// scalars and 240 bytes, and free of control, bidi-formatting, and line-break
+/// characters.
+pub fn validate_agent_status_detail(detail: &str) -> Result<(), ProtocolError> {
+    if detail.is_empty()
+        || detail.len() > MAX_AGENT_STATUS_DETAIL_BYTES
+        || detail.chars().count() > MAX_AGENT_STATUS_DETAIL_SCALARS
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "agent status detail is empty or exceeds 80 characters or 240 bytes",
+        ));
+    }
+    if detail.chars().any(is_agent_status_forbidden_character) {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "agent status detail contains control, bidi-formatting, or line-break characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Daemon-held agent status for one live incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStatusSummary {
+    pub state: AgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub sequence: u64,
+    /// An active state's TTL lapsed; the last state and detail are kept.
+    pub stale: bool,
+    /// Milliseconds since the last accepted report, at summary time.
+    pub reported_age_ms: u64,
+}
+
+impl AgentStatusSummary {
+    #[must_use]
+    pub fn validate(&self) -> bool {
+        self.sequence > 0
+            && self
+                .detail
+                .as_deref()
+                .is_none_or(|detail| validate_agent_status_detail(detail).is_ok())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1452,6 +1759,7 @@ pub enum AutomationScope {
     AuthorizationInspect,
     AuthorizationRevoke,
     AuditInspect,
+    AgentStatusReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1466,6 +1774,7 @@ pub enum AuditOperation {
     InspectTopology,
     SubscribeTopology,
     InspectSplint,
+    ResolveLaunchDirectory,
     ReadGraphicalFocus,
     PublishGraphicalFocus,
     CreateLair,
@@ -1501,6 +1810,7 @@ pub enum AuditOperation {
     ProcessExit,
     AuditInspect,
     PolicyReload,
+    AgentStatusReport,
 }
 
 impl AuditOperation {
@@ -1516,6 +1826,7 @@ impl AuditOperation {
             Self::InspectTopology => "inspect_topology",
             Self::SubscribeTopology => "subscribe_topology",
             Self::InspectSplint => "inspect_splint",
+            Self::ResolveLaunchDirectory => "resolve_launch_directory",
             Self::ReadGraphicalFocus => "read_graphical_focus",
             Self::PublishGraphicalFocus => "publish_graphical_focus",
             Self::CreateLair => "create_lair",
@@ -1551,6 +1862,7 @@ impl AuditOperation {
             Self::ProcessExit => "process_exit",
             Self::AuditInspect => "audit_inspect",
             Self::PolicyReload => "policy_reload",
+            Self::AgentStatusReport => "agent_status_report",
         }
     }
 }
@@ -1647,6 +1959,7 @@ pub enum AccessScope {
     TopologyName,
     ProcessSpawn,
     ProcessRestore,
+    AgentStatusReport,
 }
 
 impl AccessScope {
@@ -1666,6 +1979,7 @@ impl AccessScope {
             Self::TopologyName => "rename this Lair and its sessions",
             Self::ProcessSpawn => "start processes in this Lair",
             Self::ProcessRestore => "restore processes in this Lair",
+            Self::AgentStatusReport => "report agent status",
         }
     }
 }
@@ -1759,6 +2073,8 @@ pub enum ErrorCode {
     StaleImageContent,
     InvalidArgument,
     ResourceLimit,
+    /// A per-target admission rate was exceeded; retry after a short delay.
+    RateLimited,
     Cancelled,
     RequestNotFound,
     Internal,
@@ -3023,6 +3339,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_directories_are_bounded_and_anchored() {
+        for valid in [
+            LaunchDirectory::Inherit,
+            LaunchDirectory::Home,
+            LaunchDirectory::Absolute(PathBuf::from("/srv/projects")),
+            LaunchDirectory::HomeRelative(PathBuf::from("src/work")),
+        ] {
+            assert!(valid.validate().is_ok(), "{valid:?}");
+            let request = Request::ResolveLaunchDirectory {
+                source_splint_id: SplintId::new(),
+                directory: valid,
+            };
+            let round_trip: Request =
+                serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+            assert_eq!(round_trip, request);
+        }
+        for invalid in [
+            LaunchDirectory::Absolute(PathBuf::from("relative")),
+            LaunchDirectory::Absolute(PathBuf::new()),
+            LaunchDirectory::Absolute(PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES)))),
+            LaunchDirectory::HomeRelative(PathBuf::from("/absolute")),
+            LaunchDirectory::HomeRelative(PathBuf::from("../escape")),
+            LaunchDirectory::HomeRelative(PathBuf::from("./a")),
+            LaunchDirectory::HomeRelative(PathBuf::new()),
+        ] {
+            assert_eq!(
+                invalid.validate().unwrap_err().code,
+                ErrorCode::InvalidArgument,
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
     fn audit_operation_name_matches_its_wire_representation() {
         for operation in [
             AuditOperation::Ping,
@@ -3034,6 +3384,7 @@ mod tests {
             AuditOperation::InspectTopology,
             AuditOperation::SubscribeTopology,
             AuditOperation::InspectSplint,
+            AuditOperation::ResolveLaunchDirectory,
             AuditOperation::ReadGraphicalFocus,
             AuditOperation::PublishGraphicalFocus,
             AuditOperation::CreateLair,
@@ -3741,7 +4092,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 37);
+        assert_eq!(PROTOCOL_VERSION, 40);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -3967,6 +4318,7 @@ mod tests {
             expected_topology_revision: TopologyRevision::new(7),
             name: "xdg".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let encoded = serde_json::to_vec(&transient).unwrap();
         assert_eq!(
@@ -3987,6 +4339,7 @@ mod tests {
             name: "work".into(),
             launch: launch.clone(),
             promote_transient_lair: true,
+            generated_name: false,
         };
         let mut promotion_value = serde_json::to_value(&promotion).unwrap();
         assert_eq!(promotion_value["promote_transient_lair"], true);
@@ -4101,6 +4454,7 @@ mod tests {
                 code: Some(0),
                 signal: None,
             }),
+            agent_status: None,
         };
         let snapshot = TopologySnapshot {
             revision: topology.revision(),
@@ -4431,6 +4785,88 @@ mod tests {
     }
 
     #[test]
+    fn unused_dojo_close_has_explicit_wire_shapes() {
+        let dojo_id = DojoId::new();
+        let request = Request::CloseUnusedDojo { dojo_id };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"type": "close_unused_dojo", "dojo_id": dojo_id})
+        );
+        let used = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Used {
+                reason: DojoUse::Foreground,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&used).unwrap(),
+            serde_json::json!({
+                "type": "unused_dojo_close",
+                "dojo_id": dojo_id,
+                "outcome": {"outcome": "used", "reason": "foreground"},
+            })
+        );
+        let closed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: false,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&closed).unwrap()["outcome"],
+            serde_json::json!({"outcome": "closed", "topology_revision": 0})
+        );
+        let lair_removed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&lair_removed).unwrap()["outcome"]["lair_removed"],
+            serde_json::json!(true)
+        );
+        for response in [used, closed, lair_removed] {
+            assert_eq!(
+                serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap())
+                    .unwrap(),
+                response
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<Request>(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn input_marks_focus_reports_only_when_flagged() {
+        let splint_id = SplintId::new();
+        let input = |focus_report| Request::Input {
+            controller_id: 3,
+            splint_id,
+            incarnation: 4,
+            bytes: b"\x1b[I".to_vec(),
+            focus_report,
+        };
+        let ordinary = serde_json::to_value(input(false)).unwrap();
+        // Ordinary input keeps the encoding older peers send and accept.
+        assert!(ordinary.get("focus_report").is_none());
+        assert_eq!(
+            serde_json::from_value::<Request>(ordinary).unwrap(),
+            input(false)
+        );
+        let flagged = serde_json::to_value(input(true)).unwrap();
+        assert_eq!(flagged["focus_report"], true);
+        assert_eq!(
+            serde_json::from_value::<Request>(flagged).unwrap(),
+            input(true)
+        );
+    }
+
+    #[test]
     fn terminal_update_validation_bounds_revisions_rows_scrolls_and_palette() {
         assert!(update().validate_against(4, 1, 80, 24).is_ok());
 
@@ -4540,5 +4976,189 @@ mod tests {
         assert!(stale_clear.validate_against(4, 2, 80, 24).is_err());
         stale_clear.scrollback.as_mut().unwrap().history_generation = 3;
         assert!(stale_clear.validate_against(4, 2, 80, 24).is_ok());
+    }
+
+    #[test]
+    fn agent_status_report_wire_shapes_are_closed_and_additive() {
+        let splint_id = SplintId::new();
+        let request = Request::ReportAgentStatus {
+            splint_id,
+            incarnation: 3,
+            status: Some(AgentStatusReport {
+                state: AgentState::NeedsInput,
+                detail: Some("waiting for approval".into()),
+                ttl_seconds: None,
+            }),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], "report_agent_status");
+        assert_eq!(value["status"]["state"], "needs_input");
+        assert!(value["status"].get("ttl_seconds").is_none());
+        assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+        let clear: Request = serde_json::from_value(serde_json::json!({
+            "type": "report_agent_status",
+            "splint_id": splint_id,
+            "incarnation": 3,
+            "status": null
+        }))
+        .unwrap();
+        assert!(matches!(
+            clear,
+            Request::ReportAgentStatus { status: None, .. }
+        ));
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "type": "report_agent_status",
+                "splint_id": splint_id,
+                "incarnation": 3,
+                "status": {"state": "thinking"}
+            }))
+            .is_err(),
+            "unknown states are rejected by the closed vocabulary"
+        );
+        assert!(
+            serde_json::from_value::<AgentStatusReport>(serde_json::json!({
+                "state": "done",
+                "progress": 50
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(Response::AgentStatusAccepted {
+                sequence: 4,
+                expires_at_ms: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "type": "agent_status_accepted",
+                "sequence": 4,
+                "expires_at_ms": null
+            })
+        );
+        let event = SubscriptionEvent::AgentStatusChanged {
+            splint_id,
+            incarnation: 3,
+            status: None,
+            sequence: 5,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "agent_status_changed");
+        assert_eq!(
+            serde_json::from_value::<SubscriptionEvent>(value).unwrap(),
+            event
+        );
+        assert_eq!(
+            serde_json::to_value(AutomationScope::AgentStatusReport).unwrap(),
+            "agent_status_report"
+        );
+        assert_eq!(
+            serde_json::to_value(AccessScope::AgentStatusReport).unwrap(),
+            "agent_status_report"
+        );
+        assert_eq!(
+            serde_json::to_value(ErrorCode::RateLimited).unwrap(),
+            "rate_limited"
+        );
+        assert_eq!(
+            AuditOperation::AgentStatusReport.as_str(),
+            serde_json::to_value(AuditOperation::AgentStatusReport).unwrap()
+        );
+        for state in [
+            AgentState::Working,
+            AgentState::NeedsInput,
+            AgentState::Done,
+            AgentState::Error,
+            AgentState::Idle,
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        }
+    }
+
+    #[test]
+    fn runtime_summary_agent_status_is_optional_and_live_only() {
+        let splint_id = SplintId::new();
+        let mut runtime = SplintRuntimeSummary {
+            splint_id,
+            live_incarnation: Some(2),
+            last_incarnation: Some(2),
+            restorable: false,
+            lifecycle: SplintLifecycle::Running,
+            exit_status: None,
+            agent_status: None,
+        };
+        let value = serde_json::to_value(&runtime).unwrap();
+        assert!(value.get("agent_status").is_none());
+        assert_eq!(
+            serde_json::from_value::<SplintRuntimeSummary>(value).unwrap(),
+            runtime
+        );
+        runtime.agent_status = Some(AgentStatusSummary {
+            state: AgentState::Working,
+            detail: Some("compiling".into()),
+            sequence: 1,
+            stale: true,
+            reported_age_ms: 121_000,
+        });
+        assert!(runtime.validate());
+        let mut invalid = runtime.clone();
+        invalid.agent_status.as_mut().unwrap().sequence = 0;
+        assert!(!invalid.validate());
+        let mut exited = runtime;
+        exited.live_incarnation = None;
+        exited.lifecycle = SplintLifecycle::Exited;
+        exited.restorable = true;
+        assert!(!exited.validate(), "exited incarnations carry no status");
+    }
+
+    #[test]
+    fn agent_status_detail_and_ttl_are_bounded_and_rejected_not_stripped() {
+        let report = |detail: &str, ttl_seconds| AgentStatusReport {
+            state: AgentState::Working,
+            detail: Some(detail.to_owned()),
+            ttl_seconds,
+        };
+        assert!(report("waiting for approval", None).validate().is_ok());
+        assert!(report(&"x".repeat(80), Some(10)).validate().is_ok());
+        assert!(report(&"界".repeat(80), Some(900)).validate().is_ok());
+        assert!(report(&"x".repeat(81), None).validate().is_err());
+        // 61 four-byte scalars stay under 80 scalars but exceed 240 bytes.
+        assert!(report(&"🦀".repeat(61), None).validate().is_err());
+        assert!(report(&"🦀".repeat(60), None).validate().is_ok());
+        assert!(report("", None).validate().is_err());
+        for forbidden in [
+            "line\nbreak",
+            "carriage\rreturn",
+            "tab\there",
+            "nel\u{85}",
+            "line\u{2028}separator",
+            "para\u{2029}separator",
+            "rlo\u{202e}",
+            "isolate\u{2066}",
+            "mark\u{200f}",
+            "arabic\u{061c}",
+            "escape\u{1b}[31m",
+        ] {
+            let error = report(forbidden, None).validate().unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{forbidden:?}");
+        }
+        assert!(report("ok", Some(9)).validate().is_err());
+        assert!(report("ok", Some(901)).validate().is_err());
+        let working = AgentStatusReport {
+            state: AgentState::Working,
+            detail: None,
+            ttl_seconds: None,
+        };
+        assert_eq!(working.effective_ttl_seconds(), Some(120));
+        let done = AgentStatusReport {
+            state: AgentState::Done,
+            detail: None,
+            ttl_seconds: None,
+        };
+        assert_eq!(done.effective_ttl_seconds(), None);
+        let timed_done = AgentStatusReport {
+            ttl_seconds: Some(30),
+            ..done
+        };
+        assert_eq!(timed_done.effective_ttl_seconds(), Some(30));
     }
 }

@@ -30,7 +30,7 @@
     "resource": { "$ref": "#/$defs/resource" },
     "requested_scopes": {
       "type": "array",
-      "maxItems": 18,
+      "maxItems": 19,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/scope" }
     },
@@ -79,7 +79,8 @@
         "topology_name_mutate",
         "authorization_inspect",
         "authorization_revoke",
-        "audit_inspect"
+        "audit_inspect",
+        "agent_status_report"
       ]
     },
     "operation": {
@@ -122,7 +123,8 @@
         "kill_splint",
         "process_exit",
         "audit_inspect",
-        "policy_reload"
+        "policy_reload",
+        "agent_status_report"
       ]
     },
     "peer": {
