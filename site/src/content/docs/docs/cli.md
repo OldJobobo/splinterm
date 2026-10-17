@@ -59,6 +59,16 @@ A new Lair starts with `Dojo 1`. If `new-dojo` omits `--name`, Splinterm chooses
 
 Restore is always explicit. Saved launch metadata is never executed automatically.
 
+## Agent status
+
+| Command | Effect |
+| --- | --- |
+| `agent-status set STATE [--detail TEXT] [--ttl SECONDS]` | Report `working`, `needs_input`, `done`, `error`, or `idle` for the current Splint. |
+| `agent-status clear` | Clear the current Splint's reported status. |
+| `agent-status get [SPLINT_ID]` | Read one Splint's reported status. |
+
+Inside a Splint the target comes from `$SPLINTERM_SPLINT_ID` and `$SPLINTERM_SPLINT_INCARNATION`; `--splint ID --incarnation N` overrides it. Without either, the command exits 2 with `not inside a Splint`. See [Bounded automation](/docs/automation/) for authority and agent hook recipes.
+
 ## Local configuration and presets
 
 ```bash

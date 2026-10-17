@@ -3647,6 +3647,7 @@ mod tests {
                 restorable: false,
                 lifecycle: SplintLifecycle::Running,
                 exit_status: None,
+                agent_status: None,
             }],
         };
         let target = NavigationExplorerSplintTarget {

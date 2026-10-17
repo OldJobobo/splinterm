@@ -145,6 +145,7 @@ async fn splits_inherit_the_source_directory_by_default() {
                 restorable: false,
                 lifecycle: splinterm_protocol::SplintLifecycle::Exited,
                 exit_status: None,
+                agent_status: None,
             },
         }]
     })

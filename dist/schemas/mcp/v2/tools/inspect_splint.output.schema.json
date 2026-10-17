@@ -32,6 +32,9 @@
                 "exited",
                 "restorable"
               ]
+            },
+            "agent_status": {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_status"
             }
           }
         },

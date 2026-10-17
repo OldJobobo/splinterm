@@ -32,6 +32,7 @@ use super::{
     session_catalog::launch_parameters,
 };
 
+mod agent_status;
 mod control;
 mod history;
 mod mutation;
@@ -78,6 +79,7 @@ async fn connect_machine(
     }
 }
 
+pub(in crate::app) use agent_status::run_machine_agent_status;
 pub(in crate::app) use mutation::{require_expected_incarnation, require_incarnation};
 pub(in crate::app) use subscription::run_machine_subscription;
 
