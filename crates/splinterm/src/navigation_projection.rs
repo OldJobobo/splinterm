@@ -11,7 +11,8 @@ use splinterm_core::{
     MAX_PERSISTENT_LAIRS, MAX_SPLINTS, SplintId, TopologyRevision,
 };
 use splinterm_protocol::{
-    ProcessExitStatus, SplintLifecycle, SplintRuntimeSummary, TopologySnapshot,
+    AgentState, AgentStatusSummary, ProcessExitStatus, SplintLifecycle, SplintRuntimeSummary,
+    TopologySnapshot,
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -19,6 +20,149 @@ const MAX_LABEL_SCALARS: usize = 256;
 const MAX_LABEL_CELLS: usize = 160;
 const MAX_CWD_SCALARS: usize = 512;
 const MAX_CWD_CELLS: usize = 240;
+const MAX_AGENT_DETAIL_SCALARS: usize = 80;
+const MAX_AGENT_DETAIL_CELLS: usize = 160;
+
+/// Explicitly reported agent display status of one live Splint incarnation.
+///
+/// Display data only, never authority. It comes from the daemon's
+/// `SplintRuntimeSummary::agent_status` and is never inferred from terminal
+/// content. The free-text detail is sanitized and shown only in the Explorer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationAgentStatus {
+    pub state: AgentState,
+    pub detail: Option<String>,
+    /// An active state's TTL lapsed; the last state and detail are kept.
+    pub stale: bool,
+    /// Whole minutes without a report, kept only while stale so a fresh
+    /// status compares equal across topology polls.
+    pub stale_minutes: Option<u64>,
+}
+
+impl NavigationAgentStatus {
+    #[must_use]
+    pub fn from_summary(summary: &AgentStatusSummary) -> Self {
+        Self {
+            state: summary.state,
+            detail: summary
+                .detail
+                .as_deref()
+                .map(|detail| {
+                    bounded_text(detail, MAX_AGENT_DETAIL_SCALARS, MAX_AGENT_DETAIL_CELLS)
+                })
+                .filter(|detail| !detail.trim().is_empty()),
+            stale: summary.stale,
+            stale_minutes: summary.stale.then_some(summary.reported_age_ms / 60_000),
+        }
+    }
+
+    /// Status of the live incarnation only; an exited Splint has none.
+    #[must_use]
+    pub fn from_runtime(runtime: &SplintRuntimeSummary) -> Option<Self> {
+        runtime
+            .live_incarnation
+            .and(runtime.agent_status.as_ref())
+            .map(Self::from_summary)
+    }
+}
+
+/// Agent status of one Splint shown in this Window's Dojo tabs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowSplintAgentStatus {
+    pub dojo_id: DojoId,
+    pub incarnation: u64,
+    pub status: NavigationAgentStatus,
+}
+
+/// Agent status of every Splint in this Window's attached Dojos.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WindowAgentStatus {
+    pub splints: HashMap<SplintId, WindowSplintAgentStatus>,
+}
+
+impl WindowAgentStatus {
+    /// Collects statuses for the given attached Dojos from one validated
+    /// snapshot. Unknown Dojo identities are ignored.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &TopologySnapshot, attached_dojos: &[DojoId]) -> Self {
+        let runtimes: HashMap<_, _> = snapshot
+            .runtimes
+            .iter()
+            .map(|runtime| (runtime.splint_id, runtime))
+            .collect();
+        let mut splints = HashMap::new();
+        for dojo in snapshot
+            .topology
+            .lairs()
+            .flat_map(|lair| &lair.dojos)
+            .filter(|dojo| attached_dojos.contains(&dojo.id))
+        {
+            let mut ids = Vec::new();
+            collect_layout_splint_ids(&dojo.root, &mut ids);
+            for splint_id in ids {
+                let Some(runtime) = runtimes.get(&splint_id) else {
+                    continue;
+                };
+                if let (Some(incarnation), Some(status)) = (
+                    runtime.live_incarnation,
+                    NavigationAgentStatus::from_runtime(runtime),
+                ) {
+                    splints.insert(
+                        splint_id,
+                        WindowSplintAgentStatus {
+                            dojo_id: dojo.id,
+                            incarnation,
+                            status,
+                        },
+                    );
+                }
+            }
+        }
+        Self { splints }
+    }
+
+    /// Applies one status change only to the matching live incarnation.
+    /// The next topology poll supersedes it. Returns whether anything changed.
+    pub fn apply_change(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<NavigationAgentStatus>,
+    ) -> bool {
+        let Some(current) = self.splints.get_mut(&splint_id) else {
+            return false;
+        };
+        if current.incarnation != incarnation {
+            return false;
+        }
+        match status {
+            Some(status) if current.status == status => false,
+            Some(status) => {
+                current.status = status;
+                true
+            }
+            None => self.splints.remove(&splint_id).is_some(),
+        }
+    }
+
+    /// Statuses of the Splints in one Dojo, in no particular order.
+    pub fn dojo_statuses(&self, dojo_id: DojoId) -> impl Iterator<Item = &NavigationAgentStatus> {
+        self.splints
+            .values()
+            .filter(move |splint| splint.dojo_id == dojo_id)
+            .map(|splint| &splint.status)
+    }
+}
+
+fn collect_layout_splint_ids(layout: &LayoutNode, output: &mut Vec<SplintId>) {
+    match layout {
+        LayoutNode::Leaf(splint) => output.push(splint.id),
+        LayoutNode::Branch { first, second, .. } => {
+            collect_layout_splint_ids(first, output);
+            collect_layout_splint_ids(second, output);
+        }
+    }
+}
 
 /// Freshness of the endpoint data from which a projection was derived.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,6 +290,7 @@ pub struct NavigationSplint {
     pub last_incarnation: Option<u64>,
     pub exit_status: Option<ProcessExitStatus>,
     pub focused_here: bool,
+    pub agent_status: Option<NavigationAgentStatus>,
 }
 
 /// One projected Dojo in canonical daemon order.
@@ -262,6 +407,7 @@ pub struct NavigationExplorerSplint {
     pub lifecycle: NavigationLifecycle,
     pub focused_here: bool,
     pub target: NavigationExplorerSplintTarget,
+    pub agent_status: Option<NavigationAgentStatus>,
 }
 
 /// One Dojo retained by the persistent explorer, including unavailable rows.
@@ -309,6 +455,46 @@ pub struct NavigationExplorerView {
     pub freshness: EndpointFreshness,
     pub lairs: Vec<NavigationExplorerLair>,
     pub current: Option<NavigationNodeId>,
+}
+
+impl NavigationExplorerView {
+    /// Applies one `AgentStatusChanged` delivery only when the incarnation
+    /// matches this view's live incarnation for that Splint. The next
+    /// topology snapshot supersedes it. Returns whether anything changed.
+    pub fn apply_agent_status(
+        &mut self,
+        splint_id: SplintId,
+        incarnation: u64,
+        status: Option<NavigationAgentStatus>,
+    ) -> bool {
+        let Some(splint) = self
+            .lairs
+            .iter_mut()
+            .flat_map(|lair| &mut lair.dojos)
+            .flat_map(|dojo| &mut dojo.splints)
+            .find(|splint| {
+                splint.target.splint_id == splint_id
+                    && splint.target.live_incarnation == Some(incarnation)
+            })
+        else {
+            return false;
+        };
+        if splint.agent_status == status {
+            return false;
+        }
+        splint.agent_status = status;
+        true
+    }
+
+    /// Whether any Splint in this view has a reported status.
+    #[must_use]
+    pub fn has_agent_status(&self) -> bool {
+        self.lairs
+            .iter()
+            .flat_map(|lair| &lair.dojos)
+            .flat_map(|dojo| &dojo.splints)
+            .any(|splint| splint.agent_status.is_some())
+    }
 }
 
 /// Current-Window facts which are not daemon containment relationships.
@@ -443,6 +629,7 @@ impl NavigationProjection {
                     label: splint.node.label.clone(),
                     lifecycle: splint.node.lifecycle,
                     focused_here: splint.focused_here,
+                    agent_status: splint.agent_status.clone(),
                     target: NavigationExplorerSplintTarget {
                         topology_revision: self.topology_revision,
                         lair_id: dojo.lair_id,
@@ -1085,6 +1272,7 @@ fn collect_splints(
                 last_incarnation: runtime.last_incarnation,
                 exit_status: runtime.exit_status,
                 focused_here: active_here && context.window.focused_splint == Some(splint.id),
+                agent_status: NavigationAgentStatus::from_runtime(runtime),
             });
         }
         LayoutNode::Branch { first, second, .. } => {
@@ -2517,6 +2705,119 @@ mod tests {
         assert_eq!(
             projection.lairs[0].node.lifecycle,
             NavigationLifecycle::Unavailable
+        );
+    }
+
+    fn agent_summary(state: AgentState, is_stale: bool, age_ms: u64) -> AgentStatusSummary {
+        AgentStatusSummary {
+            state,
+            detail: Some("waiting for approval".to_owned()),
+            sequence: 4,
+            stale: is_stale,
+            reported_age_ms: age_ms,
+        }
+    }
+
+    #[test]
+    fn projection_carries_live_agent_status_into_the_explorer_view() {
+        let lair = running_lair("forge");
+        let dojo_id = lair.dojos[0].id;
+        let mut snapshot = snapshot(vec![lair], &[]);
+        snapshot.runtimes[0].agent_status = Some(agent_summary(AgentState::Working, true, 150_000));
+        let projection = NavigationProjection::build(&snapshot, context(&[dojo_id])).unwrap();
+        let expected = NavigationAgentStatus {
+            state: AgentState::Working,
+            detail: Some("waiting for approval".to_owned()),
+            stale: true,
+            stale_minutes: Some(2),
+        };
+        assert_eq!(
+            projection.lairs[0].dojos[0].splints[0].agent_status,
+            Some(expected.clone())
+        );
+        let view = projection.explorer_view();
+        assert!(view.has_agent_status());
+        assert_eq!(
+            view.lairs[0].dojos[0].splints[0].agent_status,
+            Some(expected)
+        );
+
+        // A fresh status keeps no report age, so heartbeats compare equal.
+        let fresh =
+            NavigationAgentStatus::from_summary(&agent_summary(AgentState::Done, false, 90_000));
+        assert_eq!(fresh.stale_minutes, None);
+        assert_eq!(
+            fresh,
+            NavigationAgentStatus::from_summary(&agent_summary(AgentState::Done, false, 1))
+        );
+
+        // Display sanitization is defence in depth behind protocol validation.
+        let mut unsafe_detail = agent_summary(AgentState::Idle, false, 0);
+        unsafe_detail.detail = Some("a\u{202e}b\u{7}c".to_owned());
+        assert_eq!(
+            NavigationAgentStatus::from_summary(&unsafe_detail)
+                .detail
+                .as_deref(),
+            Some("ab c")
+        );
+        unsafe_detail.detail = Some("\u{200f}".to_owned());
+        assert_eq!(
+            NavigationAgentStatus::from_summary(&unsafe_detail).detail,
+            None
+        );
+
+        // An exited Splint has no live incarnation and so no status.
+        let mut exited = snapshot.runtimes[0].clone();
+        exited.live_incarnation = None;
+        assert_eq!(NavigationAgentStatus::from_runtime(&exited), None);
+    }
+
+    #[test]
+    fn agent_status_changes_apply_only_to_the_matching_incarnation() {
+        let lair = running_lair("forge");
+        let dojo_id = lair.dojos[0].id;
+        let splint_id = lair.dojos[0].default_focus;
+        let mut snapshot = snapshot(vec![lair], &[]);
+        snapshot.runtimes[0].agent_status = Some(agent_summary(AgentState::Error, false, 0));
+        let mut view = NavigationProjection::build(&snapshot, context(&[dojo_id]))
+            .unwrap()
+            .explorer_view();
+        let blocked =
+            NavigationAgentStatus::from_summary(&agent_summary(AgentState::NeedsInput, false, 0));
+        assert!(!view.apply_agent_status(splint_id, 2, Some(blocked.clone())));
+        assert!(!view.apply_agent_status(SplintId::new(), 1, None));
+        assert_eq!(
+            view.lairs[0].dojos[0].splints[0]
+                .agent_status
+                .as_ref()
+                .map(|status| status.state),
+            Some(AgentState::Error)
+        );
+        assert!(view.apply_agent_status(splint_id, 1, Some(blocked.clone())));
+        assert!(!view.apply_agent_status(splint_id, 1, Some(blocked)));
+        assert!(view.apply_agent_status(splint_id, 1, None));
+        assert!(!view.has_agent_status());
+    }
+
+    #[test]
+    fn window_agent_status_collects_only_attached_dojos() {
+        let attached = running_lair("attached");
+        let detached = running_lair("detached");
+        let attached_dojo = attached.dojos[0].id;
+        let attached_splint = attached.dojos[0].default_focus;
+        let mut snapshot = snapshot(vec![attached, detached], &[]);
+        for runtime in &mut snapshot.runtimes {
+            runtime.agent_status = Some(agent_summary(AgentState::Done, false, 0));
+        }
+        let status = WindowAgentStatus::from_snapshot(&snapshot, &[attached_dojo]);
+        assert_eq!(status.splints.len(), 1);
+        let splint = &status.splints[&attached_splint];
+        assert_eq!(splint.dojo_id, attached_dojo);
+        assert_eq!(splint.incarnation, 1);
+        assert_eq!(status.dojo_statuses(attached_dojo).count(), 1);
+        assert_eq!(
+            WindowAgentStatus::from_snapshot(&snapshot, &[]),
+            WindowAgentStatus::default()
         );
     }
 }

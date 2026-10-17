@@ -2240,6 +2240,7 @@ mod tests {
             forced_control_transfer: true,
             grant_ids: Vec::new(),
             pending_transfer_id: None,
+            agent_status_incarnation: None,
         });
         let layout = command_palette_layout(
             content,

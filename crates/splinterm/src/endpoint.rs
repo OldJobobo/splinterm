@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use splinterm_automation_client::Connection;
 
-use crate::{remote::RemoteProfile, remote_session::RemoteSession};
+use crate::{remote::RemoteProfile, remote_askpass::NativePrompt, remote_session::RemoteSession};
 
 /// Informational connection-time identity, not a security or authority signal.
 /// Constructed only from a remote endpoint's negotiated daemon metadata.
@@ -105,6 +105,20 @@ impl ConnectionFactory {
     /// Returns an error when OpenSSH or graphical-relay negotiation fails.
     pub async fn remote(profile: &RemoteProfile) -> Result<Self> {
         let session = RemoteSession::connect(profile).await?;
+        Ok(Self::from_remote_session(profile.name(), session))
+    }
+
+    /// Like [`Self::remote`], but asks through `prompt` (the status Window)
+    /// when OpenSSH needs input and no terminal or `SSH_ASKPASS` can answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when OpenSSH or graphical-relay negotiation fails.
+    pub async fn remote_with_prompt(
+        profile: &RemoteProfile,
+        prompt: &NativePrompt,
+    ) -> Result<Self> {
+        let session = RemoteSession::connect_with_prompt(profile, prompt).await?;
         Ok(Self::from_remote_session(profile.name(), session))
     }
 

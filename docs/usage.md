@@ -180,6 +180,8 @@ only stopped or unavailable Splints is not live. **Saved** keeps saved and pinne
 including any live work inside them. These filters preserve the authoritative
 Lair → Dojo → Splint order; pinning adds a status marker, not refresh-driven
 sorting. Branches begin collapsed, and refreshing preserves disclosure choices.
+A chevron icon before each Lair and Dojo points right when collapsed and down
+when expanded, and a dot marks the current row.
 Label search operates within the chosen filter. The accessibility status names
 the active filter and announces the keyboard shortcut.
 
@@ -212,6 +214,71 @@ field behind it.
 [Navigation accessibility](accessibility.md) describes the bounded native AT-SPI
 interface and its limitations. The guide is included in the 0.1.1 Arch and Nix
 package documentation. This is not whole-terminal screen-reader support.
+
+### Agent status in the Explorer and on Dojo tabs
+
+An agent running in a Splint can report whether it is working, needs you, or has
+finished, through `splinterm agent-status`, the MCP tool, or an agent hook (see
+[automation](automation.md#agent-status)). Splinterm shows only what was
+explicitly reported. It never guesses from terminal text, titles, prompts, or
+output, and a status is display data: it cannot approve, type, or take control.
+
+| State | Icon | ASCII fallback | Text |
+| --- | --- | --- | --- |
+| working | `loader-2` (an open circle) | `>` | Working |
+| needs input | `message-question` (a speech bubble with `?`) | `?` | Needs input |
+| done | `circle-check` | `+` | Done |
+| error | `alert-circle` (a circle with `!`) | `!` | Error |
+| idle | `point` (a small ring) | `-` | Idle |
+| stale marker | `clock` | `~` | stale (no report for N min) |
+
+The icons are a small subset of [Tabler Icons](https://tabler.io/icons) (MIT)
+built into Splinterm, drawn in the row's text colour at the interface font's
+ascender height. Every state differs by icon shape and by text, never by colour
+or motion alone. Icons are static: the working icon never spins, and nothing
+else animates. They do not depend on the interface font; if the built-in icon
+data could not be loaded, Splinterm would show the ASCII fallbacks instead of a
+missing-glyph box. Icons are visual only: accessible text and search use the
+state words.
+
+- **Splint rows** show the icon in a fixed-width column before the name and add
+  the state to the status line, for example *Running · Needs input · waiting for
+  approval*. The agent's free-text detail appears only here, ellipsized to the
+  row width.
+- **Dojo and Lair rows** show the most urgent icon of the Splints inside them,
+  and the status line counts each state in words, joined with ", ", for example
+  *Running · Current · 1 needs input, 2 working*. Priority is needs input, then
+  error, working, done, and idle; stale statuses rank last. The icon column
+  appears while any Splint in the Explorer has a status.
+- **Dojo tabs** show one badge before the label: the most urgent icon, with a
+  count when several Splints share it (the needs-input icon followed by `2`).
+  The badge takes space from the label, never from the close control, so on a
+  narrow tab the label is shortened first and the badge is the last thing
+  dropped. Tabs never show the detail text.
+- **Stale.** `working` and `needs input` expire unless the agent reports again,
+  after two minutes by default. Splinterm then keeps the last icon and adds the
+  clock icon after it in the Explorer column and the tab badge, and the
+  Explorer status reads *Working · stale (no report for 2 min)*. A stale status
+  is dropped after 15 more minutes.
+- **Unavailable.** While the Explorer's view of the daemon is stale or
+  disconnected, rows show *Agent status unavailable* instead of the last value.
+- **Search.** Explorer search also matches state words, so `needs input` (or
+  `needs_input`, `error`, `done`, `stale`) filters to those Splints. It does not
+  match the detail text.
+- **Clear.** The palette command **Clear agent status** clears the focused
+  Splint's status. It is offered only while that Splint shows one. Splinterm's
+  own interface can clear a status but never set one.
+
+Relaunching or restoring a Splint starts with no status, and so does every Splint
+after a daemon restart or live upgrade until its agent reports again. To hide all
+agent status presentation, set `agent-status=no` in the `[explorer]` section of
+the [configuration](configuration.md); **Reload configuration** applies it.
+
+The Explorer's accessible item states include the state in words, and a polite
+announcement is made only when a visible Splint enters needs input, error, or
+done, or stops being stale. Changes to and from working are not announced.
+`SPLINTERM_REDUCED_MOTION=1` is honoured, but agent status adds nothing to
+animate; Splinterm does not yet read the desktop's reduce-animation setting.
 
 ## Panes and layouts
 
