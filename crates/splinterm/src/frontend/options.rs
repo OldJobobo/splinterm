@@ -120,6 +120,8 @@ pub struct WindowOptions {
     pub initial_tab_strip_visible: bool,
     /// Remote daemon identity from this Window's initial connection; never terminal content.
     pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
+    /// `[explorer] agent-status`: show explicitly reported agent status.
+    pub agent_status_presentation: bool,
     /// Whether the Window binds the text-input (IME) protocol. The remote
     /// connection status Window turns it off so an input method never sees or
     /// draws a typed password as composing text.
@@ -168,6 +170,7 @@ impl Default for WindowOptions {
             initial_dojo: None,
             initial_tab_strip_visible: true,
             remote_display_identity: None,
+            agent_status_presentation: true,
             input_method: true,
             mapped: None,
         }

@@ -127,6 +127,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it | no |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
+| `explorer.agent-status` | show explicitly reported agent status in the Explorer, on Dojo tabs, and in navigation accessibility; `no` hides it all; configuration reload applies it | yes |
 
 The protocol grid is bounded at 480×128. The shipped 14 px output-scale profile
 uses the complete natural grid on validated 2560×1440 and 3840×2160 surfaces.
