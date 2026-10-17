@@ -14,10 +14,11 @@ use splinterm::{
     config::AppConfig,
     endpoint::{ConnectionFactory, LaunchSemantics},
     navigation_projection::{
-        EndpointFreshness, NavigationAction, NavigationAuthority, NavigationAvailability,
-        NavigationExplorerSplintTarget, NavigationExplorerView, NavigationNodeId,
-        NavigationPermission, NavigationPickerKind, NavigationPickerView, NavigationProjection,
-        NavigationProjectionContext, NavigationWindowState,
+        EndpointFreshness, NavigationAction, NavigationAgentStatus, NavigationAuthority,
+        NavigationAvailability, NavigationExplorerSplintTarget, NavigationExplorerView,
+        NavigationNodeId, NavigationPermission, NavigationPickerKind, NavigationPickerView,
+        NavigationProjection, NavigationProjectionContext, NavigationWindowState,
+        WindowAgentStatus,
     },
     session_picker::{SessionEntry, collect_sessions, dojo_has_fully_running_pane_layout},
     tab::{DojoTab, OpenTabOutcome, WindowTabSet},
@@ -513,7 +514,8 @@ async fn apply_topology_command(
         | WindowTopologyCommand::TerminateDojo { .. }
         | WindowTopologyCommand::ActivateTab { .. }
         | WindowTopologyCommand::CloseTab { .. }
-        | WindowTopologyCommand::CloseTabs { .. } => {
+        | WindowTopologyCommand::CloseTabs { .. }
+        | WindowTopologyCommand::ClearAgentStatus { .. } => {
             unreachable!("session commands are handled by the topology manager")
         }
     };
@@ -1601,6 +1603,10 @@ enum TopologyManagerCommandOutcome {
 struct TopologyManagerState {
     tabs: WindowTabSet<ManagedDojo>,
     transient_owners: HashMap<LairId, Connection>,
+    /// Set when the frontend dropped a status locally after an accepted clear,
+    /// so the next poll republishes the daemon's status rather than diffing
+    /// against what the frontend no longer shows.
+    agent_status_republish: bool,
 }
 
 struct ManagedWindowOpen {
@@ -3056,6 +3062,31 @@ async fn handle_session_manager_command(
             }
             TopologyManagerCommandOutcome::Continue
         }
+        WindowTopologyCommand::ClearAgentStatus {
+            splint_id,
+            incarnation,
+        } => {
+            let update =
+                match clear_agent_status(connection, &state.tabs, splint_id, incarnation).await {
+                    Ok(()) => {
+                        state.agent_status_republish = true;
+                        WindowTopologyUpdate::AgentStatusCleared {
+                            splint_id,
+                            incarnation,
+                        }
+                    }
+                    Err(error) => WindowTopologyUpdate::TabFailed {
+                        explorer_target: None,
+                        dojo_id: None,
+                        message: format!("{error:#}"),
+                    },
+                };
+            if updates.send(update).await.is_err() {
+                TopologyManagerCommandOutcome::Stop
+            } else {
+                TopologyManagerCommandOutcome::Continue
+            }
+        }
         WindowTopologyCommand::RequestDojoPrompt { .. }
         | WindowTopologyCommand::ExplorerContext { .. } => TopologyManagerCommandOutcome::Continue,
         command => TopologyManagerCommandOutcome::Edit(match guard {
@@ -3172,10 +3203,18 @@ async fn reconcile_managed_topology(
 /// Runtime transitions need not advance the structural revision, and detached
 /// Dojos produce no managed-tab updates. Observe both, without polling `ListLairs`
 /// or waking the frontend on unchanged snapshots (runtime order is immaterial).
+/// Agent status is compared as presented: its report age and sequence advance
+/// on every poll or heartbeat without changing what the Explorer shows.
 #[derive(Default)]
 struct ExplorerObservation {
     revision: Option<TopologyRevision>,
-    runtimes: HashMap<SplintId, splinterm_protocol::SplintRuntimeSummary>,
+    runtimes: HashMap<
+        SplintId,
+        (
+            splinterm_protocol::SplintRuntimeSummary,
+            Option<NavigationAgentStatus>,
+        ),
+    >,
 }
 
 impl ExplorerObservation {
@@ -3183,13 +3222,69 @@ impl ExplorerObservation {
         let runtimes = snapshot
             .runtimes
             .iter()
-            .map(|runtime| (runtime.splint_id, runtime.clone()))
+            .map(|runtime| {
+                let status = NavigationAgentStatus::from_runtime(runtime);
+                let mut runtime = runtime.clone();
+                runtime.agent_status = None;
+                (runtime.splint_id, (runtime, status))
+            })
             .collect::<HashMap<_, _>>();
         let changed = self.revision != Some(snapshot.revision) || self.runtimes != runtimes;
         self.revision = Some(snapshot.revision);
         self.runtimes = runtimes;
         changed
     }
+}
+
+/// Publishes attached-Dojo agent status for tab badges only when what the
+/// badges and palette show changed. The frontend starts with no status, so an
+/// empty first observation sends nothing.
+#[derive(Default)]
+struct AgentStatusObservation {
+    published: WindowAgentStatus,
+}
+
+impl AgentStatusObservation {
+    fn observe(
+        &mut self,
+        snapshot: &splinterm_protocol::TopologySnapshot,
+        tabs: &WindowTabSet<ManagedDojo>,
+    ) -> Option<WindowAgentStatus> {
+        let attached = tabs.iter().map(|tab| tab.dojo_id).collect::<Vec<_>>();
+        let current = WindowAgentStatus::from_snapshot(snapshot, &attached);
+        if self.published == current {
+            return None;
+        }
+        self.published.clone_from(&current);
+        Some(current)
+    }
+}
+
+/// The trusted UI may only clear a status, and only for a Splint in one of
+/// this Window's Dojos, through the person's explicit palette action.
+async fn clear_agent_status(
+    connection: &mut Connection,
+    tabs: &WindowTabSet<ManagedDojo>,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        tabs.iter()
+            .any(|tab| tab.value.root.find_splint(splint_id).is_some()),
+        "agent status clear targeted a Splint outside this Window"
+    );
+    let response = connection
+        .request(Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: None,
+        })
+        .await?;
+    anyhow::ensure!(
+        matches!(response, Response::AgentStatusAccepted { .. }),
+        "splinterd did not acknowledge the agent status clear"
+    );
+    Ok(())
 }
 
 enum TopologyManagerWake {
@@ -3263,6 +3358,7 @@ pub(in crate::app) async fn run_topology_manager(
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut poll_priority = false;
     let mut explorer_observation = ExplorerObservation::default();
+    let mut agent_status_observation = AgentStatusObservation::default();
     let initial_lair_id = initial_identity.lair_id;
     let initial_dojo_id = initial_identity.dojo_id;
     let mut transient_owners = HashMap::new();
@@ -3281,6 +3377,7 @@ pub(in crate::app) async fn run_topology_manager(
             },
         )),
         transient_owners,
+        agent_status_republish: false,
     };
     let mut window_closing = false;
     loop {
@@ -3326,9 +3423,21 @@ pub(in crate::app) async fn run_topology_manager(
                 return Err(error);
             }
         };
+        if std::mem::take(&mut state.agent_status_republish) {
+            explorer_observation = ExplorerObservation::default();
+            agent_status_observation = AgentStatusObservation::default();
+        }
         if explorer_observation.observe(&snapshot)
             && updates
                 .send(WindowTopologyUpdate::LairExplorerInvalidated)
+                .await
+                .is_err()
+        {
+            break;
+        }
+        if let Some(status) = agent_status_observation.observe(&snapshot, &state.tabs)
+            && updates
+                .send(WindowTopologyUpdate::AgentStatus(status))
                 .await
                 .is_err()
         {

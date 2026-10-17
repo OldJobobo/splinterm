@@ -39,6 +39,10 @@ pub enum FontAuthority {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent shell, cursor, preset, and presentation switches from config.ini"
+)]
 pub struct AppConfig {
     pub font: String,
     pub font_ligatures: FontLigatures,
@@ -88,6 +92,9 @@ pub struct AppConfig {
     pub preset_path: Option<PathBuf>,
     pub preset_catalog: Option<PresetCatalog>,
     pub allow_unrestricted_commands: bool,
+    /// Whether explicitly reported agent status is shown in the Explorer, on
+    /// Dojo tabs, and in navigation accessibility (`[explorer] agent-status`).
+    pub explorer_agent_status: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -176,6 +183,7 @@ impl Default for AppConfig {
             preset_path: None,
             preset_catalog: Some(PresetCatalog::bundled()),
             allow_unrestricted_commands: false,
+            explorer_agent_status: true,
         }
     }
 }
@@ -278,6 +286,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                     | "presets"
                     | "multiplexer"
                     | "clipboard"
+                    | "explorer"
             ) {
                 diagnostics.push(format!(
                     "line {}: unsupported section [{section}]",
@@ -467,6 +476,10 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                         index + 1
                     ),
                 };
+                false
+            }
+            "explorer.agent-status" => {
+                config.explorer_agent_status = parse_bool(value, index)?;
                 false
             }
             "multiplexer.frame-title" => {
@@ -1718,6 +1731,20 @@ mod tests {
         }
         assert!(parse("[multiplexer]\ndivider-style=tmux\n").is_err());
         assert!(parse("[multiplexer]\nframe-title=osc\n").is_err());
+    }
+
+    #[test]
+    fn explorer_agent_status_presentation_defaults_on_and_can_be_hidden() {
+        assert!(AppConfig::default().explorer_agent_status);
+        for (value, expected) in [("yes", true), ("no", false), ("off", false), ("1", true)] {
+            let loaded = parse(&format!("[explorer]\nagent-status={value}\n")).unwrap();
+            assert_eq!(loaded.config.explorer_agent_status, expected);
+            assert!(loaded.diagnostics.is_empty());
+        }
+        assert!(parse("[explorer]\nagent-status=spinner\n").is_err());
+        let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
+        assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
+        assert!(shipped.config.explorer_agent_status);
     }
 
     #[test]

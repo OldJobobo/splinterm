@@ -45,6 +45,7 @@ zbus.workspace = true
 [dev-dependencies]
 sha2.workspace = true
 splinterd = { path = "../splinterd", features = ["integration-test"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [[example]]
 name = "font-stack-spike"
