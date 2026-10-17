@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -2459,6 +2459,8 @@ pub enum LiveError {
     PublicationMemoryFull,
     #[error("child process has already exited")]
     ProcessExited,
+    #[error("Splint is closing because it was never used")]
+    Retiring,
     #[error("image content does not exist on the active screen")]
     ImageContentNotFound,
     #[error("image content generation or digest is stale")]
@@ -3047,6 +3049,95 @@ async fn read_root_process_cwd(pid: u32, pidfd: &OwnedFd) -> Option<PathBuf> {
     root_process_is_live(pidfd).then_some(cwd)
 }
 
+/// Whether the terminal foreground process group is the root's own group.
+/// The root leads its session and process group, so its PID names the group.
+async fn read_root_holds_foreground(pid: u32, pidfd: &OwnedFd) -> Option<bool> {
+    if !root_process_is_live(pidfd) {
+        return None;
+    }
+    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .ok()?;
+    let foreground_group = parse_stat_foreground_group(&stat)?;
+    root_process_is_live(pidfd).then_some(foreground_group == i64::from(pid))
+}
+
+/// Reads `tpgid` from `/proc/PID/stat`. The command name may contain spaces
+/// and parentheses, so the fields after it are found from the last `)`.
+fn parse_stat_foreground_group(stat: &str) -> Option<i64> {
+    let (_, fields) = stat.rsplit_once(')')?;
+    // state, ppid, pgrp, session, tty_nr, tpgid
+    fields.split_whitespace().nth(5)?.parse().ok()
+}
+
+/// Whether the bytes are only focus in and out reports. Bytes alone do not
+/// prove a terminal generated them; only input the client flags as its focus
+/// reports is checked against this.
+fn is_focus_report_only(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes
+            .chunks(3)
+            .all(|report| report == b"\x1b[I" || report == b"\x1b[O")
+}
+
+const LATCH_UNUSED: u8 = 0;
+const LATCH_USED: u8 = 1;
+const LATCH_RETIRING: u8 = 2;
+
+/// Records whether a runtime has received client input.
+///
+/// A conditional close claims an unused runtime by moving it to retiring;
+/// input then fails instead of reaching a process that is about to end.
+/// Either the input or the claim wins, never both.
+#[derive(Debug, Default)]
+struct UseLatch(AtomicU8);
+
+impl UseLatch {
+    /// Records client input; false when a close has claimed the runtime.
+    fn record_input(&self, counts_as_use: bool) -> bool {
+        if !counts_as_use {
+            return self.0.load(Ordering::Acquire) != LATCH_RETIRING;
+        }
+        match self.0.compare_exchange(
+            LATCH_UNUSED,
+            LATCH_USED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(current) => current == LATCH_USED,
+        }
+    }
+
+    fn claim_unused(&self) -> bool {
+        self.0
+            .compare_exchange(
+                LATCH_UNUSED,
+                LATCH_RETIRING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn release_claim(&self) {
+        let _ = self.0.compare_exchange(
+            LATCH_RETIRING,
+            LATCH_UNUSED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn has_received_input(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LATCH_USED
+    }
+
+    fn is_claimed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LATCH_RETIRING
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveSplintHandle {
     pub splint_id: SplintId,
@@ -3059,6 +3150,7 @@ pub struct LiveSplintHandle {
     max_input_message_bytes: usize,
     metrics: Arc<RuntimeMetrics>,
     exit: watch::Receiver<Option<ProcessExit>>,
+    use_latch: Arc<UseLatch>,
 }
 
 #[allow(
@@ -3084,11 +3176,58 @@ impl LiveSplintHandle {
         read_root_process_cwd(self.child_pid, self.child_pidfd.as_deref()?).await
     }
 
+    /// Writes client input, which marks the runtime as used. Input to a
+    /// runtime claimed by a conditional close fails with
+    /// [`LiveError::Retiring`].
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
+        self.write_input(bytes, true).await
+    }
+
+    /// Writes focus reports a graphical client generated for its own focus
+    /// changes. They leave the runtime unused, but only when the bytes really
+    /// are focus reports; anything else counts as input.
+    pub async fn focus_report(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
+        let counts_as_use = !is_focus_report_only(&bytes);
+        self.write_input(bytes, counts_as_use).await
+    }
+
+    async fn write_input(&self, bytes: Vec<u8>, counts_as_use: bool) -> Result<(), LiveError> {
         if bytes.len() > self.max_input_message_bytes {
             return Err(LiveError::InputQueueFull);
         }
+        if !self.use_latch.record_input(counts_as_use) {
+            return Err(LiveError::Retiring);
+        }
         self.request(|reply| Command::Input(bytes, reply)).await
+    }
+
+    #[must_use]
+    pub fn has_received_input(&self) -> bool {
+        self.use_latch.has_received_input()
+    }
+
+    /// Claims a runtime that never received input, so later input fails.
+    /// Returns false when input already arrived or another close holds it.
+    #[must_use]
+    pub fn claim_unused(&self) -> bool {
+        self.use_latch.claim_unused()
+    }
+
+    /// Whether a conditional close holds a claim on this runtime.
+    #[must_use]
+    pub fn is_claimed_unused(&self) -> bool {
+        self.use_latch.is_claimed()
+    }
+
+    /// Returns an abandoned [`Self::claim_unused`] claim.
+    pub fn release_unused_claim(&self) {
+        self.use_latch.release_claim();
+    }
+
+    /// Whether the root shell holds the terminal foreground, or `None` when
+    /// that cannot be observed for the original root.
+    pub async fn root_holds_foreground(&self) -> Option<bool> {
+        read_root_holds_foreground(self.child_pid, self.child_pidfd.as_deref()?).await
     }
 
     pub async fn resize(&self, size: PtySize) -> Result<(), LiveError> {
@@ -3484,6 +3623,7 @@ impl LiveSplintRuntime {
             max_input_message_bytes: config.maximum_input_message_bytes(),
             metrics: Arc::clone(&metrics),
             exit,
+            use_latch: Arc::default(),
         };
         let task = tokio::spawn(async move {
             let result = Box::pin(run_actor(
@@ -3604,6 +3744,8 @@ struct SynchronizedPublication {
     timed_out: bool,
     deadline: Option<Instant>,
     next_frame_at: Option<Instant>,
+    /// A completed frame was throttled and has not been published yet.
+    frame_pending: bool,
 }
 
 impl SynchronizedPublication {
@@ -3614,6 +3756,7 @@ impl SynchronizedPublication {
             timed_out: false,
             deadline: None,
             next_frame_at: None,
+            frame_pending: false,
         }
     }
 
@@ -3639,6 +3782,20 @@ impl SynchronizedPublication {
         }
         self.next_frame_at = Some(now + SYNCHRONIZED_FRAME_INTERVAL);
         true
+    }
+
+    /// When a throttled frame must be published if no output arrives first.
+    ///
+    /// An echo is often the last output for a while, so waiting for more output
+    /// can leave the completed frame unpublished indefinitely. While a newer
+    /// frame is open the terminal holds partial state, and that frame publishes
+    /// itself when it completes or times out.
+    fn flush_deadline(&self, synchronized: bool) -> Option<Instant> {
+        if self.frame_pending && !synchronized {
+            self.next_frame_at
+        } else {
+            None
+        }
     }
 }
 
@@ -3867,6 +4024,7 @@ async fn run_actor_body(
             break;
         }
 
+        let flush_at = publication.flush_deadline(terminal.synchronized_updates());
         tokio::select! {
             () = async {
                 pending_handoff
@@ -4005,6 +4163,18 @@ async fn run_actor_body(
                 terminal.expire_synchronized_updates();
                 publication.observe(false, Instant::now());
                 publication.expire();
+                publish_updates(
+                    splint_id,
+                    &terminal,
+                    &mut publication,
+                    incarnation,
+                    child_exit,
+                    &mut subscribers,
+                    metrics,
+                );
+            }
+            () = time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                publication.should_publish_frame(Instant::now());
                 publish_updates(
                     splint_id,
                     &terminal,
@@ -4428,6 +4598,7 @@ fn publish_updates(
         .update_count_since(publication.published_revision)
         .unwrap_or(0);
     publication.published_revision = terminal.revision();
+    publication.frame_pending = false;
     let terminal_metadata = terminal.snapshot(SnapshotRequest {
         max_scrollback_rows: 0,
     });
@@ -4614,7 +4785,9 @@ fn process_output(
             let now = Instant::now();
             publication.observe(terminal.synchronized_updates(), now);
             let publish_now = if completed_frame {
-                publication.should_publish_frame(now)
+                let publish = publication.should_publish_frame(now);
+                publication.frame_pending |= !publish;
+                publish
             } else {
                 !terminal.synchronized_updates() && terminal.revision() != revision_before
             };
@@ -5220,6 +5393,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn use_latch_lets_either_input_or_a_close_claim_win() {
+        let latch = UseLatch::default();
+        assert!(!latch.has_received_input());
+        // Focus reports never mark use.
+        assert!(latch.record_input(false));
+        assert!(!latch.has_received_input());
+        assert!(latch.claim_unused());
+        assert!(!latch.record_input(true), "input after a claim is refused");
+        assert!(!latch.record_input(false));
+        assert!(!latch.claim_unused(), "one claim at a time");
+        latch.release_claim();
+        assert!(latch.record_input(true));
+        assert!(latch.has_received_input());
+        assert!(!latch.claim_unused(), "used runtimes are never claimed");
+        latch.release_claim();
+        assert!(latch.has_received_input(), "releasing nothing keeps use");
+        assert!(latch.record_input(true));
+    }
+
+    #[test]
+    fn focus_reports_alone_are_not_user_input() {
+        assert!(is_focus_report_only(b"\x1b[I"));
+        assert!(is_focus_report_only(b"\x1b[O\x1b[I\x1b[O"));
+        assert!(!is_focus_report_only(b""));
+        assert!(!is_focus_report_only(b"\x1b[Ix"));
+        assert!(!is_focus_report_only(b"\x1b[A"));
+        assert!(!is_focus_report_only(b"\x1b["));
+    }
+
+    #[test]
+    fn stat_foreground_group_survives_hostile_command_names() {
+        assert_eq!(
+            parse_stat_foreground_group("42 (sh) S 1 42 42 34816 42 4194560 0"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_stat_foreground_group("42 (a) b) 1 2 3) R 1 42 42 34816 77 0"),
+            Some(77)
+        );
+        assert_eq!(parse_stat_foreground_group("42 (sh) S 1 42"), None);
+        assert_eq!(parse_stat_foreground_group("no fields"), None);
+    }
+
+    #[test]
     fn atomic_accounting_preserves_saturation_and_admission_boundaries() {
         let count = AtomicUsize::new(usize::MAX - 1);
         assert_eq!(RuntimeMetrics::add_usize_saturating(&count, 2), usize::MAX);
@@ -5614,6 +5831,10 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+        assert!(publication.frame_pending);
+        assert_eq!(publication.flush_deadline(false), publication.next_frame_at);
+        // A newer open frame holds partial state, so nothing may flush it.
+        assert_eq!(publication.flush_deadline(true), None);
         let metrics = process_output(
             b"Z",
             SplintId::new(),
@@ -5637,6 +5858,7 @@ mod tests {
         assert_eq!(updates.len(), 2);
         assert_eq!(snapshot.visible_rows[0].cells[0].content, "A");
         assert_eq!(snapshot.visible_rows[0].cells[1].content, "Z");
+        assert!(!publication.frame_pending);
     }
 
     #[tokio::test]
@@ -8875,6 +9097,41 @@ mod tests {
         assert!(snapshot_text(&snapshot).contains("ordered-input"));
         assert!(slow.changed().await);
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    // An echo inside a synchronized frame is often the last output for a while.
+    // A completed frame refused by the frame throttle must still be published.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn throttled_final_synchronized_frame_publishes_without_more_output() {
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell(
+                "read value; printf '\\033[?2026hA\\033[?2026l\\033[?2026hB\\033[?2026l'; sleep 5",
+            ),
+            fast_config(),
+        )
+        .await
+        .unwrap();
+        let handle = runtime.handle();
+        let (_, mut subscription) = handle.attach().await.unwrap();
+        handle.input(b"go\n".to_vec()).await.unwrap();
+        // The script then sleeps, so no later output can carry frame B.
+        let mut latest = None;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = handle.snapshot().await.unwrap();
+            if snapshot_text(&snapshot).contains("AB") && latest == Some(snapshot.revision) {
+                break;
+            }
+            let event = time::timeout_at(deadline, subscription.recv())
+                .await
+                .expect("the completed frame was never published");
+            if let SubscriptionReceive::Event(LiveEvent::Update { updates, .. }) = event {
+                latest = updates.last().map(TerminalUpdate::revision).or(latest);
+            }
+        }
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

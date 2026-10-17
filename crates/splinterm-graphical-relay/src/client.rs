@@ -1129,7 +1129,7 @@ mod tests {
         time::sleep(Duration::from_millis(50)).await;
         let mut received = vec![0_u8; MAX_DATA_BYTES * FRAMES];
         delayed.read_exact(&mut received).await.unwrap();
-        for (index, chunk) in received.chunks_exact(MAX_DATA_BYTES).enumerate() {
+        for (index, chunk) in received.as_chunks::<MAX_DATA_BYTES>().0.iter().enumerate() {
             assert!(
                 chunk
                     .iter()

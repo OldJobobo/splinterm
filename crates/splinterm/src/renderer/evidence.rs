@@ -371,7 +371,7 @@ pub fn write_ppm(path: impl AsRef<Path>, canvas: &[u8], width: u32, height: u32)
 
     let mut file = fs::File::create(path)?;
     write!(file, "P6\n{width} {height}\n255\n")?;
-    for pixel in canvas.chunks_exact(4) {
+    for pixel in canvas.as_chunks::<4>().0 {
         file.write_all(&[pixel[2], pixel[1], pixel[0]])?;
     }
     file.flush()

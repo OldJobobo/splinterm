@@ -90,11 +90,12 @@ Read [Configuration and keymaps](/docs/configure/configuration/) and [Dojo prese
 splinterm remote list
 splinterm remote inspect PROFILE
 splinterm remote check PROFILE
+splinterm remotes
 splinterm --remote PROFILE
 splinterm --remote PROFILE reopen
 ```
 
-The first two commands are local-only. `remote check` performs bounded, read-only SSH, relay, and daemon probes without mapping a Window. See [Remote access](/docs/remote/).
+The first two commands are local-only. `splinterm remotes` opens a profile chooser and starts the chosen remote in its own Window. `remote check` performs bounded, read-only SSH, relay, and daemon probes without mapping a Window. See [Remote access](/docs/remote/).
 
 ## Machine output
 

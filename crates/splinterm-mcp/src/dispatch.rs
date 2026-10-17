@@ -1536,6 +1536,7 @@ async fn dispatch_mutation_to(
                     expected_topology_revision: preparation.topology_revision,
                     name: name.to_owned(),
                     launch,
+                    generated_name: false,
                 })
                 .await?
             {
@@ -1631,6 +1632,7 @@ async fn dispatch_mutation_to(
                     lair_id,
                     name: name.to_owned(),
                     launch,
+                    generated_name: false,
                 })
                 .await?
             {

@@ -71,6 +71,7 @@ pub(in crate::app) fn new_dojo_request_for(
     promote_transient_lair: bool,
     config: &AppConfig,
 ) -> Result<Request> {
+    let generated_name = name.is_none();
     let name = match name {
         Some(name) => name,
         None => next_default_dojo_name(lairs, lair_id)?,
@@ -86,12 +87,14 @@ pub(in crate::app) fn new_dojo_request_for(
                 config,
             ),
             promote_transient_lair,
+            generated_name,
         },
         LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
             expected_topology_revision,
             lair_id,
             name,
             launch: automation_launch(cwd, command),
+            generated_name,
         },
     })
 }
@@ -140,6 +143,7 @@ pub(in crate::app) fn graphical_create_request(
             semantics,
             expected_topology_revision,
             name,
+            !explicit_name,
             cwd,
             command,
             config,
@@ -152,11 +156,13 @@ pub(in crate::app) fn graphical_create_request(
                 command,
                 config,
             ),
+            generated_name: !explicit_name,
         },
     };
     Ok((request, lifetime))
 }
 
+/// A request for a Lair the user named, as the `new` command does.
 pub(in crate::app) fn create_request(
     factory: &ConnectionFactory,
     expected_topology_revision: TopologyRevision,
@@ -169,6 +175,7 @@ pub(in crate::app) fn create_request(
         factory.capabilities().launch_semantics,
         expected_topology_revision,
         name,
+        false,
         cwd,
         command,
         config,
@@ -179,6 +186,7 @@ pub(in crate::app) fn create_request_for(
     semantics: LaunchSemantics,
     expected_topology_revision: TopologyRevision,
     name: String,
+    generated_name: bool,
     cwd: Option<PathBuf>,
     command: Vec<String>,
     config: &AppConfig,
@@ -192,11 +200,13 @@ pub(in crate::app) fn create_request_for(
                 command,
                 config,
             ),
+            generated_name,
         },
         LaunchSemantics::RemoteInteractive => Request::CreateLairAutomation {
             expected_topology_revision,
             name,
             launch: automation_launch(cwd, command),
+            generated_name,
         },
     })
 }
@@ -463,9 +473,11 @@ mod tests {
                 expected_topology_revision,
                 name,
                 launch,
+                generated_name,
             } if expected_topology_revision == revision
                 && name == "generated"
                 && launch.command.is_empty()
+                && generated_name
         ));
 
         let (named, lifetime) = graphical_create_request(
@@ -479,7 +491,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lifetime, GraphicalLairLifetime::Persistent);
-        assert!(matches!(named, Request::CreateLair { name, .. } if name == "named"));
+        assert!(matches!(
+            named,
+            Request::CreateLair { name, generated_name: false, .. } if name == "named"
+        ));
 
         let (command, lifetime) = graphical_create_request(
             &ConnectionFactory::local(),
@@ -500,12 +515,19 @@ mod tests {
             LaunchSemantics::RemoteInteractive,
             revision,
             "generated".to_owned(),
+            true,
             None,
             Vec::new(),
             &transient_defaults,
         )
         .unwrap();
-        assert!(matches!(remote, Request::CreateLairAutomation { .. }));
+        assert!(matches!(
+            remote,
+            Request::CreateLairAutomation {
+                generated_name: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -537,6 +559,7 @@ mod tests {
                 name,
                 launch,
                 promote_transient_lair,
+                generated_name: true,
             } if expected_topology_revision == revision
                 && requested_lair == lair_id
                 && name == "Dojo 4"
@@ -606,11 +629,58 @@ mod tests {
                 lair_id: requested_lair,
                 name,
                 launch,
+                generated_name: false,
             } if expected_topology_revision == revision
                 && requested_lair == lair_id
                 && name == "logs"
                 && launch.cwd.is_none()
                 && launch.argv == ["remote"]
         ));
+    }
+
+    // Only a name Splinterm generated is marked so; the daemon trusts this
+    // provenance instead of comparing the name with the default label.
+    #[test]
+    fn new_dojo_requests_mark_only_generated_names() {
+        let lair = splinterm_core::Lair::new("main", PathBuf::from("/tmp"));
+        let config = AppConfig::default();
+        for semantics in [
+            LaunchSemantics::LocalTrusted,
+            LaunchSemantics::RemoteInteractive,
+        ] {
+            for (name, expected) in [
+                (None, true),
+                (Some("Dojo 2".to_owned()), false),
+                (Some("logs".to_owned()), false),
+            ] {
+                let request = new_dojo_request_for(
+                    semantics,
+                    TopologyRevision::new(3),
+                    std::slice::from_ref(&lair),
+                    lair.id,
+                    name.clone(),
+                    Some(PathBuf::from("/work")),
+                    Vec::new(),
+                    false,
+                    &config,
+                )
+                .unwrap();
+                let (Request::NewDojo {
+                    name: sent,
+                    generated_name,
+                    ..
+                }
+                | Request::NewDojoAutomation {
+                    name: sent,
+                    generated_name,
+                    ..
+                }) = request
+                else {
+                    panic!("expected a new Dojo request");
+                };
+                assert_eq!(sent, name.unwrap_or_else(|| "Dojo 2".to_owned()));
+                assert_eq!(generated_name, expected, "{semantics:?} {sent}");
+            }
+        }
     }
 }

@@ -53,7 +53,7 @@ fn paint(canvas: &mut [u8], width: usize, height: usize, frame: usize) {
     let pulse = u8::try_from((frame / 2) % 24).expect("pulse fits u8");
     let cell_width = (width / 12).max(1);
     let cell_height = (height / 8).max(1);
-    for (index, pixel) in canvas.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in canvas.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let x = index % width;
         let y = index / width;
         let header = y < height / 6;
