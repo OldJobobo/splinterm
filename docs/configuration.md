@@ -695,11 +695,13 @@ considers these directories in order:
    `XDG_STATE_HOME` says.
 3. Omarchy 3.x's `~/.config/omarchy/current/theme/`, read-only.
 
-Splinterm uses the first directory whose `omarchy/current` parent exists, and it
-re-evaluates that choice on every poll, so it follows the Omarchy 4 migration
-without a restart. A theme switch replaces only `current/theme`, so during that
-brief gap Splinterm keeps the directory it was reading rather than falling back
-to an older Omarchy 3.x leftover. If a higher-priority root vanishes entirely,
+Splinterm uses the first directory that exists, or whose theme Omarchy is
+staging as `current/next-theme`, and it re-evaluates that choice on every poll,
+so it follows the Omarchy 4 migration without a restart. A theme switch stages
+`current/next-theme` before it replaces `current/theme`, so during that brief
+gap Splinterm keeps the directory it was reading rather than falling back to an
+older Omarchy 3.x leftover, and an empty `omarchy/current` left behind in a
+higher-priority root never hides the live theme. If a higher-priority root vanishes entirely,
 the live watcher keeps it for four more polls (2 s) before using a lower one.
 
 The effective `foot.ini` supplies the terminal foreground/background, ANSI 16,

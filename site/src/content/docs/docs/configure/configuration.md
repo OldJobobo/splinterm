@@ -97,13 +97,13 @@ The default `main.font-sizing-policy=output-scale` follows Wayland compositor ou
 
 ## Omarchy theme integration
 
-With `main.theme` unset, Splinterm reads the active Omarchy theme from the first of these directories whose `omarchy/current` parent exists:
+With `main.theme` unset, Splinterm reads the active Omarchy theme from the first of these directories that exists, or whose theme Omarchy is staging as `current/next-theme`:
 
 1. `${XDG_STATE_HOME:-~/.local/state}/omarchy/current/theme/`.
 2. `~/.local/state/omarchy/current/theme/`, where Omarchy 4 always writes, when `XDG_STATE_HOME` points elsewhere.
 3. Omarchy 3.x's `~/.config/omarchy/current/theme/`, read-only.
 
-Splinterm re-checks the choice on every poll, so it follows the Omarchy 4 migration live. During a theme switch it keeps the directory it was reading rather than falling back to an old Omarchy 3.x copy.
+Splinterm re-checks the choice on every poll, so it follows the Omarchy 4 migration live. During a theme switch it keeps the directory it was reading rather than falling back to an old Omarchy 3.x copy, and an empty `omarchy/current` left in a higher-priority root never hides the live theme.
 
 The effective `foot.ini` supplies terminal colors, selection, alpha, and blur. As in Foot, `[colors]` and `[colors-dark]` merge key by key into the dark palette. `colors.toml` supplies standard Omarchy roles, with the canonical Omarchy 4 name read before the legacy alias. The active-tab body uses `lighter_background`, then `lighter_bg`, then Foot `bright0`, rather than the terminal selection color. Inactive tab labels start from `muted`, then `color8`, `dark_foreground`, `dark_fg`, or Foot `bright0`. They keep that colour when it reaches 4.5:1 contrast against the tab strip without being louder than the foreground. Otherwise they use the first qualifying 25/50/75 % mix with the foreground, or the plain foreground. The accent comes from `accent`, `cursor`, `blue`, or `color4`. JSON themes may set `inactive_tab_foreground` explicitly.
 

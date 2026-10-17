@@ -220,10 +220,11 @@ impl AppConfig {
 ///    its writes, when `XDG_STATE_HOME` names a different directory;
 /// 3. Omarchy 3.x `$HOME/.config/omarchy/current/theme`, read-only.
 ///
-/// A candidate is *claimed* while its `omarchy/current` parent exists.
-/// Omarchy replaces only `current/theme` during a theme switch, so a claimed
-/// root with a missing theme is a transient gap, not a reason to fall through
-/// to a stale lower-priority root.
+/// A candidate is *claimed* while its theme directory, or the theme Omarchy
+/// stages beside it as `current/next-theme`, exists. A theme switch stages the
+/// next theme before it removes the current one, so a claimed root with a
+/// missing theme is a transient gap, not a reason to fall through to a stale
+/// lower-priority root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OmarchyThemeRoots {
     candidates: Vec<PathBuf>,
@@ -276,11 +277,14 @@ impl OmarchyThemeRoots {
         &self.candidates
     }
 
+    /// A root is claimed while its theme directory or the theme Omarchy is
+    /// staging next to it exists. `omarchy-theme-set` writes
+    /// `current/next-theme` before it removes `current/theme`, so one of the two
+    /// exists throughout a switch, while a stale empty `current` left in a
+    /// higher root never shadows the live theme.
     fn claimed(&self) -> Option<usize> {
         self.candidates.iter().position(|theme_dir| {
-            theme_dir
-                .parent()
-                .map_or_else(|| theme_dir.is_dir(), Path::is_dir)
+            theme_dir.is_dir() || theme_dir.with_file_name("next-theme").is_dir()
         })
     }
 
@@ -2113,8 +2117,9 @@ mod tests {
         );
         assert!(OmarchyThemeRoots::ordered(Vec::new()).is_none());
 
-        // The stateless walk takes the first claimed root: one whose
-        // omarchy/current parent exists, even while its theme is replaced.
+        // The stateless walk takes the first claimed root: one whose theme, or
+        // the theme Omarchy stages as current/next-theme, exists. A stale
+        // empty current in a higher root never shadows the live theme.
         let root = std::env::temp_dir().join(format!(
             "splinterm-omarchy-theme-roots-{}",
             std::process::id()
@@ -2131,7 +2136,11 @@ mod tests {
         fs::create_dir_all(legacy).unwrap();
         assert_eq!(roots.select(), legacy);
         fs::create_dir_all(state.parent().unwrap()).unwrap();
-        assert_eq!(roots.select(), state);
+        assert_eq!(roots.select(), legacy, "an empty current claims nothing");
+        fs::create_dir_all(state.with_file_name("next-theme")).unwrap();
+        assert_eq!(roots.select(), state, "a staged theme claims its root");
+        fs::create_dir_all(xdg.parent().unwrap()).unwrap();
+        assert_eq!(roots.select(), state, "a stale empty current never shadows");
         fs::create_dir_all(xdg).unwrap();
         assert_eq!(roots.select(), xdg);
         fs::remove_dir_all(root).unwrap();

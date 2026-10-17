@@ -21,19 +21,22 @@ const GENERIC_GUM_VARIABLES: [&str; 4] = [
 ];
 
 pub(crate) async fn refresh_gum_environment(mut command: PtyCommand) -> PtyCommand {
-    let path = default_gum_environment_path();
-    let diagnostic_path = path.clone();
     let inherited_names = env::vars_os().map(|(name, _)| name).collect::<Vec<_>>();
-    let updates =
-        tokio::task::spawn_blocking(move || gum_environment_updates(&path, inherited_names)).await;
+    // Choosing the root probes the filesystem, so it runs off the executor too.
+    let updates = tokio::task::spawn_blocking(move || {
+        let path = default_gum_environment_path();
+        let updates = gum_environment_updates(&path, inherited_names);
+        (path, updates)
+    })
+    .await;
     let updates = match updates {
-        Ok(Ok(updates)) => updates,
-        Ok(Err(error)) => {
+        Ok((_, Ok(updates))) => updates,
+        Ok((diagnostic_path, Err(error))) => {
             debug!(%error, path = %diagnostic_path.display(), "active Omarchy Gum environment unavailable; preserving daemon environment");
             return command;
         }
         Err(error) => {
-            debug!(%error, path = %diagnostic_path.display(), "Omarchy Gum environment task failed; preserving daemon environment");
+            debug!(%error, "Omarchy Gum environment task failed; preserving daemon environment");
             return command;
         }
     };
@@ -76,15 +79,15 @@ fn omarchy_theme_candidates(
     candidates
 }
 
-/// Reads from the first root whose `omarchy/current` parent exists. Omarchy
-/// replaces only `current/theme` during a switch, so a spawn inside that gap
-/// fails to read and keeps the daemon environment instead of falling through
-/// to a stale Omarchy 3.x palette.
+/// Reads from the first root whose theme, or the theme Omarchy is staging as
+/// `current/next-theme`, exists. One of the two exists throughout a switch,
+/// so a spawn inside that gap fails to read and keeps the daemon environment
+/// instead of falling through to a stale Omarchy 3.x palette.
 fn gum_environment_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> PathBuf {
     let candidates = omarchy_theme_candidates(xdg_state_home, home);
     let selected = candidates
         .iter()
-        .position(|theme_dir| theme_dir.parent().is_some_and(Path::is_dir))
+        .position(|theme_dir| theme_dir.is_dir() || theme_dir.with_file_name("next-theme").is_dir())
         .unwrap_or(0);
     candidates[selected].join("gum_env.lua")
 }
@@ -281,11 +284,17 @@ hl.env("NOT_SPLINTERM_OWNED", "#ffffff")
         );
         fs::create_dir_all(&legacy).unwrap();
         assert_eq!(lookup(), legacy.join("gum_env.lua"));
-        // current/ exists while current/theme is being replaced: no flap to
-        // the Omarchy 3.x leftover.
+        // An empty current claims nothing; the theme staged as
+        // current/next-theme while current/theme is replaced does, so there is
+        // no flap to the Omarchy 3.x leftover.
         fs::create_dir_all(&state_current).unwrap();
+        assert_eq!(lookup(), legacy.join("gum_env.lua"));
+        fs::create_dir_all(state_current.join("next-theme")).unwrap();
         assert_eq!(lookup(), state_current.join("theme/gum_env.lua"));
+        // A stale empty current in a higher root never shadows the live theme.
         fs::create_dir_all(xdg.join("omarchy/current")).unwrap();
+        assert_eq!(lookup(), state_current.join("theme/gum_env.lua"));
+        fs::create_dir_all(xdg.join("omarchy/current/theme")).unwrap();
         assert_eq!(lookup(), xdg.join("omarchy/current/theme/gum_env.lua"));
         fs::remove_dir_all(root).unwrap();
     }

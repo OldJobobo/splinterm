@@ -471,16 +471,17 @@ mod tests {
             (home_state.clone(), Some(0x40_40_40))
         );
 
-        // omarchy-theme-set: rm -rf current/theme; mv current/next-theme
-        // current/theme. current/ stays, so the claimed root is kept for as
-        // long as the gap lasts and each read is rejected.
+        // omarchy-theme-set stages current/next-theme, then runs
+        // rm -rf current/theme; mv current/next-theme current/theme. The staged
+        // theme keeps the root claimed for as long as the gap lasts, and each
+        // read is rejected.
+        write_theme(&state_current.join("next-theme"), 0x41_41_41);
         std::fs::remove_dir_all(&home_state).unwrap();
         for _ in 0..=OMARCHY_ROOT_DEMOTION_GRACE_POLLS * 2 {
             let (selected, loaded) = poll(&source, &mut selection);
             assert_eq!(selected, home_state);
             assert!(loaded.is_none());
         }
-        write_theme(&state_current.join("next-theme"), 0x41_41_41);
         std::fs::rename(state_current.join("next-theme"), &home_state).unwrap();
         assert_eq!(
             poll(&source, &mut selection),

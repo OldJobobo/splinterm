@@ -70,6 +70,9 @@ impl Daemon {
         development_terminal_access: bool,
         environment: &[(&str, &str)],
     ) -> Child {
+        // A private, empty Omarchy theme keeps the daemon's Gum lookup inside
+        // the sandbox instead of falling back to the real user's `$HOME` theme.
+        fs::create_dir_all(runtime.join("state/omarchy/current/theme")).unwrap();
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
