@@ -8,12 +8,18 @@ pub(crate) use sixel::{MAX_SIXEL_COLORS, SixelDecoder, SixelError, SixelImage};
 
 use std::{
     collections::{BTreeMap, HashSet},
+    fmt,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{SeqAccess, Visitor},
+};
 use sha2::{Digest, Sha256};
 
 use crate::ActiveScreen;
@@ -25,6 +31,9 @@ pub const DEFAULT_IMAGE_PLACEMENTS_PER_TERMINAL: usize = 256;
 pub const DEFAULT_IMAGE_MAX_DIMENSION: u32 = 4096;
 pub const DEFAULT_IMAGE_MAX_PIXELS: usize = 4_194_304;
 pub const DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_CHECKPOINT_CONTENTS: usize = 1 << 16;
+pub(crate) const MAX_IMAGE_CHECKPOINT_PLACEMENTS: usize = 1 << 16;
+const MAX_IMAGE_CHECKPOINT_PIXEL_BYTES: usize = 48 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SharedKittyUploadBudgetMetrics {
@@ -277,7 +286,8 @@ impl ImageBudgetReservation {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct ImageContentId(u64);
 
 impl ImageContentId {
@@ -292,7 +302,8 @@ impl ImageContentId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct ImagePlacementId(u64);
 
 impl ImagePlacementId {
@@ -307,7 +318,8 @@ impl ImagePlacementId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImageSourceFormat {
     Sixel,
     KittyRgb,
@@ -316,25 +328,29 @@ pub enum ImageSourceFormat {
     Iterm2,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImageAlphaMode {
     Opaque,
     Premultiplied,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImageRetention {
     WhilePlaced,
     ExplicitDelete,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImageErasePolicy {
     TextOverwrite,
     ExplicitDelete,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PixelRect {
     pub x: u32,
     pub y: u32,
@@ -342,19 +358,22 @@ pub struct PixelRect {
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CellExtent {
     pub columns: usize,
     pub rows: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PixelSize {
     pub width: u32,
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageContentMetadata {
     pub id: ImageContentId,
     pub generation: u64,
@@ -385,7 +404,8 @@ impl ImageContent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImagePlacement {
     pub id: ImagePlacementId,
     pub content_id: ImageContentId,
@@ -541,6 +561,34 @@ pub struct ImagePlane {
     next_creation_order: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImageCheckpointV1 {
+    #[serde(deserialize_with = "deserialize_checkpoint_contents")]
+    contents: Vec<CheckpointImageContent>,
+    #[serde(deserialize_with = "deserialize_checkpoint_placements")]
+    placements: Vec<ImagePlacement>,
+    next_content_id: u64,
+    next_placement_id: u64,
+    next_generation: u64,
+    next_creation_order: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointImageContent {
+    screen: ActiveScreen,
+    metadata: ImageContentMetadata,
+    #[serde(with = "checkpoint_pixels")]
+    pixels: Vec<u8>,
+}
+
+struct ValidatedImageCheckpoint {
+    content_bytes: usize,
+    content_count: usize,
+    placement_count: usize,
+}
+
 impl Default for ImagePlane {
     fn default() -> Self {
         Self::new(ImageLimits::default())
@@ -548,6 +596,251 @@ impl Default for ImagePlane {
 }
 
 impl ImagePlane {
+    /// Whether a checkpoint of this plane could fit `limit` encoded bytes,
+    /// judged from live state without copying any pixels.
+    ///
+    /// Configured image limits may exceed the fixed checkpoint allowance, so
+    /// capture must refuse before [`Self::capture_checkpoint`] copies every
+    /// pixel buffer. Pixels encode as base64, so their encoded length alone is
+    /// a lower bound on the component's size.
+    pub(crate) fn checkpoint_may_fit(&self, limit: usize) -> bool {
+        if self.metrics.content_count > MAX_IMAGE_CHECKPOINT_CONTENTS
+            || self.metrics.placement_count > MAX_IMAGE_CHECKPOINT_PLACEMENTS
+        {
+            return false;
+        }
+        let mut encoded = 0_usize;
+        for screen in [ActiveScreen::Normal, ActiveScreen::Alternate] {
+            for content in self.catalog(screen).contents.values() {
+                let Some(next) = content
+                    .pixels
+                    .len()
+                    .div_ceil(3)
+                    .checked_mul(4)
+                    .and_then(|bytes| encoded.checked_add(bytes))
+                    .filter(|total| *total <= limit)
+                else {
+                    return false;
+                };
+                encoded = next;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn capture_checkpoint(
+        &self,
+        normal_row_ids: &HashSet<u64>,
+        alternate_row_ids: &HashSet<u64>,
+    ) -> Result<ImageCheckpointV1, ImageError> {
+        let mut contents = Vec::with_capacity(self.metrics.content_count);
+        let mut placements = Vec::with_capacity(self.metrics.placement_count);
+        for screen in [ActiveScreen::Normal, ActiveScreen::Alternate] {
+            contents.extend(self.catalog(screen).contents.values().map(|content| {
+                CheckpointImageContent {
+                    screen,
+                    metadata: content.metadata,
+                    pixels: content.pixels.to_vec(),
+                }
+            }));
+            placements.extend(self.catalog(screen).placements.values().copied());
+        }
+        let checkpoint = ImageCheckpointV1 {
+            contents,
+            placements,
+            next_content_id: self.next_content_id,
+            next_placement_id: self.next_placement_id,
+            next_generation: self.next_generation,
+            next_creation_order: self.next_creation_order,
+        };
+        let validated =
+            Self::validate_checkpoint(&checkpoint, self.limits, normal_row_ids, alternate_row_ids)?;
+        if validated.content_bytes != self.metrics.content_bytes
+            || validated.content_count != self.metrics.content_count
+            || validated.placement_count != self.metrics.placement_count
+        {
+            return Err(ImageError::TerminalBytes);
+        }
+        Ok(checkpoint)
+    }
+
+    pub(crate) fn restore_checkpoint(
+        checkpoint: ImageCheckpointV1,
+        limits: ImageLimits,
+        shared_budget: Option<SharedImageBudget>,
+        normal_row_ids: &HashSet<u64>,
+        alternate_row_ids: &HashSet<u64>,
+    ) -> Result<Self, ImageError> {
+        let validated =
+            Self::validate_checkpoint(&checkpoint, limits, normal_row_ids, alternate_row_ids)?;
+        let mut restored = Self::new_with_shared_budget(limits, shared_budget);
+        for record in checkpoint.contents {
+            let reservation = restored
+                .shared_budget
+                .as_ref()
+                .map(|budget| budget.reserve(record.metadata.byte_charge))
+                .transpose()?;
+            let id = record.metadata.id;
+            let content = ImageContent {
+                metadata: record.metadata,
+                pixels: Arc::from(record.pixels),
+            };
+            restored
+                .catalog_mut(record.screen)
+                .contents
+                .insert(id, content);
+            if let Some(reservation) = reservation {
+                restored
+                    .catalog_mut(record.screen)
+                    .reservations
+                    .insert(id, reservation);
+            }
+        }
+        for placement in checkpoint.placements {
+            restored
+                .catalog_mut(placement.screen)
+                .placements
+                .insert(placement.id, placement);
+        }
+        restored.metrics = ImageMetrics {
+            content_bytes: validated.content_bytes,
+            content_count: validated.content_count,
+            placement_count: validated.placement_count,
+            high_water_content_bytes: validated.content_bytes,
+            high_water_content_count: validated.content_count,
+            high_water_placement_count: validated.placement_count,
+        };
+        restored.next_content_id = checkpoint.next_content_id;
+        restored.next_placement_id = checkpoint.next_placement_id;
+        restored.next_generation = checkpoint.next_generation;
+        restored.next_creation_order = checkpoint.next_creation_order;
+        Ok(restored)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "closed image checkpoint validation keeps all identity and accounting invariants together"
+    )]
+    fn validate_checkpoint(
+        checkpoint: &ImageCheckpointV1,
+        limits: ImageLimits,
+        normal_row_ids: &HashSet<u64>,
+        alternate_row_ids: &HashSet<u64>,
+    ) -> Result<ValidatedImageCheckpoint, ImageError> {
+        if checkpoint.contents.len() > limits.contents_per_terminal
+            || checkpoint.contents.len() > MAX_IMAGE_CHECKPOINT_CONTENTS
+            || checkpoint.placements.len() > limits.placements_per_terminal
+            || checkpoint.placements.len() > MAX_IMAGE_CHECKPOINT_PLACEMENTS
+        {
+            return Err(ImageError::ContentCount);
+        }
+        let validator = Self::new(limits);
+        let mut content_authority = BTreeMap::new();
+        let mut generations = HashSet::new();
+        let mut content_bytes = 0_usize;
+        let mut maximum_content_id = 0_u64;
+        let mut maximum_generation = 0_u64;
+        let mut previous_content_key = None;
+        for record in &checkpoint.contents {
+            let metadata = record.metadata;
+            let key = (checkpoint_screen_rank(record.screen), metadata.id.value());
+            if previous_content_key.is_some_and(|previous| previous >= key)
+                || metadata.id.value() == 0
+                || metadata.generation == 0
+                || !generations.insert(metadata.generation)
+                || content_authority
+                    .insert(metadata.id, (record.screen, metadata))
+                    .is_some()
+            {
+                return Err(ImageError::IdentityExhausted);
+            }
+            let expected = validator.validate_content_geometry(metadata.width, metadata.height)?;
+            if record.pixels.len() != expected
+                || metadata.byte_charge != expected
+                || <[u8; 32]>::from(Sha256::digest(&record.pixels)) != metadata.digest
+            {
+                return Err(ImageError::PixelLength);
+            }
+            content_bytes = content_bytes
+                .checked_add(expected)
+                .filter(|bytes| *bytes <= limits.bytes_per_terminal)
+                .ok_or(ImageError::TerminalBytes)?;
+            previous_content_key = Some(key);
+            maximum_content_id = maximum_content_id.max(metadata.id.value());
+            maximum_generation = maximum_generation.max(metadata.generation);
+        }
+
+        let mut placement_ids = HashSet::new();
+        let mut creation_orders = HashSet::new();
+        let mut maximum_placement_id = 0_u64;
+        let mut maximum_creation_order = 0_u64;
+        let mut previous_placement_key = None;
+        for placement in &checkpoint.placements {
+            let rows = match placement.screen {
+                ActiveScreen::Normal => normal_row_ids,
+                ActiveScreen::Alternate => alternate_row_ids,
+            };
+            let key = (
+                checkpoint_screen_rank(placement.screen),
+                placement.id.value(),
+            );
+            if previous_placement_key.is_some_and(|previous| previous >= key)
+                || placement.id.value() == 0
+                || !placement_ids.insert(placement.id)
+                || placement.creation_order == 0
+                || !creation_orders.insert(placement.creation_order)
+                || content_authority
+                    .get(&placement.content_id)
+                    .map(|(screen, _)| *screen)
+                    != Some(placement.screen)
+                || placement.row_id == 0
+                || !rows.contains(&placement.row_id)
+                || placement.destination.columns == 0
+                || placement.destination.rows == 0
+            {
+                return Err(ImageError::InvalidAnchor);
+            }
+            let metadata = content_authority
+                .get(&placement.content_id)
+                .map(|(_, metadata)| *metadata)
+                .ok_or(ImageError::UnknownContent)?;
+            validate_crop(placement.source, metadata.width, metadata.height)?;
+            validate_source_cell_size(placement.source_cell_size)?;
+            previous_placement_key = Some(key);
+            maximum_placement_id = maximum_placement_id.max(placement.id.value());
+            maximum_creation_order = maximum_creation_order.max(placement.creation_order);
+        }
+        // Live state reclaims unplaced WhilePlaced content as soon as its last
+        // placement goes, so an orphan would only hold budget after restore.
+        let placed: HashSet<_> = checkpoint
+            .placements
+            .iter()
+            .map(|placement| placement.content_id)
+            .collect();
+        if checkpoint.contents.iter().any(|record| {
+            record.metadata.retention == ImageRetention::WhilePlaced
+                && !placed.contains(&record.metadata.id)
+        }) {
+            return Err(ImageError::UnknownContent);
+        }
+        if checkpoint.next_content_id == 0
+            || checkpoint.next_content_id <= maximum_content_id
+            || checkpoint.next_placement_id == 0
+            || checkpoint.next_placement_id <= maximum_placement_id
+            || checkpoint.next_generation == 0
+            || checkpoint.next_generation <= maximum_generation
+            || checkpoint.next_creation_order == 0
+            || checkpoint.next_creation_order <= maximum_creation_order
+        {
+            return Err(ImageError::IdentityExhausted);
+        }
+        Ok(ValidatedImageCheckpoint {
+            content_bytes,
+            content_count: checkpoint.contents.len(),
+            placement_count: checkpoint.placements.len(),
+        })
+    }
+
     #[must_use]
     pub fn new(limits: ImageLimits) -> Self {
         Self::new_with_shared_budget(limits, None)
@@ -1672,6 +1965,150 @@ impl ImagePlane {
     }
 }
 
+const fn checkpoint_screen_rank(screen: ActiveScreen) -> u8 {
+    match screen {
+        ActiveScreen::Normal => 0,
+        ActiveScreen::Alternate => 1,
+    }
+}
+
+fn deserialize_checkpoint_contents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<CheckpointImageContent>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_image_sequence(
+        deserializer,
+        MAX_IMAGE_CHECKPOINT_CONTENTS,
+        "image checkpoint contents",
+    )
+}
+
+fn deserialize_checkpoint_placements<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ImagePlacement>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_image_sequence(
+        deserializer,
+        MAX_IMAGE_CHECKPOINT_PLACEMENTS,
+        "image checkpoint placements",
+    )
+}
+
+fn deserialize_image_sequence<'de, D, T>(
+    deserializer: D,
+    maximum: usize,
+    name: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVisitor<T> {
+        maximum: usize,
+        name: &'static str,
+        marker: std::marker::PhantomData<T>,
+    }
+
+    impl<'de, T> Visitor<'de> for BoundedVisitor<T>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "at most {} {}", self.maximum, self.name)
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if sequence
+                .size_hint()
+                .is_some_and(|length| length > self.maximum)
+            {
+                return Err(serde::de::Error::custom(format_args!(
+                    "{} exceed checkpoint bound",
+                    self.name
+                )));
+            }
+            let mut values =
+                Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(self.maximum));
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == self.maximum {
+                    return Err(serde::de::Error::custom(format_args!(
+                        "{} exceed checkpoint bound",
+                        self.name
+                    )));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVisitor {
+        maximum,
+        name,
+        marker: std::marker::PhantomData,
+    })
+}
+
+mod checkpoint_pixels {
+    use super::*;
+
+    pub(super) fn serialize<S>(pixels: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(pixels))
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PixelVisitor;
+
+        impl Visitor<'_> for PixelVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("canonical bounded base64 image pixels")
+            }
+
+            fn visit_str<E>(self, encoded: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let maximum_encoded = MAX_IMAGE_CHECKPOINT_PIXEL_BYTES
+                    .checked_add(2)
+                    .and_then(|bytes| bytes.checked_div(3))
+                    .and_then(|groups| groups.checked_mul(4))
+                    .expect("fixed image checkpoint bound fits usize");
+                if encoded.len() > maximum_encoded {
+                    return Err(E::custom("image pixels exceed checkpoint bound"));
+                }
+                let pixels = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| E::custom("image pixels are not canonical base64"))?;
+                if pixels.len() > MAX_IMAGE_CHECKPOINT_PIXEL_BYTES
+                    || STANDARD.encode(&pixels) != encoded
+                {
+                    return Err(E::custom("image pixels are not canonical base64"));
+                }
+                Ok(pixels)
+            }
+        }
+
+        deserializer.deserialize_str(PixelVisitor)
+    }
+}
+
 fn composite_bgra(destination: &mut [u8], source: &[u8]) {
     let inverse_alpha = u16::from(u8::MAX - source[3]);
     for channel in 0..3 {
@@ -1925,6 +2362,33 @@ mod tests {
             application_placement_id: None,
             erase_policy: ImageErasePolicy::TextOverwrite,
         }
+    }
+
+    #[test]
+    fn checkpoint_preflight_bounds_encoded_pixels_across_screens() {
+        let mut plane = ImagePlane::new(ImageLimits::default());
+        for (screen, pixels) in [
+            (ActiveScreen::Normal, [1, 2, 3, 255]),
+            (ActiveScreen::Alternate, [4, 5, 6, 255]),
+        ] {
+            plane
+                .insert_content(screen, content(&pixels, ImageRetention::ExplicitDelete))
+                .unwrap();
+        }
+        // Each 4-byte buffer encodes as 8 base64 bytes.
+        assert!(plane.checkpoint_may_fit(16));
+        assert!(!plane.checkpoint_may_fit(15));
+        assert!(!plane.checkpoint_may_fit(0));
+        assert!(ImagePlane::new(ImageLimits::default()).checkpoint_may_fit(0));
+
+        // Live counts past the checkpoint collection bounds are refused too.
+        // Admitting that many contents is quadratic, so set the live counts.
+        let mut contents = ImagePlane::new(ImageLimits::default());
+        contents.metrics.content_count = MAX_IMAGE_CHECKPOINT_CONTENTS + 1;
+        assert!(!contents.checkpoint_may_fit(usize::MAX));
+        let mut placements = ImagePlane::new(ImageLimits::default());
+        placements.metrics.placement_count = MAX_IMAGE_CHECKPOINT_PLACEMENTS + 1;
+        assert!(!placements.checkpoint_may_fit(usize::MAX));
     }
 
     #[test]

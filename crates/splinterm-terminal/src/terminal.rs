@@ -7,7 +7,9 @@
 mod checkpoint;
 
 pub use checkpoint::{
-    CheckpointError, MAX_TERMINAL_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1,
+    CheckpointError, MAX_IMAGE_STATE_CHECKPOINT_BYTES, MAX_TERMINAL_CHECKPOINT_BYTES,
+    MAX_TERMINAL_STATE_CHECKPOINT_BYTES, TERMINAL_CHECKPOINT_SCHEMA_V1,
+    TERMINAL_CHECKPOINT_SCHEMA_V2,
 };
 
 use std::{
@@ -139,6 +141,11 @@ impl KittyImageIds {
 
     fn remove(&mut self, screen: ActiveScreen, id: u32) {
         self.map_mut(screen).remove(&id);
+    }
+
+    /// Drops every application id naming removed content.
+    fn remove_content(&mut self, screen: ActiveScreen, content: ImageContentId) {
+        self.map_mut(screen).retain(|_, mapped| *mapped != content);
     }
 
     fn clear(&mut self, screen: ActiveScreen) {
@@ -623,13 +630,15 @@ impl Terminal {
         Ok(placement)
     }
 
-    /// Removes content and all of its placements from the active screen.
+    /// Removes content, all of its placements, and any Kitty image id naming
+    /// it from the active screen.
     ///
     /// # Errors
     ///
     /// Returns [`ImageError::UnknownContent`] for absence or double removal.
     pub fn remove_image_content(&mut self, id: ImageContentId) -> Result<(), ImageError> {
         self.images.remove_content(self.active, id)?;
+        self.kitty_image_ids.remove_content(self.active, id);
         self.commit_image_change();
         Ok(())
     }
