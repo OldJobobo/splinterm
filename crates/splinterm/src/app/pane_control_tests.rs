@@ -270,6 +270,7 @@ async fn reacquire_applies_prepared_resize_before_input_and_releases_new_lease()
                     splint_id: id,
                     incarnation: 7,
                     bytes: b"marker".to_vec(),
+                    focus_report: false,
                 },
                 ack(),
             ),
@@ -416,25 +417,54 @@ async fn unexpected_control_errors_and_responses_are_still_fatal() {
     }
 }
 
-#[tokio::test]
-async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
-    let id = SplintId::new();
-    let ack = || {
-        Ok(Response::TerminalActionAcknowledged {
-            lair_id: LairId::new(),
-            dojo_id: DojoId::new(),
-            splint_id: id,
-            incarnation: 7,
-            terminal_revision: 10,
-            history_generation: 0,
-        })
-    };
-    let input = |bytes: &[u8]| Request::Input {
+fn controlled_input(id: SplintId, bytes: &[u8], focus_report: bool) -> Request {
+    Request::Input {
         controller_id: 1,
         splint_id: id,
         incarnation: 7,
         bytes: bytes.to_vec(),
-    };
+        focus_report,
+    }
+}
+
+#[tokio::test]
+async fn generated_focus_reports_are_flagged_and_typed_bytes_are_not() {
+    let id = SplintId::new();
+    let (result, _, _) = run_case(
+        id,
+        true,
+        vec![
+            WindowCommand::FocusReport(true),
+            // The same bytes typed or pasted are ordinary input.
+            WindowCommand::Input(b"\x1b[I".to_vec()),
+            WindowCommand::FocusReport(false),
+        ],
+        vec![
+            (
+                controlled_input(id, b"\x1b[I", true),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"\x1b[I", false),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"\x1b[O", true),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                Request::ReleaseControl { controller_id: 1 },
+                Ok(Response::Acknowledged),
+            ),
+        ],
+    )
+    .await;
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
+    let id = SplintId::new();
     let (result, _, _) = run_case(
         id,
         true,
@@ -451,9 +481,15 @@ async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
             WindowCommand::Input(b"e".to_vec()),
             WindowCommand::Input(Vec::new()),
             WindowCommand::Input(b"f".to_vec()),
+            // A generated focus report is a barrier and keeps its flag.
+            WindowCommand::FocusReport(true),
+            WindowCommand::Input(b"g".to_vec()),
         ],
         vec![
-            (input(b"abcd"), ack()),
+            (
+                controlled_input(id, b"abcd", false),
+                Ok(input_acknowledged(id)),
+            ),
             (
                 Request::Resize {
                     controller_id: 1,
@@ -464,9 +500,20 @@ async fn queued_input_is_coalesced_between_barriers_into_fewer_requests() {
                     pixel_width: 900,
                     pixel_height: 600,
                 },
-                ack(),
+                Ok(input_acknowledged(id)),
             ),
-            (input(b"ef"), ack()),
+            (
+                controlled_input(id, b"ef", false),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"\x1b[I", true),
+                Ok(input_acknowledged(id)),
+            ),
+            (
+                controlled_input(id, b"g", false),
+                Ok(input_acknowledged(id)),
+            ),
             (
                 Request::ReleaseControl { controller_id: 1 },
                 Ok(Response::Acknowledged),
@@ -514,6 +561,7 @@ async fn control_loss_between_coalesced_input_batches_is_observed_before_the_nex
                     splint_id: id,
                     incarnation: 7,
                     bytes: b"abcde".to_vec(),
+                    focus_report: false,
                 },
                 Ok(input_acknowledged(id)),
                 vec![lost],

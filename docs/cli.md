@@ -265,6 +265,10 @@ splinterm --remote server dojos
 splinterm --remote server --output json topology
 ```
 
+`splinterm remotes` opens a local chooser of configured profiles and starts the
+selected one in its own detached `--remote` Window; the command palette offers
+the same chooser as **Open Remote…**.
+
 See [Configuration](configuration.md) for strict INI/keymap/profile schemas and
 [Remote access](remote.md) for authentication and authority boundaries.
 
