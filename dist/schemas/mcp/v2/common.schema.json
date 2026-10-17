@@ -79,7 +79,8 @@
         "controller_acquire",
         "controller_transfer",
         "input",
-        "resize"
+        "resize",
+        "agent_status_report"
       ]
     },
     "modes": {
@@ -128,6 +129,9 @@
         },
         {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/control_resource"
+        },
+        {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_status_resource"
         }
       ]
     },
@@ -211,7 +215,8 @@
         "splinterm.decide_control_transfer",
         "splinterm.release_control",
         "splinterm.input",
-        "splinterm.resize"
+        "splinterm.resize",
+        "splinterm.report_agent_status"
       ]
     },
     "success_envelope": {
@@ -595,6 +600,77 @@
         }
       }
     },
+    "agent_status_resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "splint_id",
+        "incarnation"
+      ],
+      "properties": {
+        "kind": {
+          "const": "agent_status"
+        },
+        "splint_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/positive_integer"
+        }
+      }
+    },
+    "agent_state": {
+      "enum": [
+        "working",
+        "needs_input",
+        "done",
+        "error",
+        "idle"
+      ]
+    },
+    "agent_status_detail": {
+      "$comment": "Reporter-supplied display text, never authority. Runtime validation additionally caps the UTF-8 encoding at 240 bytes.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\u2028\\u2029]+$"
+    },
+    "agent_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "detail",
+        "stale",
+        "reported_age_ms",
+        "sequence"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_state"
+        },
+        "detail": {
+          "oneOf": [
+            {
+              "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_status_detail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "reported_age_ms": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/revision"
+        },
+        "sequence": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/positive_integer"
+        }
+      }
+    },
     "topology_splint": {
       "type": "object",
       "additionalProperties": false,
@@ -624,6 +700,9 @@
             "exited",
             "restorable"
           ]
+        },
+        "agent_status": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/agent_status"
         }
       }
     },

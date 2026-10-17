@@ -44,6 +44,9 @@ pub struct PeerIdentity {
     executable_device: u64,
     executable_inode: u64,
     persistent_executable: Option<ExecutableIdentity>,
+    /// The peer's start time in clock ticks since boot, recorded when the
+    /// connection is verified, so a reused PID is never mistaken for it.
+    start_time: Option<u64>,
 }
 
 impl PeerIdentity {
@@ -61,6 +64,7 @@ impl PeerIdentity {
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
             persistent_executable: None,
+            start_time: None,
         })
     }
 
@@ -83,6 +87,7 @@ impl PeerIdentity {
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
             persistent_executable: None,
+            start_time: None,
         }
     }
 
@@ -92,6 +97,14 @@ impl PeerIdentity {
 
     pub fn persistent_executable(&self) -> Option<&ExecutableIdentity> {
         self.persistent_executable.as_ref()
+    }
+
+    pub fn install_start_time(&mut self, start_time: u64) {
+        self.start_time = Some(start_time);
+    }
+
+    pub const fn start_time(&self) -> Option<u64> {
+        self.start_time
     }
 
     pub fn audit_peer(&self) -> Option<AuditPeer> {
