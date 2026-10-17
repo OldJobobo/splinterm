@@ -3246,7 +3246,6 @@ fn exact_capabilities_tools_schemas_annotations_and_resources_fail_closed() {
             "splinterm.rename_splint",
             "splinterm.set_dojo_default_focus",
             "splinterm.resize",
-            "splinterm.report_agent_status"
         ]
     );
 
