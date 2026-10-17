@@ -3,8 +3,9 @@
 //! The subset face is compiled into the executable, copied once into a sealed
 //! mapping, and rasterized through the same `FreeType` grayscale path as chrome
 //! text. Icons are placed only by trusted interface code through
-//! [`super::ChromeSource`]; their private-use codepoints are never interpreted
-//! in labels, titles, agent detail, or terminal content. Provenance, hashes,
+//! [`super::ChromeSource`]; their Tabler-assigned codepoints, mostly
+//! private-use, are never interpreted in labels, titles, agent detail, or
+//! terminal content. Provenance, hashes,
 //! and the license are in `crates/splinterm/assets/icons/`.
 
 use std::{
@@ -14,7 +15,7 @@ use std::{
 };
 
 use splinterm_filemap::ReadOnlyFileMap;
-use splinterm_freetype::{MIN_PIXEL_SIZE_26_6, RasterFace};
+use splinterm_freetype::{MAX_PIXEL_SIZE_26_6, MIN_PIXEL_SIZE_26_6, RasterFace};
 use swash::{FontRef, scale::image::Content};
 
 use super::{CachedGlyph, round_to_i32, u32_to_f32};
@@ -88,8 +89,12 @@ impl ChromeIcon {
 
 fn icon_font() -> Option<&'static Arc<ReadOnlyFileMap>> {
     static FONT: OnceLock<Option<Arc<ReadOnlyFileMap>>> = OnceLock::new();
-    FONT.get_or_init(|| ReadOnlyFileMap::sealed_copy(ICON_FONT).ok().map(Arc::new))
-        .as_ref()
+    FONT.get_or_init(|| {
+        ReadOnlyFileMap::sealed_copy("splinterm-icon-font", ICON_FONT)
+            .ok()
+            .map(Arc::new)
+    })
+    .as_ref()
 }
 
 /// Fraction of the em square above the baseline (hhea ascent / units per em).
@@ -187,8 +192,12 @@ fn rasterize_icon(icon: ChromeIcon, cell: IconCell) -> Option<CachedGlyph> {
         _ => em.min(cell.height).min(slot_width),
     };
     let pixel_size = isize::try_from(em).ok()?.checked_mul(64)?;
-    let mut face =
-        RasterFace::open_memory(Arc::clone(data), 0, pixel_size.max(MIN_PIXEL_SIZE_26_6)).ok()?;
+    let mut face = RasterFace::open_memory(
+        Arc::clone(data),
+        0,
+        pixel_size.clamp(MIN_PIXEL_SIZE_26_6, MAX_PIXEL_SIZE_26_6),
+    )
+    .ok()?;
     let glyph_id = face.glyph_index(icon.codepoint());
     if glyph_id == 0 {
         return None;

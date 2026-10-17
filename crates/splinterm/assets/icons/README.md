@@ -34,8 +34,9 @@ pyftsubset tabler-icons.ttf \
 
 ## Codepoints
 
-Codepoints come from the package's `dist/tabler-icons.css`. They are private-use
-codepoints inside this embedded face only: Splinterm places icons from trusted
+Codepoints come from the package's `dist/tabler-icons.css`. They are
+Tabler-assigned codepoints, mostly private-use (U+F98B falls in the CJK
+Compatibility Ideographs block), used inside this embedded face only: Splinterm places icons from trusted
 interface code and never interprets these codepoints in labels, titles, agent
 detail text, or terminal output.
 

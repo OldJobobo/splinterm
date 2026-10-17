@@ -155,21 +155,19 @@ impl ReadOnlyFileMap {
         }
 
         Ok(ImmutableFileSnapshot {
-            mapping: Self::sealed_copy(&bytes)?,
+            mapping: Self::sealed_copy("splinterm-immutable-snapshot", &bytes)?,
             source_identity,
         })
     }
 
     /// Copies bytes, such as an asset embedded in the executable, into a
     /// sealed anonymous mapping with the same immutability as a snapshot.
+    /// `name` labels the memfd in `/proc/<pid>/fd`.
     ///
     /// # Errors
     /// Returns an I/O error for empty input, sealing failure, or mapping failure.
-    pub fn sealed_copy(bytes: &[u8]) -> io::Result<Self> {
-        let descriptor = memfd_create(
-            "splinterm-immutable-snapshot",
-            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-        )?;
+    pub fn sealed_copy(name: &str, bytes: &[u8]) -> io::Result<Self> {
+        let descriptor = memfd_create(name, MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING)?;
         let mut sealed_file = File::from(descriptor);
         sealed_file.write_all(bytes)?;
         let descriptor: OwnedFd = sealed_file.into();
@@ -295,9 +293,10 @@ mod tests {
 
     #[test]
     fn sealed_copy_maps_embedded_bytes_immutably_and_rejects_empty_input() {
-        let mapping = ReadOnlyFileMap::sealed_copy(b"embedded icon font").unwrap();
+        let mapping =
+            ReadOnlyFileMap::sealed_copy("splinterm-test", b"embedded icon font").unwrap();
         assert_eq!(&*mapping, b"embedded icon font");
-        assert!(ReadOnlyFileMap::sealed_copy(b"").is_err());
+        assert!(ReadOnlyFileMap::sealed_copy("splinterm-test", b"").is_err());
     }
 
     #[test]
