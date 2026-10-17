@@ -1131,6 +1131,7 @@ pub(crate) enum BuiltInCommandId {
     FocusUp,
     FocusDown,
     CloseFocusedPane,
+    ClearAgentStatus,
     ResizePaneSmaller,
     ResizePaneLarger,
     EnterCopyMode,
@@ -1191,6 +1192,7 @@ impl BuiltInCommandId {
         Self::FocusUp,
         Self::FocusDown,
         Self::CloseFocusedPane,
+        Self::ClearAgentStatus,
         Self::ResizePaneSmaller,
         Self::ResizePaneLarger,
         Self::EnterCopyMode,
@@ -1297,6 +1299,8 @@ pub(crate) struct CommandPaletteContext {
     pub(crate) forced_control_transfer: bool,
     pub(crate) grant_ids: Vec<u64>,
     pub(crate) pending_transfer_id: Option<u64>,
+    /// Live incarnation of the focused Splint while it shows agent status.
+    pub(crate) agent_status_incarnation: Option<u64>,
 }
 
 impl CommandPaletteContext {
@@ -1691,6 +1695,13 @@ pub(crate) const BUILT_IN_COMMANDS: [BuiltInCommandDescriptor; BuiltInCommandId:
         shortcut_action: Some(ActionId::CloseFocusedPane),
     },
     BuiltInCommandDescriptor {
+        id: BuiltInCommandId::ClearAgentStatus,
+        category: CommandCategory::Panes,
+        title: "Clear agent status",
+        keywords: &["clear", "agent", "status", "badge", "reset", "pane"],
+        shortcut_action: None,
+    },
+    BuiltInCommandDescriptor {
         id: BuiltInCommandId::ResizePaneSmaller,
         category: CommandCategory::Panes,
         title: "Resize pane smaller",
@@ -1897,6 +1908,7 @@ pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteCont
         }
         BuiltInCommandId::ReleaseControl => context.controller_active,
         BuiltInCommandId::RevokeAllAccess => !context.grant_ids.is_empty(),
+        BuiltInCommandId::ClearAgentStatus => context.agent_status_incarnation.is_some(),
         BuiltInCommandId::AcceptControlTransfer | BuiltInCommandId::DenyControlTransfer => {
             context.pending_transfer_id.is_some()
         }
@@ -2357,6 +2369,13 @@ pub(crate) fn command_dispatch(
             target: context.splint_id,
             action: CommandControlAction::Force,
         },
+        // The trusted UI may only clear a status, never set one.
+        BuiltInCommandId::ClearAgentStatus => {
+            BuiltInCommandDispatch::Topology(WindowTopologyCommand::ClearAgentStatus {
+                splint_id: context.splint_id,
+                incarnation: context.agent_status_incarnation?,
+            })
+        }
         BuiltInCommandId::RevokeAllAccess => BuiltInCommandDispatch::RevokeAccess {
             target: context.splint_id,
             grant_ids: context.grant_ids.clone(),
@@ -2409,6 +2428,7 @@ mod tests {
             forced_control_transfer: true,
             grant_ids: vec![7, 9],
             pending_transfer_id: Some(42),
+            agent_status_incarnation: Some(9),
         })
     }
 
@@ -3165,6 +3185,40 @@ mod tests {
         while palette.backspace() {}
         assert!(palette.append_text("history"));
         assert_eq!(palette.filtered().len(), 5);
+    }
+
+    #[test]
+    fn clear_agent_status_targets_the_captured_incarnation_and_only_clears() {
+        let context = palette().context();
+        assert!(command_enabled(
+            BuiltInCommandId::ClearAgentStatus,
+            &context
+        ));
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ClearAgentStatus, &context),
+            Some(BuiltInCommandDispatch::Topology(
+                WindowTopologyCommand::ClearAgentStatus {
+                    splint_id: context.splint_id,
+                    incarnation: 9,
+                }
+            ))
+        );
+        let descriptor = command_descriptor(BuiltInCommandId::ClearAgentStatus);
+        assert_eq!(descriptor.title, "Clear agent status");
+        assert_eq!(descriptor.category, CommandCategory::Panes);
+        assert!(descriptor_matches(descriptor, "agent"));
+        let without_status = CommandPaletteContext {
+            agent_status_incarnation: None,
+            ..context
+        };
+        assert!(!command_enabled(
+            BuiltInCommandId::ClearAgentStatus,
+            &without_status
+        ));
+        assert_eq!(
+            command_dispatch(BuiltInCommandId::ClearAgentStatus, &without_status),
+            None
+        );
     }
 
     #[test]
