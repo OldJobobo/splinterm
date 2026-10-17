@@ -165,7 +165,7 @@ impl CandidateRuntimeStage {
 
 /// A staging failure that still owns the complete claimed descriptor table.
 #[derive(Debug, Error)]
-#[error("{error}")]
+#[error("candidate staging failed")]
 pub struct CandidateStageFailure {
     #[source]
     error: CandidateBootstrapError,
@@ -1238,6 +1238,30 @@ mod tests {
                 Err(CandidateBootstrapError::UnsupportedRole(role)) if role == slot
             ));
         }
+    }
+
+    #[test]
+    fn two_pty_roles_on_one_master_are_an_alias() {
+        let mut idle = idle_owners();
+        let mut bootstrap = bootstrap(std::mem::take(&mut idle.owners));
+        let master = pty_master();
+        let duplicate = master.try_clone().unwrap();
+        for (slot, owner) in [
+            (HandoffDescriptorSlot::PtyMaster(0), master),
+            (HandoffDescriptorSlot::PtyMaster(1), duplicate),
+        ] {
+            bootstrap.manifest.descriptors.push(ManifestDescriptor {
+                slot,
+                inherited_fd: u32::try_from(owner.as_raw_fd()).unwrap(),
+            });
+            bootstrap.claims.insert_for_test(slot, owner);
+        }
+        assert!(matches!(
+            bootstrap.verify_descriptor_roles(),
+            Err(CandidateBootstrapError::DescriptorAlias(
+                HandoffDescriptorSlot::PtyMaster(1)
+            ))
+        ));
     }
 
     #[test]

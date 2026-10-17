@@ -31,6 +31,9 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
     let Some(raw) = env::var_os(CANDIDATE_MANIFEST_FD_ENV) else {
         return Ok(None);
     };
+    // Every failure names the activation, so a stray value inherited from a
+    // parent environment is diagnosable rather than an opaque startup failure.
+    (|| {
     let manifest_fd = raw
         .to_str()
         .and_then(|raw| raw.parse::<RawFd>().ok())
@@ -42,10 +45,11 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
     // is single-threaded and owns no inherited descriptor. The source
     // generation passed the manifest and every listed descriptor through exec
     // with FD_CLOEXEC clear. Nothing between the positioned read, canonical
-    // decode, expected-set derivation, and claim opens, closes, or replaces a
-    // descriptor, so every non-standard inheritable descriptor crossed exec
-    // without a surviving Rust owner, including unexpected entries the claim
-    // closes. Both leaf entrypoints also reject a second thread.
+    // decode, expected-set derivation, and claim opens, closes, or replaces an
+    // inheritable descriptor; the leaf's procfs reads are close-on-exec and
+    // closed before the claim scans. So every non-standard inheritable
+    // descriptor crossed exec without a surviving Rust owner, including
+    // unexpected entries the claim closes. Both leaf entrypoints also reject a second thread.
     let (acquisition, claimed) = unsafe {
         let bytes = splinterm_inherited_fd::read_post_exec_sealed_descriptor(
             manifest_fd,
@@ -58,4 +62,10 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
         (acquisition, claimed)
     };
     splinterd::bind_candidate_manifest(acquisition, claimed).map(Some)
+    })()
+    .with_context(|| {
+        format!(
+            "{CANDIDATE_MANIFEST_FD_ENV} is set, so splinterd started as an upgrade-handoff candidate and will not serve"
+        )
+    })
 }
