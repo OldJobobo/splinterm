@@ -747,6 +747,13 @@ async fn subscription_task(
             break;
         }
         private_sequence = private_sequence.saturating_add(1);
+        // Agent status rides the topology subscription without a revision;
+        // the public topology resource does not project it yet.
+        if uri == ResourceUri::Topology
+            && matches!(event, SubscriptionEvent::AgentStatusChanged { .. })
+        {
+            continue;
+        }
         if apply_explicit_resync(&mut started.retained, &event, uri) {
             failed = true;
             break;

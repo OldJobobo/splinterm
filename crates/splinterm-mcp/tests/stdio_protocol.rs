@@ -311,6 +311,7 @@ fn reviewed_topology() -> TopologySnapshot {
             restorable: false,
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
+            agent_status: None,
         }],
     }
 }
@@ -449,6 +450,7 @@ fn adversarial_topology(payloads: &[&str; 4]) -> TopologySnapshot {
             restorable: false,
             lifecycle: SplintLifecycle::Running,
             exit_status: None,
+            agent_status: None,
         }],
     }
 }
@@ -472,6 +474,7 @@ fn reviewed_restorable_topology() -> TopologySnapshot {
             code: Some(0),
             signal: None,
         }),
+        agent_status: None,
     };
     snapshot
 }
@@ -1882,6 +1885,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
                     restorable: false,
                     lifecycle: SplintLifecycle::Running,
                     exit_status: None,
+                    agent_status: None,
                 });
             }
             lair.insert_lair_at(lair.revision(), dojo).unwrap();

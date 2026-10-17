@@ -1236,6 +1236,7 @@ fn automation_scope_name(scope: AutomationScope) -> &'static str {
         AutomationScope::AuthorizationInspect => "authorization_inspect",
         AutomationScope::AuthorizationRevoke => "authorization_revoke",
         AutomationScope::AuditInspect => "audit_inspect",
+        AutomationScope::AgentStatusReport => "agent_status_report",
     }
 }
 
@@ -1252,6 +1253,7 @@ fn access_scope_name(scope: AccessScope) -> Option<&'static str> {
         AccessScope::TopologyName => Some("topology_name_mutate"),
         AccessScope::ProcessSpawn => Some("process_spawn"),
         AccessScope::ProcessRestore => Some("process_restore"),
+        AccessScope::AgentStatusReport => Some("agent_status_report"),
         AccessScope::ClipboardRead | AccessScope::ClipboardWrite => None,
     }
 }
@@ -1343,7 +1345,7 @@ pub fn authorization_status_envelope(
     for grant in persistent {
         if !valid_rule_id(&grant.policy_rule_id)
             || grant.expires_at_unix_seconds == Some(0)
-            || grant.scopes.len() > 18
+            || grant.scopes.len() > 19
         {
             bail!("persistent authorization status exceeds public v2 bounds");
         }
@@ -1417,7 +1419,7 @@ fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV
             .executable_sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || record.requested_scopes.len() > 18
+        || record.requested_scopes.len() > 19
         || record.reason.is_empty()
         || record.reason.len() > 64
         || !record.reason.bytes().enumerate().all(|(index, byte)| {
@@ -1831,7 +1833,7 @@ pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV2, bool) {
             (CliErrorCodeV2::StaleIncarnation, true)
         }
         ErrorCode::InvalidArgument => (CliErrorCodeV2::InvalidArgument, false),
-        ErrorCode::ResourceLimit => (CliErrorCodeV2::ResourceLimit, true),
+        ErrorCode::ResourceLimit | ErrorCode::RateLimited => (CliErrorCodeV2::ResourceLimit, true),
         ErrorCode::Cancelled => (CliErrorCodeV2::Cancelled, true),
         ErrorCode::Internal => (CliErrorCodeV2::Internal, true),
     }
@@ -4264,6 +4266,7 @@ mod tests {
                 restorable: false,
                 lifecycle: SplintLifecycle::Running,
                 exit_status: None,
+                agent_status: None,
             }],
         }
     }

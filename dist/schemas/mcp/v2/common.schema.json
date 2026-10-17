@@ -79,7 +79,8 @@
         "controller_acquire",
         "controller_transfer",
         "input",
-        "resize"
+        "resize",
+        "agent_status_report"
       ]
     },
     "modes": {
