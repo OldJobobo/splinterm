@@ -529,7 +529,7 @@ mod tests {
         fd
     }
 
-    fn assert_invalid_body(result: Result<Vec<u8>, InheritedFdError>) {
+    fn assert_invalid_body(result: &Result<Vec<u8>, InheritedFdError>) {
         assert!(
             matches!(
                 result,
@@ -551,24 +551,24 @@ mod tests {
             rustix::fs::seek(&sealed, rustix::fs::SeekFrom::Current(0)).unwrap(),
             0
         );
-        assert_invalid_body(read_sealed_body(sealed.as_fd(), body.len() - 1));
+        assert_invalid_body(&read_sealed_body(sealed.as_fd(), body.len() - 1));
 
-        assert_invalid_body(read_sealed_body(
+        assert_invalid_body(&read_sealed_body(
             memfd(b"", REQUIRED_SEALED_BODY_SEALS).as_fd(),
             body.len(),
         ));
-        assert_invalid_body(read_sealed_body(
+        assert_invalid_body(&read_sealed_body(
             memfd(body, SealFlags::empty()).as_fd(),
             body.len(),
         ));
-        assert_invalid_body(read_sealed_body(
+        assert_invalid_body(&read_sealed_body(
             memfd(body, SealFlags::WRITE | SealFlags::SHRINK | SealFlags::SEAL).as_fd(),
             body.len(),
         ));
         let (reader, _writer) = io::pipe().unwrap();
-        assert_invalid_body(read_sealed_body(reader.as_fd(), body.len()));
+        assert_invalid_body(&read_sealed_body(reader.as_fd(), body.len()));
         let null = File::open("/dev/null").unwrap();
-        assert_invalid_body(read_sealed_body(null.as_fd(), body.len()));
+        assert_invalid_body(&read_sealed_body(null.as_fd(), body.len()));
     }
 
     #[test]

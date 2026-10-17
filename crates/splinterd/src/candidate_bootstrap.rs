@@ -1069,6 +1069,9 @@ mod tests {
             .1 = replacement;
     }
 
+    /// A role paired with a constructor for a kernel object of the wrong type.
+    type WrongKernelObject = (HandoffDescriptorSlot, fn(&Path) -> OwnedFd);
+
     #[test]
     fn every_idle_role_accepts_only_its_kernel_object_type() {
         let mut idle = idle_owners();
@@ -1076,7 +1079,7 @@ mod tests {
             .verify_descriptor_roles()
             .unwrap();
 
-        let wrong_types: [(HandoffDescriptorSlot, fn(&Path) -> OwnedFd); 7] = [
+        let wrong_types: [WrongKernelObject; 7] = [
             (HandoffDescriptorSlot::Listener, |_| body()),
             (HandoffDescriptorSlot::ImageListener, |_| pty_master()),
             (HandoffDescriptorSlot::CheckpointManifest, |directory| {
