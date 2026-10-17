@@ -754,6 +754,30 @@ malformed live theme retains the last valid palette and reports one bounded
 diagnostic. If Omarchy state is absent at startup, Splinterm uses its bundled
 safe fallback.
 
+### Glassy Windows
+
+Splinterm follows Omarchy's Glassy Windows through the theme's `foot.ini`, as
+Foot does, so no Hyprland opacity rule is involved. When Glassy Windows is on,
+`omarchy-theme-set-glass` inserts `alpha=0.65` and `blur=yes` between
+`# omarchy-glass begin` and `# omarchy-glass end` markers, directly under the
+first `[colors-dark]` header. It skips any setting the file already has. If the
+file has no `[colors-dark]` header, the script appends a `[colors-dark]` section
+holding only those lines. Turning glass off removes the block in place.
+Splinterm sees each edit within one 500 ms poll. It applies the change through
+`ext-background-effect-v1`, and the palette stays the same:
+
+* A theme that already sets `blur=yes`, as the stock template does, gains only
+  `alpha=0.65`.
+* A user template without `blur=` gains both settings.
+* A theme that declares its own `alpha` keeps it. Glass then adds only `blur`,
+  which updates the compositor effect without repainting.
+
+Only the default terminal background, the padding, and the tab strip become
+translucent; Splinterm premultiplies them by the alpha. Text, explicit cell
+backgrounds, and the cursor stay opaque, so text remains crisp over the blur. An
+explicit `[colors] alpha` or `blur` in Splinterm's own `config.ini` overrides
+the theme value and therefore also overrides Glassy Windows.
+
 For each new Splint, the persistent daemon also reads the active theme's
 `gum_env.lua`. It picks the theme directory with the same order and
 `omarchy/current` test as above, then removes inherited values in Omarchy's bounded Gum palette

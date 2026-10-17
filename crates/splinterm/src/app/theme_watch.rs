@@ -346,6 +346,113 @@ mod tests {
     }
 
     #[test]
+    fn glassy_windows_on_off_on_is_followed_live_through_in_place_edits() {
+        // Each glassy fixture is the plain one after Omarchy's
+        // omarchy-theme-set-glass (4a9c83de) with Glassy Windows on; turning
+        // it off restores the plain file byte for byte.
+        let glass_alpha = splinterm::config::parse("[colors]\nalpha=0.65\n")
+            .unwrap()
+            .config
+            .background_alpha
+            .unwrap();
+        let theme_alpha = splinterm::config::parse("[colors]\nalpha=0.9\n")
+            .unwrap()
+            .config
+            .background_alpha
+            .unwrap();
+        // (fixture, plain foot.ini, glassy foot.ini, plain alpha/blur, glassy alpha/blur)
+        let cases = [
+            (
+                "stock-template",
+                include_str!("../../tests/fixtures/omarchy4/glass/stock-template.foot.ini"),
+                include_str!("../../tests/fixtures/omarchy4/glass/stock-template.glassy.foot.ini"),
+                (u16::MAX, true),
+                (glass_alpha, true),
+            ),
+            (
+                "user-template",
+                include_str!("../../tests/fixtures/omarchy4/glass/user-template.foot.ini"),
+                include_str!("../../tests/fixtures/omarchy4/glass/user-template.glassy.foot.ini"),
+                (u16::MAX, false),
+                (glass_alpha, true),
+            ),
+            (
+                "theme-alpha",
+                include_str!("../../tests/fixtures/omarchy4/glass/theme-alpha.foot.ini"),
+                include_str!("../../tests/fixtures/omarchy4/glass/theme-alpha.glassy.foot.ini"),
+                (theme_alpha, false),
+                (theme_alpha, true),
+            ),
+        ];
+        let root =
+            std::env::temp_dir().join(format!("splinterm-glass-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (name, plain, glassy, plain_effect, glassy_effect) in cases {
+            let theme = root.join(name);
+            std::fs::create_dir_all(&theme).unwrap();
+            std::fs::write(
+                theme.join("colors.toml"),
+                include_str!("../../tests/fixtures/omarchy4/tokyo-night/colors.toml"),
+            )
+            .unwrap();
+            std::fs::write(theme.join("foot.ini"), plain).unwrap();
+            let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+            let mut selection = OmarchyThemeSelection::default();
+            let mut observed = fingerprint(&source);
+            let mut current = live_update(&source, None, None, ResolvedTheme::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (current.background_alpha, current.background_blur),
+                plain_effect,
+                "{name}"
+            );
+            let palette = current;
+            for (step, (contents, effect)) in [
+                (glassy, glassy_effect),
+                (plain, plain_effect),
+                (glassy, glassy_effect),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let foot = theme.join("foot.ini");
+                if step == 1 {
+                    // Truncate and rewrite the same inode.
+                    std::fs::write(&foot, contents).unwrap();
+                } else {
+                    // sed -i, as omarchy-theme-set-glass uses: a new inode.
+                    let staged = theme.join("foot.ini.sed");
+                    std::fs::write(&staged, contents).unwrap();
+                    std::fs::rename(&staged, &foot).unwrap();
+                }
+                let next_fingerprint = fingerprint(&source);
+                assert_ne!(next_fingerprint, observed, "{name} step {step}");
+                observed = next_fingerprint;
+                let active = active_theme_source(&source, &mut selection);
+                let next = resolve_live_theme_update(active, &mut selection, None, None, current)
+                    .unwrap()
+                    .expect("a glass toggle publishes a theme update");
+                assert_eq!(
+                    (next.background_alpha, next.background_blur),
+                    effect,
+                    "{name} step {step}"
+                );
+                assert_eq!(
+                    next.with_color_overrides(
+                        Some(palette.background_alpha),
+                        Some(palette.background_blur)
+                    ),
+                    palette,
+                    "{name} step {step}: only the background effect changes"
+                );
+                current = next;
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn omarchy_theme_switch_gap_never_flaps_to_a_stale_omarchy_3_root() {
         let root =
             std::env::temp_dir().join(format!("splinterm-omarchy-root-gap-{}", std::process::id()));

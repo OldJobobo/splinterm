@@ -111,6 +111,8 @@ Active tab text is independent from terminal selection text. Splinterm chooses w
 
 Valid theme changes reload without restarting the daemon, shell, or window. A malformed or incomplete replacement retains the last valid palette.
 
+Omarchy's Glassy Windows works through the theme's `foot.ini`, as it does for Foot. Turning it on adds `alpha=0.65` and `blur=yes` under `[colors-dark]` unless the theme already sets them, and turning it off removes them again. Splinterm applies each change within half a second. Only the default terminal background, padding, and tab strip become translucent; text, explicit cell backgrounds, and the cursor stay opaque and crisp. An explicit `[colors] alpha` or `blur` in Splinterm's own configuration overrides the theme and Glassy Windows.
+
 Set an explicit JSON palette only to opt out of native discovery:
 
 ```ini
