@@ -267,7 +267,7 @@ const DEFINITIONS: &[ToolDefinition] = &[
         "Reports this agent's explicit display status (working, needs_input, done, error, or idle; null clears) for its own Splint, defaulting to the adapter's Splint environment. Display data only, never authority.",
         false,
         false,
-        true
+        false
     ),
 ];
 

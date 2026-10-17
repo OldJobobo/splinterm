@@ -181,6 +181,24 @@ pub fn preflight_sealed_snapshots(
     preflight_sealed_snapshots_with_timeout(snapshots, DEFAULT_PREFLIGHT_TIMEOUT)
 }
 
+/// Authenticates both roles from one exact sealed generation.
+///
+/// The rollback coordinator uses this at startup, before forward sources exist,
+/// so package replacement cannot remove the running generation's rollback pair.
+/// The caller must ensure process-wide descriptor creation and closure are
+/// quiescent for the descriptor audit and process-spawn boundary.
+///
+/// # Errors
+///
+/// Returns an error unless both sealed images execute, authenticate one bounded
+/// report, exit successfully, and agree on one pair contract.
+pub fn preflight_sealed_pair(
+    pair: &SealedExecutablePair,
+    generation: PreflightGeneration,
+) -> Result<ExecutablePairPreflight, PreflightError> {
+    preflight_pair(pair, generation, DEFAULT_PREFLIGHT_TIMEOUT)
+}
+
 /// Runs one actual binary entrypoint for the cross-package integration tests.
 ///
 /// # Errors
@@ -857,6 +875,14 @@ mod tests {
             reports.rollback.pair_build_version
         );
         assert_eq!(reports.forward.capabilities, reports.rollback.capabilities);
+
+        let retained =
+            preflight_sealed_pair(fixture.snapshots.rollback(), PreflightGeneration::Rollback)
+                .unwrap();
+        assert_eq!(
+            retained.snapshots,
+            ExecutablePairBinding::from_snapshots(fixture.snapshots.rollback())
+        );
     }
 
     #[test]

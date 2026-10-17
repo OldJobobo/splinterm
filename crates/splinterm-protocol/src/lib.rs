@@ -14,7 +14,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 38;
+pub const PROTOCOL_VERSION: u16 = 40;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -446,6 +446,57 @@ pub struct PresetPaneIdentity {
     pub splint_id: SplintId,
 }
 
+/// Where a Splint, Dojo, or Lair created from inside a Window starts.
+///
+/// Every choice is resolved on the daemon that owns the source Splint, so a
+/// remote Window resolves remote paths and the remote owner's home.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
+pub enum LaunchDirectory {
+    /// The source Splint's live root-process directory, then its saved launch
+    /// directory, then the owner's home.
+    Inherit,
+    /// The daemon owner's home directory.
+    Home,
+    /// An absolute directory; falls back to the owner's home when unusable.
+    Absolute(PathBuf),
+    /// A directory below the owner's home; falls back to the home itself.
+    HomeRelative(PathBuf),
+}
+
+impl LaunchDirectory {
+    /// Validates path shape without touching the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidArgument` for an empty, oversized, NUL-bearing, or
+    /// wrongly anchored path, or a home-relative path that leaves the home.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        let valid = match self {
+            Self::Inherit | Self::Home => true,
+            Self::Absolute(path) => bounded_path(path) && path.is_absolute(),
+            Self::HomeRelative(path) => {
+                bounded_path(path)
+                    && path
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+            }
+        };
+        if !valid {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "launch directory is not a bounded absolute or home-relative path",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn bounded_path(path: &std::path::Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    !bytes.is_empty() && !bytes.contains(&0) && bytes.len() <= MAX_CWD_BYTES
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -455,6 +506,12 @@ pub enum Request {
     SubscribeTopology,
     InspectSplint {
         splint_id: SplintId,
+    },
+    /// Resolves where a Window-created Splint, Dojo, or Lair starts, on the
+    /// daemon that owns the source Splint.
+    ResolveLaunchDirectory {
+        source_splint_id: SplintId,
+        directory: LaunchDirectory,
     },
     ReadGraphicalFocus,
     PublishGraphicalFocus {
@@ -483,6 +540,9 @@ pub enum Request {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::CreateLair`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplintAutomation {
         expected_topology_revision: TopologyRevision,
@@ -502,16 +562,29 @@ pub enum Request {
         lair_id: LairId,
         name: String,
         launch: AutomationLaunch,
+        /// Set only when Splinterm generated `name`; see [`Request::NewDojo`].
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     CreateTransientLair {
         expected_topology_revision: TopologyRevision,
         name: String,
         launch: LaunchParameters,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; an unused close may then remove the Lair with its
+        /// last Dojo.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     SplitSplint {
         expected_topology_revision: TopologyRevision,
@@ -563,6 +636,10 @@ pub enum Request {
         /// Trusted owner request to atomically make a transient Lair durable.
         #[serde(default, skip_serializing_if = "bool_is_false")]
         promote_transient_lair: bool,
+        /// Set only when Splinterm generated `name` rather than the user
+        /// choosing it; a chosen name keeps the Dojo from an unused close.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        generated_name: bool,
     },
     MaterializePreset {
         expected_topology_revision: TopologyRevision,
@@ -572,6 +649,12 @@ pub enum Request {
     },
     CloseDojo {
         expected_topology_revision: TopologyRevision,
+        dojo_id: DojoId,
+    },
+    /// Terminates the Dojo only when it was never used. The daemon decides and
+    /// applies this atomically against its current state; a used Dojo is left
+    /// unchanged.
+    CloseUnusedDojo {
         dojo_id: DojoId,
     },
     TerminateLair {
@@ -674,6 +757,11 @@ pub enum Request {
         splint_id: SplintId,
         incarnation: u64,
         bytes: Vec<u8>,
+        /// Set only by the graphical client for the focus in and out reports
+        /// it generates under DECSET 1004. Such bytes leave a Dojo unused;
+        /// identical bytes sent without this flag count as use.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        focus_report: bool,
     },
     Resize {
         controller_id: u64,
@@ -759,6 +847,12 @@ pub enum Response {
         runtime: SplintRuntimeSummary,
         /// Point-in-time launch default resolved on the owning daemon, not durable topology.
         resolved_cwd: Option<PathBuf>,
+    },
+    LaunchDirectoryResolved {
+        source_splint_id: SplintId,
+        /// Point-in-time usable directory, or `None` when neither the requested
+        /// directory nor its fallbacks are usable.
+        cwd: Option<PathBuf>,
     },
     GraphicalFocus {
         focused_splint_id: Option<SplintId>,
@@ -864,6 +958,46 @@ pub enum Response {
         /// Unix milliseconds when an expiring status becomes stale.
         expires_at_ms: Option<u64>,
     },
+    UnusedDojoClose {
+        dojo_id: DojoId,
+        outcome: UnusedDojoCloseOutcome,
+    },
+}
+
+/// Result of [`Request::CloseUnusedDojo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum UnusedDojoCloseOutcome {
+    /// The Dojo was removed and its process is shutting down.
+    Closed {
+        topology_revision: TopologyRevision,
+        /// Its Lair, never named by the user, held no other Dojo and went too.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        lair_removed: bool,
+    },
+    /// The Dojo counts as used and was left unchanged.
+    Used { reason: DojoUse },
+}
+
+/// Why a Dojo counts as used, so it is never closed automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DojoUse {
+    /// It no longer holds only its original Splint.
+    Split,
+    /// It did not start in this daemon as a plain default-shell terminal, or
+    /// its Splint was relaunched or restored since.
+    Launch,
+    /// It or its Splint was renamed.
+    Renamed,
+    /// Its Splint received client input.
+    Input,
+    /// Another Window is attached to it.
+    Attached,
+    /// A program other than the shell holds the terminal foreground.
+    Foreground,
+    /// Its Splint is not running.
+    NotRunning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1640,6 +1774,7 @@ pub enum AuditOperation {
     InspectTopology,
     SubscribeTopology,
     InspectSplint,
+    ResolveLaunchDirectory,
     ReadGraphicalFocus,
     PublishGraphicalFocus,
     CreateLair,
@@ -1691,6 +1826,7 @@ impl AuditOperation {
             Self::InspectTopology => "inspect_topology",
             Self::SubscribeTopology => "subscribe_topology",
             Self::InspectSplint => "inspect_splint",
+            Self::ResolveLaunchDirectory => "resolve_launch_directory",
             Self::ReadGraphicalFocus => "read_graphical_focus",
             Self::PublishGraphicalFocus => "publish_graphical_focus",
             Self::CreateLair => "create_lair",
@@ -3203,6 +3339,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_directories_are_bounded_and_anchored() {
+        for valid in [
+            LaunchDirectory::Inherit,
+            LaunchDirectory::Home,
+            LaunchDirectory::Absolute(PathBuf::from("/srv/projects")),
+            LaunchDirectory::HomeRelative(PathBuf::from("src/work")),
+        ] {
+            assert!(valid.validate().is_ok(), "{valid:?}");
+            let request = Request::ResolveLaunchDirectory {
+                source_splint_id: SplintId::new(),
+                directory: valid,
+            };
+            let round_trip: Request =
+                serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+            assert_eq!(round_trip, request);
+        }
+        for invalid in [
+            LaunchDirectory::Absolute(PathBuf::from("relative")),
+            LaunchDirectory::Absolute(PathBuf::new()),
+            LaunchDirectory::Absolute(PathBuf::from(format!("/{}", "x".repeat(MAX_CWD_BYTES)))),
+            LaunchDirectory::HomeRelative(PathBuf::from("/absolute")),
+            LaunchDirectory::HomeRelative(PathBuf::from("../escape")),
+            LaunchDirectory::HomeRelative(PathBuf::from("./a")),
+            LaunchDirectory::HomeRelative(PathBuf::new()),
+        ] {
+            assert_eq!(
+                invalid.validate().unwrap_err().code,
+                ErrorCode::InvalidArgument,
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
     fn audit_operation_name_matches_its_wire_representation() {
         for operation in [
             AuditOperation::Ping,
@@ -3214,6 +3384,7 @@ mod tests {
             AuditOperation::InspectTopology,
             AuditOperation::SubscribeTopology,
             AuditOperation::InspectSplint,
+            AuditOperation::ResolveLaunchDirectory,
             AuditOperation::ReadGraphicalFocus,
             AuditOperation::PublishGraphicalFocus,
             AuditOperation::CreateLair,
@@ -3921,7 +4092,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 38);
+        assert_eq!(PROTOCOL_VERSION, 40);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -4147,6 +4318,7 @@ mod tests {
             expected_topology_revision: TopologyRevision::new(7),
             name: "xdg".into(),
             launch: launch.clone(),
+            generated_name: false,
         };
         let encoded = serde_json::to_vec(&transient).unwrap();
         assert_eq!(
@@ -4167,6 +4339,7 @@ mod tests {
             name: "work".into(),
             launch: launch.clone(),
             promote_transient_lair: true,
+            generated_name: false,
         };
         let mut promotion_value = serde_json::to_value(&promotion).unwrap();
         assert_eq!(promotion_value["promote_transient_lair"], true);
@@ -4609,6 +4782,88 @@ mod tests {
         empty_before_oldest.rows.clear();
         empty_before_oldest.has_older = false;
         assert!(empty_before_oldest.validate().is_ok());
+    }
+
+    #[test]
+    fn unused_dojo_close_has_explicit_wire_shapes() {
+        let dojo_id = DojoId::new();
+        let request = Request::CloseUnusedDojo { dojo_id };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"type": "close_unused_dojo", "dojo_id": dojo_id})
+        );
+        let used = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Used {
+                reason: DojoUse::Foreground,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&used).unwrap(),
+            serde_json::json!({
+                "type": "unused_dojo_close",
+                "dojo_id": dojo_id,
+                "outcome": {"outcome": "used", "reason": "foreground"},
+            })
+        );
+        let closed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: false,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&closed).unwrap()["outcome"],
+            serde_json::json!({"outcome": "closed", "topology_revision": 0})
+        );
+        let lair_removed = Response::UnusedDojoClose {
+            dojo_id,
+            outcome: UnusedDojoCloseOutcome::Closed {
+                topology_revision: TopologyRevision::default(),
+                lair_removed: true,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&lair_removed).unwrap()["outcome"]["lair_removed"],
+            serde_json::json!(true)
+        );
+        for response in [used, closed, lair_removed] {
+            assert_eq!(
+                serde_json::from_value::<Response>(serde_json::to_value(&response).unwrap())
+                    .unwrap(),
+                response
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<Request>(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn input_marks_focus_reports_only_when_flagged() {
+        let splint_id = SplintId::new();
+        let input = |focus_report| Request::Input {
+            controller_id: 3,
+            splint_id,
+            incarnation: 4,
+            bytes: b"\x1b[I".to_vec(),
+            focus_report,
+        };
+        let ordinary = serde_json::to_value(input(false)).unwrap();
+        // Ordinary input keeps the encoding older peers send and accept.
+        assert!(ordinary.get("focus_report").is_none());
+        assert_eq!(
+            serde_json::from_value::<Request>(ordinary).unwrap(),
+            input(false)
+        );
+        let flagged = serde_json::to_value(input(true)).unwrap();
+        assert_eq!(flagged["focus_report"], true);
+        assert_eq!(
+            serde_json::from_value::<Request>(flagged).unwrap(),
+            input(true)
+        );
     }
 
     #[test]

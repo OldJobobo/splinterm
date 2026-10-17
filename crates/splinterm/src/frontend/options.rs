@@ -4,6 +4,7 @@ use std::{path::PathBuf, sync::mpsc::Sender as StdSender};
 
 use tokio::sync::{
     mpsc::{Receiver, Sender},
+    oneshot,
     watch::Sender as WatchSender,
 };
 
@@ -121,6 +122,9 @@ pub struct WindowOptions {
     pub remote_display_identity: Option<crate::endpoint::RemoteDisplayIdentity>,
     /// `[explorer] agent-status`: show explicitly reported agent status.
     pub agent_status_presentation: bool,
+    /// Fired once, after the first buffer commit maps the Window. Dropped unfired
+    /// when the Window ends without mapping.
+    pub mapped: Option<oneshot::Sender<()>>,
 }
 
 impl Default for WindowOptions {
@@ -163,6 +167,7 @@ impl Default for WindowOptions {
             initial_tab_strip_visible: true,
             remote_display_identity: None,
             agent_status_presentation: true,
+            mapped: None,
         }
     }
 }

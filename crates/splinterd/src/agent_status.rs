@@ -441,6 +441,12 @@ impl AgentStatusService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// How many Splints hold a status slot.
+    #[cfg(test)]
+    pub(crate) fn slot_count(&self) -> usize {
+        self.store().len()
+    }
+
     /// Prunes statuses of retired incarnations and fills runtime summaries.
     ///
     /// Every topology snapshot passes through here, so the transaction that

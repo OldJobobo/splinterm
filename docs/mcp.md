@@ -232,8 +232,10 @@ semantic agent supervision, readiness, messaging, or completion.
 ## Reporting agent status
 
 `splinterm.report_agent_status` lets an agent show whether it is working,
-needs the person, or has finished. It is not read-only, not destructive, and
-idempotent. Input is `{ state, detail?, ttl_seconds?, splint_id?, incarnation? }`:
+needs the person, or has finished. It is not read-only and not destructive. It
+is not idempotent: a repeated report refreshes its reported time and expiry
+and counts against the rate limit. Input is
+`{ state, detail?, ttl_seconds?, splint_id?, incarnation? }`:
 
 - `state` is `working`, `needs_input`, `done`, `error`, or `idle`; `null` clears
   the status and then takes no `detail` or `ttl_seconds`.

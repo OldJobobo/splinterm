@@ -736,8 +736,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     let session_picker = options.session_picker;
     let title = if trusted_consent.is_some() {
         "Splinterm — Trusted Access Request".to_owned()
-    } else if session_picker.is_some() {
-        "Splinterm — Recent Dojos".to_owned()
+    } else if let Some(picker) = &session_picker {
+        picker.standalone_title().to_owned()
     } else {
         window_title(
             options.title.as_deref().or_else(|| {
@@ -842,6 +842,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             configured: false,
             scale_120: SCALE_DENOMINATOR,
             integer_fallback_scale: 1,
+            mapped_notify: options.mapped.take(),
         },
         presentation: PresentationState {
             render_context,
@@ -1957,6 +1958,8 @@ struct SurfaceState {
     configured: bool,
     scale_120: u32,
     integer_fallback_scale: u32,
+    /// Signals the Window's owner once the first buffer commit maps it.
+    mapped_notify: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 struct PresentationState {
@@ -2374,8 +2377,7 @@ fn try_queue_focus_report(
     commands: &Sender<WindowCommand>,
     focused: bool,
 ) -> ControlReleaseOutcome {
-    let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
-    match commands.try_send(WindowCommand::Input(report.to_vec())) {
+    match commands.try_send(WindowCommand::FocusReport(focused)) {
         Ok(()) => ControlReleaseOutcome::Queued,
         Err(TrySendError::Full(_)) => ControlReleaseOutcome::Retry,
         Err(TrySendError::Closed(_)) => ControlReleaseOutcome::Disconnected,
@@ -5827,6 +5829,9 @@ impl App {
                     target.splints,
                 ));
                 Ok(())
+            }
+            BuiltInCommandDispatch::OpenRemoteChooser => {
+                crate::remote_launch::open_remote_chooser()
             }
             BuiltInCommandDispatch::RecentSessions => (|| -> Result<()> {
                 self.show_embedded_session_picker(
@@ -10793,7 +10798,9 @@ impl App {
                 self.presentation.renderer_generation,
                 layout,
                 session_picker_palette(self.presentation.theme),
-                session_picker_purpose(self.modal.selector_kind),
+                picker
+                    .purpose()
+                    .unwrap_or(session_picker_purpose(self.modal.selector_kind)),
                 &items,
                 picker.new_enabled(),
                 picker.new_blocker(),
@@ -11002,6 +11009,9 @@ impl App {
         self.surface.buffers.swap(0, buffer_index);
         if let Some(diagnostics) = diagnostics() {
             diagnostics.mark_window_mapped();
+        }
+        if let Some(mapped) = self.surface.mapped_notify.take() {
+            let _ = mapped.send(());
         }
         let draw_duration_ns = u64::try_from(draw_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let committed_monotonic_raw_ns = commit_sequence.map(|_| monotonic_raw_ns());
@@ -12828,7 +12838,7 @@ mod tests {
         App::retry_pane_focus_report(&mut view.pane, false);
         assert_eq!(
             first_command_receiver.try_recv().unwrap(),
-            WindowCommand::Input(b"\x1b[I".to_vec())
+            WindowCommand::FocusReport(true)
         );
 
         let pending = VecDeque::from([PendingTerminalInput {
@@ -15581,7 +15591,7 @@ mod tests {
         );
         assert_eq!(
             receiver.try_recv().unwrap(),
-            WindowCommand::Input(b"\x1b[O".to_vec())
+            WindowCommand::FocusReport(false)
         );
         assert_eq!(
             try_queue_control_release(&sender),

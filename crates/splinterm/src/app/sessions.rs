@@ -8,9 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    SessionPickerDecision, SessionPickerUi, WindowOptions,
+    SessionPickerDecision, SessionPickerItem, SessionPickerUi, WindowOptions,
     config::{AppConfig, ResolvedTheme},
     endpoint::ConnectionFactory,
+    remote_launch::hand_off_to_remote_chooser,
     renderer::{self, RendererOptions},
     run_window,
     session_picker::{SessionEntry, collect_sessions},
@@ -19,6 +20,7 @@ use splinterm_core::{DojoId, LairId, SplintId};
 use splinterm_protocol::{Request, Response};
 
 use super::{
+    remote_chooser::remote_dojos_row,
     session_catalog::{
         GraphicalLairLifetime, graphical_create_request, launch_parameters, recent_dojo_ids,
         remember_dojo, select_dojo_from, session_picker_item,
@@ -130,7 +132,10 @@ pub(in crate::app) async fn select_dojo(
     }
 }
 
-fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result<()> {
+pub(in crate::app) fn configure_picker_renderer(
+    config: &AppConfig,
+    theme: ResolvedTheme,
+) -> Result<()> {
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_ligatures: config.font_ligatures,
@@ -144,16 +149,33 @@ fn configure_picker_renderer(config: &AppConfig, theme: ResolvedTheme) -> Result
     })
 }
 
+/// Shows Recent Dojos, with `remote_row` appended after the Dojo rows.
 fn choose_recent_session(
     config: &AppConfig,
     entries: &[SessionEntry],
+    remote_row: Option<SessionPickerItem>,
+    app_id: Option<String>,
+) -> Result<Option<SessionPickerDecision>> {
+    let mut items = entries.iter().map(session_picker_item).collect::<Vec<_>>();
+    items.extend(remote_row);
+    let (decision, receiver) = std_mpsc::channel();
+    let mut picker = SessionPickerUi::new(items, decision);
+    if entries.is_empty() {
+        // A lone remote row must not displace New as the default choice.
+        picker.select_new_row();
+    }
+    run_standalone_picker(config, picker, &receiver, app_id)
+}
+
+/// Runs one standalone picker Window and returns its decision, if any.
+pub(in crate::app) fn run_standalone_picker(
+    config: &AppConfig,
+    mut picker: SessionPickerUi,
+    receiver: &std_mpsc::Receiver<SessionPickerDecision>,
     app_id: Option<String>,
 ) -> Result<Option<SessionPickerDecision>> {
     let theme = load_startup_theme(config);
     configure_picker_renderer(config, theme)?;
-    let items = entries.iter().map(session_picker_item).collect();
-    let (decision, receiver) = std_mpsc::channel();
-    let mut picker = SessionPickerUi::new(items, decision);
     let snapshot = picker.snapshot();
     run_window(WindowOptions {
         snapshot: Some(snapshot),
@@ -217,16 +239,22 @@ pub(in crate::app) async fn run_dojos_from(
         .into_iter()
         .filter(SessionEntry::reopenable)
         .collect::<Vec<_>>();
+    // Remote profiles are local configuration, so only a local picker offers them.
+    let remote_row = factory.is_local().then(remote_dojos_row).flatten();
+    let remote_row_index = remote_row.is_some().then_some(entries.len());
     let picker_entries = entries.clone();
     let picker_config = config.clone();
     let picker_app_id = app_id.clone();
     let decision = tokio::task::spawn_blocking(move || {
-        choose_recent_session(&picker_config, &picker_entries, picker_app_id)
+        choose_recent_session(&picker_config, &picker_entries, remote_row, picker_app_id)
     })
     .await
     .context("Dojo picker task failed")??;
     match decision {
         None => Ok(()),
+        Some(SessionPickerDecision::Open(index)) if Some(index) == remote_row_index => {
+            hand_off_to_remote_chooser()
+        }
         Some(SessionPickerDecision::New) => {
             if let Some(diagnostics) = splinterm::diagnostics::global() {
                 diagnostics.begin_window(None, None);
@@ -285,7 +313,7 @@ fn fresh_lair_name(now: SystemTime, process_id: u32) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("terminal-{stamp}-{process_id}")
+    splinterm_core::generated_lair_name(stamp, process_id)
 }
 
 pub(in crate::app) async fn xdg_launch(
@@ -322,6 +350,7 @@ pub(in crate::app) async fn xdg_launch(
             expected_topology_revision: expected,
             name,
             launch: launch_parameters(cwd, command, &config),
+            generated_name: true,
         })
         .await?
     else {

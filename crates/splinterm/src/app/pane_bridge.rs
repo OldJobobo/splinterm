@@ -1,5 +1,9 @@
 //! Daemon-to-frontend pane protocol bridge.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -373,11 +377,27 @@ pub(in crate::app) async fn wait_for_resize_deadline(deadline: Option<tokio::tim
     }
 }
 
+/// The bytes of a focus report this Window generated under DECSET 1004.
+const fn focus_report_bytes(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
+/// Terminal input to send for a command, and whether it is a focus report
+/// this Window generated rather than input from the user.
+fn terminal_input(command: WindowCommand) -> Option<(Vec<u8>, bool)> {
+    match command {
+        WindowCommand::Input(bytes) => Some((bytes, false)),
+        WindowCommand::FocusReport(focused) => Some((focus_report_bytes(focused).to_vec(), true)),
+        _ => None,
+    }
+}
+
 fn input_requests(
     controller_id: u64,
     splint_id: SplintId,
     incarnation: u64,
     bytes: &[u8],
+    focus_report: bool,
     maximum_input_bytes: usize,
 ) -> Result<Vec<Request>> {
     if maximum_input_bytes == 0 {
@@ -390,6 +410,7 @@ fn input_requests(
             splint_id,
             incarnation,
             bytes: chunk.to_vec(),
+            focus_report,
         })
         .collect())
 }
@@ -765,15 +786,25 @@ pub(in crate::app) async fn run_controller(
                 command
             };
             let request = match command {
-                WindowCommand::Input(bytes) => {
+                WindowCommand::Input(_) | WindowCommand::FocusReport(_) => {
+                    let Some((bytes, focus_report)) = terminal_input(command) else {
+                        unreachable!("matched terminal input");
+                    };
                     // One daemon round trip per queued keystroke makes remote
-                    // input lag behind typing; send what is already queued at once.
-                    let (bytes, barrier) = coalesce_input(
-                        bytes,
-                        control.limits().maximum_input_bytes,
-                        || commands.try_recv().ok(),
-                    );
-                    coalescing_barrier = barrier;
+                    // input lag behind typing; send what is already queued at
+                    // once. A generated focus report keeps its own flagged
+                    // request, and the coalescer stops at one as a barrier.
+                    let bytes = if focus_report {
+                        bytes
+                    } else {
+                        let (bytes, barrier) = coalesce_input(
+                            bytes,
+                            control.limits().maximum_input_bytes,
+                            || commands.try_recv().ok(),
+                        );
+                        coalescing_barrier = barrier;
+                        bytes
+                    };
                     let Some(controller_id) = ensure_pane_control(
                         &mut control,
                         &mut active_controller,
@@ -793,6 +824,7 @@ pub(in crate::app) async fn run_controller(
                         splint_id,
                         incarnation,
                         &bytes,
+                        focus_report,
                         maximum_input_bytes,
                     )? {
                         match control.request(request).await {
@@ -1032,9 +1064,29 @@ fn forced_control_request(
     })
 }
 
+/// Bounds the explicit detach a closing tab waits for.
+const PANE_DETACH_DEADLINE: Duration = Duration::from_secs(2);
+
 pub(in crate::app) struct PaneTask {
     pub(in crate::app) cancellation: tokio_util::sync::CancellationToken,
     pub(in crate::app) task: tokio::task::JoinHandle<Result<()>>,
+    /// Set before cancelling to detach explicitly, so the daemon has released
+    /// the attachment by the time the task ends.
+    pub(in crate::app) detach_on_cancel: Arc<AtomicBool>,
+}
+
+impl PaneTask {
+    fn new(
+        cancellation: tokio_util::sync::CancellationToken,
+        task: tokio::task::JoinHandle<Result<()>>,
+        detach_on_cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            cancellation,
+            task,
+            detach_on_cancel,
+        }
+    }
 }
 
 pub(in crate::app) struct PreparedPane {
@@ -1177,6 +1229,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         cancellation.clone(),
     ));
     let task_updates = updates.clone();
+    let detach_on_cancel = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(run_pane_subscription(
         connection,
         attachment,
@@ -1188,6 +1241,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         factory.capabilities().image_transport,
         image_cache.clone(),
         cancellation.clone(),
+        Arc::clone(&detach_on_cancel),
     ));
     Ok(PreparedPane {
         options: WindowPaneOptions {
@@ -1199,7 +1253,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
             controlled: controller_id.is_some(),
             image_sources,
         },
-        task: PaneTask { cancellation, task },
+        task: PaneTask::new(cancellation, task, detach_on_cancel),
     })
 }
 
@@ -1316,6 +1370,7 @@ pub(in crate::app) async fn run_pane_subscription(
     image_transport: ImageTransport,
     image_cache: SharedImageContentCache,
     cancellation: tokio_util::sync::CancellationToken,
+    detach_on_cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut last_revision = attachment.snapshot.revision;
     let mut last_sequence = 0_u64;
@@ -1323,6 +1378,16 @@ pub(in crate::app) async fn run_pane_subscription(
     loop {
         tokio::select! {
             () = cancellation.cancelled() => {
+                if detach_on_cancel.load(Ordering::Acquire) {
+                    let _ = connection
+                        .request_with_deadline(
+                            Request::Detach {
+                                subscription_id: attachment.subscription_id,
+                            },
+                            PANE_DETACH_DEADLINE,
+                        )
+                        .await;
+                }
                 return finish_pane_controller(&mut controller, controller_completed).await;
             }
             result = &mut controller, if !controller_completed => {
@@ -1515,7 +1580,7 @@ mod tests {
     fn terminal_input_is_chunked_to_the_negotiated_server_limit() {
         let splint_id = SplintId::new();
         let bytes = vec![7; 17];
-        let requests = input_requests(3, splint_id, 9, &bytes, 8).unwrap();
+        let requests = input_requests(3, splint_id, 9, &bytes, false, 8).unwrap();
 
         assert_eq!(requests.len(), 3);
         let chunks = requests
@@ -1526,10 +1591,12 @@ mod tests {
                     splint_id: request_splint_id,
                     incarnation,
                     bytes,
+                    focus_report,
                 } => {
                     assert_eq!(controller_id, 3);
                     assert_eq!(request_splint_id, splint_id);
                     assert_eq!(incarnation, 9);
+                    assert!(!focus_report);
                     bytes
                 }
                 _ => panic!("expected an input request"),
@@ -1537,7 +1604,24 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [8, 8, 1]);
         assert_eq!(chunks.concat(), bytes);
-        assert!(input_requests(3, splint_id, 9, &bytes, 0).is_err());
+        assert!(input_requests(3, splint_id, 9, &bytes, false, 0).is_err());
+    }
+
+    #[test]
+    fn only_generated_focus_reports_are_flagged() {
+        assert_eq!(
+            terminal_input(WindowCommand::FocusReport(true)),
+            Some((b"\x1b[I".to_vec(), true))
+        );
+        assert_eq!(
+            terminal_input(WindowCommand::FocusReport(false)),
+            Some((b"\x1b[O".to_vec(), true))
+        );
+        assert_eq!(
+            terminal_input(WindowCommand::Input(b"\x1b[I".to_vec())),
+            Some((b"\x1b[I".to_vec(), false))
+        );
+        assert_eq!(terminal_input(WindowCommand::Resynchronize), None);
     }
 
     fn coalesce_from(
@@ -1631,7 +1715,7 @@ mod tests {
         assert_eq!(bytes, vec![7; 9]);
         assert_eq!(barrier, None);
         assert_eq!(rest, vec![WindowCommand::Input(b"z".to_vec())]);
-        let requests = input_requests(1, SplintId::new(), 1, &bytes, 8).unwrap();
+        let requests = input_requests(1, SplintId::new(), 1, &bytes, false, 8).unwrap();
         assert_eq!(requests.len(), 2);
     }
 
@@ -1642,7 +1726,7 @@ mod tests {
         assert_eq!(barrier, None);
         assert!(rest.is_empty());
         assert!(
-            input_requests(1, SplintId::new(), 1, &bytes, 8)
+            input_requests(1, SplintId::new(), 1, &bytes, false, 8)
                 .unwrap()
                 .is_empty()
         );
