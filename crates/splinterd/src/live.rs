@@ -3221,6 +3221,13 @@ impl LiveSplintHandle {
         self.child_pid
     }
 
+    /// Whether this incarnation's root process (the PTY session leader) is
+    /// still running. Without pidfd support only the observed exit is used.
+    #[must_use]
+    pub fn root_process_is_live(&self) -> bool {
+        self.exit_status().is_none() && self.child_pidfd.as_deref().is_none_or(root_process_is_live)
+    }
+
     /// Observe only this root process's cwd. Missing pidfd support or an exited
     /// root fails closed, even if its numeric PID now names a different process.
     pub async fn root_cwd(&self) -> Option<PathBuf> {

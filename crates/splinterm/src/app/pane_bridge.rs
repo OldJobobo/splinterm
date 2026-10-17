@@ -76,7 +76,8 @@ pub(in crate::app) fn classify_subscription_event(
         | SubscriptionEvent::TopologyResyncRequired { .. }
         | SubscriptionEvent::ControlStatusChanged { .. }
         | SubscriptionEvent::ControlTransferRequested { .. }
-        | SubscriptionEvent::ControlTransferResolved { .. } => EventAction::Ignore,
+        | SubscriptionEvent::ControlTransferResolved { .. }
+        | SubscriptionEvent::AgentStatusChanged { .. } => EventAction::Ignore,
     }
 }
 

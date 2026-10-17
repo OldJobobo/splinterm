@@ -27,14 +27,14 @@ use sha2::{Digest, Sha256};
 use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, TopologyRevision};
 use splinterm_filemap::ReadOnlyFileMap;
 use splinterm_protocol::{
-    AccessGrant, AccessScope, AuditDecision, AuditOutcome, AuditPage, AutomationScope, ClientFrame,
-    ClientRole, ControlStatus, ControlTransferOutcome, ErrorCode, ImageContentMetadata,
-    ImageContentRequest, ImageTransferMode, MAX_CWD_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_CHUNK_BYTES,
-    MAX_IMAGE_CHUNK_WINDOW, MAX_TERMINAL_TRANSACTION_BYTES, PROTOCOL_VERSION,
-    PersistentAuthorizationStatus, Request, Response, RestoreLeafResult, ScrollbackPage,
-    SearchPage, ServerFrame, ServerFrameTransactionAssembler, ServerLimits, SplintLifecycle,
-    SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate, TopologyChangeKind,
-    TopologySnapshot, encode_frame, image_content_socket_path,
+    AccessGrant, AccessScope, AgentState, AgentStatusSummary, AuditDecision, AuditOutcome,
+    AuditPage, AutomationScope, ClientFrame, ClientRole, ControlStatus, ControlTransferOutcome,
+    ErrorCode, ImageContentMetadata, ImageContentRequest, ImageTransferMode, MAX_CWD_BYTES,
+    MAX_FRAME_BYTES, MAX_IMAGE_CHUNK_BYTES, MAX_IMAGE_CHUNK_WINDOW, MAX_TERMINAL_TRANSACTION_BYTES,
+    PROTOCOL_VERSION, PersistentAuthorizationStatus, Request, Response, RestoreLeafResult,
+    ScrollbackPage, SearchPage, ServerFrame, ServerFrameTransactionAssembler, ServerLimits,
+    SplintLifecycle, SplintRuntimeSummary, TerminalRow, TerminalSnapshot, TerminalUpdate,
+    TopologyChangeKind, TopologySnapshot, encode_frame, image_content_socket_path,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -223,6 +223,69 @@ struct SplintSummaryV2 {
     lifecycle: SplintLifecycleV2,
     current_incarnation: Option<u64>,
     last_incarnation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_status: Option<AgentStatusV2>,
+}
+
+/// Explicitly reported display status of a live Splint incarnation.
+///
+/// The detail is reporter-supplied display text: bounded and free of control,
+/// bidi-formatting, and line-break characters, but never authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AgentStatusV2 {
+    state: &'static str,
+    detail: Option<String>,
+    stale: bool,
+    reported_age_ms: u64,
+    sequence: u64,
+}
+
+fn agent_status_projection(summary: &AgentStatusSummary) -> Result<AgentStatusV2> {
+    if !summary.validate() {
+        bail!("agent status exceeds public v2 bounds");
+    }
+    Ok(AgentStatusV2 {
+        state: summary.state.as_str(),
+        detail: summary.detail.clone(),
+        stale: summary.stale,
+        reported_age_ms: summary.reported_age_ms,
+        sequence: summary.sequence,
+    })
+}
+
+fn runtime_agent_status(runtime: &SplintRuntimeSummary) -> Result<Option<AgentStatusV2>> {
+    match (&runtime.agent_status, runtime.live_incarnation) {
+        (None, _) => Ok(None),
+        (Some(status), Some(_)) => agent_status_projection(status).map(Some),
+        (Some(_), None) => bail!("agent status was attached to an exited Splint"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AgentStatusResourceV2 {
+    splint_id: String,
+    incarnation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AgentStatusSetDataV2 {
+    accepted: bool,
+    state: &'static str,
+    sequence: u64,
+    expires_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AgentStatusClearDataV2 {
+    accepted: bool,
+    cleared: bool,
+    sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AgentStatusGetDataV2 {
+    current_incarnation: Option<u64>,
+    agent_status: Option<AgentStatusV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -252,6 +315,8 @@ struct InspectSplintDataV2 {
     current_incarnation: Option<u64>,
     last_incarnation: Option<u64>,
     exit_code: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_status: Option<AgentStatusV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -892,6 +957,7 @@ fn append_splint_summaries(
                 lifecycle: public_lifecycle(runtime),
                 current_incarnation: runtime.live_incarnation,
                 last_incarnation: runtime.last_incarnation,
+                agent_status: runtime_agent_status(runtime)?,
             });
         }
         LayoutNode::Branch { first, second, .. } => {
@@ -1026,6 +1092,7 @@ pub fn inspect_splint_envelope(
                         current_incarnation: runtime.live_incarnation,
                         last_incarnation: runtime.last_incarnation,
                         exit_code: exit_code.map(u8::try_from).transpose()?,
+                        agent_status: runtime_agent_status(runtime)?,
                     })?,
                     false,
                 );
@@ -1033,6 +1100,81 @@ pub fn inspect_splint_envelope(
         }
     }
     bail!("validated topology omitted requested Splint")
+}
+
+/// Converts one Splint's explicitly reported status to the reviewed `agent_status_get` envelope.
+pub fn agent_status_get_envelope(
+    snapshot: &TopologySnapshot,
+    splint_id: SplintId,
+) -> Result<CliEnvelopeV2> {
+    snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    for lair in snapshot.topology.lairs() {
+        for dojo in &lair.dojos {
+            if dojo.root.find_splint(splint_id).is_some() {
+                let runtime = runtime_for(snapshot, splint_id)?;
+                return CliEnvelopeV2::success(
+                    "agent_status_get",
+                    Some(serde_json::to_value(InspectSplintResourceV2 {
+                        lair_id: lair.id.to_string(),
+                        dojo_id: dojo.id.to_string(),
+                        splint_id: splint_id.to_string(),
+                        topology_revision: snapshot.revision.get(),
+                    })?),
+                    serde_json::to_value(AgentStatusGetDataV2 {
+                        current_incarnation: runtime.live_incarnation,
+                        agent_status: runtime_agent_status(runtime)?,
+                    })?,
+                    false,
+                );
+            }
+        }
+    }
+    bail!("validated topology omitted requested Splint")
+}
+
+/// Converts an accepted explicit agent status report to the reviewed
+/// `agent_status_set` or `agent_status_clear` envelope.
+///
+/// The reported detail is deliberately never echoed.
+pub fn agent_status_report_envelope(
+    splint_id: SplintId,
+    incarnation: u64,
+    state: Option<AgentState>,
+    sequence: u64,
+    expires_at_ms: Option<u64>,
+) -> Result<CliEnvelopeV2> {
+    if incarnation == 0 || (state.is_none() && expires_at_ms.is_some()) {
+        bail!("agent status acknowledgement exceeds public v2 bounds");
+    }
+    let resource = serde_json::to_value(AgentStatusResourceV2 {
+        splint_id: splint_id.to_string(),
+        incarnation,
+    })?;
+    match state {
+        Some(state) => CliEnvelopeV2::success(
+            "agent_status_set",
+            Some(resource),
+            serde_json::to_value(AgentStatusSetDataV2 {
+                accepted: true,
+                state: state.as_str(),
+                sequence,
+                expires_at_ms,
+            })?,
+            false,
+        ),
+        None => CliEnvelopeV2::success(
+            "agent_status_clear",
+            Some(resource),
+            serde_json::to_value(AgentStatusClearDataV2 {
+                accepted: true,
+                cleared: true,
+                sequence,
+            })?,
+            false,
+        ),
+    }
 }
 
 /// Converts a validated private terminal snapshot to the reviewed one-shot projection.
@@ -1236,6 +1378,7 @@ fn automation_scope_name(scope: AutomationScope) -> &'static str {
         AutomationScope::AuthorizationInspect => "authorization_inspect",
         AutomationScope::AuthorizationRevoke => "authorization_revoke",
         AutomationScope::AuditInspect => "audit_inspect",
+        AutomationScope::AgentStatusReport => "agent_status_report",
     }
 }
 
@@ -1252,6 +1395,7 @@ fn access_scope_name(scope: AccessScope) -> Option<&'static str> {
         AccessScope::TopologyName => Some("topology_name_mutate"),
         AccessScope::ProcessSpawn => Some("process_spawn"),
         AccessScope::ProcessRestore => Some("process_restore"),
+        AccessScope::AgentStatusReport => Some("agent_status_report"),
         AccessScope::ClipboardRead | AccessScope::ClipboardWrite => None,
     }
 }
@@ -1343,7 +1487,7 @@ pub fn authorization_status_envelope(
     for grant in persistent {
         if !valid_rule_id(&grant.policy_rule_id)
             || grant.expires_at_unix_seconds == Some(0)
-            || grant.scopes.len() > 18
+            || grant.scopes.len() > 19
         {
             bail!("persistent authorization status exceeds public v2 bounds");
         }
@@ -1417,7 +1561,7 @@ fn audit_record(record: &splinterm_protocol::AuditRecord) -> Result<AuditRecordV
             .executable_sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || record.requested_scopes.len() > 18
+        || record.requested_scopes.len() > 19
         || record.reason.is_empty()
         || record.reason.len() > 64
         || !record.reason.bytes().enumerate().all(|(index, byte)| {
@@ -1831,7 +1975,7 @@ pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV2, bool) {
             (CliErrorCodeV2::StaleIncarnation, true)
         }
         ErrorCode::InvalidArgument => (CliErrorCodeV2::InvalidArgument, false),
-        ErrorCode::ResourceLimit => (CliErrorCodeV2::ResourceLimit, true),
+        ErrorCode::ResourceLimit | ErrorCode::RateLimited => (CliErrorCodeV2::ResourceLimit, true),
         ErrorCode::Cancelled => (CliErrorCodeV2::Cancelled, true),
         ErrorCode::Internal => (CliErrorCodeV2::Internal, true),
     }
@@ -4264,6 +4408,7 @@ mod tests {
                 restorable: false,
                 lifecycle: SplintLifecycle::Running,
                 exit_status: None,
+                agent_status: None,
             }],
         }
     }
@@ -4329,6 +4474,126 @@ mod tests {
         assert_eq!(
             serialized(&inspect_splint_envelope(&snapshot, splint_id).unwrap()),
             expected
+        );
+    }
+
+    fn status_summary(
+        state: AgentState,
+        detail: Option<&str>,
+        is_stale: bool,
+        reported_age_ms: u64,
+        sequence: u64,
+    ) -> AgentStatusSummary {
+        AgentStatusSummary {
+            state,
+            detail: detail.map(str::to_owned),
+            sequence,
+            stale: is_stale,
+            reported_age_ms,
+        }
+    }
+
+    #[test]
+    fn public_v2_agent_status_dtos_match_golden_fixtures() {
+        let mut snapshot = reviewed_topology();
+        let splint_id = snapshot.runtimes[0].splint_id;
+        snapshot.runtimes[0].agent_status = Some(status_summary(
+            AgentState::NeedsInput,
+            Some("waiting for approval"),
+            false,
+            1_500,
+            4,
+        ));
+        assert_eq!(
+            serialized(&agent_status_get_envelope(&snapshot, splint_id).unwrap()),
+            fixture_document(include_str!(
+                "../../../tests/automation/fixtures/valid/cli-agent-status-get.json"
+            ))
+        );
+        assert_eq!(
+            serialized(&inspect_topology_envelope(&snapshot).unwrap()),
+            fixture_document(include_str!(
+                "../../../tests/automation/fixtures/valid/cli-inspect-topology-agent-status.json"
+            ))
+        );
+        snapshot.runtimes[0].agent_status =
+            Some(status_summary(AgentState::Working, None, true, 121_000, 3));
+        assert_eq!(
+            serialized(&inspect_splint_envelope(&snapshot, splint_id).unwrap()),
+            fixture_document(include_str!(
+                "../../../tests/automation/fixtures/valid/cli-inspect-splint-agent-status.json"
+            ))
+        );
+
+        // No status leaves the reviewed pre-agent-status shapes byte-for-byte.
+        snapshot.runtimes[0].agent_status = None;
+        let inspected = serialized(&inspect_splint_envelope(&snapshot, splint_id).unwrap());
+        assert!(inspected["data"].get("agent_status").is_none());
+        let topology = serialized(&inspect_topology_envelope(&snapshot).unwrap());
+        assert!(topology["data"]["splints"][0].get("agent_status").is_none());
+        let empty = serialized(&agent_status_get_envelope(&snapshot, splint_id).unwrap());
+        assert_eq!(empty["data"]["agent_status"], Value::Null);
+        assert_eq!(empty["data"]["current_incarnation"], 2);
+        assert!(agent_status_get_envelope(&snapshot, SplintId::new()).is_err());
+
+        // A summary that violates the closed bounds is never projected.
+        snapshot.runtimes[0].agent_status = Some(status_summary(
+            AgentState::Done,
+            Some("two\nlines"),
+            false,
+            0,
+            1,
+        ));
+        assert!(inspect_splint_envelope(&snapshot, splint_id).is_err());
+        assert!(agent_status_get_envelope(&snapshot, splint_id).is_err());
+    }
+
+    #[test]
+    fn public_v2_agent_status_acknowledgements_match_golden_fixtures() {
+        let splint_id: SplintId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77103".parse().unwrap();
+        assert_eq!(
+            serialized(
+                &agent_status_report_envelope(
+                    splint_id,
+                    2,
+                    Some(AgentState::NeedsInput),
+                    4,
+                    Some(1_760_630_400_000),
+                )
+                .unwrap()
+            ),
+            fixture_document(include_str!(
+                "../../../tests/automation/fixtures/valid/cli-agent-status-set.json"
+            ))
+        );
+        assert_eq!(
+            serialized(&agent_status_report_envelope(splint_id, 2, None, 5, None).unwrap()),
+            fixture_document(include_str!(
+                "../../../tests/automation/fixtures/valid/cli-agent-status-clear.json"
+            ))
+        );
+        let resting = serialized(
+            &agent_status_report_envelope(splint_id, 2, Some(AgentState::Done), 6, None).unwrap(),
+        );
+        assert_eq!(resting["data"]["expires_at_ms"], Value::Null);
+        assert!(
+            agent_status_report_envelope(splint_id, 0, Some(AgentState::Idle), 1, None).is_err()
+        );
+        assert!(agent_status_report_envelope(splint_id, 2, None, 1, Some(1)).is_err());
+        let failure = CliEnvelopeV2::protocol_failure(
+            "agent_status_set",
+            &ProtocolError::new(
+                ErrorCode::RateLimited,
+                "agent status reports exceed 10 per second for this Splint; retry later",
+            ),
+            "agent status reports exceed 10 per second for this Splint; retry later",
+        )
+        .unwrap();
+        assert_eq!(
+            serialized(&failure),
+            fixture_document(include_str!(
+                "../../../tests/automation/fixtures/valid/cli-agent-status-error.json"
+            ))
         );
     }
 

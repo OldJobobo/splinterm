@@ -1,0 +1,26 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "agent_status_get",
+    "ok": true,
+    "truncated": false,
+    "resource": {
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "dojo_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77102",
+      "splint_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77103",
+      "topology_revision": 1
+    },
+    "data": {
+      "current_incarnation": 2,
+      "agent_status": {
+        "state": "needs_input",
+        "detail": "waiting for approval",
+        "stale": false,
+        "reported_age_ms": 1500,
+        "sequence": 4
+      }
+    }
+  }
+}
