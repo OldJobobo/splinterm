@@ -10,7 +10,7 @@ use splinterm::{
     session_picker::{RecentDojos, SessionEntry},
 };
 use splinterm_core::{DojoId, LairId, TopologyRevision};
-use splinterm_protocol::{AutomationLaunch, LaunchParameters, Request};
+use splinterm_protocol::{AutomationLaunch, LaunchDirectory, LaunchParameters, Request};
 
 pub(in crate::app) async fn source_splint_cwd(
     connection: &mut splinterm::automation::Connection,
@@ -33,6 +33,35 @@ pub(in crate::app) async fn source_splint_cwd(
         "splinterd returned another Splint"
     );
     resolved_cwd.context("source working directory is unavailable")
+}
+
+/// Resolves where a Window-created Splint, Dojo, or Lair starts, on the daemon
+/// that owns `source_splint_id`. Inheritance keeps the exact source-cwd path.
+pub(in crate::app) async fn creation_directory(
+    connection: &mut splinterm::automation::Connection,
+    source_splint_id: splinterm_core::SplintId,
+    directory: &LaunchDirectory,
+) -> Result<PathBuf> {
+    if *directory == LaunchDirectory::Inherit {
+        return source_splint_cwd(connection, source_splint_id).await;
+    }
+    let splinterm_protocol::Response::LaunchDirectoryResolved {
+        source_splint_id: resolved_source,
+        cwd,
+    } = connection
+        .request(Request::ResolveLaunchDirectory {
+            source_splint_id,
+            directory: directory.clone(),
+        })
+        .await?
+    else {
+        anyhow::bail!("splinterd returned an unexpected launch-directory response");
+    };
+    anyhow::ensure!(
+        resolved_source == source_splint_id,
+        "splinterd resolved another Splint's launch directory"
+    );
+    cwd.context("configured launch directory and home directory are unavailable")
 }
 
 pub(in crate::app) fn launch_parameters(
@@ -71,6 +100,7 @@ pub(in crate::app) fn new_dojo_request_for(
     promote_transient_lair: bool,
     config: &AppConfig,
 ) -> Result<Request> {
+    let generated_name = name.is_none();
     let name = match name {
         Some(name) => name,
         None => next_default_dojo_name(lairs, lair_id)?,
@@ -86,12 +116,14 @@ pub(in crate::app) fn new_dojo_request_for(
                 config,
             ),
             promote_transient_lair,
+            generated_name,
         },
         LaunchSemantics::RemoteInteractive => Request::NewDojoAutomation {
             expected_topology_revision,
             lair_id,
             name,
             launch: automation_launch(cwd, command),
+            generated_name,
         },
     })
 }
@@ -140,6 +172,7 @@ pub(in crate::app) fn graphical_create_request(
             semantics,
             expected_topology_revision,
             name,
+            !explicit_name,
             cwd,
             command,
             config,
@@ -152,11 +185,13 @@ pub(in crate::app) fn graphical_create_request(
                 command,
                 config,
             ),
+            generated_name: !explicit_name,
         },
     };
     Ok((request, lifetime))
 }
 
+/// A request for a Lair the user named, as the `new` command does.
 pub(in crate::app) fn create_request(
     factory: &ConnectionFactory,
     expected_topology_revision: TopologyRevision,
@@ -169,6 +204,7 @@ pub(in crate::app) fn create_request(
         factory.capabilities().launch_semantics,
         expected_topology_revision,
         name,
+        false,
         cwd,
         command,
         config,
@@ -179,6 +215,7 @@ pub(in crate::app) fn create_request_for(
     semantics: LaunchSemantics,
     expected_topology_revision: TopologyRevision,
     name: String,
+    generated_name: bool,
     cwd: Option<PathBuf>,
     command: Vec<String>,
     config: &AppConfig,
@@ -192,11 +229,13 @@ pub(in crate::app) fn create_request_for(
                 command,
                 config,
             ),
+            generated_name,
         },
         LaunchSemantics::RemoteInteractive => Request::CreateLairAutomation {
             expected_topology_revision,
             name,
             launch: automation_launch(cwd, command),
+            generated_name,
         },
     })
 }
@@ -315,6 +354,139 @@ mod tests {
             ),
             GraphicalLairLifetime::Persistent
         );
+    }
+
+    /// Inheritance, home, then a wrong-Splint answer and an unavailable answer.
+    fn launch_directory_script(
+        source: splinterm_core::SplintId,
+        other: splinterm_core::SplintId,
+        relative: &LaunchDirectory,
+    ) -> Vec<(Request, splinterm_protocol::Response)> {
+        use splinterm_protocol::{Response, SplintLifecycle, SplintRuntimeSummary};
+
+        let resolve = |directory: &LaunchDirectory| Request::ResolveLaunchDirectory {
+            source_splint_id: source,
+            directory: directory.clone(),
+        };
+        let resolved = |splint, cwd: Option<&str>| Response::LaunchDirectoryResolved {
+            source_splint_id: splint,
+            cwd: cwd.map(PathBuf::from),
+        };
+        vec![
+            (
+                Request::InspectSplint { splint_id: source },
+                Response::Splint {
+                    lair_id: LairId::new(),
+                    dojo_id: DojoId::new(),
+                    title: String::new(),
+                    topology_revision: TopologyRevision::default(),
+                    resolved_cwd: Some(PathBuf::from("/remote/owner/live")),
+                    runtime: SplintRuntimeSummary {
+                        splint_id: source,
+                        live_incarnation: None,
+                        last_incarnation: None,
+                        restorable: false,
+                        lifecycle: SplintLifecycle::Exited,
+                        exit_status: None,
+                    },
+                },
+            ),
+            // Home is the remote owner's home, never the client's.
+            (
+                resolve(&LaunchDirectory::Home),
+                resolved(source, Some("/remote/owner")),
+            ),
+            (resolve(relative), resolved(other, Some("/remote/other"))),
+            (resolve(relative), resolved(source, None)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn creation_directory_resolves_configured_choices_on_the_owning_daemon() {
+        use splinterm::automation::Connection;
+        use splinterm_core::SplintId;
+        use splinterm_protocol::{
+            ClientFrame, PROTOCOL_VERSION, ServerFrame, ServerLimits, encode_frame,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(stream: &mut tokio::io::DuplexStream) -> ClientFrame {
+            let length = stream.read_u32().await.unwrap();
+            let mut body = vec![0; length as usize];
+            stream.read_exact(&mut body).await.unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        let source = SplintId::new();
+        let other = SplintId::new();
+        let relative = LaunchDirectory::HomeRelative(PathBuf::from("projects"));
+        let script = launch_directory_script(source, other, &relative);
+        let (client, mut server) = tokio::io::duplex(8192);
+        let (reader, writer) = tokio::io::split(client);
+        let task = tokio::spawn(async move {
+            assert!(matches!(
+                read_request(&mut server).await,
+                ClientFrame::Hello { .. }
+            ));
+            server
+                .write_all(
+                    &encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                        daemon_hostname: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            for (expected, result) in script {
+                let ClientFrame::Request {
+                    request_id,
+                    request,
+                    ..
+                } = read_request(&mut server).await
+                else {
+                    panic!("expected a launch-directory request")
+                };
+                assert_eq!(request, expected);
+                server
+                    .write_all(
+                        &encode_frame(&ServerFrame::Response { request_id, result }).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut connection = Connection::connect_remote_interactive_transport(reader, writer)
+            .await
+            .unwrap();
+        assert_eq!(
+            creation_directory(&mut connection, source, &LaunchDirectory::Inherit)
+                .await
+                .unwrap(),
+            PathBuf::from("/remote/owner/live")
+        );
+        assert_eq!(
+            creation_directory(&mut connection, source, &LaunchDirectory::Home)
+                .await
+                .unwrap(),
+            PathBuf::from("/remote/owner")
+        );
+        assert!(
+            creation_directory(&mut connection, source, &relative)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("another Splint")
+        );
+        assert!(
+            creation_directory(&mut connection, source, &relative)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -462,9 +634,11 @@ mod tests {
                 expected_topology_revision,
                 name,
                 launch,
+                generated_name,
             } if expected_topology_revision == revision
                 && name == "generated"
                 && launch.command.is_empty()
+                && generated_name
         ));
 
         let (named, lifetime) = graphical_create_request(
@@ -478,7 +652,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lifetime, GraphicalLairLifetime::Persistent);
-        assert!(matches!(named, Request::CreateLair { name, .. } if name == "named"));
+        assert!(matches!(
+            named,
+            Request::CreateLair { name, generated_name: false, .. } if name == "named"
+        ));
 
         let (command, lifetime) = graphical_create_request(
             &ConnectionFactory::local(),
@@ -499,12 +676,19 @@ mod tests {
             LaunchSemantics::RemoteInteractive,
             revision,
             "generated".to_owned(),
+            true,
             None,
             Vec::new(),
             &transient_defaults,
         )
         .unwrap();
-        assert!(matches!(remote, Request::CreateLairAutomation { .. }));
+        assert!(matches!(
+            remote,
+            Request::CreateLairAutomation {
+                generated_name: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -536,6 +720,7 @@ mod tests {
                 name,
                 launch,
                 promote_transient_lair,
+                generated_name: true,
             } if expected_topology_revision == revision
                 && requested_lair == lair_id
                 && name == "Dojo 4"
@@ -605,11 +790,58 @@ mod tests {
                 lair_id: requested_lair,
                 name,
                 launch,
+                generated_name: false,
             } if expected_topology_revision == revision
                 && requested_lair == lair_id
                 && name == "logs"
                 && launch.cwd.is_none()
                 && launch.argv == ["remote"]
         ));
+    }
+
+    // Only a name Splinterm generated is marked so; the daemon trusts this
+    // provenance instead of comparing the name with the default label.
+    #[test]
+    fn new_dojo_requests_mark_only_generated_names() {
+        let lair = splinterm_core::Lair::new("main", PathBuf::from("/tmp"));
+        let config = AppConfig::default();
+        for semantics in [
+            LaunchSemantics::LocalTrusted,
+            LaunchSemantics::RemoteInteractive,
+        ] {
+            for (name, expected) in [
+                (None, true),
+                (Some("Dojo 2".to_owned()), false),
+                (Some("logs".to_owned()), false),
+            ] {
+                let request = new_dojo_request_for(
+                    semantics,
+                    TopologyRevision::new(3),
+                    std::slice::from_ref(&lair),
+                    lair.id,
+                    name.clone(),
+                    Some(PathBuf::from("/work")),
+                    Vec::new(),
+                    false,
+                    &config,
+                )
+                .unwrap();
+                let (Request::NewDojo {
+                    name: sent,
+                    generated_name,
+                    ..
+                }
+                | Request::NewDojoAutomation {
+                    name: sent,
+                    generated_name,
+                    ..
+                }) = request
+                else {
+                    panic!("expected a new Dojo request");
+                };
+                assert_eq!(sent, name.unwrap_or_else(|| "Dojo 2".to_owned()));
+                assert_eq!(generated_name, expected, "{semantics:?} {sent}");
+            }
+        }
     }
 }

@@ -20,6 +20,9 @@ pub(in crate::app) struct Cli {
     /// Bind this invocation to one configured remote daemon endpoint.
     #[arg(long, global = true, value_name = "PROFILE")]
     pub(in crate::app) remote: Option<String>,
+    /// Start a new session without a controlling terminal (internal launches).
+    #[arg(long, hide = true)]
+    pub(in crate::app) detach_terminal: bool,
     #[command(subcommand)]
     pub(in crate::app) command: Option<Command>,
 }
@@ -68,6 +71,8 @@ pub(in crate::app) enum Command {
     Dojos,
     /// Reopen the most recently opened logical Dojo that is still running.
     Reopen,
+    /// Choose a configured remote profile and open it in a new Window.
+    Remotes,
     /// Render ordered snapshots of one explicitly selected terminal.
     Window {
         /// Select a Lair by stable identity (required with --dojo-id).

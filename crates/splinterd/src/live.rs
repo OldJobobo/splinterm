@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -2459,6 +2459,8 @@ pub enum LiveError {
     PublicationMemoryFull,
     #[error("child process has already exited")]
     ProcessExited,
+    #[error("Splint is closing because it was never used")]
+    Retiring,
     #[error("image content does not exist on the active screen")]
     ImageContentNotFound,
     #[error("image content generation or digest is stale")]
@@ -3047,6 +3049,95 @@ async fn read_root_process_cwd(pid: u32, pidfd: &OwnedFd) -> Option<PathBuf> {
     root_process_is_live(pidfd).then_some(cwd)
 }
 
+/// Whether the terminal foreground process group is the root's own group.
+/// The root leads its session and process group, so its PID names the group.
+async fn read_root_holds_foreground(pid: u32, pidfd: &OwnedFd) -> Option<bool> {
+    if !root_process_is_live(pidfd) {
+        return None;
+    }
+    let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .await
+        .ok()?;
+    let foreground_group = parse_stat_foreground_group(&stat)?;
+    root_process_is_live(pidfd).then_some(foreground_group == i64::from(pid))
+}
+
+/// Reads `tpgid` from `/proc/PID/stat`. The command name may contain spaces
+/// and parentheses, so the fields after it are found from the last `)`.
+fn parse_stat_foreground_group(stat: &str) -> Option<i64> {
+    let (_, fields) = stat.rsplit_once(')')?;
+    // state, ppid, pgrp, session, tty_nr, tpgid
+    fields.split_whitespace().nth(5)?.parse().ok()
+}
+
+/// Whether the bytes are only focus in and out reports. Bytes alone do not
+/// prove a terminal generated them; only input the client flags as its focus
+/// reports is checked against this.
+fn is_focus_report_only(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes
+            .chunks(3)
+            .all(|report| report == b"\x1b[I" || report == b"\x1b[O")
+}
+
+const LATCH_UNUSED: u8 = 0;
+const LATCH_USED: u8 = 1;
+const LATCH_RETIRING: u8 = 2;
+
+/// Records whether a runtime has received client input.
+///
+/// A conditional close claims an unused runtime by moving it to retiring;
+/// input then fails instead of reaching a process that is about to end.
+/// Either the input or the claim wins, never both.
+#[derive(Debug, Default)]
+struct UseLatch(AtomicU8);
+
+impl UseLatch {
+    /// Records client input; false when a close has claimed the runtime.
+    fn record_input(&self, counts_as_use: bool) -> bool {
+        if !counts_as_use {
+            return self.0.load(Ordering::Acquire) != LATCH_RETIRING;
+        }
+        match self.0.compare_exchange(
+            LATCH_UNUSED,
+            LATCH_USED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(current) => current == LATCH_USED,
+        }
+    }
+
+    fn claim_unused(&self) -> bool {
+        self.0
+            .compare_exchange(
+                LATCH_UNUSED,
+                LATCH_RETIRING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn release_claim(&self) {
+        let _ = self.0.compare_exchange(
+            LATCH_RETIRING,
+            LATCH_UNUSED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn has_received_input(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LATCH_USED
+    }
+
+    fn is_claimed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LATCH_RETIRING
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveSplintHandle {
     pub splint_id: SplintId,
@@ -3059,6 +3150,7 @@ pub struct LiveSplintHandle {
     max_input_message_bytes: usize,
     metrics: Arc<RuntimeMetrics>,
     exit: watch::Receiver<Option<ProcessExit>>,
+    use_latch: Arc<UseLatch>,
 }
 
 #[allow(
@@ -3077,11 +3169,58 @@ impl LiveSplintHandle {
         read_root_process_cwd(self.child_pid, self.child_pidfd.as_deref()?).await
     }
 
+    /// Writes client input, which marks the runtime as used. Input to a
+    /// runtime claimed by a conditional close fails with
+    /// [`LiveError::Retiring`].
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
+        self.write_input(bytes, true).await
+    }
+
+    /// Writes focus reports a graphical client generated for its own focus
+    /// changes. They leave the runtime unused, but only when the bytes really
+    /// are focus reports; anything else counts as input.
+    pub async fn focus_report(&self, bytes: Vec<u8>) -> Result<(), LiveError> {
+        let counts_as_use = !is_focus_report_only(&bytes);
+        self.write_input(bytes, counts_as_use).await
+    }
+
+    async fn write_input(&self, bytes: Vec<u8>, counts_as_use: bool) -> Result<(), LiveError> {
         if bytes.len() > self.max_input_message_bytes {
             return Err(LiveError::InputQueueFull);
         }
+        if !self.use_latch.record_input(counts_as_use) {
+            return Err(LiveError::Retiring);
+        }
         self.request(|reply| Command::Input(bytes, reply)).await
+    }
+
+    #[must_use]
+    pub fn has_received_input(&self) -> bool {
+        self.use_latch.has_received_input()
+    }
+
+    /// Claims a runtime that never received input, so later input fails.
+    /// Returns false when input already arrived or another close holds it.
+    #[must_use]
+    pub fn claim_unused(&self) -> bool {
+        self.use_latch.claim_unused()
+    }
+
+    /// Whether a conditional close holds a claim on this runtime.
+    #[must_use]
+    pub fn is_claimed_unused(&self) -> bool {
+        self.use_latch.is_claimed()
+    }
+
+    /// Returns an abandoned [`Self::claim_unused`] claim.
+    pub fn release_unused_claim(&self) {
+        self.use_latch.release_claim();
+    }
+
+    /// Whether the root shell holds the terminal foreground, or `None` when
+    /// that cannot be observed for the original root.
+    pub async fn root_holds_foreground(&self) -> Option<bool> {
+        read_root_holds_foreground(self.child_pid, self.child_pidfd.as_deref()?).await
     }
 
     pub async fn resize(&self, size: PtySize) -> Result<(), LiveError> {
@@ -3477,6 +3616,7 @@ impl LiveSplintRuntime {
             max_input_message_bytes: config.maximum_input_message_bytes(),
             metrics: Arc::clone(&metrics),
             exit,
+            use_latch: Arc::default(),
         };
         let task = tokio::spawn(async move {
             let result = Box::pin(run_actor(
@@ -5244,6 +5384,50 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn use_latch_lets_either_input_or_a_close_claim_win() {
+        let latch = UseLatch::default();
+        assert!(!latch.has_received_input());
+        // Focus reports never mark use.
+        assert!(latch.record_input(false));
+        assert!(!latch.has_received_input());
+        assert!(latch.claim_unused());
+        assert!(!latch.record_input(true), "input after a claim is refused");
+        assert!(!latch.record_input(false));
+        assert!(!latch.claim_unused(), "one claim at a time");
+        latch.release_claim();
+        assert!(latch.record_input(true));
+        assert!(latch.has_received_input());
+        assert!(!latch.claim_unused(), "used runtimes are never claimed");
+        latch.release_claim();
+        assert!(latch.has_received_input(), "releasing nothing keeps use");
+        assert!(latch.record_input(true));
+    }
+
+    #[test]
+    fn focus_reports_alone_are_not_user_input() {
+        assert!(is_focus_report_only(b"\x1b[I"));
+        assert!(is_focus_report_only(b"\x1b[O\x1b[I\x1b[O"));
+        assert!(!is_focus_report_only(b""));
+        assert!(!is_focus_report_only(b"\x1b[Ix"));
+        assert!(!is_focus_report_only(b"\x1b[A"));
+        assert!(!is_focus_report_only(b"\x1b["));
+    }
+
+    #[test]
+    fn stat_foreground_group_survives_hostile_command_names() {
+        assert_eq!(
+            parse_stat_foreground_group("42 (sh) S 1 42 42 34816 42 4194560 0"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_stat_foreground_group("42 (a) b) 1 2 3) R 1 42 42 34816 77 0"),
+            Some(77)
+        );
+        assert_eq!(parse_stat_foreground_group("42 (sh) S 1 42"), None);
+        assert_eq!(parse_stat_foreground_group("no fields"), None);
+    }
 
     #[test]
     fn atomic_accounting_preserves_saturation_and_admission_boundaries() {

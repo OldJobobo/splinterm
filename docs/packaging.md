@@ -247,7 +247,9 @@ desktop action or `splinterm-dojos` to choose an existing running Dojo, and
 **Reopen Last Dojo** or `splinterm-reopen` for the last locally remembered Dojo
 whose complete pane layout is still running. `splinterm-sessions` remains a
 compatibility alias. These aliases
-also start the user daemon on demand. They never restore exited processes. See
+also start the user daemon on demand. They never restore exited processes. The
+**Remote Dojos** action runs `splinterm remotes`, which lists the profiles in
+`remotes.toml` and needs no local daemon. See
 `configuration.md` for the suggested Omarchy shortcut split.
 
 ## Live installation and rollback
