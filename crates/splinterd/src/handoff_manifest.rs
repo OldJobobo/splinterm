@@ -104,6 +104,12 @@ impl HandoffManifestV1 {
         provenance: &ValidatedHandoffPackageProvenance,
     ) -> Result<(), ManifestError> {
         validate_manifest(self)?;
+        // The running daemon is the rollback build, whose package identity
+        // binds its capability ranges. A narrower copied range would steer
+        // negotiation below what that build advertises.
+        if running.capabilities != reports.rollback.capabilities {
+            return Err(ManifestError::CapabilityMismatch);
+        }
         let negotiated = negotiate_handoff(running, reports.forward, reports.rollback, snapshots)
             .map_err(|error| match error {
             CompatibilityError::ForwardSnapshotMismatch
@@ -1137,6 +1143,82 @@ mod tests {
                 &provenance,
             ),
             Err(ManifestError::CapabilityMismatch)
+        ));
+    }
+
+    #[test]
+    fn running_capabilities_must_equal_the_authenticated_rollback_report() {
+        let fixture = SnapshotFixture::new();
+        // Both generations advertise private protocols 1..=2, and their
+        // package identities bind those ranges.
+        let widened = |pair: &SealedExecutablePair, patch: u16| {
+            let mut report = preflight(pair, patch);
+            report.capabilities.private_protocol = version_range(1, 2);
+            report.pair_build_identity = crate::package_provenance::test_pair_build_identity(
+                report.pair_build_version,
+                report.capabilities,
+            );
+            report
+        };
+        let reports = SealedPreflightReports {
+            forward: widened(fixture.snapshots.forward(), 2),
+            rollback: widened(fixture.snapshots.rollback(), 1),
+        };
+        let provenance = ValidatedHandoffPackageProvenance::from_verified_for_test(
+            &fixture.snapshots,
+            reports.forward,
+            reports.rollback,
+        );
+        let mut manifest = manifest(ManifestKind::Forward);
+        manifest.private_protocol = 1;
+        manifest.source_generation = GenerationEvidence::from_preflight(reports.rollback);
+        manifest.target_generation = GenerationEvidence::from_preflight(reports.forward);
+        manifest.executable_pairs.forward.generation = manifest.target_generation;
+        manifest.executable_pairs.rollback.generation = manifest.source_generation;
+        let running = RunningHandoffGeneration {
+            build_identity: reports.rollback.pair_build_identity,
+            build_version: reports.rollback.pair_build_version,
+            capabilities: reports.rollback.capabilities,
+        };
+
+        // A copied running value keeps the identity and version but narrows
+        // the range, which would negotiate protocol 1 to match the manifest.
+        let mut narrowed = running;
+        narrowed.capabilities.private_protocol = version_range(1, 1);
+        assert_eq!(
+            negotiate_handoff(
+                narrowed,
+                reports.forward,
+                reports.rollback,
+                &fixture.snapshots
+            )
+            .unwrap()
+            .private_protocol,
+            1
+        );
+        assert!(matches!(
+            manifest.validate_authority_against(
+                narrowed,
+                &fixture.snapshots,
+                &reports,
+                &provenance,
+            ),
+            Err(ManifestError::CapabilityMismatch)
+        ));
+
+        // The authentic running value negotiates protocol 2, so the downgraded
+        // manifest is refused, while a manifest at 2 passes negotiation and
+        // fails only at the executable evidence this fixture cannot satisfy.
+        assert!(matches!(
+            manifest
+                .validate_authority_against(running, &fixture.snapshots, &reports, &provenance,),
+            Err(ManifestError::CapabilityMismatch)
+        ));
+        manifest.private_protocol = 2;
+        assert!(matches!(
+            manifest
+                .validate_authority_against(running, &fixture.snapshots, &reports, &provenance,),
+            Err(ManifestError::InvalidExecutables)
         ));
     }
 
