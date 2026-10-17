@@ -201,6 +201,7 @@ jobs:
             tools/package/test_installer_safety.py \
             tools/package/test_package_provenance.py \
             tools/package/test_omarchy_screensaver_integration.py \
+            tools/package/test_generate_omarchy_theme.py \
             tools/package/test_systemd_unit.py \
             tools/package/test_validate_mcp_package.py \
             tools/package/test_workload_units.py \

@@ -52,18 +52,41 @@ fn default_gum_environment_path() -> PathBuf {
     gum_environment_path(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
 }
 
-fn gum_environment_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> PathBuf {
-    xdg_state_home
+/// The active Omarchy theme directories, highest priority first, matching the
+/// client's `OmarchyThemeRoots`: `${XDG_STATE_HOME}`, Omarchy 4's hard-coded
+/// `$HOME/.local/state` when that differs, then Omarchy 3.x `$HOME/.config`.
+fn omarchy_theme_candidates(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<PathBuf> {
+    let home = home
         .filter(|value| !value.is_empty())
-        .map_or_else(
-            || {
-                home.filter(|value| !value.is_empty())
-                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
-                    .join(".local/state")
-            },
-            PathBuf::from,
-        )
-        .join("omarchy/current/theme/gum_env.lua")
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let home_state = home.join(".local/state/omarchy/current/theme");
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(xdg_state) = xdg_state_home
+        .filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value).join("omarchy/current/theme"))
+        .filter(|path| *path != home_state)
+    {
+        candidates.push(xdg_state);
+    }
+    candidates.push(home_state);
+    candidates.push(home.join(".config/omarchy/current/theme"));
+    candidates
+}
+
+/// Reads from the first root whose `omarchy/current` parent exists. Omarchy
+/// replaces only `current/theme` during a switch, so a spawn inside that gap
+/// fails to read and keeps the daemon environment instead of falling through
+/// to a stale Omarchy 3.x palette.
+fn gum_environment_path(xdg_state_home: Option<OsString>, home: Option<OsString>) -> PathBuf {
+    let candidates = omarchy_theme_candidates(xdg_state_home, home);
+    let selected = candidates
+        .iter()
+        .position(|theme_dir| theme_dir.parent().is_some_and(Path::is_dir))
+        .unwrap_or(0);
+    candidates[selected].join("gum_env.lua")
 }
 
 fn gum_environment_updates(
@@ -210,6 +233,61 @@ hl.env("NOT_SPLINTERM_OWNED", "#ffffff")
             gum_environment_path(None, Some(OsString::from("/home/test"))),
             expected
         );
+    }
+
+    #[test]
+    fn omarchy_gum_environment_follows_xdg_then_home_state_then_omarchy_3() {
+        let home = || Some(OsString::from("/home/test"));
+        let state = PathBuf::from("/home/test/.local/state/omarchy/current/theme");
+        let legacy = PathBuf::from("/home/test/.config/omarchy/current/theme");
+        for xdg in [None, Some(""), Some("/home/test/.local/state")] {
+            assert_eq!(
+                omarchy_theme_candidates(xdg.map(OsString::from), home()),
+                [state.clone(), legacy.clone()],
+                "{xdg:?}"
+            );
+        }
+        assert_eq!(
+            omarchy_theme_candidates(Some(OsString::from("/srv/state")), home()),
+            [
+                PathBuf::from("/srv/state/omarchy/current/theme"),
+                state,
+                legacy
+            ]
+        );
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "splinterd-omarchy-roots-{}-{nonce}",
+            std::process::id()
+        ));
+        let xdg = root.join("xdg");
+        let home = root.join("home");
+        let lookup = || {
+            gum_environment_path(
+                Some(xdg.clone().into_os_string()),
+                Some(home.clone().into_os_string()),
+            )
+        };
+        let legacy = home.join(".config/omarchy/current/theme");
+        let state_current = home.join(".local/state/omarchy/current");
+        assert_eq!(
+            lookup(),
+            xdg.join("omarchy/current/theme/gum_env.lua"),
+            "nothing claimed keeps the first root"
+        );
+        fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(lookup(), legacy.join("gum_env.lua"));
+        // current/ exists while current/theme is being replaced: no flap to
+        // the Omarchy 3.x leftover.
+        fs::create_dir_all(&state_current).unwrap();
+        assert_eq!(lookup(), state_current.join("theme/gum_env.lua"));
+        fs::create_dir_all(xdg.join("omarchy/current")).unwrap();
+        assert_eq!(lookup(), xdg.join("omarchy/current/theme/gum_env.lua"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
