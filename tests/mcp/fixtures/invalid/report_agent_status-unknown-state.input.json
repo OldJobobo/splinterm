@@ -1,0 +1,7 @@
+{
+  "$schema_file": "tools/report_agent_status.input.schema.json",
+  "$expected_keyword": "oneOf",
+  "document": {
+    "state": "thinking"
+  }
+}

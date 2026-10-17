@@ -61,6 +61,7 @@ fn runtime(splint_id: SplintId, incarnation: u64) -> SplintRuntimeSummary {
         restorable: false,
         lifecycle: SplintLifecycle::Running,
         exit_status: None,
+        agent_status: None,
     }
 }
 

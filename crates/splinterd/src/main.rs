@@ -1,3 +1,4 @@
+mod agent_status;
 mod audit;
 mod cgroup;
 mod consent;
@@ -728,6 +729,14 @@ impl RuntimeRegistry {
     }
 }
 
+/// Ordered topology subscription traffic: snapshots and agent status events
+/// share one queue so a status event never overtakes an older snapshot.
+#[derive(Debug)]
+enum TopologyHubEvent {
+    Change(Arc<TopologyChange>),
+    AgentStatus(Arc<SubscriptionEvent>),
+}
+
 /// Runtimes removed from the registry whose processes are still shutting down.
 ///
 /// Shutdown may wait through the whole hangup and termination grace, so it
@@ -857,7 +866,7 @@ struct ConnectionSubscription {
 
 struct TopologySubscriber {
     owner_connection_id: u64,
-    changes: mpsc::Sender<Arc<TopologyChange>>,
+    changes: mpsc::Sender<TopologyHubEvent>,
     resync: tokio::sync::watch::Sender<Option<splinterm_core::TopologyRevision>>,
 }
 
@@ -868,7 +877,7 @@ struct TopologyHub {
 
 #[derive(Debug)]
 struct TopologySubscription {
-    changes: mpsc::Receiver<Arc<TopologyChange>>,
+    changes: mpsc::Receiver<TopologyHubEvent>,
     resync: tokio::sync::watch::Receiver<Option<splinterm_core::TopologyRevision>>,
 }
 
@@ -900,17 +909,39 @@ impl TopologyHub {
     }
 
     fn publish(&mut self, change: &TopologyChange) {
+        let revision = change.revision;
         let change = Arc::new(change.clone());
-        self.subscribers.retain(|_, subscriber| {
-            match subscriber.changes.try_send(Arc::clone(&change)) {
+        self.broadcast(revision, || TopologyHubEvent::Change(Arc::clone(&change)));
+    }
+
+    /// Publishes a status event without a revision bump. A full queue asks
+    /// the subscriber to resynchronize at the current revision, whose
+    /// snapshot carries the latest status.
+    fn publish_agent_status(
+        &mut self,
+        event: SubscriptionEvent,
+        current_revision: splinterm_core::TopologyRevision,
+    ) {
+        let event = Arc::new(event);
+        self.broadcast(current_revision, || {
+            TopologyHubEvent::AgentStatus(Arc::clone(&event))
+        });
+    }
+
+    fn broadcast(
+        &mut self,
+        revision: splinterm_core::TopologyRevision,
+        event: impl Fn() -> TopologyHubEvent,
+    ) {
+        self.subscribers
+            .retain(|_, subscriber| match subscriber.changes.try_send(event()) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    subscriber.resync.send_replace(Some(change.revision));
+                    subscriber.resync.send_replace(Some(revision));
                     true
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
-            }
-        });
+            });
     }
 }
 
@@ -978,6 +1009,7 @@ struct DaemonState {
     _rollback_handoff: Option<splinterd::handoff_coordinator::RollbackHandoffAuthority>,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
+    agent_status: Arc<agent_status::AgentStatusService>,
 }
 
 /// Read the kernel nodename once for this handshake, without environment or subprocesses.
@@ -1193,7 +1225,9 @@ async fn run_daemon(
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
+        agent_status: Arc::default(),
     });
+    let _agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
@@ -3721,6 +3755,9 @@ fn observe_process_exit(state: &Arc<DaemonState>, handle: LiveSplintHandle) {
 #[derive(Debug, Default)]
 struct RequestAuthorizationContext {
     policy_match: Option<policy::PolicyMatch>,
+    /// The incarnation of the single Splint resource the policy matched, if
+    /// any; a request that names an incarnation must still name this one.
+    policy_splint_incarnation: Option<u64>,
     ephemeral_grant_id: Option<u64>,
     interactive_bypass: bool,
 }
@@ -3738,6 +3775,10 @@ impl RequestAuthorizationContext {
 
     fn authorized_grant_id(&self) -> Option<u64> {
         self.ephemeral_grant_id
+    }
+
+    fn policy_splint_incarnation(&self) -> Option<u64> {
+        self.policy_splint_incarnation
     }
 
     fn may_manage_authorization(
@@ -3812,6 +3853,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::Resize { .. }
             | Request::Detach { .. }
             | Request::KillSplint { .. }
+            | Request::ReportAgentStatus { .. }
     )
 }
 
@@ -3890,6 +3932,7 @@ fn consent_capable_request(request: &Request) -> bool {
             | Request::Input { .. }
             | Request::Resize { .. }
             | Request::KillSplint { .. }
+            | Request::ReportAgentStatus { .. }
     )
 }
 
@@ -3930,6 +3973,7 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                             AccessScope::TopologyName => Scope::TopologyNameMutate,
                             AccessScope::ProcessSpawn => Scope::ProcessSpawn,
                             AccessScope::ProcessRestore => Scope::ProcessRestore,
+                            AccessScope::AgentStatusReport => Scope::AgentStatusReport,
                             AccessScope::ClipboardRead | AccessScope::ClipboardWrite => {
                                 return None;
                             }
@@ -3960,7 +4004,8 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
                 }
                 ConditionalRequirement::RequestedControlTakeover
                 | ConditionalRequirement::LiveProcessTermination
-                | ConditionalRequirement::ExpandedLiveProcessTermination => {}
+                | ConditionalRequirement::ExpandedLiveProcessTermination
+                | ConditionalRequirement::AgentStatusSelfReportOrGrant => {}
             }
             scopes
         }
@@ -4458,7 +4503,10 @@ async fn request_policy_resources(
                 }
             }
         }
+        // The report's incarnation is checked after authorization, so an
+        // authorized reporter learns of a stale incarnation explicitly.
         Request::InspectSplint { splint_id }
+        | Request::ReportAgentStatus { splint_id, .. }
         | Request::ResolveLaunchDirectory {
             source_splint_id: splint_id,
             ..
@@ -4631,6 +4679,7 @@ fn ephemeral_access_scopes(required: &[authorization::OperationScope]) -> Option
             Scope::ProcessTerminate => AccessScope::Terminate,
             Scope::TopologyLayoutMutate => AccessScope::TopologyLayout,
             Scope::TopologyNameMutate => AccessScope::TopologyName,
+            Scope::AgentStatusReport => AccessScope::AgentStatusReport,
             Scope::AuthorizationInspect | Scope::AuthorizationRevoke | Scope::AuditInspect => {
                 return None;
             }
@@ -4763,8 +4812,13 @@ async fn authorize_request(
         None
     };
     if let Some(policy_match) = matched {
+        let policy_splint_incarnation = match resources.as_slice() {
+            [policy::PolicyResource::Splint { incarnation, .. }] => *incarnation,
+            _ => None,
+        };
         return Ok(RequestAuthorizationContext {
             policy_match: Some(policy_match),
+            policy_splint_incarnation,
             ..RequestAuthorizationContext::default()
         });
     }
@@ -5319,6 +5373,14 @@ async fn handle_request(
     remote_interactive_client: bool,
 ) -> Result<Handled, ProtocolError> {
     let request = bind_current_terminal_incarnation(request, state, peer).await?;
+    // Self-reports from inside the Splint need no grant and are not audited
+    // per update; any other peer takes the ordinary authorized path below.
+    if let Some(result) = agent_status::handle_self_report(state, peer, &request).await {
+        return result.map(|response| Handled {
+            response,
+            subscription: None,
+        });
+    }
     let audit_resource = request_policy_resources(&request, state)
         .await
         .unwrap_or_default()
@@ -7513,6 +7575,9 @@ async fn handle_authorized_request(
         | Request::NewDojoAutomation { .. } => {
             unreachable!("automation launch requests are resolved before dispatch")
         }
+        request @ Request::ReportAgentStatus { .. } => {
+            agent_status::handle_authorized_report(state, peer, authorization, &request).await?
+        }
         Request::AuditInspect {
             after_audit_id,
             max_records,
@@ -7543,7 +7608,8 @@ async fn subscribe_topology(
     let lair_guard = state.topology.read().await;
     let lair = lair_guard.clone();
     let live = state.runtimes.lock().await.handles();
-    let snapshot = topology_snapshot_from(lair, &live);
+    let mut snapshot = topology_snapshot_from(lair, &live);
+    state.agent_status.attach(&mut snapshot);
     let id = NEXT_SUBSCRIPTION.fetch_add(1, Ordering::Relaxed);
     let subscription = state.topology_hub.lock().await.subscribe(id, connection_id);
     drop(lair_guard);
@@ -7562,7 +7628,10 @@ async fn consistent_topology_snapshot(state: &DaemonState) -> TopologySnapshot {
 async fn topology_snapshot(state: &DaemonState) -> TopologySnapshot {
     let lair = state.topology.read().await.clone();
     let live = state.runtimes.lock().await.handles();
-    topology_snapshot_from(lair, &live)
+    let mut snapshot = topology_snapshot_from(lair, &live);
+    // Also drops statuses of retired incarnations in the publishing transaction.
+    state.agent_status.attach(&mut snapshot);
+    snapshot
 }
 
 fn topology_snapshot_from(
@@ -7623,6 +7692,7 @@ fn collect_runtime_summaries(
                 restorable: matches!(splint.state, SplintState::Exited(_)),
                 lifecycle,
                 exit_status,
+                agent_status: None,
             });
         }
         LayoutNode::Branch { first, second, .. } => {
@@ -7965,12 +8035,13 @@ fn spawn_topology_subscription(
                 }
                 change = subscription.changes.recv() => {
                     let Some(change) = change else { break; };
-                    (
-                        SubscriptionEvent::TopologyChanged {
+                    let event = match change {
+                        TopologyHubEvent::Change(change) => SubscriptionEvent::TopologyChanged {
                             change: (*change).clone(),
                         },
-                        false,
-                    )
+                        TopologyHubEvent::AgentStatus(event) => (*event).clone(),
+                    };
+                    (event, false)
                 }
             };
             let frame = ServerFrame::Event {
@@ -9130,6 +9201,11 @@ async fn verify_peer(stream: &UnixStream) -> Result<(PeerIdentity, Option<consen
     let mut identity = PeerIdentity::from_stream(stream)?;
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
+    }
+    // The start time tells this peer from a later process reusing its PID;
+    // agent status self-reports require it to still match.
+    if let Some(start_time) = agent_status::process_start_time(identity.pid) {
+        identity.install_start_time(start_time);
     }
     let monitor = match consent::PeerMonitor::initialize(stream, identity.pid).await {
         Ok((monitor, executable)) => {
@@ -10323,6 +10399,7 @@ mod tests {
             _rollback_handoff: None,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
+            agent_status: Arc::default(),
         })
     }
 
@@ -11395,6 +11472,97 @@ mod tests {
         reap_all(&state).await;
     }
 
+    // Status is display data bound to one incarnation. A status report is not
+    // input, so the Dojo stays unused; when an unused close or a two-phase
+    // Lair termination retires the Splint, the same transaction drops its status even
+    // though the process may still be shutting down in the background.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retired_splints_never_keep_their_agent_status() {
+        let state = test_state_with_backend(true, test_pty_backend());
+        let peer = PeerIdentity::for_test();
+        let mut statuses = Vec::new();
+        for connection_id in [71, 72] {
+            let expected_topology_revision = state.topology.read().await.revision();
+            let Response::LairCreated {
+                lair, incarnation, ..
+            } = trusted_request(
+                &state,
+                connection_id,
+                Request::CreateTransientLair {
+                    expected_topology_revision,
+                    name: format!("status {connection_id}"),
+                    launch: plain_shell_launch(),
+                    generated_name: false,
+                },
+            )
+            .await
+            .unwrap()
+            else {
+                panic!("transient create response was not returned");
+            };
+            let splint_id = lair.dojos[0].default_focus;
+            agent_status::handle_authorized_report(
+                &state,
+                &peer,
+                &RequestAuthorizationContext::default(),
+                &Request::ReportAgentStatus {
+                    splint_id,
+                    incarnation,
+                    status: Some(splinterm_protocol::AgentStatusReport {
+                        state: splinterm_protocol::AgentState::Working,
+                        detail: None,
+                        ttl_seconds: None,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            statuses.push(splinterm_protocol::MutationTarget {
+                lair_id: lair.id,
+                dojo_id: lair.dojos[0].id,
+                splint_id,
+                incarnation,
+            });
+        }
+        assert_eq!(state.agent_status.slot_count(), 2);
+
+        let response = trusted_request(
+            &state,
+            71,
+            Request::CloseUnusedDojo {
+                dojo_id: statuses[0].dojo_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                response,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Closed { .. },
+                    ..
+                }
+            ),
+            "a status report is not use: {response:?}"
+        );
+        assert_eq!(state.agent_status.slot_count(), 1);
+
+        let expected_topology_revision = state.topology.read().await.revision();
+        trusted_request(
+            &state,
+            72,
+            Request::TerminateLair {
+                expected_topology_revision,
+                lair_id: statuses[1].lair_id,
+                targets: vec![statuses[1].clone()],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.agent_status.slot_count(), 0);
+        reap_all(&state).await;
+    }
+
     // A request cancelled between claiming and closing (its client went away,
     // or the Window's deadline passed) must not leave the Splint refusing input.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -12368,6 +12536,7 @@ mod tests {
                 restorable: true,
                 lifecycle: SplintLifecycle::Exited,
                 exit_status: None,
+                agent_status: None,
             }],
         };
         let rename = prepare_mutation(
@@ -13333,5 +13502,327 @@ mod tests {
             "development terminal access is disabled",
         );
         assert_eq!(error.code, ErrorCode::DevelopmentFeatureDisabled);
+    }
+
+    // A reporter holding a Splint grant for the live incarnation learns that
+    // its stale report is stale, as policy and self reporters do; a peer
+    // without a grant still gets Unauthorized and learns nothing. An
+    // identical report that adds a TTL wakes the status timer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_status_stale_granted_reports_are_stale_and_ttl_refreshes_wake_the_timer() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "status".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("Lair creation response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let peer = PeerIdentity::for_test();
+        let ungranted = RequestAuthorizationContext::default();
+        let report = |incarnation, ttl_seconds| Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds,
+            }),
+        };
+        let retired = incarnation + 1;
+
+        let error = agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(retired, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized, "no grant, no liveness");
+
+        state.grants.lock().await.grant(
+            &peer,
+            splint_id,
+            incarnation,
+            vec![AccessScope::AgentStatusReport],
+        );
+        let error = agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(retired, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleIncarnation);
+
+        let _timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
+        let wakes = || {
+            state
+                .agent_status
+                .notified_wakes
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+        agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(incarnation, None),
+        )
+        .await
+        .unwrap();
+        // Let the first change publish, leaving the timer on its idle wait.
+        time::sleep(agent_status::PUBLISH_INTERVAL * 2).await;
+        let idle = wakes();
+        assert!(idle >= 1, "a visible change wakes the timer");
+        agent_status::handle_authorized_report(
+            &state,
+            &peer,
+            &ungranted,
+            &report(incarnation, Some(10)),
+        )
+        .await
+        .unwrap();
+        time::timeout(Duration::from_secs(5), async {
+            while wakes() == idle {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an identical report that adds a TTL wakes the idle timer");
+
+        for runtime in state.runtimes.lock().await.drain() {
+            let _ = runtime.shutdown().await;
+        }
+    }
+
+    // A policy rule for exact incarnation N authorizes a report against N. A
+    // relaunch to M after that authorization must not let the cached policy
+    // context accept a report for M; it is stale. The advertised expiry comes
+    // from the acceptance instant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one live Splint proves the policy match, the relaunch race, and the expiry"
+    )]
+    async fn agent_status_policy_authorization_stays_bound_to_the_matched_incarnation() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "policy status".into(),
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("Lair creation response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        let mut peer = PeerIdentity::for_test();
+        let executable = executable_identity::ExecutableIdentity::from_pid(std::process::id())
+            .expect("snapshot test executable");
+        peer.install_persistent_executable(executable.clone());
+        let directory = temp_dir();
+        fs::create_dir(&directory).await.unwrap();
+        let policy_path = directory.join("policy.json");
+        let policy = serde_json::json!({
+            "schema": "splinterm.policy.v2",
+            "rules": [{
+                "id": "exact-status-reporter",
+                "executable": {"path": executable.path, "sha256": executable.sha256},
+                "scopes": ["agent_status_report"],
+                "resources": [{
+                    "kind": "splint",
+                    "splint_id": splint_id,
+                    "incarnation": incarnation,
+                }],
+                "limits": {"max_results": 1},
+            }],
+        });
+        fs::write(&policy_path, serde_json::to_vec(&policy).unwrap())
+            .await
+            .unwrap();
+        fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        let topology = state.topology.read().await.clone();
+        state
+            .policy
+            .lock()
+            .await
+            .reload(Some(policy_path.as_path()), &topology);
+        let report = |incarnation| Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds: Some(60),
+            }),
+        };
+
+        let authorized = authorize_request(&report(incarnation), &state, &peer, 0, false, false)
+            .await
+            .unwrap();
+        assert!(authorized.policy_authorized());
+        assert_eq!(authorized.policy_splint_incarnation(), Some(incarnation));
+        let before = SystemTime::now();
+        let Response::AgentStatusAccepted { expires_at_ms, .. } =
+            agent_status::handle_authorized_report(
+                &state,
+                &peer,
+                &authorized,
+                &report(incarnation),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("agent status was not accepted");
+        };
+        let millis = |time: SystemTime| {
+            u64::try_from(
+                (time + Duration::from_secs(60))
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap()
+        };
+        let expires_at_ms = expires_at_ms.expect("a TTL advertises an expiry");
+        assert!((millis(before)..=millis(SystemTime::now())).contains(&expires_at_ms));
+
+        // A concurrent relaunch makes a new incarnation current after the
+        // policy matched the old one.
+        let killed = handle_authorized_request(
+            Request::KillSplint {
+                splint_id,
+                incarnation,
+            },
+            &state,
+            &PeerIdentity::for_test(),
+            1,
+            false,
+            true,
+            &RequestAuthorizationContext {
+                interactive_bypass: true,
+                ..RequestAuthorizationContext::default()
+            },
+        )
+        .await
+        .unwrap()
+        .response;
+        assert!(
+            matches!(killed, Response::SplintKilled { .. }),
+            "{killed:?}"
+        );
+        let expected_topology_revision = state.topology.read().await.revision();
+        let Response::SplintStarted {
+            incarnation: relaunched,
+            ..
+        } = trusted_request(
+            &state,
+            1,
+            Request::RelaunchSplint {
+                expected_topology_revision,
+                splint_id,
+                launch: test_launch(&["/bin/sh", "-c", "sleep 30"]),
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("relaunch response was not returned");
+        };
+        assert_ne!(relaunched, incarnation);
+        let error =
+            agent_status::handle_authorized_report(&state, &peer, &authorized, &report(relaunched))
+                .await
+                .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleIncarnation);
+
+        for runtime in state.runtimes.lock().await.drain() {
+            let _ = runtime.shutdown().await;
+        }
+        fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_status_trusted_ui_may_only_clear_and_other_peers_need_a_grant() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let set = Request::ReportAgentStatus {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            status: Some(splinterm_protocol::AgentStatusReport {
+                state: splinterm_protocol::AgentState::Done,
+                detail: None,
+                ttl_seconds: None,
+            }),
+        };
+        let Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            ..
+        } = set
+        else {
+            unreachable!()
+        };
+        let clear = Request::ReportAgentStatus {
+            splint_id,
+            incarnation,
+            status: None,
+        };
+        assert!(trusted_ui_request(&clear));
+        let trusted = RequestAuthorizationContext {
+            interactive_bypass: true,
+            ..RequestAuthorizationContext::default()
+        };
+        let error = agent_status::handle_authorized_report(&state, &peer, &trusted, &set)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        // A clear passes the authority gate and then needs a live target.
+        let error = agent_status::handle_authorized_report(&state, &peer, &trusted, &clear)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        let ungranted = RequestAuthorizationContext::default();
+        let error = agent_status::handle_authorized_report(&state, &peer, &ungranted, &clear)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        assert!(
+            agent_status::handle_self_report(&state, &peer, &set)
+                .await
+                .is_none(),
+            "a peer outside every Splint takes the audited path"
+        );
+        assert_eq!(
+            requested_operation_scopes(&set),
+            Some(vec![authorization::OperationScope::AgentStatusReport])
+        );
+        assert_eq!(
+            ephemeral_access_scopes(&[authorization::OperationScope::AgentStatusReport]),
+            Some(vec![AccessScope::AgentStatusReport])
+        );
     }
 }

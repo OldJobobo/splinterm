@@ -295,6 +295,7 @@ impl ServerHandler for SplintermServer {
                 | "splinterm.release_control"
                 | "splinterm.input"
                 | "splinterm.resize"
+                | "splinterm.report_agent_status"
         ) {
             return Ok(structured_failure(ToolFailure::unavailable(&request.name)));
         }

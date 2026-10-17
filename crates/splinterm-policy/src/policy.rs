@@ -22,6 +22,8 @@ const MAX_POLICY_BYTES: u64 = 256 * 1024;
 const MAX_RULES: usize = 64;
 const MAX_RESOURCES: usize = 64;
 const MAX_RULE_ID_BYTES: usize = 64;
+/// Every closed operation scope once, including `agent_status_report`.
+const MAX_RULE_SCOPES: usize = 19;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
 const MAX_RESOLVED_RESOURCES_PER_RULE: usize = 512;
@@ -697,7 +699,7 @@ fn validate_rule(rule: &PolicyRule, now: u64) -> Result<()> {
     {
         bail!("policy contains an expired rule");
     }
-    if rule.scopes.is_empty() || rule.scopes.len() > 18 {
+    if rule.scopes.is_empty() || rule.scopes.len() > MAX_RULE_SCOPES {
         bail!("policy rule scopes are empty or exceed limits");
     }
     if rule.scopes.iter().collect::<HashSet<_>>().len() != rule.scopes.len() {
@@ -943,6 +945,73 @@ mod tests {
         assert!(
             document
                 .authorize(&executable, &wrong_scope, u64::MAX / 2)
+                .is_none()
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn agent_status_report_scope_parses_and_matches_only_its_splint() {
+        let path = test_path("agent-status");
+        let splint_id = SplintId::new();
+        let policy = format!(
+            r#"{{"schema":"splinterm.policy.v2","rules":[{{
+                "id":"status-reporter",
+                "executable":{{"path":"/usr/bin/client","sha256":"{}"}},
+                "scopes":["agent_status_report"],
+                "resources":[{{"kind":"splint","splint_id":"{splint_id}","incarnation":"current"}}],
+                "limits":{{"max_results":1}}
+            }}]}}"#,
+            "a".repeat(64)
+        );
+        write_policy(&path, &policy, 0o600);
+        let mut document = inspect_file(&path).unwrap();
+        let (lair, lair_id, dojo_id) = topology_with_splint(splint_id);
+        document.resolve_against(&lair).unwrap();
+        let executable = ExecutableIdentity {
+            path: PathBuf::from("/usr/bin/client"),
+            device: 1,
+            inode: 2,
+            owner_uid: 0,
+            mode: 0o755,
+            size: 1,
+            sha256: "a".repeat(64),
+        };
+        let resource = PolicyResource::Splint {
+            lair_id,
+            dojo_id,
+            splint_id,
+            incarnation: Some(4),
+        };
+        let matched = document.authorize(
+            &executable,
+            &PolicyRequest {
+                required_scopes: &[OperationScope::AgentStatusReport],
+                any_scope: &[],
+                resources: &[resource],
+                limits: RequestedLimits::default(),
+            },
+            u64::MAX / 2,
+        );
+        assert_eq!(matched.unwrap().rule_id, "status-reporter");
+        let other = PolicyResource::Splint {
+            lair_id,
+            dojo_id,
+            splint_id: SplintId::new(),
+            incarnation: Some(4),
+        };
+        assert!(
+            document
+                .authorize(
+                    &executable,
+                    &PolicyRequest {
+                        required_scopes: &[OperationScope::AgentStatusReport],
+                        any_scope: &[],
+                        resources: &[other],
+                        limits: RequestedLimits::default(),
+                    },
+                    u64::MAX / 2,
+                )
                 .is_none()
         );
         fs::remove_file(path).unwrap();

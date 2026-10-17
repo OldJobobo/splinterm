@@ -133,6 +133,9 @@ outside this inventory.
 | `send SPLINT_ID TEXT` | `input` |
 | `resize SPLINT_ID COLUMNS ROWS` | `resize` |
 | `kill SPLINT_ID --yes` | `kill_splint` |
+| `agent-status set STATE [...]` | `agent_status_set` |
+| `agent-status clear [...]` | `agent_status_clear` |
+| `agent-status get [SPLINT_ID]` | `agent_status_get` |
 
 The NDJSON subscription commands are:
 
@@ -291,6 +294,142 @@ response. Absence, malformed values, stale incarnation, process exit, or denied
 topology access must not broaden policy or cause an adapter to select an
 arbitrary Splint. See [integrations.md](integrations.md) for the client-author
 checklist, reference picker, and safe shell/`jq` workflows.
+
+## Agent status
+
+An agent can tell Splinterm what it is doing so a person can see which Splint
+is working, which needs them, and which has finished or failed. Status comes
+only from an explicit report. Splinterm never infers it from terminal text,
+titles, prompts, process names, or output. A report is display data: it cannot
+grant access, confirm consent, send input, or change topology.
+
+```bash
+splinterm agent-status set STATE [--detail TEXT] [--ttl SECONDS] [--splint ID --incarnation N]
+splinterm agent-status clear [--splint ID --incarnation N]
+splinterm agent-status get [SPLINT_ID]
+```
+
+`STATE` is one of `working`, `needs_input`, `done`, `error`, or `idle`; any
+other value is a usage error. `--detail` is optional display text of at most 80
+characters and 240 UTF-8 bytes. Control, bidi-formatting, and line-break
+characters are rejected, never stripped. `working` and `needs_input` are active
+states: they turn stale after `--ttl` seconds without a fresh report (default
+120, bounds 10 to 900). `done`, `error`, and `idle` last until replaced,
+cleared, or the incarnation ends, unless `--ttl` is given. Re-sending the same
+state and detail refreshes the TTL without publishing a change, so a heartbeat
+should re-report at no more than half the TTL. A stale status keeps its last
+state and detail and is dropped 15 minutes later. Status lives only in daemon
+memory: it is dropped when the incarnation exits or relaunches and does not
+survive a daemon restart or live handoff.
+
+### Target and authority
+
+Run inside a Splint, the target defaults to `$SPLINTERM_SPLINT_ID` and
+`$SPLINTERM_SPLINT_INCARNATION`, so `splinterm agent-status set working` needs
+no other arguments. `--splint` and `--incarnation` are given together and
+override the environment. When neither the flags nor the environment name a
+target, the command fails before connecting with the distinct usage error
+`not inside a Splint` (exit 2, no stdout). An incomplete or malformed Splint
+environment is a separate usage error that also exits 2. `get` defaults to
+`$SPLINTERM_SPLINT_ID`.
+
+The environment is only a discovery hint; the daemon decides authority from the
+reporting process. A report is accepted without any grant or consent prompt
+when the reporting process is in the target Splint's live PTY session, or
+descends from the Splint's root process. A process can therefore report only
+for the Splint it runs in. Any other process needs an `agent_status_report`
+grant for that Splint from policy or interactive consent. In particular, an
+agent that fully detaches from the Splint, by calling `setsid` and being
+reparented to init or `systemd --user` (for example an agent inside a tmux
+server that was started inside the Splint), is outside the Splint by this rule
+and needs a grant. Cgroup or workload-scope membership is never evidence.
+Reports target exact incarnations: a report naming an exited or replaced
+incarnation fails as `stale_incarnation`, and admission is limited to 10
+reports per second per Splint (retryable `resource_limit`).
+
+Reports never preflight topology, so a self-reporting hook needs no read grant.
+`get`, `inspect`, and `topology` read status through the ordinary
+`topology_metadata_read` authority. Reports always connect with the automation
+role, in human mode too; `agent-status` reports go only to the local daemon,
+and `--remote` is accepted only for `get`. A remote agent reports to its own
+daemon from inside its own Splint.
+
+### Machine output and exit codes
+
+With `--output json`, `set` and `clear` emit `agent_status_set` and
+`agent_status_clear` documents whose resource is the exact `splint_id` and
+`incarnation`. Their data reports `accepted: true`, the daemon status
+`sequence`, and for `set` the state and nullable `expires_at_ms` (Unix
+milliseconds at which an active report turns stale). The detail is never
+echoed. `get` emits `agent_status_get` with the Splint's topology location,
+its nullable `current_incarnation`, and a nullable `agent_status` object.
+
+`inspect_splint` data and each `inspect_topology` Splint summary gain the same
+optional `agent_status` object only while the live incarnation has a status:
+`state`, nullable `detail`, `stale`, `reported_age_ms`, and `sequence`. Its
+absence means no status; documents without status are unchanged. Topology
+subscriptions do not carry status in this version.
+
+A report exits 0 when accepted and otherwise uses the categories above: 2 for
+usage errors including `not inside a Splint`, 3 when the reporter is neither
+inside the Splint nor granted, 4 for daemon connection failures, 5 for a stale
+incarnation, an invalid report, a missing Splint, or the rate limit, and 6 for
+a timeout. Human mode prints one confirmation line on success, exits 1 on a
+daemon failure, and exits 2 on usage errors.
+
+### Hook recipes
+
+Agent hooks run as descendants of the agent, inside its Splint, so they
+self-report with no grant. End every hook command with `>/dev/null 2>&1 ||
+true`: a hook outside Splinterm then does nothing, and some hosts treat hook
+stdout or a nonzero exit as input to the agent.
+
+Claude Code (`~/.claude/settings.json` or a project `.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}
+    ],
+    "PostToolUse": [
+      {"hooks": [{"type": "command", "command": "splinterm agent-status set working --ttl 900 >/dev/null 2>&1 || true"}]}
+    ],
+    "Notification": [
+      {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": "splinterm agent-status set needs_input --ttl 900 >/dev/null 2>&1 || true"}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "splinterm agent-status set done >/dev/null 2>&1 || true"}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "splinterm agent-status clear >/dev/null 2>&1 || true"}]}
+    ]
+  }
+}
+```
+
+`UserPromptSubmit` marks the agent `working`, `Notification` marks it
+`needs_input` when Claude Code asks for permission, and `Stop` marks it `done`
+when the turn ends. `PostToolUse` returns the status to `working` after a
+permission is approved and refreshes the TTL during long turns; identical
+re-reports do not publish a change. The `permission_prompt` matcher matters:
+Claude Code also sends a notification after waiting idle for a prompt for about
+a minute, and an unmatched `Notification` hook would replace `done` with
+`needs_input` after every turn. Both active states use `--ttl 900`, so a long
+tool run or an unanswered permission prompt stays visible for 15 minutes before
+it is shown as stale.
+
+Codex CLI runs its `notify` program after each completed agent turn. Map that
+to `done` in `~/.codex/config.toml`:
+
+```toml
+notify = ["/bin/sh", "-c", "splinterm agent-status set done >/dev/null 2>&1 || true"]
+```
+
+Codex's documented `notify` hook has no prompt-submitted or approval event, so
+`working` and `needs_input` are left unreported there unless a wrapper reports
+them. Any other agent can call the same commands, or the MCP tool
+`splinterm.report_agent_status` described in [mcp.md](mcp.md).
 
 ## Audit v2
 
