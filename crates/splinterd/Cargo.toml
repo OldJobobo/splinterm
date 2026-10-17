@@ -20,6 +20,7 @@ seccompiler.workspace = true
 sha2.workspace = true
 splinterm-core = { path = "../splinterm-core" }
 splinterm-filemap = { path = "../splinterm-filemap" }
+splinterm-inherited-fd = { path = "../splinterm-inherited-fd" }
 splinterm-policy = { path = "../splinterm-policy" }
 splinterm-protocol = { path = "../splinterm-protocol" }
 splinterm-pty = { path = "../splinterm-pty" }
@@ -34,6 +35,7 @@ zbus.workspace = true
 
 [dev-dependencies]
 splinterm-automation-client = { path = "../splinterm-automation-client" }
+splinterm-inherited-fd = { path = "../splinterm-inherited-fd", features = ["test-support"] }
 splinterm-mcp = { path = "../splinterm-mcp", features = ["integration-test"] }
 tokio = { workspace = true, features = ["test-util"] }
 
