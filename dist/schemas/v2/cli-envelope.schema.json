@@ -47,7 +47,10 @@
         "restore_lair",
         "input",
         "resize",
-        "kill_splint"
+        "kill_splint",
+        "agent_status_set",
+        "agent_status_clear",
+        "agent_status_get"
       ]
     },
     "ok": {
@@ -1734,6 +1737,165 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "agent_status_set"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/agent_status_set_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_agent_status"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "agent_status_clear"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/agent_status_clear_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_agent_status"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "agent_status_get"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/agent_status_get_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              },
+              "required": [
+                "resource"
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "resource": {
+            "$ref": "#/$defs/resource_splint_topology"
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -2163,6 +2325,9 @@
             "null"
           ],
           "minimum": 1
+        },
+        "agent_status": {
+          "$ref": "#/$defs/agent_status"
         }
       }
     },
@@ -2258,6 +2423,9 @@
           ],
           "minimum": 0,
           "maximum": 255
+        },
+        "agent_status": {
+          "$ref": "#/$defs/agent_status"
         }
       }
     },
@@ -3059,6 +3227,145 @@
         },
         "confirmed": {
           "const": true
+        }
+      }
+    },
+    "resource_agent_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "splint_id",
+        "incarnation"
+      ],
+      "properties": {
+        "splint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "agent_state": {
+      "enum": [
+        "working",
+        "needs_input",
+        "done",
+        "error",
+        "idle"
+      ]
+    },
+    "agent_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "detail",
+        "stale",
+        "reported_age_ms",
+        "sequence"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/agent_state"
+        },
+        "detail": {
+          "$comment": "Reporter-supplied display text, never authority. The daemon additionally caps the UTF-8 encoding at 240 bytes.",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\u2028\\u2029]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "reported_age_ms": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "agent_status_set_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "state",
+        "sequence",
+        "expires_at_ms"
+      ],
+      "properties": {
+        "accepted": {
+          "const": true
+        },
+        "state": {
+          "$ref": "#/$defs/agent_state"
+        },
+        "sequence": {
+          "$ref": "#/$defs/nonnegative"
+        },
+        "expires_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "agent_status_clear_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "cleared",
+        "sequence"
+      ],
+      "properties": {
+        "accepted": {
+          "const": true
+        },
+        "cleared": {
+          "const": true
+        },
+        "sequence": {
+          "$ref": "#/$defs/nonnegative"
+        }
+      }
+    },
+    "agent_status_get_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_incarnation",
+        "agent_status"
+      ],
+      "properties": {
+        "current_incarnation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "agent_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent_status"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },

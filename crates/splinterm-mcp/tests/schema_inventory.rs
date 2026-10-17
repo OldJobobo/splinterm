@@ -22,6 +22,7 @@ const TOOLS: &[&str] = &[
     "rename_lair",
     "rename_splint",
     "rename_dojo",
+    "report_agent_status",
     "request_access",
     "request_control_transfer",
     "request_lair_access",
@@ -59,7 +60,7 @@ const ERROR_CODES: &[&str] = &[
 ];
 
 const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
-    ("common.schema.json", 0x4ed0_cbfb_deb7_012f),
+    ("common.schema.json", 0x2fc5_267e_ce17_e7b8),
     ("error.schema.json", 0x9dd2_e2af_f101_25fe),
     ("resources/control.schema.json", 0xd4f3_1fbc_06b2_5c2b),
     ("resources/terminal.schema.json", 0x20c0_6b33_9e25_c903),
@@ -119,7 +120,7 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     ),
     (
         "tools/inspect_splint.output.schema.json",
-        0xf6a7_7be0_15f7_3861,
+        0xa8eb_6c4b_ade4_1779,
     ),
     (
         "tools/inspect_topology.input.schema.json",
@@ -189,6 +190,14 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     (
         "tools/rename_splint.output.schema.json",
         0x39ae_3deb_38d9_8bb6,
+    ),
+    (
+        "tools/report_agent_status.input.schema.json",
+        0x2585_acb6_fc43_7989,
+    ),
+    (
+        "tools/report_agent_status.output.schema.json",
+        0x2643_4744_05cf_0175,
     ),
     (
         "tools/request_access.input.schema.json",
@@ -345,13 +354,13 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 #[test]
-fn schema_inventory_is_exactly_33_tools_and_three_resources() {
+fn schema_inventory_is_exactly_34_tools_and_three_resources() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let schema_root = root.join("dist/schemas/mcp/v2");
     let tools = schema_root.join("tools");
     let resources = schema_root.join("resources");
 
-    assert_eq!(TOOLS.len(), 33);
+    assert_eq!(TOOLS.len(), 34);
     let expected_tools = TOOLS
         .iter()
         .map(|tool| (*tool).to_owned())
@@ -382,7 +391,7 @@ fn schema_inventory_is_exactly_33_tools_and_three_resources() {
         .collect::<Vec<_>>();
     assert_eq!(actual_error_codes, ERROR_CODES);
 
-    assert_eq!(REVIEWED_SCHEMA_FNV64.len(), 71);
+    assert_eq!(REVIEWED_SCHEMA_FNV64.len(), 73);
     for (relative_path, expected_hash) in REVIEWED_SCHEMA_FNV64 {
         let path = schema_root.join(relative_path);
         let schema: serde_json::Value = serde_json::from_slice(

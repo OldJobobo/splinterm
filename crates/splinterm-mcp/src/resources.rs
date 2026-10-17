@@ -150,7 +150,7 @@ fn topology_document(
     let data = if resync {
         json!({"lairs": []})
     } else {
-        dispatch::topology_data(snapshot)
+        dispatch::topology_data(snapshot, false)
             .map_err(|_| resource_error("invalid topology resource"))?
     };
     let value = json!({

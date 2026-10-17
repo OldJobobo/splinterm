@@ -77,7 +77,12 @@ host CLIs named above; other hosts are not implied to be supported.
 
 If the daemon uses a nondefault isolated socket, set only `SPLINTERM_SOCKET` in
 the host's `env`. `splinterm-mcp` does not read MCP roots, the host working
-directory, shell configuration, SSH material, or inherited Splinterm context.
+directory, shell configuration, or SSH material. The only inherited Splinterm
+context it reads is `SPLINTERM_SPLINT_ID` and `SPLINTERM_SPLINT_INCARNATION`,
+as the default target of `splinterm.report_agent_status`; they are discovery
+hints, never authority. Hosts that start stdio servers with a filtered
+environment must forward both variables, or the tool needs explicit
+`splint_id` and `incarnation` (see [Reporting agent status](#reporting-agent-status)).
 
 ## Handshake compatibility
 
@@ -178,7 +183,7 @@ are not a sandbox: a hostile program running as your account can already read
 your files and run commands, and can reach your terminals without asking
 Splinterm. Run agents you would trust with your account.
 
-The fixed catalog contains 33 tools, one topology resource, and terminal/control
+The fixed catalog contains 34 tools, one topology resource, and terminal/control
 resource templates. Bounds include a 256 KiB input line, 1 MiB complete tool
 response, four active and 32 admitted requests, 5-second default daemon deadline
 (configurable 100 ms–30 s), pages up to 256, 16 resource subscriptions, eight
@@ -223,6 +228,85 @@ validate them through an authorized topology read before selecting a resource.
 MCP Dojo operations edit daemon topology; they do not map, focus, move, resize,
 or assign a native Wayland Window, and Splinterm does not provide
 semantic agent supervision, readiness, messaging, or completion.
+
+## Reporting agent status
+
+`splinterm.report_agent_status` lets an agent show whether it is working,
+needs the person, or has finished. It is not read-only and not destructive. It
+is not idempotent: a repeated report refreshes its reported time and expiry
+and counts against the rate limit. Input is
+`{ state, detail?, ttl_seconds?, splint_id?, incarnation? }`:
+
+- `state` is `working`, `needs_input`, `done`, `error`, or `idle`; `null` clears
+  the status and then takes no `detail` or `ttl_seconds`.
+- `detail` is optional display text of at most 80 characters and 240 UTF-8
+  bytes, without control, bidi-formatting, or line-break characters. Invalid
+  text is rejected, never stripped, and the output never echoes it.
+- `ttl_seconds` (10 to 900) sets when an unrefreshed report turns stale.
+  `working` and `needs_input` default to 120 seconds; `done`, `error`, and
+  `idle` do not expire unless given a TTL. Re-sending the same report refreshes
+  the TTL; re-report at no more than half of it.
+- `splint_id` and `incarnation` are given together or not at all. Omitted, the
+  adapter fills them from its own `SPLINTERM_SPLINT_ID` and
+  `SPLINTERM_SPLINT_INCARNATION`. Without either, the call fails with
+  `invalid_argument` (`not inside a Splint`) before connecting to the daemon.
+
+The adapter sees those variables only if the MCP host passes them to the
+server process. A host that starts stdio servers with the agent's full
+environment forwards them automatically. A host that filters the server
+environment must forward both variables explicitly. Codex starts stdio servers
+with a whitelisted environment, so add them to its server entry in
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.splinterm]
+command = "/usr/bin/splinterm-mcp"
+env_vars = ["SPLINTERM_SPLINT_ID", "SPLINTERM_SPLINT_INCARNATION"]
+```
+
+Without them, call the tool with explicit `splint_id` and `incarnation`.
+
+The output resource is `{"kind": "agent_status", "splint_id", "incarnation"}`
+and its data is `committed: true`, the reported `state`, the daemon status
+`sequence`, and nullable `expires_at_ms`. A stale or replaced incarnation fails
+as `stale_incarnation`; more than 10 reports per second for one Splint fail as
+retryable `resource_limit`.
+
+An adapter launched by an agent running inside a Splint is in that Splint's PTY
+session or process ancestry, so it reports for that Splint with no policy rule
+and no consent prompt. It cannot report for any other Splint that way. An agent
+that fully detaches (calls `setsid` and is reparented to init or
+`systemd --user`, for example inside a tmux server started from the Splint), or
+an adapter reporting for another Splint, needs an `agent_status_report` rule
+for the exact Splint:
+
+```json
+{
+  "schema": "splinterm.policy.v2",
+  "rules": [{
+    "id": "mcp-agent-status",
+    "executable": {"path": "/usr/bin/splinterm-mcp", "sha256": "REPLACE_WITH_SHA256"},
+    "scopes": ["agent_status_report"],
+    "resources": [{"kind": "splint", "splint_id": "REPLACE_WITH_UUID", "incarnation": "current"}],
+    "limits": {"deadline_ms": 5000}
+  }]
+}
+```
+
+`inspect_splint` data and each `inspect_topology` Splint gain an optional
+`agent_status` object (`state`, nullable `detail`, `stale`, `reported_age_ms`,
+`sequence`) only while the live incarnation has a status. The detail is
+reporter-supplied text and stays inside the existing `untrusted_terminal_data`
+outputs. The topology resource and its subscription do not carry agent status
+in this version.
+
+Agents that support command hooks need no MCP at all: wire
+`splinterm agent-status set ...` into the agent's hooks as shown in
+[automation.md](automation.md#hook-recipes), for example Claude Code's
+`UserPromptSubmit` to `working`, `Notification` to `needs_input`, and `Stop` to
+`done`, or Codex's `notify` to `done`. Reported status is display data only:
+Splinterm still provides no agent supervision, readiness, messaging, or result
+transport.
 
 ## Upgrade, revocation, and troubleshooting
 

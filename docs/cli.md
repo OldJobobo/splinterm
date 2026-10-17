@@ -188,6 +188,30 @@ generation. Continuation cursors are opaque. Public machine records contain
 semantic Unicode cells, not raw daemon frames. Input and search bodies are never
 copied into bounded audit metadata.
 
+## Agent status
+
+| Command | Purpose |
+| --- | --- |
+| `agent-status set STATE [--detail TEXT] [--ttl SECONDS]` | Report `working`, `needs_input`, `done`, `error`, or `idle` for the current Splint. |
+| `agent-status clear` | Clear the current Splint's reported status. |
+| `agent-status get [SPLINT_ID]` | Read one Splint's reported status. |
+
+```bash
+splinterm agent-status set needs_input --detail 'waiting for approval'
+splinterm agent-status clear
+splinterm --output json agent-status get
+```
+
+Inside a Splint the target defaults to `$SPLINTERM_SPLINT_ID` and
+`$SPLINTERM_SPLINT_INCARNATION`; `set` and `clear` accept `--splint ID
+--incarnation N` together to override it. Without either, the command fails with
+the usage error `not inside a Splint` and exits 2. A process in the Splint's
+session or process ancestry reports without a grant; others, including agents
+that fully detach from the Splint, need `agent_status_report`. Status is display
+data only and is never inferred from terminal content. See
+[Automation](automation.md#agent-status) for authority, staleness, machine
+output, and agent hook recipes.
+
 ## Subscriptions
 
 Subscriptions require NDJSON:
