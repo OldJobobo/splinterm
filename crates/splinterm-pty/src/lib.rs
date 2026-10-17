@@ -107,6 +107,15 @@ impl PtySize {
             ws_ypixel: self.pixel_height,
         }
     }
+
+    const fn from_winsize(size: Winsize) -> Self {
+        Self {
+            rows: size.ws_row,
+            columns: size.ws_col,
+            pixel_width: size.ws_xpixel,
+            pixel_height: size.ws_ypixel,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -661,6 +670,26 @@ impl LinuxPtySession {
     #[must_use]
     pub fn master_raw_fd(&self) -> i32 {
         self.master.as_raw_fd()
+    }
+
+    /// Returns the kernel's current cell and pixel dimensions for this PTY.
+    ///
+    /// # Errors
+    /// Returns an error when the canonical master no longer identifies a PTY.
+    pub fn size(&self) -> Result<PtySize> {
+        termios::tcgetwinsize(&self.master)
+            .map(PtySize::from_winsize)
+            .map_err(|error| PtyError::io("read PTY size", error))
+    }
+
+    /// Returns the kernel's current foreground process group for this PTY.
+    ///
+    /// # Errors
+    /// Returns an error when the canonical master no longer identifies a PTY.
+    pub fn foreground_process_group(&self) -> Result<u32> {
+        let process_group = termios::tcgetpgrp(&self.master)
+            .map_err(|error| PtyError::io("read PTY foreground process group", error))?;
+        Ok(pid_to_u32(process_group))
     }
 
     /// Validates and consumes this live session into its single inherited
