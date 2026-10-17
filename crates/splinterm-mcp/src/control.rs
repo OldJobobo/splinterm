@@ -1255,6 +1255,7 @@ fn action_request(
             splint_id: metadata.splint_id,
             incarnation: metadata.incarnation,
             bytes,
+            focus_report: false,
         }),
         (None, Some((columns, rows))) => Ok(Request::Resize {
             controller_id,

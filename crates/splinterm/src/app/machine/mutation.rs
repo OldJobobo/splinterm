@@ -263,6 +263,7 @@ fn machine_new_dojo_request(
         .topology
         .find_lair(lair_id)
         .context("requested Lair was not found")?;
+    let generated_name = name.is_none();
     let name = match name {
         Some(name) => name.to_owned(),
         None => lair.next_default_dojo_name()?,
@@ -273,6 +274,7 @@ fn machine_new_dojo_request(
         name,
         launch,
         promote_transient_lair: false,
+        generated_name,
     })
 }
 
@@ -291,6 +293,7 @@ fn machine_mutation_request(
             expected_topology_revision,
             name: name.clone(),
             launch: machine_launch(cwd.clone(), command.clone())?,
+            generated_name: false,
         },
         MachineMutation::Split {
             target_splint_id,
