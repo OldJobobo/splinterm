@@ -1,8 +1,9 @@
 //! Canonical body-free handoff and rollback manifest schema v1.
 //!
 //! This internal daemon-generation ABI names authority and anonymous descriptor
-//! slots only. Terminal, image, write-queue, and client-resume bodies remain in
-//! separately sealed descriptors owned by later slices.
+//! slots only. Terminal checkpoint schema v2 embeds completed image state in its
+//! terminal body, so `image_state = not_present` means no separate image-body
+//! descriptor. Other body-bearing state remains in separately sealed descriptors.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -664,6 +665,12 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
         }
         match splint.image_state {
             BodyDisposition::NotPresent => {}
+            BodyDisposition::Descriptor(_)
+                if manifest.terminal_checkpoint_schema
+                    == splinterm_terminal::TERMINAL_CHECKPOINT_SCHEMA_V2 =>
+            {
+                return Err(ManifestError::InvalidRuntime);
+            }
             BodyDisposition::Descriptor(slot) => {
                 let slot = HandoffDescriptorSlot::ImageState(slot);
                 if !image_slots.insert(slot) || !descriptor_slots.contains(&slot) {
@@ -722,8 +729,10 @@ mod tests {
             ExecutableSnapshotPolicy, ExecutableSourcePair, HandoffExecutableSnapshots,
             RetainedRollbackExecutables,
         },
+        handoff_checkpoint::{LinkedCheckpointBody, SealedCheckpointBody},
         handoff_compatibility::{HandoffCapabilities, VersionRange},
     };
+    use splinterm_terminal::{TERMINAL_CHECKPOINT_SCHEMA_V2, Terminal, TerminalConfig};
 
     use super::*;
 
@@ -1024,6 +1033,49 @@ mod tests {
         let decoded = decode_manifest(&bytes).unwrap();
         validate_manifest_pair(&decoded, &rollback).unwrap();
         assert_eq!(encode_manifest(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn parent_owned_schema_v2_checkpoint_link_closes_the_body_free_manifest() {
+        let bytes = Terminal::new(8, 3, TerminalConfig::default())
+            .encode_checkpoint()
+            .unwrap();
+        let linked =
+            LinkedCheckpointBody::new(0, SealedCheckpointBody::seal(&bytes).unwrap()).unwrap();
+        let mut manifest = manifest(ManifestKind::Forward);
+        manifest.terminal_checkpoint_schema = TERMINAL_CHECKPOINT_SCHEMA_V2;
+        manifest.splints[0].terminal_checkpoint = linked.terminal_disposition();
+        manifest.splints[0].image_state = linked.image_disposition();
+        let linked_descriptor = linked
+            .manifest_descriptor(manifest.terminal_checkpoint_schema)
+            .unwrap();
+        let linked_raw = linked_descriptor.inherited_fd;
+        for (index, descriptor) in manifest.descriptors.iter_mut().enumerate() {
+            descriptor.inherited_fd = u32::try_from(index).unwrap() + 1000;
+            if descriptor.slot == HandoffDescriptorSlot::TerminalCheckpoint(0) {
+                *descriptor = linked_descriptor;
+            } else if descriptor.inherited_fd == linked_raw {
+                descriptor.inherited_fd += 100;
+            }
+        }
+        validate_manifest(&manifest).unwrap();
+        assert!(decode_manifest(&encode_manifest(&manifest).unwrap()).is_ok());
+        linked.verify().unwrap();
+    }
+
+    #[test]
+    fn schema_v2_rejects_a_redundant_separate_image_descriptor() {
+        let mut manifest = manifest(ManifestKind::Forward);
+        manifest.terminal_checkpoint_schema = TERMINAL_CHECKPOINT_SCHEMA_V2;
+        manifest.splints[0].image_state = BodyDisposition::Descriptor(7);
+        manifest.descriptors.push(ManifestDescriptor {
+            slot: HandoffDescriptorSlot::ImageState(7),
+            inherited_fd: 77,
+        });
+        assert!(matches!(
+            validate_manifest(&manifest),
+            Err(ManifestError::InvalidRuntime)
+        ));
     }
 
     #[test]

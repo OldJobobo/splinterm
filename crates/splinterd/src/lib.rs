@@ -2,6 +2,7 @@
 
 pub mod authorization;
 pub mod executable_snapshot;
+pub mod handoff_checkpoint;
 pub mod handoff_compatibility;
 pub mod handoff_coordinator;
 pub mod handoff_descriptors;

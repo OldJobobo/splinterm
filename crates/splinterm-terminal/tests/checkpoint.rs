@@ -19,6 +19,10 @@ fn canonical_round_trip_preserves_state_and_pending_replies() {
     original.advance("e\u{301}".as_bytes());
 
     let bytes = original.encode_checkpoint().unwrap();
+    assert_eq!(
+        Terminal::validate_checkpoint_encoding(&bytes).unwrap(),
+        splinterm_terminal::TERMINAL_CHECKPOINT_SCHEMA_V2
+    );
     assert!(bytes.len() < MAX_TERMINAL_CHECKPOINT_BYTES);
     let mut restored = Terminal::restore_checkpoint(&bytes, config).unwrap();
     assert_eq!(restored.encode_checkpoint().unwrap(), bytes);

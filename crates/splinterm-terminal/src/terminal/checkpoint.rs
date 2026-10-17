@@ -394,10 +394,6 @@ impl TerminalCheckpointV2 {
     }
 
     fn restore(self, config: TerminalConfig) -> Result<Terminal, CheckpointError> {
-        digest_json(&self.terminal, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?;
-        if digest_json(&self.images, MAX_IMAGE_STATE_CHECKPOINT_BYTES)? != self.image_sha256 {
-            return Err(CheckpointError::InvalidState);
-        }
         self.terminal.restore(config, Some(self.images))
     }
 }
@@ -639,6 +635,27 @@ impl TerminalCheckpointV1 {
     }
 }
 
+enum DecodedCheckpoint {
+    V1(TerminalCheckpointV1),
+    V2(TerminalCheckpointV2),
+}
+
+impl DecodedCheckpoint {
+    const fn schema(&self) -> u16 {
+        match self {
+            Self::V1(_) => TERMINAL_CHECKPOINT_SCHEMA_V1,
+            Self::V2(_) => TERMINAL_CHECKPOINT_SCHEMA_V2,
+        }
+    }
+
+    fn restore(self, config: TerminalConfig) -> Result<Terminal, CheckpointError> {
+        match self {
+            Self::V1(body) => body.restore(config, None),
+            Self::V2(body) => body.restore(config),
+        }
+    }
+}
+
 impl Terminal {
     /// Encodes the terminal into canonical checkpoint schema v2 bytes.
     ///
@@ -656,6 +673,17 @@ impl Terminal {
         encode_json(&envelope)
     }
 
+    /// Validates canonical checkpoint framing and digests without constructing a terminal.
+    ///
+    /// This proves the closed encoding and returns its schema. Configuration-bound
+    /// semantic validation still occurs in [`Self::restore_checkpoint`].
+    ///
+    /// # Errors
+    /// Rejects oversized, malformed, noncanonical, unknown-schema, or digest-invalid bytes.
+    pub fn validate_checkpoint_encoding(bytes: &[u8]) -> Result<u16, CheckpointError> {
+        Ok(decode_checkpoint(bytes)?.schema())
+    }
+
     /// Restores canonical checkpoint schema v1 or v2 under the supplied configuration.
     ///
     /// # Errors
@@ -665,39 +693,47 @@ impl Terminal {
         bytes: &[u8],
         config: TerminalConfig,
     ) -> Result<Self, CheckpointError> {
-        if bytes.len() > MAX_TERMINAL_CHECKPOINT_BYTES {
-            return Err(CheckpointError::TooLarge);
-        }
-        let header = decode_header(bytes)?;
-        match (header.magic, header.schema) {
-            (CHECKPOINT_MAGIC_V1, TERMINAL_CHECKPOINT_SCHEMA_V1) => {
-                let envelope: CheckpointEnvelopeV1 =
-                    serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
-                if encode_json(&envelope)? != bytes {
-                    return Err(CheckpointError::NonCanonical);
-                }
-                if digest_json(&envelope.body, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?
-                    != envelope.body_sha256
-                {
-                    return Err(CheckpointError::InvalidState);
-                }
-                envelope.body.restore(config, None)
+        decode_checkpoint(bytes)?.restore(config)
+    }
+}
+
+fn decode_checkpoint(bytes: &[u8]) -> Result<DecodedCheckpoint, CheckpointError> {
+    if bytes.len() > MAX_TERMINAL_CHECKPOINT_BYTES {
+        return Err(CheckpointError::TooLarge);
+    }
+    let header = decode_header(bytes)?;
+    match (header.magic, header.schema) {
+        (CHECKPOINT_MAGIC_V1, TERMINAL_CHECKPOINT_SCHEMA_V1) => {
+            let envelope: CheckpointEnvelopeV1 =
+                serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+            if encode_json(&envelope)? != bytes {
+                return Err(CheckpointError::NonCanonical);
             }
-            (CHECKPOINT_MAGIC_V2, TERMINAL_CHECKPOINT_SCHEMA_V2) => {
-                let envelope: CheckpointEnvelopeV2 =
-                    serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
-                if encode_json(&envelope)? != bytes {
-                    return Err(CheckpointError::NonCanonical);
-                }
-                if digest_json(&envelope.body, MAX_TERMINAL_CHECKPOINT_BYTES)?
-                    != envelope.body_sha256
-                {
-                    return Err(CheckpointError::InvalidState);
-                }
-                envelope.body.restore(config)
+            if digest_json(&envelope.body, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?
+                != envelope.body_sha256
+            {
+                return Err(CheckpointError::InvalidState);
             }
-            _ => Err(CheckpointError::InvalidState),
+            Ok(DecodedCheckpoint::V1(envelope.body))
         }
+        (CHECKPOINT_MAGIC_V2, TERMINAL_CHECKPOINT_SCHEMA_V2) => {
+            let envelope: CheckpointEnvelopeV2 =
+                serde_json::from_slice(bytes).map_err(CheckpointError::Encoding)?;
+            if encode_json(&envelope)? != bytes {
+                return Err(CheckpointError::NonCanonical);
+            }
+            // Each component has its own bound, so images never consume the
+            // terminal's allowance.
+            digest_json(&envelope.body.terminal, MAX_TERMINAL_STATE_CHECKPOINT_BYTES)?;
+            if digest_json(&envelope.body, MAX_TERMINAL_CHECKPOINT_BYTES)? != envelope.body_sha256
+                || digest_json(&envelope.body.images, MAX_IMAGE_STATE_CHECKPOINT_BYTES)?
+                    != envelope.body.image_sha256
+            {
+                return Err(CheckpointError::InvalidState);
+            }
+            Ok(DecodedCheckpoint::V2(envelope.body))
+        }
+        _ => Err(CheckpointError::InvalidState),
     }
 }
 
@@ -1262,8 +1298,12 @@ mod tests {
             body_sha256,
             body,
         };
-        let restored =
-            Terminal::restore_checkpoint(&encode_json(&envelope).unwrap(), config()).unwrap();
+        let encoded = encode_json(&envelope).unwrap();
+        assert_eq!(
+            Terminal::validate_checkpoint_encoding(&encoded).unwrap(),
+            TERMINAL_CHECKPOINT_SCHEMA_V1
+        );
+        let restored = Terminal::restore_checkpoint(&encoded, config()).unwrap();
         assert_eq!(restored.normal, terminal.normal);
         assert_eq!(restored.alternate, terminal.alternate);
         assert_eq!(restored.images.metrics(), crate::ImageMetrics::default());

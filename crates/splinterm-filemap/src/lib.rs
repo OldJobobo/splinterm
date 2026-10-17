@@ -17,9 +17,12 @@ use std::{
 };
 
 use memmap2::{Mmap, MmapOptions};
-use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, fstat, memfd_create};
+use rustix::{
+    fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, fstat, memfd_create},
+    io::{FdFlags, fcntl_dupfd_cloexec, fcntl_getfd},
+};
 
-const REQUIRED_IMMUTABLE_SEALS: SealFlags = SealFlags::WRITE
+pub const REQUIRED_IMMUTABLE_SEALS: SealFlags = SealFlags::WRITE
     .union(SealFlags::GROW)
     .union(SealFlags::SHRINK)
     .union(SealFlags::SEAL);
@@ -177,12 +180,15 @@ impl ReadOnlyFileMap {
 
     /// Verifies and maps an exactly-sized sealed descriptor read-only.
     ///
-    /// The descriptor must carry write, grow, shrink, and further-sealing seals,
-    /// making its bytes and extent immutable for the mapping lifetime.
+    /// The descriptor must be close-on-exec and carry write, grow, shrink, and
+    /// further-sealing seals, making its bytes and extent immutable for the
+    /// mapping lifetime.
     ///
     /// # Errors
-    /// Returns an I/O error for missing seals, mismatched/empty size, or mapping failure.
+    /// Returns an I/O error for an inheritable descriptor, missing seals,
+    /// mismatched/empty size, or mapping failure.
     pub fn from_sealed_fd(fd: OwnedFd, expected_len: usize) -> io::Result<Self> {
+        let flags = fcntl_getfd(&fd)?;
         let seals = fcntl_get_seals(&fd)?;
         let size = usize::try_from(fstat(&fd)?.st_size).map_err(|_| {
             io::Error::new(
@@ -190,7 +196,11 @@ impl ReadOnlyFileMap {
                 "sealed descriptor size is invalid",
             )
         })?;
-        if expected_len == 0 || size != expected_len || !seals.contains(REQUIRED_IMMUTABLE_SEALS) {
+        if !flags.contains(FdFlags::CLOEXEC)
+            || expected_len == 0
+            || size != expected_len
+            || !seals.contains(REQUIRED_IMMUTABLE_SEALS)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "sealed descriptor metadata is inconsistent",
@@ -225,7 +235,7 @@ pub fn verify_writable_shared_mapping_rejected(
         ));
     }
 
-    let duplicate = rustix::io::dup(fd)?;
+    let duplicate = duplicate_cloexec(fd)?;
     let file = File::from(duplicate);
     // SAFETY: The mapping is never exposed. The descriptor's immutable seals and
     // exact nonzero extent were verified above. An unexpected successful shared
@@ -249,6 +259,10 @@ pub fn verify_writable_shared_mapping_rejected(
         }
         Err(error) => Err(error),
     }
+}
+
+fn duplicate_cloexec(fd: BorrowedFd<'_>) -> io::Result<OwnedFd> {
+    Ok(fcntl_dupfd_cloexec(fd, 3)?)
 }
 
 impl Deref for ReadOnlyFileMap {
@@ -339,6 +353,18 @@ mod tests {
         .unwrap();
         write(&fd, b"sealed pixels").unwrap();
         fcntl_add_seals(&fd, REQUIRED_IMMUTABLE_SEALS).unwrap();
+        let inheritable = rustix::io::dup(&fd).unwrap();
+        assert!(
+            !fcntl_getfd(&inheritable)
+                .unwrap()
+                .contains(FdFlags::CLOEXEC)
+        );
+        assert_eq!(
+            ReadOnlyFileMap::from_sealed_fd(inheritable, 13)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
         let mapping = ReadOnlyFileMap::from_sealed_fd(fd, 13).unwrap();
         assert_eq!(&*mapping, b"sealed pixels");
 
@@ -362,7 +388,7 @@ mod tests {
 
         use rustix::{
             fs::{MemfdFlags, fcntl_add_seals, memfd_create},
-            io::write,
+            io::{FdFlags, fcntl_getfd, write},
         };
 
         let sealed = memfd_create(
@@ -372,6 +398,9 @@ mod tests {
         .unwrap();
         write(&sealed, b"immutable").unwrap();
         fcntl_add_seals(&sealed, REQUIRED_IMMUTABLE_SEALS).unwrap();
+        let duplicate = duplicate_cloexec(sealed.as_fd()).unwrap();
+        assert!(fcntl_getfd(&duplicate).unwrap().contains(FdFlags::CLOEXEC));
+        drop(duplicate);
         verify_writable_shared_mapping_rejected(sealed.as_fd(), 9).unwrap();
 
         let unsealed = memfd_create(
