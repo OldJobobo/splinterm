@@ -30,8 +30,9 @@ use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
     CompactSubscription, LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot,
-    LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, ProcessExit, ProcessIncarnation,
-    SubscriptionReceive, TerminalPublicationMemoryLease, authorization, executable_identity,
+    LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, MAX_LIVE_SPLINTS, ProcessExit,
+    ProcessIncarnation, SubscriptionReceive, TerminalPublicationMemoryLease, authorization,
+    executable_identity,
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
@@ -88,7 +89,6 @@ const IMAGE_CONTENT_CONNECTION_LIMIT: usize = 8;
 const IMAGE_CONTENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
 const IMAGE_MEMFD_HEADER_BYTES: usize = 45;
-const MAX_LIVE_SPLINTS: usize = 256;
 const TOPOLOGY_QUEUE: usize = 16;
 const OUTBOUND_QUEUE: usize = 32;
 const TERMINAL_TRANSACTION_MEMORY_BYTES: usize = 96 * 1024 * 1024;
