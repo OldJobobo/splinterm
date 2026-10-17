@@ -101,6 +101,8 @@ impl ExplorerContextTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WindowTopologyCommand {
+    /// The compositor closed the Window, as opposed to an explicit detach.
+    CloseWindow,
     ExplorerContext {
         target: ExplorerContextTarget,
         command: Box<WindowTopologyCommand>,

@@ -52,7 +52,9 @@ use super::{
         run_machine_subscription,
     },
     presets::{materialize_preset, run_preset_command},
+    remote_chooser::run_remotes,
     remote_cli::run_remote_command,
+    remote_status::connect_with_status,
     session_catalog::{
         automation_launch, create_request, launch_parameters, new_dojo_request_for, remember_dojo,
     },
@@ -69,8 +71,12 @@ pub(crate) async fn run() -> Result<()> {
         schema_major,
         timeout_ms,
         remote,
+        detach_terminal,
         command,
     } = Cli::parse();
+    if detach_terminal {
+        splinterm::remote_launch::detach_from_controlling_terminal();
+    }
     let command = match command {
         Some(command) => command,
         None if remote.is_some() => Command::Dojos,
@@ -79,6 +85,7 @@ pub(crate) async fn run() -> Result<()> {
     if matches!(
         &command,
         Command::Dojos
+            | Command::Remotes
             | Command::Reopen
             | Command::Window { .. }
             | Command::Launch { .. }
@@ -155,6 +162,7 @@ pub(crate) async fn run() -> Result<()> {
         && matches!(
             command,
             Command::Consent
+                | Command::Remotes
                 | Command::Diagnostics { .. }
                 | Command::Config { .. }
                 | Command::Keymap { .. }
@@ -167,7 +175,9 @@ pub(crate) async fn run() -> Result<()> {
                 | Command::XdgLaunch { .. }
         )
     {
-        usage_error("--remote cannot select local service, relay, policy, or consent commands");
+        usage_error(
+            "--remote cannot select local service, relay, policy, consent, or remote chooser commands",
+        );
     }
     if let Command::Diagnostics {
         last_exit,
@@ -219,12 +229,6 @@ pub(crate) async fn run() -> Result<()> {
         install_termination_signal_task();
     }
 
-    let factory = if let Some(profile_name) = remote {
-        let catalog = RemoteCatalog::load_default()?;
-        ConnectionFactory::remote(catalog.get(&profile_name)?).await?
-    } else {
-        ConnectionFactory::local()
-    };
     let ConfigLoad {
         config,
         diagnostics,
@@ -243,6 +247,26 @@ pub(crate) async fn run() -> Result<()> {
             eprintln!("splinterm config: {diagnostic}");
         }
     }
+    let factory = match remote {
+        // Graphical remote launches connect inside a status Window that shows
+        // progress and categorized failures instead of terminal output. A
+        // Window closed before connecting returns `RemoteNotConnected`, which
+        // `main` turns into exit status 1.
+        Some(profile_name) if graphical => {
+            let factory = connect_with_status(profile_name, &config).await?;
+            // The status Window has ended and recorded its own clean exit; the
+            // remote Window that follows is a new diagnostic Window.
+            if let Some(client_diagnostics) = diagnostics_global() {
+                client_diagnostics.begin_window(None, None);
+            }
+            factory
+        }
+        Some(profile_name) => {
+            let catalog = RemoteCatalog::load_default()?;
+            ConnectionFactory::remote(catalog.get(&profile_name)?).await?
+        }
+        None => ConnectionFactory::local(),
+    };
     run_configured_command(command, config, factory).await
 }
 
@@ -261,6 +285,7 @@ fn graphical_command(command: &Command) -> bool {
     matches!(
         command,
         Command::Dojos
+            | Command::Remotes
             | Command::Reopen
             | Command::Window { .. }
             | Command::Launch { .. }
@@ -285,6 +310,7 @@ async fn run_configured_command(
 ) -> Result<()> {
     match command {
         Command::Dojos => run_dojos(config, factory).await,
+        Command::Remotes => run_remotes(config).await,
         Command::Reopen => reopen_recent(config, factory).await,
         Command::Window { lair_id, dojo_id } => {
             let dojo = select_dojo(&factory, lair_id.zip(dojo_id)).await?;
@@ -376,6 +402,7 @@ async fn run_headless(
     let mut connection = factory.connect().await?;
     match command {
         Command::Dojos
+        | Command::Remotes
         | Command::Reopen
         | Command::Window { .. }
         | Command::Launch { .. }
@@ -685,6 +712,7 @@ async fn run_headless(
                     splint_id,
                     incarnation,
                     bytes: text.into_bytes(),
+                    focus_report: false,
                 })
                 .await?;
             connection.release_control(controller_id).await?;
@@ -806,6 +834,43 @@ mod tests {
         let dry = Cli::try_parse_from(["splinterm", "preset", "run", "omarchy.tds", "--dry-run"])
             .unwrap();
         assert!(!graphical_command(dry.command.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn remote_chooser_and_detached_launch_argv_parse_as_graphical_commands() {
+        use clap::CommandFactory;
+
+        let remotes = Cli::try_parse_from(["splinterm", "remotes"]).unwrap();
+        assert!(matches!(remotes.command, Some(Command::Remotes)));
+        assert!(!remotes.detach_terminal);
+        assert!(graphical_command(remotes.command.as_ref().unwrap()));
+        assert!(Cli::try_parse_from(["splinterm", "remotes", "extra"]).is_err());
+
+        // The argv the in-app launches build must parse back to the same intent.
+        let executable = std::path::Path::new("/usr/bin/splinterm");
+        let window = splinterm::remote_launch::remote_window_command(executable, "wintermute");
+        let window =
+            Cli::try_parse_from(std::iter::once(window.get_program()).chain(window.get_args()))
+                .unwrap();
+        assert!(window.detach_terminal);
+        assert_eq!(window.remote.as_deref(), Some("wintermute"));
+        assert!(
+            window.command.is_none(),
+            "--remote alone opens that remote's Dojos"
+        );
+        let chooser = splinterm::remote_launch::remote_chooser_command(executable);
+        let chooser =
+            Cli::try_parse_from(std::iter::once(chooser.get_program()).chain(chooser.get_args()))
+                .unwrap();
+        assert!(chooser.detach_terminal);
+        assert!(matches!(chooser.command, Some(Command::Remotes)));
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("remotes"));
+        assert!(
+            !help.contains("detach-terminal"),
+            "the launch flag stays internal"
+        );
     }
 
     #[test]
@@ -1188,6 +1253,7 @@ mod tests {
             LaunchSemantics::RemoteInteractive,
             TopologyRevision::default(),
             "remote".to_owned(),
+            false,
             None,
             Vec::new(),
             &config,

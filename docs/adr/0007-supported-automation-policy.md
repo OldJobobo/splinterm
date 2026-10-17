@@ -196,6 +196,7 @@ checked in addition to every listed scope.
 | `Resize` | own controller and `resize` |
 | `Detach` | own subscription; no additional scope |
 | `KillSplint` | `process_terminate` for exact Splint/incarnation |
+| `ResolveLaunchDirectory` (v38) | `process_spawn` and `topology_layout_mutate` for the source Splint; it prepares a creation and its answer reveals daemon-host path availability; audited as `resolve_launch_directory` |
 | `AuditInspect` | `audit_inspect` for daemon-lifetime bounded metadata |
 
 Audit inspection is paginated and requires `audit_inspect`.

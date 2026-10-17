@@ -73,6 +73,8 @@ splinterm --remote PROFILE
 splinterm --remote PROFILE reopen
 ```
 
+Without a terminal, `splinterm remotes`, the **Remote Dojos** desktop action, **Open Remote…** in the command palette, or the **Remote Dojos…** row of local Recent Dojos opens a profile chooser and starts the chosen remote in its own Window.
+
 Remote and local recency are kept separate. Losing the SSH connection closes local views and releases controllers without terminating daemon-owned remote processes. See [Remote access](/docs/remote/).
 
 :::caution
