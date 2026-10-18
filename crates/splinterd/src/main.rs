@@ -3280,15 +3280,18 @@ impl Drop for RuntimeCreationGuard {
 /// reservation admitted just before a handoff starts finishes its launch
 /// before the fence can take the permit.
 async fn reserve_launch_slot(state: &DaemonState) -> Result<LaunchSlot, ProtocolError> {
+    reserve_launch_slot_in(state, &mut *state.runtimes.lock().await)
+}
+
+/// [`reserve_launch_slot`] under a registry lock the caller already holds.
+fn reserve_launch_slot_in(
+    state: &DaemonState,
+    registry: &mut RuntimeRegistry,
+) -> Result<LaunchSlot, ProtocolError> {
     if state.handoff_gate.phase() != HandoffGatePhase::Idle {
         return Err(handoff_in_progress());
     }
-    state
-        .runtimes
-        .lock()
-        .await
-        .reserve()
-        .ok_or_else(registry_full)
+    registry.reserve().ok_or_else(registry_full)
 }
 
 fn registry_full() -> ProtocolError {
@@ -3572,7 +3575,27 @@ async fn start_exited_splint(
             return Err(invalid("only an exited Splint can be restored"));
         }
     }
-    if let Some(runtime) = state.runtimes.lock().await.remove(splint_id) {
+    let context =
+        splint_launch_context(&*state.topology.read().await, splint_id).ok_or_else(not_found)?;
+    // Reserve the slot and remove the exited runtime under one registry lock:
+    // the removal frees the entry the reservation takes, so a full registry
+    // still admits a restore of its own exited runtime, and a refused
+    // reservation (a starting handoff, or a registry full of others) leaves
+    // the exited runtime in place.
+    let (slot, exited) = {
+        let mut registry = state.runtimes.lock().await;
+        let exited = registry.remove(splint_id);
+        match reserve_launch_slot_in(state, &mut registry) {
+            Ok(slot) => (slot, exited),
+            Err(error) => {
+                if let Some(runtime) = exited {
+                    registry.entries.insert(splint_id, runtime);
+                }
+                return Err(error);
+            }
+        }
+    };
+    if let Some(runtime) = exited {
         let handle = runtime.handle();
         let incarnation = handle.incarnation.value();
         state
@@ -3593,9 +3616,6 @@ async fn start_exited_splint(
         runtime.shutdown().await.map_err(|_| internal())?;
     }
 
-    let context =
-        splint_launch_context(&*state.topology.read().await, splint_id).ok_or_else(not_found)?;
-    let slot = reserve_launch_slot(state).await?;
     let runtime = spawn_runtime(state, &slot, context, launch).await?;
     let handle = runtime.handle();
     let incarnation = handle.incarnation.value();
@@ -4555,6 +4575,31 @@ fn schedule_lair_grant_expiry(state: &Arc<DaemonState>, grant_id: u64) {
             let _ = state.revocations.send(Revocation { grant_id });
         }
     });
+}
+
+/// Commits the answer to a Lair consent prompt: a recorded denial, or a new
+/// grant unless the handoff fence went up while the prompt was open.
+async fn commit_lair_consent(
+    state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
+    lair_id: LairId,
+    scopes: Vec<AccessScope>,
+    granted: bool,
+) -> Result<Response, ProtocolError> {
+    if !granted {
+        state.grants.lock().await.deny_lair(
+            peer,
+            lair_id,
+            &scopes,
+            "denied or consent client unavailable",
+        );
+        return Err(ProtocolError::new(
+            ErrorCode::ConsentDenied,
+            "Lair access was denied",
+        ));
+    }
+    refuse_while_fenced(state)?;
+    grant_lair_access_response(state, peer, lair_id, scopes).await
 }
 
 async fn grant_lair_access_response(
@@ -5964,6 +6009,7 @@ async fn handle_authorized_request(
                         "access was denied",
                     ));
                 }
+                refuse_while_fenced(state)?;
                 grant_access_response(state, peer, splint_id, incarnation, scopes).await?
             }
         }
@@ -6025,19 +6071,7 @@ async fn handle_authorized_request(
                             false
                         }
                     };
-                if !granted {
-                    state.grants.lock().await.deny_lair(
-                        peer,
-                        lair_id,
-                        &scopes,
-                        "denied or consent client unavailable",
-                    );
-                    return Err(ProtocolError::new(
-                        ErrorCode::ConsentDenied,
-                        "Lair access was denied",
-                    ));
-                }
-                grant_lair_access_response(state, peer, lair_id, scopes).await?
+                commit_lair_consent(state, peer, lair_id, scopes, granted).await?
             }
         }
         Request::AuthorizationStatus {
@@ -7682,6 +7716,7 @@ async fn handle_authorized_request(
                         "forced control transfer denied",
                     ));
                 }
+                refuse_while_fenced(state)?;
             }
             let lease = state.controller.lock().await.force_transfer(
                 connection_id,
@@ -8031,6 +8066,17 @@ fn handoff_in_progress() -> ProtocolError {
     )
 }
 
+/// Re-checks the fence after a consent prompt returns. A prompt can outlast
+/// the check at the request choke point, so a request admitted before the
+/// fence must not commit a grant or forced lease once it is up.
+fn refuse_while_fenced(state: &DaemonState) -> Result<(), ProtocolError> {
+    if state.handoff_gate.is_fenced() {
+        Err(handoff_in_progress())
+    } else {
+        Ok(())
+    }
+}
+
 /// Whether a request is refused with `HandoffInProgress` while the handoff
 /// fence is held.
 ///
@@ -8192,9 +8238,17 @@ impl HandoffAttempt {
 
     /// Lifts the fence, returns the gate to `Idle`, and broadcasts
     /// `Cancelled`.
+    ///
+    /// The release runs in its own task, so a caller dropped while it waits
+    /// for the topology or hub lock still broadcasts `Cancelled`; awaiting
+    /// that task keeps the lifted fence visible to the caller on return.
     async fn cancel(mut self, reason: HandoffCancelReason) {
-        if let Some(hold) = self.hold.take() {
-            release_handoff(hold, reason).await;
+        if let Some(hold) = self.hold.take()
+            && let Err(error) = tokio::spawn(release_handoff(hold, reason)).await
+        {
+            // A release that panicked or was dropped unrun still dropped its
+            // hold, so the gate and fence lifted; only the broadcast is lost.
+            error!(%error, "handoff cancellation task did not finish");
         }
     }
 }
@@ -8247,7 +8301,9 @@ async fn release_handoff(hold: HandoffHold, reason: HandoffCancelReason) {
 }
 
 /// Reopens a task tracker when dropped, so a drain that finishes, times out,
-/// or is dropped leaves the tracker open as it found it.
+/// or is dropped always leaves the tracker open. While serving, the tracker
+/// is open whenever a drain starts; only daemon shutdown closes it, after
+/// every connection task, and so every drain, has ended.
 struct ReopenTracker<'a>(&'a TaskTracker);
 
 impl Drop for ReopenTracker<'_> {
@@ -13663,6 +13719,176 @@ mod tests {
         .await
         .expect("a panicked attempt broadcasts its cancellation");
         assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_caller_dropped_while_cancel_waits_still_broadcasts_cancelled() {
+        let state = test_state(false);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let (fenced, fenced_signal) = tokio::sync::oneshot::channel();
+        let (proceed, proceed_signal) = tokio::sync::oneshot::channel::<()>();
+        let caller = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+                attempt.fence().await.unwrap();
+                fenced.send(()).unwrap();
+                proceed_signal.await.unwrap();
+                attempt.cancel(HandoffCancelReason::Blocked).await;
+            }
+        });
+        fenced_signal.await.unwrap();
+        // The release blocks reading the revision while this write lock is
+        // held, so the caller is dropped mid-cancel.
+        let topology = state.topology.write().await;
+        proceed.send(()).unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            state.handoff_gate.is_fenced(),
+            "the release is still waiting"
+        );
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        drop(topology);
+        wait_for_idle_gate(&state).await;
+        let mut phases = Vec::new();
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                phases.extend(handoff_status_phases(&mut subscription));
+                if phases.last() == Some(&cancelled(HandoffCancelReason::Blocked)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached release broadcasts the caller's reason");
+        assert_eq!(
+            phases,
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Blocked),
+            ]
+        );
+        assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_lair_consent_answered_under_the_fence_commits_no_grant() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let lair = Lair::new("durable", PathBuf::from("/tmp"));
+        let lair_id = lair.id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, lair).unwrap();
+        }
+        let scopes = vec![AccessScope::Input];
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        attempt.fence().await.unwrap();
+        // The prompt was admitted before the fence and answered under it.
+        let refused = commit_lair_consent(&state, &peer, lair_id, scopes.clone(), true)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::HandoffInProgress);
+        assert!(
+            state
+                .grants
+                .lock()
+                .await
+                .authorize_lair(&peer, lair_id, &scopes)
+                .is_none(),
+            "no grant is committed under the fence"
+        );
+        // A denial is still recorded as denied, not as in progress.
+        assert_eq!(
+            commit_lair_consent(&state, &peer, lair_id, scopes.clone(), false)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::ConsentDenied
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        commit_lair_consent(&state, &peer, lair_id, scopes.clone(), true)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .grants
+                .lock()
+                .await
+                .authorize_lair(&peer, lair_id, &scopes)
+                .is_some()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restore_refused_by_a_starting_handoff_keeps_the_exited_runtime() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let expected = state.topology.read().await.revision();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            &state,
+            501,
+            Request::CreateLair {
+                expected_topology_revision: expected,
+                name: "exits".into(),
+                launch: test_launch(&["/bin/sh", "-c", "true"]),
+                generated_name: false,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("create response was not returned");
+        };
+        let splint_id = lair.dojos[0].default_focus;
+        time::timeout(Duration::from_secs(5), async {
+            while !state
+                .topology
+                .read()
+                .await
+                .find_splint(splint_id)
+                .is_some_and(|splint| matches!(splint.state, SplintState::Exited(_)))
+            {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the process exits");
+        let exited = state
+            .runtimes
+            .lock()
+            .await
+            .handle(splint_id)
+            .expect("the exited runtime stays registered")
+            .incarnation
+            .value();
+
+        let attempt = HandoffAttempt::begin(&state).await.unwrap();
+        let launch = test_launch(&["/bin/sh", "-c", "true"]);
+        let refused = start_exited_splint(&state, splint_id, &launch)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::HandoffInProgress);
+        assert_eq!(
+            state
+                .runtimes
+                .lock()
+                .await
+                .handle(splint_id)
+                .map(|handle| handle.incarnation.value()),
+            Some(exited),
+            "a refused restore leaves the exited runtime in place"
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+
+        let (restored, _) = start_exited_splint(&state, splint_id, &launch)
+            .await
+            .unwrap();
+        assert_ne!(restored, exited);
     }
 
     #[test]
