@@ -306,6 +306,13 @@ impl CandidateDescriptorClaims {
         self.descriptors.get(&slot).map(OwnedFd::as_fd)
     }
 
+    /// Every owner still in the table, bound to the slot it was claimed for.
+    pub(crate) fn handoff_descriptors(&self) -> impl Iterator<Item = HandoffDescriptor<'_>> {
+        self.descriptors
+            .iter()
+            .map(|(slot, descriptor)| HandoffDescriptor::new(*slot, descriptor.as_fd()))
+    }
+
     /// Transfers unique ownership of one validated role.
     #[must_use]
     pub(crate) fn take(&mut self, slot: HandoffDescriptorSlot) -> Option<OwnedFd> {

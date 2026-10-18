@@ -13,7 +13,7 @@ integration-test = []
 [dependencies]
 anyhow.workspace = true
 libc.workspace = true
-nix = { workspace = true, features = ["fs", "process", "uio"] }
+nix = { workspace = true, features = ["fs", "process", "signal", "uio"] }
 serde.workspace = true
 serde_json.workspace = true
 seccompiler.workspace = true

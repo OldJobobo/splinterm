@@ -6,6 +6,8 @@
 //! runtime and the systemd connection are gone. [`cross_exec_boundary`] then
 //! runs the single-threaded critical section:
 //!
+//! 0. block SIGINT, SIGTERM, and SIGHUP on the exec thread
+//!    ([`BlockedHandoffSignals`]);
 //! 1. take the process guard ([`HandoffProcessGuard::acquire_until`]), which
 //!    proves the process has exactly one thread;
 //! 2. write exactly the encoded manifest bytes into both empty manifest memfds
@@ -16,26 +18,54 @@
 //!    once a manifest is sealed;
 //! 4. exec the forward daemon (`execveat(AT_EMPTY_PATH)` of its sealed
 //!    snapshot), at the one call site in `under_guard`;
-//! 5. when exec does not happen, restore close-on-exec and release the guard.
+//! 5. when exec does not happen, restore close-on-exec, release the guard,
+//!    and restore the signal mask.
 //!
 //! Step 4 is compiled only into `integration-test` builds (Plan 0061 M3.10).
-//! The forward candidate adopts and serves in every build, but a candidate
-//! failure before its commit has no way back until the cooperative rollback
-//! executor exists (M3.11), so a production exec could still end every
-//! Splint. Every other build keeps the M3.9 behaviour: the boundary always
-//! returns, and the old generation resumes in process (Plan 0061 D5) with
-//! [`resume_handed_off`]: every Splint keeps running and every client
-//! reconnects to the same daemon generation.
+//! The forward candidate adopts and serves in every build, and since Plan
+//! 0061 M3.11a a candidate failure before its commit rolls back through
+//! [`crate::handoff_rollback`]; enabling the forward exec in production
+//! builds is M3.11b's decision. Every other build keeps the M3.9 behaviour:
+//! the boundary always returns, and the old generation resumes in process
+//! (Plan 0061 D5) with [`resume_handed_off`]: every Splint keeps running and
+//! every client reconnects to the same daemon generation.
+//!
+//! # Signals across exec
+//!
+//! A successful exec resets every caught signal to its default action, which
+//! for SIGINT, SIGTERM, and SIGHUP is to terminate. Until the candidate has
+//! installed its own handlers, `systemctl stop` or `reload` would therefore
+//! kill it mid-adoption and hang up every carried Splint. Both handoff execs
+//! (this boundary's forward exec and the rollback exec,
+//! [`exec_rollback_daemon`]) run with those three signals blocked: the
+//! blocked mask and the pending set both survive `execve`, and the candidate
+//! unblocks them right after installing its handlers
+//! ([`unblock_handoff_signals`]), so a signal that arrived in the window is
+//! delivered to the handler and acted on in order (a SIGTERM becomes an
+//! ordered shutdown after adoption). When exec does not happen, the old
+//! generation restores its mask and a pending signal reaches its still
+//! installed handler before the resumed round serves. Splint children never
+//! inherit the blocked mask: the PTY helper and the consent launcher spawn
+//! through `std::process::Command`, which empties the child's signal mask.
+//!
+//! # Exec failure past the point of no return
+//!
+//! `execveat` returns an error only while the kernel can still return to
+//! the calling image. A failure after its point of no return (for example
+//! an allocation failure while mapping the new image) kills the process
+//! instead: there is no fall-through, every PTY master closes with the
+//! process, and every carried Splint is hung up. That belongs to the
+//! daemon-crash row of Plan 0037's lifetime matrix.
 //!
 //! # No kill
 //!
-//! Nothing here signals a process or stops a workload scope. A resumed Splint
-//! whose scope cannot be adopted runs uncontained, and every scope already
-//! adopted in its Dojo stays retained in the new manager, so that manager
-//! never stops the Dojo slice under it (the M3.8a sibling-kill rule). A
-//! Splint whose actor cannot be staged again keeps its PTY master open for
-//! the life of the process: it stalls once its output fills the kernel
-//! buffer, but it is never hung up.
+//! Nothing here signals another process or stops a workload scope. A
+//! resumed Splint whose scope cannot be adopted runs uncontained, and every
+//! scope already adopted in its Dojo stays retained in the new manager, so
+//! that manager never stops the Dojo slice under it (the M3.8a sibling-kill
+//! rule). A Splint whose actor cannot be staged again keeps its PTY master
+//! open for the life of the process: it stalls once its output fills the
+//! kernel buffer, but it is never hung up.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -44,6 +74,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use rustix::{
     fs::{fcntl_add_seals, fcntl_get_seals, fstat},
     io::pwrite,
@@ -141,19 +172,19 @@ impl std::fmt::Debug for ForwardDaemonExec<'_> {
     }
 }
 
-/// The forward daemon's argument vector: `program`, the candidate activation
-/// flag naming the sealed forward manifest at `forward_manifest`, then the
-/// ordinary daemon arguments re-serialized from the old daemon's state.
+/// A handoff daemon's argument vector: `program`, the candidate activation
+/// flag naming the sealed manifest at `manifest` (the forward manifest for
+/// the forward daemon, the rollback manifest for the rollback daemon), then
+/// the ordinary daemon arguments re-serialized from the running daemon's
+/// parsed state.
 ///
-/// Never a copy of the running argv: an adopted daemon's own argv still
-/// carries its activation flag, and a second one fails closed as a
-/// candidate. `None` when `program` holds a NUL byte, which no real argv
-/// entry can.
-#[cfg(any(test, feature = "integration-test"))]
+/// Never a copy of the running argv: a candidate's own argv still carries
+/// its activation flag, and a second one fails closed as a candidate.
+/// `None` when `program` holds a NUL byte, which no real argv entry can.
 #[must_use]
-pub fn forward_daemon_arguments(
+pub fn candidate_daemon_arguments(
     program: &std::ffi::OsStr,
-    forward_manifest: RawFd,
+    manifest: RawFd,
     workload_cgroups_required: bool,
 ) -> Option<Vec<std::ffi::CString>> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
@@ -161,7 +192,7 @@ pub fn forward_daemon_arguments(
     let mut arguments = vec![
         CString::new(program.as_bytes()).ok()?,
         CString::new(format!(
-            "{}={forward_manifest}",
+            "{}={manifest}",
             crate::CANDIDATE_ACTIVATION_ARGUMENT
         ))
         .ok()?,
@@ -175,9 +206,7 @@ pub fn forward_daemon_arguments(
 /// This process's environment, unchanged, as exec's environment vector:
 /// `SPLINTERM_POLICY`, `SPLINTERM_SOCKET`, `XDG_*`, and the systemd variables
 /// cross exec as they would a restart. Candidate activation is argv only
-/// (Plan 0061 D4), so nothing in the environment activates the forward
-/// daemon.
-#[cfg(feature = "integration-test")]
+/// (Plan 0061 D4), so nothing in the environment activates a candidate.
 #[must_use]
 pub fn exec_environment() -> Vec<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
@@ -208,29 +237,7 @@ impl<'fd> ExecInheritancePlan<'fd> {
         owners: &[HandoffDescriptor<'fd>],
         manifests: [ManifestSeal<'fd>; 2],
     ) -> Result<Self, ExecBoundaryError> {
-        let mut by_slot = BTreeMap::new();
-        for owner in owners {
-            if by_slot.insert(owner.slot(), *owner).is_some() {
-                return Err(ExecBoundaryError::DuplicateOwner(owner.slot()));
-            }
-        }
-        let mut descriptors = Vec::with_capacity(recorded.len());
-        for &(slot, recorded) in recorded {
-            let owner = by_slot
-                .remove(&slot)
-                .ok_or(ExecBoundaryError::MissingOwner(slot))?;
-            if owner.raw_fd() != recorded {
-                return Err(ExecBoundaryError::Renumbered {
-                    slot,
-                    recorded,
-                    held: owner.raw_fd(),
-                });
-            }
-            descriptors.push(owner);
-        }
-        if let Some(slot) = by_slot.into_keys().next() {
-            return Err(ExecBoundaryError::UnrecordedOwner(slot));
-        }
+        let descriptors = bind_recorded_descriptors(recorded, owners)?;
         for manifest in &manifests {
             let storage = manifest.storage.as_raw_fd();
             if !descriptors
@@ -261,7 +268,7 @@ impl<'fd> ExecInheritancePlan<'fd> {
     }
 
     /// Arms the exec call site with the sealed forward daemon image and the
-    /// exact vectors exec passes it; see [`forward_daemon_arguments`] and
+    /// exact vectors exec passes it; see [`candidate_daemon_arguments`] and
     /// [`exec_environment`]. The image is executed through its descriptor,
     /// which stays close-on-exec and is not among the inherited ones.
     #[cfg(feature = "integration-test")]
@@ -317,6 +324,121 @@ impl<'fd> ExecInheritancePlan<'fd> {
     }
 }
 
+/// Binds each recorded slot to the one owner held for it, in `recorded`
+/// order, requiring every owner at exactly the number the manifest records.
+///
+/// # Errors
+/// Refuses a slot with two owners, a recorded slot without an owner, an
+/// owner at another number than recorded, or an owner nothing records.
+pub(crate) fn bind_recorded_descriptors<'fd>(
+    recorded: &[(HandoffDescriptorSlot, RawFd)],
+    owners: &[HandoffDescriptor<'fd>],
+) -> Result<Vec<HandoffDescriptor<'fd>>, ExecBoundaryError> {
+    let mut by_slot = BTreeMap::new();
+    for owner in owners {
+        if by_slot.insert(owner.slot(), *owner).is_some() {
+            return Err(ExecBoundaryError::DuplicateOwner(owner.slot()));
+        }
+    }
+    let mut descriptors = Vec::with_capacity(recorded.len());
+    for &(slot, recorded) in recorded {
+        let owner = by_slot
+            .remove(&slot)
+            .ok_or(ExecBoundaryError::MissingOwner(slot))?;
+        if owner.raw_fd() != recorded {
+            return Err(ExecBoundaryError::Renumbered {
+                slot,
+                recorded,
+                held: owner.raw_fd(),
+            });
+        }
+        descriptors.push(owner);
+    }
+    if let Some(slot) = by_slot.into_keys().next() {
+        return Err(ExecBoundaryError::UnrecordedOwner(slot));
+    }
+    Ok(descriptors)
+}
+
+/// The signals a handoff exec carries blocked: the ones systemd sends a
+/// service (`stop`, `reload`) and an interactive interrupt. Their default
+/// action terminates, and exec resets caught signals to their default.
+const HANDOFF_EXEC_SIGNALS: [Signal; 3] = [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP];
+
+fn handoff_signal_set() -> SigSet {
+    let mut set = SigSet::empty();
+    for signal in HANDOFF_EXEC_SIGNALS {
+        set.add(signal);
+    }
+    set
+}
+
+/// SIGINT, SIGTERM, and SIGHUP blocked on the calling thread for a handoff
+/// exec; dropping it restores the thread's previous mask, so a signal that
+/// arrived meanwhile is delivered then. See the module documentation.
+///
+/// The mask is per thread. Every handoff exec runs under the single-threaded
+/// process guard, so the exec thread is the only thread and its mask is
+/// what crosses exec.
+#[must_use = "dropping it restores the signal mask at once"]
+#[derive(Debug)]
+pub struct BlockedHandoffSignals {
+    previous: SigSet,
+}
+
+impl BlockedHandoffSignals {
+    /// Blocks SIGINT, SIGTERM, and SIGHUP on the calling thread.
+    ///
+    /// # Errors
+    /// Reports a failed `pthread_sigmask`, which changes nothing.
+    pub fn block() -> io::Result<Self> {
+        let mut previous = SigSet::empty();
+        pthread_sigmask(
+            SigmaskHow::SIG_BLOCK,
+            Some(&handoff_signal_set()),
+            Some(&mut previous),
+        )?;
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for BlockedHandoffSignals {
+    fn drop(&mut self) {
+        if let Err(error) = pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&self.previous), None) {
+            error!(%error, "cannot restore the signal mask after a handoff exec boundary");
+        }
+    }
+}
+
+/// Unblocks SIGINT, SIGTERM, and SIGHUP on the calling thread: a candidate
+/// calls it right after installing its handlers, on the thread that
+/// inherited the blocked mask across exec. Any of them that arrived while
+/// blocked is delivered to the handler now. Harmless when none is blocked.
+///
+/// # Errors
+/// Reports a failed `pthread_sigmask`.
+pub fn unblock_handoff_signals() -> io::Result<()> {
+    Ok(pthread_sigmask(
+        SigmaskHow::SIG_UNBLOCK,
+        Some(&handoff_signal_set()),
+        None,
+    )?)
+}
+
+/// Makes `signal` pending again while [`BlockedHandoffSignals`] holds it
+/// blocked, so it crosses the next exec instead of being lost. Used for a
+/// termination a failed candidate's handler already consumed (see
+/// [`crate::handoff_rollback`]).
+///
+/// # Errors
+/// Reports a failed `raise`.
+pub(crate) fn replay_blocked_signal(
+    _blocked: &BlockedHandoffSignals,
+    signal: Signal,
+) -> io::Result<()> {
+    Ok(nix::sys::signal::raise(signal)?)
+}
+
 /// One step of [`cross_exec_boundary`], in order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecBoundaryStage {
@@ -361,9 +483,11 @@ pub enum ExecBoundaryError {
     },
     #[error("cannot prepare descriptor inheritance: {0}")]
     Inheritance(#[source] DescriptorHandoffError),
+    #[error("cannot block the handoff signals: {0}")]
+    SignalMask(#[source] io::Error),
     /// This build does not exec (every build but `integration-test` until
-    /// Plan 0061 M3.11), or the plan names no forward daemon.
-    #[error("exec of the forward daemon is not enabled (Plan 0061 M3.11 gates it)")]
+    /// Plan 0061 M3.11b), or the plan names no forward daemon.
+    #[error("exec of the forward daemon is not enabled (Plan 0061 M3.11b gates it)")]
     ExecNotWired,
     /// `execveat` of the forward daemon returned.
     #[cfg(feature = "integration-test")]
@@ -427,6 +551,13 @@ fn cross_with(
     guard_deadline: Instant,
     mut hook: StageHook<'_>,
 ) -> ExecBoundaryError {
+    // Blocked for the whole boundary, in every build, so a signal that
+    // arrives anywhere in it either crosses exec pending or is delivered to
+    // this generation's handler once the mask is restored on return.
+    let signals = match BlockedHandoffSignals::block() {
+        Ok(signals) => signals,
+        Err(error) => return ExecBoundaryError::SignalMask(error),
+    };
     let guard = match stage(&mut hook, ExecBoundaryStage::Guard).and_then(|()| {
         HandoffProcessGuard::acquire_until(guard_deadline).map_err(ExecBoundaryError::Guard)
     }) {
@@ -435,6 +566,7 @@ fn cross_with(
     };
     let failure = under_guard(&guard, plan, hook);
     drop(guard);
+    drop(signals);
     failure
 }
 
@@ -480,14 +612,16 @@ fn under_guard(
     // `execveat(forward_daemon, "", argv, envp, AT_EMPTY_PATH)` of the sealed
     // forward daemon snapshot, compiled ONLY into `integration-test` builds
     // ([`exec_forward_daemon`]). It returns only when exec fails, and that
-    // failure takes this same restore-and-resume path.
+    // failure takes this same restore-and-resume path. SIGINT, SIGTERM, and
+    // SIGHUP are blocked (`cross_with`), so they cross exec pending.
     //
-    // HARD GATE (Plan 0061 M3.11): production builds must not exec until the
-    // cooperative rollback executor exists. Before it, a candidate that fails
-    // before its adoption commit can only exit, closing every carried PTY
-    // master and so ending every Splint. Enabling this arm outside
-    // `integration-test` is M3.11's decision, not a flag: there is no runtime
-    // switch, and a normal build has no exec code at all.
+    // HARD GATE (Plan 0061 M3.11b): the cooperative rollback executor exists
+    // since M3.11a ([`crate::handoff_rollback`]), so a candidate that fails
+    // before its adoption commit re-executes the sealed rollback daemon with
+    // the unchanged PTYs instead of exiting. Enabling this arm outside
+    // `integration-test` is M3.11b's decision, with its security review, not
+    // a flag: there is no runtime switch, and a normal build has no forward
+    // exec code at all.
     let failure = match stage(&mut hook, ExecBoundaryStage::Exec) {
         Err(failure) => failure,
         #[cfg(not(feature = "integration-test"))]
@@ -516,12 +650,11 @@ fn under_guard(
 /// descriptor, and returns only when exec fails.
 ///
 /// Compiled only into `integration-test` builds: enabling exec in a
-/// production build is a hard gate for Plan 0061 M3.11 (the cooperative
-/// rollback executor); see the call site in `under_guard`. Called with the
-/// process guard held, after both manifests are sealed and exactly the
-/// recorded descriptors were made inheritable; the image descriptor itself
-/// stays close-on-exec, which `execveat(AT_EMPTY_PATH)` of an ELF image
-/// permits.
+/// production build is Plan 0061 M3.11b's gate; see the call site in
+/// `under_guard`. Called with the handoff signals blocked and the process
+/// guard held, after both manifests are sealed and exactly the recorded
+/// descriptors were made inheritable; the image descriptor itself stays
+/// close-on-exec, which `execveat(AT_EMPTY_PATH)` of an ELF image permits.
 #[cfg(feature = "integration-test")]
 fn exec_forward_daemon(plan: &ExecInheritancePlan<'_>) -> ExecBoundaryError {
     let Some(forward) = &plan.forward else {
@@ -540,6 +673,44 @@ fn exec_forward_daemon(plan: &ExecInheritancePlan<'_>) -> ExecBoundaryError {
         nix::fcntl::AtFlags::AT_EMPTY_PATH,
     ) {
         Err(errno) => ExecBoundaryError::Exec(errno.into()),
+        Ok(never) => match never {},
+    }
+}
+
+/// ---- The rollback exec call site (Plan 0061 M3.11a) ----
+///
+/// `execveat(rollback_daemon, "", argv, envp, AT_EMPTY_PATH)` of the sealed
+/// rollback daemon snapshot a forward candidate inherited. Compiled into
+/// every build: it is the only way back for a forward candidate that failed
+/// before its adoption commit, and a production build reaches it only once
+/// a forward exec exists there (M3.11b).
+///
+/// The `_guard` and `_signals` parameters are the proof the call site
+/// requires: the process is single-threaded, SIGINT, SIGTERM, and SIGHUP are
+/// blocked, and the inheritance (`_inheritance`) cleared close-on-exec on
+/// exactly the descriptors the rollback manifest records, at the numbers it
+/// records. The image descriptor is among them (the rollback manifest
+/// records it, so the rollback daemon can verify its own image), so it is
+/// inheritable too; that changes nothing for an ELF image. Returns only
+/// when exec fails before the kernel's point of no return; see the module
+/// documentation for a failure after it.
+#[must_use]
+pub(crate) fn exec_rollback_daemon(
+    _guard: &HandoffProcessGuard,
+    _signals: &BlockedHandoffSignals,
+    _inheritance: &PreparedDescriptorInheritance<'_>,
+    daemon: BorrowedFd<'_>,
+    arguments: &[std::ffi::CString],
+    environment: &[std::ffi::CString],
+) -> io::Error {
+    match nix::unistd::execveat(
+        daemon,
+        c"",
+        arguments,
+        environment,
+        nix::fcntl::AtFlags::AT_EMPTY_PATH,
+    ) {
+        Err(errno) => errno.into(),
         Ok(never) => match never {},
     }
 }
@@ -869,7 +1040,35 @@ mod tests {
     use splinterm_pty::PtySize;
     use splinterm_terminal::{Terminal, TerminalConfig};
 
-    use super::{apply_captured_pixel_geometry, forward_daemon_arguments};
+    use super::{
+        BlockedHandoffSignals, apply_captured_pixel_geometry, candidate_daemon_arguments,
+        unblock_handoff_signals,
+    };
+
+    /// The handoff signals block on this thread, restore exactly on drop,
+    /// and unblock for a candidate that installed its handlers.
+    #[test]
+    fn handoff_signals_block_and_restore_on_the_calling_thread() {
+        use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+
+        let mask = || {
+            let mut set = SigSet::empty();
+            pthread_sigmask(SigmaskHow::SIG_BLOCK, None, Some(&mut set)).unwrap();
+            set
+        };
+        let signals = [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP];
+        let before = mask();
+        let blocked = BlockedHandoffSignals::block().unwrap();
+        assert!(signals.iter().all(|signal| mask().contains(*signal)));
+        drop(blocked);
+        assert_eq!(mask(), before);
+
+        let blocked = BlockedHandoffSignals::block().unwrap();
+        unblock_handoff_signals().unwrap();
+        assert!(signals.iter().all(|signal| !mask().contains(*signal)));
+        drop(blocked);
+        assert_eq!(mask(), before);
+    }
 
     /// The forward argv is the activation flag naming the forward manifest,
     /// then only the arguments the old daemon's state implies: never a copy
@@ -878,7 +1077,7 @@ mod tests {
     fn the_forward_argv_is_rebuilt_from_state() {
         use std::ffi::{CString, OsStr};
 
-        let plain = forward_daemon_arguments(OsStr::new("splinterd"), 7, false).unwrap();
+        let plain = candidate_daemon_arguments(OsStr::new("splinterd"), 7, false).unwrap();
         assert_eq!(
             plain,
             [
@@ -887,7 +1086,7 @@ mod tests {
             ]
         );
         let contained =
-            forward_daemon_arguments(OsStr::new("/usr/bin/splinterd"), 12, true).unwrap();
+            candidate_daemon_arguments(OsStr::new("/usr/bin/splinterd"), 12, true).unwrap();
         assert_eq!(
             contained,
             [
@@ -896,7 +1095,7 @@ mod tests {
                 CString::new("--require-workload-cgroups").unwrap(),
             ]
         );
-        assert!(forward_daemon_arguments(OsStr::new("bad\0name"), 7, false).is_none());
+        assert!(candidate_daemon_arguments(OsStr::new("bad\0name"), 7, false).is_none());
     }
 
     fn size(pixel_width: u16, pixel_height: u16) -> PtySize {

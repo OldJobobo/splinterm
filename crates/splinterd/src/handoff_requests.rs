@@ -7,7 +7,8 @@
 //! beside the retained rollback pair, fences, captures every live Splint, and
 //! builds the manifests (M3.7), then stops the runtime and crosses the exec
 //! boundary (M3.9). Only `integration-test` builds exec there (M3.10); every
-//! other build resumes in process until the rollback executor exists (M3.11).
+//! other build resumes in process until M3.11b enables production exec,
+//! now that the M3.11a rollback executor exists.
 //! Every resume ticket claim fails closed because this daemon
 //! issues no tickets (M3.16). No handoff prepare is ever
 //! pending, so every Window acknowledgement finds nothing to acknowledge

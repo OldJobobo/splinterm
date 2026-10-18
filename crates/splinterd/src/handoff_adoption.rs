@@ -24,8 +24,10 @@
 //! Until commit, every failure returns every owned part in an
 //! [`AdoptionFailure`]: the inherited descriptors, each restored terminal,
 //! and each adopted scope retained again. Nothing is killed and no scope is
-//! stopped, so the rollback executor (M3.11) can exec the rollback image with
-//! the same descriptors.
+//! stopped, so the rollback executor ([`crate::handoff_rollback`]) can exec
+//! the rollback image with the same descriptors at the same numbers. A
+//! refusal on a rollback generation's own adoption has no rollback edge: its
+//! lifecycle ends failed, and the executor refuses it.
 //!
 //! # Exited children
 //!
@@ -80,6 +82,8 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
+#[cfg(feature = "integration-test")]
+use crate::integration_test_seams::CandidateFaultPoint;
 use crate::{
     LiveError, LiveSplintConfig, LiveSplintRuntime, ProcessExit, ProcessIncarnation,
     ProcessPlacement, StagedLiveSplint,
@@ -261,6 +265,11 @@ pub enum AdoptionError {
     /// never ran.
     #[error("the adopting daemon could not start: {0}")]
     DaemonStartup(String),
+    /// A test-only fault (Plan 0061 D9): see
+    /// [`crate::integration_test_seams::CANDIDATE_FAULT_ENV`].
+    #[cfg(feature = "integration-test")]
+    #[error("injected candidate fault at {0}")]
+    Injected(&'static str),
 }
 
 /// A refused adoption with every owned part, for cooperative rollback.
@@ -315,7 +324,12 @@ impl AdoptionFailure {
 /// child unreaped, and every scope this attempt adopted retained again so
 /// that dropping this value stops nothing.
 ///
-/// The lifecycle is rolling back. Dropping this value closes every
+/// The lifecycle is rolling back for a forward candidate and failed for a
+/// rollback generation, which has no rollback edge. Only a refusal before
+/// commit ([`AdoptionFailure`], [`CandidateRuntimeStage::refuse`]) or
+/// [`StagedAdoption::abort`] builds this value; [`StagedAdoption::commit`]
+/// consumes the staged adoption and closes the rollback-only descriptors, so
+/// no committed adoption can produce one. Dropping this value closes every
 /// descriptor, which hangs up the carried terminals.
 pub struct AdoptionRecovery {
     lifecycle: HandoffLifecycle,
@@ -346,6 +360,19 @@ impl AdoptionRecovery {
     #[must_use]
     pub fn retained_scopes(&self) -> &[RetainedWorkloadScope] {
         &self.retained_scopes
+    }
+
+    /// The handoff phase: rolling back, or failed for a rollback generation.
+    pub(crate) const fn lifecycle_phase(&self) -> HandoffPhase {
+        self.lifecycle.phase()
+    }
+
+    /// Moves the lifecycle and every owned part out for the rollback
+    /// executor (`handoff_rollback`). The retained scopes need nothing: they
+    /// are identities of scopes systemd keeps, which the rollback generation
+    /// adopts again.
+    pub(crate) fn into_rollback_parts(self) -> (HandoffLifecycle, CandidateStagedAuthorities) {
+        (self.lifecycle, self.authorities)
     }
 }
 
@@ -775,10 +802,9 @@ impl AdoptionShell {
     ) -> AdoptionFailure {
         let (splints, retained_scopes) = guard.unwind();
         let mut lifecycle = self.lifecycle;
-        if lifecycle.phase() == HandoffPhase::AdoptionStaged {
-            // Always a valid edge from the only phase that adopts.
-            let _ = lifecycle.transition(HandoffPhase::RollingBack);
-        }
+        // Rolling back for a forward candidate; failed for a rollback
+        // generation, which has no rollback edge (Plan 0061 M3.11).
+        lifecycle.refuse_before_commit();
         AdoptionFailure {
             error,
             recovery: Box::new(AdoptionRecovery {
@@ -900,6 +926,10 @@ impl CandidateRuntimeStage {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fallible adoption steps in order, with the test-only fault points between them"
+)]
 async fn prepare<A: WorkloadScopeAdopter>(
     shell: &AdoptionShell,
     guard: &mut AdoptionGuard<A::Scope>,
@@ -939,6 +969,12 @@ async fn prepare<A: WorkloadScopeAdopter>(
     let listener = register_listener(HandoffDescriptorSlot::Listener, &shell.listener)?;
     let image_listener =
         register_listener(HandoffDescriptorSlot::ImageListener, &shell.image_listener)?;
+    #[cfg(feature = "integration-test")]
+    injected(
+        CandidateFaultPoint::ListenerRegistration,
+        manifest,
+        "listener registration",
+    )?;
     info!("handoff adoption: inherited listeners registered");
     if workload_cgroups_required && workload_units.is_none() {
         return Err(AdoptionError::WorkloadCgroupsUnavailable);
@@ -970,6 +1006,12 @@ async fn prepare<A: WorkloadScopeAdopter>(
         rejected = policy_generation.diagnostic.is_some(),
         "handoff adoption: persistent policy reloaded"
     );
+    #[cfg(feature = "integration-test")]
+    injected(
+        CandidateFaultPoint::ScopeAdoption,
+        manifest,
+        "scope adoption",
+    )?;
     let (reclaimed_slices, unreclaimed_slices) = match workload_units {
         Some(adopter) => {
             adopt_scopes(&adopter, guard, workload_cgroups_required).await?;
@@ -987,6 +1029,20 @@ async fn prepare<A: WorkloadScopeAdopter>(
         unreclaimed_slices = unreclaimed_slices.len(),
         "handoff adoption: workload scopes adopted"
     );
+    // The fault stages the first actor only, so the refusal unwinds one
+    // staged actor and the pending rest.
+    #[cfg(feature = "integration-test")]
+    if crate::integration_test_seams::candidate_fault(
+        CandidateFaultPoint::ActorStaging,
+        manifest.kind,
+    ) && guard.pending.len() > 1
+    {
+        let rest = guard.pending.split_off(1);
+        let staged = stage_actors(guard, &live_config);
+        guard.pending.extend(rest);
+        staged?;
+        return Err(AdoptionError::Injected("actor staging"));
+    }
     stage_actors(guard, &live_config)?;
     info!(
         staged = guard.staged.len(),
@@ -1003,6 +1059,20 @@ async fn prepare<A: WorkloadScopeAdopter>(
         reclaimed_slices,
         unreclaimed_slices,
     })
+}
+
+/// Fails with [`AdoptionError::Injected`] when the test-only fault at
+/// `point` is armed for this manifest's kind (Plan 0061 D9).
+#[cfg(feature = "integration-test")]
+fn injected(
+    point: CandidateFaultPoint,
+    manifest: &HandoffManifestV1,
+    what: &'static str,
+) -> Result<(), AdoptionError> {
+    if crate::integration_test_seams::candidate_fault(point, manifest.kind) {
+        return Err(AdoptionError::Injected(what));
+    }
+    Ok(())
 }
 
 /// Takes the prefix only from the authenticated manifest (never the running
@@ -2124,6 +2194,98 @@ mod tests {
         assert!(matches!(failure.error(), AdoptionError::DaemonStartup(_)));
         assert!(failure.to_string().contains("no metadata store"));
         assert!(harness.assert_recovered(failure.into_recovery()).is_empty());
+    }
+
+    /// The rollback executor's input for a refused harness candidate, with a
+    /// guard deadline already passed so nothing can wait.
+    fn rollback_exec() -> crate::handoff_rollback::RollbackExec {
+        crate::handoff_rollback::RollbackExec {
+            program: "splinterd".into(),
+            workload_cgroups_required: false,
+            environment: Vec::new(),
+            guard_deadline: Instant::now(),
+            pending: crate::handoff_rollback::PendingTermination::default(),
+        }
+    }
+
+    /// Reaps the carried children after the executor dropped (and so closed)
+    /// their PTY masters, which hangs them up.
+    fn reap_hung_up(manifest: &HandoffManifestV1) {
+        for splint in &manifest.splints {
+            let pid = Pid::from_raw(i32::try_from(splint.pty.child_pid).unwrap()).unwrap();
+            waitid(WaitId::Pid(pid), WaitIdOptions::EXITED).unwrap();
+        }
+    }
+
+    /// The calling thread's blocked signal mask.
+    fn signal_mask() -> nix::sys::signal::SigSet {
+        let mut mask = nix::sys::signal::SigSet::empty();
+        nix::sys::signal::pthread_sigmask(
+            nix::sys::signal::SigmaskHow::SIG_BLOCK,
+            None,
+            Some(&mut mask),
+        )
+        .unwrap();
+        mask
+    }
+
+    /// Plan 0061 M3.11: a refusal on a rollback generation's own adoption
+    /// has no rollback edge. Its lifecycle ends failed, and the executor
+    /// refuses it before touching a descriptor or the signal mask.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rollback_generation_has_no_rollback_edge() {
+        let mut harness = Harness::new(&[CAT], |_, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+        })
+        .await;
+        let failure = harness
+            .stage
+            .take()
+            .unwrap()
+            .refuse(AdoptionError::DaemonStartup("no metadata store".to_owned()));
+        let recovery: crate::handoff_rollback::PreCommitRecovery = failure.into();
+        assert!(!recovery.has_rollback_edge());
+        let mask = signal_mask();
+        let refused = crate::handoff_rollback::execute_rollback(recovery, &rollback_exec());
+        assert!(
+            matches!(
+                refused,
+                crate::handoff_rollback::RollbackError::NoRollbackEdge
+            ),
+            "{refused}"
+        );
+        assert_eq!(signal_mask(), mask);
+        reap_hung_up(&harness.manifest);
+    }
+
+    /// The executor binds every recovered descriptor to the number the
+    /// rollback manifest records and renumbers nothing: a recovery holding a
+    /// descriptor elsewhere (the harness duplicates the manifest memfds)
+    /// refuses before the signal mask, the guard, or exec.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rollback_refuses_a_descriptor_away_from_its_recorded_number() {
+        let mut harness = Harness::new(&[CAT], no_change).await;
+        let failure = harness
+            .stage
+            .take()
+            .unwrap()
+            .refuse(AdoptionError::DaemonStartup("no metadata store".to_owned()));
+        let recovery: crate::handoff_rollback::PreCommitRecovery = failure.into();
+        assert!(recovery.has_rollback_edge());
+        assert_eq!(recovery.carried_splints(), Some(1));
+        let mask = signal_mask();
+        let refused = crate::handoff_rollback::execute_rollback(recovery, &rollback_exec());
+        assert!(
+            matches!(
+                refused,
+                crate::handoff_rollback::RollbackError::Descriptors(
+                    crate::handoff_exec::ExecBoundaryError::Renumbered { .. }
+                )
+            ),
+            "{refused}"
+        );
+        assert_eq!(signal_mask(), mask);
+        reap_hung_up(&harness.manifest);
     }
 
     /// The committed adoption names the installed daemon its image came from

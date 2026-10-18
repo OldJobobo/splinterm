@@ -171,6 +171,13 @@ impl CandidatePreRuntimeStage {
                 stage: Box::new(stage),
             });
         }
+        #[cfg(feature = "integration-test")]
+        if stage.injected_fault(crate::integration_test_seams::CandidateFaultPoint::RuntimeEntry) {
+            return Err(CandidateEntryFailure {
+                error: HandoffCoordinatorError::UnexpectedPhase,
+                stage: Box::new(stage),
+            });
+        }
         Ok(stage)
     }
 }
@@ -205,6 +212,38 @@ impl CandidateRuntimeStage {
     /// (`handoff_adoption`).
     pub(crate) fn into_parts(self) -> (HandoffLifecycle, CandidateStagedAuthorities) {
         (self.lifecycle, self.authorities)
+    }
+
+    /// Whether the test-only fault at `point` is armed for this candidate's
+    /// manifest kind (Plan 0061 D9).
+    #[cfg(feature = "integration-test")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn injected_fault(
+        &self,
+        point: crate::integration_test_seams::CandidateFaultPoint,
+    ) -> bool {
+        crate::integration_test_seams::candidate_fault(point, self.authorities.manifest.kind)
+    }
+}
+
+impl CandidateBootstrap {
+    /// The handoff phase: rolling back (or failed, for a rollback
+    /// generation) once recovered from a staging failure.
+    pub(crate) const fn lifecycle_phase(&self) -> HandoffPhase {
+        self.lifecycle.phase()
+    }
+
+    /// Moves the decoded current manifest, the claimed owner table, and the
+    /// lifecycle out for the rollback executor (`handoff_rollback`).
+    pub(crate) fn into_rollback_parts(
+        self,
+    ) -> (
+        HandoffManifestV1,
+        CandidateDescriptorClaims,
+        HandoffLifecycle,
+    ) {
+        (self.manifest, self.claims, self.lifecycle)
     }
 }
 
@@ -255,7 +294,7 @@ impl CandidateRuntimeStage {
                 checkpoint_descriptor: checkpoint,
             });
         }
-        let mut lifecycle = HandoffLifecycle::candidate_claimed();
+        let mut lifecycle = HandoffLifecycle::candidate_claimed(parts.manifest.kind);
         lifecycle.transition(HandoffPhase::AdoptionStaged)?;
         Ok(Self {
             lifecycle,
@@ -358,6 +397,13 @@ pub(crate) enum CandidateBootstrapError {
     InvalidListeners,
     #[error("candidate terminal state does not match manifest evidence")]
     TerminalMismatch,
+    #[error("the candidate daemon could not start staging: {0}")]
+    DaemonStartup(String),
+    /// A test-only fault (Plan 0061 D9): see
+    /// [`crate::integration_test_seams::CANDIDATE_FAULT_ENV`].
+    #[cfg(feature = "integration-test")]
+    #[error("injected candidate fault at {0}")]
+    Injected(&'static str),
 }
 
 /// Canonical-decodes one bounded manifest body and derives its exact raw set.
@@ -403,18 +449,30 @@ pub fn bind_candidate_manifest(
     }
     let claims = CandidateDescriptorClaims::bind(&acquisition.manifest, claimed)
         .map_err(CandidateBootstrapError::from)?;
+    // The lifecycle knows the manifest's kind: only a forward candidate has
+    // a rollback edge (Plan 0061 M3.11).
+    let lifecycle = HandoffLifecycle::candidate_claimed(acquisition.manifest.kind);
     Ok(CandidateBootstrap {
         manifest: acquisition.manifest,
         claims,
         process_guard: Some(process_guard),
-        lifecycle: HandoffLifecycle::candidate_claimed(),
+        lifecycle,
     })
 }
 
 impl CandidateBootstrap {
+    /// Refuses staging before it starts, because the daemon could not build
+    /// an input staging needs (its socket paths), and returns the complete
+    /// claimed owner table exactly as a staging failure does: the guard is
+    /// released and the lifecycle takes its pre-commit failure edge.
+    #[must_use]
+    pub fn refuse(self, reason: String) -> CandidateStageFailure {
+        self.into_stage_failure(CandidateBootstrapError::DaemonStartup(reason))
+    }
+
     /// Completes every fallible descriptor and terminal check without reading a
     /// PTY or accepting a connection, then transfers owners into a staging set.
-    /// A validation failure returns the complete claimed owner table for future
+    /// A validation failure returns the complete claimed owner table for
     /// cooperative rollback. Success keeps the process guard in the returned
     /// pre-runtime stage; failure releases it.
     ///
@@ -446,6 +504,13 @@ impl CandidateBootstrap {
             Ok(verified) => verified,
             Err(error) => return Err(self.into_stage_failure(error)),
         };
+        #[cfg(feature = "integration-test")]
+        if crate::integration_test_seams::candidate_fault(
+            crate::integration_test_seams::CandidateFaultPoint::Staging,
+            self.manifest.kind,
+        ) {
+            return Err(self.into_stage_failure(CandidateBootstrapError::Injected("staging")));
+        }
         if let Err(error) = self.lifecycle.transition(HandoffPhase::AdoptionStaged) {
             return Err(self.into_stage_failure(error.into()));
         }
@@ -453,8 +518,10 @@ impl CandidateBootstrap {
     }
 
     /// Retains the complete owner table without the thread-affine guard. The
-    /// lifecycle moves to rolling back, so the phase machine itself, not only
-    /// the missing guard, refuses to stage the recovered table again.
+    /// lifecycle takes its pre-commit failure edge (rolling back for a
+    /// forward candidate, failed for a rollback generation), so the phase
+    /// machine itself, not only the missing guard, refuses to stage the
+    /// recovered table again.
     fn into_stage_failure(self, error: CandidateBootstrapError) -> CandidateStageFailure {
         let Self {
             manifest,
@@ -463,10 +530,7 @@ impl CandidateBootstrap {
             mut lifecycle,
         } = self;
         drop(process_guard);
-        if lifecycle.phase() == HandoffPhase::CandidateClaimed {
-            // Always a valid edge from the only phase that stages.
-            let _ = lifecycle.transition(HandoffPhase::RollingBack);
-        }
+        lifecycle.refuse_before_commit();
         CandidateStageFailure {
             error,
             recovery: Box::new(CandidateRecovery {
@@ -793,7 +857,7 @@ fn stage_splint(
     Ok((terminal, identity))
 }
 
-fn current_manifest_slot(kind: ManifestKind) -> HandoffDescriptorSlot {
+pub(crate) fn current_manifest_slot(kind: ManifestKind) -> HandoffDescriptorSlot {
     match kind {
         ManifestKind::Forward => HandoffDescriptorSlot::CheckpointManifest,
         ManifestKind::Rollback => HandoffDescriptorSlot::RollbackManifest,
@@ -886,7 +950,7 @@ fn manifest_cell_pixels(size: ManifestPtySize) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
-fn terminal_checkpoint_slot(
+pub(crate) fn terminal_checkpoint_slot(
     splint: &ManifestSplint,
 ) -> Result<HandoffDescriptorSlot, CandidateBootstrapError> {
     match splint.terminal_checkpoint {
@@ -1276,11 +1340,12 @@ mod tests {
         )
         .unwrap();
         let claims = CandidateDescriptorClaims::bind(&manifest, claimed).unwrap();
+        let lifecycle = HandoffLifecycle::candidate_claimed(manifest.kind);
         CandidateBootstrap {
             manifest,
             claims,
             process_guard: None,
-            lifecycle: HandoffLifecycle::candidate_claimed(),
+            lifecycle,
         }
     }
 
