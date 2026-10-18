@@ -100,6 +100,10 @@ pub struct AppConfig {
     /// Whether explicitly reported agent status is shown in the Explorer, on
     /// Dojo tabs, and in navigation accessibility (`[explorer] agent-status`).
     pub explorer_agent_status: bool,
+    /// Whether a graphical client under Omarchy may show the one-time hint
+    /// that recommends `splinterm integration omarchy enable`
+    /// (`[main] omarchy-integration-hint`).
+    pub omarchy_integration_hint: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -190,6 +194,7 @@ impl Default for AppConfig {
             preset_catalog: Some(PresetCatalog::bundled()),
             allow_unrestricted_commands: false,
             explorer_agent_status: true,
+            omarchy_integration_hint: true,
         }
     }
 }
@@ -966,6 +971,10 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             }
             "explorer.agent-status" => {
                 config.explorer_agent_status = parse_bool(value, index)?;
+                false
+            }
+            "main.omarchy-integration-hint" | "omarchy-integration-hint" => {
+                config.omarchy_integration_hint = parse_bool(value, index)?;
                 false
             }
             "multiplexer.frame-title" => {
@@ -2240,6 +2249,20 @@ mod tests {
         let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
         assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
         assert!(shipped.config.explorer_agent_status);
+    }
+
+    #[test]
+    fn omarchy_integration_hint_defaults_on_and_can_be_suppressed() {
+        assert!(AppConfig::default().omarchy_integration_hint);
+        for (value, expected) in [("yes", true), ("no", false), ("off", false), ("1", true)] {
+            let loaded = parse(&format!("[main]\nomarchy-integration-hint={value}\n")).unwrap();
+            assert_eq!(loaded.config.omarchy_integration_hint, expected);
+            assert_eq!(loaded.diagnostics, Vec::<String>::new());
+        }
+        assert!(parse("[main]\nomarchy-integration-hint=later\n").is_err());
+        let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
+        assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
+        assert!(shipped.config.omarchy_integration_hint);
     }
 
     #[test]

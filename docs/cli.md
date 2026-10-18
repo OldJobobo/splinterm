@@ -268,9 +268,13 @@ history without sending keys to the terminal application.
 Outside copy mode, both built-in profiles use `Ctrl+Shift+C/V` and `Super+C/V`
 to copy the terminal selection and perform safe/bracketed paste. The
 `omarchy-tmux` profile advertises `Ctrl+Shift+C/V` as its primary
-compositor-safe route, and both profiles accept Omarchy's terminal-tagged
-`Ctrl+Insert`/`Shift+Insert`. Omarchy must classify `com.oldjobobo.splinterm` as
-terminal; ordinary `Ctrl+C` remains terminal interrupt. In copy mode, `Super+C` copies the active selection and exits,
+compositor-safe route. For its universal `Super+C/V`, current Omarchy
+(`quattro` since `129c67e2`, after 4.0.4) sends terminal-tagged windows
+`Ctrl+Shift+C/V`, while Omarchy 3.x and 4.0.x send
+`Ctrl+Insert`/`Shift+Insert`; both profiles accept both. Omarchy must classify
+`com.oldjobobo.splinterm` as terminal, which `splinterm integration omarchy
+enable` arranges; otherwise Omarchy sends ordinary `Ctrl+C`, which remains
+terminal interrupt. In copy mode, `Super+C` copies the active selection and exits,
 while `Super+V/X/Z` are consumed locally. These Super shortcuts work only when
 the compositor delivers the chord to the Splinterm Window. Splinterm-owned
 command-palette, keybinding-help, search, and rename fields accept effective

@@ -20,9 +20,12 @@ const CANDIDATE_MANIFEST_FD_ENV: &str = "SPLINTERM_INTERNAL_HANDOFF_MANIFEST_FD"
 /// later route to cooperative rollback rather than ordinary startup.
 ///
 /// # Errors
-/// Rejects malformed activation, multi-threaded entry, an absent, uninherited,
-/// mutable, or noncanonical manifest, manifest self-link mismatch, raw claim
-/// failure, or typed binding mismatch.
+/// Rejects malformed activation, multi-threaded entry or a competing handoff
+/// guard, an absent, uninherited, mutable, or noncanonical manifest, manifest
+/// self-link mismatch, raw claim failure, or typed binding mismatch.
+///
+/// The returned bootstrap holds the exclusive single-threaded handoff process
+/// guard until staging releases it at the runtime boundary.
 #[allow(
     unsafe_code,
     reason = "sole audited invocation of the post-exec inherited-FD leaf boundary"
@@ -39,6 +42,7 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
         .and_then(|raw| raw.parse::<RawFd>().ok())
         .filter(|fd| *fd >= 3)
         .context("candidate manifest descriptor activation is invalid")?;
+    let process_guard = splinterd::handoff_coordinator::HandoffProcessGuard::acquire()?;
 
     // SAFETY: `main` calls this first, before preflight dispatch, Tokio,
     // tracing, listeners, or any other descriptor owner exists, so the process
@@ -47,7 +51,8 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
     // with FD_CLOEXEC clear. Nothing between the positioned read, canonical
     // decode, expected-set derivation, and claim opens, closes, or replaces an
     // inheritable descriptor; the leaf's procfs reads are close-on-exec and
-    // closed before the claim scans. So every non-standard inheritable
+    // closed before the claim scans, as is the process guard's procfs thread
+    // observation just above. So every non-standard inheritable
     // descriptor crossed exec without a surviving Rust owner, including
     // unexpected entries the claim closes. Both leaf entrypoints also reject a second thread.
     let (acquisition, claimed) = unsafe {
@@ -61,7 +66,7 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
         )?;
         (acquisition, claimed)
     };
-    splinterd::bind_candidate_manifest(acquisition, claimed).map(Some)
+    splinterd::bind_candidate_manifest(acquisition, claimed, process_guard).map(Some)
     })()
     .with_context(|| {
         format!(
