@@ -10110,8 +10110,18 @@ mod tests {
             handle.prepare_pty_handoff().await,
             Err(LiveError::HandoffStateUnsupported)
         ));
-        shutdown.abort();
-        drop(runtime);
+        // The shell ignores HUP and TERM, so aborting the shutdown and
+        // dropping the runtime would orphan it. Kill its process group and
+        // let the shutdown observe and reap the exit.
+        let group =
+            rustix::process::Pid::from_raw(i32::try_from(handle.child_pid()).unwrap()).unwrap();
+        rustix::process::kill_process_group(group, rustix::process::Signal::KILL).unwrap();
+        time::timeout(Duration::from_secs(10), shutdown)
+            .await
+            .expect("shutdown completes once the shell is killed")
+            .unwrap()
+            .unwrap();
+        runtime.wait().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
