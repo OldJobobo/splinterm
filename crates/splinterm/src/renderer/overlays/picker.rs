@@ -456,6 +456,27 @@ fn contrast_corrected_toward(foreground: u32, target: u32, background: u32) -> u
     mix_linear(foreground, target, passing)
 }
 
+/// Corrects `foreground` toward the strongest endpoint until it keeps the floor
+/// against every one of `backgrounds`. `None` when a few passes cannot satisfy
+/// them all, as when they pull toward opposite endpoints.
+fn contrast_corrected_against_all(foreground: u32, backgrounds: &[u32]) -> Option<u32> {
+    let readable = |color: u32| {
+        backgrounds
+            .iter()
+            .all(|&background| contrast_ratio(color, background) >= PANEL_TEXT_MIN_CONTRAST)
+    };
+    let mut corrected = foreground;
+    for _ in 0..4 {
+        if readable(corrected) {
+            return Some(corrected);
+        }
+        for &background in backgrounds {
+            corrected = contrast_corrected(corrected, background);
+        }
+    }
+    readable(corrected).then_some(corrected)
+}
+
 fn contrast_corrected(foreground: u32, background: u32) -> u32 {
     contrast_corrected_toward(
         foreground,
@@ -496,9 +517,32 @@ impl ChromeSurface {
             Self::Popup => vec![palette.primary, palette.secondary, palette.selected_rail],
         }
     }
+
+    /// Every way text meets this surface's panel fill: straight on it, and on
+    /// an unselected row under the translucent hover highlight, the press
+    /// highlight, or both. The action palette, the session picker and the tab
+    /// context menu blend those highlights before painting primary or
+    /// secondary row text; selected rows sit on the opaque selected fill.
+    fn panel_text_layers(self, palette: &SessionPickerPalette) -> Vec<PanelTextLayer> {
+        let row_text = vec![palette.highlight_primary, palette.highlight_secondary];
+        let mut layers = vec![PanelTextLayer {
+            overlays: Vec::new(),
+            text: self.panel_foregrounds(palette),
+        }];
+        layers.extend(
+            highlight_overlays(palette)
+                .into_iter()
+                .map(|overlays| PanelTextLayer {
+                    overlays,
+                    text: row_text.clone(),
+                }),
+        );
+        layers
+    }
 }
 
 /// Mixes two colours in encoded sRGB, the space the compositor blends in.
+#[cfg(test)]
 fn mix_encoded(first: u32, second: u32, second_weight: f64) -> u32 {
     let first = rgb_channels(first);
     let second = rgb_channels(second);
@@ -511,20 +555,106 @@ fn mix_encoded(first: u32, second: u32, second_weight: f64) -> u32 {
     }))
 }
 
-/// Whether every `text` colour keeps the contrast floor over `panel` drawn at
-/// `coverage`, whatever the backdrop behind it. The visible background is
-/// `coverage * panel + (1 - coverage) * backdrop`; luminance is monotonic in
-/// each channel, so the black and white backdrops bound every other one, and
-/// text whose luminance falls between them can meet an equal backdrop.
-fn panel_text_readable(panel: u32, coverage: f64, text: &[u32]) -> bool {
-    let darkest = mix_encoded(panel, 0, 1.0 - coverage);
-    let lightest = mix_encoded(panel, 0x00ff_ffff, 1.0 - coverage);
+/// Alpha, out of 255, of the translucent highlight blended over a hovered row.
+pub(crate) const ROW_HOVER_ALPHA: u8 = 64;
+/// Alpha, out of 255, of the translucent highlight blended over a pressed row.
+pub(crate) const ROW_PRESS_ALPHA: u8 = 48;
+
+/// One way text appears on a panel fill: the translucent `overlays`
+/// (`(colour, alpha out of 255)`, in paint order) blended over the panel first,
+/// then the `text` colours painted on top.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PanelTextLayer {
+    overlays: Vec<(u32, u8)>,
+    text: Vec<u32>,
+}
+
+/// The colour seen where `overlays` are blended over `panel` drawn at
+/// `coverage` above `backdrop`. Like the canvas and the compositor, it blends
+/// in encoded sRGB: the panel over the backdrop, then each overlay over that.
+fn visible_panel_color(panel: u32, coverage: f64, overlays: &[(u32, u8)], backdrop: u32) -> u32 {
+    let panel = rgb_channels(panel);
+    let backdrop = rgb_channels(backdrop);
+    let mut visible: [f64; 3] = std::array::from_fn(|index| {
+        f64::from(panel[index]) * coverage + f64::from(backdrop[index]) * (1.0 - coverage)
+    });
+    for &(color, alpha) in overlays {
+        let color = rgb_channels(color);
+        let alpha = f64::from(alpha) / 255.0;
+        for (channel, overlay) in visible.iter_mut().zip(color) {
+            *channel = f64::from(overlay) * alpha + *channel * (1.0 - alpha);
+        }
+    }
+    packed_channels(visible.map(|channel| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let channel = channel.round().clamp(0.0, 255.0) as u8;
+        channel
+    }))
+}
+
+/// Whether every text colour of `layer` keeps the contrast floor over `panel`
+/// drawn at `coverage`, whatever the backdrop behind it. The visible
+/// background is affine in the backdrop with non-negative weights, and
+/// luminance is monotonic in each channel, so the black and white backdrops
+/// bound every other one; text whose luminance falls between them can meet an
+/// equal backdrop.
+fn panel_layer_readable(panel: u32, coverage: f64, layer: &PanelTextLayer) -> bool {
+    let darkest = visible_panel_color(panel, coverage, &layer.overlays, 0);
+    let lightest = visible_panel_color(panel, coverage, &layer.overlays, 0x00ff_ffff);
     let range = relative_luminance(darkest)..=relative_luminance(lightest);
-    text.iter().all(|&color| {
+    layer.text.iter().all(|&color| {
         !range.contains(&relative_luminance(color))
             && contrast_ratio(color, darkest).min(contrast_ratio(color, lightest))
                 >= PANEL_TEXT_MIN_CONTRAST
     })
+}
+
+fn panel_layers_readable(panel: u32, coverage: f64, layers: &[PanelTextLayer]) -> bool {
+    layers
+        .iter()
+        .all(|layer| panel_layer_readable(panel, coverage, layer))
+}
+
+/// Whether `text` painted straight on the panel keeps the floor.
+#[cfg(test)]
+fn panel_text_readable(panel: u32, coverage: f64, text: &[u32]) -> bool {
+    panel_layer_readable(
+        panel,
+        coverage,
+        &PanelTextLayer {
+            overlays: Vec::new(),
+            text: text.to_vec(),
+        },
+    )
+}
+
+/// The panel coverage a shell alpha asks for over a window's own glass:
+/// `1 - (1 - shell) * (1 - window)`.
+fn configured_panel_coverage(shell_alpha: u16, window_alpha: u16) -> f64 {
+    let shell = f64::from(shell_alpha) / f64::from(u16::MAX);
+    let window = f64::from(window_alpha) / f64::from(u16::MAX);
+    1.0 - (1.0 - shell) * (1.0 - window)
+}
+
+/// The premultiplied fill for a chrome panel that follows an Omarchy shell
+/// `background-alpha` (`shell_alpha`) over a window whose background has
+/// `window_alpha`, with `text` painted straight on it. See
+/// `chrome_panel_fill_layers`.
+pub(crate) fn chrome_panel_fill(
+    panel: u32,
+    shell_alpha: u16,
+    window_alpha: u16,
+    text: &[u32],
+) -> [u8; 4] {
+    chrome_panel_fill_layers(
+        panel,
+        shell_alpha,
+        window_alpha,
+        &[PanelTextLayer {
+            overlays: Vec::new(),
+            text: text.to_vec(),
+        }],
+    )
 }
 
 /// The premultiplied fill for a chrome panel that follows an Omarchy shell
@@ -537,28 +667,27 @@ fn panel_text_readable(panel: u32, coverage: f64, text: &[u32]) -> bool {
 /// therefore keeps opaque panels, and a glassy one shows its blurred backdrop
 /// through them no more than through the terminal itself. Text over an
 /// unknown backdrop must stay readable, so the coverage is raised to the
-/// lowest value at which every `text` colour keeps 4.5:1 against a black and
-/// a white backdrop alike. Text that misses the floor even on the opaque
-/// panel keeps the panel opaque.
-pub(crate) fn chrome_panel_fill(
+/// lowest value at which every text colour of every layer, including text on
+/// translucent row highlights, keeps 4.5:1 against a black and a white
+/// backdrop alike. Text that misses the floor even on the opaque panel keeps
+/// the panel opaque.
+fn chrome_panel_fill_layers(
     panel: u32,
     shell_alpha: u16,
     window_alpha: u16,
-    text: &[u32],
+    layers: &[PanelTextLayer],
 ) -> [u8; 4] {
-    let shell = f64::from(shell_alpha) / f64::from(u16::MAX);
-    let window = f64::from(window_alpha) / f64::from(u16::MAX);
-    let configured = 1.0 - (1.0 - shell) * (1.0 - window);
-    let coverage = if panel_text_readable(panel, configured, text) {
+    let configured = configured_panel_coverage(shell_alpha, window_alpha);
+    let coverage = if panel_layers_readable(panel, configured, layers) {
         configured
-    } else if !panel_text_readable(panel, 1.0, text) {
+    } else if !panel_layers_readable(panel, 1.0, layers) {
         1.0
     } else {
         let mut failing = configured;
         let mut passing = 1.0_f64;
         for _ in 0..24 {
             let candidate = f64::midpoint(failing, passing);
-            if panel_text_readable(panel, candidate, text) {
+            if panel_layers_readable(panel, candidate, layers) {
                 passing = candidate;
             } else {
                 failing = candidate;
@@ -587,7 +716,26 @@ pub(crate) struct SessionPickerPalette {
     pub(crate) selected_fill: u32,
     pub(crate) selected_primary: u32,
     pub(crate) selected_secondary: u32,
+    /// Text for an unselected row under the translucent hover or press
+    /// highlight, corrected to 4.5:1 against every opaque highlight state.
+    pub(crate) highlight_primary: u32,
+    pub(crate) highlight_secondary: u32,
     pub(crate) shadow: [u8; 4],
+}
+
+impl SessionPickerPalette {
+    /// The primary and secondary text for a row: the selected pair on the
+    /// selected fill, the highlight pair under a hover or press highlight, and
+    /// the panel pair otherwise.
+    pub(crate) const fn row_text(&self, selected: bool, highlighted: bool) -> (u32, u32) {
+        if selected {
+            (self.selected_primary, self.selected_secondary)
+        } else if highlighted {
+            (self.highlight_primary, self.highlight_secondary)
+        } else {
+            (self.primary, self.secondary)
+        }
+    }
 }
 
 #[must_use]
@@ -611,6 +759,20 @@ pub(crate) fn session_picker_palette(theme: ResolvedTheme) -> SessionPickerPalet
         theme.ui_accent
     };
     let [red, green, blue] = rgb_channels(mix_linear(theme.background, 0, 0.80));
+    // Every opaque state an unselected highlighted row can be in.
+    let highlight_states = [
+        vec![(selected_fill, ROW_HOVER_ALPHA)],
+        vec![(theme.ui_accent, ROW_PRESS_ALPHA)],
+        vec![
+            (selected_fill, ROW_HOVER_ALPHA),
+            (theme.ui_accent, ROW_PRESS_ALPHA),
+        ],
+    ]
+    .map(|overlays| visible_panel_color(theme.background, 1.0, &overlays, 0));
+    let highlight_primary =
+        contrast_corrected_against_all(primary, &highlight_states).unwrap_or(primary);
+    let highlight_secondary =
+        contrast_corrected_against_all(secondary, &highlight_states).unwrap_or(secondary);
     let [panel_red, panel_green, panel_blue] = rgb_channels(theme.background);
     SessionPickerPalette {
         scrim: [red, green, blue, 140],
@@ -624,6 +786,8 @@ pub(crate) fn session_picker_palette(theme: ResolvedTheme) -> SessionPickerPalet
         selected_fill,
         selected_primary,
         selected_secondary,
+        highlight_primary,
+        highlight_secondary,
         shadow: [0, 0, 0, 89],
     }
 }
@@ -638,13 +802,45 @@ pub(crate) fn chrome_panel_palette(
     surface: ChromeSurface,
 ) -> SessionPickerPalette {
     let mut palette = session_picker_palette(theme);
-    palette.panel_fill = chrome_panel_fill(
+    let shell_alpha = surface.shell_alpha(theme.shell);
+    let configured = configured_panel_coverage(shell_alpha, theme.background_alpha);
+    if configured < 1.0 {
+        // Highlighted rows are transient, so their text is corrected further,
+        // against the highlights over black and white backdrops at the asked
+        // coverage, before the coverage floor is applied to everything.
+        let backgrounds = highlight_overlays(&palette)
+            .iter()
+            .flat_map(|overlays| {
+                [0, 0x00ff_ffff].map(|backdrop| {
+                    visible_panel_color(palette.panel, configured, overlays, backdrop)
+                })
+            })
+            .collect::<Vec<_>>();
+        // Keep the opaque correction when no colour fits both backdrops; the
+        // coverage floor then raises the panel instead.
+        if let (Some(primary), Some(secondary)) = (
+            contrast_corrected_against_all(palette.highlight_primary, &backgrounds),
+            contrast_corrected_against_all(palette.highlight_secondary, &backgrounds),
+        ) {
+            palette.highlight_primary = primary;
+            palette.highlight_secondary = secondary;
+        }
+    }
+    palette.panel_fill = chrome_panel_fill_layers(
         palette.panel,
-        surface.shell_alpha(theme.shell),
+        shell_alpha,
         theme.background_alpha,
-        &surface.panel_foregrounds(&palette),
+        &surface.panel_text_layers(&palette),
     );
     palette
+}
+
+/// The translucent highlights an unselected row can carry: hover, press, or
+/// both, in paint order.
+fn highlight_overlays(palette: &SessionPickerPalette) -> [Vec<(u32, u8)>; 3] {
+    let hover = (palette.selected_fill, ROW_HOVER_ALPHA);
+    let press = (palette.selected_rail, ROW_PRESS_ALPHA);
+    [vec![hover], vec![press], vec![hover, press]]
 }
 
 #[derive(Clone, Copy)]
@@ -1308,7 +1504,7 @@ pub(crate) fn paint_session_picker_overlay(
                     rgb_channels(palette.selected_fill)[0],
                     rgb_channels(palette.selected_fill)[1],
                     rgb_channels(palette.selected_fill)[2],
-                    64,
+                    ROW_HOVER_ALPHA,
                 ],
             );
         }
@@ -1322,20 +1518,13 @@ pub(crate) fn paint_session_picker_overlay(
                     rgb_channels(palette.selected_rail)[0],
                     rgb_channels(palette.selected_rail)[1],
                     rgb_channels(palette.selected_rail)[2],
-                    48,
+                    ROW_PRESS_ALPHA,
                 ],
             );
         }
-        let primary = if is_selected {
-            palette.selected_primary
-        } else {
-            palette.primary
-        };
-        let secondary = if is_selected {
-            palette.selected_secondary
-        } else {
-            palette.secondary
-        };
+        let highlighted =
+            !is_selected && (hovered == Some(row.target) || pressed == Some(row.target));
+        let (primary, secondary) = palette.row_text(is_selected, highlighted);
         let marker_width = 22_u32.saturating_mul(scale_120).div_ceil(120);
         if is_selected {
             paint_picker_text(
@@ -2293,11 +2482,16 @@ mod tests {
         assert!(alpha < u8::MAX, "{alpha}");
         let text = [palette.primary, palette.secondary];
         let coverage = |alpha: u8| f64::from(alpha) / 255.0;
-        assert!(panel_text_readable(palette.panel, coverage(alpha), &text));
-        assert!(!panel_text_readable(
+        let layers = ChromeSurface::Menu.panel_text_layers(&palette);
+        assert!(panel_layers_readable(
+            palette.panel,
+            coverage(alpha),
+            &layers
+        ));
+        assert!(!panel_layers_readable(
             palette.panel,
             coverage(alpha - 2),
-            &text
+            &layers
         ));
         for backdrop in [0, 0x00ff_ffff, 0x0080_8080, 0x00ff_0000, 0x00c0_caf5] {
             let visible = mix_encoded(palette.panel, backdrop, 1.0 - coverage(alpha));
@@ -2355,5 +2549,44 @@ mod tests {
         let popup = chrome_panel_palette(theme, ChromeSurface::Popup);
         assert!(menu.panel_fill[3] < u8::MAX);
         assert_eq!(popup.panel_fill[3], u8::MAX);
+    }
+
+    #[test]
+    fn hovered_and_pressed_rows_keep_the_floor_on_translucent_panels() {
+        // The review palette: the bare panel alone allowed 240/255 coverage,
+        // where the hover highlight dropped secondary text to about 4.15:1, and
+        // the press highlight left row text below 4.5:1 even on an opaque panel.
+        let theme = ResolvedTheme {
+            background: 0x63_05_86,
+            foreground: 0x6e_dc_dd,
+            selection: 0x9c_c3_58,
+            background_alpha: 42_597,
+            shell: OmarchyShellSettings {
+                menu_alpha: 0,
+                popup_alpha: 0,
+                text_size_px: None,
+                text_size_held: false,
+            },
+            ..ResolvedTheme::default()
+        };
+        for surface in [ChromeSurface::Menu, ChromeSurface::Popup] {
+            let palette = chrome_panel_palette(theme, surface);
+            let coverage = f64::from(palette.panel_fill[3]) / 255.0;
+            let hover = (palette.selected_fill, ROW_HOVER_ALPHA);
+            let press = (palette.selected_rail, ROW_PRESS_ALPHA);
+            for overlays in [vec![], vec![hover], vec![press], vec![hover, press]] {
+                let (primary, secondary) = palette.row_text(false, !overlays.is_empty());
+                for backdrop in [0, 0x00ff_ffff, 0x0080_8080, 0x0063_0586, 0x006e_dcdd] {
+                    let visible = visible_panel_color(palette.panel, coverage, &overlays, backdrop);
+                    for text in [primary, secondary] {
+                        let contrast = contrast_ratio(text, visible);
+                        assert!(
+                            contrast >= 4.5,
+                            "{surface:?} {overlays:?} over {backdrop:06x}: {contrast:.2}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

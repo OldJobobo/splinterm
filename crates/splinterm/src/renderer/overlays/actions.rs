@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     super::{ChromeText, ChromeTextStyle, RenderContext, blend_rect, fill_rect},
-    picker::SessionPickerPalette,
+    picker::{ROW_HOVER_ALPHA, ROW_PRESS_ALPHA, SessionPickerPalette},
 };
 
 const HEADER_HEIGHT: u32 = 52;
@@ -819,7 +819,7 @@ pub(crate) fn paint_command_palette(
                         u8::try_from((palette.selected_fill >> 16) & 0xff).unwrap_or(0),
                         u8::try_from((palette.selected_fill >> 8) & 0xff).unwrap_or(0),
                         u8::try_from(palette.selected_fill & 0xff).unwrap_or(0),
-                        64,
+                        ROW_HOVER_ALPHA,
                     ],
                 );
             }
@@ -833,16 +833,18 @@ pub(crate) fn paint_command_palette(
                         u8::try_from((palette.selected_rail >> 16) & 0xff).unwrap_or(0),
                         u8::try_from((palette.selected_rail >> 8) & 0xff).unwrap_or(0),
                         u8::try_from(palette.selected_rail & 0xff).unwrap_or(0),
-                        48,
+                        ROW_PRESS_ALPHA,
                     ],
                 );
             }
-            let primary = if !enabled {
-                palette.secondary
-            } else if is_selected {
-                palette.selected_primary
+            let highlighted = enabled
+                && !is_selected
+                && (state.hovered() == Some(row.command) || pressed == Some(row.command));
+            let (row_primary, row_secondary) = palette.row_text(is_selected, highlighted);
+            let primary = if enabled {
+                row_primary
             } else {
-                palette.primary
+                palette.secondary
             };
             if is_selected {
                 paint_text(
@@ -878,11 +880,7 @@ pub(crate) fn paint_command_palette(
                     scale_120,
                     renderer_generation,
                     buffer_rect(row.category, scale_120),
-                    if is_selected {
-                        palette.selected_secondary
-                    } else {
-                        palette.secondary
-                    },
+                    row_secondary,
                     false,
                 )?;
             }
@@ -916,11 +914,7 @@ pub(crate) fn paint_command_palette(
                     scale_120,
                     renderer_generation,
                     buffer_rect(row.shortcut, scale_120),
-                    if is_selected {
-                        palette.selected_secondary
-                    } else {
-                        palette.secondary
-                    },
+                    row_secondary,
                     true,
                 )?;
             }
@@ -1167,7 +1161,7 @@ pub(crate) fn paint_tab_context_menu(
                     u8::try_from((palette.selected_fill >> 16) & 0xff).unwrap_or(0),
                     u8::try_from((palette.selected_fill >> 8) & 0xff).unwrap_or(0),
                     u8::try_from(palette.selected_fill & 0xff).unwrap_or(0),
-                    64,
+                    ROW_HOVER_ALPHA,
                 ],
             );
         }
@@ -1181,16 +1175,17 @@ pub(crate) fn paint_tab_context_menu(
                     u8::try_from((palette.selected_rail >> 16) & 0xff).unwrap_or(0),
                     u8::try_from((palette.selected_rail >> 8) & 0xff).unwrap_or(0),
                     u8::try_from(palette.selected_rail & 0xff).unwrap_or(0),
-                    48,
+                    ROW_PRESS_ALPHA,
                 ],
             );
         }
-        let primary = if !enabled {
-            palette.secondary
-        } else if selected {
-            palette.selected_primary
+        let highlighted = enabled
+            && !selected
+            && (state.hovered() == Some(row.action) || pressed == Some(row.action));
+        let primary = if enabled {
+            palette.row_text(selected, highlighted).0
         } else {
-            palette.primary
+            palette.secondary
         };
         if selected {
             let inset = 3_u32

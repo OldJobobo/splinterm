@@ -318,6 +318,9 @@ impl From<StartupThemeLoad> for StartupTheme {
     }
 }
 
+/// A one-shot theme read for windows that start no `watch_theme`, such as
+/// the standalone Dojo and session picker and the remote-status window: they
+/// keep the palette and shell settings as of opening.
 pub(in crate::app) fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
     load_startup_theme_for_watch(config).theme
 }

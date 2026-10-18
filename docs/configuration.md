@@ -164,8 +164,8 @@ atomically, rebuilds active and hidden pane frames, and lets only an
 existing pane controller issue the final PTY resize. Observer panes prepare a
 future size without acquiring control. Font changes do not imply live reload of
 `config.ini` font size, padding, shell, scrollback, cursor, or keymap settings.
-While no size key is set, the size instead follows Omarchy's text size live
-through the same path; see "Omarchy shell settings" below.
+While no size key is set, the size instead follows Omarchy's text size, live
+in terminal windows through the same path; see "Omarchy shell settings" below.
 
 ### Opt-in terminal font shaping
 
@@ -828,7 +828,10 @@ Omarchy's template or shipped by the theme, and the user's
 `~/.config/omarchy/shell.toml`. Omarchy hard-codes that user path under `$HOME`.
 Splinterm layers them the same way, key by key: a key in the user file replaces
 the theme's value for that key only, and a key in neither file takes Omarchy's
-default. Both files join the 500 ms theme poll, so edits apply live.
+default. Terminal windows poll both files with the theme every 500 ms, so
+edits apply live there. Standalone Dojo and session picker windows and
+remote-status windows read the theme, palette and shell settings alike, once
+when they open.
 
 Splinterm reads values the way the shell's `parseShell` does: a non-empty quoted
 string without quotes inside, opened and closed by either `"` or `'`, or a bare
@@ -863,10 +866,13 @@ coverage is `1 - (1 - shell alpha) × (1 - terminal alpha)`:
 Panel borders, dividers, selected rows and text stay opaque. Because the
 backdrop is an unknown wallpaper, Splinterm raises a panel's coverage to the
 lowest value at which every foreground drawn on it keeps WCAG 4.5:1 contrast
-against both a black and a white backdrop: primary and secondary text, and on
-popups also the accent the Dojo prompt uses for its destructive choice. Those two bound every other
-backdrop. A theme whose secondary text already sits at the 4.5:1 floor on the
-opaque panel, as many light themes do, keeps its panels opaque. As in the
+against both a black and a white backdrop: primary and secondary text, text
+on a row under the translucent hover or press highlight, and on popups also the
+accent the Dojo prompt uses for its destructive choice. Those two backdrops
+bound every other one. Row text under a highlight is first corrected to 4.5:1
+against every highlight state, so a pressed row stays readable too. A theme
+whose secondary text already sits at the 4.5:1 floor on the opaque panel, as
+many light themes do, keeps its panels opaque. As in the
 shell, a number outside 0.0–1.0 is clamped into that range, and a value that is
 not a number is treated as Omarchy's opaque default; both are reported once. An
 explicit `main.theme` JSON keeps all panels opaque and ignores these values.
@@ -892,10 +898,10 @@ output scale. 9 pt is 12 px at scale 1 and 24 px at scale 2. With
 `main.font-sizing-policy=physical-dpi`, points use the output's physical DPI,
 as Foot does with `dpi-aware=yes`.
 
-A text size change rescales open windows live, without a restart, through the
-same reconciliation as a font family change. Runtime zoom stays a half-point
-offset from the followed size, and `omarchy-display-text-size reset` returns to
-the theme's size. Splinterm reads `base-size` as the shell does, with
+A text size change rescales open terminal windows live, without a restart,
+through the same reconciliation as a font family change. Runtime zoom stays a
+half-point offset from the followed size, and `omarchy-display-text-size reset`
+returns to the theme's size. Splinterm reads `base-size` as the shell does, with
 JavaScript's `parseInt` and a 1 px floor, so `12.0` and `"12px"` both mean
 12 px and any positive size is accepted, not only the command's 9–20. The
 resulting point size is clamped to the 6–96 pt Splinterm renders, which is
