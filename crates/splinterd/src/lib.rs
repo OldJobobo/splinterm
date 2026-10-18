@@ -31,10 +31,11 @@ pub use candidate_bootstrap::{
 #[doc(hidden)]
 pub use handoff_manifest::encode_manifest_pair_for_integration_test;
 pub use live::{
-    ActorHandoffEvidence, CompactSubscription, LiveCell, LiveError, LiveEvent, LiveRow,
-    LiveRuntimeMetrics, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,
-    LiveSplintHandle, LiveSplintRuntime, PreparedPtyHandoff, ProcessExit, ProcessIncarnation,
-    ProcessPlacement, Subscription, SubscriptionReceive, TerminalPublicationMemoryLease,
+    ActorHandoffEvidence, CompactSubscription, HandedOffSplint, LiveAdoptionFailure,
+    LiveAdoptionInputs, LiveCell, LiveError, LiveEvent, LiveRow, LiveRuntimeMetrics,
+    LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle,
+    LiveSplintRuntime, PreparedPtyHandoff, ProcessExit, ProcessIncarnation, ProcessPlacement,
+    StagedLiveSplint, Subscription, SubscriptionReceive, TerminalPublicationMemoryLease,
 };
 pub use splinterm_policy::{executable_identity, inspect_policy_file, policy};
 

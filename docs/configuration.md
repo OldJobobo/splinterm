@@ -114,6 +114,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `main.resize-delay-ms` | idle debounce before terminal reflow and PTY resize | 0–1000; 100 |
 | `main.dpi-aware` | deprecated **legacy Splinterm** key: `yes` maps only to `output-scale`; `no` fails with migration guidance | unset |
 | `main.theme` | explicit Splinterm JSON palette override; disables native Omarchy discovery | unset |
+| `main.omarchy-integration-hint` | under Omarchy without the `terminal` tag, show one desktop notification recommending `splinterm integration omarchy enable` ([why](integrations.md#why-the-terminal-tag-matters)) | strict boolean; yes |
 | `colors.alpha` | optional Foot-compatible override for theme background translucency | 0.0–1.0; unset (theme-owned) |
 | `colors.blur` | optional native background-blur request | strict boolean; unset (theme-owned, otherwise `no`) |
 | `scrollback.lines` | daemon terminal history budget | 0–1,000,000; 1000 |
@@ -340,11 +341,15 @@ Outside copy mode, both built-in profiles map `Ctrl+Shift+C/V` and `Super+C/V`
 to terminal-selection copy and the existing safe/bracketed paste. The
 `omarchy-tmux` profile advertises `Ctrl+Shift+C/V` first so its generated help
 remains usable when the compositor reserves Super chords; `splinterm` keeps
-`Super+C/V` primary. Omarchy's universal binding injects
-`Ctrl+Insert`/`Shift+Insert` into windows carrying its `terminal` tag, which
-Splinterm accepts. Omarchy must classify `com.oldjobobo.splinterm` as a terminal;
-without that classification its universal copy branch injects ordinary
-`Ctrl+C`, which remains terminal interrupt. In copy mode, `Super+C` copies the active
+`Super+C/V` primary. Into windows carrying its `terminal` tag, current
+Omarchy's universal binding (`quattro` since `129c67e2`, after 4.0.4) injects
+`Ctrl+Shift+C/V`, while Omarchy 3.x and 4.0.x inject
+`Ctrl+Insert`/`Shift+Insert`; Splinterm accepts both. Omarchy must classify
+`com.oldjobobo.splinterm` as a terminal, which
+`splinterm integration omarchy enable` arranges
+([why](integrations.md#why-the-terminal-tag-matters)). Without that
+classification its universal copy branch injects ordinary `Ctrl+C`, which
+remains terminal interrupt. In copy mode, `Super+C` copies the active
 selection and exits; `Super+V/X/Z` are consumed locally without pasting or
 sending PTY input. These Super shortcuts work only when the compositor delivers
 the chord to the Splinterm Window. Splinterm-owned command palette, keybinding

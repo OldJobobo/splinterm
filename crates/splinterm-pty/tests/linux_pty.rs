@@ -36,6 +36,26 @@ fn test_directory() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("splinterm-pty-{}-{nonce}", std::process::id()))
 }
 
+/// Waits until direct child `pid` has exited, without consuming its status.
+fn wait_until_exited_unreaped(pid: u32) {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let exited = rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOHANG
+                | rustix::process::WaitIdOptions::NOWAIT,
+        )
+        .unwrap();
+        if exited.is_some() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "child did not exit in time");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn read_until(session: &mut LinuxPtySession, needle: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut output = Vec::new();
@@ -329,7 +349,7 @@ fn adoption_reaps_a_child_that_exits_while_the_master_is_held() {
     let child_pid = session.child_id();
     let identity = session.identity();
     let adoptable = session.try_into_adoptable().unwrap();
-    thread::sleep(Duration::from_millis(100));
+    wait_until_exited_unreaped(child_pid);
     assert!(matches!(
         identity.verify_inherited(adoptable.master(), PtySize::cells(40, 10), child_pid),
         Err(PtyError::ProcessExited)
@@ -339,6 +359,43 @@ fn adoption_reaps_a_child_that_exits_while_the_master_is_held() {
     assert_eq!(adopted.wait().unwrap().code(), Some(7));
     assert_eq!(adopted.try_wait().unwrap().unwrap().code(), Some(7));
     assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+}
+
+#[test]
+fn unreaped_adoption_leaves_child_status_and_returns_the_same_master() {
+    let cwd = std::env::current_dir().unwrap();
+    let session = backend()
+        .spawn(
+            &PtyCommand::new("/bin/sh", cwd).args(["-c", "sleep 0.05; exit 7"]),
+            PtySize::cells(40, 10),
+        )
+        .unwrap();
+    let child_pid = session.child_id();
+    let identity = session.identity();
+    let adoptable = session.try_into_adoptable().unwrap();
+    let master_raw_fd = adoptable.master_raw_fd();
+    wait_until_exited_unreaped(child_pid);
+
+    let staged = adoptable.try_adopt_unreaped().unwrap();
+    assert_eq!(staged.identity(), identity);
+    assert_eq!(staged.master_raw_fd(), master_raw_fd);
+    assert!(
+        Path::new(&format!("/proc/{child_pid}")).exists(),
+        "staged adoption must leave the exited child unreaped"
+    );
+
+    let returned = staged.try_into_unvalidated_adoptable().unwrap();
+    assert_eq!(returned.identity(), identity);
+    assert_eq!(returned.master_raw_fd(), master_raw_fd);
+    let mut adopted = returned.try_adopt_unreaped().unwrap();
+    assert_eq!(adopted.try_wait().unwrap().unwrap().code(), Some(7));
+    assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+
+    // Once the session consumed the exit status, it can no longer be returned
+    // as adoptable: the result would carry no reaping authority.
+    let refused = adopted.try_into_unvalidated_adoptable().unwrap_err();
+    assert_eq!(refused.identity(), identity);
+    assert_eq!(refused.master_raw_fd(), master_raw_fd);
 }
 
 #[test]
