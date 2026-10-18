@@ -21,6 +21,9 @@ pub mod handoff_preflight;
 pub mod handoff_prepare;
 pub mod image_transport;
 pub mod install_prefix;
+#[cfg(feature = "integration-test")]
+#[doc(hidden)]
+pub mod integration_test_seams;
 mod live;
 pub mod package_provenance;
 
@@ -54,6 +57,19 @@ pub use splinterm_policy::{executable_identity, inspect_policy_file, policy};
 pub const MAX_LIVE_SPLINTS: usize = 256;
 // A full persisted topology must be able to run entirely live.
 const _: () = assert!(MAX_LIVE_SPLINTS >= splinterm_core::MAX_SPLINTS);
+
+/// The candidate activation flag, spelled `CANDIDATE_ACTIVATION_ARGUMENT=<fd>`,
+/// where `<fd>` is the canonical decimal number of the inherited forward
+/// manifest. It must be the first argument; the ordinary daemon arguments
+/// follow it (Plan 0061 D4).
+///
+/// The binary's first-operation acquisition parses it and the old
+/// generation's exec boundary writes it, from this one definition.
+pub const CANDIDATE_ACTIVATION_ARGUMENT: &str = "--splinterm-internal-handoff-manifest-fd-v1";
+
+/// The one ordinary daemon argument: every Splint runs in a workload cgroup,
+/// and a launch without one is refused.
+pub const REQUIRE_WORKLOAD_CGROUPS_ARGUMENT: &str = "--require-workload-cgroups";
 
 /// Source commit for diagnostics: the packaged commit, or a best-effort commit
 /// for unpackaged builds. It is never part of the handoff identity.

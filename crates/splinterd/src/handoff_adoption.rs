@@ -78,11 +78,11 @@ use splinterm_pty::AdoptableLinuxPtySession;
 use splinterm_terminal::Terminal;
 use thiserror::Error;
 use tokio::runtime::Handle;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
-    LiveError, LiveSplintConfig, LiveSplintRuntime, ProcessIncarnation, ProcessPlacement,
-    StagedLiveSplint,
+    LiveError, LiveSplintConfig, LiveSplintRuntime, ProcessExit, ProcessIncarnation,
+    ProcessPlacement, StagedLiveSplint,
     candidate_bootstrap::{
         CandidateRuntimeStage, CandidateSplintStage, CandidateStagedAuthorities,
         require_unix_stream_listener,
@@ -254,6 +254,11 @@ pub enum AdoptionError {
     TaskFailed(#[source] tokio::task::JoinError),
     #[error("the staged adoption was abandoned before commit")]
     Aborted,
+    /// The adopting daemon could not build an input adoption needs (its
+    /// signal streams, metadata store, or durable Topology), so adoption
+    /// never ran.
+    #[error("the adopting daemon could not start: {0}")]
+    DaemonStartup(String),
 }
 
 /// A refused adoption with every owned part, for cooperative rollback.
@@ -368,6 +373,10 @@ pub struct CommittedAdoption {
     /// manifest.
     pub daemon_generation: u64,
     pub install_prefix: InstallPrefix,
+    /// The installed daemon file this image was snapshotted from, as the
+    /// authenticated manifest records it: the adopted daemon's audit
+    /// identity, since the running image is a memfd with no installed path.
+    pub daemon_image: AdoptedDaemonImage,
     /// A rollback adoption found `<prefix>/splinterd` or `<prefix>/splinterm`
     /// no longer the forward pair recorded at preparation, and adopted
     /// anyway for continuity. Always `false` for a forward adoption, which
@@ -408,6 +417,70 @@ impl CommittedAdoption {
     pub fn committed(&self) -> bool {
         self.lifecycle.phase() == HandoffPhase::Committed
     }
+}
+
+/// The recorded source evidence of the daemon image an adoption runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdoptedDaemonImage {
+    pub device: u64,
+    pub inode: u64,
+    pub sha256: [u8; 32],
+}
+
+impl CommittedAdoption {
+    /// Reaps every exited child of this process that is not a carried
+    /// Splint, and returns each reaped PID with its exit.
+    ///
+    /// The old generation leaves the children of Splints it excluded from
+    /// capture (their process had exited) unreaped, and exec keeps them as
+    /// this same process's children (Plan 0061 M3.7b and M3.9 reviews).
+    /// Carried Splints are never touched: each committed actor reaps its own
+    /// child and publishes its exit. Call it once, before serving, while
+    /// this generation has spawned nothing. Children that are still running
+    /// are left alone.
+    #[must_use]
+    pub fn reap_uncarried_children(&self) -> Vec<(u32, ProcessExit)> {
+        let carried = self
+            .splints
+            .iter()
+            .map(|splint| splint.runtime.handle().child_pid())
+            .collect::<HashSet<_>>();
+        match child_pids() {
+            Ok(children) => reap_exited_among(children, &carried),
+            Err(error) => {
+                warn!(%error, "cannot list this process's children; exited children the previous generation left stay unreaped");
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// This process's children, from every thread's procfs `children` list:
+/// children of a thread that ended were reparented to a surviving one, and
+/// after exec every pre-exec child belongs to the thread that called it.
+fn child_pids() -> io::Result<Vec<u32>> {
+    let mut children = BTreeSet::new();
+    for task in fs::read_dir("/proc/self/task")? {
+        let listed = fs::read_to_string(task?.path().join("children"))?;
+        children.extend(
+            listed
+                .split_ascii_whitespace()
+                .filter_map(|pid| pid.parse::<u32>().ok()),
+        );
+    }
+    Ok(children.into_iter().collect())
+}
+
+/// Reaps each of `children` that is not `carried` and has exited.
+fn reap_exited_among(
+    children: impl IntoIterator<Item = u32>,
+    carried: &HashSet<u32>,
+) -> Vec<(u32, ProcessExit)> {
+    children
+        .into_iter()
+        .filter(|pid| !carried.contains(pid))
+        .filter_map(|pid| crate::handoff_exec::reap_exited_child(pid).map(|exit| (pid, exit)))
+        .collect()
 }
 
 /// A Splint waiting for its live runtime stage. Its placement retains on drop.
@@ -575,6 +648,40 @@ struct AdoptionShell {
 }
 
 impl AdoptionShell {
+    /// Splits a staged candidate into the shell and its Splints.
+    fn from_stage(stage: CandidateRuntimeStage) -> (Self, Vec<CandidateSplintStage>) {
+        let (lifecycle, authorities) = stage.into_parts();
+        let CandidateStagedAuthorities {
+            manifest,
+            counterpart_manifest,
+            splints,
+            listener,
+            image_listener,
+            current_manifest_descriptor,
+            counterpart_manifest_descriptor,
+            forward_client,
+            rollback_daemon,
+            rollback_client,
+            closed_unexpected,
+        } = authorities;
+        (
+            Self {
+                lifecycle,
+                manifest,
+                counterpart_manifest,
+                listener,
+                image_listener,
+                current_manifest_descriptor,
+                counterpart_manifest_descriptor,
+                forward_client,
+                rollback_daemon,
+                rollback_client,
+                closed_unexpected,
+            },
+            splints,
+        )
+    }
+
     fn fail<S: ProcessPlacement>(
         self,
         error: AdoptionError,
@@ -650,6 +757,22 @@ impl<S: ProcessPlacement> std::fmt::Debug for StagedAdoption<S> {
 }
 
 impl CandidateRuntimeStage {
+    /// Refuses adoption before it starts, with every owned part, exactly as
+    /// a refusal inside [`Self::adopt`] returns them: the daemon could not
+    /// build an input adoption needs. The lifecycle moves to rolling back.
+    pub fn refuse(self, error: AdoptionError) -> AdoptionFailure {
+        let (shell, splints) = AdoptionShell::from_stage(self);
+        // Nothing was adopted, so every placement is uncontained; the scope
+        // type is only nominal.
+        let guard = AdoptionGuard::<ActiveWorkloadScope> {
+            staged: Vec::new(),
+            pending: splints.into_iter().map(PendingSplint::new).collect(),
+        };
+        shell.fail(error, guard)
+    }
+}
+
+impl CandidateRuntimeStage {
     /// Runs every fallible adoption step without reading any PTY, accepting
     /// a connection, or stopping anything; see the module documentation.
     ///
@@ -664,33 +787,7 @@ impl CandidateRuntimeStage {
         self,
         inputs: AdoptionInputs<A>,
     ) -> Result<StagedAdoption<A::Scope>, AdoptionFailure> {
-        let (lifecycle, authorities) = self.into_parts();
-        let CandidateStagedAuthorities {
-            manifest,
-            counterpart_manifest,
-            splints,
-            listener,
-            image_listener,
-            current_manifest_descriptor,
-            counterpart_manifest_descriptor,
-            forward_client,
-            rollback_daemon,
-            rollback_client,
-            closed_unexpected,
-        } = authorities;
-        let shell = AdoptionShell {
-            lifecycle,
-            manifest,
-            counterpart_manifest,
-            listener,
-            image_listener,
-            current_manifest_descriptor,
-            counterpart_manifest_descriptor,
-            forward_client,
-            rollback_daemon,
-            rollback_client,
-            closed_unexpected,
-        };
+        let (shell, splints) = AdoptionShell::from_stage(self);
         let mut guard = AdoptionGuard {
             staged: Vec::with_capacity(splints.len()),
             pending: splints.into_iter().map(PendingSplint::new).collect(),
@@ -734,7 +831,17 @@ async fn prepare<A: WorkloadScopeAdopter>(
     }
     let manifest = &shell.manifest;
     let (install_prefix, install_pair_mismatch) = verify_install_prefix(manifest)?;
+    info!(
+        prefix = %install_prefix.directory().display(),
+        install_pair_mismatch,
+        "handoff adoption: install prefix verified"
+    );
     verify_topology(manifest, &topology)?;
+    info!(
+        revision = manifest.topology_revision,
+        carried = manifest.splints.len(),
+        "handoff adoption: durable Topology verified"
+    );
     for (slot, listener) in [
         (HandoffDescriptorSlot::Listener, &shell.listener),
         (HandoffDescriptorSlot::ImageListener, &shell.image_listener),
@@ -746,6 +853,7 @@ async fn prepare<A: WorkloadScopeAdopter>(
     let listener = register_listener(HandoffDescriptorSlot::Listener, &shell.listener)?;
     let image_listener =
         register_listener(HandoffDescriptorSlot::ImageListener, &shell.image_listener)?;
+    info!("handoff adoption: inherited listeners registered");
     if workload_cgroups_required && workload_units.is_none() {
         return Err(AdoptionError::WorkloadCgroupsUnavailable);
     }
@@ -766,7 +874,16 @@ async fn prepare<A: WorkloadScopeAdopter>(
             .find_splint(pending.evidence.splint_id)
             .map(|splint| splint.launch.scrollback_lines);
     }
+    info!(
+        carried = guard.pending.len(),
+        "handoff adoption: carried incarnations adopted"
+    );
     let (policy, policy_generation) = reload_policy(policy_path, &topology).await?;
+    info!(
+        generation = policy_generation.id,
+        rejected = policy_generation.diagnostic.is_some(),
+        "handoff adoption: persistent policy reloaded"
+    );
     let (reclaimed_slices, unreclaimed_slices) = match workload_units {
         Some(adopter) => {
             adopt_scopes(&adopter, guard, workload_cgroups_required).await?;
@@ -774,7 +891,21 @@ async fn prepare<A: WorkloadScopeAdopter>(
         }
         None => (Vec::new(), Vec::new()),
     };
+    info!(
+        contained = guard
+            .pending
+            .iter()
+            .filter(|pending| matches!(pending.placement.get(), Some(AdoptedPlacement::Scope(_))))
+            .count(),
+        reclaimed_slices = reclaimed_slices.len(),
+        unreclaimed_slices = unreclaimed_slices.len(),
+        "handoff adoption: workload scopes adopted"
+    );
     stage_actors(guard, &live_config)?;
+    info!(
+        staged = guard.staged.len(),
+        "handoff adoption: live actors staged with closed read gates"
+    );
     Ok(Prepared {
         install_prefix,
         install_pair_mismatch,
@@ -1247,11 +1378,21 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             listener: prepared.listener.as_raw_fd(),
             image_listener: prepared.image_listener.as_raw_fd(),
         };
+        let image = match manifest.kind {
+            ManifestKind::Forward => &manifest.executable_pairs.forward.daemon,
+            ManifestKind::Rollback => &manifest.executable_pairs.rollback.daemon,
+        };
+        let daemon_image = AdoptedDaemonImage {
+            device: image.source_device,
+            inode: image.source_inode,
+            sha256: image.source_sha256,
+        };
         CommittedAdoption {
             handoff_id: manifest.handoff_id.bytes(),
             rollback: manifest.kind == ManifestKind::Rollback,
             source_daemon_generation: manifest.source_daemon_generation,
             daemon_generation: manifest.target_daemon_generation,
+            daemon_image,
             install_prefix: prepared.install_prefix,
             install_pair_mismatch: prepared.install_pair_mismatch,
             topology: prepared.topology,
@@ -1876,6 +2017,78 @@ mod tests {
         assert_eq!(adopter.count("retain"), 2);
         assert_eq!(adopter.count("stop") + adopter.count("release"), 0);
         assert_eq!(harness.assert_recovered(recovery).len(), 2);
+    }
+
+    /// A daemon that cannot build adoption's inputs refuses before adopting
+    /// and still returns every part at its recorded number, killing nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_before_adoption_returns_every_part() {
+        let mut harness = Harness::new(&[CAT, CAT], no_change).await;
+        let failure = harness
+            .stage
+            .take()
+            .unwrap()
+            .refuse(AdoptionError::DaemonStartup("no metadata store".to_owned()));
+        assert!(matches!(failure.error(), AdoptionError::DaemonStartup(_)));
+        assert!(failure.to_string().contains("no metadata store"));
+        assert!(harness.assert_recovered(failure.into_recovery()).is_empty());
+    }
+
+    /// The committed adoption names the installed daemon its image came from
+    /// as the manifest recorded it, never the running memfd.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_committed_adoption_carries_the_recorded_daemon_image() {
+        let mut harness = Harness::new(&[CAT], no_change).await;
+        let recorded = harness.manifest.executable_pairs.forward.daemon.clone();
+        let staged = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap();
+        let committed = staged.commit();
+        assert_eq!(
+            committed.daemon_image,
+            AdoptedDaemonImage {
+                device: recorded.source_device,
+                inode: recorded.source_inode,
+                sha256: recorded.source_sha256,
+            }
+        );
+        shut_down(committed).await;
+    }
+
+    /// Exited children that are not carried are reaped; a carried child and
+    /// a running one are left alone.
+    #[test]
+    fn only_exited_uncarried_children_are_reaped() {
+        let spawn = |script: &str| {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .spawn()
+                .unwrap()
+                .id()
+        };
+        let exited = spawn("exit 4");
+        let carried = spawn("exit 5");
+        let mut running = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(child_has_exited(exited) && child_has_exited(carried)) {
+            assert!(Instant::now() < deadline, "children did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let reaped = reap_exited_among([exited, carried, running.id()], &HashSet::from([carried]));
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].0, exited);
+        assert_eq!(reaped[0].1.code, Some(4));
+        assert!(
+            child_has_exited(carried),
+            "the carried child stays unreaped"
+        );
+        assert!(crate::handoff_exec::reap_exited_child(carried).is_some());
+        running.kill().unwrap();
+        running.wait().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

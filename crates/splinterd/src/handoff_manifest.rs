@@ -786,11 +786,18 @@ thread_local! {
 /// The owner every packaged executable source has: root.
 ///
 /// Unit tests cannot create root-owned executables, so a unit test may name
-/// its own uid on its own thread through [`PackagedOwnerOverride`]. Only
-/// `cfg(test)` builds have that seam (Plan 0061 D9); no daemon build does.
+/// its own uid on its own thread through [`PackagedOwnerOverride`], and an
+/// `integration-test` build reads one from
+/// [`crate::integration_test_seams::PACKAGED_OWNER_UID_ENV`], so an exec
+/// test's real candidate can adopt executables the test owns. Only those
+/// builds have a seam (Plan 0061 D9); no packaged daemon does.
 fn packaged_owner_uid() -> u32 {
     #[cfg(test)]
     if let Some(uid) = TEST_PACKAGED_OWNER_UID.with(std::cell::Cell::get) {
+        return uid;
+    }
+    #[cfg(feature = "integration-test")]
+    if let Some(uid) = crate::integration_test_seams::packaged_owner_uid_override() {
         return uid;
     }
     PACKAGED_OWNER_UID
