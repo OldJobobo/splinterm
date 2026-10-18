@@ -31,10 +31,10 @@ use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
-    CompactSubscription, LiveError, LiveEvent, LiveScrollbackPage, LiveSearchPage, LiveSnapshot,
-    LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, MAX_LIVE_SPLINTS, ProcessExit,
-    ProcessIncarnation, SubscriptionReceive, TerminalPublicationMemoryLease, authorization,
-    executable_identity,
+    CompactSubscription, HandoffCheckpointBudget, LiveError, LiveEvent, LiveScrollbackPage,
+    LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
+    MAX_LIVE_SPLINTS, ProcessExit, ProcessIncarnation, SubscriptionReceive,
+    TerminalPublicationMemoryLease, authorization, executable_identity,
     handoff_coordinator::ForwardHandoffAuthority,
     handoff_prepare::{
         CaptureLimits, HandoffCaptures, ListenerDescriptors, ManifestInputs, PreparedManifests,
@@ -8076,7 +8076,9 @@ async fn handle_authorized_request(
                 // A point-in-time report, answered during a handoff too.
                 splinterm_protocol::DaemonHandoffMode::DryRun => Response::HandoffReport { report },
                 splinterm_protocol::DaemonHandoffMode::Execute => {
-                    return Err(execute_daemon_handoff(state, &report).await);
+                    // Boxed: the attempt future is larger than every other
+                    // request path, and would otherwise inflate each one.
+                    return Err(Box::pin(execute_daemon_handoff(state, &report)).await);
                 }
             }
         }
@@ -8720,11 +8722,11 @@ async fn prepare_fenced_handoff<F: ForwardPreparation>(
     };
     #[cfg(test)]
     let faults = Arc::clone(state);
-    let prepare = move |handle: LiveSplintHandle| {
+    let prepare = move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
         #[cfg(test)]
         let faults = Arc::clone(&faults);
         async move {
-            let lease = handle.prepare_pty_handoff().await?;
+            let lease = handle.prepare_pty_handoff_within(&budget).await?;
             #[cfg(test)]
             let lease = inject_capture_fault(&faults, handle.splint_id, lease).await?;
             Ok(lease)

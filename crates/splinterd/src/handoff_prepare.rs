@@ -3,7 +3,7 @@
 //!
 //! Once the handoff gate holds the fence, [`capture_live_splints`] captures
 //! every live Splint concurrently through its actor's linearization point
-//! ([`LiveSplintHandle::prepare_pty_handoff`]), each attempt under
+//! ([`LiveSplintHandle::prepare_pty_handoff_within`]), each attempt under
 //! [`HANDOFF_CAPTURE_ACTOR_TIMEOUT`] and all checkpoints together under
 //! [`MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES`]. [`build_handoff_manifests`]
 //! then binds those captures, the fenced Topology, and the attempt's
@@ -33,11 +33,15 @@ use splinterm_core::{DojoId, LairId, SplintId, Topology};
 use splinterm_protocol::HandoffCancelReason;
 use splinterm_terminal::MAX_TERMINAL_CHECKPOINT_BYTES;
 use thiserror::Error;
-use tokio::{task::JoinSet, time};
+use tokio::{
+    task::{JoinError, JoinSet},
+    time,
+};
 use tracing::warn;
 
 use crate::{
-    ActorHandoffEvidence, LiveError, LiveSplintHandle, MAX_LIVE_SPLINTS, PreparedPtyHandoff,
+    ActorHandoffEvidence, HandoffCheckpointBudget, LiveError, LiveSplintHandle, MAX_LIVE_SPLINTS,
+    PreparedPtyHandoff,
     executable_snapshot::HandoffExecutableSnapshots,
     handoff_checkpoint::{CheckpointStorageError, LinkedCheckpointBody, SealedCheckpointBody},
     handoff_compatibility::{NegotiatedHandoff, RunningHandoffGeneration},
@@ -50,6 +54,7 @@ use crate::{
         SubscriptionDisposition, decode_manifest, encode_manifest, validate_manifest_pair,
     },
     handoff_preflight::SealedPreflightReports,
+    live::SYNCHRONIZED_FRAME_INTERVAL,
     package_provenance::ValidatedHandoffPackageProvenance,
 };
 
@@ -68,12 +73,30 @@ use crate::{
 /// together, up to [`MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES`]. An actor still
 /// short of its boundary after two seconds is wedged, usually on a child that
 /// stopped reading its input, and the handoff yields rather than stretch the
-/// pause. With the one exit-race retry, capture adds at most four seconds to
-/// the fenced pause.
+/// pause. With the one retry and [`HANDOFF_CAPTURE_RETRY_DELAY`] before it,
+/// capture adds at most about four seconds to the fenced pause.
 pub const HANDOFF_CAPTURE_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Upper bound on the sealed terminal checkpoint bytes one handoff carries
-/// (Plan 0061 operator decision D14).
+/// How long a refused capture waits before its one retry: one and a half
+/// synchronized-output frame intervals.
+///
+/// A refusal returns the actor to normal reading, so the wait adds no time
+/// without a PTY reader. An actor refuses while a completed synchronized
+/// frame is held back for publication, and the live runtime publishes that
+/// frame within one frame interval. Busy synchronized-output programs (full
+/// screen TUIs) are often between such frames, and an immediate retry would
+/// find the same held frame.
+pub const HANDOFF_CAPTURE_RETRY_DELAY: Duration =
+    match SYNCHRONIZED_FRAME_INTERVAL.saturating_mul(3).checked_div(2) {
+        Some(delay) => delay,
+        None => SYNCHRONIZED_FRAME_INTERVAL,
+    };
+// The retry must outwait one held frame.
+const _: () =
+    assert!(HANDOFF_CAPTURE_RETRY_DELAY.as_nanos() > SYNCHRONIZED_FRAME_INTERVAL.as_nanos());
+
+/// Upper bound on the sealed terminal checkpoint bytes one handoff's captures
+/// hold at any moment (Plan 0061 operator decision D14).
 ///
 /// Each checkpoint may reach [`MAX_TERMINAL_CHECKPOINT_BYTES`] (about 112 MiB)
 /// and the registry holds up to [`MAX_LIVE_SPLINTS`] Splints, so without an
@@ -84,7 +107,18 @@ pub const HANDOFF_CAPTURE_ACTOR_TIMEOUT: Duration = Duration::from_secs(2);
 /// 256 MiB matches the daemon-wide terminal publication budget: the handoff
 /// never adds more sealed memory than the daemon already budgets for
 /// publishing. It carries two maximal Splints, or every Splint of a full
-/// registry at 1 MiB each. Captures past it cancel the attempt as `Failed`.
+/// registry at 1 MiB each.
+///
+/// What it bounds exactly: every actor reserves its encoded checkpoint's size
+/// against one shared [`HandoffCheckpointBudget`] after encoding and before
+/// sealing, and refuses once a reservation would pass the cap, which cancels
+/// the attempt as `Failed`. A reservation lasts as long as the sealed body's
+/// lease, so the sealed memfds of all captures together never pass the cap,
+/// however many actors capture at once. What it does not bound: each actor's
+/// transient encode buffer, up to [`MAX_TERMINAL_CHECKPOINT_BYTES`], which
+/// exists before the reservation. An actor encodes, seals, and frees that
+/// buffer within one poll of its task, so at most one buffer exists per
+/// runtime worker thread (two in the daemon).
 pub const MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES: u64 = 256 * 1024 * 1024;
 
 // One maximal Splint can always hand off on its own.
@@ -95,6 +129,9 @@ const _: () =
 const GLOBAL_DESCRIPTOR_SLOTS: usize = 7;
 // Each captured Splint adds its PTY master and its checkpoint body.
 const _: () = assert!(GLOBAL_DESCRIPTOR_SLOTS + 2 * MAX_LIVE_SPLINTS <= MAX_HANDOFF_DESCRIPTORS);
+
+/// Bound on the panic message a failed capture task reports.
+const MAX_TASK_FAILURE_CHARS: usize = 256;
 
 /// The capture bounds. Daemons use [`Self::DEFAULT`]; tests narrow them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,13 +169,13 @@ pub enum CaptureFailure {
         error: Box<LiveError>,
     },
     #[error(
-        "captured terminal checkpoints reached {captured} bytes, past the {cap}-byte handoff cap"
+        "Splint {splint_id}'s checkpoint would pass the {cap}-byte aggregate handoff checkpoint cap"
     )]
-    AggregateCapExceeded { captured: u64, cap: u64 },
+    AggregateCapExceeded { splint_id: SplintId, cap: u64 },
     #[error("{0} live Splints exceed the handoff capture bound")]
     TooManySplints(usize),
-    #[error("a handoff capture task failed")]
-    TaskFailed,
+    #[error("a handoff capture task failed: {0}")]
+    TaskFailed(String),
 }
 
 impl CaptureFailure {
@@ -151,7 +188,7 @@ impl CaptureFailure {
             Self::Failed { .. }
             | Self::AggregateCapExceeded { .. }
             | Self::TooManySplints(_)
-            | Self::TaskFailed => HandoffCancelReason::Failed,
+            | Self::TaskFailed(_) => HandoffCancelReason::Failed,
         }
     }
 
@@ -160,6 +197,20 @@ impl CaptureFailure {
             splint_id,
             error: Box::new(error),
         }
+    }
+
+    /// A capture task that panicked or was cancelled, with at most
+    /// [`MAX_TASK_FAILURE_CHARS`] characters of its panic message.
+    fn task_failed(error: JoinError) -> Self {
+        let message = match error.try_into_panic() {
+            Ok(payload) => payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panicked with a non-string payload".to_owned()),
+            Err(error) => error.to_string(),
+        };
+        Self::TaskFailed(message.chars().take(MAX_TASK_FAILURE_CHARS).collect())
     }
 }
 
@@ -202,6 +253,7 @@ pub struct HandoffCaptures {
     captured: Vec<CapturedSplint>,
     excluded: Vec<SplintId>,
     checkpoint_bytes: u64,
+    release_timeout: Duration,
 }
 
 impl HandoffCaptures {
@@ -222,7 +274,7 @@ impl HandoffCaptures {
         self.checkpoint_bytes
     }
 
-    /// Resumes every captured actor and waits, within the per-actor capture
+    /// Resumes every captured actor and waits, within the capture's per-actor
     /// deadline, until each has its reader back. An actor that does not
     /// acknowledge in time still resumes: its lease sent the resume, or sends
     /// it when the abandoned wait drops the lease.
@@ -233,7 +285,7 @@ impl HandoffCaptures {
             let splint_id = lease.evidence().splint_id;
             resumes.spawn(async move { (splint_id, lease.resume().await) });
         }
-        let acknowledged = time::timeout(HANDOFF_CAPTURE_ACTOR_TIMEOUT, async {
+        let acknowledged = time::timeout(self.release_timeout, async {
             while let Some(joined) = resumes.join_next().await {
                 match joined {
                     Ok((_, Ok(()))) => {}
@@ -254,6 +306,7 @@ impl HandoffCaptures {
         mut captured: Vec<(PreparedPtyHandoff, SealedCheckpointBody)>,
         excluded: Vec<SplintId>,
         checkpoint_bytes: u64,
+        release_timeout: Duration,
     ) -> Result<Self, CaptureFailure> {
         let count = captured.len();
         captured.sort_by_cached_key(|(lease, _)| lease.evidence().splint_id.to_string());
@@ -269,6 +322,7 @@ impl HandoffCaptures {
             captured: linked,
             excluded,
             checkpoint_bytes,
+            release_timeout,
         })
     }
 }
@@ -282,43 +336,48 @@ enum ActorCapture {
 
 /// Captures every live Splint concurrently, each through `prepare`.
 ///
-/// Daemons pass [`LiveSplintHandle::prepare_pty_handoff`]; the parameter lets
-/// tests interpose on one actor's capture.
+/// `prepare` receives the capture's shared checkpoint budget. Daemons pass
+/// [`LiveSplintHandle::prepare_pty_handoff_within`] with it; the parameter
+/// lets tests interpose on one actor's capture.
 ///
 /// A Splint whose process has already exited is excluded without an attempt.
 /// Each attempt runs under `limits.actor_timeout`. A refusal that an exit or
 /// EOF during capture can produce (the actor's unrepresentable-state refusal,
 /// which does not name the state, an observed exit, a failed kernel query on
-/// a hung-up terminal, or an ended actor) is retried once. If the retry is
-/// refused too, a Splint whose process has exited is excluded and any other
-/// cancels the capture. Exited Splints are excluded, never carried as exited:
-/// manifest v1 carries only running Splints, and the forward daemon would
-/// refuse to adopt an exited child (Plan 0061 M3.3 review). The fenced
-/// Topology already records an exit finalized before the fence; one during
-/// capture is finalized once the fence lifts, or reads as exited when the
-/// forward daemon restores durable state, as after any restart.
+/// a hung-up terminal, or an ended actor) is retried once, after
+/// [`HANDOFF_CAPTURE_RETRY_DELAY`]. If the retry is refused too, a Splint
+/// whose process has exited is excluded and any other cancels the capture.
+/// Exited Splints are excluded, never carried as exited: manifest v1 carries
+/// only running Splints, and the forward daemon would refuse to adopt an
+/// exited child (Plan 0061 M3.3 review). The fenced Topology already records
+/// an exit finalized before the fence; one during capture is finalized once
+/// the fence lifts, or reads as exited when the forward daemon restores
+/// durable state, as after any restart.
 ///
-/// Checkpoint sizes are summed as captures complete, and passing
-/// `limits.aggregate_checkpoint_bytes` cancels at once.
+/// Every actor reserves its checkpoint against one budget of
+/// `limits.aggregate_checkpoint_bytes` before sealing it; the first refused
+/// reservation cancels at once and is never retried.
 ///
 /// # Errors
 /// Cancels on the first missed deadline, a non-exit refusal, a second
 /// refusal while the process lives, the aggregate cap, or a failed task.
 /// Before returning, every outstanding attempt has ended and every lease
-/// already acquired has been dropped, which resumes its actor.
+/// already acquired has been dropped, which resumes its actor and returns
+/// its budget reservation.
 pub async fn capture_live_splints<F, Fut>(
     handles: Vec<LiveSplintHandle>,
     limits: CaptureLimits,
     prepare: F,
 ) -> Result<HandoffCaptures, CaptureFailure>
 where
-    F: Fn(LiveSplintHandle) -> Fut + Send + Sync + 'static,
+    F: Fn(LiveSplintHandle, HandoffCheckpointBudget) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<PreparedPtyHandoff, LiveError>> + Send + 'static,
 {
     if handles.len() > MAX_LIVE_SPLINTS {
         return Err(CaptureFailure::TooManySplints(handles.len()));
     }
     let prepare = Arc::new(prepare);
+    let budget = HandoffCheckpointBudget::new(limits.aggregate_checkpoint_bytes);
     let mut excluded = Vec::new();
     let mut attempts = JoinSet::new();
     for handle in handles {
@@ -326,6 +385,7 @@ where
             attempts.spawn(capture_actor(
                 handle,
                 limits.actor_timeout,
+                budget.clone(),
                 Arc::clone(&prepare),
             ));
         } else {
@@ -335,7 +395,9 @@ where
     let mut captured = Vec::with_capacity(attempts.len());
     let collected = collect_captures(&mut attempts, limits, &mut captured, &mut excluded).await;
     match collected {
-        Ok(checkpoint_bytes) => HandoffCaptures::link(captured, excluded, checkpoint_bytes),
+        Ok(checkpoint_bytes) => {
+            HandoffCaptures::link(captured, excluded, checkpoint_bytes, limits.actor_timeout)
+        }
         Err(failure) => {
             // Abort and wait out every outstanding attempt: one that already
             // holds a lease drops it, which resumes its actor.
@@ -354,7 +416,7 @@ async fn collect_captures(
 ) -> Result<u64, CaptureFailure> {
     let mut checkpoint_bytes = 0_u64;
     while let Some(joined) = attempts.join_next().await {
-        match joined.map_err(|_| CaptureFailure::TaskFailed)?? {
+        match joined.map_err(CaptureFailure::task_failed)?? {
             ActorCapture::Exited(splint_id) => excluded.push(splint_id),
             ActorCapture::Captured(lease) => {
                 let mut lease = *lease;
@@ -367,9 +429,11 @@ async fn collect_captures(
                 };
                 checkpoint_bytes = checkpoint_bytes.saturating_add(body.identity().size);
                 captured.push((lease, body));
+                // The actors' reservations already hold this bound; this
+                // catches a `prepare` that bypassed the budget.
                 if checkpoint_bytes > limits.aggregate_checkpoint_bytes {
                     return Err(CaptureFailure::AggregateCapExceeded {
-                        captured: checkpoint_bytes,
+                        splint_id,
                         cap: limits.aggregate_checkpoint_bytes,
                     });
                 }
@@ -383,10 +447,11 @@ async fn collect_captures(
 async fn capture_actor<F, Fut>(
     handle: LiveSplintHandle,
     timeout: Duration,
+    budget: HandoffCheckpointBudget,
     prepare: Arc<F>,
 ) -> Result<ActorCapture, CaptureFailure>
 where
-    F: Fn(LiveSplintHandle) -> Fut + Send + Sync + 'static,
+    F: Fn(LiveSplintHandle, HandoffCheckpointBudget) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<PreparedPtyHandoff, LiveError>> + Send + 'static,
 {
     let splint_id = handle.splint_id;
@@ -394,11 +459,17 @@ where
     loop {
         // A missed deadline drops the attempt: a pending command is withdrawn
         // and a lease already granted is dropped, so the actor resumes.
-        let error = match time::timeout(timeout, prepare(handle.clone())).await {
+        let error = match time::timeout(timeout, prepare(handle.clone(), budget.clone())).await {
             Err(_) => return Err(CaptureFailure::TimedOut { splint_id, timeout }),
             Ok(Ok(lease)) => return Ok(ActorCapture::Captured(Box::new(lease))),
             Ok(Err(error)) => error,
         };
+        if matches!(error, LiveError::CheckpointBudgetExceeded) {
+            return Err(CaptureFailure::AggregateCapExceeded {
+                splint_id,
+                cap: budget.cap(),
+            });
+        }
         if !exit_can_explain(&error) {
             return Err(CaptureFailure::failed(splint_id, error));
         }
@@ -410,6 +481,9 @@ where
             };
         }
         retried = true;
+        // The actor reads normally again meanwhile, so a held synchronized
+        // frame publishes before the retry asks.
+        time::sleep(HANDOFF_CAPTURE_RETRY_DELAY).await;
     }
 }
 
@@ -880,8 +954,11 @@ mod tests {
             .collect()
     }
 
-    async fn prepare(handle: LiveSplintHandle) -> Result<PreparedPtyHandoff, LiveError> {
-        handle.prepare_pty_handoff().await
+    async fn prepare(
+        handle: LiveSplintHandle,
+        budget: HandoffCheckpointBudget,
+    ) -> Result<PreparedPtyHandoff, LiveError> {
+        handle.prepare_pty_handoff_within(&budget).await
     }
 
     /// Real PTY Splints, each the default focus of its own Lair.
@@ -1084,11 +1161,11 @@ mod tests {
         // only when all three run at once.
         let barrier = Arc::new(Barrier::new(3));
         let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
-            move |handle: LiveSplintHandle| {
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
                 let barrier = Arc::clone(&barrier);
                 async move {
                     barrier.wait().await;
-                    handle.prepare_pty_handoff().await
+                    handle.prepare_pty_handoff_within(&budget).await
                 }
             }
         })
@@ -1131,14 +1208,18 @@ mod tests {
             actor_timeout: Duration::from_millis(300),
             ..CaptureLimits::DEFAULT
         };
-        let failure = capture_live_splints(fleet.handles(), limits, move |handle| async move {
-            let lease = handle.prepare_pty_handoff().await?;
-            if handle.splint_id == stalled {
-                // Holds its lease past the deadline.
-                time::sleep(Duration::from_secs(30)).await;
-            }
-            Ok(lease)
-        })
+        let failure = capture_live_splints(
+            fleet.handles(),
+            limits,
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| async move {
+                let lease = handle.prepare_pty_handoff_within(&budget).await?;
+                if handle.splint_id == stalled {
+                    // Holds its lease past the deadline.
+                    time::sleep(Duration::from_secs(30)).await;
+                }
+                Ok(lease)
+            },
+        )
         .await
         .unwrap_err();
 
@@ -1158,7 +1239,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
             let calls = Arc::clone(&calls);
-            move |handle: LiveSplintHandle| {
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
                 let calls = Arc::clone(&calls);
                 async move {
                     if handle.splint_id == exiting {
@@ -1167,7 +1248,7 @@ mod tests {
                         let _ = handle.input(b"bye\n".to_vec()).await;
                         let _ = handle.wait_for_exit().await;
                     }
-                    handle.prepare_pty_handoff().await
+                    handle.prepare_pty_handoff_within(&budget).await
                 }
             }
         })
@@ -1196,11 +1277,11 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
             let calls = Arc::clone(&calls);
-            move |handle: LiveSplintHandle| {
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
                 if handle.splint_id == exited {
                     calls.fetch_add(1, Ordering::SeqCst);
                 }
-                prepare(handle)
+                prepare(handle, budget)
             }
         })
         .await
@@ -1220,14 +1301,14 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
             let calls = Arc::clone(&calls);
-            move |handle: LiveSplintHandle| {
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
                 let first =
                     handle.splint_id == refused_once && calls.fetch_add(1, Ordering::SeqCst) == 0;
                 async move {
                     if first {
                         return Err(LiveError::HandoffStateUnsupported);
                     }
-                    handle.prepare_pty_handoff().await
+                    handle.prepare_pty_handoff_within(&budget).await
                 }
             }
         })
@@ -1247,13 +1328,13 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let failure = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
             let calls = Arc::clone(&calls);
-            move |handle: LiveSplintHandle| {
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
                 let refuse = handle.splint_id == refusing;
                 if refuse {
                     calls.fetch_add(1, Ordering::SeqCst);
                 }
                 async move {
-                    let lease = handle.prepare_pty_handoff().await?;
+                    let lease = handle.prepare_pty_handoff_within(&budget).await?;
                     if refuse {
                         drop(lease);
                         return Err(LiveError::HandoffStateUnsupported);
@@ -1307,7 +1388,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let failure = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
             let calls = Arc::clone(&calls);
-            move |handle: LiveSplintHandle| {
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
                 let fail = handle.splint_id == broken;
                 if fail {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -1316,7 +1397,7 @@ mod tests {
                     if fail {
                         return Err(LiveError::Io(io::Error::other("injected")));
                     }
-                    handle.prepare_pty_handoff().await
+                    handle.prepare_pty_handoff_within(&budget).await
                 }
             }
         })
@@ -1345,10 +1426,124 @@ mod tests {
 
         assert!(matches!(
             failure,
-            CaptureFailure::AggregateCapExceeded { captured, cap: 1 } if captured > 1
+            CaptureFailure::AggregateCapExceeded { cap: 1, .. }
         ));
         assert_eq!(failure.cancel_reason(), HandoffCancelReason::Failed);
         fleet.assert_all_echo("after-cap").await;
+        fleet.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sealed_checkpoints_never_pass_the_budget_and_its_refusal_is_not_retried() {
+        let fleet = Fleet::spawn(&[CAT, CAT, CAT, CAT]).await;
+        fleet.assert_all_echo("settled").await;
+        let measured = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, prepare)
+            .await
+            .unwrap();
+        let largest = measured
+            .captured()
+            .iter()
+            .map(|captured| captured.checkpoint().body().identity().size)
+            .max()
+            .unwrap();
+        measured.release().await;
+        // Room for two checkpoints and a half, so all four together never fit.
+        let cap = largest * 2 + largest / 2;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(
+            SplintId,
+            HandoffCheckpointBudget,
+        )>::new()));
+        let limits = CaptureLimits {
+            aggregate_checkpoint_bytes: cap,
+            ..CaptureLimits::DEFAULT
+        };
+        let failure = capture_live_splints(fleet.handles(), limits, {
+            let seen = Arc::clone(&seen);
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
+                seen.lock()
+                    .unwrap()
+                    .push((handle.splint_id, budget.clone()));
+                async move { handle.prepare_pty_handoff_within(&budget).await }
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            CaptureFailure::AggregateCapExceeded { cap: refused, .. } if refused == cap
+        ));
+        let (budget, mut attempts) = {
+            let seen = seen.lock().unwrap();
+            let attempts = seen
+                .iter()
+                .map(|(splint_id, _)| *splint_id)
+                .collect::<Vec<_>>();
+            (seen[0].1.clone(), attempts)
+        };
+        assert!(budget.high_water() <= cap, "sealed bytes passed the cap");
+        assert!(budget.high_water() > 0);
+        let attempted = attempts.len();
+        attempts.sort_by_key(ToString::to_string);
+        attempts.dedup();
+        assert_eq!(attempts.len(), attempted, "no capture was retried");
+        // An actor still inside its capture when the attempt was aborted
+        // drops its lease, and the reservation with it, as it replies.
+        time::timeout(Duration::from_secs(5), async {
+            while budget.reserved() != 0 {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("every reservation is returned");
+        fleet.assert_all_echo("after-budget").await;
+        fleet.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_synchronized_frame_held_at_the_first_attempt_is_captured_on_the_retry() {
+        let fleet = Fleet::spawn(&[
+            CAT,
+            "stty -echo; printf ready; while read l; do printf '\\033[?2026h1\\033[?2026l\\033[?2026h2\\033[?2026l\\033[?2026hframe-%s\\033[?2026l' \"$l\"; done",
+        ])
+        .await;
+        let framed = fleet.id(1);
+        let first = Arc::new(std::sync::Mutex::new(None::<bool>));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
+            let (first, calls) = (Arc::clone(&first), Arc::clone(&calls));
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
+                let opening =
+                    handle.splint_id == framed && calls.fetch_add(1, Ordering::SeqCst) == 0;
+                let first = Arc::clone(&first);
+                async move {
+                    if !opening {
+                        return handle.prepare_pty_handoff_within(&budget).await;
+                    }
+                    // Three frames in one burst: the first publishes and the
+                    // others are held for up to one frame interval.
+                    handle.input(b"x\n".to_vec()).await?;
+                    while !snapshot_text(&handle.snapshot().await?).contains("frame-x") {
+                        tokio::task::yield_now().await;
+                    }
+                    let attempt = handle.prepare_pty_handoff_within(&budget).await;
+                    *first.lock().unwrap() =
+                        Some(matches!(attempt, Err(LiveError::HandoffStateUnsupported)));
+                    attempt
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *first.lock().unwrap(),
+            Some(true),
+            "the first attempt met the held frame"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(captures.captured().len(), 2);
+        captures.release().await;
         fleet.shutdown().await;
     }
 
