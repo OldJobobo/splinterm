@@ -2,9 +2,14 @@
 //!
 //! Each case launches the actual binary from a sealed memfd with a sealed
 //! forward/rollback manifest pair and every idle descriptor role inherited.
-//! The candidate claims, verifies, and stages them, then stops at the
-//! deliberate adoption-not-wired boundary. It never binds or accepts on the
-//! fixture listeners and touches no installed daemon.
+//! The candidate claims, verifies, and stages them, then adopts: the
+//! fixture's forward pair is not installed at its recorded prefix, so
+//! adoption refuses before its commit. Until the rollback executor exists
+//! (Plan 0061 M3.11) that refusal is a loud, non-zero exit with diagnostics,
+//! which these cases pin as the pre-commit failure behaviour. The candidate
+//! never accepts on the fixture listeners, and it runs with a private state
+//! and configuration home and no session bus, so it touches no installed
+//! daemon, user state, or systemd manager.
 
 #![cfg(feature = "integration-test")]
 
@@ -263,6 +268,13 @@ impl Fixture {
         .args(arguments)
         .envs(environment.iter().copied())
         .env("SPLINTERM_SOCKET", &self.listener_path)
+        .env("XDG_STATE_HOME", self.directory.0.join("state"))
+        .env("XDG_CONFIG_HOME", self.directory.0.join("config"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/splinterd-test-bus",
+        )
+        .env_remove("SPLINTERM_POLICY")
         .env_remove("RUST_LOG")
         .current_dir(&self.directory.0)
         .output()
@@ -283,11 +295,31 @@ fn assert_candidate_error(output: &Output, expected: &str) {
     );
 }
 
+/// The pre-commit refusal every case below reaches once staging succeeds.
+const ADOPTION_REFUSAL: &str = "failed before its adoption commit (adoption)";
+
+/// Staging accepts every role, and adoption then refuses the fixture's
+/// uninstalled forward pair. Before Plan 0061 M3.11 the refusal exits
+/// non-zero, naming the failed phase and cause; exiting closes the claimed
+/// descriptors, which is all it ends (the fixture carries no Splint).
 #[test]
-fn sealed_idle_candidate_exec_claims_verifies_and_stages_every_role() {
+fn sealed_idle_candidate_stages_every_role_then_fails_adoption_loudly() {
     let fixture = Fixture::new(None);
     let output = fixture.launch(fixture.forward_manifest_fd);
-    assert_candidate_error(&output, "candidate runtime adoption is not wired");
+    assert_candidate_error(&output, ADOPTION_REFUSAL);
+    assert_candidate_error(
+        &output,
+        "the install prefix does not hold the forward pair the manifest recorded",
+    );
+    assert_candidate_error(&output, "live-process continuity is not guaranteed");
+    // Adoption ran no further than its first check: nothing was persisted.
+    assert!(
+        !fixture
+            .directory
+            .0
+            .join("state/splinterm/topology.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -325,7 +357,7 @@ fn candidate_accepts_the_packaged_daemon_argument_after_activation() {
         ],
         &[],
     );
-    assert_candidate_error(&output, "candidate runtime adoption is not wired");
+    assert_candidate_error(&output, ADOPTION_REFUSAL);
 }
 
 #[test]
@@ -374,7 +406,7 @@ fn malformed_activation_fails_closed_as_a_candidate_before_claiming() {
         assert_candidate_error(&output, expected);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("not inherited") && !stderr.contains("adoption is not wired"),
+            !stderr.contains("not inherited") && !stderr.contains("adoption commit"),
             "{arguments:?} reached the manifest: {stderr}"
         );
     }
