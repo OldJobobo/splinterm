@@ -25,9 +25,13 @@ trait Transport {
     fn reset(&mut self);
 }
 
-/// Drive zbus's existing async-io executor on the worker runtime rather than
-/// letting each connection spawn an unowned executor thread. The reactor is
-/// shared by async-io; all connection tasks and their driver are cancellable.
+/// Fallback driver for a connection on zbus's async-io backend. Packaged and
+/// workspace builds compile zbus with both backends (splinterd enables Tokio),
+/// and a connection built inside the worker's current-thread runtime then uses
+/// Tokio: its tasks already run on that runtime and this tick stays idle. Only
+/// a splinterm-only build has just async-io. There, rather than letting the
+/// connection spawn an unowned executor thread, this drives its executor on
+/// the worker runtime. The driver is cancellable.
 pub(super) struct ConnectionDriver(tokio::task::JoinHandle<()>);
 
 impl ConnectionDriver {
