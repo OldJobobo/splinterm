@@ -1049,6 +1049,13 @@ struct DaemonState {
     install_prefix: Arc<InstallPrefix>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
+    /// Whether the daemon runs with `--require-workload-cgroups`. Without a
+    /// connected manager every new launch then fails closed.
+    workload_cgroups_required: bool,
+    /// Set when a resumed round finds a descriptor still inheritable after
+    /// the exec boundary failed to restore close-on-exec: every new launch
+    /// then fails closed rather than leak it into a child.
+    inheritable_descriptor_leak: std::sync::atomic::AtomicBool,
     /// Shared so a resumed serve round (Plan 0061 D5) keeps the one retained
     /// rollback pair the daemon captured at startup.
     rollback_handoff: Arc<handoff_requests::RollbackAuthority>,
@@ -1273,6 +1280,7 @@ struct DaemonStateInputs {
     install_prefix: Arc<InstallPrefix>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
+    workload_cgroups_required: bool,
     rollback_handoff: Arc<handoff_requests::RollbackAuthority>,
     daemon_generation: u64,
     handoff_listeners: Option<ListenerDescriptors>,
@@ -1299,20 +1307,13 @@ fn daemon_runtime() -> tokio::runtime::Runtime {
 /// round serves the same generation again on a new runtime
 /// ([`StartupSource::Resumed`]).
 fn run_daemon(source: StartupSource) -> Result<()> {
-    let workload_cgroups_required = match &source {
-        StartupSource::Fresh {
-            require_workload_cgroups,
-            ..
-        } => *require_workload_cgroups,
-        StartupSource::Resumed { resumed, .. } => resumed.workload_cgroups_required,
-    };
     let mut source = source;
     loop {
         let runtime = daemon_runtime();
         match runtime.block_on(Box::pin(serve_round(source)))? {
             RoundEnd::Shutdown => return Ok(()),
             RoundEnd::Handoff { stopped, signals } => {
-                let resumed = stop_runtime_and_cross(runtime, *stopped, workload_cgroups_required);
+                let resumed = stop_runtime_and_cross(runtime, *stopped);
                 source = StartupSource::Resumed {
                     resumed: Box::new(resumed),
                     signals,
@@ -1395,16 +1396,18 @@ const HANDOFF_GUARD_WAIT: Duration = Duration::from_millis(50);
 // its resumed actor's first read, is bounded by named deadlines: capture
 // (`HANDOFF_CAPTURE_ACTOR_TIMEOUT` twice plus the retry delay, about 4 s),
 // manifest building, the actor end (`HANDOFF_ACTOR_END_TIMEOUT`, 2 s), the
-// systemd connection's shutdown (`SHUTDOWN_GRACE` to drain plus as long to
-// close, 2 s), the runtime stop (`HANDOFF_RUNTIME_STOP_TIMEOUT`, 2 s), the
-// guard (`HANDOFF_GUARD_TIMEOUT`, 2 s), sealing and inheritance (a procfs
-// scan and at most 1024 descriptor flag changes), and resume: a systemd
-// connection probe (500 ms requests), scope adoption
-// (`HANDOFF_RESUME_SCOPE_TIMEOUT`, 5 s), and restoring the checkpoints
-// (at most `MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES`). The worst case is
-// therefore about 19 s plus checkpoint restoration; on a healthy daemon
-// every step after capture takes milliseconds. Meanwhile the kernel buffers
-// each child's output and then blocks its writes: nothing is lost.
+// systemd connection's shutdown (three `SHUTDOWN_GRACE` phases: drain,
+// abort, close, about 3 s), the runtime stop (`HANDOFF_RUNTIME_STOP_TIMEOUT`,
+// 2 s), the guard (`HANDOFF_GUARD_TIMEOUT`, 2 s), sealing and inheritance (a
+// procfs scan and at most 1024 descriptor flag changes), and resume: the
+// fresh systemd connection (its connect and handshake bounded by the D-Bus
+// worker at four 500 ms method timeouts, 2 s, then a capability probe that
+// starts and stops a unit, about 2.5 s), the policy reload (one file read),
+// scope adoption (`HANDOFF_RESUME_SCOPE_TIMEOUT`, 5 s), and restoring the
+// checkpoints (at most `MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES`). The worst
+// case is therefore about 25 s plus checkpoint restoration; on a healthy
+// daemon every step after capture takes milliseconds. Meanwhile the kernel
+// buffers each child's output and then blocks its writes: nothing is lost.
 
 /// The old generation after serve left for the exec boundary and every
 /// captured actor ended for handoff. The runtime still exists; nothing has
@@ -1518,7 +1521,6 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
 fn stop_runtime_and_cross(
     runtime: tokio::runtime::Runtime,
     stopped: StoppedForHandoff,
-    workload_cgroups_required: bool,
 ) -> ResumedDaemon {
     let StoppedForHandoff {
         state,
@@ -1543,32 +1545,58 @@ fn stop_runtime_and_cross(
         actors_handed_off,
     );
     warn!(%reason, "daemon handoff did not exec; resuming the running generation");
+    let recorded_dojos = boundary.recorded_dojos();
     // The attempt is over: its fence and its sealed manifests and forward
     // snapshots close. The resumed state has its own idle gate.
     drop((hold, boundary));
-    let workload_units = if state.workload_units.is_some() {
-        match WorkloadUnitManager::connect(
-            WorkloadMemoryPolicy::default(),
-            workload_cgroups_required.then_some("splinterd.service"),
-        ) {
-            Ok(manager) => Some(manager),
-            Err(error) => {
-                error!(%error, workload_cgroups_required, "no workload unit manager after handoff resume; every resumed Splint and every new launch runs uncontained");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let workload_cgroups_required = state.workload_cgroups_required;
+    // Required cgroups always try, so one failed connect does not leave
+    // every later round without a manager.
+    let workload_units = (state.workload_units.is_some() || workload_cgroups_required)
+        .then(|| connect_resumed_workload_units(workload_cgroups_required))
+        .flatten();
     ResumedDaemon {
         previous: state,
         listeners,
         handed_off,
         uncaptured,
+        recorded_dojos,
         workload_units,
         workload_cgroups_required,
+        policy_path: policy::configured_path(),
         boundary_failure: reason,
     }
+}
+
+/// Connects the resumed round's fresh workload unit manager, bounded by the
+/// D-Bus worker's connect limit.
+///
+/// Failing to connect keeps every resumed Splint running uncontained:
+/// killing them would be worse. With cgroups required, new launches then
+/// fail closed (`spawn_runtime_with_size`); otherwise they run uncontained.
+#[cfg(not(test))]
+fn connect_resumed_workload_units(required: bool) -> Option<WorkloadUnitManager> {
+    match WorkloadUnitManager::connect(
+        WorkloadMemoryPolicy::default(),
+        required.then_some("splinterd.service"),
+    ) {
+        Ok(manager) => Some(manager),
+        Err(error) if required => {
+            error!(%error, "no workload unit manager after handoff resume; resumed Splints run uncontained and new launches are refused");
+            None
+        }
+        Err(error) => {
+            warn!(%error, "no workload unit manager after handoff resume; resumed Splints and new launches run uncontained");
+            None
+        }
+    }
+}
+
+/// Unit tests never reach the session's systemd manager: they resume as a
+/// daemon whose manager could not connect.
+#[cfg(test)]
+fn connect_resumed_workload_units(_: bool) -> Option<WorkloadUnitManager> {
+    None
 }
 
 /// Checks what the boundary needs, then crosses it. Returns why the old
@@ -1606,9 +1634,13 @@ struct ResumedDaemon {
     listeners: DaemonListeners,
     handed_off: Vec<HandedOffCapture>,
     uncaptured: Vec<LiveSplintRuntime>,
+    /// Each carried Splint's Dojo as the manifest records it.
+    recorded_dojos: HashMap<SplintId, DojoId>,
     /// The fresh manager, connected after the boundary.
     workload_units: Option<WorkloadUnitManager>,
     workload_cgroups_required: bool,
+    /// The persistent policy file the resumed round reloads.
+    policy_path: Option<PathBuf>,
     /// Why the boundary returned, already logged.
     boundary_failure: ExecBoundaryError,
 }
@@ -1625,8 +1657,10 @@ struct ResumedRound {
 ///
 /// It reuses the recorded install prefix and audit identity (never
 /// `start_fresh`, whose prefix derivation refuses after an upgrade), the
-/// retained rollback authority, the persisted Topology, the policy
-/// generation, and the audit records. Connection-owned state (controllers,
+/// retained rollback authority, the persisted Topology, the policy store,
+/// and the audit records. The policy file is reloaded once, as candidate
+/// adoption reloads it: a reload signalled during the handoff was abandoned
+/// under the fence and would otherwise never happen. Connection-owned state (controllers,
 /// subscriptions, grants, attachments, agent status) is dropped, as a forward
 /// daemon drops it: every client reconnects. Nothing here can fail as a
 /// whole, and nothing kills: see [`resume_handed_off`]. Uncaptured Splints
@@ -1643,8 +1677,10 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         listeners,
         handed_off,
         uncaptured,
+        recorded_dojos,
         workload_units,
-        workload_cgroups_required: _,
+        workload_cgroups_required,
+        policy_path,
         boundary_failure,
     } = resumed;
     let topology = previous.topology.read().await.clone();
@@ -1660,12 +1696,14 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         install_prefix: Arc::clone(&previous.install_prefix),
         pty_backend: previous.pty_backend.clone(),
         workload_units: workload_units.clone(),
+        workload_cgroups_required,
         rollback_handoff: Arc::clone(&previous.rollback_handoff),
         daemon_generation: previous.daemon_generation,
         handoff_listeners: previous.handoff_listeners,
     });
     *state.audit.lock().await = audit;
     drop(previous);
+    refresh_resumed_state(&state, &topology, policy_path, &boundary_failure).await;
 
     let splints = handed_off
         .into_iter()
@@ -1676,8 +1714,17 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
                 .map_or_else(default_scrollback_lines, |splint| {
                     splint.launch.scrollback_lines
                 });
+            // The manifest's Dojo, as candidate adoption uses; a test
+            // boundary records none, and the Topology names the same one.
+            // A Splint in neither cannot be placed: its unknown Dojo adopts
+            // no scope, so it runs uncontained.
+            let dojo_id = recorded_dojos
+                .get(&splint_id)
+                .copied()
+                .or_else(|| dojo_of(&topology, splint_id))
+                .unwrap_or_default();
             ResumableSplint {
-                dojo_id: dojo_of(&topology, splint_id).unwrap_or_default(),
+                dojo_id,
                 handed_off: capture.handed_off,
                 checkpoint: capture.checkpoint,
                 config: daemon_live_config(&state, scrollback),
@@ -1715,6 +1762,37 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         listeners,
         agent_status_timer,
     }
+}
+
+/// Brings a resumed state up to date before any Splint is served again.
+///
+/// After a failed close-on-exec restore it audits the descriptor table and,
+/// if anything is still inheritable, makes every new launch fail closed.
+/// Then it reloads the persistent policy once against the resumed Topology,
+/// as candidate adoption does: a reload signalled during the handoff was
+/// abandoned under the fence and would otherwise never run.
+async fn refresh_resumed_state(
+    state: &DaemonState,
+    topology: &Topology,
+    policy_path: Option<PathBuf>,
+    boundary_failure: &ExecBoundaryError,
+) {
+    if matches!(boundary_failure, ExecBoundaryError::Restore { .. })
+        && let Err(error) = splinterd::handoff_descriptors::audit_inheritable_descriptors()
+    {
+        error!(%error, "a descriptor stayed inheritable after the handoff boundary; new launches are refused until restart");
+        state
+            .inheritable_descriptor_leak
+            .store(true, Ordering::Release);
+    }
+    let candidate = reloaded_policy_candidate(
+        tokio::task::spawn_blocking(move || policy::prepare(policy_path)).await,
+    );
+    let generation = state.policy.lock().await.publish(candidate, topology);
+    if let Some(diagnostic) = &generation.diagnostic {
+        warn!(generation = generation.id, %diagnostic, "persistent policy rejected on handoff resume; installed deny-all generation");
+    }
+    record_policy_reload(state, &generation).await;
 }
 
 /// Registers every resumed runtime and observes its exit.
@@ -1861,6 +1939,7 @@ async fn start_fresh(
         pty_backend: LinuxPtyBackend::installed_in(install_prefix.directory())?,
         install_prefix,
         workload_units,
+        workload_cgroups_required: require_workload_cgroups,
         rollback_handoff: Arc::new(rollback_handoff),
         // A fresh start serves the first generation; adoption (M3.8) will
         // publish the one after its predecessor's.
@@ -1998,6 +2077,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         install_prefix,
         pty_backend,
         workload_units,
+        workload_cgroups_required,
         rollback_handoff,
         daemon_generation,
         handoff_listeners,
@@ -2047,6 +2127,8 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         install_prefix,
         pty_backend,
         workload_units,
+        workload_cgroups_required,
+        inheritable_descriptor_leak: std::sync::atomic::AtomicBool::new(false),
         rollback_handoff,
         daemon_generation,
         handoff_listeners,
@@ -2262,7 +2344,7 @@ async fn serve(
         time::sleep_until(image_transfer_expiry_deadline(state, false).await);
     tokio::pin!(image_transfer_expiry);
     let mut policy_reloads = PolicyReloadQueue::default();
-    let mut handing_off = false;
+    let mut handoff = None;
 
     loop {
         tokio::select! {
@@ -2280,8 +2362,10 @@ async fn serve(
                 break;
             }
             () = state.handoff_exit.ready.notified() => {
-                if state.handoff_exit.is_ready() {
-                    handing_off = true;
+                // Taken here, so serve leaves only with an attempt in hand;
+                // a wakeup without one keeps serving.
+                if let Some(exec) = state.handoff_exit.take() {
+                    handoff = Some(exec);
                     break;
                 }
             }
@@ -2350,9 +2434,8 @@ async fn serve(
     // reconnect to whichever generation serves next.
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
-    // No connection task remains that could deposit an attempt now.
-    match (handing_off, state.handoff_exit.take()) {
-        (true, Some(exec)) => {
+    match handoff {
+        Some(exec) => {
             policy_reloads.abandon().await;
             let listener = listener.into_std();
             let image_listener = image_listener.into_std();
@@ -2373,9 +2456,13 @@ async fn serve(
                 },
             })));
         }
-        // A shutdown signal won the race with a completed attempt.
-        (false, Some(exec)) => exec.cancel(HandoffCancelReason::Requested).await,
-        (_, None) => {}
+        // No connection task remains that could deposit an attempt now; one
+        // deposited before a shutdown signal won the race is cancelled.
+        None => {
+            if let Some(exec) = state.handoff_exit.take() {
+                exec.cancel(HandoffCancelReason::Requested).await;
+            }
+        }
     }
     // A reload signalled before termination still completes, never cut
     // between publishing a policy and disconnecting automation clients.
@@ -4047,6 +4134,27 @@ fn daemon_live_config(state: &DaemonState, scrollback_lines: usize) -> LiveSplin
     config
 }
 
+/// Refuses a launch that would break a daemon guarantee, at the one point
+/// every launch path passes before it spawns: required workload cgroups
+/// without a connected manager (a handoff resume whose fresh manager could
+/// not connect), or a descriptor left inheritable after a failed handoff
+/// boundary, which a child would inherit.
+fn refuse_unsafe_launch(state: &DaemonState) -> Result<(), ProtocolError> {
+    if state.workload_units.is_none() && state.workload_cgroups_required {
+        return Err(ProtocolError::new(
+            ErrorCode::Internal,
+            "workload cgroups are required, but no workload unit manager is connected",
+        ));
+    }
+    if state.inheritable_descriptor_leak.load(Ordering::Acquire) {
+        return Err(ProtocolError::new(
+            ErrorCode::Internal,
+            "a descriptor stayed inheritable after a daemon handoff; restart the daemon to launch",
+        ));
+    }
+    Ok(())
+}
+
 async fn spawn_runtime_with_size(
     state: &DaemonState,
     _slot: &LaunchSlot,
@@ -4055,6 +4163,7 @@ async fn spawn_runtime_with_size(
     initial_size: Option<(u16, u16)>,
 ) -> Result<LiveSplintRuntime, ProtocolError> {
     launch.validate()?;
+    refuse_unsafe_launch(state)?;
     #[cfg(test)]
     state.spawn_attempts.fetch_add(1, Ordering::SeqCst);
     let pty_command = if let Some((program, arguments)) = launch.command.split_first() {
@@ -9078,6 +9187,7 @@ impl HandoffExit {
         self.ready.notify_one();
     }
 
+    #[cfg(test)]
     fn is_ready(&self) -> bool {
         self.attempt.lock().unwrap().is_some()
     }
@@ -9098,6 +9208,9 @@ trait ExecBoundaryInputs: Send {
         listeners: &'a DaemonListeners,
         splints: &'a [HandedOffCapture],
     ) -> Result<ExecInheritancePlan<'a>, ExecBoundaryError>;
+
+    /// Each carried Splint's Dojo as the manifests record it.
+    fn recorded_dojos(&self) -> HashMap<SplintId, DojoId>;
 }
 
 /// A packaged attempt's exec authority: the forward and rollback snapshot
@@ -9135,6 +9248,10 @@ impl ExecBoundaryInputs for ForwardExec {
         ];
         owners.extend(splint_descriptors(splints));
         ExecInheritancePlan::for_prepared(&self.manifests, &owners)
+    }
+
+    fn recorded_dojos(&self) -> HashMap<SplintId, DojoId> {
+        self.manifests.splint_dojos().collect()
     }
 }
 
@@ -9500,6 +9617,10 @@ struct TestExecInputs {
 
 #[cfg(test)]
 impl ExecBoundaryInputs for TestExecInputs {
+    fn recorded_dojos(&self) -> HashMap<SplintId, DojoId> {
+        HashMap::new()
+    }
+
     fn plan<'a>(
         &'a self,
         listeners: &'a DaemonListeners,
@@ -12543,6 +12664,8 @@ mod tests {
             install_prefix: Arc::new(consent::test_install_prefix()),
             pty_backend,
             workload_units: None,
+            workload_cgroups_required: false,
+            inheritable_descriptor_leak: std::sync::atomic::AtomicBool::new(false),
             rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::NotPackaged),
             daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
             handoff_listeners: None,
@@ -15412,13 +15535,34 @@ mod tests {
         directory: PathBuf,
     }
 
+    /// A valid owner-only policy file with one rule naming `splint_id`.
+    fn write_one_rule_policy(path: &Path, splint_id: SplintId) {
+        std::fs::write(
+            path,
+            format!(
+                r#"{{"schema":"splinterm.policy.v2","rules":[{{
+                    "id":"written-during-the-fence",
+                    "executable":{{"path":"/usr/bin/client","sha256":"{}"}},
+                    "scopes":["terminal_visible_read"],
+                    "resources":[{{"kind":"splint","splint_id":"{splint_id}","incarnation":"current"}}],
+                    "limits":{{"max_returned_rows":40}}
+                }}]}}"#,
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     /// Plays one handoff round on its own runtime, with serve's part played
     /// here: two live `cat` Splints and one that exited, an `Execute` with
     /// exec authority, its request task aborted as serve aborts every
     /// connection task, the actors ended for handoff, the runtime stopped,
     /// and the exec boundary crossed. The state records the listeners at
-    /// their real numbers unless `renumbered`.
-    fn handoff_round(renumbered: bool) -> HandoffRound {
+    /// their real numbers unless `renumbered`, and the resumed round requires workload
+    /// cgroups when `cgroups_required`. The policy file changes under the
+    /// fence: it gains one rule, which the old round never loaded.
+    fn handoff_round(renumbered: bool, cgroups_required: bool) -> HandoffRound {
         let directory = temp_dir();
         std::fs::create_dir_all(&directory).unwrap();
         let listeners = test_listeners(&directory);
@@ -15456,6 +15600,11 @@ mod tests {
             tokio::task::yield_now().await;
             assert!(state.handoff_gate.is_fenced());
             let exec = state.handoff_exit.take().unwrap();
+            assert_eq!(
+                state.policy.lock().await.snapshot().document.rule_count(),
+                0
+            );
+            write_one_rule_policy(&directory.join("policy.json"), handles[0].splint_id);
             let stopped =
                 stop_for_handoff(Arc::clone(&state), ServeHandoff { exec, listeners }).await;
             assert!(stopped.actors_handed_off);
@@ -15468,7 +15617,14 @@ mod tests {
                 .collect::<Vec<_>>();
             (stopped, live, exited)
         });
-        let resumed = stop_runtime_and_cross(runtime, stopped, false);
+        let mut resumed = stop_runtime_and_cross(runtime, stopped);
+        assert!(!resumed.workload_cgroups_required);
+        // A required daemon had a manager before the handoff; unit tests
+        // never have one, so the old round runs unrequired and only the
+        // resumed round, whose fresh manager "failed" to connect, requires.
+        resumed.workload_cgroups_required = cgroups_required;
+        // `SPLINTERM_POLICY` names the file in a daemon; tests point at it.
+        resumed.policy_path = Some(directory.join("policy.json"));
         HandoffRound {
             resumed,
             live,
@@ -15500,6 +15656,10 @@ mod tests {
             );
             assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
             assert!(state.topology_transactions.try_acquire().is_ok());
+            // The policy file written under the fence is in effect.
+            let policy = state.policy.lock().await.snapshot();
+            assert!(policy.diagnostic.is_none(), "{:?}", policy.diagnostic);
+            assert_eq!(policy.document.rule_count(), 1);
             let registered = state.runtimes.lock().await.handles();
             assert_eq!(registered.len(), live.len());
             assert!(!registered.contains_key(&exited));
@@ -15511,6 +15671,28 @@ mod tests {
             }
             let handles = registered.values().cloned().collect::<Vec<_>>();
             assert_actors_echo(&handles, "after-resume").await;
+            if state.workload_cgroups_required {
+                // Required cgroups without a manager: resumed Splints stay
+                // up, but a new launch fails closed.
+                assert!(state.workload_units.is_none());
+                let revision = state.topology.read().await.revision();
+                let refused = trusted_request(
+                    &round.state,
+                    81,
+                    Request::CreateLair {
+                        expected_topology_revision: revision,
+                        name: "refused".into(),
+                        launch: test_launch(&["/bin/sh", "-c", "exec cat"]),
+                        generated_name: false,
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(refused.code, ErrorCode::Internal);
+                assert!(refused.message.contains("workload cgroups are required"));
+                assert_eq!(state.runtimes.lock().await.handles().len(), live.len());
+                assert_actors_echo(&handles, "after-refused-launch").await;
+            }
             assert_eq!(
                 state
                     .topology
@@ -15545,7 +15727,7 @@ mod tests {
     /// old generation resumes in process (Plan 0061 D5).
     #[test]
     fn an_executed_handoff_stops_the_runtime_and_resumes_when_the_guard_times_out() {
-        let round = handoff_round(false);
+        let round = handoff_round(false, false);
         assert!(
             matches!(
                 round.resumed.boundary_failure,
@@ -15563,11 +15745,34 @@ mod tests {
     /// boundary before the guard; the old generation resumes all the same.
     #[test]
     fn renumbered_listeners_refuse_the_boundary_and_resume() {
-        let round = handoff_round(true);
+        let round = handoff_round(true, false);
         assert!(matches!(
             round.resumed.boundary_failure,
             ExecBoundaryError::ListenerMismatch
         ));
+        assert_resumed_in_process(round);
+    }
+
+    /// A descriptor left inheritable after a failed restore refuses launches.
+    #[test]
+    fn a_leaked_inheritable_descriptor_refuses_launches() {
+        let state = test_state(false);
+        assert!(refuse_unsafe_launch(&state).is_ok());
+        state
+            .inheritable_descriptor_leak
+            .store(true, Ordering::Release);
+        let refused = refuse_unsafe_launch(&state).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert!(refused.message.contains("stayed inheritable"));
+    }
+
+    /// With workload cgroups required and no manager after resume (unit tests
+    /// never connect one), every resumed Splint keeps running and echoing,
+    /// and a new launch is refused rather than run uncontained.
+    #[test]
+    fn required_cgroups_without_a_manager_refuse_launches_after_resume() {
+        let round = handoff_round(false, true);
+        assert!(round.resumed.workload_units.is_none());
         assert_resumed_in_process(round);
     }
 

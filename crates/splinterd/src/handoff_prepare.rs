@@ -646,6 +646,14 @@ impl PreparedManifests {
             .collect()
     }
 
+    /// Each carried Splint with the Dojo the manifests record for it.
+    pub fn splint_dojos(&self) -> impl Iterator<Item = (SplintId, DojoId)> + '_ {
+        self.forward
+            .splints
+            .iter()
+            .map(|splint| (splint.splint_id, splint.dojo_id))
+    }
+
     /// Whether the rollback manifest returns to the forward manifest's source.
     #[must_use]
     pub const fn rollback_reverses_forward(&self) -> bool {

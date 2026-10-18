@@ -32,7 +32,7 @@ use std::{
 
 use rustix::{
     fs::{MemfdFlags, fcntl_get_seals, fstat, memfd_create},
-    io::{FdFlags, fcntl_getfd},
+    io::{FdFlags, fcntl_getfd, fcntl_setfd},
 };
 use splinterd::{
     HandoffCheckpointBudget, LiveError, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
@@ -72,11 +72,24 @@ fn main() -> ExitCode {
         Some("faults") => faults_stage(),
         Some(stage) => panic!("unknown stage {stage:?}"),
         None => {
+            // The process-wide audit refuses any stray inheritable
+            // descriptor, and a harness may leak one into this process (CI
+            // run 39137743159 did). Each stage starts without descriptors
+            // inherited from here, as the sibling descriptor tests do; this
+            // deliberately inheritable one proves it on every run.
+            let stray = fs::File::open("/dev/null").unwrap();
+            let flags = fcntl_getfd(&stray).unwrap();
+            fcntl_setfd(&stray, flags - FdFlags::CLOEXEC).unwrap();
             for stage in STAGES {
-                let output = Command::new(env::current_exe().unwrap())
+                let output = Command::new("python3")
+                    .arg("-c")
+                    .arg(
+                        "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
+                    )
+                    .arg(env::current_exe().unwrap())
                     .env(STAGE, stage)
                     .output()
-                    .unwrap();
+                    .expect("launch a stage without inherited descriptors");
                 assert!(
                     output.status.success(),
                     "{stage} stage failed with {}\nstdout:\n{}\nstderr:\n{}",
@@ -578,6 +591,11 @@ fn assert_single_threaded() {
         fs::read_dir("/proc/self/task").unwrap().count(),
         1,
         "stage must start with only its main thread"
+    );
+    assert_eq!(
+        inheritable_descriptors(16).unwrap(),
+        [],
+        "stage must start without inherited descriptors"
     );
 }
 
