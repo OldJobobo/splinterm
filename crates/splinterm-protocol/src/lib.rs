@@ -2473,6 +2473,12 @@ impl HandoffReport {
             || transient_count != (self.transient_lairs > 0).then_some(self.transient_lairs)
             // Exactly one rollback reason explains missing rollback authority.
             || rollback_reasons != usize::from(!self.rollback_available)
+            // An unpackaged build has no installed pair to roll back to.
+            || (self.build.provenance == HandoffBuildProvenance::Unpackaged
+                && !self
+                    .blocking_reasons
+                    .iter()
+                    .any(|reason| matches!(reason, HandoffBlockingReason::NotPackaged)))
         {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
@@ -5895,6 +5901,17 @@ mod tests {
                 report.blocking_reasons.remove(0);
             },
             |report: &mut HandoffReport| report.rollback_available = true,
+            // Unpackaged builds always name NotPackaged, never a ready pair or
+            // a different rollback reason.
+            |report: &mut HandoffReport| {
+                report.rollback_available = true;
+                report
+                    .blocking_reasons
+                    .retain(|reason| !matches!(reason, HandoffBlockingReason::NotPackaged));
+            },
+            |report: &mut HandoffReport| {
+                report.blocking_reasons[1] = HandoffBlockingReason::RollbackUnavailable;
+            },
             |report: &mut HandoffReport| {
                 report
                     .blocking_reasons

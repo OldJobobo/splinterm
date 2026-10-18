@@ -110,6 +110,12 @@ fn report_from(
     live_splints: usize,
     rollback: &RollbackAuthority,
 ) -> HandoffReport {
+    // An unpackaged build has no installed pair, whatever startup found.
+    let rollback = if build.provenance == HandoffBuildProvenance::Unpackaged {
+        &RollbackAuthority::NotPackaged
+    } else {
+        rollback
+    };
     let range = |range: VersionRange| HandoffVersionRange {
         minimum: range.minimum(),
         maximum: range.maximum(),
@@ -219,6 +225,29 @@ mod tests {
     }
 
     #[test]
+    fn an_unpackaged_build_always_reports_not_packaged() {
+        // Startup found a record but could not retain the pair; an unpackaged
+        // build still has no installed pair to roll back to.
+        let report = report_from(
+            FRESH_DAEMON_GENERATION,
+            build(),
+            capabilities(),
+            &Topology::new(),
+            0,
+            &RollbackAuthority::Unavailable,
+        );
+        report.validate().unwrap();
+        assert!(!report.rollback_available);
+        assert_eq!(
+            report.blocking_reasons,
+            [
+                HandoffBlockingReason::NotPackaged,
+                HandoffBlockingReason::Unsupported
+            ]
+        );
+    }
+
+    #[test]
     fn idle_development_daemon_reports_not_packaged_and_unsupported() {
         let topology = Topology::new();
         let report = report_from(
@@ -262,9 +291,14 @@ mod tests {
                 Lair::transient(format!("transient-{index}"), PathBuf::from("/tmp")),
             );
         }
+        // A packaged daemon that could not retain its rollback pair.
+        let packaged = HandoffBuild {
+            provenance: HandoffBuildProvenance::ReleaseCandidate,
+            ..build()
+        };
         let report = report_from(
             FRESH_DAEMON_GENERATION,
-            build(),
+            packaged,
             capabilities(),
             &topology,
             7,
