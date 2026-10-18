@@ -498,8 +498,14 @@ mod tests {
         let mut context = configured
             .clone()
             .with_font_size_override(Some(FontSize::Points(9.0)));
-        assert_eq!(context.effective_font_size(120).unwrap(), 12.0);
-        assert_eq!(context.effective_font_size(240).unwrap(), 24.0);
+        assert_eq!(
+            context.effective_font_size(120).unwrap().to_bits(),
+            f32::to_bits(12.0)
+        );
+        assert_eq!(
+            context.effective_font_size(240).unwrap().to_bits(),
+            f32::to_bits(24.0)
+        );
 
         // 16 px is 12 pt: 16 px at 1x, rescaled live.
         assert!(
@@ -507,7 +513,10 @@ mod tests {
                 .replace_font_size_override(Some(FontSize::Points(12.0)), 120)
                 .unwrap()
         );
-        assert_eq!(context.effective_font_size(120).unwrap(), 16.0);
+        assert_eq!(
+            context.effective_font_size(120).unwrap().to_bits(),
+            f32::to_bits(16.0)
+        );
         assert!(
             !context
                 .replace_font_size_override(Some(FontSize::Points(12.0)), 120)
@@ -521,7 +530,10 @@ mod tests {
                 .replace_font_size_override(Some(FontSize::Points(9.0)), 120)
                 .unwrap()
         );
-        assert_eq!(context.effective_font_size(120).unwrap(), 853.0 / 64.0);
+        assert_eq!(
+            context.effective_font_size(120).unwrap().to_bits(),
+            f32::to_bits(853.0 / 64.0)
+        );
 
         // Dropping the followed size returns to the configured base.
         context.apply_font_zoom_steps(0, 120).unwrap();

@@ -830,8 +830,9 @@ Splinterm layers them the same way, key by key: a key in the user file replaces
 the theme's value for that key only, and a key in neither file takes Omarchy's
 default. Both files join the 500 ms theme poll, so edits apply live.
 
-Splinterm reads values the way the shell's `parseShell` does: a quoted string,
-or a bare number such as `0.9` or `-1`, a list of two to four numbers, or a word.
+Splinterm reads values the way the shell's `parseShell` does: a non-empty quoted
+string without quotes inside, opened and closed by either `"` or `'`, or a bare
+number such as `0.9` or `-1`, a list of two to four numbers, or a word.
 The shell drops any other line, such as `background-alpha = .5` or
 `base-size = +12`, so that key stays unset and the theme's value applies.
 
@@ -861,8 +862,9 @@ coverage is `1 - (1 - shell alpha) × (1 - terminal alpha)`:
 
 Panel borders, dividers, selected rows and text stay opaque. Because the
 backdrop is an unknown wallpaper, Splinterm raises a panel's coverage to the
-lowest value at which its primary and secondary text keep WCAG 4.5:1 contrast
-against both a black and a white backdrop. Those two bound every other
+lowest value at which every foreground drawn on it keeps WCAG 4.5:1 contrast
+against both a black and a white backdrop: primary and secondary text, and on
+popups also the accent the Dojo prompt uses for its destructive choice. Those two bound every other
 backdrop. A theme whose secondary text already sits at the 4.5:1 floor on the
 opaque panel, as many light themes do, keeps its panels opaque. As in the
 shell, a number outside 0.0–1.0 is clamped into that range, and a value that is
@@ -900,7 +902,9 @@ resulting point size is clamped to the 6–96 pt Splinterm renders, which is
 reported once. A value with no leading digits, such as `big`, is reported once:
 an open window keeps its current size, and at startup Splinterm uses 12 px
 (9 pt), as the shell falls back to its 12 px default. An explicit `main.theme`
-JSON palette still follows the text size from the Omarchy `shell.toml` layers.
+JSON palette still follows the text size from the Omarchy `shell.toml` layers,
+choosing the theme directory with the same order and brief-gap grace as the
+native theme.
 While `config.ini` sets a font size, Splinterm does not report `base-size`
 problems, and with a JSON palette it does not report panel alpha problems.
 

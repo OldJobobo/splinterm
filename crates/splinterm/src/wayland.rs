@@ -861,6 +861,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             theme_generation: 0,
             pending_font_update: None,
             applied_text_size_px: options.theme.shell.text_size_px,
+            rejected_text_size: None,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title_override: options.title,
@@ -1983,6 +1984,8 @@ struct PresentationState {
     /// The followed Omarchy text size the render context last applied. A theme
     /// whose text size differs is reconciled through the font path.
     applied_text_size_px: Option<u16>,
+    /// A followed size the render context rejected, with the zoom steps then.
+    rejected_text_size: Option<(Option<u16>, i16)>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -2984,6 +2987,17 @@ fn followed_font_size(theme: ResolvedTheme) -> Option<FontSize> {
         .shell
         .text_size_px
         .map(|px| FontSize::Points(omarchy_terminal_point_size(px)))
+}
+
+/// Whether the followed text size still needs applying: it differs from the
+/// size last applied and was not already rejected at the current zoom.
+fn followed_text_size_due(
+    followed: Option<u16>,
+    applied: Option<u16>,
+    rejected: Option<(Option<u16>, i16)>,
+    zoom_steps: i16,
+) -> bool {
+    followed != applied && rejected != Some((followed, zoom_steps))
 }
 
 fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUpdateImpact {
@@ -6597,6 +6611,35 @@ impl App {
         self.install_render_context(candidate_context)
     }
 
+    /// Applies the theme's followed Omarchy text size when it differs from the
+    /// size last applied. A rejected size, typically because runtime zoom would
+    /// push it past the renderer's limit, is not retried until the request or
+    /// the zoom changes. Returns whether frames were rebuilt.
+    fn reconcile_followed_text_size(&mut self) -> bool {
+        let followed = self.presentation.theme.shell.text_size_px;
+        let attempt = (followed, self.presentation.font_zoom_steps);
+        if !followed_text_size_due(
+            followed,
+            self.presentation.applied_text_size_px,
+            self.presentation.rejected_text_size,
+            self.presentation.font_zoom_steps,
+        ) {
+            return false;
+        }
+        match self.reconcile_font_size(followed_font_size(self.presentation.theme)) {
+            Ok(rebuilt) => {
+                self.presentation.applied_text_size_px = followed;
+                self.presentation.rejected_text_size = None;
+                rebuilt
+            }
+            Err(error) => {
+                self.presentation.rejected_text_size = Some(attempt);
+                eprintln!("splinterm live text size update rejected: {error:#}");
+                false
+            }
+        }
+    }
+
     /// Applies a followed Omarchy text size through the same reconciliation as
     /// a live font generation. A base change that leaves the raster size
     /// unchanged is recorded without rebuilding frames.
@@ -6762,6 +6805,14 @@ impl App {
         self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
+        // A followed text size rejected at the previous zoom may fit now; its
+        // reconciliation rebuilds every frame for the new zoom as well.
+        if self.reconcile_followed_text_size() {
+            if self.surface.configured {
+                self.schedule_draw(queue_handle)?;
+            }
+            return Ok(true);
+        }
         if !raster_changed {
             if self.modal.inline_picker_open() && self.surface.configured {
                 self.modal.session_picker_redraw = true;
@@ -9703,21 +9754,11 @@ impl App {
                 }
             }
         }
-        let followed_text_size = self.presentation.theme.shell.text_size_px;
-        if followed_text_size != self.presentation.applied_text_size_px {
-            self.presentation.applied_text_size_px = followed_text_size;
-            match self.reconcile_font_size(followed_font_size(self.presentation.theme)) {
-                Ok(true) => {
-                    font_reconciled = true;
-                    visual_changed = true;
-                    focused_visual_changed = true;
-                    self.presentation.full_redraw = true;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    eprintln!("splinterm live text size update rejected: {error:#}");
-                }
-            }
+        if self.reconcile_followed_text_size() {
+            font_reconciled = true;
+            visual_changed = true;
+            focused_visual_changed = true;
+            self.presentation.full_redraw = true;
         }
         if !self.panes.pending_exited_splints.is_empty() {
             let topology_queue_open =
@@ -12055,6 +12096,50 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_followed_text_size_is_retried_once_zoom_changes() {
+        // Nothing to do while the followed size is the applied one.
+        assert!(!followed_text_size_due(Some(16), Some(16), None, 0));
+        assert!(followed_text_size_due(Some(16), Some(12), None, 0));
+        // A size rejected at +40 zoom steps is not retried every frame...
+        assert!(!followed_text_size_due(
+            Some(120),
+            Some(12),
+            Some((Some(120), 40)),
+            40
+        ));
+        // ...but is once the zoom changes or a different size is requested.
+        assert!(followed_text_size_due(
+            Some(120),
+            Some(12),
+            Some((Some(120), 40)),
+            0
+        ));
+        assert!(followed_text_size_due(
+            Some(14),
+            Some(12),
+            Some((Some(120), 40)),
+            40
+        ));
+
+        // The render context side: 90 pt plus 40 half-point steps exceeds the
+        // supported size and is rejected, then fits after the zoom resets.
+        let mut context =
+            RenderContext::new(u16::MAX).with_font_size_override(Some(FontSize::Points(9.0)));
+        assert_eq!(context.set_font_zoom_steps(40, 120).unwrap(), Some(true));
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(90.0)), 120)
+                .is_err()
+        );
+        assert!(context.set_font_zoom_steps(0, 120).unwrap().is_some());
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(90.0)), 120)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn followed_text_size_uses_omarchy_points_and_skips_pixel_rebuilds() {
         let current = ResolvedTheme::default();
         assert_eq!(followed_font_size(current), None);
@@ -12079,8 +12164,9 @@ mod tests {
                     context
                         .effective_font_resolution(scale_120)
                         .unwrap()
-                        .pixel_size,
-                    (points * (96.0 * scale) / 72.0 * 64.0).round() / 64.0,
+                        .pixel_size
+                        .to_bits(),
+                    ((points * (96.0 * scale) / 72.0 * 64.0).round() / 64.0).to_bits(),
                     "{px} px at {scale}x"
                 );
             }

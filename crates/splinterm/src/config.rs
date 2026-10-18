@@ -334,6 +334,13 @@ impl OmarchyThemeRoots {
         })
     }
 
+    /// Whether any root is claimed. A selected root that is missing while
+    /// another is claimed is a transient gap, not an absent Omarchy.
+    #[must_use]
+    pub fn any_claimed(&self) -> bool {
+        self.claimed().is_some()
+    }
+
     /// The stateless choice for one-shot reads: the first claimed root,
     /// otherwise the highest-priority root.
     #[must_use]
@@ -466,6 +473,8 @@ fn is_shell_bare_value(value: &str) -> bool {
 /// `[section]` headers and `key = value` lines, with keys and sections of
 /// `[A-Za-z0-9_-]` and an optional trailing `# comment`. A value is a quoted
 /// string without quotes inside, or a bare number, border-width list or word.
+/// As in the shell's `["']([^"']+)["']`, either quote opens a string and either
+/// closes it, so a mismatched pair is read as the shell reads it.
 /// Any other line is dropped, so its key stays unset and a lower layer still
 /// applies. Keys outside a section are ignored. The result maps `section.key`
 /// to its raw value; a later line wins.
@@ -571,6 +580,16 @@ pub fn omarchy_terminal_point_size(px: u16) -> f32 {
     f32::from(u16::try_from(points).unwrap_or(u16::MAX))
 }
 
+/// What an unparseable `base-size` falls back to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OmarchyTextSizeFallback {
+    /// At startup: Omarchy's 12 px default, as the shell uses.
+    OmarchyDefault,
+    /// In a running window: the size in use. `None` keeps Splinterm's
+    /// configured fallback when no shell size was followed before.
+    Current(Option<u16>),
+}
+
 /// Resolves the effective shell settings from the theme layer and the user
 /// override. Like the shell's `mergeShell`, layering is per key: a user key
 /// replaces the theme's value for that key only.
@@ -578,13 +597,12 @@ pub fn omarchy_terminal_point_size(px: u16) -> f32 {
 /// Alpha follows the shell's `pickAlpha`: a number is clamped to 0.0–1.0 and
 /// anything else falls back to Omarchy's opaque default. `base-size` follows
 /// the shell's `parseInt` and its 1 px floor. A `base-size` with no digits
-/// keeps `previous_text_size_px`, so a live edit never drops the size in use,
-/// or falls back to Omarchy's 12 px when there is none.
+/// uses `fallback`, so a live edit never changes the size in use.
 #[must_use]
 pub fn resolve_omarchy_shell(
     theme: OmarchyShellLayer<'_>,
     user: Option<OmarchyShellLayer<'_>>,
-    previous_text_size_px: Option<u16>,
+    fallback: OmarchyTextSizeFallback,
 ) -> OmarchyShellLoad {
     let theme_values = theme.contents.map(omarchy_shell_values).unwrap_or_default();
     let user_values = user
@@ -651,15 +669,22 @@ pub fn resolve_omarchy_shell(
                 }
                 Some(px)
             } else {
-                let fallback = previous_text_size_px.unwrap_or(OMARCHY_DEFAULT_TEXT_SIZE_PX);
+                let fallback = match fallback {
+                    OmarchyTextSizeFallback::OmarchyDefault => Some(OMARCHY_DEFAULT_TEXT_SIZE_PX),
+                    OmarchyTextSizeFallback::Current(current) => current,
+                };
                 load.diagnostics.push((
                     OmarchyShellConcern::TextSize,
                     format!(
-                        "{}: [font] base-size {raw:?} is not a whole number of px; using {fallback} px",
-                        origin.display()
+                        "{}: [font] base-size {raw:?} is not a whole number of px; {}",
+                        origin.display(),
+                        fallback.map_or_else(
+                            || "keeping the current size".to_owned(),
+                            |px| format!("using {px} px"),
+                        )
                     ),
                 ));
-                Some(fallback)
+                fallback
             }
         }
     };
@@ -690,7 +715,7 @@ fn read_omarchy_shell_layer(
 pub fn load_omarchy_shell(
     theme_dir: &Path,
     user_shell: Option<&Path>,
-    previous_text_size_px: Option<u16>,
+    fallback: OmarchyTextSizeFallback,
 ) -> OmarchyShellLoad {
     let theme_path = theme_dir.join("shell.toml");
     let mut diagnostics = Vec::new();
@@ -705,7 +730,7 @@ pub fn load_omarchy_shell(
             path,
             contents: contents.as_deref(),
         }),
-        previous_text_size_px,
+        fallback,
     );
     diagnostics.append(&mut load.diagnostics);
     load.diagnostics = diagnostics;
@@ -2943,11 +2968,34 @@ mod tests {
     }
 
     #[test]
+    fn omarchy_shell_quotes_follow_the_shell_string_pattern() {
+        // parseShell's string pattern is ["']([^"']+)["']: either quote opens
+        // and either closes, the value holds no quote, and it is not empty.
+        // Omarchy therefore reads a mismatched pair as the quoted value, and
+        // Splinterm does the same rather than dropping a line the shell keeps.
+        let values = omarchy_shell_values(
+            "[menu]\nbackground-alpha = \"0.5'\n[font]\nbase-size = '16\"\n[popups]\nbackground-alpha = \"\"\ntext = \"a\"b\"\nborder = \"open\n",
+        );
+        assert_eq!(values.get("menu.background-alpha").unwrap(), "0.5");
+        assert_eq!(values.get("font.base-size").unwrap(), "16");
+        // Empty, interrupted and unterminated strings match no shell pattern,
+        // so their lines are dropped.
+        assert!(!values.contains_key("popups.background-alpha"));
+        assert!(!values.contains_key("popups.text"));
+        assert!(!values.contains_key("popups.border"));
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
     fn omarchy_shell_layers_user_keys_over_the_theme_with_omarchy_defaults() {
         let template =
             include_str!("../tests/fixtures/omarchy4/shell/rendered-template.shell.toml");
         // The rendered stock template: opaque menus and popups, base-size 12.
-        let stock = resolve_omarchy_shell(shell_layer("theme/shell.toml", template), None, None);
+        let stock = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", template),
+            None,
+            OmarchyTextSizeFallback::OmarchyDefault,
+        );
         assert!(stock.diagnostics.is_empty(), "{:?}", stock.diagnostics);
         assert_eq!(
             stock.settings,
@@ -2966,7 +3014,7 @@ mod tests {
                 contents: None,
             },
             None,
-            Some(14),
+            OmarchyTextSizeFallback::Current(Some(14)),
         );
         assert_eq!(missing, OmarchyShellLoad::default());
 
@@ -2976,7 +3024,7 @@ mod tests {
         let layered = resolve_omarchy_shell(
             shell_layer("theme/shell.toml", theme),
             Some(shell_layer("user/shell.toml", "[font]\nbase-size = 16\n")),
-            None,
+            OmarchyTextSizeFallback::OmarchyDefault,
         );
         assert_eq!(layered.diagnostics, Vec::new());
         assert_eq!(layered.settings.menu_alpha, foot_alpha(0.8));
@@ -2989,7 +3037,7 @@ mod tests {
                 "user/shell.toml",
                 "[menu]\nbackground-alpha = 0.5\n",
             )),
-            None,
+            OmarchyTextSizeFallback::OmarchyDefault,
         );
         assert_eq!(user_alpha.settings.menu_alpha, foot_alpha(0.5));
         assert_eq!(user_alpha.settings.popup_alpha, foot_alpha(0.9));
@@ -3002,7 +3050,7 @@ mod tests {
                 path: Path::new("user/shell.toml"),
                 contents: None,
             }),
-            None,
+            OmarchyTextSizeFallback::OmarchyDefault,
         );
         assert_eq!(theme_size.settings.text_size_px, Some(14));
     }
@@ -3016,7 +3064,7 @@ mod tests {
                     "user/shell.toml",
                     &format!("[popups]\nbackground-alpha = {raw}\n"),
                 )),
-                None,
+                OmarchyTextSizeFallback::OmarchyDefault,
             )
         };
         // Bare values outside parseShell's number, width-list and word shapes
@@ -3052,14 +3100,14 @@ mod tests {
 
         // base-size follows the shell's parseInt and its 1 px floor; only the
         // rendered point size is bounded, and that is reported.
-        let user_size = |raw: &str, previous: Option<u16>| {
+        let user_size = |raw: &str, fallback: OmarchyTextSizeFallback| {
             resolve_omarchy_shell(
                 shell_layer("theme/shell.toml", "[font]\nbase-size = 14\n"),
                 Some(shell_layer(
                     "user/shell.toml",
                     &format!("[font]\nbase-size = {raw}\n"),
                 )),
-                previous,
+                fallback,
             )
         };
         for (raw, px, diagnostics) in [
@@ -3075,21 +3123,26 @@ mod tests {
             ("200", 200, 1),
             ("1 2", 1, 1),
         ] {
-            let load = user_size(raw, Some(13));
+            let load = user_size(raw, OmarchyTextSizeFallback::Current(Some(13)));
             assert_eq!(load.settings.text_size_px, Some(px), "{raw}");
             assert_eq!(load.diagnostics.len(), diagnostics, "{raw}");
         }
         // Dropped lines leave the theme's base-size in place.
         for raw in ["+12", "1e1", ".5"] {
-            let load = user_size(raw, Some(13));
+            let load = user_size(raw, OmarchyTextSizeFallback::Current(Some(13)));
             assert_eq!(load.settings.text_size_px, Some(14), "{raw}");
             assert!(load.diagnostics.is_empty(), "{raw}");
         }
-        // A stored value without digits keeps the previous size, or Omarchy's
-        // 12 px default when there is none.
-        for (previous, px) in [(Some(13), 13), (None, 12)] {
-            let load = user_size("big", previous);
-            assert_eq!(load.settings.text_size_px, Some(px));
+        // A stored value without digits keeps the size in use: the previous
+        // shell size, Splinterm's own fallback when a running window followed
+        // none, and Omarchy's 12 px default at startup.
+        for (fallback, px) in [
+            (OmarchyTextSizeFallback::Current(Some(13)), Some(13)),
+            (OmarchyTextSizeFallback::Current(None), None),
+            (OmarchyTextSizeFallback::OmarchyDefault, Some(12)),
+        ] {
+            let load = user_size("big", fallback);
+            assert_eq!(load.settings.text_size_px, px);
             assert_eq!(load.diagnostics.len(), 1);
             assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::TextSize);
         }
@@ -3098,9 +3151,16 @@ mod tests {
     #[test]
     fn omarchy_text_size_points_are_bounded_to_the_renderer_range() {
         for (px, points) in [(1, 6.0), (8, 6.0), (9, 7.0), (120, 90.0), (128, 96.0)] {
-            assert_eq!(omarchy_terminal_point_size(px), points, "{px} px");
+            assert_eq!(
+                omarchy_terminal_point_size(px).to_bits(),
+                f32::to_bits(points),
+                "{px} px"
+            );
         }
-        assert_eq!(omarchy_terminal_point_size(u16::MAX), 96.0);
+        assert_eq!(
+            omarchy_terminal_point_size(u16::MAX).to_bits(),
+            96.0_f32.to_bits()
+        );
     }
 
     #[test]
@@ -3112,26 +3172,29 @@ mod tests {
         let user = root.join("user/shell.toml");
         fs::create_dir_all(&theme).unwrap();
         assert_eq!(
-            load_omarchy_shell(&theme, Some(&user), None),
+            load_omarchy_shell(&theme, Some(&user), OmarchyTextSizeFallback::OmarchyDefault),
             OmarchyShellLoad::default()
         );
         fs::write(theme.join("shell.toml"), "[font]\nbase-size = 12\n").unwrap();
         fs::create_dir_all(user.parent().unwrap()).unwrap();
         fs::write(&user, "[font]\nbase-size = 18\n").unwrap();
         assert_eq!(
-            load_omarchy_shell(&theme, Some(&user), None)
+            load_omarchy_shell(&theme, Some(&user), OmarchyTextSizeFallback::OmarchyDefault)
                 .settings
                 .text_size_px,
             Some(18)
         );
         assert_eq!(
-            load_omarchy_shell(&theme, None, None).settings.text_size_px,
+            load_omarchy_shell(&theme, None, OmarchyTextSizeFallback::OmarchyDefault)
+                .settings
+                .text_size_px,
             Some(12)
         );
         // An unreadable layer is reported and treated as missing.
         fs::remove_file(&user).unwrap();
         fs::create_dir(&user).unwrap();
-        let unreadable = load_omarchy_shell(&theme, Some(&user), None);
+        let unreadable =
+            load_omarchy_shell(&theme, Some(&user), OmarchyTextSizeFallback::OmarchyDefault);
         assert_eq!(unreadable.settings.text_size_px, Some(12));
         assert_eq!(unreadable.diagnostics.len(), 1);
         fs::remove_dir_all(root).unwrap();
@@ -3168,7 +3231,11 @@ mod tests {
             (18, 14.0),
             (20, 15.0),
         ] {
-            assert_eq!(omarchy_terminal_point_size(px), points, "{px} px");
+            assert_eq!(
+                omarchy_terminal_point_size(px).to_bits(),
+                f32::to_bits(points),
+                "{px} px"
+            );
         }
     }
 

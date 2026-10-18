@@ -485,6 +485,17 @@ impl ChromeSurface {
             Self::Popup => shell.popup_alpha,
         }
     }
+
+    /// The foregrounds painted directly on this surface's panel fill. Menus
+    /// (the action palette, pickers and Explorer) draw primary and secondary
+    /// text there; the accent rail only marks rows. Popups also draw the
+    /// accent as text: the Dojo prompt's unselected destructive choice.
+    fn panel_foregrounds(self, palette: &SessionPickerPalette) -> Vec<u32> {
+        match self {
+            Self::Menu => vec![palette.primary, palette.secondary],
+            Self::Popup => vec![palette.primary, palette.secondary, palette.selected_rail],
+        }
+    }
 }
 
 /// Mixes two colours in encoded sRGB, the space the compositor blends in.
@@ -618,8 +629,9 @@ pub(crate) fn session_picker_palette(theme: ResolvedTheme) -> SessionPickerPalet
 }
 
 /// The overlay palette for a panel that follows the Omarchy shell's
-/// `background-alpha` for `surface`. Its primary and secondary text keep the
-/// contrast floor over any backdrop; see `chrome_panel_fill`.
+/// `background-alpha` for `surface`. Every foreground a painter draws directly
+/// on that surface's panel fill keeps the contrast floor over any backdrop;
+/// see `chrome_panel_fill`. Text on the opaque selected fill is excluded.
 #[must_use]
 pub(crate) fn chrome_panel_palette(
     theme: ResolvedTheme,
@@ -630,7 +642,7 @@ pub(crate) fn chrome_panel_palette(
         palette.panel,
         surface.shell_alpha(theme.shell),
         theme.background_alpha,
-        &[palette.primary, palette.secondary],
+        &surface.panel_foregrounds(&palette),
     );
     palette
 }
@@ -2318,5 +2330,29 @@ mod tests {
             chrome_panel_fill(0x77_77_77, 0, 0, &[0x78_78_78])[3],
             u8::MAX
         );
+    }
+
+    #[test]
+    fn popup_accent_text_on_the_panel_joins_the_coverage_floor() {
+        // The Dojo prompt paints its unselected Terminate label in the accent
+        // (selected_rail) straight onto the popup's panel fill.
+        let mut theme = glassy_theme(0.0, 0.0);
+        let menu = chrome_panel_palette(theme, ChromeSurface::Menu);
+        let popup = chrome_panel_palette(theme, ChromeSurface::Popup);
+        let coverage = |fill: [u8; 4]| f64::from(fill[3]) / 255.0;
+        assert!(panel_text_readable(
+            popup.panel,
+            coverage(popup.panel_fill),
+            &[popup.primary, popup.secondary, popup.selected_rail],
+        ));
+        assert!(popup.panel_fill[3] >= menu.panel_fill[3]);
+
+        // An accent too dim to read even on the opaque panel keeps popups
+        // opaque, while menus, which draw no accent text, stay translucent.
+        theme.ui_accent = 0x20_22_30;
+        let menu = chrome_panel_palette(theme, ChromeSurface::Menu);
+        let popup = chrome_panel_palette(theme, ChromeSurface::Popup);
+        assert!(menu.panel_fill[3] < u8::MAX);
+        assert_eq!(popup.panel_fill[3], u8::MAX);
     }
 }
