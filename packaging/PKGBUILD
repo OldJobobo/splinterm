@@ -96,8 +96,8 @@ package_splinterm() {
     --commit "$SPLINTERM_BUILD_COMMIT" \
     --provenance "$SPLINTERM_BUILD_PROVENANCE" \
     --version "$_build_version" \
-    --daemon target/release/splinterd \
-    --client target/release/splinterm \
+    --daemon "$pkgdir/usr/bin/splinterd" \
+    --client "$pkgdir/usr/bin/splinterm" \
     --output "$pkgdir/usr/share/splinterm/package-provenance-v1.json"
   install -Dm755 dist/bin/splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-xdg-terminal-exec"
   ln -s splinterm-xdg-terminal-exec "$pkgdir/usr/bin/splinterm-dojos"

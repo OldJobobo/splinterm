@@ -151,21 +151,46 @@ impl CandidatePreRuntimeStage {
     ///
     /// # Errors
     /// Rejects an internal lifecycle mismatch rather than starting a runtime
-    /// from authority that did not complete candidate staging.
-    pub fn enter_tokio(self) -> Result<CandidateRuntimeStage, HandoffCoordinatorError> {
-        if self.lifecycle.phase() != HandoffPhase::AdoptionStaged {
-            return Err(HandoffCoordinatorError::UnexpectedPhase);
-        }
+    /// from authority that did not complete candidate staging. The refusal
+    /// still owns every verified part (without the guard), so the caller can
+    /// hand it to cooperative rollback like any other pre-commit failure.
+    pub fn enter_tokio(self) -> Result<CandidateRuntimeStage, CandidateEntryFailure> {
         let Self {
             lifecycle,
             process_guard,
             authorities,
         } = self;
         drop(process_guard);
-        Ok(CandidateRuntimeStage {
+        let stage = CandidateRuntimeStage {
             lifecycle,
             authorities,
-        })
+        };
+        if stage.lifecycle.phase() != HandoffPhase::AdoptionStaged {
+            return Err(CandidateEntryFailure {
+                error: HandoffCoordinatorError::UnexpectedPhase,
+                stage: Box::new(stage),
+            });
+        }
+        Ok(stage)
+    }
+}
+
+/// A refused runtime entry that still owns every verified part.
+///
+/// It holds no process guard, so it remains an ordinary sendable error.
+#[derive(Debug, Error)]
+#[error("candidate runtime entry refused: {error}")]
+pub struct CandidateEntryFailure {
+    error: HandoffCoordinatorError,
+    stage: Box<CandidateRuntimeStage>,
+}
+
+impl CandidateEntryFailure {
+    /// Returns the verified stage for refusal and cooperative rollback
+    /// ([`CandidateRuntimeStage::refuse`]).
+    #[must_use]
+    pub fn into_stage(self) -> CandidateRuntimeStage {
+        *self.stage
     }
 }
 

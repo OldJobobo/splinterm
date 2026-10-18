@@ -65,7 +65,7 @@ use std::{
         fd::{AsFd, AsRawFd, OwnedFd},
         unix::{fs::MetadataExt, net::UnixListener},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use rustix::{
@@ -459,9 +459,30 @@ impl CommittedAdoption {
 /// children of a thread that ended were reparented to a surviving one, and
 /// after exec every pre-exec child belongs to the thread that called it.
 fn child_pids() -> io::Result<Vec<u32>> {
+    child_pids_in(Path::new("/proc/self/task"))
+}
+
+/// [`child_pids`] over a task directory.
+///
+/// Threads come and go while the list is read: an idle Tokio blocking-pool
+/// thread (adoption used several) exits after its keep-alive, and its
+/// `children` file then fails with `ENOENT` or `ESRCH`. Its children were
+/// already reparented to a surviving thread, so such a thread is skipped.
+/// Only a task directory that cannot be read, or any other failure, gives up
+/// the pass.
+fn child_pids_in(tasks: &Path) -> io::Result<Vec<u32>> {
     let mut children = BTreeSet::new();
-    for task in fs::read_dir("/proc/self/task")? {
-        let listed = fs::read_to_string(task?.path().join("children"))?;
+    for task in fs::read_dir(tasks)? {
+        let listed = match fs::read_to_string(task?.path().join("children")) {
+            Ok(listed) => listed,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         children.extend(
             listed
                 .split_ascii_whitespace()
@@ -2054,6 +2075,34 @@ mod tests {
             }
         );
         shut_down(committed).await;
+    }
+
+    /// A thread that exits between listing the tasks and reading its
+    /// `children` file is skipped, not the whole pass; a task directory that
+    /// cannot be read still fails.
+    #[test]
+    fn a_vanished_thread_does_not_abandon_the_child_list() {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let tasks = std::env::temp_dir().join(format!(
+            "sd-tasks-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (task, children) in [
+            ("100", Some("12 34 ")),
+            ("101", None),
+            ("102", Some("34 56")),
+        ] {
+            fs::create_dir_all(tasks.join(task)).unwrap();
+            if let Some(children) = children {
+                fs::write(tasks.join(task).join("children"), children).unwrap();
+            }
+        }
+        assert_eq!(child_pids_in(&tasks).unwrap(), [12, 34, 56]);
+        // The real list reads even while threads come and go.
+        assert!(child_pids().is_ok());
+        fs::remove_dir_all(&tasks).unwrap();
+        assert!(child_pids_in(&tasks).is_err());
     }
 
     /// Exited children that are not carried are reaped; a carried child and

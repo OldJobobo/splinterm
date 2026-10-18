@@ -427,6 +427,22 @@ fn the_retired_activation_environment_variable_is_ignored() {
     assert!(!stderr.contains("candidate"), "{stderr}");
 }
 
+/// The packaging guard refuses a binary containing the build-salt marker, so
+/// every `integration-test` daemon must contain it, and exactly once (the
+/// exec test patches the salt after it). A refactor that dropped `#[used]`
+/// or the static's only reference would otherwise let the guard pass a
+/// feature build silently.
+#[test]
+fn the_integration_test_daemon_carries_the_salt_marker_exactly_once() {
+    let marker = splinterd::integration_test_seams::BUILD_SALT_MARKER;
+    let daemon = fs::read(env!("CARGO_BIN_EXE_splinterd")).unwrap();
+    let occurrences = daemon
+        .windows(marker.len())
+        .filter(|window| *window == marker.as_slice())
+        .count();
+    assert_eq!(occurrences, 1);
+}
+
 fn activation(manifest_fd: RawFd) -> String {
     format!("{ACTIVATION_ARGUMENT}={manifest_fd}")
 }

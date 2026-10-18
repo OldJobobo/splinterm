@@ -1484,7 +1484,20 @@ fn run_candidate(startup: CandidateStartup) -> Result<()> {
         closed_unexpected = stage.closed_unexpected(),
         "daemon handoff candidate: every inherited descriptor and checkpoint verified"
     );
-    let stage = stage.enter_tokio()?;
+    let stage = match stage.enter_tokio() {
+        Ok(stage) => stage,
+        Err(failure) => {
+            let error = error_chain(&failure);
+            let refused = failure
+                .into_stage()
+                .refuse(splinterd::handoff_adoption::AdoptionError::UnexpectedPhase);
+            return Err(fail_before_commit(
+                "runtime entry",
+                &error,
+                PreCommitRecovery::Adoption(Box::new(refused.into_recovery())),
+            ));
+        }
+    };
     run_daemon(StartupSource::Adopted(Box::new(AdoptedStartup {
         stage,
         require_workload_cgroups,
@@ -1536,6 +1549,15 @@ enum PreCommitRecovery {
 /// stopped, so nothing beyond what exit implies is killed. This is why the
 /// old generation's exec stays compiled only into `integration-test` builds
 /// until M3.11.
+///
+/// Every pre-commit failure that returns, from staging through runtime entry
+/// and startup to adoption, reaches this one function. A panic before commit
+/// does not (for example `daemon_runtime().expect(..)` failing to build the
+/// runtime, or a panic inside `adopt`): it unwinds past here with no rollback
+/// path, even after M3.11, and belongs to the daemon-crash row of Plan 0037's
+/// lifetime matrix. What such an unwind drops still stops no workload scope:
+/// adoption wraps every placement so that dropping it retains the scope
+/// (`RetainOnDrop`, `StagedSplint`), and only the PTY masters close.
 fn fail_before_commit(
     phase: &'static str,
     error: &str,

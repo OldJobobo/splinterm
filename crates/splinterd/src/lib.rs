@@ -28,7 +28,8 @@ mod live;
 pub mod package_provenance;
 
 pub use candidate_bootstrap::{
-    CandidateBootstrap, CandidatePreRuntimeStage, CandidateRuntimeStage, CandidateStageFailure,
+    CandidateBootstrap, CandidateEntryFailure, CandidatePreRuntimeStage, CandidateRuntimeStage,
+    CandidateStageFailure,
 };
 #[doc(hidden)]
 pub use candidate_bootstrap::{
