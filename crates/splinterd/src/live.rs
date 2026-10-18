@@ -43,7 +43,7 @@ static INCARNATIONS: IncarnationAllocator = IncarnationAllocator::new();
 const PARSE_BATCH: usize = 256;
 const READ_BUFFER: usize = 16 * 1024;
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
-const SYNCHRONIZED_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+pub(crate) const SYNCHRONIZED_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const MAX_SUBSCRIBER_QUEUE_CAPACITY: usize = 1_048_576;
 const SUBSCRIBER_SPARSE_SEMANTIC_BYTES: u64 = 16 * 1024 * 1024;
 const SPLINT_SPARSE_SEMANTIC_BYTES: u64 = 64 * 1024 * 1024;
@@ -2535,6 +2535,8 @@ pub enum LiveError {
     Checkpoint(#[from] CheckpointStorageError),
     #[error("live Splint state is not representable at the handoff boundary")]
     HandoffStateUnsupported,
+    #[error("live Splint checkpoint would pass the handoff checkpoint budget")]
+    CheckpointBudgetExceeded,
     #[error("live Splint was handed off to another daemon generation")]
     HandedOff,
 }
@@ -2572,6 +2574,104 @@ pub struct HandedOffSplint {
     /// [`PreparedPtyHandoff::take_checkpoint_body`].
     pub checkpoint: Option<SealedCheckpointBody>,
     pub evidence: ActorHandoffEvidence,
+    /// The checkpoint's share of its handoff budget, kept with the carried
+    /// checkpoint; dropping it returns the share.
+    pub checkpoint_reservation: Option<CheckpointReservation>,
+}
+
+/// A shared bound on the sealed checkpoint bytes one handoff's captures hold
+/// at once.
+///
+/// Each actor reserves its encoded checkpoint's size after encoding and
+/// before sealing it, and refuses with [`LiveError::CheckpointBudgetExceeded`]
+/// when the reservation would pass the cap, so no sealed checkpoint memory
+/// beyond the cap ever exists. A reservation lives as long as the lease that
+/// holds the checkpoint, or the [`HandedOffSplint`] that carries it.
+#[derive(Clone, Debug)]
+pub struct HandoffCheckpointBudget(Arc<CheckpointBudgetState>);
+
+#[derive(Debug)]
+struct CheckpointBudgetState {
+    cap: u64,
+    reserved: AtomicU64,
+    high_water: AtomicU64,
+}
+
+impl HandoffCheckpointBudget {
+    #[must_use]
+    pub fn new(cap: u64) -> Self {
+        Self(Arc::new(CheckpointBudgetState {
+            cap,
+            reserved: AtomicU64::new(0),
+            high_water: AtomicU64::new(0),
+        }))
+    }
+
+    #[must_use]
+    pub fn cap(&self) -> u64 {
+        self.0.cap
+    }
+
+    /// Bytes reserved now.
+    #[must_use]
+    pub fn reserved(&self) -> u64 {
+        self.0.reserved.load(Ordering::Acquire)
+    }
+
+    /// The most bytes ever reserved at once.
+    #[must_use]
+    pub fn high_water(&self) -> u64 {
+        self.0.high_water.load(Ordering::Acquire)
+    }
+
+    /// Reserves `bytes`, or `None` when that would pass the cap.
+    fn try_reserve(&self, bytes: u64) -> Option<CheckpointReservation> {
+        let state = &self.0;
+        let mut current = state.reserved.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .filter(|next| *next <= state.cap)?;
+            match state.reserved.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    state.high_water.fetch_max(next, Ordering::AcqRel);
+                    return Some(CheckpointReservation {
+                        budget: self.clone(),
+                        bytes,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+/// One checkpoint's share of a [`HandoffCheckpointBudget`], returned on drop.
+#[derive(Debug)]
+pub struct CheckpointReservation {
+    budget: HandoffCheckpointBudget,
+    bytes: u64,
+}
+
+impl CheckpointReservation {
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl Drop for CheckpointReservation {
+    fn drop(&mut self) {
+        self.budget
+            .0
+            .reserved
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }
 
 /// Actor-owned evidence captured at the sole PTY handoff linearization point.
@@ -2611,6 +2711,7 @@ pub struct PreparedPtyHandoff {
     master_raw_fd: i32,
     evidence: ActorHandoffEvidence,
     checkpoint: Option<SealedCheckpointBody>,
+    checkpoint_reservation: Option<CheckpointReservation>,
     #[cfg(test)]
     retired_reader_raw_fd: i32,
     session: Option<AdoptableLinuxPtySession>,
@@ -2705,6 +2806,7 @@ impl PreparedPtyHandoff {
             session,
             checkpoint: self.checkpoint.take(),
             evidence: self.evidence,
+            checkpoint_reservation: self.checkpoint_reservation.take(),
         }
     }
 }
@@ -2732,7 +2834,7 @@ enum Command {
     Attach(usize, usize, Reply<(LiveSnapshot, Subscription)>),
     SubscribeCompact(usize, usize, Reply<CompactSubscription>),
     AttachCompact(usize, usize, Reply<(LiveSnapshot, CompactSubscription)>),
-    PreparePtyHandoff(Reply<PreparedPtyHandoff>),
+    PreparePtyHandoff(Option<HandoffCheckpointBudget>, Reply<PreparedPtyHandoff>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -3582,7 +3684,25 @@ impl LiveSplintHandle {
     /// Returns a PTY identity/exit error when the live session cannot be safely
     /// converted, or [`LiveError::Closed`] when the actor has ended.
     pub async fn prepare_pty_handoff(&self) -> Result<PreparedPtyHandoff, LiveError> {
-        self.request(Command::PreparePtyHandoff).await
+        self.request(|reply| Command::PreparePtyHandoff(None, reply))
+            .await
+    }
+
+    /// [`Self::prepare_pty_handoff`] with the sealed checkpoint charged to
+    /// `budget` for as long as the returned lease, or the [`HandedOffSplint`]
+    /// it becomes, holds it.
+    ///
+    /// # Errors
+    /// As [`Self::prepare_pty_handoff`], plus
+    /// [`LiveError::CheckpointBudgetExceeded`] when the encoded checkpoint
+    /// would pass the budget; nothing is sealed then.
+    pub async fn prepare_pty_handoff_within(
+        &self,
+        budget: &HandoffCheckpointBudget,
+    ) -> Result<PreparedPtyHandoff, LiveError> {
+        let budget = budget.clone();
+        self.request(|reply| Command::PreparePtyHandoff(Some(budget), reply))
+            .await
     }
 
     pub async fn shutdown(&self) -> Result<(), LiveError> {
@@ -4550,6 +4670,7 @@ async fn run_actor_body(
     let mut commands_open = true;
     let mut io = Some(io);
     let mut pending_handoff = None::<Reply<PreparedPtyHandoff>>;
+    let mut pending_budget = None::<HandoffCheckpointBudget>;
 
     loop {
         if pending_handoff
@@ -4557,11 +4678,13 @@ async fn run_actor_body(
             .is_some_and(oneshot::Sender::is_closed)
         {
             pending_handoff = None;
+            pending_budget = None;
         }
         if pending_handoff.is_some() && user_writes.is_empty() && reply_writes.is_empty() {
             let reply = pending_handoff
                 .take()
                 .expect("pending PTY handoff checked as present");
+            let budget = pending_budget.take();
             // A shutdown in progress owns escalation and waiting replies that a
             // checkpoint cannot carry. A Splint claimed by an unused close is
             // already retiring and is never captured as live.
@@ -4600,17 +4723,36 @@ async fn run_actor_body(
                     continue;
                 }
             };
-            let checkpoint = match terminal
-                .encode_checkpoint()
-                .map_err(CheckpointStorageError::from)
-                .and_then(|bytes| SealedCheckpointBody::seal(&bytes))
-            {
+            let bytes = match terminal.encode_checkpoint() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = reply.send(Err(CheckpointStorageError::from(error).into()));
+                    continue;
+                }
+            };
+            // Reserve before sealing, so sealed checkpoint memory never passes
+            // the handoff budget. Every later refusal drops the reservation.
+            let checkpoint_reservation = match &budget {
+                None => None,
+                Some(budget) => {
+                    let reservation = u64::try_from(bytes.len())
+                        .ok()
+                        .and_then(|size| budget.try_reserve(size));
+                    if reservation.is_none() {
+                        let _ = reply.send(Err(LiveError::CheckpointBudgetExceeded));
+                        continue;
+                    }
+                    reservation
+                }
+            };
+            let checkpoint = match SealedCheckpointBody::seal(&bytes) {
                 Ok(checkpoint) => checkpoint,
                 Err(error) => {
                     let _ = reply.send(Err(error.into()));
                     continue;
                 }
             };
+            drop(bytes);
             #[cfg(test)]
             run_checkpoint_sealed_hook(
                 splint_id,
@@ -4702,6 +4844,7 @@ async fn run_actor_body(
                 master_raw_fd,
                 evidence,
                 checkpoint: Some(checkpoint),
+                checkpoint_reservation,
                 #[cfg(test)]
                 retired_reader_raw_fd,
                 session: Some(adoptable),
@@ -4773,10 +4916,12 @@ async fn run_actor_body(
                     .await;
             }, if pending_handoff.is_some() => {
                 pending_handoff = None;
+                pending_budget = None;
             }
             command = commands.recv(), if commands_open && pending_handoff.is_none() => {
-                if let Some(Command::PreparePtyHandoff(reply)) = command {
+                if let Some(Command::PreparePtyHandoff(budget, reply)) = command {
                     pending_handoff = Some(reply);
+                    pending_budget = budget;
                 } else if let Some(command) = command {
                     handle_command(
                         command,
@@ -5310,7 +5455,7 @@ fn handle_command(
             };
             let _ = reply.send(Ok((snapshot, subscription)));
         }
-        Command::PreparePtyHandoff(_) => {
+        Command::PreparePtyHandoff(..) => {
             unreachable!("PTY handoff is intercepted by the actor loop")
         }
         Command::Shutdown(reply) => {

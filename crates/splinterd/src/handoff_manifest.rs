@@ -74,6 +74,12 @@ pub struct HandoffManifestV1 {
     pub handoff_id: HandoffId,
     pub source_generation: GenerationEvidence,
     pub target_generation: GenerationEvidence,
+    /// The `Hello.daemon_generation` the source daemon serves.
+    pub source_daemon_generation: u64,
+    /// The `Hello.daemon_generation` the target serves once it adopts: one
+    /// past the source for a forward manifest, and the old generation again
+    /// for a rollback manifest.
+    pub target_daemon_generation: u64,
     pub topology_revision: u64,
     pub durable_state_generation: u64,
     pub private_protocol: u16,
@@ -453,6 +459,7 @@ pub fn validate_manifest(manifest: &HandoffManifestV1) -> Result<(), ManifestErr
     if manifest.source_generation == manifest.target_generation {
         return Err(ManifestError::InvalidIdentity);
     }
+    validate_daemon_generations(manifest)?;
     if manifest.splints.len() > MAX_MANIFEST_SPLINTS
         || manifest.descriptors.len() > MAX_HANDOFF_DESCRIPTORS
     {
@@ -499,6 +506,8 @@ pub fn validate_manifest_pair(
         || forward.descriptor_manifest_schema != rollback.descriptor_manifest_schema
         || forward.source_generation != rollback.target_generation
         || forward.target_generation != rollback.source_generation
+        || forward.source_daemon_generation != rollback.target_daemon_generation
+        || forward.target_daemon_generation != rollback.source_daemon_generation
         || forward.executable_pairs != rollback.executable_pairs
         || forward_splints != rollback_splints
         || forward_descriptors != rollback_descriptors
@@ -550,6 +559,25 @@ fn validate_generation(generation: GenerationEvidence) -> Result<(), ManifestErr
     Ok(())
 }
 
+/// A forward manifest moves to the next served generation and a rollback
+/// manifest returns to the one before it; generation 0 is never served.
+fn validate_daemon_generations(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
+    let (older, newer) = match manifest.kind {
+        ManifestKind::Forward => (
+            manifest.source_daemon_generation,
+            manifest.target_daemon_generation,
+        ),
+        ManifestKind::Rollback => (
+            manifest.target_daemon_generation,
+            manifest.source_daemon_generation,
+        ),
+    };
+    if older == 0 || older.checked_add(1) != Some(newer) {
+        return Err(ManifestError::InvalidIdentity);
+    }
+    Ok(())
+}
+
 fn validate_executable_pairs(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
     let pairs = &manifest.executable_pairs;
     validate_executable_pair(&pairs.forward)?;
@@ -589,7 +617,7 @@ fn validate_executable_image(image: &ManifestExecutableImage) -> Result<(), Mani
         || image.source_inode == 0
         || image.snapshot_device == 0
         || image.snapshot_inode == 0
-        || image.source_owner_uid != PACKAGED_OWNER_UID
+        || image.source_owner_uid != packaged_owner_uid()
         || !regular_file
         || image.source_mode & 0o111 == 0
         || image.source_mode & 0o022 != 0
@@ -721,6 +749,46 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
         return Err(ManifestError::InvalidBounds);
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PACKAGED_OWNER_UID: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The owner every packaged executable source has: root.
+///
+/// Unit tests cannot create root-owned executables, so a unit test may name
+/// its own uid on its own thread through [`PackagedOwnerOverride`]. Only
+/// `cfg(test)` builds have that seam (Plan 0061 D9); no daemon build does.
+fn packaged_owner_uid() -> u32 {
+    #[cfg(test)]
+    if let Some(uid) = TEST_PACKAGED_OWNER_UID.with(std::cell::Cell::get) {
+        return uid;
+    }
+    PACKAGED_OWNER_UID
+}
+
+/// While held, manifest validation on this thread accepts executables owned
+/// by the test's own uid in place of root.
+#[cfg(test)]
+pub(crate) struct PackagedOwnerOverride(());
+
+#[cfg(test)]
+impl PackagedOwnerOverride {
+    pub(crate) fn current_user() -> Self {
+        let uid = rustix::process::geteuid().as_raw();
+        TEST_PACKAGED_OWNER_UID.with(|owner| owner.set(Some(uid)));
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for PackagedOwnerOverride {
+    fn drop(&mut self) {
+        TEST_PACKAGED_OWNER_UID.with(|owner| owner.set(None));
+    }
 }
 
 /// Whether a decoded identifier names a positive Linux PID, the only values a
@@ -930,6 +998,8 @@ mod tests {
             handoff_id: HandoffId::new([9; 16]).unwrap(),
             source_generation: source,
             target_generation: target,
+            source_daemon_generation: 1,
+            target_daemon_generation: 2,
             topology_revision: 4,
             durable_state_generation: 4,
             private_protocol: splinterm_protocol::PROTOCOL_VERSION,
@@ -965,6 +1035,10 @@ mod tests {
         std::mem::swap(
             &mut rollback.source_generation,
             &mut rollback.target_generation,
+        );
+        std::mem::swap(
+            &mut rollback.source_daemon_generation,
+            &mut rollback.target_daemon_generation,
         );
         (forward, rollback)
     }
@@ -1402,6 +1476,19 @@ mod tests {
             },
             |manifest| manifest.source_generation = manifest.target_generation,
             |manifest| manifest.counterpart_manifest_slot = HandoffDescriptorSlot::Listener,
+            |manifest| manifest.source_daemon_generation = 0,
+            |manifest| manifest.target_daemon_generation = 3,
+            |manifest| manifest.target_daemon_generation = manifest.source_daemon_generation,
+            |manifest| {
+                std::mem::swap(
+                    &mut manifest.source_daemon_generation,
+                    &mut manifest.target_daemon_generation,
+                );
+            },
+            |manifest| {
+                manifest.source_daemon_generation = u64::MAX;
+                manifest.target_daemon_generation = 0;
+            },
         ] {
             let mut invalid = baseline.clone();
             mutate(&mut invalid);
@@ -1468,6 +1555,11 @@ mod tests {
             }) as fn(&mut HandoffManifestV1),
             |manifest| manifest.topology_revision += 1,
             |manifest| manifest.durable_state_generation += 1,
+            |manifest| {
+                // Each manifest still steps one generation; the pair does not.
+                manifest.source_daemon_generation += 1;
+                manifest.target_daemon_generation += 1;
+            },
             |manifest| manifest.private_protocol += 1,
             |manifest| manifest.handoff_protocol += 1,
             |manifest| manifest.terminal_checkpoint_schema += 1,

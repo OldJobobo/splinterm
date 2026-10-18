@@ -282,6 +282,17 @@ pub struct ValidatedHandoffPackageProvenance {
 }
 
 impl ValidatedHandoffPackageProvenance {
+    /// Pairs the forward generation's validated package record with the
+    /// rollback generation's. Each was bound to its sealed pair and
+    /// authenticated report when it was verified, and [`Self::validate_against`]
+    /// rebinds both before the pair is accepted as handoff authority.
+    pub(crate) fn from_generations(
+        forward: ValidatedPackageProvenance,
+        rollback: ValidatedPackageProvenance,
+    ) -> Self {
+        Self { forward, rollback }
+    }
+
     /// Rebinds this opaque package-validation result to the exact snapshots and
     /// authenticated reports used by a later coordinator stage.
     ///
@@ -289,10 +300,6 @@ impl ValidatedHandoffPackageProvenance {
     ///
     /// Rejects pair substitution or any build identity, version, or executable
     /// digest that differs from the records validated earlier.
-    #[allow(
-        dead_code,
-        reason = "the manifest acceptance boundary precedes coordinator adoption"
-    )]
     pub(crate) fn validate_against(
         &self,
         snapshots: &HandoffExecutableSnapshots,
@@ -316,10 +323,6 @@ impl ValidatedHandoffPackageProvenance {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the manifest acceptance boundary precedes coordinator adoption"
-)]
 fn validate_package_binding(
     provenance: &ValidatedPackageProvenance,
     pair: &SealedExecutablePair,
