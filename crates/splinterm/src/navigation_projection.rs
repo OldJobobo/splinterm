@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use splinterm_core::{
-    Dojo, DojoId, LairId, LairRetention, LayoutNode, MAX_DOJOS_PER_LAIR, MAX_LAYOUT_DEPTH,
+    Dojo, DojoId, Lair, LairId, LairRetention, LayoutNode, MAX_DOJOS_PER_LAIR, MAX_LAYOUT_DEPTH,
     MAX_PERSISTENT_LAIRS, MAX_SPLINTS, SplintId, TopologyRevision,
 };
 use splinterm_protocol::{
@@ -851,20 +851,10 @@ impl NavigationProjection {
         let attached: HashSet<_> = context.window.attached_dojos.iter().copied().collect();
         let mut lairs = Vec::new();
 
-        let persistent_lairs = snapshot
-            .topology
-            .lairs()
-            .filter(|lair| lair.lifetime.is_persistent())
-            .collect::<Vec<_>>();
-        let labels = friendly_labels(
-            persistent_lairs.iter().map(|lair| lair.name.as_str()),
-            "Lair",
-        );
-        for (lair, label) in persistent_lairs.into_iter().zip(labels) {
+        for (lair, label) in labeled_persistent_lairs(snapshot.topology.lairs()) {
             let lair_id = lair.id;
             let lair_node_id = NavigationNodeId::Lair(lair_id);
-            let dojo_labels =
-                friendly_labels(lair.dojos.iter().map(|dojo| dojo.name.as_str()), "Dojo");
+            let dojo_labels = dojo_labels(lair);
             let dojos = lair
                 .dojos
                 .iter()
@@ -1359,6 +1349,25 @@ const fn is_bidi_formatting(character: char) -> bool {
     )
 }
 
+/// The persistent Lairs, in the given topology order, each with its display
+/// label: a generated name becomes "Lair N". The Explorer, its pickers, and the
+/// Recent Dojos picker all number Lairs through this, so they agree.
+pub(crate) fn labeled_persistent_lairs<'a>(
+    lairs: impl IntoIterator<Item = &'a Lair>,
+) -> Vec<(&'a Lair, String)> {
+    let persistent = lairs
+        .into_iter()
+        .filter(|lair| lair.lifetime.is_persistent())
+        .collect::<Vec<_>>();
+    let labels = friendly_labels(persistent.iter().map(|lair| lair.name.as_str()), "Lair");
+    persistent.into_iter().zip(labels).collect()
+}
+
+/// Display labels for a Lair's Dojos, in order: a generated name becomes "Dojo N".
+pub(crate) fn dojo_labels(lair: &Lair) -> Vec<String> {
+    friendly_labels(lair.dojos.iter().map(|dojo| dojo.name.as_str()), "Dojo")
+}
+
 // Presentation aliases only: never rewrite stored names or use labels as action
 // authority. Allocate before filtering/MRU ordering so every navigation surface
 // agrees, and reserve explicit sibling labels before assigning generated ones.
@@ -1840,6 +1849,86 @@ mod tests {
             NavigationProjection::build(&captured, ctx).unwrap(),
             projection
         );
+    }
+
+    #[test]
+    fn recent_dojos_picker_labels_match_the_explorer() {
+        // Topology order follows the random Lair ids, so repeat to cover
+        // several orders of the two generated Lairs.
+        for _ in 0..16 {
+            recent_dojos_picker_labels_match_the_explorer_once();
+        }
+    }
+
+    fn recent_dojos_picker_labels_match_the_explorer_once() {
+        let mut first = running_lair("terminal-1787899189123456789-4132");
+        first.dojos[0].name = "terminal".into();
+        let mut transient = running_lair("terminal-1787899189123456790-4133");
+        transient.lifetime = LairLifetime::Transient;
+        let mut named = running_lair("work");
+        // A generated Dojo name before a custom one checks Dojo order too.
+        named.dojos.insert(0, running_dojo("terminal"));
+        named.dojos.push(running_dojo("logs"));
+        let reserved = running_lair("Lair 1");
+        let second = running_lair("terminal-1787899189123456791-4134");
+        let (named_id, reserved_id) = (named.id, reserved.id);
+        let generated_ids = [first.id, second.id];
+        let captured = snapshot(vec![first, transient, named, reserved, second], &[]);
+        let view = NavigationProjection::build(&captured, context(&[]))
+            .unwrap()
+            .explorer_view();
+        assert_eq!(view.lairs.len(), 4, "the transient Lair is not listed");
+        let label = |lair_id| {
+            view.lairs
+                .iter()
+                .find(|lair| lair.id == NavigationNodeId::Lair(lair_id))
+                .unwrap()
+                .label
+                .as_str()
+        };
+        assert_eq!(label(named_id), "work");
+        assert_eq!(label(reserved_id), "Lair 1");
+        // The user's "Lair 1" is reserved, so the generated Lairs number on.
+        let mut generated = generated_ids.map(label);
+        generated.sort_unstable();
+        assert_eq!(generated, ["Lair 2", "Lair 3"]);
+        // The picker reads the daemon's Lair list, which is in topology order.
+        let listed = captured.topology.lairs().cloned().collect::<Vec<_>>();
+        let entries = crate::session_picker::collect_sessions(&listed, &[]);
+        // With no recency, the picker lists Dojos in the Explorer's order and
+        // with its labels.
+        let explorer_rows = view
+            .lairs
+            .iter()
+            .flat_map(|lair| {
+                lair.dojos.iter().map(move |dojo| {
+                    let NavigationNodeId::Dojo { lair_id, dojo_id } = dojo.id else {
+                        panic!("Explorer Dojo rows carry Dojo ids");
+                    };
+                    (
+                        lair_id,
+                        dojo_id,
+                        lair.label.clone(),
+                        dojo.label.clone(),
+                        format!("{} / {}", lair.label, dojo.label),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let picker_rows = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.lair_id,
+                    entry.dojo_id,
+                    entry.lair_display_title(),
+                    entry.dojo_display_title(),
+                    entry.display_title(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(picker_rows, explorer_rows);
+        assert_eq!(picker_rows.len(), 6);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use splinterm::{
     SessionPickerItem, SessionPickerTarget, WindowDojoIdentity, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate,
     automation::{Connection, SharedImageContentCache, protocol_error},
-    config::AppConfig,
+    config::{AppConfig, TopologyReloadSettings},
     endpoint::{ConnectionFactory, LaunchSemantics},
     navigation_projection::{
         EndpointFreshness, NavigationAction, NavigationAgentStatus, NavigationAuthority,
@@ -31,7 +31,7 @@ use splinterm_protocol::{
     ErrorCode, LaunchDirectory, MutationTarget, Request, Response, UnusedDojoCloseOutcome,
     validate_preset_materialized,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane_at_incarnation},
@@ -3293,6 +3293,20 @@ enum TopologyManagerWake {
     Shutdown,
 }
 
+/// Takes the settings the Window last published from Reload configuration.
+/// The manager calls this before every command, poll, and the exit-time
+/// close, so each decision uses the latest reload; a decision already under
+/// way keeps the value it started with.
+fn refresh_reloaded_settings(
+    config: &mut AppConfig,
+    settings: &mut watch::Receiver<TopologyReloadSettings>,
+) {
+    // A closed sender still holds the last published value.
+    if settings.has_changed().unwrap_or(true) {
+        settings.borrow_and_update().apply_to(config);
+    }
+}
+
 /// Drains commands left after the Window dropped its sender, reporting
 /// whether a close notice was among them. Nothing else can apply now.
 fn close_notice_queued(commands: &mut mpsc::Receiver<WindowTopologyCommand>) -> bool {
@@ -3344,7 +3358,8 @@ async fn next_topology_manager_wake(
 )]
 pub(in crate::app) async fn run_topology_manager(
     factory: ConnectionFactory,
-    config: AppConfig,
+    mut config: AppConfig,
+    mut settings: watch::Receiver<TopologyReloadSettings>,
     image_cache: SharedImageContentCache,
     initial_identity: WindowDojoIdentity,
     root: LayoutNode,
@@ -3395,6 +3410,7 @@ pub(in crate::app) async fn run_topology_manager(
                     break;
                 }
             };
+        refresh_reloaded_settings(&mut config, &mut settings);
         let command = if let Some(command) = command {
             match handle_session_manager_command(
                 &factory,
@@ -3549,6 +3565,7 @@ pub(in crate::app) async fn run_topology_manager(
         }
     }
     if window_closing {
+        refresh_reloaded_settings(&mut config, &mut settings);
         close_unused_tabs_on_exit(&mut connection, &config, &mut state).await;
     }
     let mut remaining_tasks = Vec::new();
@@ -4296,6 +4313,8 @@ mod tests {
             dojo_id,
             lair_name: "lair".to_owned(),
             dojo_name: "dojo".to_owned(),
+            lair_label: "lair".to_owned(),
+            dojo_label: "dojo".to_owned(),
             cwd: PathBuf::from("/tmp"),
             pane_count: 1,
             running_panes: 1,

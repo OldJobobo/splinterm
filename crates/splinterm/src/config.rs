@@ -156,6 +156,37 @@ impl Default for MultiplexerLifetimeConfig {
     }
 }
 
+/// The settings a Window's topology manager reads from its configuration that
+/// Reload configuration changes. The Window publishes them on reload and the
+/// manager picks up the latest before each decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TopologyReloadSettings {
+    pub close_unused: bool,
+    pub persist_on_tab_organization: bool,
+    pub new_dojo_directory: LaunchDirectory,
+    pub new_splint_directory: LaunchDirectory,
+}
+
+impl TopologyReloadSettings {
+    #[must_use]
+    pub fn from_config(config: &AppConfig) -> Self {
+        Self {
+            close_unused: config.multiplexer_lifetime.close_unused,
+            persist_on_tab_organization: config.multiplexer_lifetime.persist_on_tab_organization,
+            new_dojo_directory: config.new_dojo_directory.clone(),
+            new_splint_directory: config.new_splint_directory.clone(),
+        }
+    }
+
+    /// Writes these settings over the matching fields of `config`.
+    pub fn apply_to(&self, config: &mut AppConfig) {
+        config.multiplexer_lifetime.close_unused = self.close_unused;
+        config.multiplexer_lifetime.persist_on_tab_organization = self.persist_on_tab_organization;
+        config.new_dojo_directory = self.new_dojo_directory.clone();
+        config.new_splint_directory = self.new_splint_directory.clone();
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {

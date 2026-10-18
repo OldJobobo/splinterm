@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use splinterm::{
     PerfTraceCorrelation, WindowOptions, WindowUpdate,
     automation::{Connection, MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
-    config::{AppConfig, FontAuthority},
+    config::{AppConfig, FontAuthority, TopologyReloadSettings},
     endpoint::{
         ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, LaunchSemantics,
     },
@@ -220,6 +220,8 @@ async fn run_live_multipane_window_inner(
         );
     }
     let (topology_commands, topology_command_receiver) = mpsc::channel(8);
+    let (topology_settings, topology_settings_receiver) =
+        watch::channel(TopologyReloadSettings::from_config(&config));
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
     let local_endpoint = factory.is_local();
@@ -259,6 +261,7 @@ async fn run_live_multipane_window_inner(
     let topology_manager = tokio::spawn(run_topology_manager(
         factory,
         config,
+        topology_settings_receiver,
         image_cache,
         initial_identity.clone(),
         manager_root,
@@ -275,6 +278,7 @@ async fn run_live_multipane_window_inner(
             active_splint: Some(active_splint),
             topology_updates: Some(topology_updates),
             topology_commands: Some(topology_commands),
+            topology_settings: Some(topology_settings),
             graphical_focus,
             forced_control_transfer,
             remote_display_identity,

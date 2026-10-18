@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use splinterm_core::{DojoId, Lair, LairId, LayoutNode, SplintState};
 use unicode_width::UnicodeWidthChar;
 
+use crate::navigation_projection::{dojo_labels, labeled_persistent_lairs};
+
 const RECENT_FILE: &str = "recent-dojos.json";
 const LEGACY_RECENT_FILE: &str = "recent-windows.json";
 const RECENT_VERSION: u8 = 2;
@@ -74,6 +76,10 @@ pub struct SessionEntry {
     pub dojo_id: DojoId,
     pub lair_name: String,
     pub dojo_name: String,
+    /// The Explorer's label for the Lair: "Lair N" for a generated name.
+    pub lair_label: String,
+    /// The Explorer's label for the Dojo: "Dojo N" for a generated name.
+    pub dojo_label: String,
     pub cwd: PathBuf,
     pub pane_count: usize,
     pub running_panes: usize,
@@ -88,10 +94,13 @@ impl SessionEntry {
 
     #[must_use]
     pub fn display_title(&self) -> String {
+        // Collapse only when the canonical names match; equal labels can come
+        // from distinct names (a generated "Lair 1" holding a Dojo named
+        // "Lair 1"), and both levels must stay visible then.
         let label = if self.lair_name == self.dojo_name {
-            self.lair_name.clone()
+            self.lair_label.clone()
         } else {
-            format!("{} / {}", self.lair_name, self.dojo_name)
+            format!("{} / {}", self.lair_label, self.dojo_label)
         };
         picker_label(&label, MAX_PICKER_TITLE_SCALARS, MAX_PICKER_TITLE_CELLS)
     }
@@ -99,7 +108,7 @@ impl SessionEntry {
     #[must_use]
     pub fn lair_display_title(&self) -> String {
         picker_label(
-            &self.lair_name,
+            &self.lair_label,
             MAX_PICKER_TITLE_SCALARS,
             MAX_PICKER_TITLE_CELLS,
         )
@@ -108,7 +117,7 @@ impl SessionEntry {
     #[must_use]
     pub fn dojo_display_title(&self) -> String {
         picker_label(
-            &self.dojo_name,
+            &self.dojo_label,
             MAX_PICKER_TITLE_SCALARS,
             MAX_PICKER_TITLE_CELLS,
         )
@@ -149,6 +158,11 @@ pub fn dojo_has_fully_running_pane_layout(dojo: &splinterm_core::Dojo) -> bool {
     running_panes > 0 && running_panes == dojo.root.splint_count()
 }
 
+/// Collects the persistent Lairs' Dojos, most recent first, then the rest in
+/// topology order.
+///
+/// `lairs` must be in topology order, as the daemon lists them, so generated
+/// names get the same "Lair N" labels the Explorer shows.
 #[must_use]
 pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> {
     let ranks: HashMap<_, _> = recent
@@ -158,11 +172,8 @@ pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> 
         .map(|(rank, id)| (id, rank))
         .collect();
     let mut entries = Vec::new();
-    for lair in lairs {
-        if !lair.lifetime.is_persistent() {
-            continue;
-        }
-        for dojo in &lair.dojos {
+    for (lair, lair_label) in labeled_persistent_lairs(lairs) {
+        for (dojo, dojo_label) in lair.dojos.iter().zip(dojo_labels(lair)) {
             let (running_panes, exited_panes) = pane_states(&dojo.root);
             let cwd = dojo
                 .root
@@ -174,6 +185,8 @@ pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> 
                 dojo_id: dojo.id,
                 lair_name: lair.name.clone(),
                 dojo_name: dojo.name.clone(),
+                lair_label: lair_label.clone(),
+                dojo_label,
                 cwd,
                 pane_count: dojo.root.splint_count(),
                 running_panes,
@@ -181,15 +194,10 @@ pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> 
             });
         }
     }
-    entries.sort_by(|left, right| {
-        let left_rank = ranks.get(&left.dojo_id).copied().unwrap_or(usize::MAX);
-        let right_rank = ranks.get(&right.dojo_id).copied().unwrap_or(usize::MAX);
-        left_rank
-            .cmp(&right_rank)
-            .then_with(|| left.lair_name.cmp(&right.lair_name))
-            .then_with(|| left.dojo_name.cmp(&right.dojo_name))
-            .then_with(|| left.dojo_id.to_string().cmp(&right.dojo_id.to_string()))
-    });
+    // Entries were collected in topology order (Lair, then Dojo), which is the
+    // Explorer's order. The stable sort keeps it for Dojos with no recency,
+    // rather than ordering by name or label text ("Lair 10" < "Lair 2").
+    entries.sort_by_key(|entry| ranks.get(&entry.dojo_id).copied().unwrap_or(usize::MAX));
     entries
 }
 
@@ -424,6 +432,82 @@ mod tests {
     }
 
     #[test]
+    fn unranked_dojos_keep_topology_order_not_name_or_label_order() {
+        let mut lairs = (0..11_u32)
+            .map(|index| running_dojo(&format!("terminal-17878991891234567{index:02}-42"), "/t"))
+            .collect::<Vec<_>>();
+        // Raw names that sort against topology order.
+        lairs.reverse();
+        lairs.insert(1, running_dojo("aaa", "/a"));
+        let recent = lairs[5].dojos[0].id;
+        let entries = collect_sessions(&lairs, &[recent]);
+        let titles = entries
+            .iter()
+            .map(SessionEntry::lair_display_title)
+            .collect::<Vec<_>>();
+        assert_eq!(titles[0], "Lair 5", "a recent Dojo still comes first");
+        assert_eq!(
+            titles[1..],
+            [
+                "Lair 1", "aaa", "Lair 2", "Lair 3", "Lair 4", "Lair 6", "Lair 7", "Lair 8",
+                "Lair 9", "Lair 10", "Lair 11",
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_lair_and_dojo_names_get_topology_ordered_labels() {
+        let mut first = running_dojo("terminal-1787899189123456789-4132", "/a");
+        first.dojos[0].name = "terminal".into();
+        let mut transient = running_dojo("terminal-1787899189123456790-4133", "/b");
+        transient.lifetime = splinterm_core::LairLifetime::Transient;
+        let named = running_dojo("work", "/work");
+        let second = running_dojo("terminal-1787899189123456791-4134", "/c");
+        let ids = [first.id, named.id, second.id];
+        let entries = collect_sessions(&[first, transient, named, second], &[]);
+        let title = |lair_id| {
+            entries
+                .iter()
+                .find(|entry| entry.lair_id == lair_id)
+                .unwrap()
+                .display_title()
+        };
+        // The transient Lair takes no number, as in the Explorer.
+        assert_eq!(title(ids[0]), "Lair 1 / Dojo 1");
+        assert_eq!(title(ids[1]), "work / Dojo 1");
+        assert_eq!(title(ids[2]), "Lair 2 / Dojo 1");
+        let generated = entries
+            .iter()
+            .find(|entry| entry.lair_id == ids[0])
+            .unwrap();
+        assert_eq!(generated.lair_name, "terminal-1787899189123456789-4132");
+        assert_eq!(generated.lair_display_title(), "Lair 1");
+        assert_eq!(generated.dojo_display_title(), "Dojo 1");
+    }
+
+    #[test]
+    fn equal_labels_from_distinct_names_keep_both_title_segments() {
+        // A generated Lair labelled "Lair 1" holding a Dojo the user named
+        // "Lair 1": the labels match but the names don't.
+        let mut generated = running_dojo("terminal-1787899189123456789-4132", "/a");
+        generated.dojos[0].name = "Lair 1".into();
+        // Matching canonical names still collapse to one segment.
+        let mut same = running_dojo("work", "/work");
+        same.dojos[0].name = "work".into();
+        let ids = [generated.id, same.id];
+        let entries = collect_sessions(&[generated, same], &[]);
+        let title = |lair_id| {
+            entries
+                .iter()
+                .find(|entry| entry.lair_id == lair_id)
+                .unwrap()
+                .display_title()
+        };
+        assert_eq!(title(ids[0]), "Lair 1 / Lair 1");
+        assert_eq!(title(ids[1]), "work");
+    }
+
+    #[test]
     fn transient_lairs_are_never_collected_or_reopened() {
         let persistent = running_dojo("persistent", "/tmp");
         let mut transient = running_dojo("transient", "/var/tmp");
@@ -467,7 +551,7 @@ mod tests {
     #[test]
     fn picker_labels_replace_controls_remove_bidi_and_bound_metadata() {
         let mut entry = collect_sessions(&[running_dojo("work\n\rspoof", "/tmp")], &[]).remove(0);
-        entry.dojo_name = format!(
+        entry.dojo_label = format!(
             "{}{}",
             "terminal\u{1b}[31m\u{202e}\u{2066}".repeat(100),
             "界".repeat(200)
