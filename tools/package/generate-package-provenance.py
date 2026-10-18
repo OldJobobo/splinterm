@@ -16,6 +16,11 @@ PRIVATE_PROTOCOL = 41
 HANDOFF_PROTOCOL = 1
 TERMINAL_CHECKPOINT = 2
 DESCRIPTOR_MANIFEST = 1
+# Every `integration-test` build of the daemon library carries this marker
+# before its build-identity salt (crates/splinterd/src/integration_test_seams.rs,
+# Plan 0061 D9). Such a build also honours test-only handoff seams, so no
+# packaged daemon or client may contain it.
+INTEGRATION_TEST_MARKER = b"splinterm-integration-test-salt:"
 
 
 def sha256(path: Path) -> str:
@@ -24,6 +29,17 @@ def sha256(path: Path) -> str:
         while block := stream.read(64 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def contains_integration_test_marker(path: Path) -> bool:
+    overlap = len(INTEGRATION_TEST_MARKER) - 1
+    tail = b""
+    with path.open("rb") as stream:
+        while block := stream.read(64 * 1024):
+            if INTEGRATION_TEST_MARKER in tail + block:
+                return True
+            tail = block[-overlap:]
+    return False
 
 
 def pair_identity(commit: str, provenance: str, version: str) -> str:
@@ -63,6 +79,12 @@ def generate(
 ) -> dict[str, object]:
     if not daemon.is_file() or not client.is_file():
         raise ValueError("daemon and client must be regular files")
+    for binary in (daemon, client):
+        if contains_integration_test_marker(binary):
+            raise ValueError(
+                f"{binary} was built with the splinterd integration-test feature; "
+                "packaged builds must never enable it"
+            )
     return {
         "architecture": "x86_64",
         "build_version": version,

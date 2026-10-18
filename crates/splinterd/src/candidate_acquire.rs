@@ -26,7 +26,9 @@ use anyhow::{Context, Result};
 /// The candidate activation flag, spelled `ACTIVATION_ARGUMENT=<fd>`, where
 /// `<fd>` is the canonical decimal number of the inherited forward manifest.
 /// It must be the first argument; the ordinary daemon arguments follow it.
-pub const ACTIVATION_ARGUMENT: &str = "--splinterm-internal-handoff-manifest-fd-v1";
+/// The library owns the spelling, so the old generation's exec boundary
+/// writes exactly what this parses.
+pub const ACTIVATION_ARGUMENT: &str = splinterd::CANDIDATE_ACTIVATION_ARGUMENT;
 
 /// Every argument starting with this is an activation attempt. Only the exact
 /// [`ACTIVATION_ARGUMENT`] spelling is valid, so a near miss or a future

@@ -14,14 +14,18 @@
 //!    record, at exactly the numbers they record
 //!    ([`PreparedDescriptorInheritance::prepare`]); nothing is renumbered
 //!    once a manifest is sealed;
-//! 4. exec the forward daemon, at the one call site M3.10 fills;
+//! 4. exec the forward daemon (`execveat(AT_EMPTY_PATH)` of its sealed
+//!    snapshot), at the one call site in `under_guard`;
 //! 5. when exec does not happen, restore close-on-exec and release the guard.
 //!
-//! The forward candidate still ends in `reject_until_runtime_adoption`, so
-//! step 4 is deliberately not wired: execing now would end every Splint. The
-//! boundary therefore always returns, and the old generation resumes in
-//! process (Plan 0061 D5) with [`resume_handed_off`]: every Splint keeps
-//! running and every client reconnects to the same daemon generation.
+//! Step 4 is compiled only into `integration-test` builds (Plan 0061 M3.10).
+//! The forward candidate adopts and serves in every build, but a candidate
+//! failure before its commit has no way back until the cooperative rollback
+//! executor exists (M3.11), so a production exec could still end every
+//! Splint. Every other build keeps the M3.9 behaviour: the boundary always
+//! returns, and the old generation resumes in process (Plan 0061 D5) with
+//! [`resume_handed_off`]: every Splint keeps running and every client
+//! reconnects to the same daemon generation.
 //!
 //! # No kill
 //!
@@ -109,6 +113,83 @@ impl<'fd> ManifestSeal<'fd> {
 pub struct ExecInheritancePlan<'fd> {
     manifests: [ManifestSeal<'fd>; 2],
     descriptors: Vec<HandoffDescriptor<'fd>>,
+    /// What the exec call site executes; without it the boundary returns
+    /// [`ExecBoundaryError::ExecNotWired`].
+    #[cfg(feature = "integration-test")]
+    forward: Option<ForwardDaemonExec<'fd>>,
+}
+
+/// The sealed forward daemon image and the exact argument and environment
+/// vectors the exec call site hands it.
+#[cfg(feature = "integration-test")]
+pub struct ForwardDaemonExec<'fd> {
+    daemon: BorrowedFd<'fd>,
+    arguments: Vec<std::ffi::CString>,
+    environment: Vec<std::ffi::CString>,
+}
+
+#[cfg(feature = "integration-test")]
+impl std::fmt::Debug for ForwardDaemonExec<'_> {
+    // The environment may hold credentials; only its size is diagnostic.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ForwardDaemonExec")
+            .field("daemon", &self.daemon)
+            .field("arguments", &self.arguments)
+            .field("environment_entries", &self.environment.len())
+            .finish()
+    }
+}
+
+/// The forward daemon's argument vector: `program`, the candidate activation
+/// flag naming the sealed forward manifest at `forward_manifest`, then the
+/// ordinary daemon arguments re-serialized from the old daemon's state.
+///
+/// Never a copy of the running argv: an adopted daemon's own argv still
+/// carries its activation flag, and a second one fails closed as a
+/// candidate. `None` when `program` holds a NUL byte, which no real argv
+/// entry can.
+#[cfg(any(test, feature = "integration-test"))]
+#[must_use]
+pub fn forward_daemon_arguments(
+    program: &std::ffi::OsStr,
+    forward_manifest: RawFd,
+    workload_cgroups_required: bool,
+) -> Option<Vec<std::ffi::CString>> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let mut arguments = vec![
+        CString::new(program.as_bytes()).ok()?,
+        CString::new(format!(
+            "{}={forward_manifest}",
+            crate::CANDIDATE_ACTIVATION_ARGUMENT
+        ))
+        .ok()?,
+    ];
+    if workload_cgroups_required {
+        arguments.push(CString::new(crate::REQUIRE_WORKLOAD_CGROUPS_ARGUMENT).ok()?);
+    }
+    Some(arguments)
+}
+
+/// This process's environment, unchanged, as exec's environment vector:
+/// `SPLINTERM_POLICY`, `SPLINTERM_SOCKET`, `XDG_*`, and the systemd variables
+/// cross exec as they would a restart. Candidate activation is argv only
+/// (Plan 0061 D4), so nothing in the environment activates the forward
+/// daemon.
+#[cfg(feature = "integration-test")]
+#[must_use]
+pub fn exec_environment() -> Vec<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let mut entry = key.as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_bytes());
+            std::ffi::CString::new(entry).ok()
+        })
+        .collect()
 }
 
 impl<'fd> ExecInheritancePlan<'fd> {
@@ -162,7 +243,41 @@ impl<'fd> ExecInheritancePlan<'fd> {
         Ok(Self {
             manifests,
             descriptors,
+            #[cfg(feature = "integration-test")]
+            forward: None,
         })
+    }
+
+    /// The number the manifests record for the forward manifest
+    /// (`CheckpointManifest`), which the forward daemon's activation flag
+    /// names.
+    #[cfg(feature = "integration-test")]
+    #[must_use]
+    pub fn forward_manifest_descriptor(&self) -> Option<RawFd> {
+        self.descriptors
+            .iter()
+            .find(|descriptor| descriptor.slot() == HandoffDescriptorSlot::CheckpointManifest)
+            .map(|descriptor| descriptor.raw_fd())
+    }
+
+    /// Arms the exec call site with the sealed forward daemon image and the
+    /// exact vectors exec passes it; see [`forward_daemon_arguments`] and
+    /// [`exec_environment`]. The image is executed through its descriptor,
+    /// which stays close-on-exec and is not among the inherited ones.
+    #[cfg(feature = "integration-test")]
+    #[must_use]
+    pub fn with_forward_daemon(
+        mut self,
+        daemon: BorrowedFd<'fd>,
+        arguments: Vec<std::ffi::CString>,
+        environment: Vec<std::ffi::CString>,
+    ) -> Self {
+        self.forward = Some(ForwardDaemonExec {
+            daemon,
+            arguments,
+            environment,
+        });
+        self
     }
 
     /// [`Self::new`] for a prepared manifest pair: its recorded descriptors,
@@ -234,6 +349,8 @@ pub enum ExecBoundaryError {
     ListenerMismatch,
     #[error("a captured actor did not confirm its handoff end")]
     ActorsNotHandedOff,
+    #[error("cannot record the excluded Splints' final exits in the manifests: {0}")]
+    ManifestRefresh(#[source] crate::handoff_prepare::ManifestPreparationError),
     #[error("the process did not reach one thread: {0}")]
     Guard(#[source] HandoffCoordinatorError),
     #[error("cannot write and seal the {kind} manifest: {source}")]
@@ -244,8 +361,14 @@ pub enum ExecBoundaryError {
     },
     #[error("cannot prepare descriptor inheritance: {0}")]
     Inheritance(#[source] DescriptorHandoffError),
-    #[error("exec of the forward daemon is not wired yet (Plan 0061 M3.10)")]
+    /// This build does not exec (every build but `integration-test` until
+    /// Plan 0061 M3.11), or the plan names no forward daemon.
+    #[error("exec of the forward daemon is not enabled (Plan 0061 M3.11 gates it)")]
     ExecNotWired,
+    /// `execveat` of the forward daemon returned.
+    #[cfg(feature = "integration-test")]
+    #[error("exec of the forward daemon failed: {0}")]
+    Exec(#[source] io::Error),
     #[error("injected exec boundary fault at {0:?}")]
     Injected(ExecBoundaryStage),
     #[error("{cause}; restoring close-on-exec then failed: {restore}")]
@@ -257,8 +380,9 @@ pub enum ExecBoundaryError {
 
 /// Runs the exec boundary and returns why the old generation resumes.
 ///
-/// See the module documentation for the steps. A successful exec (M3.10)
-/// will never return; today the boundary always returns, at the latest with
+/// See the module documentation for the steps. A successful exec never
+/// returns; a build without the exec call site (every build but
+/// `integration-test`, Plan 0061 M3.10) always returns, at the latest with
 /// [`ExecBoundaryError::ExecNotWired`]. Every return has released the guard,
 /// and every one after inheritance preparation has restored close-on-exec
 /// (or reports in [`ExecBoundaryError::Restore`] that it could not, after
@@ -353,16 +477,23 @@ fn under_guard(
     };
 
     // ---- The exec call site (Plan 0061 M3.10) ----
-    // M3.10 replaces the `Ok(())` arm with `execveat` of the sealed forward
-    // daemon (`AT_EMPTY_PATH`, `SPLINTERM_POLICY` preserved, argv the
-    // candidate activation flag naming the forward manifest followed by the
-    // ordinary daemon arguments), which returns only when exec fails; that
-    // failure takes this same restore-and-resume path. Until the candidate
-    // adopts instead of rejecting, execing would end every Splint, so nothing
-    // is executed.
+    // `execveat(forward_daemon, "", argv, envp, AT_EMPTY_PATH)` of the sealed
+    // forward daemon snapshot, compiled ONLY into `integration-test` builds
+    // ([`exec_forward_daemon`]). It returns only when exec fails, and that
+    // failure takes this same restore-and-resume path.
+    //
+    // HARD GATE (Plan 0061 M3.11): production builds must not exec until the
+    // cooperative rollback executor exists. Before it, a candidate that fails
+    // before its adoption commit can only exit, closing every carried PTY
+    // master and so ending every Splint. Enabling this arm outside
+    // `integration-test` is M3.11's decision, not a flag: there is no runtime
+    // switch, and a normal build has no exec code at all.
     let failure = match stage(&mut hook, ExecBoundaryStage::Exec) {
         Err(failure) => failure,
+        #[cfg(not(feature = "integration-test"))]
         Ok(()) => ExecBoundaryError::ExecNotWired,
+        #[cfg(feature = "integration-test")]
+        Ok(()) => exec_forward_daemon(plan),
     };
 
     let restored = stage(&mut hook, ExecBoundaryStage::Restore).and_then(|()| {
@@ -378,6 +509,38 @@ fn under_guard(
             cause: Box::new(failure),
             restore: Box::new(restore),
         },
+    }
+}
+
+/// Executes the forward daemon the plan names, from its sealed snapshot
+/// descriptor, and returns only when exec fails.
+///
+/// Compiled only into `integration-test` builds: enabling exec in a
+/// production build is a hard gate for Plan 0061 M3.11 (the cooperative
+/// rollback executor); see the call site in `under_guard`. Called with the
+/// process guard held, after both manifests are sealed and exactly the
+/// recorded descriptors were made inheritable; the image descriptor itself
+/// stays close-on-exec, which `execveat(AT_EMPTY_PATH)` of an ELF image
+/// permits.
+#[cfg(feature = "integration-test")]
+fn exec_forward_daemon(plan: &ExecInheritancePlan<'_>) -> ExecBoundaryError {
+    let Some(forward) = &plan.forward else {
+        return ExecBoundaryError::ExecNotWired;
+    };
+    tracing::info!(
+        arguments = forward.arguments.len(),
+        inherited = plan.descriptors.len(),
+        "daemon handoff: executing the sealed forward daemon"
+    );
+    match nix::unistd::execveat(
+        forward.daemon,
+        c"",
+        &forward.arguments,
+        &forward.environment,
+        nix::fcntl::AtFlags::AT_EMPTY_PATH,
+    ) {
+        Err(errno) => ExecBoundaryError::Exec(errno.into()),
+        Ok(never) => match never {},
     }
 }
 
@@ -706,7 +869,35 @@ mod tests {
     use splinterm_pty::PtySize;
     use splinterm_terminal::{Terminal, TerminalConfig};
 
-    use super::apply_captured_pixel_geometry;
+    use super::{apply_captured_pixel_geometry, forward_daemon_arguments};
+
+    /// The forward argv is the activation flag naming the forward manifest,
+    /// then only the arguments the old daemon's state implies: never a copy
+    /// of its own argv, which may already carry an activation flag.
+    #[test]
+    fn the_forward_argv_is_rebuilt_from_state() {
+        use std::ffi::{CString, OsStr};
+
+        let plain = forward_daemon_arguments(OsStr::new("splinterd"), 7, false).unwrap();
+        assert_eq!(
+            plain,
+            [
+                CString::new("splinterd").unwrap(),
+                CString::new("--splinterm-internal-handoff-manifest-fd-v1=7").unwrap(),
+            ]
+        );
+        let contained =
+            forward_daemon_arguments(OsStr::new("/usr/bin/splinterd"), 12, true).unwrap();
+        assert_eq!(
+            contained,
+            [
+                CString::new("/usr/bin/splinterd").unwrap(),
+                CString::new("--splinterm-internal-handoff-manifest-fd-v1=12").unwrap(),
+                CString::new("--require-workload-cgroups").unwrap(),
+            ]
+        );
+        assert!(forward_daemon_arguments(OsStr::new("bad\0name"), 7, false).is_none());
+    }
 
     fn size(pixel_width: u16, pixel_height: u16) -> PtySize {
         PtySize {

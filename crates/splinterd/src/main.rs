@@ -39,7 +39,7 @@ use splinterd::{
     handoff_descriptors::{HandoffDescriptor, HandoffDescriptorSlot},
     handoff_exec::{
         ExecBoundaryError, ExecInheritancePlan, HANDOFF_RESUME_SCOPE_TIMEOUT, ResumableSplint,
-        ResumeBudgets, ResumedSplint, cross_exec_boundary, resume_handed_off,
+        ResumeBudgets, cross_exec_boundary, resume_handed_off,
     },
     handoff_prepare::{
         CaptureLimits, HandedOffCapture, HandoffCaptures, ListenerDescriptors, ManifestInputs,
@@ -1104,7 +1104,8 @@ fn parse_daemon_arguments(arguments: impl IntoIterator<Item = OsString>) -> Resu
     match arguments.next() {
         None => Ok(false),
         Some(argument)
-            if argument == "--require-workload-cgroups" && arguments.next().is_none() =>
+            if argument == splinterd::REQUIRE_WORKLOAD_CGROUPS_ARGUMENT
+                && arguments.next().is_none() =>
         {
             Ok(true)
         }
@@ -1139,21 +1140,12 @@ fn main() -> Result<()> {
     let shared_kitty_upload_budget =
         SharedKittyUploadBudget::new(DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON);
     if let Some(candidate) = candidate {
-        let listener_path = socket_path()?;
-        let image_listener_path = image_content_socket_path(&listener_path);
-        // Staging is read-only and still holds the single-threaded handoff
-        // guard. Until cooperative rollback is wired, a failure drops the
-        // recovery table, closing every claimed descriptor.
-        let stage = candidate.stage(
-            &shared_image_budget,
-            &shared_kitty_upload_budget,
-            &listener_path,
-            &image_listener_path,
-        )?;
-        // Runtime adoption will build Tokio only after this releases the
-        // guard. Forward exec does not activate this path yet, so a verified
-        // stage is a deliberate fatal stop rather than ordinary startup.
-        return stage.enter_tokio()?.reject_until_runtime_adoption();
+        return run_candidate(CandidateStartup {
+            candidate,
+            require_workload_cgroups,
+            shared_image_budget,
+            shared_kitty_upload_budget,
+        });
     }
     // Everything before this point must stay single-threaded: prepare_installed
     // takes the handoff process guard, and a thread started earlier (tracing, a
@@ -1170,9 +1162,6 @@ fn main() -> Result<()> {
 }
 
 /// Where a daemon process gets the state and listeners it serves.
-///
-/// Candidate runtime adoption (M3.10) will add `Adopted`, built from a
-/// verified handoff stage.
 #[allow(
     clippy::large_enum_variant,
     reason = "one value per serve round, moved once into the round"
@@ -1188,6 +1177,10 @@ enum StartupSource {
         shared_image_budget: SharedImageBudget,
         shared_kitty_upload_budget: SharedKittyUploadBudget,
     },
+    /// Adopt the state, listeners and Splints a previous generation handed
+    /// off through exec, commit, and serve them as the next generation
+    /// (Plan 0061 M3.10).
+    Adopted(Box<AdoptedStartup>),
     /// Serve the old daemon's own Topology, listeners and Splints again on a
     /// rebuilt runtime after the exec boundary returned (Plan 0061 D5). The
     /// signal streams are process-global, so they are reused, never
@@ -1270,10 +1263,43 @@ struct ServingListeners {
     _image_listener: UnixListener,
 }
 
+/// Both listeners registered with the serving runtime, ready for `serve`.
+///
+/// A fresh or resumed round registers its plain descriptors
+/// ([`register_listeners`]); an adopted round receives the listeners its
+/// adoption registered before commit and never registers them again.
+struct ServeListeners {
+    socket: PathBuf,
+    image_socket: PathBuf,
+    listener: UnixListener,
+    image_listener: UnixListener,
+}
+
+/// Registers both plain listeners with the current runtime, keeping their
+/// descriptor numbers.
+fn register_listeners(listeners: DaemonListeners) -> Result<ServeListeners> {
+    let DaemonListeners {
+        socket,
+        image_socket,
+        listener,
+        image_listener,
+    } = listeners;
+    let listener = UnixListener::from_std(listener)
+        .with_context(|| format!("failed to register {}", socket.display()))?;
+    let image_listener = UnixListener::from_std(image_listener)
+        .with_context(|| format!("failed to register {}", image_socket.display()))?;
+    Ok(ServeListeners {
+        socket,
+        image_socket,
+        listener,
+        image_listener,
+    })
+}
+
 /// What a startup source hands its serve round.
 struct StartedDaemon {
     state: Arc<DaemonState>,
-    listeners: DaemonListeners,
+    listeners: ServeListeners,
     signals: DaemonSignals,
     agent_status_timer: AbortOnDrop,
 }
@@ -1312,10 +1338,11 @@ fn daemon_runtime() -> tokio::runtime::Runtime {
 /// Serves rounds until an ordered shutdown.
 ///
 /// A round that leaves serve for the exec boundary stops its runtime and the
-/// systemd connection, crosses the boundary ([`stop_runtime_and_cross`]),
-/// and, because exec is not wired yet (M3.10), always comes back: the next
-/// round serves the same generation again on a new runtime
-/// ([`StartupSource::Resumed`]).
+/// systemd connection and crosses the boundary ([`stop_runtime_and_cross`]).
+/// A successful exec never returns. Every build but `integration-test` has
+/// no exec call site (Plan 0061 M3.11 gates it), so the boundary always
+/// comes back there, and the next round serves the same generation again on
+/// a new runtime ([`StartupSource::Resumed`]).
 fn run_daemon(source: StartupSource) -> Result<()> {
     let mut source = source;
     loop {
@@ -1354,11 +1381,12 @@ async fn serve_round(source: StartupSource) -> Result<RoundEnd> {
             )
             .await?
         }
+        StartupSource::Adopted(startup) => Box::pin(start_adopted(*startup)).await?,
         StartupSource::Resumed { resumed, signals } => {
             let round = Box::pin(start_resumed(*resumed)).await;
             StartedDaemon {
                 state: round.state,
-                listeners: round.listeners,
+                listeners: register_listeners(round.listeners)?,
                 signals,
                 agent_status_timer: round.agent_status_timer,
             }
@@ -1380,6 +1408,485 @@ async fn serve_round(source: StartupSource) -> Result<RoundEnd> {
             })
         }
     }
+}
+
+/// What `main` hands an upgrade-handoff candidate: the claimed inherited
+/// descriptors, still under the single-threaded handoff guard, and what
+/// normal startup already validated.
+struct CandidateStartup {
+    candidate: splinterd::CandidateBootstrap,
+    require_workload_cgroups: bool,
+    shared_image_budget: SharedImageBudget,
+    shared_kitty_upload_budget: SharedKittyUploadBudget,
+}
+
+/// A verified candidate stage, outside the single-threaded boundary, waiting
+/// for the serve round that adopts it.
+struct AdoptedStartup {
+    stage: splinterd::CandidateRuntimeStage,
+    require_workload_cgroups: bool,
+    shared_image_budget: SharedImageBudget,
+    shared_kitty_upload_budget: SharedKittyUploadBudget,
+    socket: PathBuf,
+    image_socket: PathBuf,
+}
+
+/// Stages a claimed candidate, then adopts, commits, and serves it as the
+/// next daemon generation (Plan 0061 M3.10).
+///
+/// Staging is read-only and still holds the single-threaded handoff guard;
+/// only `enter_tokio` releases it, and only then does `run_daemon` build the
+/// runtime. Tracing is installed first: it allocates and writes standard
+/// output but creates no thread and no descriptor, so the guard's
+/// single-threaded descriptor table is unchanged.
+fn run_candidate(startup: CandidateStartup) -> Result<()> {
+    let CandidateStartup {
+        candidate,
+        require_workload_cgroups,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+    } = startup;
+    init_tracing();
+    info!("daemon handoff candidate: inherited descriptors claimed; staging");
+    let socket = match socket_path() {
+        Ok(socket) => socket,
+        Err(error) => {
+            return Err(fail_before_commit(
+                "staging",
+                &format!("{error:#}"),
+                PreCommitRecovery::Unstaged(Box::new(candidate)),
+            ));
+        }
+    };
+    let image_socket = image_content_socket_path(&socket);
+    let stage = match candidate.stage(
+        &shared_image_budget,
+        &shared_kitty_upload_budget,
+        &socket,
+        &image_socket,
+    ) {
+        Ok(stage) => stage,
+        Err(failure) => {
+            let error = error_chain(&failure);
+            return Err(fail_before_commit(
+                "staging",
+                &error,
+                PreCommitRecovery::Unstaged(Box::new(failure.into_recovery())),
+            ));
+        }
+    };
+    info!(
+        closed_unexpected = stage.closed_unexpected(),
+        "daemon handoff candidate: every inherited descriptor and checkpoint verified"
+    );
+    let stage = match stage.enter_tokio() {
+        Ok(stage) => stage,
+        Err(failure) => {
+            let error = error_chain(&failure);
+            let refused = failure
+                .into_stage()
+                .refuse(splinterd::handoff_adoption::AdoptionError::UnexpectedPhase);
+            return Err(fail_before_commit(
+                "runtime entry",
+                &error,
+                PreCommitRecovery::Adoption(Box::new(refused.into_recovery())),
+            ));
+        }
+    };
+    run_daemon(StartupSource::Adopted(Box::new(AdoptedStartup {
+        stage,
+        require_workload_cgroups,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+        socket,
+        image_socket,
+    })))
+}
+
+/// An error and every source under it, as one line.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
+/// Everything a candidate still owns when it fails before its adoption
+/// commit, for the cooperative rollback executor.
+enum PreCommitRecovery {
+    /// Staging refused: the complete claimed descriptor table.
+    Unstaged(
+        #[allow(
+            dead_code,
+            reason = "held only to be handed to the M3.11 rollback executor; until then it is dropped"
+        )]
+        Box<splinterd::CandidateBootstrap>,
+    ),
+    /// Adoption refused: every staged part, each adopted scope retained.
+    Adoption(Box<splinterd::handoff_adoption::AdoptionRecovery>),
+}
+
+/// Ends a candidate that failed before its adoption commit, and returns the
+/// error `main` exits with.
+///
+/// ---- Pre-commit candidate failure (Plan 0061 M3.11 hand-off point) ----
+/// M3.11 replaces this body with the cooperative rollback executor: it takes
+/// `recovery`, acquires a fresh single-threaded guard, and executes the
+/// sealed rollback daemon by descriptor with the unchanged PTYs and the
+/// rollback manifest (Plan 0037 "Failure and rollback", item 5). Until then
+/// the honest outcome is a loud, non-zero exit with full diagnostics.
+/// Dropping `recovery` and exiting closes every carried PTY master, which
+/// hangs up every carried Splint; scopes adoption took are retained, never
+/// stopped, so nothing beyond what exit implies is killed. This is why the
+/// old generation's exec stays compiled only into `integration-test` builds
+/// until M3.11.
+///
+/// Every pre-commit failure that returns, from staging through runtime entry
+/// and startup to adoption, reaches this one function. A panic before commit
+/// does not (for example `daemon_runtime().expect(..)` failing to build the
+/// runtime, or a panic inside `adopt`): it unwinds past here with no rollback
+/// path, even after M3.11, and belongs to the daemon-crash row of Plan 0037's
+/// lifetime matrix. What such an unwind drops still stops no workload scope:
+/// adoption wraps every placement so that dropping it retains the scope
+/// (`RetainOnDrop`, `StagedSplint`), and only the PTY masters close.
+fn fail_before_commit(
+    phase: &'static str,
+    error: &str,
+    recovery: PreCommitRecovery,
+) -> anyhow::Error {
+    let (carried, retained_scopes) = match &recovery {
+        PreCommitRecovery::Unstaged(_) => (None, 0),
+        PreCommitRecovery::Adoption(recovery) => (
+            Some(recovery.splint_count()),
+            recovery.retained_scopes().len(),
+        ),
+    };
+    error!(
+        phase,
+        %error,
+        ?carried,
+        retained_scopes,
+        "daemon handoff candidate failed before its adoption commit; no rollback executor exists yet (Plan 0061 M3.11), so it exits and every carried Splint's terminal is hung up"
+    );
+    drop(recovery);
+    anyhow::anyhow!(
+        "upgrade-handoff candidate failed before its adoption commit ({phase}): {error}; live-process continuity is not guaranteed"
+    )
+}
+
+/// The inputs a candidate builds on the serving runtime before adopting.
+struct AdoptionStartupInputs {
+    signals: DaemonSignals,
+    metadata: MetadataStore,
+    topology: Topology,
+}
+
+/// Installs the signal streams and loads the durable Topology through the
+/// fresh-start restore path, which reserves recorded incarnations but
+/// allocates none (every carried incarnation is adopted first).
+async fn adoption_startup_inputs() -> Result<AdoptionStartupInputs> {
+    let signals = DaemonSignals::install()?;
+    let metadata = MetadataStore::discover()?;
+    let topology = restore_topology(&metadata).await?;
+    Ok(AdoptionStartupInputs {
+        signals,
+        metadata,
+        topology,
+    })
+}
+
+/// Connects the process's one workload unit manager for adoption, off the
+/// runtime's workers. A manager that cannot connect while cgroups are
+/// required is `None` here, and adoption then refuses with every part
+/// returned (`WorkloadCgroupsUnavailable`) instead of exiting.
+async fn connect_adoption_workload_units(required: bool) -> Option<WorkloadUnitManager> {
+    let connected = tokio::task::spawn_blocking(move || {
+        WorkloadUnitManager::connect(
+            WorkloadMemoryPolicy::default(),
+            required.then_some("splinterd.service"),
+        )
+    })
+    .await;
+    match connected {
+        Ok(Ok(manager)) => Some(manager),
+        Ok(Err(error)) if required => {
+            error!(%error, "required workload cgroup manager is unavailable for handoff adoption");
+            None
+        }
+        Ok(Err(error)) => {
+            warn!(%error, "workload cgroup manager unavailable for handoff adoption; carried Splints run uncontained");
+            None
+        }
+        Err(error) => {
+            error!(%error, "workload cgroup manager connection task failed during handoff adoption");
+            None
+        }
+    }
+}
+
+/// Adopts the staged candidate, commits, and builds the state the next
+/// generation serves (Plan 0061 M3.10; Plan 0037 quiescence items 7 to 9).
+///
+/// Every fallible step runs before `commit`: the inputs, one workload unit
+/// manager for the whole process, and [`splinterd::CandidateRuntimeStage::adopt`].
+/// A failure of any of them returns every owned part to
+/// [`fail_before_commit`]. Nothing fallible runs between `adopt` and
+/// `commit`. After commit nothing can fail the round: what remains degrades
+/// instead (an unpinnable client snapshot is logged and not pinned).
+///
+/// The adopted daemon has no rollback authority: its sealed rollback pair
+/// closed at commit, and the pair it would retain for the next handoff is a
+/// startup capture of an installed image it no longer runs from. Handoff is
+/// therefore unavailable until the daemon restarts (Plan 0061 D8); rebuilding
+/// that authority after a handoff is M3.17's.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered adopt, commit, publish sequence with nothing fallible after commit"
+)]
+async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
+    let AdoptedStartup {
+        stage,
+        require_workload_cgroups,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+        socket,
+        image_socket,
+    } = startup;
+    info!("daemon handoff candidate: serving runtime started; loading durable state");
+    let AdoptionStartupInputs {
+        signals,
+        metadata,
+        topology,
+    } = match adoption_startup_inputs().await {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            let error = format!("{error:#}");
+            let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
+                error,
+            ));
+            let error = failure.to_string();
+            return Err(fail_before_commit(
+                "startup",
+                &error,
+                PreCommitRecovery::Adoption(Box::new(failure.into_recovery())),
+            ));
+        }
+    };
+    let workload_units = connect_adoption_workload_units(require_workload_cgroups).await;
+    info!(
+        revision = topology.revision().get(),
+        workload_units = workload_units.is_some(),
+        "daemon handoff candidate: adopting"
+    );
+    let adopted = Box::pin(stage.adopt(splinterd::handoff_adoption::AdoptionInputs {
+        topology,
+        workload_units: workload_units.clone(),
+        workload_cgroups_required: require_workload_cgroups,
+        policy_path: policy::configured_path(),
+        live_config: live_config_with_budgets(
+            &shared_image_budget,
+            &shared_kitty_upload_budget,
+            default_scrollback_lines(),
+        ),
+    }))
+    .await;
+    let staged = match adopted {
+        Ok(staged) => staged,
+        Err(failure) => {
+            let error = failure.to_string();
+            return Err(fail_before_commit(
+                "adoption",
+                &error,
+                PreCommitRecovery::Adoption(Box::new(failure.into_recovery())),
+            ));
+        }
+    };
+    // The irreversible adoption commit: nothing fallible since `adopt`, and
+    // from here no cooperative rollback is permitted (Plan 0037 item 8).
+    let mut committed = staged.commit();
+    // Before anything publishes the Topology: each Splint the previous
+    // generation excluded (its process had exited) gets its real exit, from
+    // its reaped child or the status the old actor observed. Only then are
+    // children nothing names reaped.
+    let excluded = committed.finalize_excluded_splints();
+    let reaped = committed.reap_uncarried_children();
+    info!(
+        daemon_generation = committed.daemon_generation,
+        source_daemon_generation = committed.source_daemon_generation,
+        rollback = committed.rollback,
+        carried = committed.splints.len(),
+        exited_before_adoption = committed.exited_before_adoption.len(),
+        excluded = excluded.len(),
+        excluded_exit_unknown = excluded.iter().filter(|(_, exit)| exit.is_none()).count(),
+        reaped_uncarried = reaped.len(),
+        reclaimed_slices = committed.reclaimed_slices.len(),
+        unreclaimed_slices = committed.unreclaimed_slices.len(),
+        closed_unexpected = committed.closed_unexpected,
+        "daemon handoff: adoption committed"
+    );
+    if committed.install_pair_mismatch {
+        warn!(
+            "daemon handoff: the installed pair changed since preparation; launches use the prefix as installed now"
+        );
+    }
+    let splinterd::handoff_adoption::CommittedAdoption {
+        rollback,
+        daemon_generation,
+        install_prefix,
+        daemon_image,
+        topology,
+        policy,
+        policy_generation,
+        splints,
+        listener,
+        image_listener,
+        handoff_listeners,
+        ..
+    } = committed;
+    // The forward client snapshot closes here: nothing relaunches from it
+    // before M3.14, and no peer executing it is trusted UI. The adopted
+    // daemon trusts exactly `<prefix>/splinterm`, as a fresh daemon does
+    // (AGENTS.md §4.4); matching the pinned snapshot needs an approved §4.4
+    // amendment first.
+    let install_prefix = Arc::new(install_prefix);
+    let daemon_audit_peer = adopted_daemon_audit_peer(&install_prefix, daemon_image);
+    let state = build_daemon_state(DaemonStateInputs {
+        topology,
+        metadata: Some(metadata),
+        policy,
+        daemon_audit_peer,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+        // `LinuxPtyBackend::installed_in` without its absolute-path check,
+        // which cannot fail for a prefix and must not after commit.
+        pty_backend: LinuxPtyBackend::new(
+            install_prefix
+                .directory()
+                .join(splinterm_pty::HELPER_EXECUTABLE),
+        ),
+        install_prefix,
+        workload_units,
+        workload_cgroups_required: require_workload_cgroups,
+        rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::Unavailable),
+        daemon_generation,
+        handoff_listeners: Some(handoff_listeners),
+    });
+    record_policy_reload(&state, &policy_generation).await;
+    record_handoff_adoption_audit(&state, rollback).await;
+    // Durable before anything serves: the excluded Splints' real exits and
+    // the adopted states exist only in memory until saved.
+    persist_adopted_topology(&state).await;
+    // Registered and observed before serve accepts anyone. A committed actor
+    // may already have published its exit (a child that exited before
+    // adoption is reaped by its actor): the exit status is level-triggered,
+    // so its observer still sees it and finalizes it.
+    register_live_runtimes(
+        &state,
+        splints
+            .into_iter()
+            .map(|splint| (splint.splint_id, splint.runtime)),
+    )
+    .await;
+    if let Err(error) = splinterd::handoff_descriptors::audit_inheritable_descriptors() {
+        error!(%error, "a descriptor is inheritable after handoff adoption; new launches are refused until restart");
+        state
+            .inheritable_descriptor_leak
+            .store(true, Ordering::Release);
+    }
+    let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
+    info!(
+        daemon_generation,
+        "daemon handoff: adopted generation published"
+    );
+    Ok(StartedDaemon {
+        state,
+        listeners: ServeListeners {
+            socket,
+            image_socket,
+            listener,
+            image_listener,
+        },
+        signals,
+        agent_status_timer,
+    })
+}
+
+/// Saves the adopted Topology through the daemon's normal save path, under
+/// the topology transaction permit, so the exits adoption recorded for
+/// excluded Splints survive a crash before the next mutation.
+///
+/// Post-commit, so it cannot fail the round: a failed save is logged and
+/// the daemon serves on; the next mutation or the ordered shutdown saves
+/// again. Returns whether the save succeeded.
+async fn persist_adopted_topology(state: &DaemonState) -> bool {
+    let Ok(_transaction) = state.topology_transactions.acquire().await else {
+        warn!("topology transaction barrier closed; the adopted Topology is not saved yet");
+        return false;
+    };
+    let topology = state.topology.read().await.clone();
+    if persist_topology(state, &topology).await.is_err() {
+        warn!("cannot save the adopted Topology; serving on, the next save retries");
+        return false;
+    }
+    true
+}
+
+/// The adopted daemon's own audit identity: the installed daemon file the
+/// authenticated manifest recorded for its image, bound to
+/// `<prefix>/splinterd`. `of_current_process_at` cannot be used: the running
+/// image is a sealed memfd with no installed path.
+fn adopted_daemon_audit_peer(
+    install_prefix: &InstallPrefix,
+    image: splinterd::handoff_adoption::AdoptedDaemonImage,
+) -> splinterm_protocol::AuditPeer {
+    splinterm_protocol::AuditPeer {
+        uid: rustix::process::geteuid().as_raw(),
+        executable_path: install_prefix
+            .daemon()
+            .to_string_lossy()
+            .chars()
+            .take(4096)
+            .collect(),
+        executable_sha256: image.sha256.iter().fold(String::new(), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        }),
+        device: Some(image.device),
+        inode: Some(image.inode),
+    }
+}
+
+/// Records the adoption in the new generation's audit log (Plan 0037
+/// "Authority reset"): no ticket, terminal, or input content. The old
+/// generation's records ended with its process; the journal keeps the phase
+/// diagnostics of both.
+async fn record_handoff_adoption_audit(state: &DaemonState, rollback: bool) {
+    state.audit.lock().await.record(audit::AuditDraft {
+        unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        policy_generation: None,
+        policy_rule_id: None,
+        peer: state.daemon_audit_peer.clone(),
+        operation: splinterm_protocol::AuditOperation::PrepareDaemonHandoff,
+        resource: None,
+        requested_scopes: Vec::new(),
+        decision: splinterm_protocol::AuditDecision::Allowed,
+        reason: if rollback {
+            "handoff_rollback_adopted"
+        } else {
+            "handoff_adopted"
+        },
+        outcome: Some(splinterm_protocol::AuditOutcome::Succeeded),
+        argument_count: None,
+        executable_basename: None,
+    });
 }
 
 /// How long captured actors get to end for handoff after their leases became
@@ -1433,6 +1940,10 @@ struct StoppedForHandoff {
     /// exited. They end with the runtime; the resumed round reaps and
     /// records them.
     uncaptured: Vec<LiveSplintRuntime>,
+    /// The excluded Splints' handles: once their actors stop with the
+    /// runtime, each holds its final observed exit, which the manifests
+    /// then record.
+    excluded: Vec<splinterd::handoff_prepare::ExcludedSplint>,
     /// Whether every captured actor confirmed its handoff end in time.
     actors_handed_off: bool,
 }
@@ -1507,6 +2018,7 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
         listeners,
         handed_off,
         uncaptured,
+        excluded,
         actors_handed_off,
     }
 }
@@ -1524,6 +2036,10 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
 ///    uncaptured actors (Splints that had exited) and their scopes, which
 ///    now stop nothing; their PTY masters close.
 /// 3. The boundary needs one thread, which steps 1 and 2 provide.
+/// 4. With every excluded actor stopped, their final exits are recorded in
+///    the manifests ([`ExecBoundaryInputs::refresh_excluded_exits`]) before
+///    the boundary writes and seals them, so no status is lost between the
+///    manifest build and exec.
 ///
 /// A fresh manager is connected after the boundary released the guard; the
 /// shut-down one is never used again, so no retained identity is adopted
@@ -1535,10 +2051,11 @@ fn stop_runtime_and_cross(
     let StoppedForHandoff {
         state,
         hold,
-        boundary,
+        mut boundary,
         listeners,
         handed_off,
         uncaptured,
+        excluded,
         actors_handed_off,
     } = stopped;
     if let Some(manager) = state.workload_units.clone()
@@ -1547,13 +2064,16 @@ fn stop_runtime_and_cross(
         error!(%error, "workload unit manager did not shut down cleanly");
     }
     runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
-    let reason = cross_boundary(
-        &state,
-        boundary.as_ref(),
-        &listeners,
-        &handed_off,
-        actors_handed_off,
-    );
+    let reason = match boundary.refresh_excluded_exits(&state.rollback_handoff, &excluded) {
+        Ok(()) => cross_boundary(
+            &state,
+            boundary.as_ref(),
+            &listeners,
+            &handed_off,
+            actors_handed_off,
+        ),
+        Err(error) => error,
+    };
     warn!(%reason, "daemon handoff did not exec; resuming the running generation");
     let recorded_dojos = boundary.recorded_dojos();
     // The attempt is over: its fence and its sealed manifests and forward
@@ -1631,8 +2151,52 @@ fn cross_boundary(
         return ExecBoundaryError::ListenerMismatch;
     }
     match boundary.plan(listeners, handed_off) {
-        Ok(plan) => cross_exec_boundary(&plan, Instant::now() + HANDOFF_GUARD_WAIT),
+        Ok(plan) => {
+            #[cfg(feature = "integration-test")]
+            let plan = arm_forward_exec(state, boundary, plan);
+            cross_exec_boundary(&plan, Instant::now() + HANDOFF_GUARD_WAIT)
+        }
         Err(error) => error,
+    }
+}
+
+/// Arms the exec call site with the attempt's sealed forward daemon, when
+/// the attempt has one (Plan 0061 M3.10). Compiled only into
+/// `integration-test` builds: production exec is gated on the M3.11
+/// rollback executor (see `handoff_exec::under_guard`).
+///
+/// The argument vector is rebuilt from this daemon's state, never copied
+/// from its own argv, which in an adopted daemon still names its activation
+/// manifest. The environment crosses unchanged (`SPLINTERM_POLICY` and the
+/// rest), as across a restart.
+#[cfg(feature = "integration-test")]
+fn arm_forward_exec<'a>(
+    state: &DaemonState,
+    boundary: &'a dyn ExecBoundaryInputs,
+    plan: ExecInheritancePlan<'a>,
+) -> ExecInheritancePlan<'a> {
+    let Some(daemon) = boundary.forward_daemon() else {
+        return plan;
+    };
+    let program = env::args_os()
+        .next()
+        .unwrap_or_else(|| OsString::from("splinterd"));
+    let arguments = plan.forward_manifest_descriptor().and_then(|manifest| {
+        splinterd::handoff_exec::forward_daemon_arguments(
+            &program,
+            manifest,
+            state.workload_cgroups_required,
+        )
+    });
+    if let Some(arguments) = arguments {
+        plan.with_forward_daemon(
+            daemon,
+            arguments,
+            splinterd::handoff_exec::exec_environment(),
+        )
+    } else {
+        error!("cannot build the forward daemon's arguments; the old generation resumes");
+        plan
     }
 }
 
@@ -1761,7 +2325,14 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         error!(stranded = ?fleet.stranded, uncontained_dojos = ?fleet.uncontained_dojos, "handoff resume degraded some Splints; none was killed");
     }
     let resumed_count = fleet.resumed.len();
-    register_resumed(&state, fleet.resumed).await;
+    register_live_runtimes(
+        &state,
+        fleet
+            .resumed
+            .into_iter()
+            .map(|splint| (splint.splint_id, splint.runtime)),
+    )
+    .await;
     let reaped = reap_uncaptured(&state, uncaptured, workload_units).await;
     let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     info!(
@@ -1839,19 +2410,23 @@ async fn refresh_resumed_state(
     record_policy_reload(state, &generation).await;
 }
 
-/// Registers every resumed runtime and observes its exit.
-async fn register_resumed(state: &Arc<DaemonState>, resumed: Vec<ResumedSplint>) {
+/// Registers every resumed or adopted runtime and observes its exit.
+async fn register_live_runtimes(
+    state: &Arc<DaemonState>,
+    live: impl IntoIterator<Item = (SplintId, LiveSplintRuntime)>,
+) {
     let mut runtimes = state.runtimes.lock().await;
-    for splint in resumed {
-        let handle = splint.runtime.handle();
+    for (splint_id, runtime) in live {
+        let handle = runtime.handle();
         let Some(slot) = runtimes.reserve() else {
-            // Unreachable: the stopped registry held every one of them.
+            // Unreachable: the previous generation's registry held every
+            // one of them, and the manifest is bounded by the same limit.
             // Dropping the runtime detaches its actor; it is not stopped.
-            error!(splint_id = %splint.splint_id, "no live slot for a resumed Splint");
+            error!(%splint_id, "no live slot for a carried Splint");
             continue;
         };
-        if runtimes.insert(splint.runtime, slot).is_err() {
-            error!(splint_id = %splint.splint_id, "resumed Splint is already registered");
+        if runtimes.insert(runtime, slot).is_err() {
+            error!(%splint_id, "carried Splint is already registered");
             continue;
         }
         observe_process_exit(state, handle);
@@ -1953,8 +2528,8 @@ async fn start_fresh(
     init_tracing();
     // The one moment the prefix is derived from the running image: a fresh
     // daemon still runs from its installed path. Nothing later re-resolves it.
-    // An adopted daemon (M3.8/M3.10) runs from a sealed memfd and will take
-    // its prefix from the authenticated manifest's `install_prefix` instead.
+    // An adopted daemon runs from a sealed memfd and takes its prefix from
+    // the authenticated manifest's `install_prefix` instead (`start_adopted`).
     let install_prefix = Arc::new(
         InstallPrefix::of_running_daemon().context("cannot establish the installed prefix")?,
     );
@@ -1985,8 +2560,8 @@ async fn start_fresh(
         workload_units,
         workload_cgroups_required: require_workload_cgroups,
         rollback_handoff: Arc::new(rollback_handoff),
-        // A fresh start serves the first generation; adoption (M3.8) will
-        // publish the one after its predecessor's.
+        // A fresh start serves the first generation; an adoption publishes
+        // the one after its predecessor's.
         daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
         handoff_listeners: Some(ListenerDescriptors {
             listener: listeners.listener.as_raw_fd(),
@@ -1997,7 +2572,7 @@ async fn start_fresh(
     record_policy_reload(&state, &policy_generation).await;
     Ok(StartedDaemon {
         state,
-        listeners,
+        listeners: register_listeners(listeners)?,
         signals,
         agent_status_timer,
     })
@@ -2367,19 +2942,15 @@ impl PolicyReloadQueue {
 )]
 async fn serve(
     state: &Arc<DaemonState>,
-    listeners: DaemonListeners,
+    listeners: ServeListeners,
     signals: &mut DaemonSignals,
 ) -> Result<ServeOutcome> {
-    let DaemonListeners {
+    let ServeListeners {
         socket,
         image_socket,
         listener,
         image_listener,
     } = listeners;
-    let listener = UnixListener::from_std(listener)
-        .with_context(|| format!("failed to register {}", socket.display()))?;
-    let image_listener = UnixListener::from_std(image_listener)
-        .with_context(|| format!("failed to register {}", image_socket.display()))?;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
@@ -4164,6 +4735,20 @@ async fn spawn_runtime(
 /// grace periods, the shared budgets, scrollback, and the incarnation
 /// environment. Spawned and resumed Splints start from the same values.
 fn daemon_live_config(state: &DaemonState, scrollback_lines: usize) -> LiveSplintConfig {
+    live_config_with_budgets(
+        &state.shared_image_budget,
+        &state.shared_kitty_upload_budget,
+        scrollback_lines,
+    )
+}
+
+/// The daemon's runtime configuration for one Splint, charged to the
+/// process-wide budgets; adoption uses it before the state exists.
+fn live_config_with_budgets(
+    shared_image_budget: &SharedImageBudget,
+    shared_kitty_upload_budget: &SharedKittyUploadBudget,
+    scrollback_lines: usize,
+) -> LiveSplintConfig {
     let mut config = LiveSplintConfig::default();
     #[cfg(debug_assertions)]
     if let Some(grace) = debug_test_shutdown_grace(env::var_os("SPLINTERM_TEST_SHUTDOWN_GRACE_MS"))
@@ -4172,8 +4757,8 @@ fn daemon_live_config(state: &DaemonState, scrollback_lines: usize) -> LiveSplin
         config.terminate_grace = grace;
     }
     config.terminal.scrollback_lines = scrollback_lines;
-    config.terminal.shared_image_budget = Some(state.shared_image_budget.clone());
-    config.terminal.shared_kitty_upload_budget = Some(state.shared_kitty_upload_budget.clone());
+    config.terminal.shared_image_budget = Some(shared_image_budget.clone());
+    config.terminal.shared_kitty_upload_budget = Some(shared_kitty_upload_budget.clone());
     config.incarnation_environment = Some(OsString::from("SPLINTERM_SPLINT_INCARNATION"));
     config
 }
@@ -9255,6 +9840,24 @@ trait ExecBoundaryInputs: Send {
 
     /// Each carried Splint's Dojo as the manifests record it.
     fn recorded_dojos(&self) -> HashMap<SplintId, DojoId>;
+
+    /// Records each excluded Splint's final exit in the manifests, after
+    /// the runtime stopped and before the boundary seals them.
+    fn refresh_excluded_exits(
+        &mut self,
+        _rollback: &handoff_requests::RollbackAuthority,
+        _excluded: &[splinterd::handoff_prepare::ExcludedSplint],
+    ) -> Result<(), ExecBoundaryError> {
+        Ok(())
+    }
+
+    /// The sealed forward daemon image the exec call site executes, if this
+    /// attempt has one. It is executed through its descriptor, never
+    /// inherited.
+    #[cfg(feature = "integration-test")]
+    fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        None
+    }
 }
 
 /// A packaged attempt's exec authority: the forward and rollback snapshot
@@ -9296,6 +9899,37 @@ impl ExecBoundaryInputs for ForwardExec {
 
     fn recorded_dojos(&self) -> HashMap<SplintId, DojoId> {
         self.manifests.splint_dojos().collect()
+    }
+
+    fn refresh_excluded_exits(
+        &mut self,
+        rollback: &handoff_requests::RollbackAuthority,
+        excluded: &[splinterd::handoff_prepare::ExcludedSplint],
+    ) -> Result<(), ExecBoundaryError> {
+        let Some(rollback) = rollback.retained() else {
+            return Err(ExecBoundaryError::ManifestRefresh(
+                splinterd::handoff_prepare::ManifestPreparationError::RollbackUnavailable,
+            ));
+        };
+        let refreshed = splinterd::handoff_prepare::refresh_excluded_exits(
+            rollback,
+            &self.forward,
+            &mut self.manifests,
+            excluded,
+        )
+        .map_err(ExecBoundaryError::ManifestRefresh)?;
+        if refreshed > 0 {
+            info!(
+                refreshed,
+                "daemon handoff: recorded excluded Splints' final exits"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "integration-test")]
+    fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        Some(self.forward.snapshots().forward().daemon().descriptor())
     }
 }
 
@@ -12728,6 +13362,38 @@ mod tests {
             .unwrap()
             .as_nanos();
         env::temp_dir().join(format!("splinterd-test-{}-{nonce}", std::process::id()))
+    }
+
+    /// An adopted daemon saves its Topology, with the exit adoption recorded
+    /// for an excluded Splint, before it serves; a failed save only degrades.
+    #[tokio::test]
+    async fn the_adopted_topology_is_saved_before_serving() {
+        let directory = temp_dir();
+        let metadata = MetadataStore::from_base(&directory);
+        let state =
+            test_state_with_backend_and_metadata(false, test_pty_backend(), Some(metadata.clone()));
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("adopted", PathBuf::from("/tmp"))
+            .unwrap();
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("a new Lair has one Splint");
+        };
+        let splint_id = splint.id;
+        topology.set_splint_state(splint_id, SplintState::Exited(3));
+        *state.topology.write().await = topology;
+
+        assert!(persist_adopted_topology(&state).await);
+        let saved = metadata.load().unwrap().unwrap().into_topology().unwrap();
+        assert_eq!(
+            saved.find_splint(splint_id).unwrap().state,
+            SplintState::Exited(3)
+        );
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        assert!(!persist_adopted_topology(&state).await);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     fn test_launch(command: &[&str]) -> splinterm_protocol::LaunchParameters {

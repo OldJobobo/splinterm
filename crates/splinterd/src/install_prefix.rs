@@ -12,9 +12,9 @@
 //! A fresh daemon computes the prefix exactly once, from its canonical running
 //! path, while that path still names the running image
 //! ([`InstallPrefix::of_running_daemon`]). A daemon adopted from a handoff
-//! (M3.8/M3.10) will instead take it from the authenticated manifest's
+//! (M3.8/M3.10) instead takes it from the authenticated manifest's
 //! `install_prefix`, bound to the sealed executable pair's recorded source
-//! paths; that startup source does not exist yet.
+//! paths (`StartupSource::Adopted` in the binary).
 
 use std::{
     fs, io,

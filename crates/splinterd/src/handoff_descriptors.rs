@@ -669,6 +669,7 @@ mod tests {
             },
             counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
             splints: Vec::new(),
+            excluded_splints: Vec::new(),
             descriptors: CLAIM_ROLES
                 .into_iter()
                 .zip(raw_fds)
