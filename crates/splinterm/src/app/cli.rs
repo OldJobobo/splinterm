@@ -251,6 +251,9 @@ pub(crate) async fn run() -> Result<()> {
             eprintln!("splinterm config: {diagnostic}");
         }
     }
+    if config.omarchy_integration_hint && remote.is_none() && offers_omarchy_hint(&command) {
+        super::omarchy_hint::offer();
+    }
     let factory = match remote {
         // Graphical remote launches connect inside a status Window that shows
         // progress and categorized failures instead of terminal output. A
@@ -327,6 +330,20 @@ const fn xdg_launch_opens_picker(
     startup: StartupMode,
 ) -> bool {
     picker || (!new && commandless && matches!(startup, StartupMode::DojoPicker))
+}
+
+/// Local terminal Windows that carry Splinterm's own app ID may show the
+/// one-time Omarchy integration hint. A custom app ID, such as the Omarchy
+/// screensaver's, already has its own Hyprland rules.
+const fn offers_omarchy_hint(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Dojos
+            | Command::Reopen
+            | Command::Window { .. }
+            | Command::Launch { .. }
+            | Command::XdgLaunch { app_id: None, .. }
+    )
 }
 
 fn graphical_command(command: &Command) -> bool {
@@ -1237,6 +1254,29 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(rejected).is_err(), "{rejected:?}");
         }
+    }
+
+    #[test]
+    fn omarchy_hint_reaches_only_local_windows_with_the_splinterm_app_id() {
+        let offers = |argv: &[&str]| {
+            offers_omarchy_hint(&Cli::try_parse_from(argv).unwrap().command.unwrap())
+        };
+        assert!(offers(&["splinterm", "xdg-launch"]));
+        assert!(offers(&["splinterm", "xdg-launch", "--", "/usr/bin/true"]));
+        assert!(offers(&["splinterm", "dojos"]));
+        assert!(offers(&["splinterm", "reopen"]));
+        assert!(offers(&["splinterm", "launch"]));
+        assert!(!offers(&[
+            "splinterm",
+            "xdg-launch",
+            "--app-id=org.omarchy.screensaver",
+            "--",
+            "omarchy-screensaver",
+        ]));
+        assert!(!offers(&["splinterm", "consent"]));
+        assert!(!offers(&["splinterm", "remotes"]));
+        assert!(!offers(&["splinterm", "integration", "omarchy", "status"]));
+        assert!(!offers(&["splinterm", "list"]));
     }
 
     #[test]

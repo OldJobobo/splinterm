@@ -22,14 +22,14 @@ const HYPR_REQUIRE_BLOCK: &str = "\n-- BEGIN SPLINTERM OMARCHY INTEGRATION\nrequ
 const EXTERNAL_HYPR_RULE: &str = "hl.window_rule({\n  name = \"splinterm-terminal-tag\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm$\" },\n  tag = \"+terminal\",\n})";
 
 #[derive(Clone, Debug)]
-struct Roots {
+pub(super) struct Roots {
     home: PathBuf,
     config: PathBuf,
     state: PathBuf,
 }
 
 impl Roots {
-    fn from_env() -> Result<Self> {
+    pub(super) fn from_env() -> Result<Self> {
         let home = absolute_env("HOME")?.context("HOME must name an absolute directory")?;
         if !home.is_dir() {
             bail!("HOME must name an existing directory");
@@ -43,7 +43,16 @@ impl Roots {
         })
     }
 
-    fn integration_state(&self) -> PathBuf {
+    #[cfg(test)]
+    pub(super) const fn from_parts(home: PathBuf, config: PathBuf, state: PathBuf) -> Self {
+        Self {
+            home,
+            config,
+            state,
+        }
+    }
+
+    pub(super) fn integration_state(&self) -> PathBuf {
         self.state.join("splinterm/integrations")
     }
 
@@ -63,7 +72,7 @@ impl Roots {
         self.config.join("xdg-terminals.list.splinterm-original")
     }
 
-    fn hypr_entrypoint(&self) -> PathBuf {
+    pub(super) fn hypr_entrypoint(&self) -> PathBuf {
         self.config.join("hypr/hyprland.lua")
     }
 
@@ -285,11 +294,17 @@ fn hypr_external_ready(roots: &Roots) -> bool {
     })
 }
 
-fn active_lua(text: &str) -> String {
+pub(super) fn active_lua(text: &str) -> String {
     text.lines()
         .map(|line| line.split_once("--").map_or(line, |(active, _)| active))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether Hyprland gives Splinterm windows Omarchy's `terminal` tag through
+/// the managed module or an equivalent user rule. Only reads files.
+pub(super) fn terminal_tag_ready(roots: &Roots) -> bool {
+    managed_hypr_ready(roots) || hypr_external_ready(roots)
 }
 
 fn managed_hypr_ready(roots: &Roots) -> bool {
@@ -738,7 +753,7 @@ fn rollback_enable(
 
 fn status(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) -> Result<()> {
     let terminal = terminal_ready(runtime);
-    let hypr = managed_hypr_ready(roots) || hypr_external_ready(roots);
+    let hypr = terminal_tag_ready(roots);
     let screensaver = screensaver_ready(roots);
     let managed = roots.manifest().exists();
     writeln!(
