@@ -2,11 +2,16 @@
 //!
 //! This is deliberately preparation-only. It does not build a checkpoint or
 //! descriptor manifest, quiesce live PTYs, execute a forward image, publish a
-//! generation, or claim candidate descriptors.
+//! generation, or claim candidate descriptors. It also owns the fail-closed
+//! handoff phase machine and the exclusive single-threaded process guard that
+//! both sides of the exec boundary hold across descriptor-table work.
 
 use std::{
     io,
+    marker::PhantomData,
     path::{Path, PathBuf},
+    rc::Rc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use thiserror::Error;
@@ -24,12 +29,189 @@ use crate::{
     },
 };
 
+static HANDOFF_PROCESS_GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// One explicit handoff generation phase.
+///
+/// The old and candidate generations construct separate lifecycle values across
+/// exec. Transitions encode the rollback boundary: once adoption commits, no
+/// transition back to cooperative rollback is valid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the complete transition boundary lands before each coordinator call site"
+)]
+pub(crate) enum HandoffPhase {
+    /// The old generation serves normally; no handoff is in progress.
+    OldRunning,
+    /// The old generation is building checkpoint and manifest authority.
+    Preparing,
+    /// The old generation fences lifecycle work. Before `RuntimeStopped`, the
+    /// coordinator that drives this phase must also drain or fence retiring
+    /// Splint processes and held unused-close claims, which leave the runtime
+    /// registry before their processes are reaped.
+    Quiescing,
+    /// Tokio and every live runtime are stopped; the process is single-threaded.
+    RuntimeStopped,
+    /// The bounded descriptor allowlist is inheritable for exec.
+    InheritancePrepared,
+    /// The candidate owns the complete inherited descriptor set.
+    CandidateClaimed,
+    /// The candidate verified and staged every inherited authority.
+    AdoptionStaged,
+    /// The candidate adopted the staged authority; rollback is closed.
+    Committed,
+    /// The candidate published its generation.
+    Published,
+    /// The candidate is returning authority to the rollback generation.
+    RollingBack,
+    /// The handoff failed terminally.
+    Failed,
+}
+
+/// Fail-closed state machine for one side of a daemon handoff exec boundary.
+///
+/// Deliberately neither `Clone` nor `Copy`: the lifecycle is uniquely owned,
+/// so committing advances the only rollback-capable value and no stale copy
+/// can later roll back.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct HandoffLifecycle {
+    phase: HandoffPhase,
+}
+
+impl HandoffLifecycle {
+    #[must_use]
+    pub(crate) const fn old_running() -> Self {
+        Self {
+            phase: HandoffPhase::OldRunning,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn candidate_claimed() -> Self {
+        Self {
+            phase: HandoffPhase::CandidateClaimed,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn phase(&self) -> HandoffPhase {
+        self.phase
+    }
+
+    /// Advances to `next` only along a defined handoff edge.
+    pub(crate) fn transition(&mut self, next: HandoffPhase) -> Result<(), HandoffCoordinatorError> {
+        let valid = matches!(
+            (self.phase, next),
+            (HandoffPhase::OldRunning, HandoffPhase::Preparing)
+                | (
+                    HandoffPhase::Preparing,
+                    HandoffPhase::Quiescing | HandoffPhase::OldRunning
+                )
+                | (
+                    HandoffPhase::Quiescing,
+                    HandoffPhase::RuntimeStopped | HandoffPhase::OldRunning
+                )
+                | (
+                    HandoffPhase::RuntimeStopped,
+                    HandoffPhase::InheritancePrepared | HandoffPhase::OldRunning
+                )
+                | (HandoffPhase::InheritancePrepared, HandoffPhase::OldRunning)
+                | (
+                    HandoffPhase::CandidateClaimed,
+                    HandoffPhase::AdoptionStaged | HandoffPhase::RollingBack
+                )
+                | (
+                    HandoffPhase::AdoptionStaged,
+                    HandoffPhase::RollingBack | HandoffPhase::Committed
+                )
+                | (
+                    HandoffPhase::Committed,
+                    HandoffPhase::Published | HandoffPhase::Failed
+                )
+                | (
+                    HandoffPhase::Published | HandoffPhase::RollingBack,
+                    HandoffPhase::Failed
+                )
+        );
+        if !valid {
+            return Err(HandoffCoordinatorError::InvalidPhaseTransition);
+        }
+        self.phase = next;
+        Ok(())
+    }
+}
+
+/// Exclusive single-threaded process authority for descriptor-table handoff.
+///
+/// Acquiring this guard proves that exactly one thread exists at the observation
+/// point and prevents a competing Splinterm handoff critical section. The owner
+/// must not create another thread while it is held. The guard is intentionally
+/// neither `Send` nor `Sync`, keeping the pre/post-exec critical section on its
+/// acquiring thread.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct HandoffProcessGuard {
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl HandoffProcessGuard {
+    /// Acquires exclusive handoff authority in an observed single-threaded
+    /// process.
+    ///
+    /// The thread observation is one close-on-exec procfs directory read,
+    /// closed before this returns.
+    ///
+    /// # Errors
+    /// Rejects a competing handoff, an unreadable process thread table, or any
+    /// process with other live threads.
+    pub fn acquire() -> Result<Self, HandoffCoordinatorError> {
+        Self::acquire_with(process_thread_count)
+    }
+
+    pub(crate) fn acquire_with(
+        observe_threads: impl FnOnce() -> io::Result<usize>,
+    ) -> Result<Self, HandoffCoordinatorError> {
+        HANDOFF_PROCESS_GUARD_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| HandoffCoordinatorError::ProcessGuardActive)?;
+        let observed = match observe_threads() {
+            Ok(observed) => observed,
+            Err(error) => {
+                HANDOFF_PROCESS_GUARD_ACTIVE.store(false, Ordering::Release);
+                return Err(HandoffCoordinatorError::InspectProcessThreads(error));
+            }
+        };
+        if observed != 1 {
+            HANDOFF_PROCESS_GUARD_ACTIVE.store(false, Ordering::Release);
+            return Err(HandoffCoordinatorError::ProcessNotSingleThreaded { observed });
+        }
+        Ok(Self {
+            _not_send_or_sync: PhantomData,
+        })
+    }
+}
+
+impl Drop for HandoffProcessGuard {
+    fn drop(&mut self) {
+        let was_active = HANDOFF_PROCESS_GUARD_ACTIVE.swap(false, Ordering::AcqRel);
+        debug_assert!(was_active, "handoff process guard released exactly once");
+    }
+}
+
+fn process_thread_count() -> io::Result<usize> {
+    std::fs::read_dir("/proc/self/task")?.try_fold(0_usize, |count, entry| {
+        entry.map(|_| count.saturating_add(1))
+    })
+}
+
 /// Complete rollback authority retained before package paths can be replaced.
 #[derive(Debug)]
 pub struct RollbackHandoffAuthority {
     executables: RetainedRollbackExecutables,
     preflight: ExecutablePairPreflight,
     provenance: ValidatedPackageProvenance,
+    lifecycle: HandoffLifecycle,
 }
 
 impl RollbackHandoffAuthority {
@@ -37,12 +219,15 @@ impl RollbackHandoffAuthority {
     ///
     /// This must run synchronously during startup before Tokio, listeners,
     /// connection tasks, or live PTY runtimes can create or close descriptors
-    /// concurrently with sealed preflight's descriptor audit.
+    /// concurrently with sealed preflight's descriptor audit. The exclusive
+    /// [`HandoffProcessGuard`] enforces that requirement from the first
+    /// executable capture through preflight and provenance binding.
     ///
     /// # Errors
     ///
     /// Fails closed if the installed executable pair, sealed execution, or
-    /// package record cannot be authenticated as one exact running generation.
+    /// package record cannot be authenticated as one exact running generation,
+    /// or if the process is not single-threaded once a package record exists.
     pub fn prepare_installed() -> Result<Self, HandoffCoordinatorError> {
         let daemon = std::env::current_exe().map_err(HandoffCoordinatorError::CurrentExecutable)?;
         let daemon =
@@ -60,6 +245,9 @@ impl RollbackHandoffAuthority {
             }
             record => record?,
         };
+        // Development daemons return above without the guard, so only a
+        // packaged pair's capture and sealed preflight need one thread.
+        let _process_guard = HandoffProcessGuard::acquire()?;
         let source = installed_source_pair(&daemon)?;
         let executables = RetainedRollbackExecutables::capture(
             &source,
@@ -88,7 +276,8 @@ impl RollbackHandoffAuthority {
     }
 
     #[must_use]
-    pub const fn running_generation(&self) -> RunningHandoffGeneration {
+    pub fn running_generation(&self) -> RunningHandoffGeneration {
+        debug_assert_eq!(self.lifecycle.phase(), HandoffPhase::OldRunning);
         RunningHandoffGeneration {
             build_identity: self.preflight.pair_build_identity,
             build_version: self.preflight.pair_build_version,
@@ -105,6 +294,16 @@ pub enum HandoffCoordinatorError {
     NotPackaged,
     #[error("the running daemon is not an installed splinterd executable")]
     InvalidInstalledPair,
+    #[error("another daemon handoff process guard is already active")]
+    ProcessGuardActive,
+    #[error("cannot inspect daemon process threads: {0}")]
+    InspectProcessThreads(#[source] io::Error),
+    #[error("daemon handoff requires exactly one thread, observed {observed}")]
+    ProcessNotSingleThreaded { observed: usize },
+    #[error("invalid daemon handoff phase transition")]
+    InvalidPhaseTransition,
+    #[error("daemon handoff authority is in an unexpected phase")]
+    UnexpectedPhase,
     #[error(transparent)]
     Snapshot(#[from] ExecutableSnapshotError),
     #[error(transparent)]
@@ -135,8 +334,13 @@ fn prepare_with_preflight(
         executables,
         preflight,
         provenance,
+        lifecycle: HandoffLifecycle::old_running(),
     })
 }
+
+/// Serializes unit tests that hold the process-global handoff guard.
+#[cfg(test)]
+pub(crate) static PROCESS_GUARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -332,6 +536,84 @@ mod tests {
         let pair = installed_source_pair(Path::new("/usr/bin/splinterd")).unwrap();
         assert_eq!(pair.daemon(), Path::new("/usr/bin/splinterd"));
         assert_eq!(pair.client(), Path::new("/usr/bin/splinterm"));
+    }
+
+    #[test]
+    fn lifecycle_rejects_skips_and_rollback_after_commit() {
+        let mut old = HandoffLifecycle::old_running();
+        assert!(matches!(
+            old.transition(HandoffPhase::RuntimeStopped),
+            Err(HandoffCoordinatorError::InvalidPhaseTransition)
+        ));
+        for phase in [
+            HandoffPhase::Preparing,
+            HandoffPhase::Quiescing,
+            HandoffPhase::RuntimeStopped,
+            HandoffPhase::InheritancePrepared,
+        ] {
+            old.transition(phase).unwrap();
+        }
+        for skipped in [
+            HandoffPhase::CandidateClaimed,
+            HandoffPhase::AdoptionStaged,
+            HandoffPhase::Committed,
+        ] {
+            assert!(matches!(
+                old.transition(skipped),
+                Err(HandoffCoordinatorError::InvalidPhaseTransition)
+            ));
+        }
+        assert_eq!(old.phase(), HandoffPhase::InheritancePrepared);
+        old.transition(HandoffPhase::OldRunning).unwrap();
+
+        let mut candidate = HandoffLifecycle::candidate_claimed();
+        assert!(matches!(
+            candidate.transition(HandoffPhase::Committed),
+            Err(HandoffCoordinatorError::InvalidPhaseTransition)
+        ));
+        candidate.transition(HandoffPhase::AdoptionStaged).unwrap();
+        candidate.transition(HandoffPhase::Committed).unwrap();
+        assert!(matches!(
+            candidate.transition(HandoffPhase::RollingBack),
+            Err(HandoffCoordinatorError::InvalidPhaseTransition)
+        ));
+        candidate.transition(HandoffPhase::Published).unwrap();
+        candidate.transition(HandoffPhase::Failed).unwrap();
+        assert!(matches!(
+            candidate.transition(HandoffPhase::OldRunning),
+            Err(HandoffCoordinatorError::InvalidPhaseTransition)
+        ));
+
+        let mut rolling_back = HandoffLifecycle::candidate_claimed();
+        rolling_back.transition(HandoffPhase::RollingBack).unwrap();
+        assert!(matches!(
+            rolling_back.transition(HandoffPhase::AdoptionStaged),
+            Err(HandoffCoordinatorError::InvalidPhaseTransition)
+        ));
+    }
+
+    #[test]
+    fn process_guard_requires_one_thread_and_one_owner() {
+        let _serial = PROCESS_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            HandoffProcessGuard::acquire_with(|| Ok(2)),
+            Err(HandoffCoordinatorError::ProcessNotSingleThreaded { observed: 2 })
+        ));
+        assert!(matches!(
+            HandoffProcessGuard::acquire_with(|| Err(io::Error::other("procfs"))),
+            Err(HandoffCoordinatorError::InspectProcessThreads(_))
+        ));
+        let guard = HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap();
+        assert!(matches!(
+            HandoffProcessGuard::acquire_with(|| Ok(1)),
+            Err(HandoffCoordinatorError::ProcessGuardActive)
+        ));
+        drop(guard);
+
+        let reacquired = HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap();
+        drop(reacquired);
     }
 
     #[test]
