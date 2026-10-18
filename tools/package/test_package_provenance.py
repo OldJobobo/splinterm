@@ -26,6 +26,7 @@ VALIDATOR_SPEC.loader.exec_module(VALIDATOR)
 PROTOCOL_SOURCE = ROOT / "crates/splinterm-protocol/src/lib.rs"
 PREFLIGHT_SOURCE = ROOT / "crates/splinterd/src/handoff_preflight.rs"
 CHECKPOINT_SOURCE = ROOT / "crates/splinterm-terminal/src/terminal/checkpoint.rs"
+SEAMS_SOURCE = ROOT / "crates/splinterd/src/integration_test_seams.rs"
 
 COMMIT = "1234567890abcdef1234567890abcdef12345678"
 
@@ -76,6 +77,31 @@ class PackageProvenanceTests(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
                 json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
             )
+
+    def test_refuses_binaries_built_with_the_integration_test_feature(self) -> None:
+        marker = MODULE.INTEGRATION_TEST_MARKER
+        rust = re.findall(
+            r'^pub const BUILD_SALT_MARKER: &\[u8; 32\] = b"([^"]+)";$',
+            SEAMS_SOURCE.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+        self.assertEqual(rust, [marker.decode("ascii")])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = root / "clean"
+            clean.write_bytes(b"x" * 100_000)
+            # A marker straddling a read-block boundary must still be found.
+            tainted = root / "tainted"
+            tainted.write_bytes(b"x" * (64 * 1024 - 5) + marker + bytes(16))
+            self.assertFalse(MODULE.contains_integration_test_marker(clean))
+            self.assertTrue(MODULE.contains_integration_test_marker(tainted))
+            for daemon, client in ((tainted, clean), (clean, tainted)):
+                with self.subTest(daemon=daemon.name, client=client.name):
+                    with self.assertRaisesRegex(ValueError, "integration-test feature"):
+                        MODULE.generate(
+                            COMMIT, "local-committed-head", "0.1.0", daemon, client
+                        )
+            MODULE.generate(COMMIT, "local-committed-head", "0.1.0", clean, clean)
 
     def test_rejects_zero_malformed_and_unsupported_provenance(self) -> None:
         for commit, provenance, version in [

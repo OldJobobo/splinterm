@@ -467,16 +467,18 @@ pub fn compiled_build_provenance(
     {
         return Err(PackageProvenanceError::InvalidRecord);
     }
+    let pair_build_identity =
+        derive_pair_build_identity(source_commit, kind, build_version, capabilities)?;
+    // An integration-test image may carry a build salt (Plan 0061 D9), so an
+    // exec test can run a forward pair whose identity differs from its own.
+    #[cfg(feature = "integration-test")]
+    let pair_build_identity =
+        crate::integration_test_seams::salt_compiled_identity(pair_build_identity);
     Ok(CompiledBuildProvenance {
         source_commit,
         kind,
         build_version,
-        pair_build_identity: derive_pair_build_identity(
-            source_commit,
-            kind,
-            build_version,
-            capabilities,
-        )?,
+        pair_build_identity,
     })
 }
 

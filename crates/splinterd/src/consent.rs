@@ -173,10 +173,12 @@ impl PeerIdentity {
         executable_matches && graphical_mode
     }
 
-    // M3.10/M3.15 extend this: a client relaunched from the pinned sealed
-    // forward client snapshot executes a memfd, so the adopted daemon will
-    // also match against that snapshot's device and inode. Stale-inode clients
-    // never regain authority either way.
+    // An adopted daemon (M3.10) trusts exactly this too: no peer executing
+    // the sealed forward client snapshot is trusted UI. M3.14, which first
+    // relaunches a Window from that snapshot, reintroduces matching its
+    // pinned device and inode, and only after the operator approves the
+    // matching AGENTS.md §4.4 amendment. Stale-inode clients never regain
+    // authority either way.
     fn matches_installed_executable(&self, expected: &Path) -> bool {
         fs::metadata(expected).is_ok_and(|metadata| {
             metadata.dev() == self.executable_device && metadata.ino() == self.executable_inode

@@ -84,6 +84,12 @@ class InstallerSafetyTest(unittest.TestCase):
         for recipe in (private, aur):
             self.assertIn("generate-package-provenance.py", recipe)
             self.assertIn("package-provenance-v1.json", recipe)
+            # The generator hashes, and refuses integration-test builds of,
+            # the files the package actually installs (Plan 0061 D9).
+            self.assertIn('--daemon "$pkgdir/usr/bin/splinterd"', recipe)
+            self.assertIn('--client "$pkgdir/usr/bin/splinterm"', recipe)
+            self.assertNotIn("--daemon target/release/", recipe)
+            self.assertNotIn("--client target/release/", recipe)
         self.assertIn("git -C \"$root\" rev-parse --verify HEAD", build)
         self.assertIn("SPLINTERM_BUILD_COMMIT=$commit", build)
         self.assertIn("local-committed-head", build)

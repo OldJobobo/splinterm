@@ -151,21 +151,46 @@ impl CandidatePreRuntimeStage {
     ///
     /// # Errors
     /// Rejects an internal lifecycle mismatch rather than starting a runtime
-    /// from authority that did not complete candidate staging.
-    pub fn enter_tokio(self) -> Result<CandidateRuntimeStage, HandoffCoordinatorError> {
-        if self.lifecycle.phase() != HandoffPhase::AdoptionStaged {
-            return Err(HandoffCoordinatorError::UnexpectedPhase);
-        }
+    /// from authority that did not complete candidate staging. The refusal
+    /// still owns every verified part (without the guard), so the caller can
+    /// hand it to cooperative rollback like any other pre-commit failure.
+    pub fn enter_tokio(self) -> Result<CandidateRuntimeStage, CandidateEntryFailure> {
         let Self {
             lifecycle,
             process_guard,
             authorities,
         } = self;
         drop(process_guard);
-        Ok(CandidateRuntimeStage {
+        let stage = CandidateRuntimeStage {
             lifecycle,
             authorities,
-        })
+        };
+        if stage.lifecycle.phase() != HandoffPhase::AdoptionStaged {
+            return Err(CandidateEntryFailure {
+                error: HandoffCoordinatorError::UnexpectedPhase,
+                stage: Box::new(stage),
+            });
+        }
+        Ok(stage)
+    }
+}
+
+/// A refused runtime entry that still owns every verified part.
+///
+/// It holds no process guard, so it remains an ordinary sendable error.
+#[derive(Debug, Error)]
+#[error("candidate runtime entry refused: {error}")]
+pub struct CandidateEntryFailure {
+    error: HandoffCoordinatorError,
+    stage: Box<CandidateRuntimeStage>,
+}
+
+impl CandidateEntryFailure {
+    /// Returns the verified stage for refusal and cooperative rollback
+    /// ([`CandidateRuntimeStage::refuse`]).
+    #[must_use]
+    pub fn into_stage(self) -> CandidateRuntimeStage {
+        *self.stage
     }
 }
 
@@ -180,58 +205,6 @@ impl CandidateRuntimeStage {
     /// (`handoff_adoption`).
     pub(crate) fn into_parts(self) -> (HandoffLifecycle, CandidateStagedAuthorities) {
         (self.lifecycle, self.authorities)
-    }
-
-    /// Keeps the newly verified owners alive until the next adoption slice.
-    ///
-    /// Forward exec is not wired in this slice, so reaching this temporary
-    /// boundary is a fatal internal activation error rather than ordinary
-    /// daemon startup. The explicit destructure ensures every staged authority
-    /// remains represented while the later runtime-adoption API is developed.
-    ///
-    /// # Errors
-    /// Always returns the deliberate bounded adoption-not-wired error after
-    /// checking that the complete staged authority remains represented.
-    pub fn reject_until_runtime_adoption(self) -> anyhow::Result<()> {
-        if self.lifecycle.phase() != HandoffPhase::AdoptionStaged {
-            anyhow::bail!("candidate runtime lifecycle invariant failed");
-        }
-        let CandidateStagedAuthorities {
-            manifest,
-            counterpart_manifest,
-            splints,
-            listener,
-            image_listener,
-            current_manifest_descriptor,
-            counterpart_manifest_descriptor,
-            forward_client,
-            rollback_daemon,
-            rollback_client,
-            closed_unexpected: _,
-        } = self.authorities;
-        let staged_splints = splints.len() == manifest.splints.len()
-            && splints.iter().all(|stage| {
-                stage.evidence.incarnation > 0
-                    && stage.terminal.revision().value() == stage.evidence.terminal_revision
-                    && stage.pty.master_raw_fd() >= 3
-                    && stage.checkpoint_descriptor.as_raw_fd() >= 3
-            });
-        let retained = [
-            listener.as_raw_fd(),
-            image_listener.as_raw_fd(),
-            current_manifest_descriptor.as_raw_fd(),
-            counterpart_manifest_descriptor.as_raw_fd(),
-            forward_client.as_raw_fd(),
-            rollback_daemon.as_raw_fd(),
-            rollback_client.as_raw_fd(),
-        ]
-        .into_iter()
-        .all(|fd| fd >= 3);
-        let paired = manifest.handoff_id == counterpart_manifest.handoff_id;
-        if !(staged_splints && retained && paired) {
-            anyhow::bail!("candidate runtime staging invariant failed");
-        }
-        anyhow::bail!("candidate runtime adoption is not wired")
     }
 }
 
@@ -1285,6 +1258,7 @@ mod tests {
             },
             counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
             splints: Vec::new(),
+            excluded_splints: Vec::new(),
             descriptors: owners
                 .iter()
                 .map(|(slot, owner)| ManifestDescriptor {
