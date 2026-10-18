@@ -611,6 +611,33 @@ impl AdoptableLinuxPtySession {
     pub fn try_adopt(
         self,
     ) -> std::result::Result<LinuxPtySession, (PtyError, AdoptableLinuxPtySession)> {
+        self.try_adopt_with(true)
+    }
+
+    /// Validates and reconstructs runtime PTY authority like
+    /// [`Self::try_adopt`], but never consumes the child's exit status.
+    ///
+    /// A child that already exited stays an unreaped zombie for the returned
+    /// session's ordinary [`PtySession::try_wait`]. Staged adoption uses this so
+    /// that no irreversible process step happens before its commit, and a
+    /// failed later staging step can return the descriptor through
+    /// [`LinuxPtySession::into_unvalidated_adoptable`] with reaping authority
+    /// intact.
+    ///
+    /// # Errors
+    /// Returns the error together with the unchanged adoptable session when
+    /// process, parent/reaping, session, process-group, or controlling-terminal
+    /// identity no longer matches the manifest.
+    pub fn try_adopt_unreaped(
+        self,
+    ) -> std::result::Result<LinuxPtySession, (PtyError, AdoptableLinuxPtySession)> {
+        self.try_adopt_with(false)
+    }
+
+    fn try_adopt_with(
+        self,
+        reap_exited: bool,
+    ) -> std::result::Result<LinuxPtySession, (PtyError, AdoptableLinuxPtySession)> {
         let identity = self.identity;
         let master = File::from(self.master);
         if let Err(error) = identity.validate_process() {
@@ -651,7 +678,7 @@ impl AdoptableLinuxPtySession {
         let observed_exit = match restore_descriptor_before_status_consumption(
             || ensure_close_on_exec(&master),
             || {
-                if child_exited {
+                if child_exited && reap_exited {
                     match process::waitpid(Some(identity.child), process::WaitOptions::NOHANG) {
                         Ok(Some((_, status))) => Ok(Some(ExitStatus::from_raw(status.as_raw()))),
                         Ok(None) => Err(PtyError::IdentityMismatch),
@@ -785,6 +812,23 @@ impl LinuxPtySession {
             identity: self.identity,
             master: self.master.into(),
         })
+    }
+
+    /// Regroups this session's canonical master and identity without
+    /// validation or any process operation.
+    ///
+    /// This is the infallible inverse of
+    /// [`AdoptableLinuxPtySession::try_adopt_unreaped`] for a staged adoption
+    /// that fails before it starts reading. Callers must first drop every cloned
+    /// reader. A session that already consumed its child's exit status yields
+    /// a value whose next adoption fails closed, because direct-child authority
+    /// is revalidated there.
+    #[must_use]
+    pub fn into_unvalidated_adoptable(self) -> AdoptableLinuxPtySession {
+        AdoptableLinuxPtySession {
+            identity: self.identity,
+            master: self.master.into(),
+        }
     }
 
     /// Sends a lifecycle signal to the original child process group.

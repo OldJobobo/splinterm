@@ -342,6 +342,37 @@ fn adoption_reaps_a_child_that_exits_while_the_master_is_held() {
 }
 
 #[test]
+fn unreaped_adoption_leaves_child_status_and_returns_the_same_master() {
+    let cwd = std::env::current_dir().unwrap();
+    let session = backend()
+        .spawn(
+            &PtyCommand::new("/bin/sh", cwd).args(["-c", "sleep 0.05; exit 7"]),
+            PtySize::cells(40, 10),
+        )
+        .unwrap();
+    let child_pid = session.child_id();
+    let identity = session.identity();
+    let adoptable = session.try_into_adoptable().unwrap();
+    let master_raw_fd = adoptable.master_raw_fd();
+    thread::sleep(Duration::from_millis(100));
+
+    let staged = adoptable.try_adopt_unreaped().unwrap();
+    assert_eq!(staged.identity(), identity);
+    assert_eq!(staged.master_raw_fd(), master_raw_fd);
+    assert!(
+        Path::new(&format!("/proc/{child_pid}")).exists(),
+        "staged adoption must leave the exited child unreaped"
+    );
+
+    let returned = staged.into_unvalidated_adoptable();
+    assert_eq!(returned.identity(), identity);
+    assert_eq!(returned.master_raw_fd(), master_raw_fd);
+    let mut adopted = returned.try_adopt_unreaped().unwrap();
+    assert_eq!(adopted.try_wait().unwrap().unwrap().code(), Some(7));
+    assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+}
+
+#[test]
 fn failed_recovery_kills_and_reaps_a_verified_exact_child() {
     let cwd = std::env::current_dir().unwrap();
     let session = backend()

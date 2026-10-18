@@ -94,6 +94,19 @@ impl ProcessIncarnation {
         NEXT_INCARNATION.fetch_max(next, Ordering::Relaxed);
     }
 
+    /// Reconstructs an incarnation carried across a daemon handoff and
+    /// reserves allocation beyond it, so this generation never reissues it.
+    ///
+    /// Returns `None` for a value allocation can never produce.
+    #[must_use]
+    pub fn adopted(value: u64) -> Option<Self> {
+        if value == 0 || value == u64::MAX {
+            return None;
+        }
+        Self::reserve_after(value);
+        Some(Self(value))
+    }
+
     /// Allocates the next process-wide incarnation.
     ///
     /// # Panics
@@ -2479,6 +2492,8 @@ pub enum LiveError {
     Checkpoint(#[from] CheckpointStorageError),
     #[error("live Splint state is not representable at the handoff boundary")]
     HandoffStateUnsupported,
+    #[error("live Splint was handed off to another daemon generation")]
+    HandedOff,
 }
 
 type Reply<T> = oneshot::Sender<Result<T, LiveError>>;
@@ -2487,6 +2502,33 @@ type Reply<T> = oneshot::Sender<Result<T, LiveError>>;
 struct PtyResume {
     session: AdoptableLinuxPtySession,
     acknowledged: Option<Reply<()>>,
+}
+
+/// What a quiesced actor does when its [`PreparedPtyHandoff`] lease ends.
+#[derive(Debug)]
+enum PtyHandoffDisposition {
+    /// Restore the returned master and one reader, then continue serving.
+    Resume(PtyResume),
+    /// End without signaling or reaping the child and without publishing an
+    /// exit; the caller now owns the canonical master.
+    HandedOff,
+}
+
+/// A live Splint whose actor ended for a daemon handoff while its child kept
+/// running.
+///
+/// It owns the one canonical PTY master; the actor's reader was closed at
+/// capture. Nothing has signaled or reaped the child. Dropping this value
+/// closes the master, which hangs up the child's terminal, and leaves the
+/// child unreaped, so a coordinator either carries `session` across exec or
+/// adopts it again with [`LiveSplintRuntime::adopt_staged`].
+#[derive(Debug)]
+pub struct HandedOffSplint {
+    pub session: AdoptableLinuxPtySession,
+    /// `None` when the body already moved to manifest linkage through
+    /// [`PreparedPtyHandoff::take_checkpoint_body`].
+    pub checkpoint: Option<SealedCheckpointBody>,
+    pub evidence: ActorHandoffEvidence,
 }
 
 /// Actor-owned evidence captured at the sole PTY handoff linearization point.
@@ -2529,7 +2571,7 @@ pub struct PreparedPtyHandoff {
     #[cfg(test)]
     retired_reader_raw_fd: i32,
     session: Option<AdoptableLinuxPtySession>,
-    resume: Option<oneshot::Sender<PtyResume>>,
+    resume: Option<oneshot::Sender<PtyHandoffDisposition>>,
 }
 
 impl PreparedPtyHandoff {
@@ -2582,12 +2624,45 @@ impl PreparedPtyHandoff {
         let resume = self.resume.take().ok_or(LiveError::Closed)?;
         let (acknowledged, receiver) = oneshot::channel();
         resume
-            .send(PtyResume {
+            .send(PtyHandoffDisposition::Resume(PtyResume {
                 session,
                 acknowledged: Some(acknowledged),
-            })
+            }))
             .map_err(|_| LiveError::Closed)?;
         receiver.await.map_err(|_| LiveError::Closed)?
+    }
+
+    /// Ends the quiesced actor without killing its child and moves the
+    /// canonical PTY master, sealed checkpoint and capture evidence to the
+    /// caller.
+    ///
+    /// The actor leaves through its own path: it neither signals nor reaps the
+    /// child, publishes no exit to subscribers or to its exit watch, and
+    /// retains its process placement through
+    /// [`ProcessPlacement::retain_for_handoff`] instead of releasing it.
+    /// [`LiveSplintRuntime::wait`] returns [`LiveError::HandedOff`] once the
+    /// placement is retained, so a coordinator awaits it before stopping the
+    /// runtime.
+    ///
+    /// # Panics
+    /// Never for a lease returned by [`LiveSplintHandle::prepare_pty_handoff`]:
+    /// only consuming methods remove its master.
+    #[must_use]
+    pub fn into_handed_off(mut self) -> HandedOffSplint {
+        let session = self
+            .session
+            .take()
+            .expect("an unresumed handoff lease owns the canonical master");
+        if let Some(resume) = self.resume.take() {
+            // A send fails only when the actor already ended, and then nothing
+            // remains that could signal, reap or publish.
+            let _ = resume.send(PtyHandoffDisposition::HandedOff);
+        }
+        HandedOffSplint {
+            session,
+            checkpoint: self.checkpoint.take(),
+            evidence: self.evidence,
+        }
     }
 }
 
@@ -2596,10 +2671,10 @@ impl Drop for PreparedPtyHandoff {
         let (Some(session), Some(resume)) = (self.session.take(), self.resume.take()) else {
             return;
         };
-        let _ = resume.send(PtyResume {
+        let _ = resume.send(PtyHandoffDisposition::Resume(PtyResume {
             session,
             acknowledged: None,
-        });
+        }));
     }
 }
 
@@ -3076,8 +3151,18 @@ impl RuntimeMetrics {
 }
 
 fn capture_child_pidfd(pid: u32) -> Option<OwnedFd> {
-    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).ok()?)?;
-    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+    open_child_pidfd(pid).ok()
+}
+
+/// Opens a close-on-exec pidfd for `pid`. Callers hold direct-child authority
+/// and have not reaped the child, so the number cannot name a reused process.
+fn open_child_pidfd(pid: u32) -> Result<OwnedFd, LiveError> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or(PtyError::InvalidChildId)?;
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        .map_err(|error| LiveError::Io(error.into()))
 }
 
 fn root_process_is_live(pidfd: &OwnedFd) -> bool {
@@ -3151,6 +3236,12 @@ const LATCH_RETIRING: u8 = 2;
 struct UseLatch(AtomicU8);
 
 impl UseLatch {
+    /// A latch for an adopted Splint. Capture recorded it as used, so it is
+    /// never closed as unused in the next generation either.
+    const fn used() -> Self {
+        Self(AtomicU8::new(LATCH_USED))
+    }
+
     /// Records client input; false when a close has claimed the runtime.
     fn record_input(&self, counts_as_use: bool) -> bool {
         if !counts_as_use {
@@ -3477,7 +3568,25 @@ impl LiveSplintHandle {
 }
 
 pub trait ProcessPlacement: Send + 'static {
+    /// Releases the external placement after the Splint's process ended.
     fn release(self);
+
+    /// Keeps the external placement alive across a daemon handoff, after the
+    /// actor ended while its process kept running.
+    ///
+    /// This default is the minimal hook: it forgets `self` without running
+    /// [`Self::release`] or `Drop`, so nothing the placement names (such as a
+    /// systemd scope that `Drop` would stop) is torn down. In-process
+    /// bookkeeping it holds is leaked, which is bounded because a handoff
+    /// replaces this process image. Plan 0061 slice M3.4 implements scope
+    /// retention for workload scopes, so the next generation can adopt the
+    /// scope and rebuild its reference counts.
+    fn retain_for_handoff(self)
+    where
+        Self: Sized,
+    {
+        std::mem::forget(self);
+    }
 }
 
 impl ProcessPlacement for () {
@@ -3508,6 +3617,11 @@ impl<P: ProcessPlacement> Drop for SpawnOutcome<P> {
 
 async fn release_placement<P: ProcessPlacement>(placement: P) -> Result<(), LiveError> {
     tokio::task::spawn_blocking(move || placement.release()).await?;
+    Ok(())
+}
+
+async fn retain_placement<P: ProcessPlacement>(placement: P) -> Result<(), LiveError> {
+    tokio::task::spawn_blocking(move || placement.retain_for_handoff()).await?;
     Ok(())
 }
 
@@ -3663,46 +3777,104 @@ impl LiveSplintRuntime {
             config.pixel_width,
             config.pixel_height,
         );
-        let (sender, receiver) = mpsc::channel(config.command_capacity.max(1));
-        let (exit_sender, exit) = watch::channel(None);
-        let metrics = Arc::new(RuntimeMetrics::default());
-        let child_pid = session.child_id();
-        // The session still owns its unreaped std::process::Child here; the
-        // actor that can reap it has not started. Capture identity before spawn.
-        let child_pidfd = capture_child_pidfd(child_pid).map(Arc::new);
-        let use_latch = Arc::<UseLatch>::default();
-        let handle = LiveSplintHandle {
+        // The actor that can reap the child has not started, so the PID still
+        // names it. Capture identity before spawn.
+        let child_pidfd = capture_child_pidfd(session.child_id());
+        let (handle, actor) = ActorStart::new(
             splint_id,
             incarnation,
-            child_pid,
+            session,
+            io,
+            terminal,
+            config,
+            publication_memory_metrics,
             child_pidfd,
-            commands: sender,
-            default_snapshot_rows: config.max_scrollback_snapshot_rows,
-            default_subscriber_capacity: config.subscriber_capacity,
-            max_input_message_bytes: config.maximum_input_message_bytes(),
-            metrics: Arc::clone(&metrics),
-            exit,
-            use_latch: Arc::clone(&use_latch),
+            UseLatch::default(),
+            placement,
+        );
+        Self {
+            handle,
+            task: actor.spawn(),
+        }
+    }
+
+    /// Stages an actor for a PTY session handed off by an earlier daemon
+    /// generation, with its read gate closed.
+    ///
+    /// Every fallible step runs here, before anything reads the PTY: terminal
+    /// and configuration checks, adoption that validates process, session,
+    /// process-group and controlling-terminal identity without reaping, a
+    /// kernel size check, the child pidfd, and the one close-on-exec reader
+    /// duplicated from the adopted master and registered with Tokio. No step
+    /// reads or writes the PTY, resizes it, signals the child or consumes its
+    /// exit status. [`StagedLiveSplint::commit`] then starts the actor and
+    /// cannot fail. Its publication baseline is the restored terminal's
+    /// revision, and its use latch starts as used because capture recorded the
+    /// Splint as used.
+    ///
+    /// # Panics
+    /// Panics outside a Tokio runtime with I/O enabled, like [`AsyncFd::new`].
+    ///
+    /// # Errors
+    /// Returns the error together with every input untouched: the same master
+    /// descriptor and identity, the child unreaped, and the terminal,
+    /// configuration and placement as passed, so a rollback can exec with the
+    /// same descriptors.
+    pub fn adopt_staged<P: ProcessPlacement>(
+        splint_id: SplintId,
+        incarnation: ProcessIncarnation,
+        session: AdoptableLinuxPtySession,
+        terminal: Terminal,
+        config: LiveSplintConfig,
+        placement: P,
+    ) -> Result<StagedLiveSplint<P>, Box<LiveAdoptionFailure<P>>> {
+        let failure = |error, session, terminal, config, placement| {
+            Box::new(LiveAdoptionFailure {
+                error,
+                inputs: LiveAdoptionInputs {
+                    session,
+                    terminal,
+                    config,
+                    placement,
+                },
+            })
         };
-        let task = tokio::spawn(async move {
-            let result = Box::pin(run_actor(
-                splint_id,
-                incarnation,
-                session,
-                io,
-                terminal,
-                receiver,
-                config,
-                publication_memory_metrics,
-                metrics,
-                use_latch,
-                exit_sender,
-            ))
-            .await;
-            release_placement(placement).await?;
-            result
-        });
-        Self { handle, task }
+        if let Err(error) = validate_adopted_terminal(&terminal, &config) {
+            return Err(failure(error, session, terminal, config, placement));
+        }
+        let adopted = match session.try_adopt_unreaped() {
+            Ok(adopted) => adopted,
+            Err((error, session)) => {
+                return Err(failure(error.into(), session, terminal, config, placement));
+            }
+        };
+        let (child_pidfd, io) = match stage_adopted_io(splint_id, &adopted, &config) {
+            Ok(staged) => staged,
+            Err(error) => {
+                // Every reader and pidfd created above is already closed, and
+                // nothing consumed the child's status.
+                return Err(failure(
+                    error,
+                    adopted.into_unvalidated_adoptable(),
+                    terminal,
+                    config,
+                    placement,
+                ));
+            }
+        };
+        let (handle, actor) = ActorStart::new(
+            splint_id,
+            incarnation,
+            adopted,
+            io,
+            terminal,
+            config,
+            false,
+            Some(child_pidfd),
+            UseLatch::used(),
+            placement,
+        );
+        Ok(StagedLiveSplint { handle, actor })
     }
 
     #[must_use]
@@ -3713,7 +3885,7 @@ impl LiveSplintRuntime {
     pub async fn shutdown(self) -> Result<ProcessExit, LiveError> {
         let request = self.handle.shutdown().await;
         let task = self.task.await?;
-        if task.is_ok() {
+        if task.is_ok() || matches!(task, Err(LiveError::HandedOff)) {
             return task;
         }
         request?;
@@ -3722,6 +3894,287 @@ impl LiveSplintRuntime {
 
     pub async fn wait(self) -> Result<ProcessExit, LiveError> {
         self.task.await?
+    }
+}
+
+/// The inputs of [`LiveSplintRuntime::adopt_staged`], returned unchanged when
+/// staging fails or is aborted.
+pub struct LiveAdoptionInputs<P> {
+    pub session: AdoptableLinuxPtySession,
+    pub terminal: Terminal,
+    pub config: LiveSplintConfig,
+    pub placement: P,
+}
+
+/// A failed [`LiveSplintRuntime::adopt_staged`] with its untouched inputs.
+pub struct LiveAdoptionFailure<P> {
+    pub error: LiveError,
+    pub inputs: LiveAdoptionInputs<P>,
+}
+
+impl<P> std::fmt::Debug for LiveAdoptionFailure<P> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveAdoptionFailure")
+            .field("error", &self.error)
+            .field("identity", &self.inputs.session.identity())
+            .finish_non_exhaustive()
+    }
+}
+
+/// An adopted actor whose fallible staging is complete and whose read gate
+/// is still closed.
+///
+/// No task exists yet that could poll the registered reader, write the PTY,
+/// apply commands, signal the child or reap it. Commands sent through
+/// [`Self::handle`] wait in the bounded command channel and apply in order
+/// after [`Self::commit`]. Dropping this value without committing or aborting
+/// closes the master and drops the placement, so a caller that may roll back
+/// calls [`Self::abort`].
+pub struct StagedLiveSplint<P: ProcessPlacement> {
+    handle: LiveSplintHandle,
+    actor: ActorStart<P>,
+}
+
+impl<P: ProcessPlacement> std::fmt::Debug for StagedLiveSplint<P> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StagedLiveSplint")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P: ProcessPlacement> StagedLiveSplint<P> {
+    #[must_use]
+    pub fn handle(&self) -> LiveSplintHandle {
+        self.handle.clone()
+    }
+
+    /// Opens the read gate by starting the actor. Nothing here can fail; the
+    /// first PTY read happens in the started actor.
+    ///
+    /// # Panics
+    /// Panics when called outside a Tokio runtime, like [`tokio::spawn`].
+    #[must_use]
+    pub fn commit(self) -> LiveSplintRuntime {
+        LiveSplintRuntime {
+            handle: self.handle,
+            task: self.actor.spawn(),
+        }
+    }
+
+    /// Abandons staging before commit and returns the inputs unchanged.
+    ///
+    /// The staged reader and its Tokio registration are closed first, so the
+    /// returned master is again the only descriptor for this PTY that this
+    /// runtime owns. The child pidfd closes once every handle clone is gone.
+    #[must_use]
+    pub fn abort(self) -> LiveAdoptionInputs<P> {
+        let ActorStart {
+            session,
+            io,
+            terminal,
+            config,
+            placement,
+            ..
+        } = self.actor;
+        drop(io);
+        LiveAdoptionInputs {
+            session: session.into_unvalidated_adoptable(),
+            terminal,
+            config,
+            placement,
+        }
+    }
+}
+
+/// Requires the restored terminal and the runtime configuration to describe
+/// the same grid, because the actor tracks one current size for both.
+fn validate_adopted_terminal(
+    terminal: &Terminal,
+    config: &LiveSplintConfig,
+) -> Result<(), LiveError> {
+    validate_dimensions(config.columns, config.rows)?;
+    if config.poll_interval.is_zero() {
+        return Err(LiveError::InvalidPollInterval);
+    }
+    let dimensions = terminal
+        .snapshot(SnapshotRequest {
+            max_scrollback_rows: 0,
+        })
+        .dimensions();
+    if dimensions
+        != (Dimensions {
+            columns: usize::from(config.columns),
+            rows: usize::from(config.rows),
+        })
+    {
+        return Err(LiveError::HandoffStateUnsupported);
+    }
+    Ok(())
+}
+
+/// Runs the fallible I/O staging for an adopted session: the kernel size
+/// check, the child pidfd, and the one reader with its Tokio registration.
+/// Nothing here reads or writes the PTY or touches the child's status.
+fn stage_adopted_io(
+    splint_id: SplintId,
+    session: &LinuxPtySession,
+    config: &LiveSplintConfig,
+) -> Result<(OwnedFd, AsyncFd<std::fs::File>), LiveError> {
+    let expected = PtySize {
+        columns: config.columns,
+        rows: config.rows,
+        pixel_width: config.pixel_width,
+        pixel_height: config.pixel_height,
+    };
+    if session.size()? != expected {
+        return Err(LiveError::HandoffStateUnsupported);
+    }
+    let child_pidfd = open_child_pidfd(session.child_id())?;
+    // One close-on-exec duplicate of the adopted master, created only after
+    // adoption validated it.
+    let reader = session.try_clone_reader()?;
+    #[cfg(test)]
+    if take_adoption_reader_fault(splint_id) {
+        drop(reader);
+        return Err(io::Error::other("injected reader registration failure").into());
+    }
+    #[cfg(not(test))]
+    let _ = splint_id;
+    let io = AsyncFd::new(reader)?;
+    Ok((child_pidfd, io))
+}
+
+/// Test-only Splints whose next staged adoption fails reader registration.
+#[cfg(test)]
+static ADOPTION_READER_FAULTS: std::sync::Mutex<Vec<SplintId>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn take_adoption_reader_fault(splint_id: SplintId) -> bool {
+    let mut faults = ADOPTION_READER_FAULTS.lock().unwrap();
+    faults
+        .iter()
+        .position(|id| *id == splint_id)
+        .map(|index| faults.swap_remove(index))
+        .is_some()
+}
+
+/// Everything one actor owns, assembled before its task starts.
+struct ActorStart<P: ProcessPlacement> {
+    splint_id: SplintId,
+    incarnation: ProcessIncarnation,
+    session: LinuxPtySession,
+    io: AsyncFd<std::fs::File>,
+    terminal: Terminal,
+    commands: mpsc::Receiver<Command>,
+    config: LiveSplintConfig,
+    publication_memory_metrics: bool,
+    metrics: Arc<RuntimeMetrics>,
+    use_latch: Arc<UseLatch>,
+    exit_sender: watch::Sender<Option<ProcessExit>>,
+    placement: P,
+}
+
+impl<P: ProcessPlacement> ActorStart<P> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the actor exclusively owns its runtime state"
+    )]
+    fn new(
+        splint_id: SplintId,
+        incarnation: ProcessIncarnation,
+        session: LinuxPtySession,
+        io: AsyncFd<std::fs::File>,
+        terminal: Terminal,
+        config: LiveSplintConfig,
+        publication_memory_metrics: bool,
+        child_pidfd: Option<OwnedFd>,
+        use_latch: UseLatch,
+        placement: P,
+    ) -> (LiveSplintHandle, Self) {
+        let (sender, commands) = mpsc::channel(config.command_capacity.max(1));
+        let (exit_sender, exit) = watch::channel(None);
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let use_latch = Arc::new(use_latch);
+        let handle = LiveSplintHandle {
+            splint_id,
+            incarnation,
+            child_pid: session.child_id(),
+            child_pidfd: child_pidfd.map(Arc::new),
+            commands: sender,
+            default_snapshot_rows: config.max_scrollback_snapshot_rows,
+            default_subscriber_capacity: config.subscriber_capacity,
+            max_input_message_bytes: config.maximum_input_message_bytes(),
+            metrics: Arc::clone(&metrics),
+            exit,
+            use_latch: Arc::clone(&use_latch),
+        };
+        let actor = Self {
+            splint_id,
+            incarnation,
+            session,
+            io,
+            terminal,
+            commands,
+            config,
+            publication_memory_metrics,
+            metrics,
+            use_latch,
+            exit_sender,
+            placement,
+        };
+        (handle, actor)
+    }
+
+    fn spawn(self) -> JoinHandle<Result<ProcessExit, LiveError>> {
+        let Self {
+            splint_id,
+            incarnation,
+            session,
+            io,
+            terminal,
+            commands,
+            config,
+            publication_memory_metrics,
+            metrics,
+            use_latch,
+            exit_sender,
+            placement,
+        } = self;
+        tokio::spawn(async move {
+            let result = Box::pin(run_actor(
+                splint_id,
+                incarnation,
+                session,
+                io,
+                terminal,
+                commands,
+                config,
+                publication_memory_metrics,
+                metrics,
+                use_latch,
+                exit_sender,
+            ))
+            .await;
+            match result {
+                Ok(ActorEnd::Exited(status)) => {
+                    release_placement(placement).await?;
+                    Ok(status)
+                }
+                // The process lives on in the next generation, so its
+                // placement must outlive this actor.
+                Ok(ActorEnd::HandedOff) => {
+                    retain_placement(placement).await?;
+                    Err(LiveError::HandedOff)
+                }
+                Err(error) => {
+                    release_placement(placement).await?;
+                    Err(error)
+                }
+            }
+        })
     }
 }
 
@@ -3950,7 +4403,7 @@ async fn run_actor(
     metrics: Arc<RuntimeMetrics>,
     use_latch: Arc<UseLatch>,
     exit_sender: watch::Sender<Option<ProcessExit>>,
-) -> Result<ProcessExit, LiveError> {
+) -> Result<ActorEnd, LiveError> {
     let mut session = Some(session);
     let result = run_actor_body(
         splint_id,
@@ -3974,10 +4427,29 @@ async fn run_actor(
     } else {
         None
     };
-    if let Some(status) = result.as_ref().ok().copied().or(forced_status) {
-        exit_sender.send_replace(Some(status));
+    match &result {
+        Ok(ActorEnd::Exited(status)) => {
+            exit_sender.send_replace(Some(*status));
+        }
+        // The child keeps running under the next generation. Dropping the
+        // sender without a value tells exit observers that nothing ended.
+        Ok(ActorEnd::HandedOff) => {}
+        Err(_) => {
+            if let Some(status) = forced_status {
+                exit_sender.send_replace(Some(status));
+            }
+        }
     }
     result
+}
+
+/// How an actor ended.
+enum ActorEnd {
+    /// The child exited and was reaped; the exit was published.
+    Exited(ProcessExit),
+    /// The canonical master moved to a [`HandedOffSplint`]; the child was not
+    /// signaled, reaped or reported as exited.
+    HandedOff,
 }
 
 #[allow(
@@ -3996,7 +4468,7 @@ async fn run_actor_body(
     publication_memory_metrics: bool,
     metrics: &Arc<RuntimeMetrics>,
     use_latch: &UseLatch,
-) -> Result<ProcessExit, LiveError> {
+) -> Result<ActorEnd, LiveError> {
     let mut subscribers = Vec::<Subscriber>::new();
     let mut publication = SynchronizedPublication::new(terminal.revision());
     let mut current_size = PtySize {
@@ -4183,7 +4655,14 @@ async fn run_actor_body(
             let PtyResume {
                 session: adoptable,
                 acknowledged,
-            } = resumed.await.map_err(|_| LiveError::Closed)?;
+            } = match resumed.await.map_err(|_| LiveError::Closed)? {
+                PtyHandoffDisposition::Resume(resume) => resume,
+                // The session and reader are already gone and both write
+                // queues are empty. Return before anything could signal, reap
+                // or publish; dropping the subscribers closes their streams
+                // without an exit event.
+                PtyHandoffDisposition::HandedOff => return Ok(ActorEnd::HandedOff),
+            };
             let active_session = match adoptable.try_adopt() {
                 Ok(active_session) => active_session,
                 Err((_error, retained)) => {
@@ -4416,7 +4895,7 @@ async fn run_actor_body(
     for reply in shutdown_replies {
         let _ = reply.send(());
     }
-    Ok(status)
+    Ok(ActorEnd::Exited(status))
 }
 
 fn subscriber_channel_capacity(requested: usize, configured: usize) -> Result<usize, LiveError> {
@@ -5594,6 +6073,16 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn adopted_incarnation_is_never_reissued() {
+        assert_eq!(ProcessIncarnation::adopted(0), None);
+        assert_eq!(ProcessIncarnation::adopted(u64::MAX), None);
+        let carried = ProcessIncarnation::allocate().value() + 1_000;
+        let adopted = ProcessIncarnation::adopted(carried).unwrap();
+        assert_eq!(adopted.value(), carried);
+        assert!(ProcessIncarnation::allocate().value() > carried);
+    }
 
     #[test]
     fn use_latch_lets_either_input_or_a_close_claim_win() {
@@ -9525,6 +10014,475 @@ mod tests {
         time::sleep(Duration::from_millis(50)).await;
         assert!(snapshot_text(&handle.snapshot().await.unwrap()).contains("<drop-recovers>"));
         assert_eq!(runtime.wait().await.unwrap().code, Some(0));
+    }
+
+    /// A placement that records which lifecycle hook ended it.
+    #[derive(Clone, Default)]
+    struct RecordingPlacement(Arc<Mutex<Vec<&'static str>>>);
+
+    impl RecordingPlacement {
+        fn calls(&self) -> Vec<&'static str> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessPlacement for RecordingPlacement {
+        fn release(self) {
+            self.0.lock().unwrap().push("release");
+        }
+
+        fn retain_for_handoff(self) {
+            self.0.lock().unwrap().push("retain");
+        }
+    }
+
+    async fn spawn_recorded(
+        script: &str,
+        config: LiveSplintConfig,
+    ) -> (LiveSplintRuntime, RecordingPlacement) {
+        let placement = RecordingPlacement::default();
+        let placed = placement.clone();
+        let runtime = LiveSplintRuntime::spawn_with_placement(
+            SplintId::new(),
+            ProcessIncarnation::allocate(),
+            backend(),
+            shell(script),
+            config,
+            move |_| Ok(placed),
+        )
+        .await
+        .unwrap();
+        (runtime, placement)
+    }
+
+    async fn wait_for_text(handle: &LiveSplintHandle, needle: &str) -> String {
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                let text = snapshot_text(&handle.snapshot().await.unwrap());
+                if text.contains(needle) {
+                    return text;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}"))
+    }
+
+    /// Captures a quiesced Splint, hands it off, and proves the old actor ended
+    /// through the handoff path with its placement retained.
+    async fn hand_off(
+        runtime: LiveSplintRuntime,
+        placement: &RecordingPlacement,
+    ) -> (HandedOffSplint, LiveSplintHandle) {
+        let handle = runtime.handle();
+        let handed_off = handle
+            .prepare_pty_handoff()
+            .await
+            .unwrap()
+            .into_handed_off();
+        assert!(matches!(runtime.wait().await, Err(LiveError::HandedOff)));
+        assert_eq!(placement.calls(), ["retain"]);
+        (handed_off, handle)
+    }
+
+    fn restore_handed_off_terminal(
+        handed_off: &HandedOffSplint,
+        terminal_config: TerminalConfig,
+    ) -> Terminal {
+        let body = handed_off
+            .checkpoint
+            .as_ref()
+            .expect("handed-off Splint retains its sealed checkpoint");
+        body.verify().unwrap();
+        let descriptor = rustix::io::fcntl_dupfd_cloexec(body.descriptor(), 3).unwrap();
+        let checkpoint = splinterm_filemap::ReadOnlyFileMap::from_sealed_fd(
+            descriptor,
+            usize::try_from(body.identity().size).unwrap(),
+        )
+        .unwrap();
+        let terminal = Terminal::restore_checkpoint(&checkpoint, terminal_config).unwrap();
+        assert_eq!(terminal.revision(), handed_off.evidence.terminal_revision);
+        terminal
+    }
+
+    fn adoption_config(base: &LiveSplintConfig, size: PtySize) -> LiveSplintConfig {
+        LiveSplintConfig {
+            columns: size.columns,
+            rows: size.rows,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+            ..base.clone()
+        }
+    }
+
+    /// Whether `pid` is a live direct child whose status nobody consumed.
+    fn child_is_running_unreaped(pid: u32) -> bool {
+        let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+        matches!(
+            rustix::process::waitid(
+                rustix::process::WaitId::Pid(pid),
+                rustix::process::WaitIdOptions::EXITED
+                    | rustix::process::WaitIdOptions::NOHANG
+                    | rustix::process::WaitIdOptions::NOWAIT,
+            ),
+            Ok(None)
+        )
+    }
+
+    /// Descriptors this process holds for the PTY master with `tty_index`.
+    fn pty_descriptor_count(tty_index: &str) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|fd| pty_tty_index(*fd).as_deref() == Some(tty_index))
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handed_off_actor_never_kills_reaps_or_publishes_and_retains_placement() {
+        let (runtime, placement) =
+            spawn_recorded("printf ready; exec sleep 30", fast_config()).await;
+        let handle = runtime.handle();
+        let child_pid = handle.child_pid();
+        wait_for_text(&handle, "ready").await;
+        let mut subscription = handle.subscribe().await.unwrap();
+
+        let (handed_off, handle) = hand_off(runtime, &placement).await;
+        assert_eq!(handed_off.session.identity().child_pid(), child_pid);
+        assert_eq!(
+            handed_off.evidence.pty_identity,
+            handed_off.session.identity()
+        );
+        assert!(child_is_running_unreaped(child_pid));
+        assert_eq!(handle.exit_status(), None);
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), handle.wait_for_exit())
+                .await
+                .expect("a dropped exit watch must end exit observation"),
+            None
+        );
+        while let Some(event) = time::timeout(Duration::from_secs(1), subscription.events.recv())
+            .await
+            .expect("the ended actor must close its subscriber streams")
+        {
+            assert!(
+                !matches!(event, LiveEvent::Exited { .. }),
+                "a handed-off actor must not publish an exit"
+            );
+        }
+        assert!(matches!(handle.snapshot().await, Err(LiveError::Closed)));
+        assert!(child_is_running_unreaped(child_pid));
+        assert_eq!(placement.calls(), ["retain"]);
+
+        let status = tokio::task::spawn_blocking(move || handed_off.session.kill_child_and_wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.signal(), Some(9));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one round trip proves identity, gating, ordering and control in sequence"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handoff_round_trip_adopts_the_same_process_behind_a_closed_read_gate() {
+        let config = LiveSplintConfig {
+            columns: 60,
+            rows: 24,
+            ..fast_config()
+        };
+        let script = "printf 'ready\\n'; \
+            read a; i=0; while [ $i -lt 50 ]; do printf 'a%02d ' $i; i=$((i+1)); done; printf '\\n'; \
+            read b; i=0; while [ $i -lt 50 ]; do printf 'b%02d ' $i; i=$((i+1)); done; printf '\\n'; \
+            read c; printf '<%s>\\n' \"$c\"; read d; stty size; exec sleep 30";
+        let (runtime, old_placement) = spawn_recorded(script, config.clone()).await;
+        let old_handle = runtime.handle();
+        let splint_id = old_handle.splint_id;
+        let child_pid = old_handle.child_pid();
+        wait_for_text(&old_handle, "ready").await;
+
+        let (handed_off, old_handle) = hand_off(runtime, &old_placement).await;
+        let evidence = handed_off.evidence;
+        assert_eq!(evidence.splint_id, splint_id);
+        assert_eq!(evidence.incarnation, old_handle.incarnation);
+        let identity = handed_off.session.identity();
+        assert_eq!(identity, evidence.pty_identity);
+        assert_eq!(identity.child_pid(), child_pid);
+        assert_eq!(old_handle.exit_status(), None);
+        // Test-only write side of the PTY, used to make the child produce
+        // output while no reader exists. It never reads.
+        let writer = rustix::io::fcntl_dupfd_cloexec(handed_off.session.master(), 3).unwrap();
+
+        // Output produced between the old actor's end and staging.
+        rustix::io::write(&writer, b"gap-a\n").unwrap();
+        time::sleep(Duration::from_millis(100)).await;
+        let terminal = restore_handed_off_terminal(&handed_off, config.terminal.clone());
+        let new_placement = RecordingPlacement::default();
+        let staged = LiveSplintRuntime::adopt_staged(
+            splint_id,
+            evidence.incarnation,
+            handed_off.session,
+            terminal,
+            adoption_config(&config, evidence.size),
+            new_placement.clone(),
+        )
+        .unwrap();
+        let handle = staged.handle();
+
+        // Output produced while staged, behind the closed read gate.
+        rustix::io::write(&writer, b"gap-b\n").unwrap();
+        let queued_handle = handle.clone();
+        let mut queued_snapshot = tokio::spawn(async move { queued_handle.snapshot().await });
+        assert!(
+            time::timeout(Duration::from_millis(100), &mut queued_snapshot)
+                .await
+                .is_err(),
+            "commands must wait behind the closed read gate"
+        );
+        let gated = handle.metrics();
+        assert_eq!(gated.pty_read_calls, 0);
+        assert_eq!(gated.pty_read_bytes, 0);
+        assert!(child_is_running_unreaped(child_pid));
+        assert_eq!(new_placement.calls(), Vec::<&str>::new());
+
+        let runtime = staged.commit();
+        assert!(queued_snapshot.await.unwrap().unwrap().revision >= evidence.terminal_revision);
+        let token_run = |prefix: char| {
+            let mut run = String::new();
+            for index in 0..50 {
+                std::fmt::Write::write_fmt(&mut run, format_args!("{prefix}{index:02} ")).unwrap();
+            }
+            run
+        };
+        let expected_a = token_run('a');
+        let expected_b = token_run('b');
+        let text = wait_for_text(&handle, &expected_b).await;
+        let ready = text
+            .find("ready")
+            .expect("restored checkpoint keeps prior output");
+        let gap_a = text.find("gap-a").unwrap();
+        let output_a = text.find(&expected_a).expect("gap output arrives intact");
+        let gap_b = text.find("gap-b").unwrap();
+        let output_b = text.find(&expected_b).unwrap();
+        assert!(
+            ready < gap_a && gap_a < output_a && output_a < gap_b && gap_b < output_b,
+            "gap output must follow the checkpoint in exact order: {text:?}"
+        );
+        assert!(handle.metrics().pty_read_calls > 0);
+        assert!(handle.snapshot().await.unwrap().revision > evidence.terminal_revision);
+
+        // Same process, group, session and incarnation.
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child_pid).unwrap()).unwrap();
+        assert_eq!(handle.child_pid(), child_pid);
+        assert_eq!(handle.incarnation, evidence.incarnation);
+        assert_eq!(handle.splint_id, splint_id);
+        assert_eq!(rustix::process::getpgid(Some(pid)).unwrap(), pid);
+        assert_eq!(rustix::process::getsid(Some(pid)).unwrap(), pid);
+        assert!(handle.root_process_is_live());
+        drop(writer);
+
+        // Input, resize, signal and reap work through the adopted actor.
+        handle.input(b"after-commit\n".to_vec()).await.unwrap();
+        wait_for_text(&handle, "<after-commit>").await;
+        handle.resize(PtySize::cells(50, 12)).await.unwrap();
+        handle.input(b"size\n".to_vec()).await.unwrap();
+        wait_for_text(&handle, "12 50").await;
+        assert_eq!(new_placement.calls(), Vec::<&str>::new());
+        let status = runtime.shutdown().await.unwrap();
+        assert_eq!(
+            status.signal,
+            Some(1),
+            "hangup reaches the adopted process group"
+        );
+        assert_eq!(handle.exit_status(), Some(status));
+        assert!(!PathBuf::from(format!("/proc/{child_pid}")).exists());
+        assert_eq!(new_placement.calls(), ["release"]);
+        assert_eq!(old_placement.calls(), ["retain"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_try_adopt_returns_every_input_untouched() {
+        let config = fast_config();
+        let (runtime, old_placement) = spawn_recorded(
+            "printf ready; read value; printf '<%s>' \"$value\"; exec sleep 30",
+            config.clone(),
+        )
+        .await;
+        let child_pid = runtime.handle().child_pid();
+        wait_for_text(&runtime.handle(), "ready").await;
+        let (handed_off, _) = hand_off(runtime, &old_placement).await;
+        let evidence = handed_off.evidence;
+        let terminal = restore_handed_off_terminal(&handed_off, config.terminal.clone());
+        let identity = handed_off.session.identity();
+        let master_raw_fd = handed_off.session.master_raw_fd();
+        let master_tty = pty_tty_index(master_raw_fd).unwrap();
+        let (_, master) = handed_off.session.into_parts();
+        let mismatched =
+            LinuxPtyIdentity::from_raw(child_pid, child_pid.checked_add(1).unwrap(), child_pid)
+                .unwrap();
+        let placement = RecordingPlacement::default();
+
+        let failure = LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            evidence.incarnation,
+            AdoptableLinuxPtySession::from_parts(mismatched, master),
+            terminal,
+            adoption_config(&config, evidence.size),
+            placement.clone(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure.error, LiveError::Pty(PtyError::IdentityMismatch)),
+            "{failure:?}"
+        );
+        let inputs = failure.inputs;
+        assert_eq!(inputs.session.identity(), mismatched);
+        assert_eq!(inputs.session.master_raw_fd(), master_raw_fd);
+        assert_eq!(pty_descriptor_count(&master_tty), 1);
+        assert_eq!(inputs.terminal.revision(), evidence.terminal_revision);
+        assert_eq!(placement.calls(), Vec::<&str>::new());
+        assert!(child_is_running_unreaped(child_pid));
+
+        let (_, master) = inputs.session.into_parts();
+        let runtime = LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            evidence.incarnation,
+            AdoptableLinuxPtySession::from_parts(identity, master),
+            inputs.terminal,
+            inputs.config,
+            inputs.placement,
+        )
+        .unwrap()
+        .commit();
+        let handle = runtime.handle();
+        handle.input(b"retried\n".to_vec()).await.unwrap();
+        wait_for_text(&handle, "<retried>").await;
+        assert_eq!(runtime.shutdown().await.unwrap().signal, Some(1));
+        assert_eq!(placement.calls(), ["release"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_reader_registration_returns_every_input_untouched() {
+        let config = fast_config();
+        let (runtime, old_placement) = spawn_recorded(
+            "printf ready; read value; printf '<%s>' \"$value\"; exec sleep 30",
+            config.clone(),
+        )
+        .await;
+        let child_pid = runtime.handle().child_pid();
+        wait_for_text(&runtime.handle(), "ready").await;
+        let (handed_off, _) = hand_off(runtime, &old_placement).await;
+        let evidence = handed_off.evidence;
+        let terminal = restore_handed_off_terminal(&handed_off, config.terminal.clone());
+        let identity = handed_off.session.identity();
+        let master_raw_fd = handed_off.session.master_raw_fd();
+        let master_tty = pty_tty_index(master_raw_fd).unwrap();
+        let placement = RecordingPlacement::default();
+        ADOPTION_READER_FAULTS
+            .lock()
+            .unwrap()
+            .push(evidence.splint_id);
+
+        let failure = LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            evidence.incarnation,
+            handed_off.session,
+            terminal,
+            adoption_config(&config, evidence.size),
+            placement.clone(),
+        )
+        .unwrap_err();
+        assert!(matches!(failure.error, LiveError::Io(_)), "{failure:?}");
+        let inputs = failure.inputs;
+        assert_eq!(inputs.session.identity(), identity);
+        assert_eq!(inputs.session.master_raw_fd(), master_raw_fd);
+        assert_eq!(
+            pty_descriptor_count(&master_tty),
+            1,
+            "the staged reader must be closed before the master is returned"
+        );
+        assert_eq!(inputs.terminal.revision(), evidence.terminal_revision);
+        assert_eq!(placement.calls(), Vec::<&str>::new());
+        assert!(child_is_running_unreaped(child_pid));
+
+        let runtime = LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            evidence.incarnation,
+            inputs.session,
+            inputs.terminal,
+            inputs.config,
+            inputs.placement,
+        )
+        .unwrap()
+        .commit();
+        let handle = runtime.handle();
+        handle.input(b"retried\n".to_vec()).await.unwrap();
+        wait_for_text(&handle, "<retried>").await;
+        assert_eq!(runtime.shutdown().await.unwrap().signal, Some(1));
+        assert_eq!(placement.calls(), ["release"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_staging_returns_inputs_and_child_exit_waits_for_commit() {
+        let config = fast_config();
+        let (runtime, old_placement) =
+            spawn_recorded("printf ready; read value; exit 5", config.clone()).await;
+        let child_pid = runtime.handle().child_pid();
+        wait_for_text(&runtime.handle(), "ready").await;
+        let (handed_off, _) = hand_off(runtime, &old_placement).await;
+        let evidence = handed_off.evidence;
+        let terminal = restore_handed_off_terminal(&handed_off, config.terminal.clone());
+        let identity = handed_off.session.identity();
+        let master_raw_fd = handed_off.session.master_raw_fd();
+        let master_tty = pty_tty_index(master_raw_fd).unwrap();
+        let placement = RecordingPlacement::default();
+        let staged = LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            evidence.incarnation,
+            handed_off.session,
+            terminal,
+            adoption_config(&config, evidence.size),
+            placement.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            pty_descriptor_count(&master_tty),
+            2,
+            "master plus one reader"
+        );
+
+        let inputs = staged.abort();
+        assert_eq!(inputs.session.identity(), identity);
+        assert_eq!(inputs.session.master_raw_fd(), master_raw_fd);
+        assert_eq!(pty_descriptor_count(&master_tty), 1);
+        assert_eq!(placement.calls(), Vec::<&str>::new());
+
+        // The child exits before the next staging. Staging must leave it
+        // unreaped; the committed actor reaps and publishes it.
+        rustix::io::write(inputs.session.master(), b"go\n").unwrap();
+        time::sleep(Duration::from_millis(150)).await;
+        let staged = LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            evidence.incarnation,
+            inputs.session,
+            inputs.terminal,
+            inputs.config,
+            inputs.placement,
+        )
+        .unwrap();
+        assert!(
+            PathBuf::from(format!("/proc/{child_pid}")).exists(),
+            "staging must not reap an exited child"
+        );
+        let handle = staged.handle();
+        let runtime = staged.commit();
+        assert_eq!(runtime.wait().await.unwrap().code, Some(5));
+        assert_eq!(handle.exit_status().unwrap().code, Some(5));
+        assert!(!PathBuf::from(format!("/proc/{child_pid}")).exists());
+        assert_eq!(placement.calls(), ["release"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
