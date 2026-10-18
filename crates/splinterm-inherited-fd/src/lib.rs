@@ -2,12 +2,13 @@
 //!
 //! Rust cannot safely construct `OwnedFd` from manifest-provided raw numbers:
 //! the compiler cannot prove that no pre-exec Rust owner survived. This crate is
-//! the only Plan 0037 boundary permitted to perform that conversion. Its unsafe
-//! entrypoint is intentionally narrow and valid only in the new daemon image,
-//! before threads or ordinary runtime objects are created, so its caller must
-//! prove the temporal ownership contract. Both entrypoints, the pre-claim
-//! sealed manifest read and the claim itself, independently reject a
-//! multi-threaded process before they observe or mutate any descriptor.
+//! the only inherited-FD ownership boundary permitted to perform that
+//! conversion. Its unsafe entrypoint is intentionally narrow and valid only in
+//! the new daemon image, before threads or ordinary runtime objects are
+//! created, so its caller must prove the temporal ownership contract. Both
+//! entrypoints, the pre-claim sealed manifest read and the claim itself,
+//! independently reject a multi-threaded process before they observe or mutate
+//! any descriptor.
 
 #![deny(unsafe_code)]
 

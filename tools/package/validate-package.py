@@ -69,6 +69,9 @@ MCP_REQUIRED = {
     "usr/share/licenses/splinterm-mcp/THIRD_PARTY.md",
 }
 PRIVATE_PROTOCOL_VERSION = 40
+PACKAGE_PAIR_CAPABILITIES = (
+    PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 2, 2, 1, 1
+)
 PACKAGE_PROVENANCE_KEYS = {
     "schema", "package", "architecture", "provenance", "source_commit",
     "build_version", "pair_build_identity", "daemon_sha256", "client_sha256",
@@ -275,7 +278,7 @@ def validate_package_provenance(root: Path) -> None:
     digest.update(record["provenance"].encode("ascii"))
     digest.update(b"\0")
     digest.update(record["build_version"].encode("ascii"))
-    for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, 1, 1, 2, 2, 1, 1):
+    for value in PACKAGE_PAIR_CAPABILITIES:
         digest.update(value.to_bytes(2, "big"))
     assert record["pair_build_identity"] == digest.hexdigest()
 

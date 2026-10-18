@@ -16,6 +16,13 @@ SPEC = importlib.util.spec_from_file_location("package_provenance_generator", SO
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+VALIDATOR_SOURCE = ROOT / "tools/package/validate-package.py"
+VALIDATOR_SPEC = importlib.util.spec_from_file_location(
+    "package_validator", VALIDATOR_SOURCE
+)
+assert VALIDATOR_SPEC is not None and VALIDATOR_SPEC.loader is not None
+VALIDATOR = importlib.util.module_from_spec(VALIDATOR_SPEC)
+VALIDATOR_SPEC.loader.exec_module(VALIDATOR)
 PROTOCOL_SOURCE = ROOT / "crates/splinterm-protocol/src/lib.rs"
 PREFLIGHT_SOURCE = ROOT / "crates/splinterd/src/handoff_preflight.rs"
 CHECKPOINT_SOURCE = ROOT / "crates/splinterm-terminal/src/terminal/checkpoint.rs"
@@ -104,6 +111,20 @@ class PackageProvenanceTests(unittest.TestCase):
         self.assertEqual(MODULE.HANDOFF_PROTOCOL, handoff_protocol)
         self.assertEqual(MODULE.TERMINAL_CHECKPOINT, checkpoint_schema)
         self.assertEqual(MODULE.DESCRIPTOR_MANIFEST, descriptor_manifest)
+        self.assertEqual(VALIDATOR.PRIVATE_PROTOCOL_VERSION, private_protocol)
+        self.assertEqual(
+            VALIDATOR.PACKAGE_PAIR_CAPABILITIES,
+            (
+                private_protocol,
+                private_protocol,
+                handoff_protocol,
+                handoff_protocol,
+                checkpoint_schema,
+                checkpoint_schema,
+                descriptor_manifest,
+                descriptor_manifest,
+            ),
+        )
 
     def test_same_version_different_commit_or_kind_has_distinct_identity(self) -> None:
         baseline = MODULE.pair_identity(COMMIT, "local-committed-head", "0.1.0")
