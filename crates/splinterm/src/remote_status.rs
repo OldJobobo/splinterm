@@ -21,6 +21,11 @@ use crate::{
 
 const MAX_DETAIL_LINES: usize = 6;
 const MAX_DETAIL_CHARS: usize = 100;
+/// Quoted OpenSSH prompt text wraps at this many cells so that, after its
+/// four-cell quote prefix, it stays inside the 72 columns the status screen
+/// always has instead of running past the Window edge. Prompt lines arrive
+/// up to [`crate::remote_askpass::MAX_PROMPT_LINE_CHARS`] long.
+const PROMPT_WRAP_CELLS: usize = 68;
 /// Shown instead of a `--remote` argument that fails the profile-name rule.
 pub const FALLBACK_PROFILE_LABEL: &str = "remote";
 
@@ -532,7 +537,12 @@ impl RemoteStatus {
     }
 
     fn prompt_lines(&self, prompt: &PromptDisplay, lines: &mut Vec<String>) {
-        let quoted = prompt.lines.iter().map(|line| format!("  │ {line}"));
+        let quoted = prompt
+            .lines
+            .iter()
+            .flat_map(|line| wrap_cells(line, PROMPT_WRAP_CELLS))
+            .map(|line| format!("  │ {line}"))
+            .collect::<Vec<_>>();
         match prompt.kind {
             AskpassKind::Secret => {
                 // A ProxyJump hop prompts too, so the destination is only
@@ -579,6 +589,39 @@ impl RemoteStatus {
     pub fn snapshot(&self, splint_id: SplintId, revision: u64) -> TerminalSnapshot {
         synthetic_text_snapshot(splint_id, revision, &self.title(), self.lines())
     }
+}
+
+/// Splits `line` into rows of at most `maximum` display cells, breaking at
+/// spaces where it can and inside a word only when the word alone is longer.
+fn wrap_cells(line: &str, maximum: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+
+    let cells = |text: &str| {
+        text.chars()
+            .map(|character| character.width().unwrap_or(0).min(2))
+            .sum::<usize>()
+    };
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    for (index, word) in line.split(' ').enumerate() {
+        if index > 0 {
+            // A row break replaces the space between two words.
+            if !current.is_empty() && cells(&current) + 1 + cells(word) > maximum {
+                rows.push(std::mem::take(&mut current));
+            } else if cells(&current) < maximum {
+                current.push(' ');
+            }
+        }
+        for character in word.chars() {
+            let width = character.width().unwrap_or(0).min(2);
+            if width > 0 && !current.is_empty() && cells(&current) + width > maximum {
+                rows.push(std::mem::take(&mut current));
+            }
+            current.push(character);
+        }
+    }
+    rows.push(current);
+    rows
 }
 
 #[cfg(test)]
@@ -998,6 +1041,39 @@ mod tests {
         status.show_prompt(AskpassKind::Secret, &prompt_lines(&["password:"]));
         status.on_key(RemoteStatusKey::Close);
         assert!(status.prompt().is_none());
+    }
+
+    #[test]
+    fn long_prompt_lines_wrap_inside_the_status_screen() {
+        use unicode_width::UnicodeWidthStr;
+
+        let long = "The authenticity of host 'omarchy-test.example.internal (192.0.2.10)' can't be established, ok?";
+        assert!(long.chars().count() <= crate::remote_askpass::MAX_PROMPT_LINE_CHARS);
+        let word = "x".repeat(crate::remote_askpass::MAX_PROMPT_LINE_CHARS);
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        for kind in [
+            AskpassKind::Secret,
+            AskpassKind::Confirm,
+            AskpassKind::Notice,
+        ] {
+            status.show_prompt(kind, &prompt_lines(&[long, &word, "short:"]));
+            let quoted = status
+                .lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix("  │ ").map(str::to_owned))
+                .collect::<Vec<_>>();
+            assert!(quoted.iter().all(|line| line.width() <= PROMPT_WRAP_CELLS));
+            assert!(quoted.iter().all(|line| line.width() + 4 <= 72));
+            assert_eq!(quoted.len(), 5, "{quoted:?}");
+            assert_eq!(quoted[..2].join(" "), long);
+            assert_eq!(quoted[2..4].concat(), word);
+            assert_eq!(quoted[4], "short:");
+        }
+        assert_eq!(wrap_cells("", 68), vec![String::new()]);
+        assert_eq!(
+            wrap_cells("界界界", 4),
+            vec!["界界".to_owned(), "界".to_owned()]
+        );
     }
 
     #[test]

@@ -526,6 +526,22 @@ fn paint_text(
     Ok(())
 }
 
+const fn palette_title(binding_help: bool) -> &'static str {
+    if binding_help {
+        "KEY BINDINGS"
+    } else {
+        "COMMANDS"
+    }
+}
+
+/// The header title slot, in buffer pixels: the 98 logical px the palette has
+/// always reserved, widened to fit a longer title and a gap before the query,
+/// but by no more than half of `available`, so the query keeps room.
+fn palette_title_width(title_width: u32, available: u32, scale_120: u32) -> u32 {
+    let scaled = |value: u32| value.saturating_mul(scale_120).div_ceil(120);
+    scaled(98).max(title_width.saturating_add(scaled(12)).min(available / 2))
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn paint_command_palette(
     cache: &mut CommandPaletteTextCache,
@@ -628,18 +644,27 @@ pub(crate) fn paint_command_palette(
 
     let header = buffer_rect(layout.header, scale_120);
     let inset = CONTENT_INSET.saturating_mul(scale_120).div_ceil(120);
-    let title_width = 98_u32.saturating_mul(scale_120).div_ceil(120);
+    let title = palette_title(binding_help.is_some());
+    let title_width = palette_title_width(
+        cache
+            .text(
+                context,
+                title,
+                ChromeTextStyle::Bold,
+                scale_120,
+                renderer_generation,
+            )?
+            .pixel_width(),
+        header.width.saturating_sub(inset.saturating_mul(2)),
+        scale_120,
+    );
     paint_text(
         cache,
         context,
         canvas,
         width,
         height,
-        if binding_help.is_some() {
-            "KEYS"
-        } else {
-            "COMMANDS"
-        },
+        title,
         ChromeTextStyle::Bold,
         scale_120,
         renderer_generation,
@@ -1905,6 +1930,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn key_binding_help_titles_itself_and_ellipsizes_its_source_column() {
+        let context = RenderContext::new(u16::MAX);
+        let mut cache = CommandPaletteTextCache::default();
+        assert_eq!(palette_title(true), "KEY BINDINGS");
+        assert_eq!(palette_title(false), "COMMANDS");
+        for scale in [120, 150, 180, 240] {
+            let available = buffer_rect(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: PANEL_MAX_WIDTH - CONTENT_INSET * 2,
+                    height: 1,
+                },
+                scale,
+            )
+            .width;
+            for title in [palette_title(true), palette_title(false)] {
+                let text_width = cache
+                    .text(&context, title, ChromeTextStyle::Bold, scale, 1)
+                    .unwrap()
+                    .pixel_width();
+                let slot = palette_title_width(text_width, available, scale);
+                assert!(text_width < slot, "{title} at scale {scale}");
+                assert!(slot <= available / 2);
+            }
+            // A narrow header keeps the original slot rather than none.
+            assert_eq!(
+                palette_title_width(u32::MAX, 0, scale),
+                98_u32.saturating_mul(scale).div_ceil(120)
+            );
+            let source = "built-in profile splinterm";
+            let clip = 72_u32.saturating_mul(scale).div_ceil(120);
+            let text = fitted_text(
+                &mut cache,
+                &context,
+                source,
+                ChromeTextStyle::Regular,
+                scale,
+                1,
+                clip,
+            )
+            .unwrap();
+            assert!(text.pixel_width() <= clip);
+            assert!(
+                cache.entries.keys().any(|(text, _)| text.ends_with('…')
+                    && source.starts_with(text.trim_end_matches('…')))
+            );
+        }
+    }
+
     /// VM case E6: at maximum zoom "Preview saved layout" was clipped into
     /// fragments. It must fit its menu row whole or end in an ellipsis.
     #[test]
@@ -2106,6 +2182,8 @@ mod tests {
             vec![(SplintId::new(), 1), (SplintId::new(), 2)],
         );
         let rename_layout = dojo_prompt_layout(content, &rename).unwrap();
+        // The Dojo may be renamed from the Explorer without being open as a tab.
+        assert_eq!(rename.title_and_body().0, "RENAME DOJO");
         assert!(rename_layout.input.is_some());
         assert!(rename_layout.cancel.is_none());
         assert!(contains(
