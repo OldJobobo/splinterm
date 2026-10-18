@@ -170,14 +170,16 @@ pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
     // SAFETY: `main` calls this first, before preflight dispatch, Tokio,
     // tracing, listeners, or any other descriptor owner exists, so the process
     // is single-threaded and owns no inherited descriptor; the argument
-    // parsing above only reads memory. The source generation passed the manifest and every listed descriptor through exec
-    // with FD_CLOEXEC clear. Nothing between the positioned read, canonical
-    // decode, expected-set derivation, and claim opens, closes, or replaces an
+    // parsing above only reads memory. The source generation passed the
+    // manifest and every listed descriptor through exec with FD_CLOEXEC
+    // clear. Nothing between the positioned read, canonical decode,
+    // expected-set derivation, and claim opens, closes, or replaces an
     // inheritable descriptor; the leaf's procfs reads are close-on-exec and
     // closed before the claim scans, as is the process guard's procfs thread
-    // observation just above. So every non-standard inheritable
-    // descriptor crossed exec without a surviving Rust owner, including
-    // unexpected entries the claim closes. Both leaf entrypoints also reject a second thread.
+    // observation just above. So every non-standard inheritable descriptor
+    // crossed exec without a surviving Rust owner, including unexpected
+    // entries the claim closes. Both leaf entrypoints also reject a second
+    // thread.
     let (acquisition, claimed) = unsafe {
         let bytes = splinterm_inherited_fd::read_post_exec_sealed_descriptor(
             manifest_fd,

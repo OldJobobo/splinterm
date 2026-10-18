@@ -1094,6 +1094,11 @@ async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> ti
     )
 }
 
+/// Parses the daemon's own arguments.
+///
+/// Candidate acquisition calls this before it claims inherited descriptors,
+/// and its SAFETY argument relies on that: this must stay memory-only and
+/// never open, close, or replace a descriptor.
 fn parse_daemon_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<bool> {
     let mut arguments = arguments.into_iter();
     match arguments.next() {
