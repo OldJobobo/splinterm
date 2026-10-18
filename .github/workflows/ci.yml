@@ -61,7 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y dbus fonts-noto-cjk libfontconfig1-dev libfreetype6-dev libpixman-1-dev libxkbcommon-dev pkg-config
       - name: Fetch the locked dependency graph
         run: cargo fetch --locked
       - name: Install pinned renderer test fonts
@@ -105,8 +105,11 @@ jobs:
               --test handoff_descriptors_exec --test unsafe_boundary_audit -- --test-threads=1
             cargo test --frozen -p splinterm-inherited-fd \
               --test post_exec_claim -- --test-threads=1
-            cargo test --frozen --workspace --features splinterd/integration-test \
-              --test sealed_preflight_binary --test candidate_bootstrap_exec -- --test-threads=1
+            # The handoff runtime-stop session-bus stage must not skip in CI.
+            SPLINTERD_REQUIRE_SESSION_BUS=1 \
+              cargo test --frozen --workspace --features splinterd/integration-test \
+              --test sealed_preflight_binary --test candidate_bootstrap_exec \
+              --test handoff_runtime_stop -- --test-threads=1
             cargo test --frozen -p splinterm-pty \
               --test linux_pty --test pty_adoption_exec -- --test-threads=1
             cargo test --frozen -p splinterm-relay --test stdio -- --test-threads=1

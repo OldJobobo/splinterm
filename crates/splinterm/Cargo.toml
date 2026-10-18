@@ -40,7 +40,7 @@ unicode-width.workspace = true
 uuid.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
-zbus.workspace = true
+zbus = { workspace = true, features = ["async-io"] }
 
 [dev-dependencies]
 sha2.workspace = true
