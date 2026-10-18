@@ -18,7 +18,8 @@ use std::{
 use tokio::io::unix::AsyncFd;
 
 use splinterm_pty::{
-    LinuxPtyBackend, LinuxPtySession, PtyCommand, PtyError, PtySession, PtySignal, PtySize,
+    InheritedChild, LinuxPtyBackend, LinuxPtySession, PtyCommand, PtyError, PtySession, PtySignal,
+    PtySize,
 };
 
 const HELPER: &str = env!("CARGO_BIN_EXE_splinterm-pty-child");
@@ -245,6 +246,21 @@ fn live_session_identity_and_single_master_adoption_round_trip() {
     identity
         .verify_inherited(adoptable.master(), expected_size, expected_foreground)
         .unwrap();
+    assert_eq!(
+        identity
+            .verify_inherited_allowing_exit(adoptable.master(), expected_size, expected_foreground)
+            .unwrap(),
+        InheritedChild::Running
+    );
+    // A running child still gets the full terminal checks.
+    assert!(matches!(
+        identity.verify_inherited_allowing_exit(
+            adoptable.master(),
+            expected_size,
+            expected_foreground + 1
+        ),
+        Err(PtyError::IdentityMismatch)
+    ));
     assert!(matches!(
         identity.verify_inherited(
             adoptable.master(),
@@ -354,6 +370,23 @@ fn adoption_reaps_a_child_that_exits_while_the_master_is_held() {
         identity.verify_inherited(adoptable.master(), PtySize::cells(40, 10), child_pid),
         Err(PtyError::ProcessExited)
     ));
+    // Handoff staging tolerates the exit without consuming the status, but
+    // still checks the master and its kernel size.
+    assert_eq!(
+        identity
+            .verify_inherited_allowing_exit(adoptable.master(), PtySize::cells(40, 10), child_pid)
+            .unwrap(),
+        InheritedChild::Exited
+    );
+    assert!(matches!(
+        identity.verify_inherited_allowing_exit(
+            adoptable.master(),
+            PtySize::cells(41, 10),
+            child_pid
+        ),
+        Err(PtyError::IdentityMismatch)
+    ));
+    assert!(Path::new(&format!("/proc/{child_pid}")).exists());
 
     let mut adopted = adoptable.try_adopt().unwrap();
     assert_eq!(adopted.wait().unwrap().code(), Some(7));
