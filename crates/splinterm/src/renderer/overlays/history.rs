@@ -70,7 +70,7 @@ pub(crate) fn paint_history_overlay(
     content: Rect,
     scale_120: u32,
     status: HistoryOverlayStatus,
-    background: u32,
+    panel_fill: [u8; 4],
     accent: u32,
 ) -> Option<HistoryOverlayLayout> {
     let mut layout = history_overlay_layout(content.width, content.height, scale_120)?;
@@ -80,13 +80,7 @@ pub(crate) fn paint_history_overlay(
     layout.panel.1 = layout.panel.1.saturating_add(offset_y);
     layout.return_to_live.0 = layout.return_to_live.0.saturating_add(offset_x);
     layout.return_to_live.1 = layout.return_to_live.1.saturating_add(offset_y);
-    fill_rect(
-        canvas,
-        width,
-        height,
-        layout.panel,
-        themed_rgba(background, u8::MAX),
-    );
+    fill_rect(canvas, width, height, layout.panel, panel_fill);
     let (x, y, _, panel_height) = layout.panel;
     let unit = scale_120.div_ceil(120).max(1);
     let bright = themed_rgba(accent, u8::MAX);
@@ -411,7 +405,7 @@ mod tests {
                 available_rows: 4_096,
                 unseen_rows: 1_000,
             },
-            0x0010_1820,
+            [0x10, 0x18, 0x20, 0xff],
             0x00f2_3888,
         )
         .expect("overlay fits");
@@ -432,7 +426,7 @@ mod tests {
                 available_rows: 999,
                 unseen_rows: 999,
             },
-            0x0010_1820,
+            [0x10, 0x18, 0x20, 0xff],
             0x00f2_3888,
         );
         assert_eq!(clamped, maximum);
@@ -482,5 +476,53 @@ mod tests {
             }
         }
         assert!(history_overlay_layout(40, 20, 120).is_none());
+    }
+
+    #[test]
+    fn translucent_history_panel_keeps_its_marks_opaque() {
+        use super::super::picker::chrome_panel_fill;
+
+        let (width, height) = (320, 180);
+        let accent = 0x00c0_caf5;
+        // [popups] background-alpha 0.9 over a 0.65 glassy window.
+        let fill = chrome_panel_fill(0x001a_1b26, 58_981, 42_598, &[accent]);
+        assert!(fill[3] < u8::MAX);
+        let mut canvas = vec![0_u8; usize::try_from(width * height * 4).unwrap()];
+        let layout = paint_history_overlay(
+            &mut canvas,
+            width,
+            height,
+            Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            120,
+            HistoryOverlayStatus {
+                offset_from_bottom: 1,
+                available_rows: 2,
+                unseen_rows: 0,
+            },
+            fill,
+            accent,
+        )
+        .unwrap();
+        let (panel_x, panel_y, _, panel_height) = layout.panel;
+        let pixel = |x: i32, y: i32| -> [u8; 4] {
+            let index = usize::try_from(
+                (u32::try_from(y).unwrap() * width + u32::try_from(x).unwrap()) * 4,
+            )
+            .unwrap();
+            canvas[index..index + 4].try_into().unwrap()
+        };
+        assert_eq!(
+            pixel(
+                panel_x + 1,
+                panel_y + i32::try_from(panel_height - 1).unwrap()
+            ),
+            [fill[2], fill[1], fill[0], fill[3]]
+        );
+        assert_eq!(pixel(panel_x + 7, panel_y + 8), [0xf5, 0xca, 0xc0, 0xff]);
     }
 }

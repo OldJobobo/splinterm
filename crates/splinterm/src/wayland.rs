@@ -121,7 +121,9 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 use crate::background_effect::{
     BackgroundEffectState, CommitReason as BackgroundCommitReason, EffectAction, EffectDiagnostic,
 };
-use crate::config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
+use crate::config::{
+    CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme, omarchy_terminal_point_size,
+};
 use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
 };
@@ -139,7 +141,7 @@ use crate::frontend::{
     lair_lifecycle_command, tab_menu_right_press,
 };
 use crate::geometry::{
-    OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
+    FontSize, OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
     logical_extent_to_buffer,
 };
 use crate::navigation_projection::{NavigationAction, NavigationNodeId};
@@ -152,11 +154,12 @@ use crate::pane::{
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
-    ChromeSource, ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache,
-    CursorPresentation, DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout,
-    LairExplorerPresentationMode, PickerHitTarget, RenderContext, SessionPickerOverlayLayout,
-    SessionPickerPurpose, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
-    SnapshotOverlays, TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    ChromeSource, ChromeSurface, ChromeText, ChromeTextStyle, CommandPaletteLayout,
+    CommandPaletteTextCache, CursorPresentation, DojoPromptLayout, HistoryOverlayStatus,
+    LairExplorerLayout, LairExplorerPresentationMode, PickerHitTarget, RenderContext,
+    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
+    SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
+    background_bgra, chrome_panel_fill, chrome_panel_palette, clear_snapshot_caches,
     command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
     fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
     lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
@@ -164,8 +167,8 @@ use crate::renderer::{
     paint_search_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
     paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
     paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
-    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
-    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
+    session_picker_hit_test, session_picker_overlay_layout, snapshot_row_rect,
+    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -646,7 +649,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         diagnostics.ensure_window(dojo_id, splint_id);
     }
     let managed_tabs = options.initial_dojo.is_some();
-    let render_context = RenderContext::new(options.theme.background_alpha);
+    let render_context = RenderContext::new(options.theme.background_alpha)
+        .with_font_size_override(followed_font_size(options.theme));
     let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
@@ -856,6 +860,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             renderer_generation: 0,
             theme_generation: 0,
             pending_font_update: None,
+            applied_text_size_px: options.theme.shell.text_size_px,
+            rejected_text_size: None,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title_override: options.title,
@@ -1975,6 +1981,11 @@ struct PresentationState {
     renderer_generation: u64,
     theme_generation: u64,
     pending_font_update: Option<FontUpdate>,
+    /// The followed Omarchy text size the render context last applied. A theme
+    /// whose text size differs is reconciled through the font path.
+    applied_text_size_px: Option<u16>,
+    /// A followed size the render context rejected, with the zoom steps then.
+    rejected_text_size: Option<(Option<u16>, i16)>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -2968,6 +2979,29 @@ fn retain_newest_theme(slot: &mut Option<ThemeUpdate>, update: ThemeUpdate) {
     }
 }
 
+/// The followed Omarchy text size as Omarchy sets it for terminals: px × 9/12
+/// points, which output-scale sizing resolves as Foot does with its default
+/// `dpi-aware=no`.
+fn followed_font_size(theme: ResolvedTheme) -> Option<FontSize> {
+    theme
+        .shell
+        .text_size_px
+        .map(|px| FontSize::Points(omarchy_terminal_point_size(px)))
+}
+
+/// Whether the followed text size still needs applying: the shell value is
+/// parseable (`held` is false), it differs from the size last applied, and it
+/// was not already rejected at the current zoom.
+fn followed_text_size_due(
+    followed: Option<u16>,
+    held: bool,
+    applied: Option<u16>,
+    rejected: Option<(Option<u16>, i16)>,
+    zoom_steps: i16,
+) -> bool {
+    !held && followed != applied && rejected != Some((followed, zoom_steps))
+}
+
 fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUpdateImpact {
     let reconcile_effect = current.background_alpha != next.background_alpha
         || current.background_blur != next.background_blur;
@@ -2975,6 +3009,11 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     let mut next_pixels = next;
     current_pixels.background_blur = false;
     next_pixels.background_blur = false;
+    // A text size change is reconciled through the font path instead.
+    current_pixels.shell.text_size_px = None;
+    next_pixels.shell.text_size_px = None;
+    current_pixels.shell.text_size_held = false;
+    next_pixels.shell.text_size_held = false;
     ThemeUpdateImpact {
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
@@ -6573,7 +6612,60 @@ impl App {
         if !candidate_context.replace_font_generation(update.generation) {
             return Ok(false);
         }
+        self.install_render_context(candidate_context)
+    }
 
+    /// Applies the theme's followed Omarchy text size when it differs from the
+    /// size last applied. A rejected size, typically because runtime zoom would
+    /// push it past the renderer's limit, is not retried until the request or
+    /// the zoom changes. Returns whether frames were rebuilt.
+    fn reconcile_followed_text_size(&mut self) -> bool {
+        let held = self.presentation.theme.shell.text_size_held;
+        if held {
+            // The shell value became unparseable: keep the size actually
+            // applied and cancel any rejected request awaiting a zoom change.
+            self.presentation.rejected_text_size = None;
+        }
+        let followed = self.presentation.theme.shell.text_size_px;
+        let attempt = (followed, self.presentation.font_zoom_steps);
+        if !followed_text_size_due(
+            followed,
+            held,
+            self.presentation.applied_text_size_px,
+            self.presentation.rejected_text_size,
+            self.presentation.font_zoom_steps,
+        ) {
+            return false;
+        }
+        match self.reconcile_font_size(followed_font_size(self.presentation.theme)) {
+            Ok(rebuilt) => {
+                self.presentation.applied_text_size_px = followed;
+                self.presentation.rejected_text_size = None;
+                rebuilt
+            }
+            Err(error) => {
+                self.presentation.rejected_text_size = Some(attempt);
+                eprintln!("splinterm live text size update rejected: {error:#}");
+                false
+            }
+        }
+    }
+
+    /// Applies a followed Omarchy text size through the same reconciliation as
+    /// a live font generation. A base change that leaves the raster size
+    /// unchanged is recorded without rebuilding frames.
+    fn reconcile_font_size(&mut self, size: Option<FontSize>) -> Result<bool> {
+        let mut candidate_context = self.presentation.render_context.clone();
+        if !candidate_context.replace_font_size_override(size, self.surface.scale_120)? {
+            self.presentation.render_context = candidate_context;
+            return Ok(false);
+        }
+        self.install_render_context(candidate_context)
+    }
+
+    /// Rebuilds every pane frame and text cache for a staged render context,
+    /// then installs it and lets the pane controller resize the PTY.
+    fn install_render_context(&mut self, candidate_context: RenderContext) -> Result<bool> {
         let focused = if let Some(mut display) = self.panes.display_snapshot() {
             apply_ime_preedit(&mut display, self.input.ime.visible_preedit.as_deref());
             Some(SnapshotFrame::load_scaled_with_sources_and_context(
@@ -6724,6 +6816,14 @@ impl App {
         self.tab_state.remote_host_clipped = None;
         self.tab_state.tab_new_text = None;
         self.modal.session_picker_layout = None;
+        // A followed text size rejected at the previous zoom may fit now; its
+        // reconciliation rebuilds every frame for the new zoom as well.
+        if self.reconcile_followed_text_size() {
+            if self.surface.configured {
+                self.schedule_draw(queue_handle)?;
+            }
+            return Ok(true);
+        }
         if !raster_changed {
             if self.modal.inline_picker_open() && self.surface.configured {
                 self.modal.session_picker_redraw = true;
@@ -9665,6 +9765,12 @@ impl App {
                 }
             }
         }
+        if self.reconcile_followed_text_size() {
+            font_reconciled = true;
+            visual_changed = true;
+            focused_visual_changed = true;
+            self.presentation.full_redraw = true;
+        }
         if !self.panes.pending_exited_splints.is_empty() {
             let topology_queue_open =
                 self.tab_state
@@ -10679,7 +10785,12 @@ impl App {
                     content_buffer_rect,
                     self.surface.scale_120,
                     status,
-                    self.presentation.theme.background,
+                    chrome_panel_fill(
+                        self.presentation.theme.background,
+                        ChromeSurface::Popup.shell_alpha(self.presentation.theme.shell),
+                        self.presentation.theme.background_alpha,
+                        &[self.presentation.theme.ui_accent],
+                    ),
                     self.presentation.theme.ui_accent,
                 );
             }
@@ -10749,7 +10860,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 &rows,
                 self.explorer.selected(),
                 breadcrumb.as_deref(),
@@ -10772,7 +10883,7 @@ impl App {
                     Self::buffer_rect(terminal, self.surface.scale_120)?,
                     self.surface.scale_120,
                     self.presentation.renderer_generation,
-                    session_picker_palette(self.presentation.theme),
+                    chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
                     input.text(),
                     &self.panes.pane.search.query,
                     self.panes.pane.search.matches.len(),
@@ -10804,7 +10915,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 picker
                     .purpose()
                     .unwrap_or(session_picker_purpose(self.modal.selector_kind)),
@@ -10834,7 +10945,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 palette,
                 &self.input.keymap,
                 self.modal.command_palette_pressed,
@@ -10857,7 +10968,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
                 prompt,
                 self.input.keyboard_focused,
             )?;
@@ -10877,7 +10988,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
                 menu,
                 self.modal.tab_context_menu_pressed,
                 self.input.keyboard_focused,
@@ -11976,6 +12087,137 @@ mod tests {
             classify_theme_update(current, current),
             ThemeUpdateImpact::default()
         );
+    }
+
+    #[test]
+    fn shell_panel_alpha_updates_repaint_chrome_without_touching_the_effect() {
+        let current = ResolvedTheme::default();
+        for (menu_alpha, popup_alpha) in [(u16::MAX / 2, u16::MAX), (u16::MAX, u16::MAX / 2)] {
+            let mut next = current;
+            next.shell.menu_alpha = menu_alpha;
+            next.shell.popup_alpha = popup_alpha;
+            assert_eq!(
+                classify_theme_update(current, next),
+                ThemeUpdateImpact {
+                    rebuild_pixels: true,
+                    reconcile_effect: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn an_unparseable_base_size_cancels_a_rejected_followed_size_retry() {
+        // 120 px was published and rejected at +40 zoom steps, so the window
+        // still renders its applied 12 px. Resetting the zoom would retry it...
+        let rejected = Some((Some(120), 40));
+        assert!(followed_text_size_due(
+            Some(120),
+            false,
+            Some(12),
+            rejected,
+            0
+        ));
+        // ...but once base-size turns unparseable the watcher republishes the
+        // same request marked held, and the applied size stays.
+        assert!(!followed_text_size_due(
+            Some(120),
+            true,
+            Some(12),
+            rejected,
+            0
+        ));
+        assert!(!followed_text_size_due(Some(120), true, Some(12), None, 0));
+        // The marker alone repaints nothing.
+        let mut held = ResolvedTheme::default();
+        held.shell.text_size_px = Some(120);
+        let mut published = held;
+        published.shell.text_size_held = true;
+        assert_eq!(
+            classify_theme_update(held, published),
+            ThemeUpdateImpact::default()
+        );
+    }
+
+    #[test]
+    fn a_rejected_followed_text_size_is_retried_once_zoom_changes() {
+        // Nothing to do while the followed size is the applied one.
+        assert!(!followed_text_size_due(Some(16), false, Some(16), None, 0));
+        assert!(followed_text_size_due(Some(16), false, Some(12), None, 0));
+        // A size rejected at +40 zoom steps is not retried every frame...
+        assert!(!followed_text_size_due(
+            Some(120),
+            false,
+            Some(12),
+            Some((Some(120), 40)),
+            40
+        ));
+        // ...but is once the zoom changes or a different size is requested.
+        assert!(followed_text_size_due(
+            Some(120),
+            false,
+            Some(12),
+            Some((Some(120), 40)),
+            0
+        ));
+        assert!(followed_text_size_due(
+            Some(14),
+            false,
+            Some(12),
+            Some((Some(120), 40)),
+            40
+        ));
+
+        // The render context side: 90 pt plus 40 half-point steps exceeds the
+        // supported size and is rejected, then fits after the zoom resets.
+        let mut context =
+            RenderContext::new(u16::MAX).with_font_size_override(Some(FontSize::Points(9.0)));
+        assert_eq!(context.set_font_zoom_steps(40, 120).unwrap(), Some(true));
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(90.0)), 120)
+                .is_err()
+        );
+        assert!(context.set_font_zoom_steps(0, 120).unwrap().is_some());
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(90.0)), 120)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn followed_text_size_uses_omarchy_points_and_skips_pixel_rebuilds() {
+        let current = ResolvedTheme::default();
+        assert_eq!(followed_font_size(current), None);
+        let mut next = current;
+        for (px, points) in [(12, 9.0), (16, 12.0), (14, 11.0)] {
+            next.shell.text_size_px = Some(px);
+            assert_eq!(followed_font_size(next), Some(FontSize::Points(points)));
+            // The text size goes through font reconciliation, not a palette
+            // pixel rebuild.
+            assert_eq!(
+                classify_theme_update(current, next),
+                ThemeUpdateImpact::default()
+            );
+            // A new window starts at the followed size: Foot's output-scale
+            // sizing of the same point size.
+            let context =
+                RenderContext::new(u16::MAX).with_font_size_override(followed_font_size(next));
+            for scale in [1.0_f32, 1.25, 2.0] {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let scale_120 = (scale * 120.0) as u32;
+                assert_eq!(
+                    context
+                        .effective_font_resolution(scale_120)
+                        .unwrap()
+                        .pixel_size
+                        .to_bits(),
+                    ((points * (96.0 * scale) / 72.0 * 64.0).round() / 64.0).to_bits(),
+                    "{px} px at {scale}x"
+                );
+            }
+        }
     }
 
     #[test]
