@@ -707,6 +707,9 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
         .map(|entry| entry.slot)
         .collect::<BTreeSet<_>>();
     let mut splint_ids = HashSet::new();
+    // One process can lead only one PTY session, so two records naming the
+    // same child would let one inherited PTY authority stand for two Splints.
+    let mut child_pids = HashSet::new();
     let mut dojo_lairs = BTreeMap::new();
     let mut lairs = HashSet::new();
     let mut dojos = HashSet::new();
@@ -718,6 +721,7 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
         lairs.insert(splint.lair_id);
         dojos.insert(splint.dojo_id);
         if !splint_ids.insert(splint.splint_id)
+            || !child_pids.insert(splint.pty.child_pid)
             || dojo_lairs
                 .insert(splint.dojo_id, splint.lair_id)
                 .is_some_and(|lair| lair != splint.lair_id)
@@ -1782,10 +1786,24 @@ mod tests {
         let mut duplicate_pty = baseline.clone();
         let mut second = duplicate_pty.splints[0].clone();
         second.splint_id = SplintId::new();
+        // A distinct child, so the shared PTY slot is what is refused.
+        second.pty.child_pid += 1;
+        second.pty.process_group = second.pty.child_pid;
+        second.pty.session_id = second.pty.child_pid;
         duplicate_pty.splints.push(second);
         assert!(matches!(
             validate_manifest(&duplicate_pty),
             Err(ManifestError::InvalidDescriptors)
+        ));
+        let mut duplicate_child = with_splint_count(2);
+        let shared = duplicate_child.splints[0].pty;
+        let second = &mut duplicate_child.splints[1].pty;
+        second.child_pid = shared.child_pid;
+        second.process_group = shared.process_group;
+        second.session_id = shared.session_id;
+        assert!(matches!(
+            validate_manifest(&duplicate_child),
+            Err(ManifestError::InvalidTopology)
         ));
         let mut conflicting_parent = with_splint_count(2);
         conflicting_parent.splints[1].dojo_id = conflicting_parent.splints[0].dojo_id;

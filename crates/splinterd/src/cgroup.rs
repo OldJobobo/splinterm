@@ -762,6 +762,26 @@ impl WorkloadUnitManager {
         Ok(reclaim)
     }
 
+    /// Whether systemd has neither the retained scope nor its Dojo slice
+    /// loaded: the evidence that the generation which placed this process
+    /// ran it uncontained, so no slice exists that could stop under it.
+    ///
+    /// # Errors
+    /// Reports a failed systemd request.
+    pub fn retained_units_absent(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<bool, WorkloadUnitError> {
+        Ok(self
+            .adapter
+            .loaded_unit(&retained.names.splint_scope)?
+            .is_none()
+            && self
+                .adapter
+                .loaded_unit(&retained.names.dojo_slice)?
+                .is_none())
+    }
+
     /// Closes the systemd user-manager connection and joins its D-Bus worker
     /// thread, so the daemon can return to one thread for upgrade handoff.
     ///
@@ -1711,6 +1731,19 @@ mod tests {
         );
         assert!(adapter.stops().is_empty());
         assert!(adapter.is_loaded(running.splint_scope()));
+        // A process no generation placed has neither unit; one in a loaded
+        // scope does not qualify.
+        assert!(
+            fresh
+                .retained_units_absent(&RetainedWorkloadScope::new(
+                    DojoId::new(),
+                    SplintId::new(),
+                    1,
+                    259
+                ))
+                .unwrap()
+        );
+        assert!(!fresh.retained_units_absent(&running).unwrap());
 
         assert_eq!(
             fresh.reclaim_empty_dojo_slice(emptied).unwrap(),

@@ -739,15 +739,28 @@ impl AdoptableLinuxPtySession {
                 ));
             }
         };
-        if !child_exited && let Err(error) = identity.validate_terminal(&master) {
-            return Err((
-                error,
-                AdoptableLinuxPtySession {
-                    identity,
-                    master: master.into(),
-                },
-            ));
-        }
+        let child_exited = if !child_exited && let Err(error) = identity.validate_terminal(&master)
+        {
+            // A child that exits between the wait above and the terminal check
+            // detaches the terminal from its session. That race is an exit, as
+            // in `verify_inherited_allowing_exit`, not a substituted terminal.
+            match identity.child_exited() {
+                Ok(true) => true,
+                // Still running: the terminal mismatch stands. A failed
+                // query reports its own error.
+                running_or_failed => {
+                    return Err((
+                        running_or_failed.err().unwrap_or(error),
+                        AdoptableLinuxPtySession {
+                            identity,
+                            master: master.into(),
+                        },
+                    ));
+                }
+            }
+        } else {
+            child_exited
+        };
         let observed_exit = match restore_descriptor_before_status_consumption(
             || ensure_close_on_exec(&master),
             || {

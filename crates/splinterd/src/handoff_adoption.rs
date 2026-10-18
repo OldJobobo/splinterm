@@ -5,10 +5,12 @@
 //! quiescence item 7):
 //!
 //! 1. the install prefix, taken only from the authenticated sealed manifest,
-//!    re-resolved, and re-bound to the forward pair's recorded sources;
+//!    re-resolved, and re-bound to the forward pair's recorded sources (a
+//!    rollback reports a changed pair instead of refusing it);
 //! 2. the durable Topology at the manifest's revision, with every carried
 //!    Splint present in its Lair and Dojo at its carried incarnation;
-//! 3. both inherited listeners re-checked as listening Unix stream sockets;
+//! 3. both inherited listeners re-checked as listening Unix stream sockets
+//!    and registered with the serving runtime;
 //! 4. every carried incarnation adopted before this generation allocates one;
 //! 5. a fresh persistent-policy generation against the adopted Topology;
 //! 6. every carried workload scope adopted on the blocking pool, and any
@@ -42,7 +44,10 @@
 //! D7), whether or not cgroups are required: a failed adoption of a process
 //! that is still running fails the whole adoption, because continuing with it
 //! uncounted would let its Dojo slice stop under it once its adopted siblings
-//! release (the M3.8a sibling-kill rule). Without a manager (development, or
+//! release (the M3.8a sibling-kill rule). The one exception: with cgroups
+//! optional, a running child whose scope and Dojo slice are both absent ran
+//! uncontained in the old generation, has no slice that could stop under
+//! it, and runs uncontained here too. Without a manager (development, or
 //! a manager that could not connect while cgroups are optional), Splints run
 //! uncontained. Required cgroups without a manager fail closed.
 //!
@@ -55,7 +60,7 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
-    fs,
+    fs, io,
     os::{
         fd::{AsFd, AsRawFd, OwnedFd},
         unix::{fs::MetadataExt, net::UnixListener},
@@ -119,6 +124,16 @@ pub trait WorkloadScopeAdopter: Clone + Send + Sync + 'static {
         &self,
         dojo_id: DojoId,
     ) -> Result<DojoSliceReclaim, WorkloadUnitError>;
+
+    /// Whether systemd has neither the retained scope nor its Dojo slice
+    /// loaded. Blocking.
+    ///
+    /// # Errors
+    /// See [`WorkloadUnitManager::retained_units_absent`].
+    fn retained_units_absent(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<bool, WorkloadUnitError>;
 }
 
 impl WorkloadScopeAdopter for WorkloadUnitManager {
@@ -136,6 +151,13 @@ impl WorkloadScopeAdopter for WorkloadUnitManager {
         dojo_id: DojoId,
     ) -> Result<DojoSliceReclaim, WorkloadUnitError> {
         Self::reclaim_empty_dojo_slice(self, dojo_id)
+    }
+
+    fn retained_units_absent(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<bool, WorkloadUnitError> {
+        Self::retained_units_absent(self, retained)
     }
 }
 
@@ -206,6 +228,12 @@ pub enum AdoptionError {
     IncarnationAllocationStarted(u64),
     #[error("inherited {0:?} is not a listening Unix stream socket")]
     InvalidListener(HandoffDescriptorSlot),
+    #[error("inherited {slot:?} cannot be registered with the serving runtime: {error}")]
+    ListenerRegistration {
+        slot: HandoffDescriptorSlot,
+        #[source]
+        error: io::Error,
+    },
     #[error("workload cgroups are required, but no workload unit manager is available")]
     WorkloadCgroupsUnavailable,
     #[error(
@@ -229,6 +257,7 @@ pub enum AdoptionError {
 }
 
 /// A refused adoption with every owned part, for cooperative rollback.
+#[must_use = "a refused adoption owns every carried descriptor; recover it for rollback"]
 pub struct AdoptionFailure {
     error: AdoptionError,
     recovery: Box<AdoptionRecovery>,
@@ -339,6 +368,11 @@ pub struct CommittedAdoption {
     /// manifest.
     pub daemon_generation: u64,
     pub install_prefix: InstallPrefix,
+    /// A rollback adoption found `<prefix>/splinterd` or `<prefix>/splinterm`
+    /// no longer the forward pair recorded at preparation, and adopted
+    /// anyway for continuity. Always `false` for a forward adoption, which
+    /// refuses that case.
+    pub install_pair_mismatch: bool,
     /// The durable Topology with every carried Splint running and every
     /// other Splint exited.
     pub topology: Topology,
@@ -346,9 +380,13 @@ pub struct CommittedAdoption {
     pub policy_generation: PolicyGeneration,
     /// Committed actors, in manifest order.
     pub splints: Vec<AdoptedSplint>,
-    pub listener: UnixListener,
-    pub image_listener: UnixListener,
-    /// The inherited listener numbers, which the daemon keeps for its life.
+    /// Both listeners, registered with the serving runtime before commit.
+    /// Each owns a duplicate of its inherited descriptor; commit closed the
+    /// inherited numbers themselves.
+    pub listener: tokio::net::UnixListener,
+    pub image_listener: tokio::net::UnixListener,
+    /// The registered listeners' numbers, which the daemon holds for its
+    /// life and a later handoff manifest names.
     pub handoff_listeners: ListenerDescriptors,
     pub forward_client: OwnedFd,
     /// Carried Splints whose child had already exited when adoption staged
@@ -574,6 +612,9 @@ impl AdoptionShell {
 /// What the fallible steps produced besides the staged Splints.
 struct Prepared {
     install_prefix: InstallPrefix,
+    install_pair_mismatch: bool,
+    listener: tokio::net::UnixListener,
+    image_listener: tokio::net::UnixListener,
     topology: Topology,
     policy: PolicyStore,
     policy_generation: PolicyGeneration,
@@ -586,6 +627,7 @@ struct Prepared {
 /// [`Self::abort`] returns every owned part instead. Dropping it uncommitted
 /// retains every adopted scope, so nothing is stopped, but closes the carried
 /// descriptors, which hangs up their terminals.
+#[must_use = "a staged adoption must be committed or aborted"]
 pub struct StagedAdoption<S: ProcessPlacement> {
     runtime: Handle,
     shell: AdoptionShell,
@@ -691,7 +733,7 @@ async fn prepare<A: WorkloadScopeAdopter>(
         return Err(AdoptionError::UnexpectedPhase);
     }
     let manifest = &shell.manifest;
-    let install_prefix = verify_install_prefix(manifest)?;
+    let (install_prefix, install_pair_mismatch) = verify_install_prefix(manifest)?;
     verify_topology(manifest, &topology)?;
     for (slot, listener) in [
         (HandoffDescriptorSlot::Listener, &shell.listener),
@@ -699,6 +741,11 @@ async fn prepare<A: WorkloadScopeAdopter>(
     ] {
         verify_listener(slot, listener)?;
     }
+    // Re-registration is fallible, so it happens here, before commit
+    // (Plan 0037 quiescence items 7 and 9).
+    let listener = register_listener(HandoffDescriptorSlot::Listener, &shell.listener)?;
+    let image_listener =
+        register_listener(HandoffDescriptorSlot::ImageListener, &shell.image_listener)?;
     if workload_cgroups_required && workload_units.is_none() {
         return Err(AdoptionError::WorkloadCgroupsUnavailable);
     }
@@ -722,7 +769,7 @@ async fn prepare<A: WorkloadScopeAdopter>(
     let (policy, policy_generation) = reload_policy(policy_path, &topology).await?;
     let (reclaimed_slices, unreclaimed_slices) = match workload_units {
         Some(adopter) => {
-            adopt_scopes(&adopter, guard).await?;
+            adopt_scopes(&adopter, guard, workload_cgroups_required).await?;
             reclaim_leftover_slices(&adopter, guard).await?
         }
         None => (Vec::new(), Vec::new()),
@@ -730,6 +777,9 @@ async fn prepare<A: WorkloadScopeAdopter>(
     stage_actors(guard, &live_config)?;
     Ok(Prepared {
         install_prefix,
+        install_pair_mismatch,
+        listener,
+        image_listener,
         topology,
         policy,
         policy_generation,
@@ -744,27 +794,65 @@ async fn prepare<A: WorkloadScopeAdopter>(
 /// sees them now (Plan 0061 M3.5b review). Both manifest kinds check the
 /// forward pair: the package upgrade installed it at the prefix, and a
 /// rollback restores the old process, not the old package.
-fn verify_install_prefix(manifest: &HandoffManifestV1) -> Result<InstallPrefix, AdoptionError> {
+///
+/// A forward adoption refuses a mismatch. A rollback adoption only reports
+/// it (the returned flag) and warns: the package may have changed again
+/// since preparation, and refusing would end in a failed service that
+/// destroys the Splints rollback exists to save. Live continuity outranks
+/// launch authority from the prefix.
+fn verify_install_prefix(
+    manifest: &HandoffManifestV1,
+) -> Result<(InstallPrefix, bool), AdoptionError> {
     let prefix = InstallPrefix::from_directory(&manifest.install_prefix)
         .map_err(AdoptionError::InstallPrefix)?;
-    let pair = &manifest.executable_pairs.forward;
-    for (name, image) in [
-        (DAEMON_EXECUTABLE, &pair.daemon),
-        (CLIENT_EXECUTABLE, &pair.client),
-    ] {
-        let metadata = fs::symlink_metadata(prefix.directory().join(name))
-            .map_err(|_| AdoptionError::InstallPrefixMismatch)?;
-        if !metadata.is_file()
-            || metadata.dev() != image.source_device
-            || metadata.ino() != image.source_inode
-            || metadata.uid() != image.source_owner_uid
-            || metadata.mode() != image.source_mode
-            || metadata.len() != image.source_size
-        {
-            return Err(AdoptionError::InstallPrefixMismatch);
+    if forward_pair_installed(&prefix, manifest) {
+        return Ok((prefix, false));
+    }
+    match manifest.kind {
+        ManifestKind::Forward => Err(AdoptionError::InstallPrefixMismatch),
+        ManifestKind::Rollback => {
+            warn!(
+                prefix = %prefix.directory().display(),
+                "installed pair changed since handoff preparation; rollback adopts anyway"
+            );
+            Ok((prefix, true))
         }
     }
-    Ok(prefix)
+}
+
+/// Whether `<prefix>/splinterd` and `<prefix>/splinterm` are exactly the
+/// forward pair's recorded sources.
+fn forward_pair_installed(prefix: &InstallPrefix, manifest: &HandoffManifestV1) -> bool {
+    let pair = &manifest.executable_pairs.forward;
+    [
+        (DAEMON_EXECUTABLE, &pair.daemon),
+        (CLIENT_EXECUTABLE, &pair.client),
+    ]
+    .into_iter()
+    .all(|(name, image)| {
+        fs::symlink_metadata(prefix.directory().join(name)).is_ok_and(|metadata| {
+            metadata.is_file()
+                && metadata.dev() == image.source_device
+                && metadata.ino() == image.source_inode
+                && metadata.uid() == image.source_owner_uid
+                && metadata.mode() == image.source_mode
+                && metadata.len() == image.source_size
+        })
+    })
+}
+
+/// Registers one inherited listener with the serving runtime's I/O driver.
+///
+/// Registration owns what it registers and closes it on failure, so it
+/// registers a close-on-exec duplicate: the inherited descriptor stays at
+/// its recorded number, recoverable for rollback, until commit.
+fn register_listener(
+    slot: HandoffDescriptorSlot,
+    inherited: &OwnedFd,
+) -> Result<tokio::net::UnixListener, AdoptionError> {
+    let registration = |error| AdoptionError::ListenerRegistration { slot, error };
+    let duplicate = inherited.try_clone().map_err(registration)?;
+    tokio::net::UnixListener::from_std(UnixListener::from(duplicate)).map_err(registration)
 }
 
 /// Requires the durable Topology at the revision the old generation persisted
@@ -888,21 +976,28 @@ async fn reload_policy(
 /// How one carried scope's adoption ended on the blocking pool.
 enum ScopeOutcome<S: ProcessPlacement> {
     Adopted(RetainOnDrop<S>),
-    /// Systemd no longer confirms the scope, and the child has exited.
-    Exited,
+    /// No scope to adopt and none to stop under the child: it has exited,
+    /// or, with cgroups optional, systemd has neither its scope nor its
+    /// Dojo slice because the old generation ran it uncontained.
+    Uncontained,
 }
 
 /// Adopts every carried scope, in manifest order, on the blocking pool:
 /// [`WorkloadUnitManager::adopt_scope`] holds a lock across D-Bus calls.
 ///
 /// A scope that fails for a child that has exited is tolerated, and that
-/// Splint runs uncontained. A failure for a child still running fails the
-/// adoption (the sibling-kill rule). Every adopted scope is wrapped so that
-/// a panic, an early return, or a dropped adoption future retains it rather
-/// than stopping it.
+/// Splint runs uncontained. So does a running child when cgroups are
+/// optional and systemd has neither its scope nor its Dojo slice loaded: the
+/// old generation ran it uncontained (its manager never connected), and no
+/// slice exists that could stop under it. Any other failure for a running
+/// child fails the adoption (the sibling-kill rule): with its slice loaded,
+/// continuing uncounted would let that slice stop under it. Every adopted
+/// scope is wrapped so that a panic, an early return, or a dropped adoption
+/// future retains it rather than stopping it.
 async fn adopt_scopes<A: WorkloadScopeAdopter>(
     adopter: &A,
     guard: &mut AdoptionGuard<A::Scope>,
+    cgroups_required: bool,
 ) -> Result<(), AdoptionError> {
     let identities = guard
         .pending
@@ -918,7 +1013,15 @@ async fn adopt_scopes<A: WorkloadScopeAdopter>(
                 // Checked after the failure: a child cannot come back, so an
                 // exit seen now explains the failure.
                 Err(_) if child_has_exited(retained.child_pid()) => {
-                    outcomes.push(ScopeOutcome::Exited);
+                    outcomes.push(ScopeOutcome::Uncontained);
+                }
+                Err(_)
+                    if !cgroups_required
+                        && adopter
+                            .retained_units_absent(retained)
+                            .is_ok_and(|absent| absent) =>
+                {
+                    outcomes.push(ScopeOutcome::Uncontained);
                 }
                 Err(error) => return (outcomes, Some(error)),
             }
@@ -1137,10 +1240,12 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             counterpart_manifest_descriptor,
             rollback_daemon,
             rollback_client,
+            listener,
+            image_listener,
         ));
         let handoff_listeners = ListenerDescriptors {
-            listener: listener.as_raw_fd(),
-            image_listener: image_listener.as_raw_fd(),
+            listener: prepared.listener.as_raw_fd(),
+            image_listener: prepared.image_listener.as_raw_fd(),
         };
         CommittedAdoption {
             handoff_id: manifest.handoff_id.bytes(),
@@ -1148,12 +1253,13 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             source_daemon_generation: manifest.source_daemon_generation,
             daemon_generation: manifest.target_daemon_generation,
             install_prefix: prepared.install_prefix,
+            install_pair_mismatch: prepared.install_pair_mismatch,
             topology: prepared.topology,
             policy: prepared.policy,
             policy_generation: prepared.policy_generation,
             splints,
-            listener: UnixListener::from(listener),
-            image_listener: UnixListener::from(image_listener),
+            listener: prepared.listener,
+            image_listener: prepared.image_listener,
             handoff_listeners,
             forward_client,
             exited_before_adoption,
@@ -1193,7 +1299,6 @@ fn child_has_exited(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::ErrorKind,
         os::unix::net::UnixStream,
         path::Path,
         sync::{
@@ -1225,6 +1330,8 @@ mod tests {
     struct FakeState {
         events: Mutex<Vec<&'static str>>,
         refused: Mutex<HashSet<SplintId>>,
+        /// Splints whose scope and Dojo slice systemd does not have.
+        unplaced: Mutex<HashSet<SplintId>>,
         reclaims: Mutex<Vec<DojoId>>,
     }
 
@@ -1297,6 +1404,18 @@ mod tests {
         ) -> Result<DojoSliceReclaim, WorkloadUnitError> {
             self.0.reclaims.lock().unwrap().push(dojo_id);
             Ok(DojoSliceReclaim::Stopped)
+        }
+
+        fn retained_units_absent(
+            &self,
+            retained: &RetainedWorkloadScope,
+        ) -> Result<bool, WorkloadUnitError> {
+            Ok(self
+                .0
+                .unplaced
+                .lock()
+                .unwrap()
+                .contains(&retained.splint_id()))
         }
     }
 
@@ -1489,20 +1608,26 @@ mod tests {
         .expect("an adopted Splint reads its PTY and takes input");
     }
 
-    async fn accept_one(listener: &UnixListener) {
-        time::timeout(Duration::from_secs(5), async {
-            loop {
-                match listener.accept() {
-                    Ok(_) => return,
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        time::sleep(Duration::from_millis(5)).await;
-                    }
-                    Err(error) => panic!("inherited listener refused: {error}"),
-                }
-            }
-        })
-        .await
-        .expect("the inherited listener accepts");
+    async fn accept_one(listener: &tokio::net::UnixListener) {
+        time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the registered listener accepts")
+            .unwrap();
+    }
+
+    /// Replaces `<prefix>/splinterd` with a new inode, as a later package
+    /// upgrade would between preparation and adoption.
+    fn reinstall_daemon(prefix: &Path) {
+        let staged = prefix.join(".splinterd.reinstalled");
+        fs::write(&staged, "reinstalled-daemon").unwrap();
+        fs::set_permissions(&staged, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fs::rename(&staged, prefix.join(DAEMON_EXECUTABLE)).unwrap();
+    }
+
+    async fn shut_down(committed: CommittedAdoption) {
+        for adopted in committed.splints {
+            adopted.runtime.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1558,10 +1683,15 @@ mod tests {
             );
             assert_echoes(&adopted.runtime.handle(), "after-adoption").await;
         }
-        // Both inherited listeners still accept at their bound paths.
+        // Both listeners were registered before commit and accept at their
+        // bound paths; the record names the registered descriptors.
+        assert!(!committed.install_pair_mismatch);
         assert_eq!(
-            committed.handoff_listeners.listener,
-            committed.listener.as_raw_fd()
+            committed.handoff_listeners,
+            ListenerDescriptors {
+                listener: committed.listener.as_raw_fd(),
+                image_listener: committed.image_listener.as_raw_fd(),
+            }
         );
         for (name, listener) in [
             ("daemon.sock", &committed.listener),
@@ -1746,6 +1876,93 @@ mod tests {
         assert_eq!(adopter.count("retain"), 2);
         assert_eq!(adopter.count("stop") + adopter.count("release"), 0);
         assert_eq!(harness.assert_recovered(recovery).len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_changed_install_pair_refuses_forward_but_not_rollback() {
+        let mut harness = Harness::new(&[CAT], |_, manifest| {
+            reinstall_daemon(&manifest.install_prefix);
+        })
+        .await;
+        let failure = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::InstallPrefixMismatch
+        ));
+        harness.assert_recovered(failure.into_recovery());
+
+        // Rollback keeps the Splints and reports the changed pair.
+        let mut harness = Harness::new(&[CAT], |_, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+            reinstall_daemon(&manifest.install_prefix);
+        })
+        .await;
+        let committed = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap()
+            .commit();
+        assert!(committed.rollback);
+        assert!(committed.install_pair_mismatch);
+        assert_echoes(&committed.splints[0].runtime.handle(), "after-rollback").await;
+        shut_down(committed).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_old_uncontained_child_is_adopted_uncontained_only_when_cgroups_are_optional() {
+        // Optional cgroups, and systemd has neither the scope nor the slice:
+        // the child runs uncontained, its sibling keeps its scope.
+        let mut harness = Harness::new(&[CAT, CAT], no_change).await;
+        let unplaced = harness.splint_id(0);
+        let adopter = FakeAdopter::default();
+        adopter.refuse(unplaced);
+        adopter.0.unplaced.lock().unwrap().insert(unplaced);
+        let mut inputs = harness.inputs(Some(adopter.clone()));
+        inputs.workload_cgroups_required = false;
+        let committed = harness.adopt(inputs).await.unwrap().commit();
+        assert_eq!(adopter.count("adopt"), 1);
+        assert!(committed.exited_before_adoption.is_empty());
+        for adopted in &committed.splints {
+            assert_echoes(&adopted.runtime.handle(), "uncontained").await;
+        }
+        shut_down(committed).await;
+        assert_eq!(adopter.count("release"), 1);
+        assert_eq!(adopter.count("stop"), 0);
+
+        // Required cgroups keep the sibling-kill rule for the same child.
+        let mut harness = Harness::new(&[CAT, CAT], no_change).await;
+        let unplaced = harness.splint_id(0);
+        let adopter = FakeAdopter::default();
+        adopter.refuse(unplaced);
+        adopter.0.unplaced.lock().unwrap().insert(unplaced);
+        let failure = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::WorkloadScope { splint_id, .. } if *splint_id == unplaced
+        ));
+        harness.assert_recovered(failure.into_recovery());
+
+        // So does a loaded slice with optional cgroups: it could stop under
+        // an uncounted child.
+        let mut harness = Harness::new(&[CAT, CAT], no_change).await;
+        let refused = harness.splint_id(0);
+        let adopter = FakeAdopter::default();
+        adopter.refuse(refused);
+        let mut inputs = harness.inputs(Some(adopter.clone()));
+        inputs.workload_cgroups_required = false;
+        let failure = harness.adopt(inputs).await.unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::WorkloadScope { splint_id, .. } if *splint_id == refused
+        ));
+        harness.assert_recovered(failure.into_recovery());
+        assert_eq!(adopter.count("stop"), 0);
     }
 
     #[test]
