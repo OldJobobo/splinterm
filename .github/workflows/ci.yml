@@ -109,7 +109,8 @@ jobs:
             SPLINTERD_REQUIRE_SESSION_BUS=1 \
               cargo test --frozen --workspace --features splinterd/integration-test \
               --test sealed_preflight_binary --test candidate_bootstrap_exec \
-              --test handoff_runtime_stop --test handoff_exec_resume -- --test-threads=1
+              --test handoff_runtime_stop --test handoff_exec_resume \
+              --test handoff_exec_adoption -- --test-threads=1
             cargo test --frozen -p splinterm-pty \
               --test linux_pty --test pty_adoption_exec -- --test-threads=1
             cargo test --frozen -p splinterm-relay --test stdio -- --test-threads=1

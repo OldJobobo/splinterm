@@ -12,7 +12,11 @@
 //!   unsalted identity); a test copies the binary and overwrites those bytes
 //!   in its copy. The salt lives in a writable static of atomics, so the
 //!   compiler cannot fold its value: the running image reads whatever bytes
-//!   its file carried.
+//!   its file carried. Package provenance verification in these builds
+//!   accepts a record naming the same salt (`integration_test_build_salt`)
+//!   whose identity is [`salted_pair_build_identity`] of the canonical
+//!   derivation; every other build has no salt field and refuses such a
+//!   record (`package_provenance`).
 //! * **A packaged-owner override.** Manifest validation requires every
 //!   recorded executable source to be root-owned, which a test running as an
 //!   ordinary user cannot create. [`PACKAGED_OWNER_UID_ENV`] names the uid

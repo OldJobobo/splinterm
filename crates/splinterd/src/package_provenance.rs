@@ -80,6 +80,19 @@ pub struct CompiledBuildProvenance {
     pub pair_build_identity: BuildIdentity,
 }
 
+/// The build salt a package record may name (Plan 0061 D9).
+///
+/// Only an `integration-test` build has one: it carries
+/// [`crate::integration_test_seams::BUILD_SALT_BYTES`] bytes, all zero when
+/// the record names none. Every other build has no salt at all (the type is
+/// `()`), its record wire format has no salt field, and a record naming one
+/// is refused as an unknown field. Shipped verification therefore computes
+/// exactly [`derive_pair_build_identity`].
+#[cfg(feature = "integration-test")]
+type RecordBuildSalt = [u8; crate::integration_test_seams::BUILD_SALT_BYTES];
+#[cfg(not(feature = "integration-test"))]
+type RecordBuildSalt = ();
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageProvenanceRecord {
     source_path: PathBuf,
@@ -89,6 +102,7 @@ pub struct PackageProvenanceRecord {
     pair_build_identity: BuildIdentity,
     daemon_sha256: [u8; 32],
     client_sha256: [u8; 32],
+    build_salt: RecordBuildSalt,
 }
 
 impl PackageProvenanceRecord {
@@ -160,15 +174,20 @@ impl PackageProvenanceRecord {
         {
             return Err(PackageProvenanceError::LocationMismatch);
         }
+        #[cfg(feature = "integration-test")]
+        let build_salt = parse_record_build_salt(wire.integration_test_build_salt.as_deref())?;
+        #[cfg(not(feature = "integration-test"))]
+        let build_salt = ();
         Ok(Self {
             source_path: source_path.to_path_buf(),
             source_commit: wire.source_commit,
             kind,
             build_version: wire.build_version,
-            pair_build_identity: BuildIdentity::new(parse_hex_32(&wire.pair_build_identity)?)
+            pair_build_identity: BuildIdentity::new(parse_hex(&wire.pair_build_identity)?)
                 .map_err(|_| PackageProvenanceError::InvalidRecord)?,
-            daemon_sha256: parse_hex_32(&wire.daemon_sha256)?,
-            client_sha256: parse_hex_32(&wire.client_sha256)?,
+            daemon_sha256: parse_hex(&wire.daemon_sha256)?,
+            client_sha256: parse_hex(&wire.client_sha256)?,
+            build_salt,
         })
     }
 
@@ -196,11 +215,12 @@ impl PackageProvenanceRecord {
         if preflight.pair_build_version != expected_version {
             return Err(PackageProvenanceError::BuildMismatch);
         }
-        let derived = derive_pair_build_identity(
+        let derived = recorded_pair_build_identity(
             &self.source_commit,
             self.kind,
             &self.build_version,
             preflight.capabilities,
+            self.build_salt,
         )?;
         if derived != self.pair_build_identity
             || preflight.pair_build_identity != self.pair_build_identity
@@ -216,6 +236,7 @@ impl PackageProvenanceRecord {
             daemon_sha256: self.daemon_sha256,
             client_sha256: self.client_sha256,
             snapshots: preflight.snapshots,
+            build_salt: self.build_salt,
         })
     }
 }
@@ -339,16 +360,72 @@ fn validate_package_binding(
     }
     // The pair identity hashes every capability range, so a later report that
     // keeps the identity but changes a range is not the report validated here.
-    let derived = derive_pair_build_identity(
+    let derived = recorded_pair_build_identity(
         &provenance.source_commit,
         provenance.kind,
         &provenance.build_version,
         preflight.capabilities,
+        provenance.build_salt,
     )?;
     if derived != provenance.pair_build_identity {
         return Err(PackageProvenanceError::BuildMismatch);
     }
     Ok(())
+}
+
+/// The pair identity a package record must carry: the canonical derivation
+/// from its build metadata, salted in an `integration-test` build by the
+/// record's own build salt exactly as a salted image salts its compiled
+/// identity (Plan 0061 D9). Every other build has no salt, so this is
+/// [`derive_pair_build_identity`] unchanged.
+fn recorded_pair_build_identity(
+    source_commit: &str,
+    kind: BuildProvenanceKind,
+    build_version: &str,
+    capabilities: HandoffCapabilities,
+    build_salt: RecordBuildSalt,
+) -> Result<BuildIdentity, PackageProvenanceError> {
+    let derived = derive_pair_build_identity(source_commit, kind, build_version, capabilities)?;
+    #[cfg(feature = "integration-test")]
+    let derived = crate::integration_test_seams::salted_pair_build_identity(derived, build_salt);
+    #[cfg(not(feature = "integration-test"))]
+    let () = build_salt;
+    Ok(derived)
+}
+
+/// The identity a package record for a salted `integration-test` image must
+/// carry, computed exactly as verification computes the identity it expects
+/// (Plan 0061 D9). A test writes this, with the same salt in the record's
+/// `integration_test_build_salt`, into the provenance record of the salted
+/// pair it installs. An all-zero salt yields the unsalted derivation.
+///
+/// # Errors
+/// Rejects malformed commit/version metadata or invalid capability ranges.
+#[cfg(feature = "integration-test")]
+#[doc(hidden)]
+pub fn salted_record_pair_build_identity_for_integration_test(
+    source_commit: &str,
+    kind: BuildProvenanceKind,
+    build_version: &str,
+    capabilities: HandoffCapabilities,
+    build_salt: [u8; crate::integration_test_seams::BUILD_SALT_BYTES],
+) -> Result<BuildIdentity, PackageProvenanceError> {
+    recorded_pair_build_identity(source_commit, kind, build_version, capabilities, build_salt)
+}
+
+/// Parses a record's optional test build salt: absent is no salt (all
+/// zero); present must be exactly the salt's lowercase hexadecimal bytes
+/// and not all zero, so each salt has one spelling.
+#[cfg(feature = "integration-test")]
+fn parse_record_build_salt(value: Option<&str>) -> Result<RecordBuildSalt, PackageProvenanceError> {
+    let Some(value) = value else {
+        return Ok(RecordBuildSalt::default());
+    };
+    let salt = parse_hex(value)?;
+    if salt == RecordBuildSalt::default() {
+        return Err(PackageProvenanceError::InvalidRecord);
+    }
+    Ok(salt)
 }
 
 #[cfg(test)]
@@ -390,6 +467,7 @@ fn validated_for_test(
         daemon_sha256: pair.daemon().source().sha256,
         client_sha256: pair.client().source().sha256,
         snapshots: preflight.snapshots,
+        build_salt: RecordBuildSalt::default(),
     }
 }
 
@@ -403,6 +481,7 @@ pub struct ValidatedPackageProvenance {
     pub daemon_sha256: [u8; 32],
     pub client_sha256: [u8; 32],
     snapshots: ExecutablePairBinding,
+    build_salt: RecordBuildSalt,
 }
 
 #[derive(Debug, Error)]
@@ -447,6 +526,23 @@ struct PackageProvenanceWire {
     pair_build_identity: String,
     daemon_sha256: String,
     client_sha256: String,
+    /// The test build salt of a salted pair's record (Plan 0061 D9). Only
+    /// `integration-test` builds know this field; every other build refuses
+    /// a record naming it as an unknown field. An unsalted record omits it:
+    /// `null` is refused, so "no salt" has one spelling.
+    #[cfg(feature = "integration-test")]
+    #[serde(default, deserialize_with = "deserialize_present_salt")]
+    integration_test_build_salt: Option<String>,
+}
+
+/// Accepts the salt field only as a string. `#[serde(default)]` alone would
+/// also read `null` as no salt; absence is the only spelling of that.
+#[cfg(feature = "integration-test")]
+fn deserialize_present_salt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 /// Returns build provenance compiled into both daemon and client through their
@@ -578,15 +674,16 @@ fn parse_u16(value: Option<&str>) -> Result<u16, PackageProvenanceError> {
         .map_err(|_| PackageProvenanceError::InvalidRecord)
 }
 
-fn parse_hex_32(value: &str) -> Result<[u8; 32], PackageProvenanceError> {
-    if value.len() != 64
+/// Exactly `N` bytes spelled as `2 * N` lowercase hexadecimal digits.
+fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N], PackageProvenanceError> {
+    if value.len() != 2 * N
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(PackageProvenanceError::InvalidRecord);
     }
-    let mut bytes = [0_u8; 32];
+    let mut bytes = [0_u8; N];
     for (index, byte) in bytes.iter_mut().enumerate() {
         let offset = index * 2;
         *byte = u8::from_str_radix(&value[offset..offset + 2], 16)
@@ -714,7 +811,17 @@ mod tests {
     }
 
     fn write_record(path: &Path, pair: &SealedExecutablePair, identity: BuildIdentity) {
-        let value = serde_json::json!({
+        write_record_with_salt(path, pair, identity, None);
+    }
+
+    /// A record naming `salt` (lowercase hexadecimal) as its test build salt.
+    fn write_record_with_salt(
+        path: &Path,
+        pair: &SealedExecutablePair,
+        identity: BuildIdentity,
+        salt: Option<&str>,
+    ) {
+        let mut value = serde_json::json!({
             "schema": 1,
             "package": "splinterm",
             "architecture": "x86_64",
@@ -725,8 +832,108 @@ mod tests {
             "daemon_sha256": hex(pair.daemon().source().sha256),
             "client_sha256": hex(pair.client().source().sha256),
         });
+        if let Some(salt) = salt {
+            value["integration_test_build_salt"] = serde_json::json!(salt);
+        }
         fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// Plan 0061 D9 (#152 review): the record of a salted `integration-test`
+    /// pair verifies when its identity was computed the way verification
+    /// computes it and it names the same salt. Without the salt it fails with
+    /// the `BuildMismatch` the review found, and any other salt fails too.
+    #[cfg(feature = "integration-test")]
+    #[test]
+    fn a_salted_record_verifies_only_with_its_own_salt() {
+        use crate::integration_test_seams::{BUILD_SALT_BYTES, salted_pair_build_identity};
+
+        let fixture = Fixture::new();
+        let owner = rustix::process::geteuid().as_raw();
+        let forward = fixture.snapshots.forward();
+        let salt = [0x5a; BUILD_SALT_BYTES];
+        let salted = salted_record_pair_build_identity_for_integration_test(
+            "1234567890abcdef1234567890abcdef12345678",
+            BuildProvenanceKind::LocalCommittedHead,
+            "0.2.3-beta1",
+            fixture.capabilities,
+            salt,
+        )
+        .unwrap();
+        // What a salted image compiles: its own salt over the unsalted pair.
+        assert_eq!(salted, salted_pair_build_identity(fixture.identity, salt));
+        assert_ne!(salted, fixture.identity);
+        let mut preflight = fixture.preflight(forward);
+        preflight.pair_build_identity = salted;
+        let salt_hex = "5a".repeat(BUILD_SALT_BYTES);
+
+        write_record_with_salt(&fixture.record, forward, salted, Some(&salt_hex));
+        let record = PackageProvenanceRecord::load(&fixture.record, owner).unwrap();
+        let validated = record.verify_pair(forward, preflight).unwrap();
+        assert_eq!(validated.pair_build_identity, salted);
+        validate_package_binding(&validated, forward, preflight).unwrap();
+        // The unsalted image of the same build is not this record's pair.
+        assert!(matches!(
+            record.verify_pair(forward, fixture.preflight(forward)),
+            Err(PackageProvenanceError::BuildMismatch)
+        ));
+
+        for other in [None, Some("5b".repeat(BUILD_SALT_BYTES))] {
+            write_record_with_salt(&fixture.record, forward, salted, other.as_deref());
+            let record = PackageProvenanceRecord::load(&fixture.record, owner).unwrap();
+            assert!(
+                matches!(
+                    record.verify_pair(forward, preflight),
+                    Err(PackageProvenanceError::BuildMismatch)
+                ),
+                "{other:?}"
+            );
+        }
+        // One spelling per salt: an explicit zero salt and a malformed one
+        // are refused.
+        for malformed in [
+            "00".repeat(BUILD_SALT_BYTES),
+            "5A".repeat(BUILD_SALT_BYTES),
+            "5a".repeat(BUILD_SALT_BYTES - 1),
+        ] {
+            write_record_with_salt(&fixture.record, forward, salted, Some(&malformed));
+            assert!(
+                matches!(
+                    PackageProvenanceRecord::load(&fixture.record, owner),
+                    Err(PackageProvenanceError::InvalidRecord)
+                ),
+                "{malformed}"
+            );
+        }
+        // No salt is spelled by omitting the field, never as `null`.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.record).unwrap()).unwrap();
+        value["integration_test_build_salt"] = serde_json::Value::Null;
+        fs::write(&fixture.record, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            PackageProvenanceRecord::load(&fixture.record, owner),
+            Err(PackageProvenanceError::Parse(_))
+        ));
+    }
+
+    /// Shipped builds have no build salt: a record naming one is an unknown
+    /// field, so no record can steer shipped verification off the canonical
+    /// derivation (Plan 0061 D9).
+    #[cfg(not(feature = "integration-test"))]
+    #[test]
+    fn shipped_builds_refuse_a_record_naming_a_test_build_salt() {
+        let fixture = Fixture::new();
+        let forward = fixture.snapshots.forward();
+        write_record_with_salt(
+            &fixture.record,
+            forward,
+            fixture.identity,
+            Some(&"5a".repeat(16)),
+        );
+        assert!(matches!(
+            PackageProvenanceRecord::load(&fixture.record, rustix::process::geteuid().as_raw()),
+            Err(PackageProvenanceError::Parse(_))
+        ));
     }
 
     #[test]
