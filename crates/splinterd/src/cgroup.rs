@@ -457,6 +457,11 @@ impl WorkloadUnitManager {
     /// Closes the systemd user-manager connection and joins its D-Bus worker
     /// thread, so the daemon can return to one thread for upgrade handoff.
     ///
+    /// Running requests get up to
+    /// [`SHUTDOWN_GRACE`](splinterd::dbus_worker::SHUTDOWN_GRACE) to finish
+    /// before they are aborted, and closing is bounded the same way, so a
+    /// wedged session bus cannot hold this forever.
+    ///
     /// Clones of this manager and any outstanding scopes stay valid values,
     /// but every later systemd request fails with
     /// [`WorkloadUnitError::Connection`]. Dropping a scope after shutdown

@@ -6,7 +6,7 @@
 //! thread, so no test inside it can ever observe one thread. Each stage runs
 //! in a fresh child copy of this binary that starts with only its main
 //! thread. Harness arguments such as `--test-threads=1` are accepted and
-//! ignored.
+//! ignored; `--list` prints the two stages the way libtest lists tests.
 //!
 //! The `runtime` stage always runs. The `session-bus` stage runs under
 //! `dbus-run-session` with a private bus. When no private bus can be started
@@ -34,8 +34,17 @@ const METHOD_TIMEOUT: Duration = Duration::from_millis(500);
 const SETTLE: Duration = Duration::from_secs(2);
 /// How long a negative control keeps retrying before it must report failure.
 const BUSY: Duration = Duration::from_millis(100);
+/// Shutdown grace for the stuck-request check.
+const STUCK_GRACE: Duration = Duration::from_millis(200);
+const STAGES: [&str; 2] = ["runtime", "session-bus"];
 
 fn main() -> ExitCode {
+    if env::args().skip(1).any(|argument| argument == "--list") {
+        for stage in STAGES {
+            println!("handoff_runtime_stop::{stage}: test");
+        }
+        return ExitCode::SUCCESS;
+    }
     match env::var(STAGE).ok().as_deref() {
         Some("runtime") => runtime_stage(),
         Some("session-bus") => session_bus_stage(),
@@ -259,7 +268,33 @@ fn session_bus_stage() {
         "threads besides main: {others:?}"
     );
 
-    bus.shutdown().unwrap();
+    // A request that never completes must not hold shutdown: it is aborted
+    // after the grace period and its caller sees the worker closed.
+    let (entered, stuck_running) = mpsc::channel();
+    let stuck_worker = Arc::clone(&bus);
+    let stuck = thread::spawn(move || {
+        stuck_worker.call(move |_| async move {
+            entered.send(()).unwrap();
+            std::future::pending::<zbus::Result<()>>().await
+        })
+    });
+    stuck_running.recv().unwrap();
+    let started = Instant::now();
+    bus.shutdown_within(STUCK_GRACE).unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= STUCK_GRACE,
+        "shutdown returned before the grace period: {elapsed:?}"
+    );
+    // Drain plus a prompt abort and close: well under three grace periods.
+    assert!(
+        elapsed < STUCK_GRACE * 3,
+        "shutdown exceeded its bound: {elapsed:?}"
+    );
+    assert!(matches!(
+        stuck.join().unwrap(),
+        Err(DbusWorkerError::Closed)
+    ));
     assert!(matches!(
         bus.call(|_| async { Ok(()) }),
         Err(DbusWorkerError::Closed)

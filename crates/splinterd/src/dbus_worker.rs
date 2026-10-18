@@ -13,9 +13,10 @@
 //! worker owns the connection instead. It runs a current-thread Tokio runtime
 //! on its own thread. Because the connection is built inside that runtime,
 //! zbus picks its Tokio backend even when `async-io` is compiled in, and every
-//! connection task runs on the worker. [`DbusWorker::shutdown`] closes the
-//! connection, drops the runtime, which joins its blocking pool, and then
-//! joins the worker thread.
+//! connection task runs on the worker. [`DbusWorker::shutdown`] gives running
+//! requests a bounded grace period, aborts any that remain, closes the
+//! connection within the same bound, drops the runtime (which joins its
+//! blocking pool), and then joins the worker thread.
 
 use std::{
     fmt,
@@ -28,17 +29,33 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::{sync::mpsc as job_channel, task::JoinSet};
+use tokio::{
+    sync::mpsc as job_channel,
+    task::{JoinError, JoinSet},
+    time::timeout,
+};
+use tracing::warn;
 
 /// Name of the worker thread that owns the connection. Linux keeps at most
 /// 15 bytes of a thread name, so both names fit in that.
 pub const WORKER_THREAD_NAME: &str = "splinterd-dbus";
-/// Name of the blocking-pool thread zbus uses on the worker's runtime. Its
-/// Unix handshake sends the credentials byte and reads peer credentials
-/// through `spawn_blocking`; dropping the runtime joins that thread.
+/// Name of the blocking-pool thread zbus uses on the worker's runtime. On
+/// Linux only its peer-credentials read uses `spawn_blocking`; dropping the
+/// runtime joins that thread.
 pub const BLOCKING_THREAD_NAME: &str = "splinterd-dbusb";
+/// Default bound for each shutdown phase. zbus's method timeout covers only
+/// the reply wait, not sending a request or closing the socket, so a wedged
+/// bus could otherwise hold shutdown forever.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// Longest panic message logged for a failed request.
+const PANIC_MESSAGE_LIMIT: usize = 256;
 
 type Job = Box<dyn FnOnce(zbus::Connection) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+enum Command {
+    Run(Job),
+    Shutdown(Duration),
+}
 
 #[derive(Debug, Error)]
 pub enum DbusWorkerError {
@@ -54,7 +71,7 @@ pub enum DbusWorkerError {
 
 /// Session-bus connection served by one thread that [`Self::shutdown`] joins.
 pub struct DbusWorker {
-    jobs: Mutex<Option<job_channel::UnboundedSender<Job>>>,
+    jobs: Mutex<Option<job_channel::UnboundedSender<Command>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -138,26 +155,41 @@ impl DbusWorker {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .ok_or(DbusWorkerError::Closed)?
-            .send(job)
+            .send(Command::Run(job))
             .map_err(|_| DbusWorkerError::Closed)?;
         response.recv().map_err(|_| DbusWorkerError::Closed)
     }
 
-    /// Closes the connection and joins the worker thread.
-    ///
-    /// Requests already running finish first; each is bounded by the method
-    /// timeout. Every later [`Self::call`] fails with
-    /// [`DbusWorkerError::Closed`]. Calling this again is a no-op.
+    /// [`Self::shutdown_within`] with the default [`SHUTDOWN_GRACE`].
     ///
     /// # Errors
     /// Reports a worker thread that panicked.
     pub fn shutdown(&self) -> Result<(), DbusWorkerError> {
-        drop(
-            self.jobs
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take(),
-        );
+        self.shutdown_within(SHUTDOWN_GRACE)
+    }
+
+    /// Closes the connection and joins the worker thread.
+    ///
+    /// Running requests get up to `grace` to finish. Any still running are
+    /// then aborted, and their callers get [`DbusWorkerError::Closed`]. Closing
+    /// the connection is bounded by `grace` too, so the worker ends within
+    /// about three `grace` periods (drain, abort, close) plus dropping its
+    /// runtime. Every later [`Self::call`] fails with
+    /// [`DbusWorkerError::Closed`]. Calling this again is a no-op.
+    ///
+    /// # Errors
+    /// Reports a worker thread that panicked.
+    pub fn shutdown_within(&self, grace: Duration) -> Result<(), DbusWorkerError> {
+        if let Some(jobs) = self
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            // A worker that already stopped has dropped its receiver; the
+            // join below still reaps it.
+            let _ = jobs.send(Command::Shutdown(grace));
+        }
         let thread = self
             .thread
             .lock()
@@ -178,7 +210,7 @@ impl Drop for DbusWorker {
 async fn serve(
     method_timeout: Duration,
     ready: mpsc::SyncSender<Result<(), DbusWorkerError>>,
-    mut queue: job_channel::UnboundedReceiver<Job>,
+    mut queue: job_channel::UnboundedReceiver<Command>,
 ) {
     let connection = match connect(method_timeout).await {
         Ok(connection) => connection,
@@ -192,20 +224,64 @@ async fn serve(
         return;
     }
     let mut requests = JoinSet::new();
-    loop {
+    let grace = loop {
         tokio::select! {
-            job = queue.recv() => match job {
-                Some(job) => {
+            command = queue.recv() => match command {
+                Some(Command::Run(job)) => {
                     requests.spawn(job(connection.clone()));
                 }
-                None => break,
+                Some(Command::Shutdown(grace)) => break grace,
+                None => break SHUTDOWN_GRACE,
             },
-            Some(_) = requests.join_next(), if !requests.is_empty() => {}
+            Some(outcome) = requests.join_next(), if !requests.is_empty() => {
+                log_request_outcome(outcome);
+            }
+        }
+    };
+    if !drain(&mut requests, grace).await {
+        // Aborting drops each stuck request, which releases any socket
+        // write lock it holds, so the close below can proceed.
+        warn!(
+            requests = requests.len(),
+            "aborting D-Bus requests still running at shutdown"
+        );
+        requests.abort_all();
+        if !drain(&mut requests, grace).await {
+            warn!("aborted D-Bus requests did not finish; dropping them with the runtime");
         }
     }
-    while requests.join_next().await.is_some() {}
     // Closing ends the socket reader task before the runtime is dropped.
-    let _ = connection.close().await;
+    if timeout(grace, connection.close()).await.is_err() {
+        warn!("D-Bus connection did not close within the shutdown bound");
+    }
+}
+
+/// Waits up to `grace` for every request; returns whether all finished.
+async fn drain(requests: &mut JoinSet<()>, grace: Duration) -> bool {
+    timeout(grace, async {
+        while let Some(outcome) = requests.join_next().await {
+            log_request_outcome(outcome);
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn log_request_outcome(outcome: Result<(), JoinError>) {
+    let Err(error) = outcome else {
+        return;
+    };
+    if !error.is_panic() {
+        return;
+    }
+    let payload = error.into_panic();
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    let message: String = message.chars().take(PANIC_MESSAGE_LIMIT).collect();
+    warn!(panic = %message, "D-Bus worker request panicked");
 }
 
 async fn connect(method_timeout: Duration) -> zbus::Result<zbus::Connection> {
