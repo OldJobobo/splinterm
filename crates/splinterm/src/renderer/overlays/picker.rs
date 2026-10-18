@@ -2245,6 +2245,7 @@ mod tests {
                 menu_alpha: foot_alpha(menu_alpha),
                 popup_alpha: foot_alpha(popup_alpha),
                 text_size_px: None,
+                text_size_held: false,
             },
             ..ResolvedTheme::default()
         }

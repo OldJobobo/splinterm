@@ -2989,15 +2989,17 @@ fn followed_font_size(theme: ResolvedTheme) -> Option<FontSize> {
         .map(|px| FontSize::Points(omarchy_terminal_point_size(px)))
 }
 
-/// Whether the followed text size still needs applying: it differs from the
-/// size last applied and was not already rejected at the current zoom.
+/// Whether the followed text size still needs applying: the shell value is
+/// parseable (`held` is false), it differs from the size last applied, and it
+/// was not already rejected at the current zoom.
 fn followed_text_size_due(
     followed: Option<u16>,
+    held: bool,
     applied: Option<u16>,
     rejected: Option<(Option<u16>, i16)>,
     zoom_steps: i16,
 ) -> bool {
-    followed != applied && rejected != Some((followed, zoom_steps))
+    !held && followed != applied && rejected != Some((followed, zoom_steps))
 }
 
 fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUpdateImpact {
@@ -3010,6 +3012,8 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     // A text size change is reconciled through the font path instead.
     current_pixels.shell.text_size_px = None;
     next_pixels.shell.text_size_px = None;
+    current_pixels.shell.text_size_held = false;
+    next_pixels.shell.text_size_held = false;
     ThemeUpdateImpact {
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
@@ -6616,10 +6620,17 @@ impl App {
     /// push it past the renderer's limit, is not retried until the request or
     /// the zoom changes. Returns whether frames were rebuilt.
     fn reconcile_followed_text_size(&mut self) -> bool {
+        let held = self.presentation.theme.shell.text_size_held;
+        if held {
+            // The shell value became unparseable: keep the size actually
+            // applied and cancel any rejected request awaiting a zoom change.
+            self.presentation.rejected_text_size = None;
+        }
         let followed = self.presentation.theme.shell.text_size_px;
         let attempt = (followed, self.presentation.font_zoom_steps);
         if !followed_text_size_due(
             followed,
+            held,
             self.presentation.applied_text_size_px,
             self.presentation.rejected_text_size,
             self.presentation.font_zoom_steps,
@@ -12096,13 +12107,47 @@ mod tests {
     }
 
     #[test]
+    fn an_unparseable_base_size_cancels_a_rejected_followed_size_retry() {
+        // 120 px was published and rejected at +40 zoom steps, so the window
+        // still renders its applied 12 px. Resetting the zoom would retry it...
+        let rejected = Some((Some(120), 40));
+        assert!(followed_text_size_due(
+            Some(120),
+            false,
+            Some(12),
+            rejected,
+            0
+        ));
+        // ...but once base-size turns unparseable the watcher republishes the
+        // same request marked held, and the applied size stays.
+        assert!(!followed_text_size_due(
+            Some(120),
+            true,
+            Some(12),
+            rejected,
+            0
+        ));
+        assert!(!followed_text_size_due(Some(120), true, Some(12), None, 0));
+        // The marker alone repaints nothing.
+        let mut held = ResolvedTheme::default();
+        held.shell.text_size_px = Some(120);
+        let mut published = held;
+        published.shell.text_size_held = true;
+        assert_eq!(
+            classify_theme_update(held, published),
+            ThemeUpdateImpact::default()
+        );
+    }
+
+    #[test]
     fn a_rejected_followed_text_size_is_retried_once_zoom_changes() {
         // Nothing to do while the followed size is the applied one.
-        assert!(!followed_text_size_due(Some(16), Some(16), None, 0));
-        assert!(followed_text_size_due(Some(16), Some(12), None, 0));
+        assert!(!followed_text_size_due(Some(16), false, Some(16), None, 0));
+        assert!(followed_text_size_due(Some(16), false, Some(12), None, 0));
         // A size rejected at +40 zoom steps is not retried every frame...
         assert!(!followed_text_size_due(
             Some(120),
+            false,
             Some(12),
             Some((Some(120), 40)),
             40
@@ -12110,12 +12155,14 @@ mod tests {
         // ...but is once the zoom changes or a different size is requested.
         assert!(followed_text_size_due(
             Some(120),
+            false,
             Some(12),
             Some((Some(120), 40)),
             0
         ));
         assert!(followed_text_size_due(
             Some(14),
+            false,
             Some(12),
             Some((Some(120), 40)),
             40

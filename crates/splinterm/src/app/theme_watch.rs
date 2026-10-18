@@ -41,6 +41,7 @@ impl ThemeOverrides {
     fn apply(self, mut theme: ResolvedTheme) -> ResolvedTheme {
         if !self.follow_text_size {
             theme.shell.text_size_px = None;
+            theme.shell.text_size_held = false;
         }
         theme.with_color_overrides(self.alpha, self.blur)
     }
@@ -77,9 +78,11 @@ enum ActiveThemeSource<'a> {
 struct JsonShellRoot<'a> {
     layers: ShellLayers<'a>,
     index: usize,
-    /// The selected theme directory is missing while another root is claimed:
-    /// a theme switch or a briefly vanished root, so the current shell
-    /// settings are kept rather than read from a partial or stale root.
+    /// The selected theme directory is missing while another root is claimed
+    /// or while it is the last good root the selection holds: a theme switch,
+    /// a briefly vanished root or an outage of every root. The current shell
+    /// settings are kept rather than read from a partial, stale or absent root,
+    /// as the native theme keeps its palette.
     gap: bool,
 }
 
@@ -134,7 +137,9 @@ fn active_theme_source<'a>(
                         panels: false,
                     },
                     index,
-                    gap: !theme_dir.is_dir() && roots.any_claimed(),
+                    // Missing while another root is claimed, or while the selection
+                    // holds this last good root through an outage of every root.
+                    gap: !theme_dir.is_dir() && (roots.any_claimed() || selection.holds(index)),
                 }
             }),
         },
@@ -234,6 +239,7 @@ fn with_omarchy_shell(
     } else {
         OmarchyShellSettings {
             text_size_px: load.settings.text_size_px,
+            text_size_held: load.settings.text_size_held,
             ..OmarchyShellSettings::default()
         }
     };
@@ -1321,10 +1327,24 @@ mod tests {
         let mut selection = OmarchyThemeSelection::default();
         let mut reported = Vec::new();
         let active = active_theme_source(&source, &mut selection);
-        assert!(
+        // The published update only marks the size as held; no shell size is
+        // followed, so the window keeps rendering at its configured fallback.
+        let next =
             resolve_live_theme_update(active, &mut selection, NO_OVERRIDES, startup, &mut reported)
                 .unwrap()
-                .is_none()
+                .expect("the held marker is published");
+        assert_eq!(next.shell.text_size_px, None);
+        assert!(next.shell.text_size_held);
+        assert_eq!(
+            next,
+            ResolvedTheme {
+                shell: OmarchyShellSettings {
+                    text_size_held: true,
+                    ..startup.shell
+                },
+                ..startup
+            },
+            "nothing but the held marker changes"
         );
         assert_eq!(reported.len(), 1);
 
@@ -1336,6 +1356,56 @@ mod tests {
                 .text_size_px,
             Some(12)
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_json_palette_keeps_shell_state_while_every_root_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-shell-json-outage-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let high = root.join("state/omarchy/current/theme");
+        let low = root.join("legacy/omarchy/current/theme");
+        let json = root.join("theme.json");
+        std::fs::create_dir_all(&high).unwrap();
+        std::fs::write(high.join("shell.toml"), "[font]\nbase-size = 16\n").unwrap();
+        std::fs::write(&json, valid_theme_json(1.0, false)).unwrap();
+        let source = ThemeSource::Json {
+            path: json,
+            shell: OmarchyThemeRoots::ordered(vec![high.clone(), low]),
+        };
+        let mut selection = OmarchyThemeSelection::default();
+        let mut current = ResolvedTheme::default();
+        let mut poll = |current: &mut ResolvedTheme| {
+            let active = active_theme_source(&source, &mut selection);
+            if let Some(next) = resolve_live_theme_update(
+                active,
+                &mut selection,
+                NO_OVERRIDES,
+                *current,
+                &mut Vec::new(),
+            )
+            .unwrap()
+            {
+                *current = next;
+            }
+            current.shell.text_size_px
+        };
+        assert_eq!(poll(&mut current), Some(16));
+
+        // Every root disappears, so nothing is claimed; the selection holds
+        // the last good root, and the followed size is kept like the native
+        // palette rather than reset to defaults.
+        let displaced = root.join("displaced");
+        std::fs::rename(&high, &displaced).unwrap();
+        for _ in 0..=OMARCHY_ROOT_DEMOTION_GRACE_POLLS * 2 {
+            assert_eq!(poll(&mut current), Some(16));
+        }
+        std::fs::rename(&displaced, &high).unwrap();
+        std::fs::write(high.join("shell.toml"), "[font]\nbase-size = 18\n").unwrap();
+        assert_eq!(poll(&mut current), Some(18));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

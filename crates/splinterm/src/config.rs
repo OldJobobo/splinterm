@@ -378,6 +378,13 @@ impl OmarchyThemeSelection {
         }
     }
 
+    /// Whether `index` is the root that last loaded successfully, which the
+    /// selection keeps through gaps.
+    #[must_use]
+    pub fn holds(&self, index: usize) -> bool {
+        self.last_good == Some(index)
+    }
+
     /// Records that the candidate at `index` produced a coherent theme.
     pub fn accepted(&mut self, index: usize) {
         self.last_good = Some(index);
@@ -404,6 +411,10 @@ pub struct OmarchyShellSettings {
     pub popup_alpha: u16,
     /// Effective `[font] base-size` in px, or `None` when no layer sets it.
     pub text_size_px: Option<u16>,
+    /// A running window's `base-size` became unparseable. `text_size_px`
+    /// then repeats the last followed request, and the window keeps the size
+    /// it has actually applied instead of retrying that request.
+    pub text_size_held: bool,
 }
 
 impl Default for OmarchyShellSettings {
@@ -413,6 +424,7 @@ impl Default for OmarchyShellSettings {
             menu_alpha: u16::MAX,
             popup_alpha: u16::MAX,
             text_size_px: None,
+            text_size_held: false,
         }
     }
 }
@@ -669,6 +681,8 @@ pub fn resolve_omarchy_shell(
                 }
                 Some(px)
             } else {
+                load.settings.text_size_held =
+                    matches!(fallback, OmarchyTextSizeFallback::Current(_));
                 let fallback = match fallback {
                     OmarchyTextSizeFallback::OmarchyDefault => Some(OMARCHY_DEFAULT_TEXT_SIZE_PX),
                     OmarchyTextSizeFallback::Current(current) => current,
@@ -3003,6 +3017,7 @@ mod tests {
                 menu_alpha: u16::MAX,
                 popup_alpha: u16::MAX,
                 text_size_px: Some(12),
+                text_size_held: false,
             }
         );
 
@@ -3143,6 +3158,10 @@ mod tests {
         ] {
             let load = user_size("big", fallback);
             assert_eq!(load.settings.text_size_px, px);
+            assert_eq!(
+                load.settings.text_size_held,
+                matches!(fallback, OmarchyTextSizeFallback::Current(_))
+            );
             assert_eq!(load.diagnostics.len(), 1);
             assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::TextSize);
         }
