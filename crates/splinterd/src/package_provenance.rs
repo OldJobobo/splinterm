@@ -528,10 +528,21 @@ struct PackageProvenanceWire {
     client_sha256: String,
     /// The test build salt of a salted pair's record (Plan 0061 D9). Only
     /// `integration-test` builds know this field; every other build refuses
-    /// a record naming it as an unknown field.
+    /// a record naming it as an unknown field. An unsalted record omits it:
+    /// `null` is refused, so "no salt" has one spelling.
     #[cfg(feature = "integration-test")]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_salt")]
     integration_test_build_salt: Option<String>,
+}
+
+/// Accepts the salt field only as a string. `#[serde(default)]` alone would
+/// also read `null` as no salt; absence is the only spelling of that.
+#[cfg(feature = "integration-test")]
+fn deserialize_present_salt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 /// Returns build provenance compiled into both daemon and client through their
@@ -894,6 +905,15 @@ mod tests {
                 "{malformed}"
             );
         }
+        // No salt is spelled by omitting the field, never as `null`.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture.record).unwrap()).unwrap();
+        value["integration_test_build_salt"] = serde_json::Value::Null;
+        fs::write(&fixture.record, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(matches!(
+            PackageProvenanceRecord::load(&fixture.record, owner),
+            Err(PackageProvenanceError::Parse(_))
+        ));
     }
 
     /// Shipped builds have no build salt: a record naming one is an unknown

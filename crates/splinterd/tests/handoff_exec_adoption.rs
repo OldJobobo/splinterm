@@ -43,7 +43,9 @@
 //! side: every Splint runs uncontained and no scope can be stopped. The
 //! stage starts without inherited descriptors (`close_fds`) and with only
 //! its main thread, as the process guard requires. The parent kills every
-//! process a stage left behind if a check fails.
+//! process a stage left behind if a check fails, and a parent-death signal
+//! ends the stage (by then the adopted daemon) if the parent itself is
+//! killed.
 
 #![cfg(feature = "integration-test")]
 
@@ -126,6 +128,36 @@ const RECORD: &str = "stage-record.json";
 const STAGED_TOPOLOGY: &str = "topology.staged.json";
 const STDOUT: &str = "stage.stdout";
 const STDERR: &str = "stage.stderr";
+/// Names this test process's PID for the launcher's parent-death check.
+const PARENT: &str = "SPLINTERD_EXEC_ADOPTION_PARENT";
+/// Runs the stage with `close_fds`, so it inherits no descriptor, and ties
+/// both lifetimes to their parents with `PR_SET_PDEATHSIG` = `SIGKILL`.
+/// Drop guards cannot run when this test binary is itself killed or timed
+/// out, and an adopted daemon never exits on its own: without this it and
+/// its Splints would be orphaned.
+///
+/// The launcher dies with this test process (the thread that spawned it is
+/// `main`, which outlives every stage), and the stage with the launcher
+/// (whose only thread forks it). The signal is set after fork in the stage
+/// (`preexec_fn`) and survives `execve` of the test binary and the stage's
+/// own `execveat` into the forward daemon, neither of which is set-user-ID
+/// or file-capability bearing; `fork` clears it, so Splint shells do not
+/// inherit it (they hang up when the daemon's PTY masters close). Each
+/// side re-checks its parent after `prctl`, closing the race with a parent
+/// that died first.
+const LAUNCHER: &str = r#"
+import ctypes, os, signal, subprocess, sys
+libc = ctypes.CDLL(None, use_errno=True)
+PR_SET_PDEATHSIG = 1
+def die_with(parent):
+    if libc.prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGKILL), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+        os._exit(126)
+    if os.getppid() != parent:
+        os._exit(126)
+die_with(int(os.environ["SPLINTERD_EXEC_ADOPTION_PARENT"]))
+launcher = os.getpid()
+raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True, preexec_fn=lambda: die_with(launcher)).returncode)
+"#;
 
 fn main() -> ExitCode {
     if env::args().skip(1).any(|argument| argument == "--list") {
@@ -773,10 +805,9 @@ impl Stage {
         let stderr = fs::File::create(directory.0.join(STDERR)).unwrap();
         let launcher = Command::new("python3")
             .arg("-c")
-            .arg(
-                "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
-            )
+            .arg(LAUNCHER)
             .arg(env::current_exe().unwrap())
+            .env(PARENT, std::process::id().to_string())
             .env(STAGE, case)
             .env(DIRECTORY, &directory.0)
             .env("SPLINTERM_SOCKET", directory.socket())
@@ -815,6 +846,8 @@ impl Stage {
         format!("stdout:\n{}\nstderr:\n{}", read(STDOUT), read(STDERR))
     }
 
+    /// # Panics
+    /// When the launcher's status cannot be read; `Drop` never calls this.
     fn exited(&mut self) -> Option<std::process::ExitStatus> {
         self.launcher.try_wait().unwrap()
     }
@@ -857,8 +890,9 @@ impl Stage {
 }
 
 impl Drop for Stage {
+    // Runs during unwinding too, so nothing here may panic.
     fn drop(&mut self) {
-        if self.exited().is_none() {
+        if self.launcher.try_wait().ok().flatten().is_none() {
             for stage in children_of(self.launcher.id()) {
                 for child in children_of(stage) {
                     signal(child, Signal::KILL);
