@@ -1,4 +1,5 @@
-//! Startup retention of the running packaged daemon/client rollback authority.
+//! Startup retention of the running packaged daemon/client rollback authority,
+//! and per-attempt preparation of the installed forward pair beside it.
 //!
 //! This is deliberately preparation-only. It does not build a checkpoint or
 //! descriptor manifest, quiesce live PTYs, execute a forward image, publish a
@@ -21,9 +22,13 @@ use thiserror::Error;
 use crate::{
     executable_snapshot::{
         ExecutableSnapshotError, ExecutableSnapshotPolicy, ExecutableSourcePair,
-        PACKAGED_OWNER_UID, RetainedRollbackExecutables, SealedExecutablePair,
+        HandoffExecutableSnapshots, PACKAGED_OWNER_UID, RetainedRollbackExecutables,
+        SealedExecutablePair,
     },
-    handoff_compatibility::{ExecutablePairPreflight, RunningHandoffGeneration},
+    handoff_compatibility::{
+        CompatibilityError, ExecutablePairPreflight, NegotiatedHandoff, RunningHandoffGeneration,
+        negotiate_handoff,
+    },
     handoff_preflight::{PreflightError, PreflightGeneration, preflight_sealed_pair},
     package_provenance::{
         PackageProvenanceError, PackageProvenanceRecord, ValidatedPackageProvenance,
@@ -257,11 +262,14 @@ pub struct RollbackHandoffAuthority {
 impl RollbackHandoffAuthority {
     /// Captures the running installed pair and binds it to packaged provenance.
     ///
-    /// This must run synchronously during startup before Tokio, listeners,
-    /// connection tasks, or live PTY runtimes can create or close descriptors
-    /// concurrently with sealed preflight's descriptor audit. The exclusive
-    /// [`HandoffProcessGuard`] enforces that requirement from the first
-    /// executable capture through preflight and provenance binding.
+    /// This runs synchronously during startup, before Tokio, listeners,
+    /// connection tasks, or live PTY runtimes exist, so the running pair is
+    /// sealed before a package upgrade can replace it, and nothing else can
+    /// create or close descriptors meanwhile. The exclusive
+    /// [`HandoffProcessGuard`] enforces one thread from the first executable
+    /// capture through preflight and provenance binding. Sealed preflight no
+    /// longer depends on that quiet (Plan 0061 D2): forward preparation runs it
+    /// beside a serving daemon.
     ///
     /// # Errors
     ///
@@ -324,6 +332,126 @@ impl RollbackHandoffAuthority {
             capabilities: self.preflight.capabilities,
         }
     }
+
+    /// Prepares the installed forward pair for one handoff attempt, borrowing
+    /// this rollback authority.
+    ///
+    /// The forward candidate is whatever is installed now at the paths this
+    /// authority was captured from: `splinterd` and the adjacent `splinterm`,
+    /// where a package upgrade replaces them. Both are opened without following
+    /// symlinks and must be root-owned, regular, executable, writable by no
+    /// group or other user, and unchanged across their copy, exactly as the
+    /// rollback capture requires. The package record beside them is located
+    /// and loaded as at startup, then bound to the sealed forward pair and its
+    /// authenticated forward preflight. Finally the forward, running, and
+    /// rollback contracts must negotiate one handoff.
+    ///
+    /// The rollback pair is shared, not consumed: every failure, and dropping
+    /// the result, leaves this authority intact for the next attempt.
+    ///
+    /// Sealed preflight runs and waits for two children, so async callers run
+    /// this on a blocking thread. It is safe while the daemon serves (Plan
+    /// 0061 D2); see the descriptor discipline in [`crate::handoff_preflight`].
+    ///
+    /// # Errors
+    ///
+    /// [`HandoffCoordinatorError::NoInstalledUpgrade`] when the installed pair
+    /// is the running build. Otherwise fails closed on a missing, replaced,
+    /// unsafe, or mutating forward source, a copy, digest, or seal failure, a
+    /// failed or mismatched preflight, a package record that does not describe
+    /// the sealed pair, or an incompatible contract.
+    pub fn prepare_forward_installed(
+        &self,
+    ) -> Result<ForwardHandoffAuthority, HandoffCoordinatorError> {
+        let daemon = &self.pair().daemon().source().path;
+        let source = installed_source_pair(daemon)?;
+        let record =
+            PackageProvenanceRecord::load(&package_provenance_path(daemon)?, PACKAGED_OWNER_UID)?;
+        self.prepare_forward(
+            &source,
+            &record,
+            ExecutableSnapshotPolicy {
+                expected_owner_uid: PACKAGED_OWNER_UID,
+            },
+            |pair| preflight_sealed_pair(pair, PreflightGeneration::Forward),
+        )
+    }
+
+    fn prepare_forward(
+        &self,
+        source: &ExecutableSourcePair,
+        record: &PackageProvenanceRecord,
+        policy: ExecutableSnapshotPolicy,
+        preflight: impl FnOnce(&SealedExecutablePair) -> Result<ExecutablePairPreflight, PreflightError>,
+    ) -> Result<ForwardHandoffAuthority, HandoffCoordinatorError> {
+        if self.lifecycle.phase() != HandoffPhase::OldRunning {
+            return Err(HandoffCoordinatorError::UnexpectedPhase);
+        }
+        let snapshots = HandoffExecutableSnapshots::materialize(source, &self.executables, policy)?;
+        let (forward, running) = (snapshots.forward(), self.pair());
+        // Exactly the running images: nothing to hand off to, so spawn nothing.
+        if forward.daemon().source().sha256 == running.daemon().source().sha256
+            && forward.client().source().sha256 == running.client().source().sha256
+        {
+            return Err(HandoffCoordinatorError::NoInstalledUpgrade);
+        }
+        let forward_preflight = preflight(forward)?;
+        let provenance = record.verify_pair(forward, forward_preflight)?;
+        // A different image of the same authenticated build, such as a local
+        // rebuild of the running commit, is the running generation too.
+        if forward_preflight.pair_build_identity == self.preflight.pair_build_identity {
+            return Err(HandoffCoordinatorError::NoInstalledUpgrade);
+        }
+        let negotiated = negotiate_handoff(
+            self.running_generation(),
+            forward_preflight,
+            self.preflight,
+            &snapshots,
+        )?;
+        Ok(ForwardHandoffAuthority {
+            snapshots,
+            preflight: forward_preflight,
+            provenance,
+            negotiated,
+        })
+    }
+}
+
+/// One attempt's complete forward authority: the sealed installed forward
+/// pair beside its own handle on the retained rollback pair, the forward pair's
+/// authenticated preflight and package provenance, and the contract all three
+/// generations negotiated.
+///
+/// Dropping it closes only this attempt's descriptors; the retained rollback
+/// authority keeps its own.
+#[derive(Debug)]
+pub struct ForwardHandoffAuthority {
+    snapshots: HandoffExecutableSnapshots,
+    preflight: ExecutablePairPreflight,
+    provenance: ValidatedPackageProvenance,
+    negotiated: NegotiatedHandoff,
+}
+
+impl ForwardHandoffAuthority {
+    #[must_use]
+    pub const fn snapshots(&self) -> &HandoffExecutableSnapshots {
+        &self.snapshots
+    }
+
+    #[must_use]
+    pub const fn preflight(&self) -> ExecutablePairPreflight {
+        self.preflight
+    }
+
+    #[must_use]
+    pub const fn provenance(&self) -> &ValidatedPackageProvenance {
+        &self.provenance
+    }
+
+    #[must_use]
+    pub const fn negotiated(&self) -> NegotiatedHandoff {
+        self.negotiated
+    }
 }
 
 #[derive(Debug, Error)]
@@ -344,6 +472,10 @@ pub enum HandoffCoordinatorError {
     InvalidPhaseTransition,
     #[error("daemon handoff authority is in an unexpected phase")]
     UnexpectedPhase,
+    #[error("the installed daemon is the running build; there is nothing to hand off to")]
+    NoInstalledUpgrade,
+    #[error(transparent)]
+    Compatibility(#[from] CompatibilityError),
     #[error(transparent)]
     Snapshot(#[from] ExecutableSnapshotError),
     #[error(transparent)]
@@ -407,6 +539,8 @@ mod tests {
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
     const COMMIT: &str = "1234567890abcdef1234567890abcdef12345678";
     const VERSION: &str = "0.2.3-beta1";
+    const FORWARD_COMMIT: &str = "abcdef1234567890abcdef1234567890abcdef12";
+    const FORWARD_VERSION: &str = "0.2.4";
 
     struct Fixture {
         directory: PathBuf,
@@ -435,37 +569,62 @@ mod tests {
             for path in [&daemon, &client] {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
             }
-            let source = ExecutableSourcePair::new(daemon.clone(), client.clone()).unwrap();
+            let source = ExecutableSourcePair::new(daemon, client).unwrap();
             let capabilities = capabilities();
-            let identity = derive_pair_build_identity(
+            let record = write_record(
+                &directory.join("package-provenance.json"),
+                &source,
                 COMMIT,
-                BuildProvenanceKind::LocalCommittedHead,
                 VERSION,
                 capabilities,
-            )
-            .unwrap();
-            let record_path = directory.join("package-provenance.json");
-            let record_json = serde_json::json!({
-                "schema": 1,
-                "package": "splinterm",
-                "architecture": "x86_64",
-                "provenance": "local-committed-head",
-                "source_commit": COMMIT,
-                "build_version": VERSION,
-                "pair_build_identity": hex(identity.as_bytes()),
-                "daemon_sha256": hex(Sha256::digest(fs::read(daemon).unwrap()).into()),
-                "client_sha256": hex(Sha256::digest(fs::read(client).unwrap()).into()),
-            });
-            fs::write(&record_path, serde_json::to_vec(&record_json).unwrap()).unwrap();
-            fs::set_permissions(&record_path, fs::Permissions::from_mode(0o644)).unwrap();
-            let record =
-                PackageProvenanceRecord::load(&record_path, rustix::process::geteuid().as_raw())
-                    .unwrap();
+            );
             Self {
                 directory,
                 source,
                 record,
                 capabilities,
+            }
+        }
+
+        fn authority(&self) -> RollbackHandoffAuthority {
+            prepare_with_preflight(self.retained(), &self.record, |pair| Ok(self.report(pair)))
+                .unwrap()
+        }
+
+        /// Replaces the running pair in place, as a package upgrade does, and
+        /// returns the new pair's record.
+        fn install(
+            &self,
+            images: (&[u8], &[u8]),
+            commit: &str,
+            version: &str,
+        ) -> PackageProvenanceRecord {
+            fs::write(self.source.daemon(), images.0).unwrap();
+            fs::write(self.source.client(), images.1).unwrap();
+            let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            write_record(
+                &self
+                    .directory
+                    .join(format!("forward-provenance-{sequence}.json")),
+                &self.source,
+                commit,
+                version,
+                self.capabilities,
+            )
+        }
+
+        fn forward_report(&self, pair: &SealedExecutablePair) -> ExecutablePairPreflight {
+            ExecutablePairPreflight {
+                pair_build_identity: derive_pair_build_identity(
+                    FORWARD_COMMIT,
+                    BuildProvenanceKind::LocalCommittedHead,
+                    FORWARD_VERSION,
+                    self.capabilities,
+                )
+                .unwrap(),
+                pair_build_version: BuildVersion::new(0, 2, 4),
+                capabilities: self.capabilities,
+                snapshots: ExecutablePairBinding::from_snapshots(pair),
             }
         }
 
@@ -509,6 +668,44 @@ mod tests {
             terminal_checkpoint: exact(1),
             descriptor_manifest: exact(1),
         }
+    }
+
+    fn policy() -> ExecutableSnapshotPolicy {
+        ExecutableSnapshotPolicy {
+            expected_owner_uid: rustix::process::geteuid().as_raw(),
+        }
+    }
+
+    /// Writes and loads a package record for the pair's current images.
+    fn write_record(
+        path: &Path,
+        source: &ExecutableSourcePair,
+        commit: &str,
+        version: &str,
+        capabilities: HandoffCapabilities,
+    ) -> PackageProvenanceRecord {
+        let identity = derive_pair_build_identity(
+            commit,
+            BuildProvenanceKind::LocalCommittedHead,
+            version,
+            capabilities,
+        )
+        .unwrap();
+        let digest = |path: &Path| hex(Sha256::digest(fs::read(path).unwrap()).into());
+        let record_json = serde_json::json!({
+            "schema": 1,
+            "package": "splinterm",
+            "architecture": "x86_64",
+            "provenance": "local-committed-head",
+            "source_commit": commit,
+            "build_version": version,
+            "pair_build_identity": hex(identity.as_bytes()),
+            "daemon_sha256": digest(source.daemon()),
+            "client_sha256": digest(source.client()),
+        });
+        fs::write(path, serde_json::to_vec(&record_json).unwrap()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        PackageProvenanceRecord::load(path, rustix::process::geteuid().as_raw()).unwrap()
     }
 
     fn hex(bytes: [u8; 32]) -> String {
@@ -564,6 +761,127 @@ mod tests {
             Err(HandoffCoordinatorError::Provenance(
                 PackageProvenanceError::BuildMismatch
             ))
+        ));
+    }
+
+    #[test]
+    fn forward_preparation_binds_the_installed_upgrade_beside_the_shared_rollback_pair() {
+        let fixture = Fixture::new();
+        let authority = fixture.authority();
+        let record = fixture.install(
+            (b"forward-daemon", b"forward-client"),
+            FORWARD_COMMIT,
+            FORWARD_VERSION,
+        );
+        let forward = authority
+            .prepare_forward(&fixture.source, &record, policy(), |pair| {
+                Ok(fixture.forward_report(pair))
+            })
+            .unwrap();
+
+        assert_eq!(forward.provenance().source_commit, FORWARD_COMMIT);
+        assert_eq!(
+            forward.preflight().snapshots,
+            ExecutablePairBinding::from_snapshots(forward.snapshots().forward())
+        );
+        assert_eq!(
+            forward.snapshots().forward().daemon().source().sha256,
+            <[u8; 32]>::from(Sha256::digest(b"forward-daemon"))
+        );
+        // The shared rollback pair is the exact pair startup preflighted.
+        assert_eq!(
+            ExecutablePairBinding::from_snapshots(forward.snapshots().rollback()),
+            authority.preflight().snapshots
+        );
+        let negotiated = forward.negotiated();
+        assert_eq!(
+            negotiated.forward_build_identity,
+            forward.preflight().pair_build_identity
+        );
+        assert_eq!(
+            negotiated.rollback_build_identity,
+            authority.running_generation().build_identity
+        );
+    }
+
+    #[test]
+    fn a_failed_forward_attempt_keeps_rollback_authority_for_the_next() {
+        let fixture = Fixture::new();
+        let authority = fixture.authority();
+        let rollback = authority.preflight().snapshots;
+        let forward_report =
+            |pair: &SealedExecutablePair| Ok::<_, PreflightError>(fixture.forward_report(pair));
+
+        // A record describing other images than the installed pair.
+        let record = fixture.install(
+            (b"forward-daemon", b"forward-client"),
+            FORWARD_COMMIT,
+            FORWARD_VERSION,
+        );
+        fs::write(fixture.source.daemon(), b"substituted-daemon").unwrap();
+        assert!(matches!(
+            authority.prepare_forward(&fixture.source, &record, policy(), forward_report),
+            Err(HandoffCoordinatorError::Provenance(
+                PackageProvenanceError::ExecutableMismatch
+            ))
+        ));
+        // A sealed preflight failure.
+        let record = fixture.install(
+            (b"forward-daemon", b"forward-client"),
+            FORWARD_COMMIT,
+            FORWARD_VERSION,
+        );
+        assert!(matches!(
+            authority.prepare_forward(&fixture.source, &record, policy(), |_| {
+                Err(PreflightError::Timeout)
+            }),
+            Err(HandoffCoordinatorError::Preflight(PreflightError::Timeout))
+        ));
+        // A forward client missing mid-upgrade.
+        let displaced = fixture.source.client().with_file_name("displaced");
+        fs::rename(fixture.source.client(), &displaced).unwrap();
+        assert!(matches!(
+            authority.prepare_forward(&fixture.source, &record, policy(), forward_report),
+            Err(HandoffCoordinatorError::Snapshot(
+                ExecutableSnapshotError::OpenSource { .. }
+            ))
+        ));
+        fs::rename(&displaced, fixture.source.client()).unwrap();
+
+        // The next attempt succeeds with the same rollback authority, twice.
+        for _ in 0..2 {
+            let forward = authority
+                .prepare_forward(&fixture.source, &record, policy(), forward_report)
+                .unwrap();
+            assert_eq!(
+                ExecutablePairBinding::from_snapshots(forward.snapshots().rollback()),
+                rollback
+            );
+        }
+        assert_eq!(
+            ExecutablePairBinding::from_snapshots(authority.pair()),
+            rollback
+        );
+    }
+
+    #[test]
+    fn the_running_build_installed_again_is_no_upgrade() {
+        let fixture = Fixture::new();
+        let authority = fixture.authority();
+        // The untouched pair is refused before any preflight child runs.
+        assert!(matches!(
+            authority.prepare_forward(&fixture.source, &fixture.record, policy(), |_| {
+                panic!("no preflight runs for the running images")
+            }),
+            Err(HandoffCoordinatorError::NoInstalledUpgrade)
+        ));
+        // Different images of the same authenticated build are refused too.
+        let record = fixture.install((b"rebuilt-daemon", b"rebuilt-client"), COMMIT, VERSION);
+        assert!(matches!(
+            authority.prepare_forward(&fixture.source, &record, policy(), |pair| {
+                Ok(fixture.report(pair))
+            }),
+            Err(HandoffCoordinatorError::NoInstalledUpgrade)
         ));
     }
 
