@@ -1940,6 +1940,10 @@ struct StoppedForHandoff {
     /// exited. They end with the runtime; the resumed round reaps and
     /// records them.
     uncaptured: Vec<LiveSplintRuntime>,
+    /// The excluded Splints' handles: once their actors stop with the
+    /// runtime, each holds its final observed exit, which the manifests
+    /// then record.
+    excluded: Vec<splinterd::handoff_prepare::ExcludedSplint>,
     /// Whether every captured actor confirmed its handoff end in time.
     actors_handed_off: bool,
 }
@@ -2014,6 +2018,7 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
         listeners,
         handed_off,
         uncaptured,
+        excluded,
         actors_handed_off,
     }
 }
@@ -2031,6 +2036,10 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
 ///    uncaptured actors (Splints that had exited) and their scopes, which
 ///    now stop nothing; their PTY masters close.
 /// 3. The boundary needs one thread, which steps 1 and 2 provide.
+/// 4. With every excluded actor stopped, their final exits are recorded in
+///    the manifests ([`ExecBoundaryInputs::refresh_excluded_exits`]) before
+///    the boundary writes and seals them, so no status is lost between the
+///    manifest build and exec.
 ///
 /// A fresh manager is connected after the boundary released the guard; the
 /// shut-down one is never used again, so no retained identity is adopted
@@ -2042,10 +2051,11 @@ fn stop_runtime_and_cross(
     let StoppedForHandoff {
         state,
         hold,
-        boundary,
+        mut boundary,
         listeners,
         handed_off,
         uncaptured,
+        excluded,
         actors_handed_off,
     } = stopped;
     if let Some(manager) = state.workload_units.clone()
@@ -2054,13 +2064,16 @@ fn stop_runtime_and_cross(
         error!(%error, "workload unit manager did not shut down cleanly");
     }
     runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
-    let reason = cross_boundary(
-        &state,
-        boundary.as_ref(),
-        &listeners,
-        &handed_off,
-        actors_handed_off,
-    );
+    let reason = match boundary.refresh_excluded_exits(&state.rollback_handoff, &excluded) {
+        Ok(()) => cross_boundary(
+            &state,
+            boundary.as_ref(),
+            &listeners,
+            &handed_off,
+            actors_handed_off,
+        ),
+        Err(error) => error,
+    };
     warn!(%reason, "daemon handoff did not exec; resuming the running generation");
     let recorded_dojos = boundary.recorded_dojos();
     // The attempt is over: its fence and its sealed manifests and forward
@@ -9828,6 +9841,16 @@ trait ExecBoundaryInputs: Send {
     /// Each carried Splint's Dojo as the manifests record it.
     fn recorded_dojos(&self) -> HashMap<SplintId, DojoId>;
 
+    /// Records each excluded Splint's final exit in the manifests, after
+    /// the runtime stopped and before the boundary seals them.
+    fn refresh_excluded_exits(
+        &mut self,
+        _rollback: &handoff_requests::RollbackAuthority,
+        _excluded: &[splinterd::handoff_prepare::ExcludedSplint],
+    ) -> Result<(), ExecBoundaryError> {
+        Ok(())
+    }
+
     /// The sealed forward daemon image the exec call site executes, if this
     /// attempt has one. It is executed through its descriptor, never
     /// inherited.
@@ -9876,6 +9899,32 @@ impl ExecBoundaryInputs for ForwardExec {
 
     fn recorded_dojos(&self) -> HashMap<SplintId, DojoId> {
         self.manifests.splint_dojos().collect()
+    }
+
+    fn refresh_excluded_exits(
+        &mut self,
+        rollback: &handoff_requests::RollbackAuthority,
+        excluded: &[splinterd::handoff_prepare::ExcludedSplint],
+    ) -> Result<(), ExecBoundaryError> {
+        let Some(rollback) = rollback.retained() else {
+            return Err(ExecBoundaryError::ManifestRefresh(
+                splinterd::handoff_prepare::ManifestPreparationError::RollbackUnavailable,
+            ));
+        };
+        let refreshed = splinterd::handoff_prepare::refresh_excluded_exits(
+            rollback,
+            &self.forward,
+            &mut self.manifests,
+            excluded,
+        )
+        .map_err(ExecBoundaryError::ManifestRefresh)?;
+        if refreshed > 0 {
+            info!(
+                refreshed,
+                "daemon handoff: recorded excluded Splints' final exits"
+            );
+        }
+        Ok(())
     }
 
     #[cfg(feature = "integration-test")]

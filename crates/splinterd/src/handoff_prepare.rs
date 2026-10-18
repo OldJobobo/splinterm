@@ -708,6 +708,8 @@ pub enum ManifestPreparationError {
     Checkpoint(#[from] CheckpointStorageError),
     #[error("handoff manifest is invalid: {0}")]
     Manifest(#[source] ManifestRejection),
+    #[error("the retained rollback authority the manifests were built with is gone")]
+    RollbackUnavailable,
 }
 
 const fn rejected(error: ManifestError) -> ManifestPreparationError {
@@ -847,8 +849,31 @@ fn build_manifests(
         counterpart_manifest_slot: HandoffDescriptorSlot::CheckpointManifest,
         ..forward.clone()
     };
-    let forward_bytes = encode_manifest(&forward).map_err(rejected)?;
-    let rollback_bytes = encode_manifest(&rollback).map_err(rejected)?;
+    let (forward, rollback, forward_bytes, rollback_bytes) =
+        encode_validated_pair(authority, &forward, &rollback)?;
+    Ok(PreparedManifests {
+        forward,
+        rollback,
+        forward_bytes,
+        rollback_bytes,
+        forward_storage,
+        rollback_storage,
+    })
+}
+
+/// A canonical manifest pair and its encodings.
+type EncodedPair = (HandoffManifestV1, HandoffManifestV1, Vec<u8>, Vec<u8>);
+
+/// Encodes both manifests and runs every check the candidate will run on
+/// what it reads: the canonical bytes decoded, pair validation, and
+/// authority validation of each.
+fn encode_validated_pair(
+    authority: &ManifestAuthority<'_>,
+    forward: &HandoffManifestV1,
+    rollback: &HandoffManifestV1,
+) -> Result<EncodedPair, ManifestPreparationError> {
+    let forward_bytes = encode_manifest(forward).map_err(rejected)?;
+    let rollback_bytes = encode_manifest(rollback).map_err(rejected)?;
     // Validate what the candidate will read: the canonical bytes decoded.
     let forward = decode_manifest(&forward_bytes).map_err(rejected)?;
     let rollback = decode_manifest(&rollback_bytes).map_err(rejected)?;
@@ -863,14 +888,96 @@ fn build_manifests(
             )
             .map_err(rejected)?;
     }
-    Ok(PreparedManifests {
-        forward,
-        rollback,
-        forward_bytes,
-        rollback_bytes,
-        forward_storage,
-        rollback_storage,
-    })
+    Ok((forward, rollback, forward_bytes, rollback_bytes))
+}
+
+/// Records each excluded Splint's final exit in both manifests, once every
+/// excluded actor has stopped, and re-encodes and revalidates the pair.
+///
+/// The manifests were built while excluded actors still ran, and one may
+/// reap its child after that: its status would then be in neither the
+/// manifest nor a zombie the target can reap. Called after the runtime
+/// stopped and before the exec boundary writes and seals the manifest
+/// memfds, it closes that window: each status is now either recorded here
+/// (its actor reaped it) or still a zombie the target reaps. Only exit
+/// fields change; the Splints, descriptors, and memfds stay exactly as
+/// built. Returns how many records gained an exit.
+///
+/// # Errors
+/// Any check [`build_handoff_manifests`] runs refusing the refreshed pair,
+/// or a refresh that would change anything but exit fields. The manifests
+/// are then unchanged, and the caller resumes rather than exec.
+pub fn refresh_excluded_exits(
+    rollback: &RollbackHandoffAuthority,
+    forward: &ForwardHandoffAuthority,
+    manifests: &mut PreparedManifests,
+    excluded: &[ExcludedSplint],
+) -> Result<usize, ManifestPreparationError> {
+    refresh_manifests(
+        &ManifestAuthority::from_attempt(rollback, forward),
+        manifests,
+        excluded,
+    )
+}
+
+fn refresh_manifests(
+    authority: &ManifestAuthority<'_>,
+    manifests: &mut PreparedManifests,
+    excluded: &[ExcludedSplint],
+) -> Result<usize, ManifestPreparationError> {
+    let mut forward = manifests.forward.clone();
+    let mut rollback = manifests.rollback.clone();
+    let mut refreshed = 0;
+    for record in &mut forward.excluded_splints {
+        if record.exit.is_some() {
+            continue;
+        }
+        let exit = excluded
+            .iter()
+            .map(ExcludedSplint::handle)
+            .find(|handle| {
+                handle.splint_id == record.splint_id
+                    && handle.incarnation.value() == record.incarnation
+            })
+            .and_then(LiveSplintHandle::exit_status)
+            .map(|exit| ManifestProcessExit {
+                code: exit.code,
+                signal: exit.signal,
+            })
+            .filter(|exit| exit.is_valid());
+        if exit.is_some() {
+            record.exit = exit;
+            refreshed += 1;
+        }
+    }
+    if refreshed == 0 {
+        return Ok(0);
+    }
+    rollback
+        .excluded_splints
+        .clone_from(&forward.excluded_splints);
+    let (forward, rollback, forward_bytes, rollback_bytes) =
+        encode_validated_pair(authority, &forward, &rollback)?;
+    let only_exits_changed = |before: &HandoffManifestV1, after: &HandoffManifestV1| {
+        let strip = |manifest: &HandoffManifestV1| {
+            let mut manifest = manifest.clone();
+            for record in &mut manifest.excluded_splints {
+                record.exit = None;
+            }
+            manifest
+        };
+        strip(before) == strip(after)
+    };
+    if !only_exits_changed(&manifests.forward, &forward)
+        || !only_exits_changed(&manifests.rollback, &rollback)
+    {
+        return Err(rejected(ManifestError::PairMismatch));
+    }
+    manifests.forward = forward;
+    manifests.rollback = rollback;
+    manifests.forward_bytes = forward_bytes;
+    manifests.rollback_bytes = rollback_bytes;
+    Ok(refreshed)
 }
 
 /// The slots every manifest names: both listeners, both manifest memfds, and
@@ -1828,6 +1935,72 @@ pub(crate) mod tests {
         assert_eq!(manifests.rollback.excluded_splints, [recorded]);
         assert_eq!(manifests.splint_count(), 1);
         assert_eq!(manifests.descriptor_count(), GLOBAL_DESCRIPTOR_SLOTS + 2);
+        drop(manifests);
+        captures.release().await;
+        fleet.shutdown().await;
+    }
+
+    /// An excluded child whose exit its actor observed only after the
+    /// manifests were built ends up with its real status in both re-encoded
+    /// manifests; nothing but that exit changes. The race is simulated by
+    /// clearing the exit the build recorded, as a build that ran just before
+    /// the actor reaped would have left it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_exit_observed_after_the_build_is_refreshed_into_the_manifests() {
+        let fleet = Fleet::spawn(&[CAT, "exit 3"]).await;
+        let handle = fleet.runtimes[1].handle();
+        assert_eq!(handle.wait_for_exit().await.unwrap().code, Some(3));
+        let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, prepare)
+            .await
+            .unwrap();
+        let fixture = AuthorityFixture::new();
+        let (_listener, _image_listener, listeners) = listeners();
+        let inputs = ManifestInputs {
+            topology: &fleet.topology,
+            listeners,
+            daemon_generation: 1,
+            install_prefix: &fixture.install_prefix,
+        };
+        let _owner = PackagedOwnerOverride::current_user();
+        let mut manifests = build_manifests(&fixture.authority(), &captures, &inputs).unwrap();
+        let exited = Some(ManifestProcessExit {
+            code: Some(3),
+            signal: None,
+        });
+        assert_eq!(manifests.forward.excluded_splints[0].exit, exited);
+        // Every exit already recorded: nothing to refresh.
+        assert_eq!(
+            refresh_manifests(&fixture.authority(), &mut manifests, captures.excluded()).unwrap(),
+            0
+        );
+        for manifest in [&mut manifests.forward, &mut manifests.rollback] {
+            manifest.excluded_splints[0].exit = None;
+        }
+        manifests.forward_bytes = encode_manifest(&manifests.forward).unwrap();
+        manifests.rollback_bytes = encode_manifest(&manifests.rollback).unwrap();
+        let before = (
+            manifests.recorded_descriptors(),
+            manifests.forward.splints.clone(),
+        );
+
+        assert_eq!(
+            refresh_manifests(&fixture.authority(), &mut manifests, captures.excluded()).unwrap(),
+            1
+        );
+        for bytes in [manifests.forward_bytes(), manifests.rollback_bytes()] {
+            assert_eq!(
+                decode_manifest(bytes).unwrap().excluded_splints[0].exit,
+                exited
+            );
+        }
+        assert_eq!(manifests.rollback.excluded_splints[0].exit, exited);
+        assert_eq!(
+            (
+                manifests.recorded_descriptors(),
+                manifests.forward.splints.clone(),
+            ),
+            before
+        );
         drop(manifests);
         captures.release().await;
         fleet.shutdown().await;

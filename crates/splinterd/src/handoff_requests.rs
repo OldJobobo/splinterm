@@ -80,6 +80,14 @@ impl RollbackAuthority {
         }
     }
 
+    /// The retained rollback pair, when startup retained one.
+    pub(crate) fn retained(&self) -> Option<&RollbackHandoffAuthority> {
+        match self {
+            Self::Retained { authority } => Some(authority),
+            Self::NotPackaged | Self::Unavailable => None,
+        }
+    }
+
     const fn blocking_reason(&self) -> Option<HandoffBlockingReason> {
         match self {
             Self::Retained { .. } => None,

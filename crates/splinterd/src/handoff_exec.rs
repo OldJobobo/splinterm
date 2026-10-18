@@ -349,6 +349,8 @@ pub enum ExecBoundaryError {
     ListenerMismatch,
     #[error("a captured actor did not confirm its handoff end")]
     ActorsNotHandedOff,
+    #[error("cannot record the excluded Splints' final exits in the manifests: {0}")]
+    ManifestRefresh(#[source] crate::handoff_prepare::ManifestPreparationError),
     #[error("the process did not reach one thread: {0}")]
     Guard(#[source] HandoffCoordinatorError),
     #[error("cannot write and seal the {kind} manifest: {source}")]
