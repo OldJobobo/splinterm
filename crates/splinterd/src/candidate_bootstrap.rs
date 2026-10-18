@@ -10,6 +10,11 @@
 //! kernel-type and aliasing pass, then manifest pairing, compiled generation,
 //! executable snapshot, listener, checkpoint, terminal, and PTY evidence. Only
 //! then are owners transferred out of the claim table.
+//!
+//! The exclusive single-threaded [`HandoffProcessGuard`] travels with the
+//! claimed owners from acquisition through staging and is released only by
+//! [`CandidatePreRuntimeStage::enter_tokio`], so no runtime thread can exist
+//! while inherited authority is unverified.
 
 use std::{
     collections::BTreeSet,
@@ -38,6 +43,9 @@ use thiserror::Error;
 use crate::{
     executable_snapshot::{MAX_EXECUTABLE_SNAPSHOT_BYTES, REQUIRED_EXECUTABLE_SEALS},
     handoff_compatibility::VersionRange,
+    handoff_coordinator::{
+        HandoffCoordinatorError, HandoffLifecycle, HandoffPhase, HandoffProcessGuard,
+    },
     handoff_descriptors::{
         CandidateDescriptorClaims, DescriptorHandoffError, HandoffDescriptorSlot,
     },
@@ -76,15 +84,20 @@ impl CandidateManifestAcquisition {
 }
 
 /// Claimed candidate owners bound to one canonical manifest, not yet verified.
+///
+/// An acquired bootstrap holds the process guard. One recovered from a staging
+/// failure does not: it is rollback-only, and staging it again fails closed.
 #[derive(Debug)]
 pub struct CandidateBootstrap {
     manifest: HandoffManifestV1,
     claims: CandidateDescriptorClaims,
+    process_guard: Option<HandoffProcessGuard>,
+    lifecycle: HandoffLifecycle,
 }
 
-/// Verified candidate authority held before the first post-checkpoint PTY read.
+/// Every owner and decoded record that staging verified.
 #[derive(Debug)]
-pub struct CandidateRuntimeStage {
+struct CandidateStagedAuthorities {
     manifest: HandoffManifestV1,
     counterpart_manifest: HandoffManifestV1,
     splints: Vec<CandidateSplintStage>,
@@ -98,6 +111,22 @@ pub struct CandidateRuntimeStage {
     closed_unexpected: usize,
 }
 
+/// Fully verified candidate authority while the process remains single-threaded.
+#[derive(Debug)]
+pub struct CandidatePreRuntimeStage {
+    lifecycle: HandoffLifecycle,
+    process_guard: HandoffProcessGuard,
+    authorities: CandidateStagedAuthorities,
+}
+
+/// Verified candidate authority held before the first post-checkpoint PTY read,
+/// released from the single-threaded boundary for runtime adoption.
+#[derive(Debug)]
+pub struct CandidateRuntimeStage {
+    lifecycle: HandoffLifecycle,
+    authorities: CandidateStagedAuthorities,
+}
+
 #[derive(Debug)]
 struct CandidateSplintStage {
     evidence: ManifestSplint,
@@ -106,11 +135,41 @@ struct CandidateSplintStage {
     checkpoint_descriptor: OwnedFd,
 }
 
+impl CandidatePreRuntimeStage {
+    /// Number of unmanifested inherited descriptors the raw claim closed.
+    #[must_use]
+    pub const fn closed_unexpected(&self) -> usize {
+        self.authorities.closed_unexpected
+    }
+
+    /// Releases the single-threaded descriptor-table boundary. Runtime
+    /// adoption may create Tokio threads and descriptors only after this.
+    ///
+    /// # Errors
+    /// Rejects an internal lifecycle mismatch rather than starting a runtime
+    /// from authority that did not complete candidate staging.
+    pub fn enter_tokio(self) -> Result<CandidateRuntimeStage, HandoffCoordinatorError> {
+        if self.lifecycle.phase() != HandoffPhase::AdoptionStaged {
+            return Err(HandoffCoordinatorError::UnexpectedPhase);
+        }
+        let Self {
+            lifecycle,
+            process_guard,
+            authorities,
+        } = self;
+        drop(process_guard);
+        Ok(CandidateRuntimeStage {
+            lifecycle,
+            authorities,
+        })
+    }
+}
+
 impl CandidateRuntimeStage {
     /// Number of unmanifested inherited descriptors the raw claim closed.
     #[must_use]
     pub const fn closed_unexpected(&self) -> usize {
-        self.closed_unexpected
+        self.authorities.closed_unexpected
     }
 
     /// Keeps the newly verified owners alive until the next adoption slice.
@@ -124,7 +183,10 @@ impl CandidateRuntimeStage {
     /// Always returns the deliberate bounded adoption-not-wired error after
     /// checking that the complete staged authority remains represented.
     pub fn reject_until_runtime_adoption(self) -> anyhow::Result<()> {
-        let Self {
+        if self.lifecycle.phase() != HandoffPhase::AdoptionStaged {
+            anyhow::bail!("candidate runtime lifecycle invariant failed");
+        }
+        let CandidateStagedAuthorities {
             manifest,
             counterpart_manifest,
             splints,
@@ -136,7 +198,7 @@ impl CandidateRuntimeStage {
             rollback_daemon,
             rollback_client,
             closed_unexpected: _,
-        } = self;
+        } = self.authorities;
         let staged_splints = splints.len() == manifest.splints.len()
             && splints.iter().all(|stage| {
                 stage.evidence.incarnation > 0
@@ -164,19 +226,44 @@ impl CandidateRuntimeStage {
 }
 
 /// A staging failure that still owns the complete claimed descriptor table.
+///
+/// It never holds the thread-affine process guard, so it remains an ordinary
+/// sendable error.
 #[derive(Debug, Error)]
 #[error("candidate staging failed")]
 pub struct CandidateStageFailure {
     #[source]
     error: CandidateBootstrapError,
-    recovery: Box<CandidateBootstrap>,
+    recovery: Box<CandidateRecovery>,
+}
+
+/// The claimed owner table and lifecycle a staging failure retains.
+#[derive(Debug)]
+struct CandidateRecovery {
+    manifest: HandoffManifestV1,
+    claims: CandidateDescriptorClaims,
+    lifecycle: HandoffLifecycle,
 }
 
 impl CandidateStageFailure {
     /// Returns the untouched claimed owner table for cooperative rollback.
+    ///
+    /// The returned bootstrap holds no process guard: a rollback executor must
+    /// acquire a fresh single-threaded guard before descriptor mutation or
+    /// exec, and staging it again fails closed.
     #[must_use]
     pub fn into_recovery(self) -> CandidateBootstrap {
-        *self.recovery
+        let CandidateRecovery {
+            manifest,
+            claims,
+            lifecycle,
+        } = *self.recovery;
+        CandidateBootstrap {
+            manifest,
+            claims,
+            process_guard: None,
+            lifecycle,
+        }
     }
 }
 
@@ -198,6 +285,8 @@ pub(crate) enum CandidateBootstrapError {
     Checkpoint(#[from] CheckpointError),
     #[error("candidate compiled handoff identity is invalid: {0}")]
     Preflight(#[from] PreflightError),
+    #[error("candidate handoff lifecycle is invalid: {0}")]
+    Coordinator(#[from] HandoffCoordinatorError),
     #[error("candidate inherited PTY is invalid: {0}")]
     Pty(#[from] PtyError),
     #[error("cannot inspect candidate descriptor: {0}")]
@@ -244,13 +333,17 @@ pub fn decode_candidate_manifest(
 
 /// Safely binds already-owned descriptors to one decoded candidate manifest.
 ///
+/// The process guard acquired before the raw read moves into the bootstrap and
+/// stays held through staging.
+///
 /// # Errors
 /// Rejects any owner count, number, or order mismatch against the validated
-/// manifest; the rejected owners are closed.
+/// manifest; the rejected owners are closed and the guard is released.
 #[doc(hidden)]
 pub fn bind_candidate_manifest(
     acquisition: CandidateManifestAcquisition,
     claimed: splinterm_inherited_fd::ClaimedInheritedDescriptors,
+    process_guard: HandoffProcessGuard,
 ) -> anyhow::Result<CandidateBootstrap> {
     if !claimed.matches_raw_fds(&acquisition.expected_raw_descriptors) {
         return Err(
@@ -262,6 +355,8 @@ pub fn bind_candidate_manifest(
     Ok(CandidateBootstrap {
         manifest: acquisition.manifest,
         claims,
+        process_guard: Some(process_guard),
+        lifecycle: HandoffLifecycle::candidate_claimed(),
     })
 }
 
@@ -269,28 +364,54 @@ impl CandidateBootstrap {
     /// Completes every fallible descriptor and terminal check without reading a
     /// PTY or accepting a connection, then transfers owners into a staging set.
     /// A validation failure returns the complete claimed owner table for future
-    /// cooperative rollback.
+    /// cooperative rollback. Success keeps the process guard in the returned
+    /// pre-runtime stage; failure releases it.
     ///
     /// # Errors
     /// Returns typed validation failure together with the complete recovery
-    /// owner table when any manifest, descriptor, PTY, or terminal check fails.
+    /// owner table when any manifest, descriptor, PTY, or terminal check fails,
+    /// or when the bootstrap no longer holds the process guard because it was
+    /// recovered from an earlier failure.
     pub fn stage(
-        self,
+        mut self,
         shared_image_budget: &SharedImageBudget,
         shared_kitty_upload_budget: &SharedKittyUploadBudget,
         listener_path: &Path,
         image_listener_path: &Path,
-    ) -> Result<CandidateRuntimeStage, CandidateStageFailure> {
-        match self.verify(
+    ) -> Result<CandidatePreRuntimeStage, CandidateStageFailure> {
+        let Some(process_guard) = self.process_guard.take() else {
+            return Err(self.into_stage_failure(HandoffCoordinatorError::UnexpectedPhase.into()));
+        };
+        let verified = match self.verify(
             shared_image_budget,
             shared_kitty_upload_budget,
             listener_path,
             image_listener_path,
         ) {
-            Ok(verified) => Ok(self.transfer_verified(verified)),
-            Err(error) => Err(CandidateStageFailure {
-                error,
-                recovery: Box::new(self),
+            Ok(verified) => verified,
+            Err(error) => return Err(self.into_stage_failure(error)),
+        };
+        if let Err(error) = self.lifecycle.transition(HandoffPhase::AdoptionStaged) {
+            return Err(self.into_stage_failure(error.into()));
+        }
+        Ok(self.transfer_verified(verified, process_guard))
+    }
+
+    /// Retains the complete owner table without the thread-affine guard.
+    fn into_stage_failure(self, error: CandidateBootstrapError) -> CandidateStageFailure {
+        let Self {
+            manifest,
+            claims,
+            process_guard,
+            lifecycle,
+        } = self;
+        drop(process_guard);
+        CandidateStageFailure {
+            error,
+            recovery: Box::new(CandidateRecovery {
+                manifest,
+                claims,
+                lifecycle,
             }),
         }
     }
@@ -527,7 +648,11 @@ impl CandidateBootstrap {
         Ok(terminals)
     }
 
-    fn transfer_verified(mut self, verified: VerifiedCandidate) -> CandidateRuntimeStage {
+    fn transfer_verified(
+        mut self,
+        verified: VerifiedCandidate,
+        process_guard: HandoffProcessGuard,
+    ) -> CandidatePreRuntimeStage {
         let current_manifest_slot = current_manifest_slot(self.manifest.kind);
         let counterpart_manifest_slot = self.manifest.counterpart_manifest_slot;
         let evidence = self.manifest.splints.clone();
@@ -545,7 +670,7 @@ impl CandidateBootstrap {
                 checkpoint_descriptor,
             });
         }
-        let stage = CandidateRuntimeStage {
+        let authorities = CandidateStagedAuthorities {
             manifest: self.manifest.clone(),
             counterpart_manifest: verified.counterpart_manifest,
             splints,
@@ -560,7 +685,11 @@ impl CandidateBootstrap {
         };
         // The role pass rejected every role without a staged consumer.
         debug_assert!(self.claims.is_empty());
-        stage
+        CandidatePreRuntimeStage {
+            lifecycle: self.lifecycle,
+            process_guard,
+            authorities,
+        }
     }
 
     fn required(
@@ -982,13 +1111,17 @@ mod tests {
     }
 
     fn idle_owners() -> IdleOwners {
+        // Parallel tests can read the same clock value; the sequence keeps
+        // each fixture directory unique.
+        static NEXT_DIRECTORY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let directory = std::env::temp_dir().join(format!(
-            "sd-roles-{}-{}",
+            "sd-roles-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_DIRECTORY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&directory).unwrap();
         let owners = vec![
@@ -1054,7 +1187,12 @@ mod tests {
         )
         .unwrap();
         let claims = CandidateDescriptorClaims::bind(&manifest, claimed).unwrap();
-        CandidateBootstrap { manifest, claims }
+        CandidateBootstrap {
+            manifest,
+            claims,
+            process_guard: None,
+            lifecycle: HandoffLifecycle::candidate_claimed(),
+        }
     }
 
     fn replace_role(
@@ -1275,5 +1413,59 @@ mod tests {
                 DescriptorHandoffError::CandidateClaimMismatch
             ))
         ));
+    }
+
+    fn stage_for_test(
+        bootstrap: CandidateBootstrap,
+        directory: &Path,
+    ) -> Result<CandidatePreRuntimeStage, CandidateStageFailure> {
+        bootstrap.stage(
+            &SharedImageBudget::new(1 << 20),
+            &SharedKittyUploadBudget::new(1 << 20),
+            &directory.join("daemon.sock"),
+            &directory.join("image.sock"),
+        )
+    }
+
+    #[test]
+    fn staging_failure_releases_guard_and_recovers_a_rollback_only_owner_table() {
+        let _serial = crate::handoff_coordinator::PROCESS_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut idle = idle_owners();
+        replace_role(&mut idle.owners, HandoffDescriptorSlot::Listener, body());
+        let directory = idle.directory.clone();
+        let mut acquired = bootstrap(std::mem::take(&mut idle.owners));
+        acquired.process_guard = Some(HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap());
+
+        let failure = stage_for_test(acquired, &directory).unwrap_err();
+        assert!(matches!(
+            failure.error,
+            CandidateBootstrapError::DescriptorRole(HandoffDescriptorSlot::Listener)
+        ));
+        // The failure released the guard rather than carrying it as an error.
+        drop(HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap());
+
+        let recovered = failure.into_recovery();
+        assert!(recovered.process_guard.is_none());
+        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::CandidateClaimed);
+        assert_eq!(recovered.claims.len(), recovered.manifest.descriptors.len());
+
+        // A recovered table is rollback-only: staging it again fails before
+        // any verification and still returns every owner.
+        let failure = stage_for_test(recovered, &directory).unwrap_err();
+        assert!(matches!(
+            failure.error,
+            CandidateBootstrapError::Coordinator(HandoffCoordinatorError::UnexpectedPhase)
+        ));
+        let recovered = failure.into_recovery();
+        assert_eq!(recovered.claims.len(), recovered.manifest.descriptors.len());
+        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::CandidateClaimed);
+    }
+
+    #[test]
+    fn stage_failure_is_a_sendable_error() {
+        fn assert_send_sync<T: Send + Sync + 'static>() {}
+        assert_send_sync::<CandidateStageFailure>();
     }
 }

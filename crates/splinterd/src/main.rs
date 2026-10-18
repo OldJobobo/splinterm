@@ -1070,17 +1070,19 @@ fn main() -> Result<()> {
     if let Some(candidate) = candidate {
         let listener_path = socket_path()?;
         let image_listener_path = image_content_socket_path(&listener_path);
-        // Staging is read-only. Until cooperative rollback is wired, a failure
-        // drops the recovery table, closing every claimed descriptor.
+        // Staging is read-only and still holds the single-threaded handoff
+        // guard. Until cooperative rollback is wired, a failure drops the
+        // recovery table, closing every claimed descriptor.
         let stage = candidate.stage(
             &shared_image_budget,
             &shared_kitty_upload_budget,
             &listener_path,
             &image_listener_path,
         )?;
-        // Forward exec does not activate this path yet, so a verified stage
-        // is a deliberate fatal stop rather than ordinary startup.
-        return stage.reject_until_runtime_adoption();
+        // Runtime adoption will build Tokio only after this releases the
+        // guard. Forward exec does not activate this path yet, so a verified
+        // stage is a deliberate fatal stop rather than ordinary startup.
+        return stage.enter_tokio()?.reject_until_runtime_adoption();
     }
     let rollback_handoff =
         splinterd::handoff_coordinator::RollbackHandoffAuthority::prepare_installed();
