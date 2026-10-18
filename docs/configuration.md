@@ -901,9 +901,12 @@ as Foot does with `dpi-aware=yes`.
 A text size change rescales open terminal windows live, without a restart,
 through the same reconciliation as a font family change. Runtime zoom stays a
 half-point offset from the followed size, and `omarchy-display-text-size reset`
-returns to the theme's size. Splinterm reads `base-size` as the shell does, with
-JavaScript's `parseInt` and a 1 px floor, so `12.0` and `"12px"` both mean
-12 px and any positive size is accepted, not only the command's 9–20. The
+returns to the theme's size. Window chrome (tabs, Explorer, menus and the command
+palette) follows the terminal font size, runtime zoom included, until its text
+reaches a 24 px line height (logical pixels), then stays at that size.
+Splinterm reads `base-size` as the shell does, with JavaScript's `parseInt` and
+a 1 px floor, so `12.0` and `"12px"` both mean 12 px and any positive size is
+accepted, not only the command's 9–20. The
 resulting point size is clamped to the 6–96 pt Splinterm renders, which is
 reported once. A value with no leading digits, such as `big`, is reported once:
 an open window keeps its current size, and at startup Splinterm uses 12 px

@@ -27,6 +27,8 @@ const FOOTER_HEIGHT: u32 = 30;
 const ROW_HEIGHT: u32 = 48;
 /// The fewest terminal columns the docked Explorer leaves beside itself.
 const MINIMUM_DOCKED_TERMINAL_COLUMNS: u16 = 20;
+/// The docking floor never exceeds this many logical pixels, whatever the zoom.
+const MAXIMUM_DOCKED_TERMINAL_FLOOR: u32 = 240;
 
 /// The narrowest terminal width, in logical pixels, that keeps the Explorer
 /// docked beside the terminal; narrower Windows get the drawer.
@@ -36,11 +38,19 @@ const MINIMUM_DOCKED_TERMINAL_COLUMNS: u16 = 20;
 /// still takes input. Docking therefore needs only a small usable terminal,
 /// not the configured initial grid (80 columns by default), which sent an
 /// ordinary half-width tiled Window to the drawer.
+///
+/// The drawer exposes the same strip beside the panel that docking would
+/// give the terminal, only with line starts hidden, so a docked terminal
+/// always shows at least as much. The floor is therefore capped at a fixed
+/// logical width: zoomed-in cells must not send a wide Window to the drawer.
 #[must_use]
 pub(crate) fn explorer_minimum_docked_terminal_width(cell_width: u32, initial_columns: u16) -> u32 {
-    cell_width.max(1).saturating_mul(u32::from(
-        initial_columns.min(MINIMUM_DOCKED_TERMINAL_COLUMNS),
-    ))
+    cell_width
+        .max(1)
+        .saturating_mul(u32::from(
+            initial_columns.min(MINIMUM_DOCKED_TERMINAL_COLUMNS),
+        ))
+        .min(MAXIMUM_DOCKED_TERMINAL_FLOOR)
 }
 
 const fn explorer_header_text(focused: bool) -> &'static str {
@@ -976,6 +986,42 @@ mod tests {
         .unwrap();
         assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
         assert_eq!(drawer.terminal, content(PREFERRED_WIDTH + minimum - 1));
+    }
+
+    /// Review of VM E6-0: at maximum zoom the zoomed cell (about 77 px) made
+    /// the floor wider than a full-width Window, so the drawer covered line
+    /// starts ("rojects/splin" cut at the panel edge).
+    #[test]
+    fn maximum_zoom_keeps_a_wide_window_docked() {
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let context = RenderContext::new(u16::MAX).at_maximum_zoom(120);
+        let size = context.effective_font_size(120).unwrap();
+        let primary = &context.font_generation().unwrap().faces[0];
+        let cell_width = super::super::super::cell_metrics(primary, size)
+            .unwrap()
+            .width;
+        assert!(cell_width * 20 > 1268, "cell width {cell_width}");
+        let window = Rect {
+            x: 0,
+            y: 34,
+            width: 1268,
+            height: 754,
+        };
+        let layout = lair_explorer_layout(
+            window,
+            explorer_minimum_docked_terminal_width(cell_width, 80),
+            &rows,
+            Some(id),
+            0,
+        )
+        .unwrap();
+        assert_eq!(layout.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(layout.terminal.x, layout.panel.x + layout.panel.width);
+        assert_eq!(
+            explorer_minimum_docked_terminal_width(u32::MAX, 80),
+            MAXIMUM_DOCKED_TERMINAL_FLOOR
+        );
     }
 
     /// VM case E6: at maximum zoom every Explorer line still holds a whole

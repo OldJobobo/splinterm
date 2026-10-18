@@ -1372,6 +1372,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded badge, scale, and width paint matrix"
+    )]
     fn tab_badge_paints_first_and_never_reaches_the_close_control() {
         use super::{CachedFrameTitle, ChromeSource, ChromeText, ChromeTextStyle, Rect};
         use crate::frontend::badged_tab_label;
@@ -1391,7 +1395,11 @@ mod tests {
                     let dojo = DojoId::new();
                     let layout = tab_strip_layout(logical_width, &[dojo], 0).unwrap();
                     let tab = &layout.tabs[0];
-                    let maximum_cells = usize::try_from((tab.label_rect.width / 8).max(1)).unwrap();
+                    let maximum_cells = usize::try_from(super::tab_label_maximum_cells(
+                        App::buffer_rect(tab.label_rect, scale).unwrap().width,
+                        ChromeText::load("×", scale).unwrap().pixel_width(),
+                    ))
+                    .unwrap();
                     let width = super::logical_extent_to_buffer(logical_width, scale).unwrap();
                     let height =
                         super::logical_extent_to_buffer(TAB_STRIP_LOGICAL_HEIGHT, scale).unwrap();

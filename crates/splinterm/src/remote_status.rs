@@ -26,6 +26,9 @@ const MAX_DETAIL_CHARS: usize = 100;
 /// always has instead of running past the Window edge. Prompt lines arrive
 /// up to [`crate::remote_askpass::MAX_PROMPT_LINE_CHARS`] long.
 const PROMPT_WRAP_CELLS: usize = 68;
+/// At most this many quoted prompt rows, a leading `…` row included, so the
+/// key hints below a password prompt stay inside a 24-row status screen.
+const MAX_QUOTED_PROMPT_ROWS: usize = 12;
 /// Shown instead of a `--remote` argument that fails the profile-name rule.
 pub const FALLBACK_PROFILE_LABEL: &str = "remote";
 
@@ -537,10 +540,18 @@ impl RemoteStatus {
     }
 
     fn prompt_lines(&self, prompt: &PromptDisplay, lines: &mut Vec<String>) {
-        let quoted = prompt
+        let mut wrapped = prompt
             .lines
             .iter()
             .flat_map(|line| wrap_cells(line, PROMPT_WRAP_CELLS))
+            .collect::<Vec<_>>();
+        // OpenSSH ends with the question, so the end is kept.
+        if wrapped.len() > MAX_QUOTED_PROMPT_ROWS {
+            wrapped.drain(..=wrapped.len() - MAX_QUOTED_PROMPT_ROWS);
+            wrapped.insert(0, "…".to_owned());
+        }
+        let quoted = wrapped
+            .into_iter()
             .map(|line| format!("  │ {line}"))
             .collect::<Vec<_>>();
         match prompt.kind {
@@ -1074,6 +1085,28 @@ mod tests {
             wrap_cells("界界界", 4),
             vec!["界界".to_owned(), "界".to_owned()]
         );
+    }
+
+    #[test]
+    fn many_prompt_rows_keep_the_question_and_key_hints_in_24_rows() {
+        let long = format!("{} end", "word ".repeat(19));
+        let mut lines = vec![long; crate::remote_askpass::MAX_PROMPT_LINES - 1];
+        lines.push("Password for omarchy@localhost:".to_owned());
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        status.show_prompt(AskpassKind::Secret, &lines);
+        let screen = status.lines();
+        let quoted = screen
+            .iter()
+            .filter(|line| line.starts_with("  │ "))
+            .collect::<Vec<_>>();
+        assert_eq!(quoted.len(), MAX_QUOTED_PROMPT_ROWS);
+        assert_eq!(quoted[0], "  │ …");
+        assert_eq!(
+            quoted.last().unwrap().as_str(),
+            "  │ Password for omarchy@localhost:"
+        );
+        assert!(screen.len() <= 24, "{} rows", screen.len());
+        assert_eq!(screen.last().unwrap(), "Enter: submit          Esc: cancel");
     }
 
     #[test]

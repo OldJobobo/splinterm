@@ -18,7 +18,9 @@ use crate::{
 
 use super::{
     super::{ChromeText, ChromeTextStyle, RenderContext, blend_rect, fill_rect},
-    picker::{ROW_HOVER_ALPHA, ROW_PRESS_ALPHA, SessionPickerPalette, truncate_picker_text},
+    picker::{
+        ROW_HOVER_ALPHA, ROW_PRESS_ALPHA, SessionPickerPalette, editable_text, truncate_picker_text,
+    },
 };
 
 const HEADER_HEIGHT: u32 = 52;
@@ -463,8 +465,36 @@ fn rgba(color: u32) -> [u8; 4] {
     ]
 }
 
-/// `source` as chrome text, ended with `…` where it is wider than
-/// `clip_width` buffer pixels, so a long label is never cut off silently.
+/// `source` truncated to its last `maximum_cells` cells behind a leading `…`.
+fn truncate_text_start(source: &str, maximum_cells: usize) -> String {
+    let cells = |character: char| character.width().unwrap_or(0).min(2);
+    if source.chars().map(cells).sum::<usize>() <= maximum_cells {
+        return source.to_owned();
+    }
+    if maximum_cells == 0 {
+        return String::new();
+    }
+    let mut used = 0_usize;
+    let mut reversed = Vec::new();
+    for character in source.chars().rev() {
+        if used.saturating_add(cells(character)) > maximum_cells - 1 {
+            break;
+        }
+        used = used.saturating_add(cells(character));
+        reversed.push(character);
+    }
+    let tail = reversed
+        .into_iter()
+        .rev()
+        .skip_while(|character| cells(*character) == 0)
+        .collect::<String>();
+    format!("…{tail}")
+}
+
+/// `source` as chrome text bounded by `clip_width` buffer pixels, so a long
+/// label is never cut off silently: it ends with `…`, or with `keep_end` it
+/// starts with `…` and keeps its end (a right-aligned shortcut keeps its key).
+#[allow(clippy::too_many_arguments)]
 fn fitted_text<'a>(
     cache: &'a mut CommandPaletteTextCache,
     context: &RenderContext,
@@ -473,6 +503,7 @@ fn fitted_text<'a>(
     scale_120: u32,
     renderer_generation: u64,
     clip_width: u32,
+    keep_end: bool,
 ) -> Result<&'a ChromeText> {
     let (fits, cell_width) = {
         let text = cache.text(context, source, style, scale_120, renderer_generation)?;
@@ -485,8 +516,39 @@ fn fitted_text<'a>(
         return cache.text(context, source, style, scale_120, renderer_generation);
     }
     let maximum_cells = usize::try_from(clip_width / cell_width).unwrap_or(usize::MAX);
-    let truncated = truncate_picker_text(source, maximum_cells);
+    let truncated = if keep_end {
+        truncate_text_start(source, maximum_cells)
+    } else {
+        truncate_picker_text(source, maximum_cells)
+    };
     cache.text(context, &truncated, style, scale_120, renderer_generation)
+}
+
+/// An editable `value` after `prefix` with its caret, fitted to `clip_width`
+/// buffer pixels by keeping its end: the caret and the latest input stay
+/// visible and the start gives way behind `…`.
+fn editable_field_text(
+    cache: &mut CommandPaletteTextCache,
+    context: &RenderContext,
+    prefix: &str,
+    value: &str,
+    scale_120: u32,
+    renderer_generation: u64,
+    clip_width: u32,
+) -> Result<String> {
+    let cell_width = cache
+        .text(
+            context,
+            "_",
+            ChromeTextStyle::Regular,
+            scale_120,
+            renderer_generation,
+        )?
+        .frame
+        .cell_width
+        .max(1);
+    let maximum_cells = usize::try_from(clip_width / cell_width).unwrap_or(usize::MAX);
+    Ok(editable_text(prefix, value, maximum_cells))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -512,6 +574,7 @@ fn paint_text(
         scale_120,
         renderer_generation,
         clip.width,
+        right_aligned,
     )?;
     let x = if right_aligned {
         clip.x
@@ -677,19 +740,32 @@ pub(crate) fn paint_command_palette(
         palette.primary,
         false,
     )?;
-    let query = if let Some(help) = binding_help {
-        if help.query().is_empty() {
-            "> Search keybindings".to_owned()
-        } else {
-            format!("> {}_", help.query())
-        }
-    } else if state.query().is_empty() {
-        "> Type a command".to_owned()
-    } else {
-        format!("> {}_", state.query())
+    let query_clip = Rect {
+        x: header.x.saturating_add(inset).saturating_add(title_width),
+        y: header.y,
+        width: header
+            .width
+            .saturating_sub(inset.saturating_mul(2))
+            .saturating_sub(title_width),
+        height: header.height,
     };
-    let query_is_placeholder =
-        binding_help.map_or_else(|| state.query().is_empty(), |help| help.query().is_empty());
+    let typed = binding_help.map_or_else(|| state.query(), |help| help.query());
+    let query_is_placeholder = typed.is_empty();
+    let query = if !query_is_placeholder {
+        editable_field_text(
+            cache,
+            context,
+            "> ",
+            typed,
+            scale_120,
+            renderer_generation,
+            query_clip.width,
+        )?
+    } else if binding_help.is_some() {
+        "> Search keybindings".to_owned()
+    } else {
+        "> Type a command".to_owned()
+    };
     paint_text(
         cache,
         context,
@@ -700,15 +776,7 @@ pub(crate) fn paint_command_palette(
         ChromeTextStyle::Regular,
         scale_120,
         renderer_generation,
-        Rect {
-            x: header.x.saturating_add(inset).saturating_add(title_width),
-            y: header.y,
-            width: header
-                .width
-                .saturating_sub(inset.saturating_mul(2))
-                .saturating_sub(title_width),
-            height: header.height,
-        },
+        query_clip,
         if query_is_placeholder {
             palette.secondary
         } else {
@@ -1579,21 +1647,31 @@ pub(crate) fn paint_dojo_prompt(
             rgba(palette.selected_fill),
         );
         let inset = 12_u32.saturating_mul(scale_120).div_ceil(120);
+        let input_clip = Rect {
+            x: input.x.saturating_add(inset),
+            width: input.width.saturating_sub(inset.saturating_mul(2)),
+            ..input
+        };
+        let field = editable_field_text(
+            cache,
+            context,
+            "> ",
+            prompt_input,
+            scale_120,
+            renderer_generation,
+            input_clip.width,
+        )?;
         paint_text(
             cache,
             context,
             canvas,
             width,
             height,
-            &format!("> {prompt_input}_"),
+            &field,
             ChromeTextStyle::Regular,
             scale_120,
             renderer_generation,
-            Rect {
-                x: input.x.saturating_add(inset),
-                width: input.width.saturating_sub(inset.saturating_mul(2)),
-                ..input
-            },
+            input_clip,
             palette.selected_primary,
             false,
         )?;
@@ -1971,6 +2049,7 @@ mod tests {
                 scale,
                 1,
                 clip,
+                false,
             )
             .unwrap();
             assert!(text.pixel_width() <= clip);
@@ -1978,6 +2057,55 @@ mod tests {
                 cache.entries.keys().any(|(text, _)| text.ends_with('…')
                     && source.starts_with(text.trim_end_matches('…')))
             );
+        }
+    }
+
+    #[test]
+    fn editable_fields_keep_their_caret_and_shortcuts_keep_their_key() {
+        assert_eq!(truncate_text_start("Ctrl+Shift+P", 12), "Ctrl+Shift+P");
+        assert_eq!(truncate_text_start("Ctrl+Shift+P", 7), "…hift+P");
+        assert_eq!(truncate_text_start("Ctrl+界", 3), "…界");
+        assert_eq!(truncate_text_start("abc", 0), "");
+        assert_eq!(editable_text("> ", "dojo", 20), "> dojo_");
+        assert_eq!(editable_text("> ", "my-long-dojo-name", 12), "> …ojo-name_");
+
+        let context = RenderContext::new(u16::MAX);
+        let mut cache = CommandPaletteTextCache::default();
+        for scale in [120, 150, 180, 240] {
+            let cell = cache
+                .text(&context, "_", ChromeTextStyle::Regular, scale, 1)
+                .unwrap()
+                .frame
+                .cell_width;
+            let clip = cell * 12;
+            let field = editable_field_text(
+                &mut cache,
+                &context,
+                "> ",
+                "my-long-dojo-name",
+                scale,
+                1,
+                clip,
+            )
+            .unwrap();
+            assert_eq!(field, "> …ojo-name_", "scale {scale}");
+            let short =
+                editable_field_text(&mut cache, &context, "> ", "dojo", scale, 1, clip).unwrap();
+            assert_eq!(short, "> dojo_");
+            let shortcut = "Ctrl+Shift+PageDown";
+            let text = fitted_text(
+                &mut cache,
+                &context,
+                shortcut,
+                ChromeTextStyle::Regular,
+                scale,
+                1,
+                cell * 10,
+                true,
+            )
+            .unwrap();
+            assert!(text.pixel_width() <= cell * 10);
+            assert!(cache.contains_source("…+PageDown"), "scale {scale}");
         }
     }
 
@@ -2031,6 +2159,7 @@ mod tests {
                         scale,
                         1,
                         clip.width,
+                        false,
                     )
                     .unwrap();
                     assert!(text.pixel_height() <= chrome_maximum_cell_height(scale));

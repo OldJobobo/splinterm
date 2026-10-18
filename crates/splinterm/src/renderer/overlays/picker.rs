@@ -974,13 +974,21 @@ fn truncate_picker_source(source: &ChromeSource, maximum_cells: usize) -> Chrome
 }
 
 fn editable_search_text(query: &str, maximum_cells: usize) -> String {
+    editable_text("Search: ", query, maximum_cells)
+}
+
+/// An editable `query` after `label` with a trailing `_` caret, within
+/// `maximum_cells`. When it does not fit, the start of the query gives way
+/// behind a leading `…` (and the label too when space is very short), so the
+/// caret and the latest input stay visible.
+pub(super) fn editable_text(label: &str, query: &str, maximum_cells: usize) -> String {
     let width = |source: &str| {
         source
             .chars()
             .map(|character| character.width().unwrap_or(0).min(2))
             .sum::<usize>()
     };
-    let full = format!("Search: {query}_");
+    let full = format!("{label}{query}_");
     if width(&full) <= maximum_cells {
         return full;
     }
@@ -1000,8 +1008,8 @@ fn editable_search_text(query: &str, maximum_cells: usize) -> String {
         .map(|character| character.width().unwrap_or(0).min(2))
         .find(|width| *width > 0)
         .unwrap_or(0);
-    let label = if maximum_cells >= width("Search: ") + 2 + last_character_width {
-        "Search: "
+    let label = if maximum_cells >= width(label) + 2 + last_character_width {
+        label
     } else {
         ""
     };
