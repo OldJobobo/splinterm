@@ -262,14 +262,15 @@ fn cells(text: &str) -> usize {
 
 /// Composes a Dojo tab label within `maximum_cells`. The badge comes first and
 /// the label text gives up width before it, so on a narrow tab the badge is
-/// the last thing dropped. Without a badge the label is returned unchanged.
+/// the last thing dropped. Without a badge a label too long for the tab ends in
+/// an ellipsis.
 pub(crate) fn badged_tab_label(
     badge: Option<&ChromeSource>,
     label: &str,
     maximum_cells: usize,
 ) -> ChromeSource {
     let Some(badge) = badge else {
-        return ChromeSource::from(label);
+        return ChromeSource::from(ellipsized(label, maximum_cells.max(1)));
     };
     let mut composed = badge.clone();
     // One separating space, then at least one label cell and an ellipsis.
@@ -277,22 +278,30 @@ pub(crate) fn badged_tab_label(
     if label.is_empty() || label_budget < 2 {
         return composed;
     }
-    composed.push_str(" ");
-    if cells(label) <= label_budget {
-        composed.push_str(label);
-        return composed;
+    composed
+        .push_str(" ")
+        .push_str(&ellipsized(label, label_budget));
+    composed
+}
+
+/// `label` within `maximum_cells`, its last kept cell replaced by `…` when it
+/// is longer; `maximum_cells` must be at least one.
+fn ellipsized(label: &str, maximum_cells: usize) -> String {
+    if cells(label) <= maximum_cells {
+        return label.to_owned();
     }
+    let mut kept = String::new();
     let mut used = 0_usize;
     for character in label.chars() {
         let width = character.width().unwrap_or(0).min(2);
-        if used.saturating_add(width) > label_budget - 1 {
+        if used.saturating_add(width) > maximum_cells - 1 {
             break;
         }
-        composed.push_str(character.encode_utf8(&mut [0; 4]));
+        kept.push(character);
         used = used.saturating_add(width);
     }
-    composed.push_str("…");
-    composed
+    kept.push('…');
+    kept
 }
 
 #[cfg(test)]
@@ -490,7 +499,9 @@ mod tests {
                 .text()
                 .to_owned()
         };
-        assert_eq!(label(None, "editor", 3), "editor");
+        assert_eq!(label(None, "editor", 6), "editor");
+        assert_eq!(label(None, "editor", 3), "ed…");
+        assert_eq!(label(None, "editor", 0), "…");
         assert_eq!(label(Some("?"), "editor", 20), "? editor");
         assert_eq!(label(Some("?2"), "editor", 9), "?2 editor");
         assert_eq!(label(Some("?2"), "editor", 8), "?2 edit…");

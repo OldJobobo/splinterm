@@ -161,14 +161,14 @@ use crate::renderer::{
     SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
     background_bgra, chrome_panel_fill, chrome_panel_palette, clear_snapshot_caches,
     command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
-    fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
-    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
-    paint_command_palette, paint_dojo_prompt, paint_history_overlay, paint_lair_explorer,
-    paint_search_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
-    paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
-    paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
-    session_picker_hit_test, session_picker_overlay_layout, snapshot_row_rect,
-    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
+    explorer_minimum_docked_terminal_width, fill_rect, history_overlay_layout,
+    lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
+    lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
+    paint_lair_explorer, paint_search_overlay, paint_session_picker_overlay,
+    paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
+    paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
+    scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
+    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -3274,7 +3274,7 @@ impl App {
             })
             .unwrap_or(1);
         let minimum_terminal_width =
-            cell_width.saturating_mul(u32::from(self.presentation.initial_columns));
+            explorer_minimum_docked_terminal_width(cell_width, self.presentation.initial_columns);
         let rows = self.explorer.rows();
         lair_explorer_layout(
             self.base_content_rect(),

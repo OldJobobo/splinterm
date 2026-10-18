@@ -21,6 +21,31 @@ use crate::{
 
 const MAX_DETAIL_LINES: usize = 6;
 const MAX_DETAIL_CHARS: usize = 100;
+/// Quoted OpenSSH prompt text wraps at this many cells so that, after its
+/// four-cell quote prefix, it stays inside the 72 columns the status screen
+/// always has instead of running past the Window edge. Prompt lines arrive
+/// up to [`crate::remote_askpass::MAX_PROMPT_LINE_CHARS`] long.
+const PROMPT_WRAP_CELLS: usize = 68;
+/// The status Window's rows unless [`RemoteStatus::with_rows`] says otherwise:
+/// the default `main.initial-rows`.
+const DEFAULT_STATUS_ROWS: u16 = 24;
+
+/// What a prompt-screen line is, in the order lines give way when the status
+/// Window is too short for all of them: blank spacing first, the key hints
+/// last. Quoted prompt rows give way before any of these, down to the last
+/// one, which holds OpenSSH's question.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PromptLine {
+    Blank,
+    Guidance,
+    HandlingNote,
+    Header,
+    Status,
+    Intro,
+    Field,
+    Question,
+    Controls,
+}
 /// Shown instead of a `--remote` argument that fails the profile-name rule.
 pub const FALLBACK_PROFILE_LABEL: &str = "remote";
 
@@ -333,6 +358,7 @@ pub struct RemoteStatus {
     attempts: u32,
     terminal: bool,
     prompt: Option<PromptDisplay>,
+    rows: u16,
 }
 
 impl RemoteStatus {
@@ -348,6 +374,7 @@ impl RemoteStatus {
             attempts: 1,
             terminal: false,
             prompt: None,
+            rows: DEFAULT_STATUS_ROWS,
         }
     }
 
@@ -356,6 +383,14 @@ impl RemoteStatus {
     #[must_use]
     pub const fn with_terminal(mut self, terminal: bool) -> Self {
         self.terminal = terminal;
+        self
+    }
+
+    /// Records the status Window's row count. The Window keeps its configured
+    /// size, so a prompt screen is fitted to it rather than overflowing it.
+    #[must_use]
+    pub const fn with_rows(mut self, rows: u16) -> Self {
+        self.rows = rows;
         self
     }
 
@@ -503,10 +538,8 @@ impl RemoteStatus {
                 lines.push(format!("Connected to {}.", self.destination));
             }
             RemoteStatusPhase::Connecting if self.prompt.is_some() => {
-                lines.push(format!("Connecting to {}…", self.destination));
-                lines.push(String::new());
                 if let Some(prompt) = &self.prompt {
-                    self.prompt_lines(prompt, &mut lines);
+                    return self.prompt_screen(prompt);
                 }
             }
             RemoteStatusPhase::Connecting | RemoteStatusPhase::Closed => {
@@ -531,47 +564,108 @@ impl RemoteStatus {
         lines
     }
 
-    fn prompt_lines(&self, prompt: &PromptDisplay, lines: &mut Vec<String>) {
-        let quoted = prompt.lines.iter().map(|line| format!("  │ {line}"));
-        match prompt.kind {
+    /// A prompt screen fitted to the status Window's rows: the key hints and
+    /// OpenSSH's question always stay, quoted prompt rows give way first
+    /// (keeping the end, behind a `…` row), then the other lines by
+    /// [`PromptLine`] order.
+    fn prompt_screen(&self, prompt: &PromptDisplay) -> Vec<String> {
+        use PromptLine::{
+            Blank, Controls, Field, Guidance, HandlingNote, Header, Intro, Question, Status,
+        };
+
+        let mut before = vec![
+            (Header, format!("REMOTE · {}", self.profile)),
+            (Blank, String::new()),
+            (Status, format!("Connecting to {}…", self.destination)),
+            (Blank, String::new()),
+        ];
+        let after = match prompt.kind {
             AskpassKind::Secret => {
                 // A ProxyJump hop prompts too, so the destination is only
                 // context; OpenSSH's own text names who is asking.
-                lines.push(format!(
-                    "OpenSSH, connecting to {}, is asking for a credential.",
-                    self.destination
+                before.push((
+                    Intro,
+                    format!(
+                        "OpenSSH, connecting to {}, is asking for a credential.",
+                        self.destination
+                    ),
                 ));
-                lines.push("Its prompt names who it is for; it may be a jump host:".to_owned());
-                lines.extend(quoted);
-                lines.push(String::new());
-                lines.push(if prompt.has_input {
-                    "Password field: entered (hidden)".to_owned()
-                } else {
-                    "Password field: empty".to_owned()
-                });
-                lines.push(SECRET_HANDLING_NOTE.to_owned());
-                lines.push(String::new());
-                lines.push("Enter: submit          Esc: cancel".to_owned());
+                before.push((
+                    Guidance,
+                    "Its prompt names who it is for; it may be a jump host:".to_owned(),
+                ));
+                vec![
+                    (Blank, String::new()),
+                    (
+                        Field,
+                        if prompt.has_input {
+                            "Password field: entered (hidden)".to_owned()
+                        } else {
+                            "Password field: empty".to_owned()
+                        },
+                    ),
+                    (HandlingNote, SECRET_HANDLING_NOTE.to_owned()),
+                    (Blank, String::new()),
+                    (Controls, "Enter: submit          Esc: cancel".to_owned()),
+                ]
             }
             AskpassKind::Confirm => {
-                lines.push(format!(
-                    "OpenSSH, connecting to {}, asks you to confirm:",
-                    self.destination
+                before.push((
+                    Intro,
+                    format!(
+                        "OpenSSH, connecting to {}, asks you to confirm:",
+                        self.destination
+                    ),
                 ));
-                lines.extend(quoted);
-                lines.push(String::new());
-                lines.push("Y: yes          N / Esc: no".to_owned());
+                vec![
+                    (Blank, String::new()),
+                    (Controls, "Y: yes          N / Esc: no".to_owned()),
+                ]
             }
             AskpassKind::Notice => {
-                lines.push(format!(
-                    "OpenSSH, connecting to {}, says:",
-                    self.destination
+                before.push((
+                    Intro,
+                    format!("OpenSSH, connecting to {}, says:", self.destination),
                 ));
-                lines.extend(quoted);
-                lines.push(String::new());
-                lines.push("C / Esc: cancel".to_owned());
+                vec![
+                    (Blank, String::new()),
+                    (Controls, "C / Esc: cancel".to_owned()),
+                ]
+            }
+        };
+        let rows = usize::from(self.rows).max(1);
+        let mut quoted = prompt
+            .lines
+            .iter()
+            .flat_map(|line| wrap_cells(line, PROMPT_WRAP_CELLS))
+            .collect::<Vec<_>>();
+        // OpenSSH ends with the question, so the end is kept.
+        let budget = rows.saturating_sub(before.len() + after.len()).max(1);
+        if quoted.len() > budget {
+            quoted.drain(..quoted.len() - budget);
+            if budget > 1 {
+                "…".clone_into(&mut quoted[0]);
             }
         }
+        let mut screen = before;
+        screen.extend(
+            quoted
+                .into_iter()
+                .map(|line| (Question, format!("  │ {line}"))),
+        );
+        screen.extend(after);
+        while screen.len() > rows {
+            let Some(index) = screen
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (kind, _))| *kind)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            screen.remove(index);
+        }
+        screen.into_iter().map(|(_, line)| line).collect()
     }
 
     /// Renders the current phase as a snapshot of the status Window.
@@ -579,6 +673,39 @@ impl RemoteStatus {
     pub fn snapshot(&self, splint_id: SplintId, revision: u64) -> TerminalSnapshot {
         synthetic_text_snapshot(splint_id, revision, &self.title(), self.lines())
     }
+}
+
+/// Splits `line` into rows of at most `maximum` display cells, breaking at
+/// spaces where it can and inside a word only when the word alone is longer.
+fn wrap_cells(line: &str, maximum: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+
+    let cells = |text: &str| {
+        text.chars()
+            .map(|character| character.width().unwrap_or(0).min(2))
+            .sum::<usize>()
+    };
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    for (index, word) in line.split(' ').enumerate() {
+        if index > 0 {
+            // A row break replaces the space between two words.
+            if !current.is_empty() && cells(&current) + 1 + cells(word) > maximum {
+                rows.push(std::mem::take(&mut current));
+            } else if cells(&current) < maximum {
+                current.push(' ');
+            }
+        }
+        for character in word.chars() {
+            let width = character.width().unwrap_or(0).min(2);
+            if width > 0 && !current.is_empty() && cells(&current) + width > maximum {
+                rows.push(std::mem::take(&mut current));
+            }
+            current.push(character);
+        }
+    }
+    rows.push(current);
+    rows
 }
 
 #[cfg(test)]
@@ -998,6 +1125,88 @@ mod tests {
         status.show_prompt(AskpassKind::Secret, &prompt_lines(&["password:"]));
         status.on_key(RemoteStatusKey::Close);
         assert!(status.prompt().is_none());
+    }
+
+    #[test]
+    fn long_prompt_lines_wrap_inside_the_status_screen() {
+        use unicode_width::UnicodeWidthStr;
+
+        let long = "The authenticity of host 'omarchy-test.example.internal (192.0.2.10)' can't be established, ok?";
+        assert!(long.chars().count() <= crate::remote_askpass::MAX_PROMPT_LINE_CHARS);
+        let word = "x".repeat(crate::remote_askpass::MAX_PROMPT_LINE_CHARS);
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        for kind in [
+            AskpassKind::Secret,
+            AskpassKind::Confirm,
+            AskpassKind::Notice,
+        ] {
+            status.show_prompt(kind, &prompt_lines(&[long, &word, "short:"]));
+            let quoted = status
+                .lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix("  │ ").map(str::to_owned))
+                .collect::<Vec<_>>();
+            assert!(quoted.iter().all(|line| line.width() <= PROMPT_WRAP_CELLS));
+            assert!(quoted.iter().all(|line| line.width() + 4 <= 72));
+            assert_eq!(quoted.len(), 5, "{quoted:?}");
+            assert_eq!(quoted[..2].join(" "), long);
+            assert_eq!(quoted[2..4].concat(), word);
+            assert_eq!(quoted[4], "short:");
+        }
+        assert_eq!(wrap_cells("", 68), vec![String::new()]);
+        assert_eq!(
+            wrap_cells("界界界", 4),
+            vec!["界界".to_owned(), "界".to_owned()]
+        );
+    }
+
+    /// Codex review on #153: the status Window keeps its configured rows
+    /// (`main.initial-rows` 2..), so a maximal prompt must fit every height
+    /// and keep the key hints and OpenSSH's question.
+    #[test]
+    fn maximal_prompts_fit_every_supported_window_height() {
+        let long = format!("{} end", "word ".repeat(19));
+        assert!(long.chars().count() <= crate::remote_askpass::MAX_PROMPT_LINE_CHARS);
+        let mut lines = vec![long; crate::remote_askpass::MAX_PROMPT_LINES - 1];
+        lines.push("Password for omarchy@localhost:".to_owned());
+        let cases = [
+            (AskpassKind::Secret, "Enter: submit          Esc: cancel"),
+            (AskpassKind::Confirm, "Y: yes          N / Esc: no"),
+            (AskpassKind::Notice, "C / Esc: cancel"),
+        ];
+        for rows in 2..=30_u16 {
+            for (kind, controls) in cases {
+                let mut status = RemoteStatus::new("wintermute", "wintermute").with_rows(rows);
+                status.show_prompt(kind, &lines);
+                let screen = status.lines();
+                assert!(
+                    screen.len() <= usize::from(rows),
+                    "{kind:?} at {rows} rows: {screen:?}"
+                );
+                assert_eq!(screen.last().unwrap(), controls, "{kind:?} at {rows} rows");
+                let quoted = screen
+                    .iter()
+                    .filter(|line| line.starts_with("  │ "))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    quoted.last().unwrap().as_str(),
+                    "  │ Password for omarchy@localhost:",
+                    "{kind:?} at {rows} rows"
+                );
+                if kind == AskpassKind::Secret && (19..=24).contains(&rows) {
+                    // Every line of the full screen stays; only quoted rows
+                    // give way, behind a `…` row.
+                    assert_eq!(screen.len(), usize::from(rows));
+                    assert_eq!(quoted[0], "  │ …");
+                    assert!(screen.contains(&SECRET_HANDLING_NOTE.to_owned()));
+                    assert!(screen.contains(&"Password field: empty".to_owned()));
+                }
+            }
+        }
+        // The default height leaves the whole wrapped prompt but its start.
+        let mut status = RemoteStatus::new("wintermute", "wintermute");
+        status.show_prompt(AskpassKind::Secret, &lines);
+        assert_eq!(status.lines().len(), usize::from(DEFAULT_STATUS_ROWS));
     }
 
     #[test]

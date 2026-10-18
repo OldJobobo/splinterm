@@ -463,8 +463,10 @@ pub(in crate::app) async fn connect_with_status(
         |_| profile_label(&profile_name).to_owned(),
         |profile| destination(&profile),
     );
-    let status =
-        RemoteStatus::new(&profile_name, &initial).with_terminal(std::io::stdin().is_terminal());
+    // The status Window keeps its configured rows; prompts are fitted to them.
+    let status = RemoteStatus::new(&profile_name, &initial)
+        .with_terminal(std::io::stdin().is_terminal())
+        .with_rows(config.initial_rows);
     let splint_id = SplintId::new();
     let snapshot = status.snapshot(splint_id, 1);
     let (updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
