@@ -100,7 +100,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `main.font` | explicit fontconfig pattern; when unset, follow Omarchy's effective `monospace` family | unset |
 | `main.font-ligatures` | startup-only cross-cell shaping: `off`, `on`, or `cursor` | off |
 | `main.font-features` | startup-only comma-separated OpenType `tag=value` settings | empty; at most 64 unique tags |
-| `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
+| `main.font-pixelsize` | configured pixel font size; any size key stops Splinterm following Omarchy's text size | 6–96; Omarchy's text size, otherwise 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
@@ -162,7 +162,9 @@ fallback metadata off the Wayland dispatch path, publishes the generation
 atomically, rebuilds active and hidden pane frames, and lets only an
 existing pane controller issue the final PTY resize. Observer panes prepare a
 future size without acquiring control. Font changes do not imply live reload of
-font size, padding, shell, scrollback, cursor, or keymap settings.
+`config.ini` font size, padding, shell, scrollback, cursor, or keymap settings.
+While no size key is set, the size instead follows Omarchy's text size live
+through the same path; see "Omarchy shell settings" below.
 
 ### Opt-in terminal font shaping
 
@@ -814,13 +816,16 @@ loads.
 
 ### Omarchy shell settings
 
-Splinterm also follows a few settings from the Omarchy 4 shell's `shell.toml`.
+Splinterm also follows two settings from the Omarchy 4 shell's `shell.toml`:
+panel alpha and text size.
 The shell reads two layers: the active theme's `shell.toml`, rendered from
 Omarchy's template or shipped by the theme, and the user's
 `~/.config/omarchy/shell.toml`. Omarchy hard-codes that user path under `$HOME`.
 Splinterm layers them the same way, key by key: a key in the user file replaces
 the theme's value for that key only, and a key in neither file takes Omarchy's
 default. Both files join the 500 ms theme poll, so edits apply live.
+
+#### Panel alpha
 
 Panels follow the shell's own card alpha:
 
@@ -853,3 +858,37 @@ opaque panel, as many light themes do, keeps its panels opaque. Values outside
 0.0–1.0 or not numbers are reported once and treated as Omarchy's opaque
 default. An explicit `main.theme` JSON keeps all panels opaque. Splinterm has no
 separate panel alpha key.
+
+#### Text size
+
+`omarchy-display-text-size <9-20>` writes `[font] base-size` to the user
+`shell.toml` and sets every terminal it knows to `px × 9/12` points, rounded to
+a whole point: 12 px gives 9 pt and 16 px gives 12 pt. While Splinterm's own
+`config.ini` sets none of `main.font-pixelsize`, `main.font-point-size` or the
+deprecated `main.font-size`, Splinterm follows the same text size:
+
+1. The user `~/.config/omarchy/shell.toml` `[font] base-size`, when set.
+2. Otherwise the active theme's `shell.toml` `[font] base-size`. Omarchy's
+   rendered template sets 12, so a stock Omarchy 4 desktop gives 9 pt.
+3. Otherwise Splinterm's own default of 14 px.
+
+Splinterm uses Omarchy's point size, so it matches Foot at the same text size:
+Foot's default `dpi-aware=no` and Splinterm's default
+`main.font-sizing-policy=output-scale` both size points at 96 DPI times the
+output scale. 9 pt is 12 px at scale 1 and 24 px at scale 2. With
+`main.font-sizing-policy=physical-dpi`, points use the output's physical DPI,
+as Foot does with `dpi-aware=yes`.
+
+A text size change rescales open windows live, without a restart, through the
+same reconciliation as a font family change. Runtime zoom stays a half-point
+offset from the followed size, and `omarchy-display-text-size reset` returns to
+the theme's size. A value that is not a whole number from 9 to 20 is reported
+once and the previous size is kept. An explicit `main.theme` JSON palette still
+follows the text size from the Omarchy `shell.toml` layers.
+
+To opt out, set a size in `config.ini`, for example:
+
+```ini
+[main]
+font-pixelsize=14
+```

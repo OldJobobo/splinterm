@@ -65,6 +65,8 @@ pub struct RenderContext {
     font_generation: Result<Arc<FontGeneration>, Arc<String>>,
     output_dpi: OutputDpiObservation,
     font_zoom_steps: i16,
+    /// The followed Omarchy text size, replacing the configured base size.
+    font_size_override: Option<FontSize>,
     background_alpha: u16,
 }
 
@@ -85,6 +87,7 @@ impl RenderContext {
             output_dpi: OutputDpiObservation::provided(resources.options.physical_dpi)
                 .expect("configured physical DPI was validated"),
             font_zoom_steps: 0,
+            font_size_override: None,
             background_alpha,
         }
     }
@@ -163,7 +166,7 @@ impl RenderContext {
     ) -> Result<crate::geometry::ResolvedFontSize> {
         let options = &self.resources.options;
         resolve_font_size_with_output(
-            zoomed_font_size(options, self.font_zoom_steps, &self.output_dpi)?,
+            self.zoomed(self.font_zoom_steps, &self.output_dpi)?,
             options.font_sizing_policy,
             surface_scale_120,
             &self.output_dpi,
@@ -184,7 +187,7 @@ impl RenderContext {
     ) -> Result<Option<bool>> {
         let previous = self.effective_font_resolution(surface_scale_120)?;
         let options = &self.resources.options;
-        let Ok(size) = zoomed_font_size(options, steps, &self.output_dpi) else {
+        let Ok(size) = self.zoomed(steps, &self.output_dpi) else {
             return Ok(None);
         };
         let next = resolve_font_size_with_output(
@@ -202,6 +205,53 @@ impl RenderContext {
         ))
     }
 
+    /// The base size runtime zoom applies to: the followed Omarchy text size,
+    /// otherwise the configured size.
+    fn base_font_size(&self) -> FontSize {
+        self.font_size_override
+            .unwrap_or(self.resources.options.font_size)
+    }
+
+    fn zoomed(&self, steps: i16, observation: &OutputDpiObservation) -> Result<FontSize> {
+        zoomed_size(
+            self.base_font_size(),
+            self.resources.options.font_sizing_policy,
+            steps,
+            observation,
+        )
+    }
+
+    /// Starts this context at a followed Omarchy text size instead of the
+    /// configured base size; `None` keeps the configured size.
+    #[must_use]
+    pub fn with_font_size_override(mut self, size: Option<FontSize>) -> Self {
+        self.font_size_override = size;
+        self
+    }
+
+    /// Replaces the followed base size live and keeps runtime zoom as an
+    /// offset from it. Returns whether the effective raster size changed.
+    ///
+    /// # Errors
+    /// Rejects a size whose zoomed raster is unsupported, keeping the current
+    /// base size.
+    pub(crate) fn replace_font_size_override(
+        &mut self,
+        size: Option<FontSize>,
+        surface_scale_120: u32,
+    ) -> Result<bool> {
+        let previous = self.effective_font_resolution(surface_scale_120)?;
+        let mut candidate = self.clone();
+        candidate.font_size_override = size;
+        let next = candidate.effective_font_resolution(surface_scale_120)?;
+        anyhow::ensure!(
+            effective_raster_size_supported(next.effective_pixel_size_26_6)?,
+            "followed text size resolves to an unsupported raster size"
+        );
+        self.font_size_override = size;
+        Ok(previous.effective_pixel_size_26_6 != next.effective_pixel_size_26_6)
+    }
+
     /// Updates this context's current output observation.
     pub(super) fn apply_output_dpi(
         &mut self,
@@ -211,7 +261,7 @@ impl RenderContext {
         let options = &self.resources.options;
         let previous = self.effective_font_resolution(surface_scale_120)?;
         let next = resolve_font_size_with_output(
-            zoomed_font_size(options, self.font_zoom_steps, &observation)?,
+            self.zoomed(self.font_zoom_steps, &observation)?,
             options.font_sizing_policy,
             surface_scale_120,
             &observation,
@@ -282,19 +332,35 @@ pub(super) fn renderer_options() -> &'static RendererOptions {
     &renderer_resources().options
 }
 
+#[cfg(test)]
 pub(super) fn zoomed_font_size(
     options: &RendererOptions,
     steps: i16,
     observation: &OutputDpiObservation,
 ) -> Result<FontSize> {
+    zoomed_size(
+        options.font_size,
+        options.font_sizing_policy,
+        steps,
+        observation,
+    )
+}
+
+/// Applies `steps` of Foot runtime zoom to `base`.
+fn zoomed_size(
+    base: FontSize,
+    policy: FontSizingPolicy,
+    steps: i16,
+    observation: &OutputDpiObservation,
+) -> Result<FontSize> {
     if steps == 0 {
-        return Ok(options.font_size);
+        return Ok(base);
     }
-    let sizing_dpi = match options.font_sizing_policy {
+    let sizing_dpi = match policy {
         FontSizingPolicy::OutputScale => 96.0,
         FontSizingPolicy::PhysicalDpi => observation.dpi,
     };
-    let base_points = match options.font_size {
+    let base_points = match base {
         FontSize::Points(points) => points,
         FontSize::Pixels(pixels) => pixels * 72.0 / sizing_dpi,
     };
@@ -422,5 +488,57 @@ mod tests {
             first.effective_font_resolution(120).unwrap(),
             second.effective_font_resolution(120).unwrap()
         );
+    }
+
+    #[test]
+    fn followed_text_size_replaces_the_base_and_keeps_runtime_zoom() {
+        // The default context is 22 px at output-scale; Omarchy's 12 px text
+        // size is 9 pt, which output-scale resolves to 12 px per scale unit.
+        let configured = RenderContext::new(u16::MAX);
+        let mut context = configured
+            .clone()
+            .with_font_size_override(Some(FontSize::Points(9.0)));
+        assert_eq!(context.effective_font_size(120).unwrap(), 12.0);
+        assert_eq!(context.effective_font_size(240).unwrap(), 24.0);
+
+        // 16 px is 12 pt: 16 px at 1x, rescaled live.
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(12.0)), 120)
+                .unwrap()
+        );
+        assert_eq!(context.effective_font_size(120).unwrap(), 16.0);
+        assert!(
+            !context
+                .replace_font_size_override(Some(FontSize::Points(12.0)), 120)
+                .unwrap()
+        );
+
+        // Runtime zoom stays a half-point offset from the followed base.
+        assert_eq!(context.apply_font_zoom_steps(2, 120).unwrap(), Some(true));
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(9.0)), 120)
+                .unwrap()
+        );
+        assert_eq!(context.effective_font_size(120).unwrap(), 853.0 / 64.0);
+
+        // Dropping the followed size returns to the configured base.
+        context.apply_font_zoom_steps(0, 120).unwrap();
+        assert!(context.replace_font_size_override(None, 120).unwrap());
+        assert_eq!(
+            context.effective_font_resolution(120).unwrap(),
+            configured.effective_font_resolution(120).unwrap()
+        );
+
+        // A base whose zoomed size leaves the supported range is rejected and
+        // the current base is kept.
+        let before = context.effective_font_resolution(120).unwrap();
+        assert!(
+            context
+                .replace_font_size_override(Some(FontSize::Points(1_000.0)), 120)
+                .is_err()
+        );
+        assert_eq!(context.effective_font_resolution(120).unwrap(), before);
     }
 }

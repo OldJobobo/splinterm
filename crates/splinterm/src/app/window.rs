@@ -30,7 +30,7 @@ use super::{
         resolve_update_images, resynchronize, run_controller, terminal_grid_limits,
         update_advances_from, validate_attached_snapshot,
     },
-    theme_watch::{ThemeUpdateSink, load_startup_theme, watch_theme},
+    theme_watch::{ThemeOverrides, ThemeUpdateSink, load_startup_theme, watch_theme},
     topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
 };
 
@@ -228,8 +228,7 @@ async fn run_live_multipane_window_inner(
         factory.capabilities().launch_semantics == LaunchSemantics::RemoteInteractive;
     let theme_task = AbortOnDropTask::new(tokio::spawn(watch_theme(
         config.theme_source(),
-        config.background_alpha,
-        config.background_blur,
+        ThemeOverrides::from_config(&config),
         theme,
         ThemeUpdateSink::Topology(topology_update_sender.clone()),
     )));
@@ -386,8 +385,7 @@ pub(super) async fn run_live_window(
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let _theme_watcher = AbortOnDropTask::new(tokio::spawn(watch_theme(
         config.theme_source(),
-        config.background_alpha,
-        config.background_blur,
+        ThemeOverrides::from_config(&config),
         theme,
         ThemeUpdateSink::Panes(vec![updates.clone()]),
     )));

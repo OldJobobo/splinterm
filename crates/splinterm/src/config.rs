@@ -51,6 +51,9 @@ pub struct AppConfig {
     pub font_features: FeatureSettings,
     pub font_authority: FontAuthority,
     pub font_size: FontSize,
+    /// `Explicit` when `config.ini` sets a font size; otherwise Splinterm
+    /// follows the Omarchy text size (`shell.toml` `[font] base-size`).
+    pub font_size_authority: FontAuthority,
     pub font_sizing_policy: FontSizingPolicy,
     pub padding: TerminalPadding,
     pub initial_columns: u16,
@@ -157,6 +160,7 @@ impl Default for AppConfig {
             font_features: FeatureSettings::default(),
             font_authority: FontAuthority::NativeOmarchy,
             font_size: FontSize::Pixels(14.0),
+            font_size_authority: FontAuthority::NativeOmarchy,
             font_sizing_policy: FontSizingPolicy::OutputScale,
             padding: TerminalPadding::DEFAULT,
             initial_columns: 80,
@@ -199,7 +203,12 @@ pub struct ConfigLoad {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ThemeSource {
     Omarchy(OmarchyThemeRoots),
-    Json(PathBuf),
+    /// An explicit JSON palette. `shell` names the Omarchy roots whose
+    /// `shell.toml` still supplies the text size; panel alpha stays opaque.
+    Json {
+        path: PathBuf,
+        shell: Option<OmarchyThemeRoots>,
+    },
 }
 
 impl AppConfig {
@@ -207,9 +216,28 @@ impl AppConfig {
     pub fn theme_source(&self) -> ThemeSource {
         self.theme_path.clone().map_or_else(
             || ThemeSource::Omarchy(OmarchyThemeRoots::from_environment()),
-            ThemeSource::Json,
+            |path| ThemeSource::Json {
+                path,
+                shell: Some(OmarchyThemeRoots::from_environment()),
+            },
         )
     }
+
+    /// Whether the font size follows Omarchy's `[font] base-size`: only while
+    /// `config.ini` sets no font size.
+    #[must_use]
+    pub fn follows_omarchy_text_size(&self) -> bool {
+        self.font_size_authority == FontAuthority::NativeOmarchy
+    }
+}
+
+/// Omarchy's terminal point size for a shell text size, as
+/// `omarchy-display-text-size` writes it for alacritty, kitty, ghostty and
+/// foot: `px × 9/12`, rounded half up to a whole point (12 px → 9 pt,
+/// 16 px → 12 pt).
+#[must_use]
+pub fn omarchy_terminal_point_size(px: u8) -> f32 {
+    f32::from((u16::from(px) * 9 + 6) / 12)
 }
 
 /// The active Omarchy theme directories Splinterm may read, highest priority
@@ -689,6 +717,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 }
                 config.font_size = FontSize::Pixels(parse_range(value, 6.0, 96.0, index)?);
                 explicit_font_size_line = Some(index + 1);
+                config.font_size_authority = FontAuthority::Explicit;
                 if full != "main.font-pixelsize" {
                     diagnostics.push(format!(
                         "line {}: font-size is deprecated; use main.font-pixelsize",
@@ -706,6 +735,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                 }
                 config.font_size = FontSize::Points(parse_range(value, 6.0, 96.0, index)?);
                 explicit_font_size_line = Some(index + 1);
+                config.font_size_authority = FontAuthority::Explicit;
                 false
             }
             "main.font-sizing-policy" => {
@@ -1524,7 +1554,7 @@ pub fn load_theme(path: &Path) -> Result<ResolvedTheme> {
 pub fn load_theme_source(source: &ThemeSource) -> Result<ResolvedTheme> {
     match source {
         ThemeSource::Omarchy(roots) => load_omarchy_theme(roots.select()),
-        ThemeSource::Json(path) => load_theme(path),
+        ThemeSource::Json { path, .. } => load_theme(path),
     }
 }
 
@@ -2102,7 +2132,10 @@ mod tests {
             .config;
         assert_eq!(
             loaded.theme_source(),
-            ThemeSource::Json(PathBuf::from("/tmp/splinterm-theme.json"))
+            ThemeSource::Json {
+                path: PathBuf::from("/tmp/splinterm-theme.json"),
+                shell: Some(OmarchyThemeRoots::from_environment()),
+            }
         );
     }
 
@@ -2917,5 +2950,42 @@ mod tests {
             OmarchyThemeRoots::fixed(PathBuf::from("/theme")).user_shell(),
             None
         );
+    }
+
+    #[test]
+    fn omarchy_text_size_maps_px_to_omarchy_terminal_points() {
+        // omarchy-display-text-size: int(px * 9 / 12 + 0.5).
+        for (px, points) in [
+            (9, 7.0),
+            (10, 8.0),
+            (11, 8.0),
+            (12, 9.0),
+            (13, 10.0),
+            (14, 11.0),
+            (15, 11.0),
+            (16, 12.0),
+            (18, 14.0),
+            (20, 15.0),
+        ] {
+            assert_eq!(omarchy_terminal_point_size(px), points, "{px} px");
+        }
+    }
+
+    #[test]
+    fn only_an_unset_font_size_follows_the_omarchy_text_size() {
+        assert!(AppConfig::default().follows_omarchy_text_size());
+        let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
+        assert!(shipped.config.follows_omarchy_text_size());
+        assert!(
+            parse("[main]\nfont=monospace\n")
+                .unwrap()
+                .config
+                .follows_omarchy_text_size()
+        );
+        for key in ["font-pixelsize=14", "font-point-size=10", "font-size=14"] {
+            let config = parse(&format!("[main]\n{key}\n")).unwrap().config;
+            assert_eq!(config.font_size_authority, FontAuthority::Explicit, "{key}");
+            assert!(!config.follows_omarchy_text_size(), "{key}");
+        }
     }
 }

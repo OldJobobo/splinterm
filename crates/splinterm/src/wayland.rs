@@ -121,7 +121,9 @@ use smithay_client_toolkit::reexports::protocols::wp::{
 use crate::background_effect::{
     BackgroundEffectState, CommitReason as BackgroundCommitReason, EffectAction, EffectDiagnostic,
 };
-use crate::config::{CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme};
+use crate::config::{
+    CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme, omarchy_terminal_point_size,
+};
 use crate::diagnostics::{
     DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, global as diagnostics,
 };
@@ -139,7 +141,7 @@ use crate::frontend::{
     lair_lifecycle_command, tab_menu_right_press,
 };
 use crate::geometry::{
-    OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
+    FontSize, OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
     logical_extent_to_buffer,
 };
 use crate::navigation_projection::{NavigationAction, NavigationNodeId};
@@ -647,7 +649,8 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         diagnostics.ensure_window(dojo_id, splint_id);
     }
     let managed_tabs = options.initial_dojo.is_some();
-    let render_context = RenderContext::new(options.theme.background_alpha);
+    let render_context = RenderContext::new(options.theme.background_alpha)
+        .with_font_size_override(followed_font_size(options.theme));
     let inactive_options = options.activate_multi_pane_input()?;
     if let Some(snapshot) = options.snapshot.as_mut() {
         snapshot
@@ -857,6 +860,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             renderer_generation: 0,
             theme_generation: 0,
             pending_font_update: None,
+            applied_text_size_px: options.theme.shell.text_size_px,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
             title_override: options.title,
@@ -1976,6 +1980,9 @@ struct PresentationState {
     renderer_generation: u64,
     theme_generation: u64,
     pending_font_update: Option<FontUpdate>,
+    /// The followed Omarchy text size the render context last applied. A theme
+    /// whose text size differs is reconciled through the font path.
+    applied_text_size_px: Option<u8>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,
@@ -2969,6 +2976,16 @@ fn retain_newest_theme(slot: &mut Option<ThemeUpdate>, update: ThemeUpdate) {
     }
 }
 
+/// The followed Omarchy text size as Omarchy sets it for terminals: px × 9/12
+/// points, which output-scale sizing resolves as Foot does with its default
+/// `dpi-aware=no`.
+fn followed_font_size(theme: ResolvedTheme) -> Option<FontSize> {
+    theme
+        .shell
+        .text_size_px
+        .map(|px| FontSize::Points(omarchy_terminal_point_size(px)))
+}
+
 fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUpdateImpact {
     let reconcile_effect = current.background_alpha != next.background_alpha
         || current.background_blur != next.background_blur;
@@ -2976,6 +2993,9 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     let mut next_pixels = next;
     current_pixels.background_blur = false;
     next_pixels.background_blur = false;
+    // A text size change is reconciled through the font path instead.
+    current_pixels.shell.text_size_px = None;
+    next_pixels.shell.text_size_px = None;
     ThemeUpdateImpact {
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
@@ -6574,7 +6594,24 @@ impl App {
         if !candidate_context.replace_font_generation(update.generation) {
             return Ok(false);
         }
+        self.install_render_context(candidate_context)
+    }
 
+    /// Applies a followed Omarchy text size through the same reconciliation as
+    /// a live font generation. A base change that leaves the raster size
+    /// unchanged is recorded without rebuilding frames.
+    fn reconcile_font_size(&mut self, size: Option<FontSize>) -> Result<bool> {
+        let mut candidate_context = self.presentation.render_context.clone();
+        if !candidate_context.replace_font_size_override(size, self.surface.scale_120)? {
+            self.presentation.render_context = candidate_context;
+            return Ok(false);
+        }
+        self.install_render_context(candidate_context)
+    }
+
+    /// Rebuilds every pane frame and text cache for a staged render context,
+    /// then installs it and lets the pane controller resize the PTY.
+    fn install_render_context(&mut self, candidate_context: RenderContext) -> Result<bool> {
         let focused = if let Some(mut display) = self.panes.display_snapshot() {
             apply_ime_preedit(&mut display, self.input.ime.visible_preedit.as_deref());
             Some(SnapshotFrame::load_scaled_with_sources_and_context(
@@ -9666,6 +9703,22 @@ impl App {
                 }
             }
         }
+        let followed_text_size = self.presentation.theme.shell.text_size_px;
+        if followed_text_size != self.presentation.applied_text_size_px {
+            self.presentation.applied_text_size_px = followed_text_size;
+            match self.reconcile_font_size(followed_font_size(self.presentation.theme)) {
+                Ok(true) => {
+                    font_reconciled = true;
+                    visual_changed = true;
+                    focused_visual_changed = true;
+                    self.presentation.full_redraw = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("splinterm live text size update rejected: {error:#}");
+                }
+            }
+        }
         if !self.panes.pending_exited_splints.is_empty() {
             let topology_queue_open =
                 self.tab_state
@@ -11998,6 +12051,39 @@ mod tests {
                     reconcile_effect: false,
                 }
             );
+        }
+    }
+
+    #[test]
+    fn followed_text_size_uses_omarchy_points_and_skips_pixel_rebuilds() {
+        let current = ResolvedTheme::default();
+        assert_eq!(followed_font_size(current), None);
+        let mut next = current;
+        for (px, points) in [(12, 9.0), (16, 12.0), (14, 11.0)] {
+            next.shell.text_size_px = Some(px);
+            assert_eq!(followed_font_size(next), Some(FontSize::Points(points)));
+            // The text size goes through font reconciliation, not a palette
+            // pixel rebuild.
+            assert_eq!(
+                classify_theme_update(current, next),
+                ThemeUpdateImpact::default()
+            );
+            // A new window starts at the followed size: Foot's output-scale
+            // sizing of the same point size.
+            let context =
+                RenderContext::new(u16::MAX).with_font_size_override(followed_font_size(next));
+            for scale in [1.0_f32, 1.25, 2.0] {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let scale_120 = (scale * 120.0) as u32;
+                assert_eq!(
+                    context
+                        .effective_font_resolution(scale_120)
+                        .unwrap()
+                        .pixel_size,
+                    (points * (96.0 * scale) / 72.0 * 64.0).round() / 64.0,
+                    "{px} px at {scale}x"
+                );
+            }
         }
     }
 
