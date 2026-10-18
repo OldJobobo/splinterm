@@ -1,11 +1,13 @@
-//! Daemon handoff requests answered before the handoff gate exists.
+//! Daemon handoff reports and the answers that need no handoff gate.
 //!
 //! A dry run reports what the running daemon knows cheaply. It never fences,
-//! captures, or opens the installed candidate. `Execute` is refused with the
-//! same blocking reasons until the old-side gate lands (Plan 0061 M3.6), and
-//! every resume ticket claim fails closed because this daemon issues no
-//! tickets (M3.16). No handoff prepare is ever pending, so every Window
-//! acknowledgement finds nothing to acknowledge (M3.13).
+//! captures, or opens the installed candidate. `Execute` is refused before
+//! the old-side gate (Plan 0061 M3.6) runs whenever anything but
+//! `Unsupported` blocks it; the gate itself always ends cancelled until
+//! capture and exec land (M3.7–M3.10). Every resume ticket claim fails closed
+//! because this daemon issues no tickets (M3.16). No handoff prepare is ever
+//! pending, so every Window acknowledgement finds nothing to acknowledge
+//! (M3.13).
 
 use splinterd::{
     handoff_compatibility::{HandoffCapabilities, VersionRange},
@@ -15,8 +17,8 @@ use splinterd::{
 };
 use splinterm_core::{LairLifetime, Topology};
 use splinterm_protocol::{
-    DaemonHandoffMode, ErrorCode, HandoffBlockingReason, HandoffBuild, HandoffBuildProvenance,
-    HandoffReport, HandoffVersionRange, MAX_HANDOFF_REPORTED_LAIRS, ProtocolError, Response,
+    ErrorCode, HandoffBlockingReason, HandoffBuild, HandoffBuildProvenance, HandoffCancelReason,
+    HandoffReport, HandoffVersionRange, MAX_HANDOFF_REPORTED_LAIRS, ProtocolError,
 };
 use tracing::{debug, warn};
 
@@ -138,7 +140,7 @@ fn report_from(
         });
     }
     blocking_reasons.extend(rollback.blocking_reason());
-    // No live handoff exists before the old-side gate and adoption land.
+    // No live handoff completes before capture, exec, and adoption land.
     blocking_reasons.push(HandoffBlockingReason::Unsupported);
     HandoffReport {
         daemon_generation,
@@ -156,21 +158,45 @@ fn report_from(
     }
 }
 
-/// Answers a dry run with its report, and refuses `Execute` with every
-/// reason the report names.
+/// Refuses `Execute` before the handoff gate runs when the report names any
+/// reason other than `Unsupported`.
+///
+/// `Unsupported` alone lets the gate fence, re-check, drain, and persist; the
+/// attempt then cancels, because capture and exec do not exist yet. Every
+/// other reason (transient Lairs, no rollback authority) refuses without
+/// fencing anything.
 ///
 /// # Errors
-/// Returns `HandoffUnavailable` for `Execute`; the report always names at
-/// least `Unsupported` until the handoff gate exists.
-pub(crate) fn prepare_daemon_handoff(
-    mode: DaemonHandoffMode,
-    report: HandoffReport,
-) -> Result<Response, ProtocolError> {
-    match mode {
-        DaemonHandoffMode::DryRun => Ok(Response::HandoffReport { report }),
-        DaemonHandoffMode::Execute => {
-            Err(ProtocolError::handoff_unavailable(report.blocking_reasons))
-        }
+/// Returns `HandoffUnavailable` naming every reason the report names.
+pub(crate) fn refuse_blocked_execute(report: &HandoffReport) -> Result<(), ProtocolError> {
+    if report
+        .blocking_reasons
+        .iter()
+        .all(|reason| matches!(reason, HandoffBlockingReason::Unsupported))
+    {
+        Ok(())
+    } else {
+        Err(ProtocolError::handoff_unavailable(
+            report.blocking_reasons.clone(),
+        ))
+    }
+}
+
+/// The answer to an `Execute` whose gate ran and cancelled: unavailable, with
+/// every reason a fresh report names and why this attempt stopped.
+pub(crate) fn cancelled_handoff(
+    reason: HandoffCancelReason,
+    blocking_reasons: Vec<HandoffBlockingReason>,
+) -> ProtocolError {
+    let reason = match reason {
+        HandoffCancelReason::Requested => "it was cancelled",
+        HandoffCancelReason::Blocked => "a blocking condition appeared",
+        HandoffCancelReason::Failed => "preparation could not complete",
+        HandoffCancelReason::TimedOut => "a step missed its deadline",
+    };
+    ProtocolError {
+        message: format!("daemon handoff is unavailable: {reason}"),
+        ..ProtocolError::handoff_unavailable(blocking_reasons)
     }
 }
 
@@ -270,14 +296,52 @@ mod tests {
                 HandoffBlockingReason::Unsupported
             ]
         );
-        assert!(matches!(
-            prepare_daemon_handoff(DaemonHandoffMode::DryRun, report.clone()),
-            Ok(Response::HandoffReport { report: answered }) if answered == report
-        ));
-        let refused = prepare_daemon_handoff(DaemonHandoffMode::Execute, report.clone())
-            .expect_err("execute is refused until the handoff gate exists");
+        let refused = refuse_blocked_execute(&report)
+            .expect_err("an unpackaged daemon refuses execute before the gate runs");
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
+    }
+
+    #[test]
+    fn only_an_unsupported_report_reaches_the_handoff_gate() {
+        let unsupported = report_from(
+            FRESH_DAEMON_GENERATION,
+            HandoffBuild {
+                provenance: HandoffBuildProvenance::ReleaseCandidate,
+                ..build()
+            },
+            capabilities(),
+            &Topology::new(),
+            0,
+            &RollbackAuthority::Unavailable,
+        );
+        let mut gated = unsupported.clone();
+        gated.blocking_reasons = vec![HandoffBlockingReason::Unsupported];
+        assert!(refuse_blocked_execute(&gated).is_ok());
+        let refused = refuse_blocked_execute(&unsupported).unwrap_err();
+        assert_eq!(
+            refused.handoff_blocking_reasons,
+            [
+                HandoffBlockingReason::RollbackUnavailable,
+                HandoffBlockingReason::Unsupported
+            ]
+        );
+
+        for reason in [
+            HandoffCancelReason::Requested,
+            HandoffCancelReason::Blocked,
+            HandoffCancelReason::Failed,
+            HandoffCancelReason::TimedOut,
+        ] {
+            let cancelled = cancelled_handoff(reason, gated.blocking_reasons.clone());
+            assert_eq!(cancelled.code, ErrorCode::HandoffUnavailable);
+            assert_eq!(cancelled.handoff_blocking_reasons, gated.blocking_reasons);
+            assert!(
+                cancelled
+                    .message
+                    .starts_with("daemon handoff is unavailable: ")
+            );
+        }
     }
 
     #[test]

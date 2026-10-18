@@ -523,7 +523,7 @@ async fn publish_due(state: &DaemonState) {
     }
     let mut hub = state.topology_hub.lock().await;
     for event in events {
-        hub.publish_agent_status(event.into(), snapshot.revision);
+        hub.publish_status(event.into(), snapshot.revision);
     }
 }
 
