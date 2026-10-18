@@ -988,6 +988,11 @@ pub(crate) mod tests {
             BuildVersion, ExecutablePairBinding, ExecutablePairPreflight, HandoffCapabilities,
             VersionRange, negotiate_handoff,
         },
+        handoff_descriptors::HandoffDescriptor,
+        handoff_exec::{
+            ExecBoundaryError, ExecInheritancePlan, ResumableSplint, ResumeBudgets,
+            resume_handed_off,
+        },
         handoff_manifest::{MAX_HANDOFF_MANIFEST_BYTES, PackagedOwnerOverride},
     };
 
@@ -1703,6 +1708,170 @@ pub(crate) mod tests {
         captures.release().await;
         fleet.assert_all_echo("after-manifest").await;
         fleet.shutdown().await;
+    }
+
+    /// Every descriptor exec inherits, as the daemon's `ForwardExec` lists
+    /// them: the listeners, the inherited executables, and each Splint's
+    /// master and checkpoint. The plan adds both manifest memfds.
+    fn exec_owners<'a>(
+        listeners: [&'a File; 2],
+        snapshots: &'a HandoffExecutableSnapshots,
+        handed_off: &'a [HandedOffCapture],
+    ) -> Vec<HandoffDescriptor<'a>> {
+        let mut owners = vec![
+            HandoffDescriptor::new(HandoffDescriptorSlot::Listener, listeners[0].as_fd()),
+            HandoffDescriptor::new(HandoffDescriptorSlot::ImageListener, listeners[1].as_fd()),
+            HandoffDescriptor::new(
+                HandoffDescriptorSlot::ForwardClient,
+                snapshots.forward().client().descriptor(),
+            ),
+            HandoffDescriptor::new(
+                HandoffDescriptorSlot::RollbackDaemon,
+                snapshots.rollback().daemon().descriptor(),
+            ),
+            HandoffDescriptor::new(
+                HandoffDescriptorSlot::RollbackClient,
+                snapshots.rollback().client().descriptor(),
+            ),
+        ];
+        for capture in handed_off {
+            owners.push(HandoffDescriptor::new(
+                HandoffDescriptorSlot::PtyMaster(capture.slot()),
+                capture.handed_off.session.master(),
+            ));
+            owners.push(capture.checkpoint.handoff_descriptor());
+        }
+        owners
+    }
+
+    /// The plan binds exactly the recorded numbers, in manifest order, and
+    /// refuses a renumbered, a missing, or an unrecorded owner.
+    fn assert_plan_binds_recorded_numbers(
+        manifests: &PreparedManifests,
+        owners: &[HandoffDescriptor<'_>],
+    ) {
+        let plan = ExecInheritancePlan::for_prepared(manifests, owners).unwrap();
+        assert_eq!(
+            plan.descriptors()
+                .iter()
+                .map(|descriptor| (descriptor.slot(), descriptor.raw_fd()))
+                .collect::<Vec<_>>(),
+            manifests.recorded_descriptors()
+        );
+        let other = File::open("/dev/null").unwrap();
+        let mut moved = owners.to_vec();
+        moved[0] = HandoffDescriptor::new(HandoffDescriptorSlot::Listener, other.as_fd());
+        assert!(matches!(
+            ExecInheritancePlan::for_prepared(manifests, &moved),
+            Err(ExecBoundaryError::Renumbered {
+                slot: HandoffDescriptorSlot::Listener,
+                ..
+            })
+        ));
+        assert!(matches!(
+            ExecInheritancePlan::for_prepared(manifests, &owners[1..]),
+            Err(ExecBoundaryError::MissingOwner(
+                HandoffDescriptorSlot::Listener
+            ))
+        ));
+        let mut extra = owners.to_vec();
+        extra.push(HandoffDescriptor::new(
+            HandoffDescriptorSlot::ImageState(0),
+            other.as_fd(),
+        ));
+        assert!(matches!(
+            ExecInheritancePlan::for_prepared(manifests, &extra),
+            Err(ExecBoundaryError::UnrecordedOwner(
+                HandoffDescriptorSlot::ImageState(0)
+            ))
+        ));
+    }
+
+    /// The exec boundary's plan binds every descriptor a real manifest pair
+    /// records, at exactly its recorded number; the handed-off Splints then
+    /// resume in process (Plan 0061 D5) at their incarnations and processes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_inheritance_binds_the_recorded_numbers_and_the_fleet_resumes() {
+        let mut adoptable = config();
+        let budgets = ResumeBudgets {
+            image: splinterm_terminal::SharedImageBudget::new(ADOPTION_BUDGET_BYTES),
+            kitty_upload: splinterm_terminal::SharedKittyUploadBudget::new(ADOPTION_BUDGET_BYTES),
+        };
+        adoptable.terminal.shared_image_budget = Some(budgets.image.clone());
+        adoptable.terminal.shared_kitty_upload_budget = Some(budgets.kitty_upload.clone());
+        let fleet = Fleet::spawn_with(&[CAT, CAT], &adoptable).await;
+        fleet.assert_all_echo("ready").await;
+        let handles = fleet.handles();
+        let captures = capture_live_splints(handles.clone(), CaptureLimits::DEFAULT, prepare)
+            .await
+            .unwrap();
+        let fixture = AuthorityFixture::new();
+        let (listener, image_listener, listeners) = listeners();
+        let manifests = {
+            let _owner = PackagedOwnerOverride::current_user();
+            build_manifests(
+                &fixture.authority(),
+                &captures,
+                &ManifestInputs {
+                    topology: &fleet.topology,
+                    listeners,
+                    daemon_generation: 1,
+                    install_prefix: &fixture.install_prefix,
+                },
+            )
+            .unwrap()
+        };
+        let (handed_off, _) = captures.hand_off();
+        let Fleet { topology, runtimes } = fleet;
+        for runtime in runtimes {
+            assert!(matches!(runtime.wait().await, Err(LiveError::HandedOff)));
+        }
+        let owners = exec_owners(
+            [&listener, &image_listener],
+            &fixture.snapshots,
+            &handed_off,
+        );
+        assert_plan_binds_recorded_numbers(&manifests, &owners);
+        drop((owners, manifests));
+
+        let splints = handed_off
+            .into_iter()
+            .map(|capture| ResumableSplint {
+                dojo_id: placement(&topology, capture.handed_off.evidence.splint_id)
+                    .unwrap()
+                    .1,
+                handed_off: capture.handed_off,
+                checkpoint: capture.checkpoint,
+                config: adoptable.clone(),
+            })
+            .collect();
+        let resumed = resume_handed_off(
+            splints,
+            None::<crate::cgroup::WorkloadUnitManager>,
+            &budgets,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(resumed.blank_terminals.is_empty() && resumed.stranded.is_empty());
+        assert_eq!(resumed.resumed.len(), handles.len());
+        let resumed = Fleet {
+            topology,
+            runtimes: resumed
+                .resumed
+                .into_iter()
+                .map(|resumed| resumed.runtime)
+                .collect(),
+        };
+        for handle in resumed.handles() {
+            let before = handles
+                .iter()
+                .find(|before| before.splint_id == handle.splint_id)
+                .unwrap();
+            assert_eq!(handle.incarnation, before.incarnation);
+            assert_eq!(handle.child_pid(), before.child_pid());
+        }
+        resumed.assert_all_echo("after-resume").await;
+        resumed.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
