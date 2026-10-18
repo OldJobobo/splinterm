@@ -1,3 +1,6 @@
+//! Nested systemd workload units: one transient slice per Dojo and one
+//! transient scope per Splint process incarnation, on the user manager.
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -10,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use splinterd::{
+use crate::{
     ProcessPlacement,
     dbus_worker::{DbusWorker, DbusWorkerError},
 };
@@ -28,8 +31,9 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERIFY_INTERVAL: Duration = Duration::from_millis(25);
 static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Nested `MemoryHigh` percentages for Dojo slices and Splint scopes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WorkloadMemoryPolicy {
+pub struct WorkloadMemoryPolicy {
     pub(crate) dojo_memory_high_percent: u32,
     pub(crate) splint_memory_high_percent: u32,
 }
@@ -85,8 +89,9 @@ fn percent_scale(percent: u32) -> u32 {
     u32::try_from(scaled).expect("bounded percentage scale fits u32")
 }
 
+/// A systemd workload unit request or its bookkeeping failed.
 #[derive(Debug, Error)]
-pub(crate) enum WorkloadUnitError {
+pub enum WorkloadUnitError {
     #[error("workload memory policy is invalid")]
     InvalidPolicy,
     #[error("systemd user-manager connection failed")]
@@ -389,15 +394,23 @@ struct WorkloadUnitState {
     dojo_references: HashMap<DojoId, usize>,
 }
 
+/// Places Splint processes in reference-counted Dojo slices and per-Splint
+/// scopes on the systemd user manager.
 #[derive(Clone)]
-pub(crate) struct WorkloadUnitManager {
+pub struct WorkloadUnitManager {
     adapter: Arc<dyn SystemdUnitAdapter>,
     policy: WorkloadMemoryPolicy,
     state: Arc<Mutex<WorkloadUnitState>>,
 }
 
 impl WorkloadUnitManager {
-    pub(crate) fn connect(
+    /// Connects to the session's systemd user manager and probes that it can
+    /// create transient memory-limited units.
+    ///
+    /// # Errors
+    /// Reports an invalid policy, an unavailable session bus, or a failed
+    /// capability probe.
+    pub fn connect(
         policy: WorkloadMemoryPolicy,
         owner_unit: Option<&str>,
     ) -> Result<Self, WorkloadUnitError> {
@@ -417,7 +430,16 @@ impl WorkloadUnitManager {
         })
     }
 
-    pub(crate) fn prepare(
+    /// Takes a Dojo slice reference for one Splint incarnation, starting the
+    /// slice when it has no other reference.
+    ///
+    /// # Errors
+    /// Reports a poisoned state lock or a failed slice start.
+    ///
+    /// # Panics
+    /// Never in practice: the live Splint bound keeps Dojo reference counts
+    /// far below `usize::MAX`.
+    pub fn prepare(
         &self,
         dojo_id: DojoId,
         splint_id: SplintId,
@@ -458,7 +480,7 @@ impl WorkloadUnitManager {
     /// thread, so the daemon can return to one thread for upgrade handoff.
     ///
     /// Running requests get up to
-    /// [`SHUTDOWN_GRACE`](splinterd::dbus_worker::SHUTDOWN_GRACE) to finish
+    /// [`SHUTDOWN_GRACE`](crate::dbus_worker::SHUTDOWN_GRACE) to finish
     /// before they are aborted, and closing is bounded the same way, so a
     /// wedged session bus cannot hold this forever.
     ///
@@ -470,11 +492,7 @@ impl WorkloadUnitManager {
     ///
     /// # Errors
     /// Reports a D-Bus worker thread that panicked.
-    #[allow(
-        dead_code,
-        reason = "the handoff coordinator calls this once its runtime-stop slice lands"
-    )]
-    pub(crate) fn shutdown(self) -> Result<(), WorkloadUnitError> {
+    pub fn shutdown(self) -> Result<(), WorkloadUnitError> {
         self.adapter.shutdown()
     }
 
@@ -495,7 +513,9 @@ impl WorkloadUnitManager {
     }
 }
 
-pub(crate) struct PreparedWorkloadScope {
+/// A Dojo slice reference waiting for its Splint process; dropping it unplaced
+/// returns the reference.
+pub struct PreparedWorkloadScope {
     manager: WorkloadUnitManager,
     dojo_id: DojoId,
     names: WorkloadUnitNames,
@@ -503,7 +523,13 @@ pub(crate) struct PreparedWorkloadScope {
 }
 
 impl PreparedWorkloadScope {
-    pub(crate) fn place(mut self, identity: LinuxPtyIdentity) -> io::Result<ActiveWorkloadScope> {
+    /// Starts the Splint scope around the PTY child and verifies systemd
+    /// placed the child in it.
+    ///
+    /// # Errors
+    /// Reports a failed scope start or an unverified placement; the Dojo
+    /// reference is returned when the prepared scope drops.
+    pub fn place(mut self, identity: LinuxPtyIdentity) -> io::Result<ActiveWorkloadScope> {
         self.manager
             .adapter
             .start_splint_scope(&self.names, identity.child_pid(), self.manager.policy)
@@ -528,7 +554,9 @@ impl Drop for PreparedWorkloadScope {
     }
 }
 
-pub(crate) struct ActiveWorkloadScope {
+/// A placed Splint scope holding one Dojo slice reference; releasing or
+/// dropping it stops the scope and returns the reference.
+pub struct ActiveWorkloadScope {
     manager: WorkloadUnitManager,
     dojo_id: DojoId,
     names: WorkloadUnitNames,

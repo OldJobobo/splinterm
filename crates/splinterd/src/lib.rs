@@ -2,6 +2,7 @@
 
 pub mod authorization;
 mod candidate_bootstrap;
+pub mod cgroup;
 #[doc(hidden)]
 pub mod dbus_worker;
 pub mod executable_snapshot;
