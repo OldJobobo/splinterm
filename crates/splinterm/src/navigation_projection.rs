@@ -1865,7 +1865,10 @@ mod tests {
         first.dojos[0].name = "terminal".into();
         let mut transient = running_lair("terminal-1787899189123456790-4133");
         transient.lifetime = LairLifetime::Transient;
-        let named = running_lair("work");
+        let mut named = running_lair("work");
+        // A generated Dojo name before a custom one checks Dojo order too.
+        named.dojos.insert(0, running_dojo("terminal"));
+        named.dojos.push(running_dojo("logs"));
         let reserved = running_lair("Lair 1");
         let second = running_lair("terminal-1787899189123456791-4134");
         let (named_id, reserved_id) = (named.id, reserved.id);
@@ -1892,22 +1895,40 @@ mod tests {
         // The picker reads the daemon's Lair list, which is in topology order.
         let listed = captured.topology.lairs().cloned().collect::<Vec<_>>();
         let entries = crate::session_picker::collect_sessions(&listed, &[]);
-        assert_eq!(entries.len(), view.lairs.len());
-        for lair in &view.lairs {
-            let NavigationNodeId::Lair(lair_id) = lair.id else {
-                panic!("Explorer Lair row has a Lair id");
-            };
-            let entry = entries
-                .iter()
-                .find(|entry| entry.lair_id == lair_id)
-                .expect("the picker lists every persistent Lair's Dojo");
-            assert_eq!(entry.lair_display_title(), lair.label);
-            assert_eq!(entry.dojo_display_title(), lair.dojos[0].label);
-            assert_eq!(
-                entry.display_title(),
-                format!("{} / {}", lair.label, lair.dojos[0].label)
-            );
-        }
+        // With no recency, the picker lists Dojos in the Explorer's order and
+        // with its labels.
+        let explorer_rows = view
+            .lairs
+            .iter()
+            .flat_map(|lair| {
+                lair.dojos.iter().map(move |dojo| {
+                    let NavigationNodeId::Dojo { lair_id, dojo_id } = dojo.id else {
+                        panic!("Explorer Dojo rows carry Dojo ids");
+                    };
+                    (
+                        lair_id,
+                        dojo_id,
+                        lair.label.clone(),
+                        dojo.label.clone(),
+                        format!("{} / {}", lair.label, dojo.label),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let picker_rows = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.lair_id,
+                    entry.dojo_id,
+                    entry.lair_display_title(),
+                    entry.dojo_display_title(),
+                    entry.display_title(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(picker_rows, explorer_rows);
+        assert_eq!(picker_rows.len(), 6);
     }
 
     #[test]

@@ -974,6 +974,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             tab_new_text: None,
             topology_updates: options.topology_updates,
             topology_commands: options.topology_commands,
+            topology_settings: options.topology_settings,
             session_switch_pending: false,
             deferred_topology_updates: Vec::new(),
             agent: agent_status::TabAgentStatus::new(options.agent_status_presentation),
@@ -2458,18 +2459,17 @@ fn try_topology_command(
     })
 }
 
-/// Hands the settings the topology manager owns to it after an accepted
-/// configuration reload. A Window without a manager has nothing to update.
-fn send_configuration_reload(
-    commands: Option<&Sender<WindowTopologyCommand>>,
-    close_unused: bool,
-) -> Result<()> {
-    commands.map_or(Ok(()), |commands| {
-        try_topology_command(
-            commands,
-            WindowTopologyCommand::ReloadConfiguration { close_unused },
-        )
-    })
+/// Publishes the settings the topology manager reads after an accepted
+/// configuration reload. This is shared state, not a queued command: it never
+/// takes a command-queue slot, and a busy manager still sees the latest value
+/// at its next decision. A Window without a manager has nothing to update.
+fn publish_topology_settings(
+    settings: Option<&tokio::sync::watch::Sender<crate::config::TopologyReloadSettings>>,
+    config: &crate::config::AppConfig,
+) {
+    if let Some(settings) = settings {
+        settings.send_replace(crate::config::TopologyReloadSettings::from_config(config));
+    }
 }
 
 fn try_topology_command_with_rollback(
@@ -5469,6 +5469,10 @@ impl App {
         match crate::config::load_default() {
             Ok(loaded) => {
                 self.cancel_clipboard_image();
+                publish_topology_settings(
+                    self.tab_state.topology_settings.as_ref(),
+                    &loaded.config,
+                );
                 self.clipboard.image_directory = loaded.config.clipboard_image_directory;
                 self.input.keymap = loaded.config.keymap;
                 self.input.prefix_timeout =
@@ -5476,14 +5480,6 @@ impl App {
                 self.input.prefix_state.clear();
                 if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
                     self.presentation.full_redraw = true;
-                }
-                if send_configuration_reload(
-                    self.tab_state.topology_commands.as_ref(),
-                    loaded.config.multiplexer_lifetime.close_unused,
-                )
-                .is_err()
-                {
-                    eprintln!("splinterm config reload could not update close-unused");
                 }
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
@@ -16033,18 +16029,35 @@ mod tests {
     }
 
     #[test]
-    fn configuration_reload_hands_close_unused_to_the_topology_manager() {
-        assert!(send_configuration_reload(None, true).is_ok());
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        for close_unused in [true, false] {
-            send_configuration_reload(Some(&sender), close_unused).unwrap();
-            assert_eq!(
-                receiver.try_recv().unwrap(),
-                WindowTopologyCommand::ReloadConfiguration { close_unused }
-            );
-        }
-        drop(receiver);
-        assert!(send_configuration_reload(Some(&sender), true).is_err());
+    fn a_reload_reaches_the_topology_manager_even_with_a_full_command_queue() {
+        use crate::config::{AppConfig, TopologyReloadSettings};
+
+        let startup = AppConfig::default();
+        let (settings, mut manager_view) =
+            tokio::sync::watch::channel(TopologyReloadSettings::from_config(&startup));
+        // A busy manager: its bounded command queue is full.
+        let (commands, mut queued) = tokio::sync::mpsc::channel(1);
+        try_topology_command(&commands, WindowTopologyCommand::RequestSessionPicker).unwrap();
+        assert!(
+            try_topology_command(&commands, WindowTopologyCommand::RequestSessionPicker).is_err()
+        );
+
+        let mut reloaded = AppConfig::default();
+        reloaded.multiplexer_lifetime.close_unused = true;
+        reloaded.multiplexer_lifetime.persist_on_tab_organization = false;
+        reloaded.new_dojo_directory = splinterm_protocol::LaunchDirectory::Inherit;
+        reloaded.new_splint_directory = splinterm_protocol::LaunchDirectory::Home;
+        publish_topology_settings(Some(&settings), &reloaded);
+
+        assert!(manager_view.has_changed().unwrap());
+        assert_eq!(
+            *manager_view.borrow_and_update(),
+            TopologyReloadSettings::from_config(&reloaded)
+        );
+        // The reload took no queue slot: only the original command is queued.
+        assert!(queued.try_recv().is_ok());
+        assert!(queued.try_recv().is_err());
+        publish_topology_settings(None, &reloaded);
     }
 
     #[test]

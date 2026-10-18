@@ -388,38 +388,35 @@ fn a_close_notice_queued_before_the_window_exits_is_seen() {
         .unwrap();
     sender.try_send(WindowTopologyCommand::CloseWindow).unwrap();
     drop(sender);
-    let mut config = AppConfig::default();
-    assert!(close_notice_queued(&mut receiver, &mut config));
+    assert!(close_notice_queued(&mut receiver));
     let (sender, mut receiver) = mpsc::channel::<WindowTopologyCommand>(4);
     drop(sender);
-    assert!(!close_notice_queued(&mut receiver, &mut config));
+    assert!(!close_notice_queued(&mut receiver));
 }
 
-#[test]
-fn a_configuration_reload_is_consumed_and_others_pass_through() {
-    let mut config = close_unused_config(false);
-    assert_eq!(
-        apply_configuration_reload(
-            &mut config,
-            WindowTopologyCommand::ReloadConfiguration { close_unused: true }
-        ),
-        None
-    );
-    assert!(config.multiplexer_lifetime.close_unused);
-    assert_eq!(
-        apply_configuration_reload(&mut config, WindowTopologyCommand::RequestSessionPicker),
-        Some(WindowTopologyCommand::RequestSessionPicker)
-    );
-    assert!(config.multiplexer_lifetime.close_unused);
+/// The Window's side of Reload configuration: the settings it publishes,
+/// starting from `config`, and the manager's view of them.
+fn reload_channel(
+    config: &AppConfig,
+) -> (
+    watch::Sender<TopologyReloadSettings>,
+    watch::Receiver<TopologyReloadSettings>,
+) {
+    watch::channel(TopologyReloadSettings::from_config(config))
+}
+
+/// Publishes `reloaded` as the Window does and refreshes `config` as the
+/// manager does before its next decision.
+fn reload_into(config: &mut AppConfig, reloaded: &AppConfig) {
+    let (sender, mut receiver) = reload_channel(config);
+    sender.send_replace(TopologyReloadSettings::from_config(reloaded));
+    refresh_reloaded_settings(config, &mut receiver);
 }
 
 #[tokio::test]
 async fn close_tab_after_a_reload_uses_the_reloaded_close_unused() {
     let mut config = close_unused_config(false);
-    apply_configuration_reload(
-        &mut config,
-        WindowTopologyCommand::ReloadConfiguration { close_unused: true },
-    );
+    reload_into(&mut config, &close_unused_config(true));
     let (requests, detached) = close_second_tab(config, vec![Ok(closed(DojoId::new()))]).await;
     assert!(detached, "the reloaded setting asks the pane to detach");
     assert!(matches!(
@@ -428,28 +425,77 @@ async fn close_tab_after_a_reload_uses_the_reloaded_close_unused() {
     ));
 
     let mut config = close_unused_config(true);
-    apply_configuration_reload(
-        &mut config,
-        WindowTopologyCommand::ReloadConfiguration {
-            close_unused: false,
-        },
-    );
+    reload_into(&mut config, &close_unused_config(false));
     let (requests, detached) = close_second_tab(config, Vec::new()).await;
     assert!(requests.is_empty(), "the reload turned close-unused off");
     assert!(!detached);
 }
 
+#[tokio::test]
+async fn a_reload_just_before_the_window_exits_applies_to_the_exit_close() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let detached = Arc::new(AtomicBool::new(false));
+        let single = managed_tab(slow_pane(&detached));
+        let single_id = single.dojo_id;
+        let (mut connection, peer, finished) =
+            scripted_connection(vec![Ok(closed(single_id))], Arc::clone(&detached)).await;
+        let mut state = TopologyManagerState {
+            tabs: WindowTabSet::new(single),
+            transient_owners: HashMap::new(),
+            agent_status_republish: false,
+        };
+        let mut config = close_unused_config(false);
+        let (window, mut manager) = reload_channel(&config);
+        window.send_replace(TopologyReloadSettings::from_config(&close_unused_config(
+            true,
+        )));
+        // The Window is gone by the time the manager closes its tabs.
+        drop(window);
+        refresh_reloaded_settings(&mut config, &mut manager);
+        close_unused_tabs_on_exit(&mut connection, &config, &mut state).await;
+        let _ = finished.send(());
+        assert_eq!(
+            peer.await.unwrap(),
+            vec![(Request::CloseUnusedDojo { dojo_id: single_id }, true)]
+        );
+    })
+    .await
+    .expect("bounded scripted Window close");
+}
+
 #[test]
-fn a_reload_queued_before_the_window_exits_still_applies_to_the_close() {
-    let (sender, mut receiver) = mpsc::channel(4);
-    sender
-        .try_send(WindowTopologyCommand::ReloadConfiguration { close_unused: true })
-        .unwrap();
-    sender.try_send(WindowTopologyCommand::CloseWindow).unwrap();
-    drop(sender);
-    let mut config = close_unused_config(false);
-    assert!(close_notice_queued(&mut receiver, &mut config));
+fn a_reload_refreshes_every_setting_the_manager_reads() {
+    let mut config = AppConfig::default();
+    let mut reloaded = AppConfig::default();
+    reloaded.multiplexer_lifetime.close_unused = true;
+    reloaded.multiplexer_lifetime.persist_on_tab_organization = false;
+    reloaded.new_dojo_directory = LaunchDirectory::Absolute("/srv/dojos".into());
+    reloaded.new_splint_directory = LaunchDirectory::Home;
+    assert!(tab_organization_promotes(&config, true));
+
+    let (window, mut manager) = reload_channel(&config);
+    refresh_reloaded_settings(&mut config, &mut manager);
+    assert_eq!(
+        TopologyReloadSettings::from_config(&config),
+        TopologyReloadSettings::from_config(&AppConfig::default()),
+        "nothing changes before a reload"
+    );
+    window.send_replace(TopologyReloadSettings::from_config(&reloaded));
+    refresh_reloaded_settings(&mut config, &mut manager);
     assert!(config.multiplexer_lifetime.close_unused);
+    assert!(!tab_organization_promotes(&config, true));
+    assert_eq!(
+        config.new_dojo_directory,
+        LaunchDirectory::Absolute("/srv/dojos".into())
+    );
+    assert_eq!(config.new_splint_directory, LaunchDirectory::Home);
+    // Settings the manager does not read are left alone.
+    assert_eq!(
+        config.multiplexer_lifetime.persistent_by_default,
+        AppConfig::default()
+            .multiplexer_lifetime
+            .persistent_by_default
+    );
 }
 
 // Waits out the real three-second detach bound.

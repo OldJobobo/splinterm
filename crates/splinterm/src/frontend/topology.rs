@@ -104,11 +104,6 @@ impl ExplorerContextTarget {
 pub enum WindowTopologyCommand {
     /// The compositor closed the Window, as opposed to an explicit detach.
     CloseWindow,
-    /// Settings an accepted configuration reload changes in the manager. They
-    /// apply to the next Close Tab or Window close.
-    ReloadConfiguration {
-        close_unused: bool,
-    },
     ExplorerContext {
         target: ExplorerContextTarget,
         command: Box<WindowTopologyCommand>,

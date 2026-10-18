@@ -155,7 +155,8 @@ pub fn dojo_has_fully_running_pane_layout(dojo: &splinterm_core::Dojo) -> bool {
     running_panes > 0 && running_panes == dojo.root.splint_count()
 }
 
-/// Collects the persistent Lairs' Dojos, most recent first.
+/// Collects the persistent Lairs' Dojos, most recent first, then the rest in
+/// topology order.
 ///
 /// `lairs` must be in topology order, as the daemon lists them, so generated
 /// names get the same "Lair N" labels the Explorer shows.
@@ -190,15 +191,10 @@ pub fn collect_sessions(lairs: &[Lair], recent: &[DojoId]) -> Vec<SessionEntry> 
             });
         }
     }
-    entries.sort_by(|left, right| {
-        let left_rank = ranks.get(&left.dojo_id).copied().unwrap_or(usize::MAX);
-        let right_rank = ranks.get(&right.dojo_id).copied().unwrap_or(usize::MAX);
-        left_rank
-            .cmp(&right_rank)
-            .then_with(|| left.lair_name.cmp(&right.lair_name))
-            .then_with(|| left.dojo_name.cmp(&right.dojo_name))
-            .then_with(|| left.dojo_id.to_string().cmp(&right.dojo_id.to_string()))
-    });
+    // Entries were collected in topology order (Lair, then Dojo), which is the
+    // Explorer's order. The stable sort keeps it for Dojos with no recency,
+    // rather than ordering by name or label text ("Lair 10" < "Lair 2").
+    entries.sort_by_key(|entry| ranks.get(&entry.dojo_id).copied().unwrap_or(usize::MAX));
     entries
 }
 
@@ -430,6 +426,30 @@ mod tests {
         assert_eq!(entries[0].dojo_id, recent);
         assert_eq!(entries[0].display_title(), "notes / Dojo 1");
         assert_eq!(entries[0].working_directory(), "/notes");
+    }
+
+    #[test]
+    fn unranked_dojos_keep_topology_order_not_name_or_label_order() {
+        let mut lairs = (0..11_u32)
+            .map(|index| running_dojo(&format!("terminal-17878991891234567{index:02}-42"), "/t"))
+            .collect::<Vec<_>>();
+        // Raw names that sort against topology order.
+        lairs.reverse();
+        lairs.insert(1, running_dojo("aaa", "/a"));
+        let recent = lairs[5].dojos[0].id;
+        let entries = collect_sessions(&lairs, &[recent]);
+        let titles = entries
+            .iter()
+            .map(SessionEntry::lair_display_title)
+            .collect::<Vec<_>>();
+        assert_eq!(titles[0], "Lair 5", "a recent Dojo still comes first");
+        assert_eq!(
+            titles[1..],
+            [
+                "Lair 1", "aaa", "Lair 2", "Lair 3", "Lair 4", "Lair 6", "Lair 7", "Lair 8",
+                "Lair 9", "Lair 10", "Lair 11",
+            ]
+        );
     }
 
     #[test]

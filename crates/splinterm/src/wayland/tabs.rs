@@ -547,6 +547,9 @@ pub(super) struct TabsState {
     pub(super) tab_new_text: Option<(u32, ChromeText)>,
     pub(super) topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     pub(super) topology_commands: Option<Sender<WindowTopologyCommand>>,
+    /// Settings Reload configuration publishes to the topology manager.
+    pub(super) topology_settings:
+        Option<tokio::sync::watch::Sender<crate::config::TopologyReloadSettings>>,
     pub(super) session_switch_pending: bool,
     pub(super) deferred_topology_updates: Vec<WindowTopologyUpdate>,
     pub(super) agent: super::agent_status::TabAgentStatus,
