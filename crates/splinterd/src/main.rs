@@ -1126,7 +1126,9 @@ enum ServeOutcome {
 }
 
 /// The daemon's process-signal streams, installed before the potentially slow
-/// metadata load. They belong to the runtime that installed them.
+/// metadata load. Their receivers are process-global, so they keep working
+/// across a runtime rebuild once a runtime with a signal driver is live again;
+/// a resumed round reuses them rather than reinstalling.
 struct DaemonSignals {
     interrupt: signal::unix::Signal,
     terminate: signal::unix::Signal,
