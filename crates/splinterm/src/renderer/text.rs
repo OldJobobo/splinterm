@@ -16,6 +16,21 @@ use super::{
     packed_rgb, round_to_i32, u32_to_f32,
 };
 
+/// The tightest fixed chrome text line, in logical pixels: an Explorer row's
+/// name and status lines and a saved-layout preview line are each this tall,
+/// and every other chrome row is taller.
+///
+/// Chrome text follows the terminal font, runtime zoom included, only until
+/// its cell fills this line. Past that it stops growing, because chrome rows
+/// have fixed heights: at maximum zoom, glyphs larger than their rows were
+/// clipped into unreadable fragments.
+pub(crate) const CHROME_MAXIMUM_LINE_HEIGHT: u32 = 24;
+
+/// The tallest chrome text cell, in buffer pixels, at `scale_120`.
+pub(crate) const fn chrome_maximum_cell_height(scale_120: u32) -> u32 {
+    CHROME_MAXIMUM_LINE_HEIGHT.saturating_mul(scale_120) / 120
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ChromeTextStyle {
     Regular,
@@ -340,7 +355,12 @@ impl ChromeText {
             exited_code: None,
             exited_signal: None,
         };
-        let mut frame = SnapshotFrame::load_scaled_with_context(&snapshot, scale_120, context)?;
+        let mut frame = SnapshotFrame::load_scaled_with_maximum_cell_height(
+            &snapshot,
+            scale_120,
+            context,
+            chrome_maximum_cell_height(scale_120),
+        )?;
         place_icons(&mut frame, icons, cell_count)?;
         Ok(Self {
             frame,
@@ -423,5 +443,47 @@ mod tests {
             0x12_34_56,
         );
         assert!(canvas.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
+    }
+
+    /// VM case E6: after about 180 zoom-in steps chrome drew terminal-sized
+    /// glyphs inside fixed chrome rows, clipping every label into fragments.
+    #[test]
+    fn chrome_text_stops_growing_at_its_line_height_at_maximum_zoom() {
+        for scale in [120, 150, 180, 240] {
+            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let bound = chrome_maximum_cell_height(scale);
+            // The terminal itself keeps the zoomed size, far taller than a
+            // chrome line; only chrome text is bounded.
+            let zoomed = context.effective_font_size(scale).unwrap();
+            let primary = &context.font_generation().unwrap().faces[0];
+            assert!(super::super::cell_metrics(primary, zoomed).unwrap().height > bound * 3);
+            for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                let text = ChromeText::load_styled_with_context(
+                    "Preview saved layout",
+                    scale,
+                    style,
+                    &context,
+                )
+                .unwrap();
+                assert!(
+                    text.pixel_height() <= bound,
+                    "scale {scale}: {} > {bound}",
+                    text.pixel_height()
+                );
+                // Bounded, not collapsed: it still fills most of the line.
+                assert!(text.pixel_height() * 4 >= bound * 3, "scale {scale}");
+                assert!(text.frame.font_size < zoomed);
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_text_below_its_line_height_keeps_the_terminal_font_size() {
+        let mut context = RenderContext::new(u16::MAX);
+        context.apply_font_zoom_steps(-10, 120).unwrap().unwrap();
+        let size = context.effective_font_size(120).unwrap();
+        let text = ChromeText::load_with_context("Lair 1", 120, &context).unwrap();
+        assert!(text.pixel_height() <= chrome_maximum_cell_height(120));
+        assert_eq!(text.frame.font_size.to_bits(), size.to_bits());
     }
 }

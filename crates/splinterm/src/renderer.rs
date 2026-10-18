@@ -94,9 +94,9 @@ pub(crate) use overlays::actions::{
     reason = "preserve the crate-local renderer facade for the inferred layout return type"
 )]
 pub(crate) use overlays::explorer::{
-    LairExplorerLayout, LairExplorerPresentationMode, lair_explorer_disclosure_hit_test,
-    lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout,
-    paint_lair_explorer,
+    LairExplorerLayout, LairExplorerPresentationMode, explorer_minimum_docked_terminal_width,
+    lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
+    lair_explorer_layout, paint_lair_explorer,
 };
 pub(crate) use overlays::history::{
     HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout, paint_history_overlay,
@@ -120,6 +120,8 @@ use settings::{
 pub use settings::{
     RenderContext, RendererOptions, RendererResources, configure, effective_font_resolution,
 };
+#[cfg(test)]
+pub(crate) use text::CHROME_MAXIMUM_LINE_HEIGHT;
 pub(crate) use text::{ChromeSource, ChromeText, ChromeTextStyle};
 
 pub(crate) fn premultiplied_theme_rgba(color: u32, alpha: u16) -> [u8; 4] {

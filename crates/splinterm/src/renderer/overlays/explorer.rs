@@ -25,6 +25,33 @@ const HEADER_HEIGHT: u32 = 104;
 const FILTER_HEIGHT: u32 = 28;
 const FOOTER_HEIGHT: u32 = 30;
 const ROW_HEIGHT: u32 = 48;
+/// The fewest terminal columns the docked Explorer leaves beside itself.
+const MINIMUM_DOCKED_TERMINAL_COLUMNS: u16 = 20;
+/// The docking floor never exceeds this many logical pixels, whatever the zoom.
+const MAXIMUM_DOCKED_TERMINAL_FLOOR: u32 = 240;
+
+/// The narrowest terminal width, in logical pixels, that keeps the Explorer
+/// docked beside the terminal; narrower Windows get the drawer.
+///
+/// The drawer's opaque panel covers the terminal's leftmost columns, where
+/// every prompt and line starts, so a terminal under it looks blank while it
+/// still takes input. Docking therefore needs only a small usable terminal,
+/// not the configured initial grid (80 columns by default), which sent an
+/// ordinary half-width tiled Window to the drawer.
+///
+/// The drawer exposes the same strip beside the panel that docking would
+/// give the terminal, only with line starts hidden, so a docked terminal
+/// always shows at least as much. The floor is therefore capped at a fixed
+/// logical width: zoomed-in cells must not send a wide Window to the drawer.
+#[must_use]
+pub(crate) fn explorer_minimum_docked_terminal_width(cell_width: u32, initial_columns: u16) -> u32 {
+    cell_width
+        .max(1)
+        .saturating_mul(u32::from(
+            initial_columns.min(MINIMUM_DOCKED_TERMINAL_COLUMNS),
+        ))
+        .min(MAXIMUM_DOCKED_TERMINAL_FLOOR)
+}
 
 const fn explorer_header_text(focused: bool) -> &'static str {
     if focused {
@@ -890,6 +917,180 @@ mod tests {
             lair_explorer_disclosure_hit_test(&drawer, &rows, (100.0, row_y)),
             None
         );
+    }
+
+    /// VM report F5/R1: a 628 px half-width tile on a 1280 px output leaves a
+    /// 622 px canvas. With the 80-column docking floor the Explorer fell back
+    /// to the drawer, covering the terminal's left 288 px where all of its
+    /// text was, so the visible terminal area painted nothing.
+    #[test]
+    fn half_width_tile_docks_beside_a_visible_terminal() {
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let content = Rect {
+            x: 0,
+            y: 34,
+            width: 622,
+            height: 716,
+        };
+        for cell_width in [7, 8, 9] {
+            let layout = lair_explorer_layout(
+                content,
+                explorer_minimum_docked_terminal_width(cell_width, 80),
+                &rows,
+                Some(id),
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                layout.mode,
+                LairExplorerPresentationMode::Docked,
+                "cell width {cell_width}"
+            );
+            // The terminal starts where the panel ends: nothing covers it.
+            assert_eq!(layout.terminal.x, layout.panel.x + layout.panel.width);
+            assert_eq!(
+                layout.terminal.x + layout.terminal.width,
+                content.x + content.width
+            );
+            assert!(layout.terminal.width / cell_width >= 20);
+        }
+    }
+
+    #[test]
+    fn docking_floor_is_bounded_and_tiny_windows_keep_the_drawer() {
+        assert_eq!(explorer_minimum_docked_terminal_width(8, 80), 160);
+        assert_eq!(explorer_minimum_docked_terminal_width(8, 12), 96);
+        assert_eq!(explorer_minimum_docked_terminal_width(0, 80), 20);
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let content = |width| Rect {
+            x: 0,
+            y: 34,
+            width,
+            height: 716,
+        };
+        let minimum = explorer_minimum_docked_terminal_width(8, 80);
+        let docked =
+            lair_explorer_layout(content(PREFERRED_WIDTH + minimum), minimum, &rows, None, 0)
+                .unwrap();
+        assert_eq!(docked.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(docked.terminal.width, minimum);
+        let drawer = lair_explorer_layout(
+            content(PREFERRED_WIDTH + minimum - 1),
+            minimum,
+            &rows,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
+        assert_eq!(drawer.terminal, content(PREFERRED_WIDTH + minimum - 1));
+    }
+
+    /// Review of VM E6-0: at maximum zoom the zoomed cell (about 77 px) made
+    /// the floor wider than a full-width Window, so the drawer covered line
+    /// starts ("rojects/splin" cut at the panel edge).
+    #[test]
+    fn maximum_zoom_keeps_a_wide_window_docked() {
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let context = RenderContext::new(u16::MAX).at_maximum_zoom(120);
+        let size = context.effective_font_size(120).unwrap();
+        let primary = &context.font_generation().unwrap().faces[0];
+        let cell_width = super::super::super::cell_metrics(primary, size)
+            .unwrap()
+            .width;
+        assert!(cell_width * 20 > 1268, "cell width {cell_width}");
+        let window = Rect {
+            x: 0,
+            y: 34,
+            width: 1268,
+            height: 754,
+        };
+        let layout = lair_explorer_layout(
+            window,
+            explorer_minimum_docked_terminal_width(cell_width, 80),
+            &rows,
+            Some(id),
+            0,
+        )
+        .unwrap();
+        assert_eq!(layout.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(layout.terminal.x, layout.panel.x + layout.panel.width);
+        assert_eq!(
+            explorer_minimum_docked_terminal_width(u32::MAX, 80),
+            MAXIMUM_DOCKED_TERMINAL_FLOOR
+        );
+    }
+
+    /// VM case E6: at maximum zoom every Explorer line still holds a whole
+    /// chrome glyph, and a long label is ellipsized to the panel width.
+    #[test]
+    fn maximum_zoom_text_fits_every_explorer_line_and_ellipsizes_long_labels() {
+        use super::super::super::{ChromeText, text::chrome_maximum_cell_height};
+        use super::super::picker::truncate_picker_text;
+
+        let id = NavigationNodeId::Lair(LairId::new());
+        let mut long = row(id);
+        long.label = "e-long-label-lair-with-a-very-long-name".into();
+        let rows = [long];
+        let layout = lair_explorer_layout(
+            Rect {
+                x: 0,
+                y: 34,
+                width: 1268,
+                height: 754,
+            },
+            160,
+            &rows,
+            Some(id),
+            0,
+        )
+        .unwrap();
+        for scale in [120, 150, 180, 240] {
+            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let text = ChromeText::load_source_styled_with_context(
+                &row_label_source(&rows[0], true),
+                scale,
+                ChromeTextStyle::Regular,
+                &context,
+            )
+            .unwrap();
+            assert!(text.pixel_height() <= chrome_maximum_cell_height(scale));
+            let inset = 12_u32.saturating_mul(scale).div_ceil(120);
+            let (label, status) = row_text_clips(
+                buffer_rect(layout.rows[0].rect, scale),
+                rows[0].level,
+                inset,
+            );
+            let header = buffer_rect(layout.header, scale);
+            let header_line = (HEADER_HEIGHT - FILTER_HEIGHT)
+                .saturating_mul(scale)
+                .div_ceil(120)
+                .min(header.height)
+                / 2;
+            for (what, height) in [
+                ("label", label.height),
+                ("status", status.height),
+                ("header", header_line),
+                ("filter", buffer_rect(layout.filters[0].1, scale).height),
+                ("footer", buffer_rect(layout.footer, scale).height),
+            ] {
+                assert!(
+                    text.pixel_height() <= height,
+                    "{what} line at scale {scale}: {} > {height}",
+                    text.pixel_height()
+                );
+            }
+            // The label line is ellipsized to whole cells within its clip.
+            assert!(text.pixel_width() > label.width);
+            let cells = usize::try_from(label.width / text.frame.cell_width).unwrap();
+            let fitted = truncate_picker_text(&rows[0].label, cells);
+            assert!(fitted.ends_with('…'));
+            let fitted = ChromeText::load_with_context(&fitted, scale, &context).unwrap();
+            assert!(fitted.pixel_width() <= label.width);
+        }
     }
 
     /// Paints one unselected row and returns the canvas and its label clip.

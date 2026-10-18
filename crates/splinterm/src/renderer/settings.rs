@@ -105,6 +105,20 @@ impl RenderContext {
         self
     }
 
+    /// This context zoomed in to the largest runtime step it accepts at
+    /// `surface_scale_120`, as repeated zoom-in presses leave it.
+    #[cfg(test)]
+    pub(crate) fn at_maximum_zoom(mut self, surface_scale_120: u32) -> Self {
+        let mut steps = self.font_zoom_steps;
+        while self
+            .apply_font_zoom_steps(steps.saturating_add(1), surface_scale_120)
+            .is_ok_and(|accepted| accepted.is_some())
+        {
+            steps = steps.saturating_add(1);
+        }
+        self
+    }
+
     pub(super) fn font_generation(&self) -> Result<&Arc<FontGeneration>> {
         self.font_generation
             .as_ref()

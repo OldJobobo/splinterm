@@ -307,7 +307,10 @@ impl DojoPromptUi {
 
     pub(crate) fn title_and_body(&self) -> (&'static str, String) {
         match self {
-            Self::Rename(prompt) => ("RENAME TAB", format!("Name for ‘{}’", prompt.target().name)),
+            Self::Rename(prompt) => (
+                "RENAME DOJO",
+                format!("Name for ‘{}’", prompt.target().name),
+            ),
             Self::Terminate(prompt) => (
                 "TERMINATE DOJO",
                 format!(
