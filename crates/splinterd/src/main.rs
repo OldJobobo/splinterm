@@ -1084,6 +1084,10 @@ fn main() -> Result<()> {
         // stage is a deliberate fatal stop rather than ordinary startup.
         return stage.enter_tokio()?.reject_until_runtime_adoption();
     }
+    // Everything before this point must stay single-threaded: prepare_installed
+    // takes the handoff process guard, and a thread started earlier (tracing, a
+    // blocking pool) would silently cost every packaged daemon its rollback
+    // authority.
     let rollback_handoff =
         splinterd::handoff_coordinator::RollbackHandoffAuthority::prepare_installed();
     run_daemon(

@@ -379,6 +379,10 @@ impl CandidateBootstrap {
         listener_path: &Path,
         image_listener_path: &Path,
     ) -> Result<CandidatePreRuntimeStage, CandidateStageFailure> {
+        // Only a freshly claimed table stages; a recovered one is rolling back.
+        if self.lifecycle.phase() != HandoffPhase::CandidateClaimed {
+            return Err(self.into_stage_failure(HandoffCoordinatorError::UnexpectedPhase.into()));
+        }
         let Some(process_guard) = self.process_guard.take() else {
             return Err(self.into_stage_failure(HandoffCoordinatorError::UnexpectedPhase.into()));
         };
@@ -397,15 +401,21 @@ impl CandidateBootstrap {
         Ok(self.transfer_verified(verified, process_guard))
     }
 
-    /// Retains the complete owner table without the thread-affine guard.
+    /// Retains the complete owner table without the thread-affine guard. The
+    /// lifecycle moves to rolling back, so the phase machine itself, not only
+    /// the missing guard, refuses to stage the recovered table again.
     fn into_stage_failure(self, error: CandidateBootstrapError) -> CandidateStageFailure {
         let Self {
             manifest,
             claims,
             process_guard,
-            lifecycle,
+            mut lifecycle,
         } = self;
         drop(process_guard);
+        if lifecycle.phase() == HandoffPhase::CandidateClaimed {
+            // Always a valid edge from the only phase that stages.
+            let _ = lifecycle.transition(HandoffPhase::RollingBack);
+        }
         CandidateStageFailure {
             error,
             recovery: Box::new(CandidateRecovery {
@@ -1448,7 +1458,7 @@ mod tests {
 
         let recovered = failure.into_recovery();
         assert!(recovered.process_guard.is_none());
-        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::CandidateClaimed);
+        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::RollingBack);
         assert_eq!(recovered.claims.len(), recovered.manifest.descriptors.len());
 
         // A recovered table is rollback-only: staging it again fails before
@@ -1460,7 +1470,20 @@ mod tests {
         ));
         let recovered = failure.into_recovery();
         assert_eq!(recovered.claims.len(), recovered.manifest.descriptors.len());
-        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::CandidateClaimed);
+        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::RollingBack);
+
+        // Even with a fresh guard put back, the phase machine refuses.
+        let mut recovered = recovered;
+        recovered.process_guard = Some(HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap());
+        let failure = stage_for_test(recovered, &directory).unwrap_err();
+        assert!(matches!(
+            failure.error,
+            CandidateBootstrapError::Coordinator(HandoffCoordinatorError::UnexpectedPhase)
+        ));
+        assert_eq!(
+            failure.into_recovery().lifecycle.phase(),
+            HandoffPhase::RollingBack
+        );
     }
 
     #[test]
