@@ -363,7 +363,7 @@ pub(crate) fn paint_lair_explorer(
         canvas_width,
         canvas_height,
         tuple(panel),
-        rgba(palette.panel),
+        palette.panel_fill,
     );
     let border = scale_120.div_ceil(120).max(1);
     let right = panel.x.saturating_add(panel.width.saturating_sub(border));

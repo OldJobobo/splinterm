@@ -774,8 +774,9 @@ Splinterm sees each edit within one 500 ms poll. It applies the change through
 * A theme that declares its own `alpha` keeps it. Glass then adds only `blur`,
   which updates the compositor effect without repainting.
 
-Only the default terminal background, the padding, and the tab strip become
-translucent; Splinterm premultiplies them by the alpha. Text, explicit cell
+The default terminal background, the padding, and the tab strip become
+translucent; Splinterm premultiplies them by the alpha. Panels follow the shell
+alpha described under "Omarchy shell settings" below. Text, explicit cell
 backgrounds, and the cursor stay opaque, so text remains crisp over the blur. An
 explicit `[colors] alpha` or `blur` in Splinterm's own `config.ini` overrides
 the theme value and therefore also overrides Glassy Windows.
@@ -810,3 +811,45 @@ selected-tab body comes from `lighter_background`, then `lighter_bg`, then
 merge as above. It leaves `inactive_tab_foreground` unset, so that role is
 derived from ANSI color 8, which the exporter fills from `muted`, when the theme
 loads.
+
+### Omarchy shell settings
+
+Splinterm also follows a few settings from the Omarchy 4 shell's `shell.toml`.
+The shell reads two layers: the active theme's `shell.toml`, rendered from
+Omarchy's template or shipped by the theme, and the user's
+`~/.config/omarchy/shell.toml`. Omarchy hard-codes that user path under `$HOME`.
+Splinterm layers them the same way, key by key: a key in the user file replaces
+the theme's value for that key only, and a key in neither file takes Omarchy's
+default. Both files join the 500 ms theme poll, so edits apply live.
+
+Panels follow the shell's own card alpha:
+
+| Splinterm panel | Follows | Omarchy default |
+| --- | --- | --- |
+| Action palette, Dojo and session picker, Lair Explorer | `[menu] background-alpha` | 1.0 |
+| Tab context menu, Dojo prompt, search bar, history overlay | `[popups] background-alpha` | 1.0 |
+
+The action palette and pickers are list cards with a selected row, like the
+shell's menus. The docked Lair Explorer is Splinterm's navigation menu and has
+the same rows and selected-row treatment, so it follows `[menu]` too. The tab
+context menu, the Dojo prompt, the search bar and the history overlay are
+small flyouts and status cards, which the shell draws with `[popups]`.
+
+A panel uses the theme background, the same colour as the window's own glass,
+so Splinterm draws it as that glass with the shell alpha layered over it. Its
+coverage is `1 - (1 - shell alpha) × (1 - terminal alpha)`:
+
+* With Glassy Windows off the terminal is opaque, so panels stay opaque and the
+  window never shows holes.
+* With Glassy Windows on, a panel shows the blurred backdrop no more than the
+  terminal around it does. Omarchy's default of 1.0 keeps panels opaque.
+
+Panel borders, dividers, selected rows and text stay opaque. Because the
+backdrop is an unknown wallpaper, Splinterm raises a panel's coverage to the
+lowest value at which its primary and secondary text keep WCAG 4.5:1 contrast
+against both a black and a white backdrop. Those two bound every other
+backdrop. A theme whose secondary text already sits at the 4.5:1 floor on the
+opaque panel, as many light themes do, keeps its panels opaque. Values outside
+0.0–1.0 or not numbers are reported once and treated as Omarchy's opaque
+default. An explicit `main.theme` JSON keeps all panels opaque. Splinterm has no
+separate panel alpha key.

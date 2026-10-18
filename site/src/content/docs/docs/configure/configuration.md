@@ -113,6 +113,8 @@ Valid theme changes reload without restarting the daemon, shell, or window. A ma
 
 Omarchy's Glassy Windows works through the theme's `foot.ini`, as it does for Foot. Turning it on adds `alpha=0.65` and `blur=yes` under `[colors-dark]` unless the theme already sets them, and turning it off removes them again. Splinterm applies each change within half a second. Only the default terminal background, padding, and tab strip become translucent; text, explicit cell backgrounds, and the cursor stay opaque and crisp. An explicit `[colors] alpha` or `blur` in Splinterm's own configuration overrides the theme and Glassy Windows.
 
+Splinterm also follows the Omarchy 4 shell's `shell.toml`. It layers the user's `~/.config/omarchy/shell.toml` over the active theme's `shell.toml` key by key, as the shell does, and picks up edits within half a second. The action palette, Dojo and session picker, and Lair Explorer follow `[menu] background-alpha`. The tab context menu, Dojo prompt, search bar, and history overlay follow `[popups] background-alpha`. A panel is drawn as the window's own glass with that alpha layered over it, so panels stay opaque while Glassy Windows is off and with Omarchy's default of 1.0. Borders, selected rows, and text stay opaque, and Splinterm raises a panel's alpha as far as needed to keep its text at 4.5:1 contrast over any wallpaper.
+
 Set an explicit JSON palette only to opt out of native discovery:
 
 ```ini

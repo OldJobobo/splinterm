@@ -531,7 +531,7 @@ pub(crate) fn paint_command_palette(
         ),
         palette.shadow,
     );
-    fill_rect(canvas, width, height, tuple(panel), rgba(palette.panel));
+    fill_rect(canvas, width, height, tuple(panel), palette.panel_fill);
     let border = scale_120.div_ceil(120).max(1);
     let frame = if keyboard_focused {
         palette.focused_frame
@@ -1097,7 +1097,7 @@ pub(crate) fn paint_tab_context_menu(
         ),
         palette.shadow,
     );
-    fill_rect(canvas, width, height, tuple(panel), rgba(palette.panel));
+    fill_rect(canvas, width, height, tuple(panel), palette.panel_fill);
     let border = scale_120.div_ceil(120).max(1);
     let frame = if keyboard_focused {
         palette.focused_frame
@@ -1417,7 +1417,7 @@ pub(crate) fn paint_dojo_prompt(
         [palette.scrim[0], palette.scrim[1], palette.scrim[2], 112],
     );
     let panel = buffer_rect(layout.panel, scale_120);
-    fill_rect(canvas, width, height, tuple(panel), rgba(palette.panel));
+    fill_rect(canvas, width, height, tuple(panel), palette.panel_fill);
     let border = scale_120.div_ceil(120).max(1);
     let frame = if keyboard_focused {
         palette.focused_frame
@@ -1590,11 +1590,11 @@ pub(crate) fn paint_dojo_prompt(
                 width,
                 height,
                 tuple(rect),
-                rgba(if selected {
-                    palette.selected_fill
+                if selected {
+                    rgba(palette.selected_fill)
                 } else {
-                    palette.panel
-                }),
+                    palette.panel_fill
+                },
             );
             paint_text(
                 cache,
@@ -2338,5 +2338,100 @@ mod tests {
         .unwrap();
         assert!(cache.contains_source("> definitely absent xyz_"));
         assert!(cache.contains_source("No matching keybindings"));
+    }
+
+    #[test]
+    fn translucent_menu_panel_follows_shell_alpha_with_opaque_text() {
+        use crate::{
+            config::OmarchyShellSettings,
+            renderer::{ChromeSurface, chrome_panel_palette},
+        };
+
+        let content = Rect {
+            x: 0,
+            y: 34,
+            width: 640,
+            height: 366,
+        };
+        let state = CommandPaletteUi::new(CommandPaletteContext {
+            lair_id: LairId::new(),
+            lair_retention: splinterm_core::LairRetention::Disposable,
+            dojo_id: DojoId::new(),
+            dojo_name: "test".to_owned(),
+            pane_count: 1,
+            splint_id: SplintId::new(),
+            dojo_splints: vec![(SplintId::new(), 1)],
+            other_dojo_ids: Vec::new(),
+            previous_dojo_id: None,
+            next_dojo_id: None,
+            tab_move: CommandTabMoveAvailability::Neither,
+            focus_left: None,
+            focus_right: None,
+            focus_up: None,
+            focus_down: None,
+            clipboard_image_available: false,
+            viewport_detached: false,
+            controller_active: false,
+            forced_control_transfer: true,
+            grant_ids: Vec::new(),
+            pending_transfer_id: None,
+            agent_status_incarnation: None,
+        });
+        let layout = command_palette_layout(
+            content,
+            state.filtered(),
+            state.selected_index(),
+            state.visible_start(),
+        )
+        .unwrap();
+        // Glassy Windows (0.65) with [menu] background-alpha 0.9.
+        let theme = ResolvedTheme {
+            background: 0x1a_1b_26,
+            foreground: 0xc0_ca_f5,
+            background_alpha: 42_597,
+            shell: OmarchyShellSettings {
+                menu_alpha: 58_981,
+                ..OmarchyShellSettings::default()
+            },
+            ..ResolvedTheme::default()
+        };
+        let palette = chrome_panel_palette(theme, ChromeSurface::Menu);
+        assert_eq!(palette.panel_fill[3], 247);
+        let mut canvas = vec![0_u8; 640 * 400 * 4];
+        paint_command_palette(
+            &mut CommandPaletteTextCache::default(),
+            &RenderContext::new(theme.background_alpha),
+            &mut canvas,
+            640,
+            400,
+            content,
+            120,
+            1,
+            &layout,
+            palette,
+            &state,
+            &ResolvedKeymap::default(),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        let panel = buffer_rect(layout.panel, 120);
+        let fill = palette.panel_fill;
+        let fill_bgra = [fill[2], fill[1], fill[0], fill[3]];
+        let [_, red, green, blue] = palette.primary.to_be_bytes();
+        let text_bgra = [blue, green, red, u8::MAX];
+        let (mut filled, mut text, mut total) = (0, 0, 0);
+        for y in panel.y + 1..panel.y + panel.height - 1 {
+            for x in panel.x + 1..panel.x + panel.width - 1 {
+                let index = usize::try_from((y * 640 + x) * 4).unwrap();
+                let pixel: [u8; 4] = canvas[index..index + 4].try_into().unwrap();
+                total += 1;
+                filled += usize::from(pixel == fill_bgra);
+                text += usize::from(pixel == text_bgra);
+            }
+        }
+        assert!(filled * 2 > total, "{filled} of {total} panel pixels");
+        assert!(text > 0, "fully covered glyph pixels stay opaque text");
     }
 }

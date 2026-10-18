@@ -152,11 +152,12 @@ use crate::pane::{
 #[cfg(test)]
 use crate::renderer::paint_box_drawing_cell;
 use crate::renderer::{
-    ChromeSource, ChromeText, ChromeTextStyle, CommandPaletteLayout, CommandPaletteTextCache,
-    CursorPresentation, DojoPromptLayout, HistoryOverlayStatus, LairExplorerLayout,
-    LairExplorerPresentationMode, PickerHitTarget, RenderContext, SessionPickerOverlayLayout,
-    SessionPickerPurpose, SessionPickerTextCache, SessionPickerTextItem, SnapshotFrame,
-    SnapshotOverlays, TabContextMenuLayout, TextRow, background_bgra, clear_snapshot_caches,
+    ChromeSource, ChromeSurface, ChromeText, ChromeTextStyle, CommandPaletteLayout,
+    CommandPaletteTextCache, CursorPresentation, DojoPromptLayout, HistoryOverlayStatus,
+    LairExplorerLayout, LairExplorerPresentationMode, PickerHitTarget, RenderContext,
+    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
+    SessionPickerTextItem, SnapshotFrame, SnapshotOverlays, TabContextMenuLayout, TextRow,
+    background_bgra, chrome_panel_fill, chrome_panel_palette, clear_snapshot_caches,
     command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
     fill_rect, history_overlay_layout, lair_explorer_disclosure_hit_test,
     lair_explorer_filter_hit_test, lair_explorer_hit_test, lair_explorer_layout, paint,
@@ -164,8 +165,8 @@ use crate::renderer::{
     paint_search_overlay, paint_session_picker_overlay, paint_snapshot_overlays,
     paint_snapshot_presented, paint_snapshot_region_presented, paint_snapshot_rows_presented,
     paint_tab_context_menu, premultiplied_theme_rgba, scroll_snapshot_pixels,
-    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
-    snapshot_row_rect, tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
+    session_picker_hit_test, session_picker_overlay_layout, snapshot_row_rect,
+    tab_context_menu_hit_test, tab_context_menu_layout, write_ppm,
 };
 use crate::{
     keymap::{ActionId, KeymapPress, PrefixState, ResolvedKeymap},
@@ -10679,7 +10680,12 @@ impl App {
                     content_buffer_rect,
                     self.surface.scale_120,
                     status,
-                    self.presentation.theme.background,
+                    chrome_panel_fill(
+                        self.presentation.theme.background,
+                        ChromeSurface::Popup.shell_alpha(self.presentation.theme.shell),
+                        self.presentation.theme.background_alpha,
+                        &[self.presentation.theme.ui_accent],
+                    ),
                     self.presentation.theme.ui_accent,
                 );
             }
@@ -10749,7 +10755,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 &rows,
                 self.explorer.selected(),
                 breadcrumb.as_deref(),
@@ -10772,7 +10778,7 @@ impl App {
                     Self::buffer_rect(terminal, self.surface.scale_120)?,
                     self.surface.scale_120,
                     self.presentation.renderer_generation,
-                    session_picker_palette(self.presentation.theme),
+                    chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
                     input.text(),
                     &self.panes.pane.search.query,
                     self.panes.pane.search.matches.len(),
@@ -10804,7 +10810,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 picker
                     .purpose()
                     .unwrap_or(session_picker_purpose(self.modal.selector_kind)),
@@ -10834,7 +10840,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Menu),
                 palette,
                 &self.input.keymap,
                 self.modal.command_palette_pressed,
@@ -10857,7 +10863,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
                 prompt,
                 self.input.keyboard_focused,
             )?;
@@ -10877,7 +10883,7 @@ impl App {
                 self.surface.scale_120,
                 self.presentation.renderer_generation,
                 layout,
-                session_picker_palette(self.presentation.theme),
+                chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
                 menu,
                 self.modal.tab_context_menu_pressed,
                 self.input.keyboard_focused,
@@ -11976,6 +11982,23 @@ mod tests {
             classify_theme_update(current, current),
             ThemeUpdateImpact::default()
         );
+    }
+
+    #[test]
+    fn shell_panel_alpha_updates_repaint_chrome_without_touching_the_effect() {
+        let current = ResolvedTheme::default();
+        for (menu_alpha, popup_alpha) in [(u16::MAX / 2, u16::MAX), (u16::MAX, u16::MAX / 2)] {
+            let mut next = current;
+            next.shell.menu_alpha = menu_alpha;
+            next.shell.popup_alpha = popup_alpha;
+            assert_eq!(
+                classify_theme_update(current, next),
+                ThemeUpdateImpact {
+                    rebuild_pixels: true,
+                    reconcile_effect: false,
+                }
+            );
+        }
     }
 
     #[test]
