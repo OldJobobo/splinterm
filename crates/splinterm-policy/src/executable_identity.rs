@@ -1,4 +1,20 @@
 //! Race-resistant snapshots of a local peer's executable.
+//!
+//! # Identity invariant
+//!
+//! Every identity field except `path` (device, inode, owner, mode, size, and
+//! digest) is read through one open descriptor on the executing file object,
+//! obtained by opening the kernel's executable link, so it describes exactly
+//! the bytes the process runs. `path` is accepted only as a binding, never as
+//! the source of identity: it must be a bounded canonical absolute path, not
+//! an unlinked one, and after hashing it must still resolve in this mount
+//! namespace to the same device and inode as the open descriptor.
+//!
+//! An executable with no such path fails closed: a memfd image
+//! (`/memfd:… (deleted)`), an unlinked or replaced file, a path changed while
+//! hashing, or a path that names a different file here (another mount
+//! namespace). Callers that need only device and inode, such as trusted-client
+//! matching, read them from the opened link directly and need no path.
 
 use std::{
     fs::{self, File, Metadata},
@@ -14,6 +30,7 @@ use sha2::{Digest, Sha256};
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_EXECUTABLE_PATH_BYTES: usize = 4096;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+const CURRENT_PROCESS_EXECUTABLE: &str = "/proc/self/exe";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutableIdentity {
@@ -27,15 +44,36 @@ pub struct ExecutableIdentity {
 }
 
 impl ExecutableIdentity {
-    /// Snapshots and hashes the exact executable currently held by `pid`.
+    /// Snapshots and hashes the exact executable currently held by `pid`,
+    /// bound to the path its executable link names.
     ///
     /// # Errors
     ///
     /// Returns an error when procfs identity, path, metadata, size, or stable
-    /// descriptor verification fails.
+    /// descriptor verification fails, including for a memfd-backed, unlinked,
+    /// or replaced executable.
     pub fn from_pid(pid: u32) -> Result<Self> {
         snapshot_link(Path::new(&format!("/proc/{pid}/exe")))
             .with_context(|| format!("cannot snapshot peer executable for pid {pid}"))
+    }
+
+    /// Snapshots and hashes the executable running this process, bound to
+    /// `installed`, a path the caller already holds as authority (such as the
+    /// daemon's installed prefix) instead of the executable link's text.
+    ///
+    /// The same invariant holds: `installed` must still name the running file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `installed` is not a bounded canonical absolute
+    /// path, the running image cannot be hashed stably, or `installed` does not
+    /// name it.
+    pub fn of_current_process_at(installed: &Path) -> Result<Self> {
+        validate_canonical_path(installed)?;
+        let mut file = open_executable(Path::new(CURRENT_PROCESS_EXECUTABLE))?;
+        let (metadata, sha256) = hash_stable(&mut file, || Ok(()))?;
+        bind_path(installed, &metadata)?;
+        Ok(identity(installed.to_path_buf(), &metadata, sha256))
     }
 }
 
@@ -50,38 +88,62 @@ fn snapshot_link_with(
     let target_before = fs::read_link(link).context("cannot resolve executable link")?;
     validate_canonical_path(&target_before)?;
 
-    let descriptor = rustix::fs::open(link, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
-        .context("cannot open executable link")?;
-    let mut file = File::from(descriptor);
-    let metadata_before = file.metadata().context("cannot stat opened executable")?;
-    validate_metadata(&metadata_before)?;
-
-    after_open()?;
-    let sha256 = hash_bounded(&mut file, metadata_before.len())?;
-    let metadata_after = file.metadata().context("cannot restat opened executable")?;
-    if metadata_fingerprint(&metadata_before) != metadata_fingerprint(&metadata_after) {
-        bail!("executable changed while hashing");
-    }
+    let mut file = open_executable(link)?;
+    let (metadata, sha256) = hash_stable(&mut file, after_open)?;
 
     let target_after = fs::read_link(link).context("cannot re-resolve executable link")?;
     if target_after != target_before {
         bail!("executable link changed while hashing");
     }
-    let path_metadata =
-        fs::metadata(&target_after).context("executable path no longer resolves")?;
-    if path_metadata.dev() != metadata_after.dev() || path_metadata.ino() != metadata_after.ino() {
+    bind_path(&target_after, &metadata)?;
+    Ok(identity(target_after, &metadata, sha256))
+}
+
+/// Opens the executing file object through the kernel's executable link,
+/// which resolves to it even when its path no longer names it.
+fn open_executable(link: &Path) -> Result<File> {
+    let descriptor = rustix::fs::open(link, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+        .context("cannot open executable link")?;
+    Ok(File::from(descriptor))
+}
+
+/// Hashes the open executable, requiring its metadata to be unchanged across
+/// the read.
+fn hash_stable(
+    file: &mut File,
+    after_open: impl FnOnce() -> Result<()>,
+) -> Result<(Metadata, String)> {
+    let metadata_before = file.metadata().context("cannot stat opened executable")?;
+    validate_metadata(&metadata_before)?;
+
+    after_open()?;
+    let sha256 = hash_bounded(file, metadata_before.len())?;
+    let metadata_after = file.metadata().context("cannot restat opened executable")?;
+    if metadata_fingerprint(&metadata_before) != metadata_fingerprint(&metadata_after) {
+        bail!("executable changed while hashing");
+    }
+    Ok((metadata_after, sha256))
+}
+
+/// Requires `path` to resolve, here and now, to the opened file.
+fn bind_path(path: &Path, opened: &Metadata) -> Result<()> {
+    let path_metadata = fs::metadata(path).context("executable path no longer resolves")?;
+    if path_metadata.dev() != opened.dev() || path_metadata.ino() != opened.ino() {
         bail!("executable path no longer names the opened file");
     }
+    Ok(())
+}
 
-    Ok(ExecutableIdentity {
-        path: target_after,
-        device: metadata_after.dev(),
-        inode: metadata_after.ino(),
-        owner_uid: metadata_after.uid(),
-        mode: metadata_after.mode(),
-        size: metadata_after.len(),
+fn identity(path: PathBuf, metadata: &Metadata, sha256: String) -> ExecutableIdentity {
+    ExecutableIdentity {
+        path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        owner_uid: metadata.uid(),
+        mode: metadata.mode(),
+        size: metadata.len(),
         sha256,
-    })
+    }
 }
 
 fn validate_canonical_path(path: &Path) -> Result<()> {
@@ -271,5 +333,112 @@ mod tests {
             .expect("size sparse file");
         symlink(&oversized, &oversized_link).expect("create oversized link");
         assert!(snapshot_link(&oversized_link).is_err());
+    }
+
+    /// A child process the test started and owns, killed and reaped on drop.
+    struct OwnedChild(std::process::Child);
+
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn system_sleep() -> &'static Path {
+        ["/usr/bin/sleep", "/bin/sleep"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file())
+            .expect("a sleep executable")
+    }
+
+    fn spawn_sleep(program: &Path) -> OwnedChild {
+        // A sibling test thread's fork can briefly inherit the descriptor
+        // that wrote a fresh copy, so its exec may see ETXTBSY.
+        for _ in 0..100 {
+            match std::process::Command::new(program).arg("30").spawn() {
+                Ok(child) => return OwnedChild(child),
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn sleeping child: {error}"),
+            }
+        }
+        panic!("spawn sleeping child: executable stayed busy");
+    }
+
+    fn install_executable_copy(destination: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let staged = destination.with_extension("staged");
+        fs::copy(system_sleep(), &staged).expect("copy executable");
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
+            .expect("make copy executable");
+        fs::rename(&staged, destination).expect("install copy");
+    }
+
+    #[test]
+    fn snapshots_a_process_running_an_installed_file() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join("client");
+        install_executable_copy(&executable);
+        let child = spawn_sleep(&executable);
+
+        let identity = ExecutableIdentity::from_pid(child.0.id()).expect("snapshot child");
+        let metadata = fs::metadata(&executable).expect("installed metadata");
+        assert_eq!(identity.path, executable);
+        assert_eq!(
+            (identity.device, identity.inode),
+            (metadata.dev(), metadata.ino())
+        );
+    }
+
+    #[test]
+    fn rejects_a_process_whose_executable_was_replaced_or_unlinked() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join("client");
+        install_executable_copy(&executable);
+        let child = spawn_sleep(&executable);
+
+        // Replaced by rename: the path now names a different inode.
+        install_executable_copy(&executable);
+        assert!(ExecutableIdentity::from_pid(child.0.id()).is_err());
+
+        // Unlinked: the path names nothing.
+        fs::remove_file(&executable).expect("unlink executable");
+        assert!(ExecutableIdentity::from_pid(child.0.id()).is_err());
+    }
+
+    #[test]
+    fn rejects_a_process_running_a_memfd_image() {
+        let memfd = rustix::fs::memfd_create("splinterm", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("create memfd");
+        let mut image = File::from(memfd);
+        image
+            .write_all(&fs::read(system_sleep()).expect("read executable"))
+            .expect("write memfd image");
+        let child = spawn_sleep(Path::new(&format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&image)
+        )));
+
+        assert!(ExecutableIdentity::from_pid(child.0.id()).is_err());
+    }
+
+    #[test]
+    fn binds_the_running_image_only_to_a_path_that_names_it() {
+        let running = fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical test executable");
+        let identity =
+            ExecutableIdentity::of_current_process_at(&running).expect("snapshot running image");
+        let reference = ExecutableIdentity::from_pid(std::process::id()).expect("snapshot self");
+        assert_eq!(identity, reference);
+
+        let directory = TestDirectory::new();
+        let other = directory.0.join("other");
+        fs::write(&other, b"other").expect("write other file");
+        assert!(ExecutableIdentity::of_current_process_at(&other).is_err());
+        assert!(ExecutableIdentity::of_current_process_at(Path::new("relative")).is_err());
+        assert!(ExecutableIdentity::of_current_process_at(&directory.0.join("missing")).is_err());
     }
 }

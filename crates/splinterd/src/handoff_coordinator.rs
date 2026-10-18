@@ -338,7 +338,9 @@ impl RollbackHandoffAuthority {
     ///
     /// The forward candidate is whatever is installed now at the paths this
     /// authority was captured from: `splinterd` and the adjacent `splinterm`,
-    /// where a package upgrade replaces them. Both are opened without following
+    /// where a package upgrade replaces them. The daemon retains this authority
+    /// only when those recorded paths are its installed prefix's, so nothing
+    /// here re-resolves the running executable. Both are opened without following
     /// symlinks and must be root-owned, regular, executable, writable by no
     /// group or other user, and unchanged across their copy, exactly as the
     /// rollback capture requires. The package record beside them is located

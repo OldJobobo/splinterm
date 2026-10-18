@@ -5,7 +5,10 @@
 //! terminal body, so `image_state = not_present` means no separate image-body
 //! descriptor. Other body-bearing state remains in separately sealed descriptors.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use splinterm_core::{DojoId, LairId, SplintId};
@@ -22,6 +25,7 @@ use crate::{
     },
     handoff_descriptors::{HandoffDescriptorSlot, MAX_HANDOFF_DESCRIPTORS},
     handoff_preflight::SealedPreflightReports,
+    install_prefix::{names_pair_in, validate_install_prefix_path},
     package_provenance::ValidatedHandoffPackageProvenance,
 };
 
@@ -86,6 +90,13 @@ pub struct HandoffManifestV1 {
     pub handoff_protocol: u16,
     pub terminal_checkpoint_schema: u16,
     pub descriptor_manifest_schema: u16,
+    /// The installed-prefix authority both generations share: the directory
+    /// holding `splinterd`, `splinterm`, and their helpers. Every executable
+    /// pair in the manifest was captured from `<install_prefix>/splinterd` and
+    /// `<install_prefix>/splinterm`. A daemon adopted from a sealed memfd
+    /// (M3.8/M3.10) takes its prefix from here, since its running image no
+    /// longer has an installed path.
+    pub install_prefix: PathBuf,
     pub executable_pairs: ExecutablePairSetEvidence,
     pub counterpart_manifest_slot: HandoffDescriptorSlot,
     pub splints: Vec<ManifestSplint>,
@@ -111,6 +122,12 @@ impl HandoffManifestV1 {
         provenance: &ValidatedHandoffPackageProvenance,
     ) -> Result<(), ManifestError> {
         validate_manifest(self)?;
+        // Both generations' images came from exactly this installation.
+        if !names_pair_in(&self.install_prefix, snapshots.forward())
+            || !names_pair_in(&self.install_prefix, snapshots.rollback())
+        {
+            return Err(ManifestError::InvalidInstallPrefix);
+        }
         // The running daemon is the rollback build, whose package identity
         // binds its capability ranges. A narrower copied range would steer
         // negotiation below what that build advertises.
@@ -378,6 +395,8 @@ pub enum ManifestError {
     CapabilityMismatch,
     #[error("handoff manifest executable evidence is invalid")]
     InvalidExecutables,
+    #[error("handoff manifest installed prefix is invalid or does not name its executables")]
+    InvalidInstallPrefix,
     #[error("forward and rollback manifests do not form one exact operation pair")]
     PairMismatch,
 }
@@ -460,6 +479,8 @@ pub fn validate_manifest(manifest: &HandoffManifestV1) -> Result<(), ManifestErr
         return Err(ManifestError::InvalidIdentity);
     }
     validate_daemon_generations(manifest)?;
+    validate_install_prefix_path(&manifest.install_prefix)
+        .map_err(|_| ManifestError::InvalidInstallPrefix)?;
     if manifest.splints.len() > MAX_MANIFEST_SPLINTS
         || manifest.descriptors.len() > MAX_HANDOFF_DESCRIPTORS
     {
@@ -508,6 +529,7 @@ pub fn validate_manifest_pair(
         || forward.target_generation != rollback.source_generation
         || forward.source_daemon_generation != rollback.target_daemon_generation
         || forward.target_daemon_generation != rollback.source_daemon_generation
+        || forward.install_prefix != rollback.install_prefix
         || forward.executable_pairs != rollback.executable_pairs
         || forward_splints != rollback_splints
         || forward_descriptors != rollback_descriptors
@@ -831,6 +853,8 @@ mod tests {
 
     struct SnapshotFixture {
         directory: PathBuf,
+        /// The installed prefix both pairs were captured from.
+        prefix: PathBuf,
         snapshots: HandoffExecutableSnapshots,
     }
 
@@ -846,17 +870,21 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir(&directory).unwrap();
-            let forward = executable_pair(&directory, "forward");
-            let rollback = executable_pair(&directory, "rollback");
+            let prefix = directory.join("bin");
             let policy = ExecutableSnapshotPolicy {
                 expected_owner_uid: rustix::process::geteuid().as_raw(),
             };
+            // As in a package upgrade, the forward pair replaces the rollback
+            // pair at the same installed paths after the rollback capture.
+            let rollback = install_pair(&prefix);
             let rollback =
                 RetainedRollbackExecutables::capture_declared_for_test(&rollback, policy).unwrap();
+            let forward = install_pair(&prefix);
             let snapshots =
                 HandoffExecutableSnapshots::materialize(&forward, &rollback, policy).unwrap();
             Self {
                 directory,
+                prefix,
                 snapshots,
             }
         }
@@ -868,17 +896,20 @@ mod tests {
         }
     }
 
-    fn executable_pair(root: &Path, generation: &str) -> ExecutableSourcePair {
-        let directory = root.join(generation);
-        fs::create_dir(&directory).unwrap();
-        let daemon = directory.join("splinterd");
-        let client = directory.join("splinterm");
+    /// Installs a pair in `prefix` by rename, replacing any earlier pair with
+    /// new inodes.
+    fn install_pair(prefix: &Path) -> ExecutableSourcePair {
+        fs::create_dir_all(prefix).unwrap();
+        let daemon = prefix.join("splinterd");
+        let client = prefix.join("splinterm");
         for (path, bytes) in [
             (&daemon, b"daemon".as_slice()),
             (&client, b"client".as_slice()),
         ] {
-            fs::write(path, bytes).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            let staged = path.with_extension("staged");
+            fs::write(&staged, bytes).unwrap();
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::rename(&staged, path).unwrap();
         }
         ExecutableSourcePair::new(daemon, client).unwrap()
     }
@@ -1006,6 +1037,7 @@ mod tests {
             handoff_protocol: 1,
             terminal_checkpoint_schema: 1,
             descriptor_manifest_schema: 1,
+            install_prefix: PathBuf::from("/usr/bin"),
             executable_pairs: ExecutablePairSetEvidence {
                 forward: ManifestExecutablePair {
                     daemon: image(2),
@@ -1250,6 +1282,7 @@ mod tests {
         );
         let mut baseline = manifest(ManifestKind::Forward);
         baseline.private_protocol = 1;
+        baseline.install_prefix.clone_from(&fixture.prefix);
         validate_negotiated_contract(&baseline, negotiated).unwrap();
 
         for mutate in [
@@ -1320,6 +1353,7 @@ mod tests {
         );
         let mut manifest = manifest(ManifestKind::Forward);
         manifest.private_protocol = 1;
+        manifest.install_prefix.clone_from(&fixture.prefix);
         manifest.source_generation = GenerationEvidence::from_preflight(reports.rollback);
         manifest.target_generation = GenerationEvidence::from_preflight(reports.forward);
         manifest.executable_pairs.forward.generation = manifest.target_generation;
@@ -1367,6 +1401,89 @@ mod tests {
         assert!(matches!(
             manifest
                 .validate_authority_against(running, &fixture.snapshots, &reports, &provenance,),
+            Err(ManifestError::InvalidExecutables)
+        ));
+    }
+
+    #[test]
+    fn the_installed_prefix_is_canonical_required_and_names_both_pairs() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let oversized = format!(
+            "/{}",
+            "a".repeat(crate::install_prefix::MAX_INSTALL_PREFIX_BYTES)
+        );
+        for invalid in [
+            PathBuf::new(),
+            PathBuf::from("/"),
+            PathBuf::from("usr/bin"),
+            PathBuf::from("/usr/bin/"),
+            PathBuf::from("/usr//bin"),
+            PathBuf::from("/usr/./bin"),
+            PathBuf::from("/usr/../bin"),
+            PathBuf::from(oversized),
+            PathBuf::from(OsStr::from_bytes(b"/usr/b\0in")),
+        ] {
+            let mut manifest = manifest(ManifestKind::Forward);
+            manifest.install_prefix = invalid;
+            assert!(
+                matches!(
+                    validate_manifest(&manifest),
+                    Err(ManifestError::InvalidInstallPrefix)
+                ),
+                "accepted {:?}",
+                manifest.install_prefix
+            );
+        }
+
+        // The field is required: a manifest without it does not decode.
+        let mut value = serde_json::to_value(manifest(ManifestKind::Forward)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("install_prefix")
+            .unwrap();
+        assert!(matches!(
+            decode_manifest(&serde_json::to_vec(&value).unwrap()),
+            Err(ManifestError::Encoding(_))
+        ));
+
+        let fixture = SnapshotFixture::new();
+        let reports = SealedPreflightReports {
+            forward: preflight(fixture.snapshots.forward(), 2),
+            rollback: preflight(fixture.snapshots.rollback(), 1),
+        };
+        let running = RunningHandoffGeneration {
+            build_identity: reports.rollback.pair_build_identity,
+            build_version: reports.rollback.pair_build_version,
+            capabilities: reports.rollback.capabilities,
+        };
+        let provenance = ValidatedHandoffPackageProvenance::from_verified_for_test(
+            &fixture.snapshots,
+            reports.forward,
+            reports.rollback,
+        );
+        let mut manifest = manifest(ManifestKind::Forward);
+        manifest.private_protocol = 1;
+        // Neither another installation nor a directory above the pairs names
+        // both sealed pairs' sources.
+        for elsewhere in [PathBuf::from("/usr/bin"), fixture.directory.clone()] {
+            manifest.install_prefix = elsewhere;
+            assert!(matches!(
+                manifest.validate_authority_against(
+                    running,
+                    &fixture.snapshots,
+                    &reports,
+                    &provenance,
+                ),
+                Err(ManifestError::InvalidInstallPrefix)
+            ));
+        }
+        // The capturing prefix passes, leaving only the fixture's synthetic
+        // image evidence to refuse.
+        manifest.install_prefix.clone_from(&fixture.prefix);
+        assert!(matches!(
+            manifest.validate_authority_against(running, &fixture.snapshots, &reports, &provenance),
             Err(ManifestError::InvalidExecutables)
         ));
     }
@@ -1565,6 +1682,7 @@ mod tests {
             |manifest| manifest.terminal_checkpoint_schema += 1,
             |manifest| manifest.splints[0].terminal_revision += 1,
             |manifest| manifest.descriptors[0].inherited_fd += 100,
+            |manifest| manifest.install_prefix = PathBuf::from("/opt/splinterm/bin"),
             |manifest| {
                 manifest.executable_pairs.forward.daemon.source_sha256[0] ^= 1;
                 manifest.executable_pairs.forward.daemon.snapshot_sha256[0] ^= 1;
