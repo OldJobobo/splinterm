@@ -77,6 +77,10 @@ pub struct WindowOptions {
     pub authority: AuthorityStatus,
     /// Whether the legacy single-pane command channel already owns control.
     pub controlled: bool,
+    /// Whether the title names a controlling Window "local controller". Only
+    /// the title: input still follows `controlled`. The remote connection
+    /// status Window turns it off because it controls no terminal.
+    pub controller_title: bool,
     /// Endpoint-local terminal limits for the legacy or activated focused pane.
     pub terminal_grid_limits: TerminalGridLimits,
     /// Initial terminal dimensions from the supported configuration subset.
@@ -145,6 +149,7 @@ impl Default for WindowOptions {
             session_picker: None,
             authority: AuthorityStatus::default(),
             controlled: true,
+            controller_title: true,
             terminal_grid_limits: TerminalGridLimits::default(),
             initial_columns: 80,
             initial_rows: 24,
