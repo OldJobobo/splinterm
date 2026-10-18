@@ -5628,7 +5628,7 @@ struct ProcessOutputMetrics {
     subscriber_overflows: u64,
 }
 
-fn set_terminal_pixel_geometry(
+pub(crate) fn set_terminal_pixel_geometry(
     terminal: &mut Terminal,
     columns: u16,
     rows: u16,

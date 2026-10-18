@@ -1052,9 +1052,10 @@ struct DaemonState {
     /// Whether the daemon runs with `--require-workload-cgroups`. Without a
     /// connected manager every new launch then fails closed.
     workload_cgroups_required: bool,
-    /// Set when a resumed round finds a descriptor still inheritable after
-    /// the exec boundary failed to restore close-on-exec: every new launch
-    /// then fails closed rather than leak it into a child.
+    /// Set when a resumed round finds a descriptor still inheritable after a
+    /// handoff boundary, and carried into every later resumed round: every
+    /// new launch then fails closed, until restart, rather than leak it into
+    /// a child.
     inheritable_descriptor_leak: std::sync::atomic::AtomicBool,
     /// Shared so a resumed serve round (Plan 0061 D5) keeps the one retained
     /// rollback pair the daemon captured at startup.
@@ -1704,8 +1705,11 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
     });
     *state.audit.lock().await = audit;
     carry_unused_provenance(&previous, &state, &topology);
+    // Sticky until restart: a later boundary usually fails earlier, at the
+    // inheritance audit, and must not clear what an earlier one leaked.
+    let earlier_leak = previous.inheritable_descriptor_leak.load(Ordering::Acquire);
     drop(previous);
-    refresh_resumed_state(&state, &topology, policy_path, &boundary_failure).await;
+    refresh_resumed_state(&state, &topology, policy_path, earlier_leak).await;
 
     let splints = handed_off
         .into_iter()
@@ -1786,21 +1790,32 @@ fn carry_unused_provenance(previous: &DaemonState, state: &DaemonState, topology
 
 /// Brings a resumed state up to date before any Splint is served again.
 ///
-/// After a failed close-on-exec restore it audits the descriptor table and,
-/// if anything is still inheritable, makes every new launch fail closed.
-/// Then it reloads the persistent policy once against the resumed Topology,
-/// as candidate adoption does: a reload signalled during the handoff was
-/// abandoned under the fence and would otherwise never run.
+/// After every boundary, whatever it failed with, it audits the descriptor
+/// table, and makes every new launch fail closed if anything is still
+/// inheritable or an earlier round's boundary already left something so
+/// (`earlier_leak`): the latch holds until restart. Then it reloads the
+/// persistent policy once against the resumed Topology, as candidate
+/// adoption does: a reload signalled during the handoff was abandoned under
+/// the fence and would otherwise never run.
 async fn refresh_resumed_state(
     state: &DaemonState,
     topology: &Topology,
     policy_path: Option<PathBuf>,
-    boundary_failure: &ExecBoundaryError,
+    earlier_leak: bool,
 ) {
-    if matches!(boundary_failure, ExecBoundaryError::Restore { .. })
-        && let Err(error) = splinterd::handoff_descriptors::audit_inheritable_descriptors()
-    {
-        error!(%error, "a descriptor stayed inheritable after the handoff boundary; new launches are refused until restart");
+    let leaked_now = match splinterd::handoff_descriptors::audit_inheritable_descriptors() {
+        Ok(()) => false,
+        Err(error) => {
+            error!(%error, "a descriptor stayed inheritable after the handoff boundary; new launches are refused until restart");
+            true
+        }
+    };
+    if earlier_leak && !leaked_now {
+        error!(
+            "an earlier handoff boundary left a descriptor inheritable; new launches stay refused until restart"
+        );
+    }
+    if earlier_leak || leaked_now {
         state
             .inheritable_descriptor_leak
             .store(true, Ordering::Release);
@@ -15887,6 +15902,68 @@ mod tests {
         let refused = refuse_unsafe_launch(&state).unwrap_err();
         assert_eq!(refused.code, ErrorCode::Internal);
         assert!(refused.message.contains("stayed inheritable"));
+    }
+
+    /// First round: a descriptor still inheritable after the boundary (as a
+    /// failed restore leaves it) sets the launch latch, whatever the boundary
+    /// failed with.
+    #[tokio::test]
+    async fn a_descriptor_inheritable_after_a_boundary_latches_launch_refusal() {
+        let state = test_state(false);
+        let leaked = std::fs::File::open("/dev/null").unwrap();
+        let flags = rustix::io::fcntl_getfd(&leaked).unwrap();
+        rustix::io::fcntl_setfd(&leaked, flags - rustix::io::FdFlags::CLOEXEC).unwrap();
+        refresh_resumed_state(&state, &Topology::new(), None, false).await;
+        // Close-on-exec again before anything else can spawn a child.
+        rustix::io::fcntl_setfd(&leaked, flags).unwrap();
+        assert!(state.inheritable_descriptor_leak.load(Ordering::Acquire));
+        assert!(refuse_unsafe_launch(&state).is_err());
+    }
+
+    /// Second round: the earlier round's latch survives a later resume whose
+    /// boundary failed at the inheritance audit instead, and launches stay
+    /// refused.
+    #[test]
+    fn an_earlier_descriptor_leak_keeps_launches_refused_after_a_later_resume() {
+        let mut round = handoff_round(false, false);
+        round
+            .resumed
+            .previous
+            .inheritable_descriptor_leak
+            .store(true, Ordering::Release);
+        round.resumed.boundary_failure = ExecBoundaryError::Inheritance(
+            splinterd::handoff_descriptors::DescriptorHandoffError::UnexpectedInheritableDescriptor(
+                142,
+            ),
+        );
+        let HandoffRound {
+            resumed, directory, ..
+        } = round;
+        daemon_runtime().block_on(async {
+            let round = start_resumed(resumed).await;
+            let state = &round.state;
+            assert!(state.inheritable_descriptor_leak.load(Ordering::Acquire));
+            let revision = state.topology.read().await.revision();
+            let refused = trusted_request(
+                state,
+                81,
+                Request::CreateLair {
+                    expected_topology_revision: revision,
+                    name: "refused".into(),
+                    launch: test_launch(&["/bin/sh", "-c", "exec cat"]),
+                    generated_name: false,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::Internal);
+            assert!(refused.message.contains("stayed inheritable"));
+            let remaining = state.runtimes.lock().await.drain();
+            for runtime in remaining {
+                let _ = runtime.shutdown().await;
+            }
+        });
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// With workload cgroups required and no manager after resume (unit tests

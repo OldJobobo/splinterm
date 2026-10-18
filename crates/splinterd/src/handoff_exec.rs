@@ -497,7 +497,7 @@ pub async fn resume_handed_off<A: WorkloadScopeAdopter>(
         config.rows = size.rows;
         config.pixel_width = size.pixel_width;
         config.pixel_height = size.pixel_height;
-        let terminal = restore_terminal(&checkpoint, &config, budgets).unwrap_or_else(|| {
+        let mut terminal = restore_terminal(&checkpoint, &config, budgets).unwrap_or_else(|| {
             warn!(splint_id = %handed_off.evidence.splint_id, "handoff checkpoint could not be restored; resuming with a blank terminal");
             fleet.blank_terminals.push(handed_off.evidence.splint_id);
             Terminal::new(
@@ -506,6 +506,7 @@ pub async fn resume_handed_off<A: WorkloadScopeAdopter>(
                 config.terminal.clone(),
             )
         });
+        apply_captured_pixel_geometry(&mut terminal, size);
         drop(checkpoint);
         pending.push((dojo_id, handed_off, terminal, config));
     }
@@ -633,6 +634,21 @@ async fn adopt_scopes<A: WorkloadScopeAdopter>(
     }
 }
 
+/// Gives a resumed terminal the cell pixel geometry its PTY was captured
+/// with, exactly as a spawned actor derives it, so image placement before the
+/// next resize uses real cells. A restored checkpoint already carries the
+/// actor's geometry, which this re-derives unchanged; a blank fallback
+/// terminal starts without one.
+fn apply_captured_pixel_geometry(terminal: &mut Terminal, size: splinterm_pty::PtySize) {
+    crate::live::set_terminal_pixel_geometry(
+        terminal,
+        size.columns,
+        size.rows,
+        size.pixel_width,
+        size.pixel_height,
+    );
+}
+
 /// Restores one terminal from its sealed checkpoint, or `None` when the body
 /// is unreadable, invalid, or of another size than the capture recorded.
 fn restore_terminal(
@@ -680,5 +696,46 @@ pub fn reap_exited_child(pid: u32) -> Option<ProcessExit> {
             signal: status.terminating_signal(),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use splinterm_pty::PtySize;
+    use splinterm_terminal::{Terminal, TerminalConfig};
+
+    use super::apply_captured_pixel_geometry;
+
+    fn size(pixel_width: u16, pixel_height: u16) -> PtySize {
+        PtySize {
+            columns: 80,
+            rows: 24,
+            pixel_width,
+            pixel_height,
+        }
+    }
+
+    /// A blank fallback terminal for a capture with pixel extents gets the
+    /// cell size a spawned actor would derive; zero extents stay unknown.
+    #[test]
+    fn a_blank_resumed_terminal_takes_the_captured_cell_pixel_size() {
+        let mut terminal = Terminal::new(80, 24, TerminalConfig::default());
+        assert_eq!(terminal.cell_pixel_size(), None);
+        apply_captured_pixel_geometry(&mut terminal, size(800, 480));
+        assert_eq!(terminal.cell_pixel_size(), Some((10, 20)));
+
+        let mut unknown = Terminal::new(80, 24, TerminalConfig::default());
+        apply_captured_pixel_geometry(&mut unknown, size(0, 0));
+        assert_eq!(unknown.cell_pixel_size(), None);
+    }
+
+    /// A restored terminal ends with the captured geometry too, whatever its
+    /// checkpoint carried.
+    #[test]
+    fn a_restored_terminal_keeps_the_geometry_its_capture_recorded() {
+        let mut terminal = Terminal::new(80, 24, TerminalConfig::default());
+        terminal.set_cell_pixel_size(7, 9);
+        apply_captured_pixel_geometry(&mut terminal, size(800, 480));
+        assert_eq!(terminal.cell_pixel_size(), Some((10, 20)));
     }
 }
