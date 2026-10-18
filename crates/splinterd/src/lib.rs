@@ -2,6 +2,8 @@
 
 pub mod authorization;
 mod candidate_bootstrap;
+#[doc(hidden)]
+pub mod dbus_worker;
 pub mod executable_snapshot;
 pub mod handoff_checkpoint;
 pub mod handoff_compatibility;
