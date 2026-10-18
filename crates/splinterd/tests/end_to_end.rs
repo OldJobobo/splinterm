@@ -2710,6 +2710,242 @@ async fn shutdown_reaps_signal_resistant_child_and_removes_socket() {
     .expect("signal-resistant shutdown integration timed out");
 }
 
+/// The pids an interactive shell's rc file recorded for one Splint, one per
+/// launch, in launch order.
+fn recorded_shell_pids(path: &Path, splint_id: SplintId) -> Vec<u32> {
+    let splint = splint_id.to_string();
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (recorded, pid) = line.split_once(' ')?;
+            (recorded == splint).then(|| pid.trim().parse().ok())?
+        })
+        .collect()
+}
+
+async fn wait_for_shell_pid(path: &Path, splint_id: SplintId, launch: usize) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(pid) = recorded_shell_pids(path, splint_id).get(launch) {
+            return *pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "launch {launch} of {splint_id} never ran its rc file"
+        );
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_exited_lifecycle(connection: &mut Connection, splint_id: SplintId) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match connection
+            .request(Request::InspectSplint { splint_id })
+            .await
+        {
+            Response::Splint { runtime, .. } if runtime.lifecycle == SplintLifecycle::Exited => {
+                return;
+            }
+            Response::Splint { .. } => {}
+            response => panic!("unexpected Splint inspection response: {response:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{splint_id} never reported its exit"
+        );
+        time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn type_into(daemon: &Daemon, splint_id: SplintId, bytes: &[u8]) {
+    let mut connection = daemon.connect().await;
+    let incarnation = connection.live_incarnation(splint_id).await;
+    connection.input(splint_id, incarnation, bytes).await;
+}
+
+/// Kills a process the test started when the test ends, passing or not.
+struct KillOnDrop(u32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = i32::try_from(self.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario replays the Explorer restore, external kill, and SIGTERM sequence"
+)]
+async fn sigterm_shutdown_ends_a_restored_splint_whose_job_outlives_its_shell() {
+    // Production's 30-second hangup and termination graces: a shutdown that
+    // waits for escalation cannot fit the bound below.
+    const SHUTDOWN_BOUND: Duration = Duration::from_secs(10);
+    time::timeout(TEST_TIMEOUT, async {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let runtime =
+            std::env::temp_dir().join(format!("sprestore-{}-{nonce:x}", std::process::id()));
+        let home = runtime.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let pids = runtime.join("shell-pids");
+        fs::write(
+            home.join(".bashrc"),
+            format!(
+                "printf '%s %s\\n' \"$SPLINTERM_SPLINT_ID\" \"$$\" >> {}\nPS1='$ '\n",
+                pids.display()
+            ),
+        )
+        .unwrap();
+        let socket = runtime.join("splinterd.sock");
+        // An unparsable override leaves the production graces in place.
+        let child = Daemon::spawn_configured_with_environment(
+            &runtime,
+            &socket,
+            None,
+            true,
+            &[
+                ("HOME", home.to_str().unwrap()),
+                ("SPLINTERM_TEST_SHUTDOWN_GRACE_MS", ""),
+            ],
+        );
+        Daemon::wait_until_ready(&socket).await;
+        let mut daemon = Daemon {
+            child,
+            runtime,
+            socket,
+            policy: None,
+            development_terminal_access: true,
+        };
+        let launch = LaunchParameters {
+            cwd: home.clone(),
+            command: Vec::new(),
+            shell: Some("/bin/bash".into()),
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut connection = daemon.connect().await;
+        let Response::LairCreated { lair, .. } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "restore-shutdown".into(),
+                launch: launch.clone(),
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("Lair was not created");
+        };
+        let dojo_id = lair.dojos[0].id;
+        let LayoutNode::Leaf(restored) = &lair.dojos[0].root else {
+            panic!("created Dojo was not a leaf");
+        };
+        let restored_id = restored.id;
+        let expected_topology_revision = connection.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id: killed_id,
+            ..
+        } = connection
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: restored_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch,
+            })
+            .await
+        else {
+            panic!("second Splint was not created");
+        };
+        wait_for_shell_pid(&pids, restored_id, 0).await;
+        wait_for_shell_pid(&pids, killed_id, 0).await;
+
+        // The shell exits, and the Explorer restores the Dojo's exited Splint.
+        type_into(&daemon, restored_id, b"exit\n").await;
+        wait_for_exited_lifecycle(&mut connection, restored_id).await;
+        let expected_topology_revision = connection.topology_revision().await;
+        let Response::RestoreCompleted { results, .. } = connection
+            .request(Request::RestoreDojo {
+                expected_topology_revision,
+                dojo_id,
+            })
+            .await
+        else {
+            panic!("Dojo restore failed");
+        };
+        assert!(
+            results
+                .iter()
+                .any(|result| result.splint_id == restored_id && result.incarnation.is_some()),
+            "{results:?}"
+        );
+        let restored_shell = wait_for_shell_pid(&pids, restored_id, 1).await;
+        // The restored shell starts a job in its own process group that
+        // ignores hangup and keeps the PTY open.
+        let holder = daemon.runtime.join("holder-pid");
+        type_into(
+            &daemon,
+            restored_id,
+            format!(
+                "(trap '' HUP; echo $BASHPID > {}; exec sleep 120) &\n",
+                holder.display()
+            )
+            .as_bytes(),
+        )
+        .await;
+        let holder_pid = time::timeout(Duration::from_secs(5), wait_for_pid_file(&holder))
+            .await
+            .expect("the restored shell never started its job");
+        let _holder = KillOnDrop(holder_pid);
+        // Another Splint is killed externally.
+        let incarnation = connection.live_incarnation(killed_id).await;
+        assert!(matches!(
+            connection
+                .request(Request::KillSplint {
+                    splint_id: killed_id,
+                    incarnation,
+                })
+                .await,
+            Response::SplintKilled { .. }
+        ));
+        drop(connection);
+
+        let started = Instant::now();
+        let pid =
+            rustix::process::Pid::from_raw(i32::try_from(daemon.child.id()).unwrap()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        let status = loop {
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < SHUTDOWN_BOUND,
+                "SIGTERM shutdown is still waiting on the restored Splint after {:?}",
+                started.elapsed()
+            );
+            time::sleep(Duration::from_millis(10)).await;
+        };
+        daemon.assert_success(status);
+        assert!(!daemon.socket.exists());
+        assert!(
+            !Path::new(&format!("/proc/{restored_shell}")).exists(),
+            "the hangup ended the restored shell"
+        );
+    })
+    .await
+    .expect("restored Splint shutdown scenario timed out");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,

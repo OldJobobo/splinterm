@@ -933,6 +933,19 @@ impl LinuxPtySession {
             .map_err(|error| PtyError::io("signal process group", error))
     }
 
+    /// Whether any process is still a member of the original child process
+    /// group.
+    ///
+    /// Once the child is reaped, the group empties when the last member it
+    /// left behind exits; [`Self::signal_process_group`] can then reach
+    /// nothing. A process outside the group may still hold the PTY slave open.
+    /// A group with members this process may not signal still has members.
+    #[must_use]
+    pub fn process_group_has_members(&self) -> bool {
+        process::test_kill_process_group(self.identity.process_group)
+            != Err(rustix::io::Errno::SRCH)
+    }
+
     /// Waits for and reaps the child process.
     ///
     /// # Errors

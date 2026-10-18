@@ -4556,6 +4556,12 @@ enum ShutdownStage {
     Hangup(Instant),
     Terminate(Instant),
     Kill,
+    /// The child has exited and its process group is empty, so no escalation
+    /// signal can reach anything. Whatever still holds the PTY open is
+    /// outside the group (a job the shell moved to its own group, or a
+    /// process that left the session); waiting through the remaining grace
+    /// for its EOF would only delay shutdown.
+    Settled,
 }
 
 /// Test-only action run on one Splint's PTY session between sealing its
@@ -4915,7 +4921,10 @@ async fn run_actor_body(
             continue;
         }
 
-        let shutdown_settled = shutdown.is_none() || matches!(shutdown, Some(ShutdownStage::Kill));
+        let shutdown_settled = matches!(
+            shutdown,
+            None | Some(ShutdownStage::Kill | ShutdownStage::Settled)
+        );
         if child_exit.is_some()
             && (eof
                 || (shutdown_settled
@@ -5096,7 +5105,7 @@ async fn run_actor_body(
                     child_exit = Some(status.into());
                     drain_deadline = Some(Instant::now() + config.exit_drain_timeout);
                 }
-                advance_shutdown(session, &mut shutdown, &config);
+                advance_shutdown(session, &mut shutdown, &config, child_exit.is_some());
             }
         }
     }
@@ -5843,11 +5852,30 @@ fn publish_exit(
     overflows
 }
 
+/// Escalates a shutdown from hangup to termination to kill, signalling the
+/// child's process group at each grace deadline.
+///
+/// Escalation keeps going after the child exits while members it left in its
+/// process group may still hold the PTY. Once the child has exited and the
+/// group is empty there is nothing left to signal, so the shutdown settles
+/// immediately instead of waiting out the remaining grace for an EOF that a
+/// process outside the group withholds.
 fn advance_shutdown(
     session: &LinuxPtySession,
     shutdown: &mut Option<ShutdownStage>,
     config: &LiveSplintConfig,
+    child_exited: bool,
 ) {
+    if child_exited
+        && matches!(
+            *shutdown,
+            Some(ShutdownStage::Hangup(_) | ShutdownStage::Terminate(_))
+        )
+        && !session.process_group_has_members()
+    {
+        *shutdown = Some(ShutdownStage::Settled);
+        return;
+    }
     let now = Instant::now();
     match *shutdown {
         Some(ShutdownStage::Hangup(deadline)) if now >= deadline => {
@@ -10958,6 +10986,76 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(status.code, Some(0));
+    }
+
+    /// Kills a test-owned process when the test ends, passing or not.
+    struct KillOnDrop(u32);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if let Some(pid) = i32::try_from(self.0)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_settles_when_only_a_process_outside_the_group_holds_the_pty() {
+        // A process in its own session keeps the PTY slave open and ignores
+        // hangup, as a shell's background job can. Once the child exits on
+        // the hangup and its group is empty, no escalation signal reaches
+        // that process, so shutdown must not wait out the grace for its EOF.
+        let marker = std::env::temp_dir().join(format!(
+            "splinterd-pty-holder-{}-{}",
+            std::process::id(),
+            SplintId::new()
+        ));
+        let marker_path = marker.display();
+        let runtime = LiveSplintRuntime::spawn(
+            SplintId::new(),
+            backend(),
+            shell(&format!(
+                "setsid sh -c 'trap \"\" HUP; echo $$ > {marker_path}; exec sleep 30' & \
+                 while [ ! -s {marker_path} ]; do sleep 0.01; done; \
+                 printf ready; while :; do sleep 1; done"
+            )),
+            LiveSplintConfig {
+                hangup_grace: Duration::from_secs(10),
+                terminate_grace: Duration::from_secs(10),
+                ..fast_config()
+            },
+        )
+        .await
+        .unwrap();
+        let holder = time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&marker)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+                {
+                    return pid;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let _holder = KillOnDrop(holder);
+        let _ = std::fs::remove_file(&marker);
+        time::sleep(Duration::from_millis(50)).await;
+
+        let status = time::timeout(Duration::from_secs(3), runtime.shutdown())
+            .await
+            .expect("shutdown waited out the grace for a holder outside the process group")
+            .unwrap();
+        assert_eq!(status.signal, Some(1), "the hangup ended the child");
+        assert!(
+            PathBuf::from(format!("/proc/{holder}")).exists(),
+            "the holder outside the group is out of the escalation's reach"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
