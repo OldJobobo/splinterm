@@ -296,6 +296,10 @@ class OmarchyScreensaverIntegrationTest(unittest.TestCase):
                 "openwindow>>0xa,org.omarchy.screensaver,title\n"
             )
             subprocess.run([launcher, "force"], env=environment, check=True, timeout=5)
+            # The detached focus return writes into this directory after the
+            # launcher exits; its focus call is the last thing it does, so wait
+            # for it before the directory is removed.
+            self.assertEqual(len(self.focus_calls(log, 3)), 3)
             calls = log.read_text(encoding="utf-8").splitlines()
             fallback = [line for line in calls if "dispatch exec --" in line]
             self.assertEqual(len(fallback), 1, calls)
