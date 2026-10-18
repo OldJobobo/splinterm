@@ -1712,7 +1712,12 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
     };
     // The irreversible adoption commit: nothing fallible since `adopt`, and
     // from here no cooperative rollback is permitted (Plan 0037 item 8).
-    let committed = staged.commit();
+    let mut committed = staged.commit();
+    // Before anything publishes the Topology: each Splint the previous
+    // generation excluded (its process had exited) gets its real exit, from
+    // its reaped child or the status the old actor observed. Only then are
+    // children nothing names reaped.
+    let excluded = committed.finalize_excluded_splints();
     let reaped = committed.reap_uncarried_children();
     info!(
         daemon_generation = committed.daemon_generation,
@@ -1720,6 +1725,8 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
         rollback = committed.rollback,
         carried = committed.splints.len(),
         exited_before_adoption = committed.exited_before_adoption.len(),
+        excluded = excluded.len(),
+        excluded_exit_unknown = excluded.iter().filter(|(_, exit)| exit.is_none()).count(),
         reaped_uncarried = reaped.len(),
         reclaimed_slices = committed.reclaimed_slices.len(),
         unreclaimed_slices = committed.unreclaimed_slices.len(),

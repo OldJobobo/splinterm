@@ -52,8 +52,9 @@ use crate::{
     handoff_manifest::{
         ControllerDisposition, ExecutablePairSetEvidence, ExitDisposition, GenerationEvidence,
         HANDOFF_MANIFEST_SCHEMA_V1, HandoffId, HandoffManifestV1, ManifestDescriptor,
-        ManifestError, ManifestKind, ManifestPtyIdentity, ManifestPtySize, ManifestSplint,
-        SubscriptionDisposition, decode_manifest, encode_manifest, validate_manifest_pair,
+        ManifestError, ManifestExcludedSplint, ManifestKind, ManifestProcessExit,
+        ManifestPtyIdentity, ManifestPtySize, ManifestSplint, SubscriptionDisposition,
+        decode_manifest, encode_manifest, validate_manifest_pair,
     },
     handoff_preflight::SealedPreflightReports,
     install_prefix::InstallPrefix,
@@ -247,6 +248,27 @@ impl CapturedSplint {
     }
 }
 
+/// A registered Splint excluded from capture because its process had exited.
+///
+/// Its handle stays live until the runtime stops, so the manifest records
+/// the exit its actor observed as late as possible.
+#[derive(Clone, Debug)]
+pub struct ExcludedSplint {
+    handle: LiveSplintHandle,
+}
+
+impl ExcludedSplint {
+    #[must_use]
+    pub const fn splint_id(&self) -> SplintId {
+        self.handle.splint_id
+    }
+
+    #[must_use]
+    pub const fn handle(&self) -> &LiveSplintHandle {
+        &self.handle
+    }
+}
+
 /// Every live Splint captured at the fence, in ascending slot order.
 ///
 /// Dropping it resumes every actor without waiting; [`Self::release`] waits
@@ -254,7 +276,7 @@ impl CapturedSplint {
 #[derive(Debug)]
 pub struct HandoffCaptures {
     captured: Vec<CapturedSplint>,
-    excluded: Vec<SplintId>,
+    excluded: Vec<ExcludedSplint>,
     checkpoint_bytes: u64,
     release_timeout: Duration,
 }
@@ -265,10 +287,11 @@ impl HandoffCaptures {
         &self.captured
     }
 
-    /// Registered Splints whose process had exited, so the handoff carries
-    /// them only as their persisted Topology state.
+    /// Registered Splints whose process had exited. The handoff carries no
+    /// descriptor for them, only a manifest record the target uses to reap
+    /// each child, record its exit, and account for its Dojo slice.
     #[must_use]
-    pub fn excluded(&self) -> &[SplintId] {
+    pub fn excluded(&self) -> &[ExcludedSplint] {
         &self.excluded
     }
 
@@ -287,7 +310,7 @@ impl HandoffCaptures {
     /// The caller awaits each runtime's [`LiveError::HandedOff`] before it
     /// stops the Tokio runtime. Nothing here can fail.
     #[must_use]
-    pub fn hand_off(self) -> (Vec<HandedOffCapture>, Vec<SplintId>) {
+    pub fn hand_off(self) -> (Vec<HandedOffCapture>, Vec<ExcludedSplint>) {
         let handed_off = self
             .captured
             .into_iter()
@@ -329,7 +352,7 @@ impl HandoffCaptures {
 
     fn link(
         mut captured: Vec<(PreparedPtyHandoff, SealedCheckpointBody)>,
-        excluded: Vec<SplintId>,
+        excluded: Vec<ExcludedSplint>,
         checkpoint_bytes: u64,
         release_timeout: Duration,
     ) -> Result<Self, CaptureFailure> {
@@ -376,7 +399,7 @@ impl HandedOffCapture {
 enum ActorCapture {
     Captured(Box<PreparedPtyHandoff>),
     /// The Splint's process exited during capture; it is excluded.
-    Exited(SplintId),
+    Exited(ExcludedSplint),
 }
 
 /// Captures every live Splint concurrently, each through `prepare`.
@@ -434,7 +457,7 @@ where
                 Arc::clone(&prepare),
             ));
         } else {
-            excluded.push(handle.splint_id);
+            excluded.push(ExcludedSplint { handle });
         }
     }
     let mut captured = Vec::with_capacity(attempts.len());
@@ -457,12 +480,12 @@ async fn collect_captures(
     attempts: &mut JoinSet<Result<ActorCapture, CaptureFailure>>,
     limits: CaptureLimits,
     captured: &mut Vec<(PreparedPtyHandoff, SealedCheckpointBody)>,
-    excluded: &mut Vec<SplintId>,
+    excluded: &mut Vec<ExcludedSplint>,
 ) -> Result<u64, CaptureFailure> {
     let mut checkpoint_bytes = 0_u64;
     while let Some(joined) = attempts.join_next().await {
         match joined.map_err(CaptureFailure::task_failed)?? {
-            ActorCapture::Exited(splint_id) => excluded.push(splint_id),
+            ActorCapture::Exited(splint) => excluded.push(splint),
             ActorCapture::Captured(lease) => {
                 let mut lease = *lease;
                 let splint_id = lease.evidence().splint_id;
@@ -522,7 +545,7 @@ where
             return if handle.root_process_is_live() {
                 Err(CaptureFailure::failed(splint_id, error))
             } else {
-                Ok(ActorCapture::Exited(splint_id))
+                Ok(ActorCapture::Exited(ExcludedSplint { handle }))
             };
         }
         retried = true;
@@ -783,6 +806,11 @@ fn build_manifests(
                 .manifest_descriptor(authority.negotiated.terminal_checkpoint)?,
         );
     }
+    let excluded_splints = captures
+        .excluded
+        .iter()
+        .filter_map(|excluded| manifest_excluded_splint(excluded, inputs.topology))
+        .collect();
     let revision = inputs.topology.revision().get();
     let negotiated = authority.negotiated;
     let forward = HandoffManifestV1 {
@@ -807,6 +835,7 @@ fn build_manifests(
         .map_err(rejected)?,
         counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
         splints,
+        excluded_splints,
         descriptors,
     };
     let rollback = HandoffManifestV1 {
@@ -942,6 +971,34 @@ fn manifest_splint(
         image_state: captured.checkpoint.image_disposition(),
         controller: ControllerDisposition::Released,
         subscriptions: SubscriptionDisposition::Dropped,
+    })
+}
+
+/// The manifest record of one excluded Splint, with the exit its actor
+/// observed so far. A Splint the fenced Topology does not place has no Dojo
+/// to account for and no exit to record; the target still reaps its child as
+/// an unknown one.
+fn manifest_excluded_splint(
+    excluded: &ExcludedSplint,
+    topology: &Topology,
+) -> Option<ManifestExcludedSplint> {
+    let handle = &excluded.handle;
+    let (lair_id, dojo_id) = placement(topology, handle.splint_id)?;
+    Some(ManifestExcludedSplint {
+        lair_id,
+        dojo_id,
+        splint_id: handle.splint_id,
+        incarnation: handle.incarnation.value(),
+        child_pid: handle.child_pid(),
+        exit: handle.exit_status().and_then(|exit| {
+            let exit = ManifestProcessExit {
+                code: exit.code,
+                signal: exit.signal,
+            };
+            // A status the manifest cannot represent is left for the target
+            // to reap, or to report as an unknown exit.
+            exit.is_valid().then_some(exit)
+        }),
     })
 }
 
@@ -1350,7 +1407,14 @@ pub(crate) mod tests {
         .unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 2, "one retry, then exclusion");
-        assert_eq!(captures.excluded(), [exiting]);
+        assert_eq!(
+            captures
+                .excluded()
+                .iter()
+                .map(ExcludedSplint::splint_id)
+                .collect::<Vec<_>>(),
+            [exiting]
+        );
         assert_eq!(captures.captured().len(), 2);
         assert!(
             captures
@@ -1382,7 +1446,14 @@ pub(crate) mod tests {
         .unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(captures.excluded(), [exited]);
+        assert_eq!(
+            captures
+                .excluded()
+                .iter()
+                .map(ExcludedSplint::splint_id)
+                .collect::<Vec<_>>(),
+            [exited]
+        );
         assert_eq!(captures.captured().len(), 1);
         captures.release().await;
         fleet.shutdown().await;
@@ -1715,6 +1786,50 @@ pub(crate) mod tests {
         drop(manifests);
         captures.release().await;
         fleet.assert_all_echo("after-manifest").await;
+        fleet.shutdown().await;
+    }
+
+    /// A Splint excluded because its process exited is recorded with its
+    /// place, incarnation, child, and observed exit, and carries no
+    /// descriptor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_excluded_splint_is_recorded_with_its_exit() {
+        let fleet = Fleet::spawn(&[CAT, "exit 3"]).await;
+        let exited = fleet.id(1);
+        let handle = fleet.runtimes[1].handle();
+        assert_eq!(handle.wait_for_exit().await.unwrap().code, Some(3));
+        let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, prepare)
+            .await
+            .unwrap();
+        let fixture = AuthorityFixture::new();
+        let (_listener, _image_listener, listeners) = listeners();
+        let inputs = ManifestInputs {
+            topology: &fleet.topology,
+            listeners,
+            daemon_generation: 1,
+            install_prefix: &fixture.install_prefix,
+        };
+        let owner = PackagedOwnerOverride::current_user();
+        let manifests = build_manifests(&fixture.authority(), &captures, &inputs).unwrap();
+        drop(owner);
+        let (lair_id, dojo_id) = placement(&fleet.topology, exited).unwrap();
+        let recorded = ManifestExcludedSplint {
+            lair_id,
+            dojo_id,
+            splint_id: exited,
+            incarnation: handle.incarnation.value(),
+            child_pid: handle.child_pid(),
+            exit: Some(ManifestProcessExit {
+                code: Some(3),
+                signal: None,
+            }),
+        };
+        assert_eq!(manifests.forward.excluded_splints, [recorded]);
+        assert_eq!(manifests.rollback.excluded_splints, [recorded]);
+        assert_eq!(manifests.splint_count(), 1);
+        assert_eq!(manifests.descriptor_count(), GLOBAL_DESCRIPTOR_SLOTS + 2);
+        drop(manifests);
+        captures.release().await;
         fleet.shutdown().await;
     }
 

@@ -1258,6 +1258,7 @@ mod tests {
             },
             counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
             splints: Vec::new(),
+            excluded_splints: Vec::new(),
             descriptors: owners
                 .iter()
                 .map(|(slot, owner)| ManifestDescriptor {

@@ -100,6 +100,13 @@ pub struct HandoffManifestV1 {
     pub executable_pairs: ExecutablePairSetEvidence,
     pub counterpart_manifest_slot: HandoffDescriptorSlot,
     pub splints: Vec<ManifestSplint>,
+    /// Registered Splints the source excluded from capture because their
+    /// process had already exited (amended into v1 before 0.2.0, Plan 0061
+    /// D3). The target reaps each child by its recorded PID and records its
+    /// real exit, and reclaims an empty Dojo slice no adopted scope counts.
+    /// Omitted from the canonical encoding when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_splints: Vec<ManifestExcludedSplint>,
     pub descriptors: Vec<ManifestDescriptor>,
 }
 
@@ -326,6 +333,39 @@ pub struct ManifestSplint {
     pub subscriptions: SubscriptionDisposition,
 }
 
+/// A registered Splint the source excluded from capture: no descriptor
+/// crosses for it, only the evidence the target needs to reap its unreaped
+/// child and account for its Dojo.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestExcludedSplint {
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub child_pid: u32,
+    /// The exit the source's actor already observed (and so reaped), if any.
+    pub exit: Option<ManifestProcessExit>,
+}
+
+/// A process exit: exactly one of an exit code or a terminating signal.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestProcessExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+impl ManifestProcessExit {
+    pub(crate) fn is_valid(self) -> bool {
+        match (self.code, self.signal) {
+            (Some(code), None) => (0..=255).contains(&code),
+            (None, Some(signal)) => (1..=127).contains(&signal),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestPtyIdentity {
@@ -411,6 +451,9 @@ pub enum ManifestError {
 pub fn encode_manifest(manifest: &HandoffManifestV1) -> Result<Vec<u8>, ManifestError> {
     let mut canonical = manifest.clone();
     canonical.splints.sort_by_key(splint_sort_key);
+    canonical
+        .excluded_splints
+        .sort_by_key(excluded_splint_sort_key);
     canonical.descriptors.sort_by_key(|entry| entry.slot);
     validate_manifest(&canonical)?;
     let bytes = serde_json::to_vec(&canonical)?;
@@ -482,6 +525,8 @@ pub fn validate_manifest(manifest: &HandoffManifestV1) -> Result<(), ManifestErr
     validate_install_prefix_path(&manifest.install_prefix)
         .map_err(|_| ManifestError::InvalidInstallPrefix)?;
     if manifest.splints.len() > MAX_MANIFEST_SPLINTS
+        || manifest.excluded_splints.len() > MAX_MANIFEST_SPLINTS
+        || manifest.splints.len() + manifest.excluded_splints.len() > MAX_MANIFEST_SPLINTS
         || manifest.descriptors.len() > MAX_HANDOFF_DESCRIPTORS
     {
         return Err(ManifestError::InvalidBounds);
@@ -512,6 +557,10 @@ pub fn validate_manifest_pair(
     let mut rollback_splints = rollback.splints.clone();
     forward_splints.sort_by_key(splint_sort_key);
     rollback_splints.sort_by_key(splint_sort_key);
+    let mut forward_excluded = forward.excluded_splints.clone();
+    let mut rollback_excluded = rollback.excluded_splints.clone();
+    forward_excluded.sort_by_key(excluded_splint_sort_key);
+    rollback_excluded.sort_by_key(excluded_splint_sort_key);
     let mut forward_descriptors = forward.descriptors.clone();
     let mut rollback_descriptors = rollback.descriptors.clone();
     forward_descriptors.sort_by_key(|entry| entry.slot);
@@ -532,6 +581,7 @@ pub fn validate_manifest_pair(
         || forward.install_prefix != rollback.install_prefix
         || forward.executable_pairs != rollback.executable_pairs
         || forward_splints != rollback_splints
+        || forward_excluded != rollback_excluded
         || forward_descriptors != rollback_descriptors
     {
         return Err(ManifestError::PairMismatch);
@@ -771,6 +821,26 @@ fn validate_splints(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
             return Err(ManifestError::InvalidRuntime);
         }
     }
+    // An excluded Splint shares the carried Splints' identity and PID
+    // namespaces: no overlap, no duplicate, and one Lair per Dojo across both.
+    for excluded in &manifest.excluded_splints {
+        lairs.insert(excluded.lair_id);
+        dojos.insert(excluded.dojo_id);
+        if !splint_ids.insert(excluded.splint_id)
+            || !child_pids.insert(excluded.child_pid)
+            || dojo_lairs
+                .insert(excluded.dojo_id, excluded.lair_id)
+                .is_some_and(|lair| lair != excluded.lair_id)
+        {
+            return Err(ManifestError::InvalidTopology);
+        }
+        if excluded.incarnation == 0
+            || !is_linux_pid(excluded.child_pid)
+            || excluded.exit.is_some_and(|exit| !exit.is_valid())
+        {
+            return Err(ManifestError::InvalidRuntime);
+        }
+    }
     if lairs.len() > MAX_MANIFEST_LAIRS || dojos.len() > MAX_MANIFEST_DOJOS {
         return Err(ManifestError::InvalidBounds);
     }
@@ -828,6 +898,14 @@ impl Drop for PackagedOwnerOverride {
 /// restored PTY identity can carry.
 fn is_linux_pid(raw: u32) -> bool {
     i32::try_from(raw).is_ok_and(|pid| pid > 0)
+}
+
+fn excluded_splint_sort_key(splint: &ManifestExcludedSplint) -> (String, String, String) {
+    (
+        splint.lair_id.to_string(),
+        splint.dojo_id.to_string(),
+        splint.splint_id.to_string(),
+    )
 }
 
 fn splint_sort_key(splint: &ManifestSplint) -> (String, String, String) {
@@ -1066,6 +1144,7 @@ mod tests {
                 ManifestKind::Rollback => HandoffDescriptorSlot::CheckpointManifest,
             },
             splints: vec![splint],
+            excluded_splints: Vec::new(),
             descriptors,
         }
     }
@@ -1779,6 +1858,108 @@ mod tests {
                 Err(ManifestError::InvalidDescriptors)
             ));
         }
+    }
+
+    type Mutation = fn(&mut HandoffManifestV1);
+
+    fn excluded(child_pid: u32) -> ManifestExcludedSplint {
+        ManifestExcludedSplint {
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            splint_id: SplintId::new(),
+            incarnation: 2,
+            child_pid,
+            exit: Some(ManifestProcessExit {
+                code: Some(3),
+                signal: None,
+            }),
+        }
+    }
+
+    /// Excluded Splints round-trip canonically, share the carried Splints'
+    /// identity and PID namespaces, and must match across the pair.
+    #[test]
+    fn excluded_splints_are_validated_and_paired() {
+        let (mut forward, mut rollback) = pair();
+        let first = excluded(900);
+        let mut second = excluded(901);
+        second.exit = None;
+        forward.excluded_splints = vec![second, first];
+        rollback.excluded_splints = vec![first, second];
+        validate_manifest_pair(&forward, &rollback).unwrap();
+        let encoded = encode_manifest(&forward).unwrap();
+        let decoded = decode_manifest(&encoded).unwrap();
+        assert_eq!(decoded.excluded_splints.len(), 2);
+        // An empty list is omitted, so v1 encodings without one are unchanged.
+        assert!(
+            !String::from_utf8(encode_manifest(&manifest(ManifestKind::Forward)).unwrap())
+                .unwrap()
+                .contains("excluded_splints")
+        );
+
+        let invalid_cases: [(Mutation, ManifestError); 7] = [
+            // Overlaps a carried Splint's identity.
+            (
+                |manifest| manifest.excluded_splints[0].splint_id = manifest.splints[0].splint_id,
+                ManifestError::InvalidTopology,
+            ),
+            // Shares a carried Splint's child.
+            (
+                |manifest| {
+                    manifest.excluded_splints[0].child_pid = manifest.splints[0].pty.child_pid;
+                },
+                ManifestError::InvalidTopology,
+            ),
+            // Duplicates another excluded record.
+            (
+                |manifest| manifest.excluded_splints[1] = manifest.excluded_splints[0],
+                ManifestError::InvalidTopology,
+            ),
+            // Puts a carried Dojo in another Lair.
+            (
+                |manifest| manifest.excluded_splints[0].dojo_id = manifest.splints[0].dojo_id,
+                ManifestError::InvalidTopology,
+            ),
+            (
+                |manifest| manifest.excluded_splints[0].incarnation = 0,
+                ManifestError::InvalidRuntime,
+            ),
+            (
+                |manifest| manifest.excluded_splints[0].child_pid = 0,
+                ManifestError::InvalidRuntime,
+            ),
+            (
+                |manifest| {
+                    manifest.excluded_splints[0].exit = Some(ManifestProcessExit {
+                        code: Some(1),
+                        signal: Some(9),
+                    });
+                },
+                ManifestError::InvalidRuntime,
+            ),
+        ];
+        for (mutate, expected) in invalid_cases {
+            let mut invalid = forward.clone();
+            mutate(&mut invalid);
+            assert_eq!(
+                std::mem::discriminant(&validate_manifest(&invalid).unwrap_err()),
+                std::mem::discriminant(&expected)
+            );
+        }
+        // Carried and excluded records together stay within the Splint bound.
+        let mut crowded = with_splint_count(MAX_MANIFEST_SPLINTS);
+        crowded.excluded_splints =
+            vec![excluded(u32::try_from(MAX_MANIFEST_SPLINTS).unwrap() + 900)];
+        assert!(matches!(
+            validate_manifest(&crowded),
+            Err(ManifestError::InvalidBounds)
+        ));
+        let mut mismatched = rollback.clone();
+        mismatched.excluded_splints.pop();
+        assert!(matches!(
+            validate_manifest_pair(&forward, &mismatched),
+            Err(ManifestError::PairMismatch)
+        ));
     }
 
     #[test]

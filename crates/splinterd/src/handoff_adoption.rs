@@ -93,7 +93,9 @@ use crate::{
     },
     handoff_coordinator::{HandoffLifecycle, HandoffPhase},
     handoff_descriptors::HandoffDescriptorSlot,
-    handoff_manifest::{ExitDisposition, HandoffManifestV1, ManifestKind, ManifestSplint},
+    handoff_manifest::{
+        ExitDisposition, HandoffManifestV1, ManifestExcludedSplint, ManifestKind, ManifestSplint,
+    },
     handoff_prepare::ListenerDescriptors,
     install_prefix::{CLIENT_EXECUTABLE, DAEMON_EXECUTABLE, InstallPrefix, InstallPrefixError},
 };
@@ -408,6 +410,9 @@ pub struct CommittedAdoption {
     /// slice empties.
     pub unreclaimed_slices: Vec<DojoId>,
     pub closed_unexpected: usize,
+    /// The Splints the previous generation excluded from capture; see
+    /// [`Self::finalize_excluded_splints`].
+    excluded_splints: Vec<ManifestExcludedSplint>,
     lifecycle: HandoffLifecycle,
 }
 
@@ -425,6 +430,64 @@ pub struct AdoptedDaemonImage {
     pub device: u64,
     pub inode: u64,
     pub sha256: [u8; 32],
+}
+
+impl CommittedAdoption {
+    /// Reaps the child of each Splint the previous generation excluded from
+    /// capture, by the PID its manifest records, and writes that Splint's
+    /// real exit into [`Self::topology`] before anything publishes it.
+    /// Returns each excluded Splint with the exit recorded for it.
+    ///
+    /// Call it right after commit and before
+    /// [`Self::reap_uncarried_children`], which would otherwise consume
+    /// these statuses as unknown children's.
+    #[must_use]
+    pub fn finalize_excluded_splints(&mut self) -> Vec<(SplintId, Option<ProcessExit>)> {
+        finalize_excluded(&mut self.topology, &self.excluded_splints)
+    }
+}
+
+/// Records each excluded Splint's exit: its reaped child's status, else the
+/// status the previous generation's actor observed (it reaped the child
+/// first), else nothing, which leaves the `Exited(0)` adoption already wrote
+/// (or a status the durable Topology recorded): the child was reaped before
+/// its status could be recorded, or is not this process's child. A record
+/// whose incarnation is no longer the Topology's is left alone.
+fn finalize_excluded(
+    topology: &mut Topology,
+    excluded: &[ManifestExcludedSplint],
+) -> Vec<(SplintId, Option<ProcessExit>)> {
+    excluded
+        .iter()
+        .map(|record| {
+            let current = topology
+                .find_splint(record.splint_id)
+                .is_some_and(|splint| splint.last_incarnation == Some(record.incarnation));
+            if !current {
+                return (record.splint_id, None);
+            }
+            let exit = crate::handoff_exec::reap_exited_child(record.child_pid).or_else(|| {
+                record.exit.map(|exit| ProcessExit {
+                    code: exit.code,
+                    signal: exit.signal,
+                })
+            });
+            if let Some(exit) = exit {
+                topology.set_splint_state(record.splint_id, SplintState::Exited(exit_code(exit)));
+            }
+            (record.splint_id, exit)
+        })
+        .collect()
+}
+
+/// The code a Topology records for a process exit: the exit code, or 128
+/// plus the terminating signal, as the daemon records every other exit.
+const fn exit_code(exit: ProcessExit) -> i32 {
+    match (exit.code, exit.signal) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => 128 + signal,
+        (None, None) => 1,
+    }
 }
 
 impl CommittedAdoption {
@@ -908,7 +971,7 @@ async fn prepare<A: WorkloadScopeAdopter>(
     let (reclaimed_slices, unreclaimed_slices) = match workload_units {
         Some(adopter) => {
             adopt_scopes(&adopter, guard, workload_cgroups_required).await?;
-            reclaim_leftover_slices(&adopter, guard).await?
+            reclaim_leftover_slices(&adopter, guard, &manifest.excluded_splints).await?
         }
         None => (Vec::new(), Vec::new()),
     };
@@ -1199,17 +1262,22 @@ async fn adopt_scopes<A: WorkloadScopeAdopter>(
     }
 }
 
-/// Reclaims each carried Dojo's slice when none of its carried scopes was
-/// adopted, only when systemd proves it empty. A failed request is reported
-/// in the committed adoption, never as a refusal.
+/// Reclaims the slice of each Dojo the handoff names (a carried Splint's,
+/// or an excluded Splint's) when no adopted scope counts it, only when
+/// systemd proves it empty. A Dojo whose Splints all exited before capture
+/// still has its slice loaded, uncounted by this generation, so a later
+/// launch there would otherwise fail with `UnitExists`. A failed request is
+/// reported in the committed adoption, never as a refusal.
 async fn reclaim_leftover_slices<A: WorkloadScopeAdopter>(
     adopter: &A,
     guard: &AdoptionGuard<A::Scope>,
+    excluded: &[ManifestExcludedSplint],
 ) -> Result<(Vec<DojoId>, Vec<DojoId>), AdoptionError> {
     let carried = guard
         .pending
         .iter()
         .map(|pending| pending.evidence.dojo_id)
+        .chain(excluded.iter().map(|splint| splint.dojo_id))
         .collect::<BTreeSet<_>>();
     let counted = guard
         .pending
@@ -1428,6 +1496,7 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             reclaimed_slices: prepared.reclaimed_slices,
             unreclaimed_slices: prepared.unreclaimed_slices,
             closed_unexpected,
+            excluded_splints: manifest.excluded_splints,
             lifecycle,
         }
     }
@@ -2075,6 +2144,93 @@ mod tests {
             }
         );
         shut_down(committed).await;
+    }
+
+    /// A Dojo whose only Splint was excluded before capture holds no adopted
+    /// scope, so its slice is reclaimed when systemd proves it empty, and
+    /// a Dojo with an adopted scope is not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_excluded_only_dojo_has_its_empty_slice_reclaimed() {
+        let excluded_dojo = DojoId::new();
+        let mut harness = Harness::new(&[CAT], |_, manifest| {
+            manifest.excluded_splints.push(ManifestExcludedSplint {
+                lair_id: LairId::new(),
+                dojo_id: excluded_dojo,
+                splint_id: SplintId::new(),
+                incarnation: 7,
+                child_pid: 999_999,
+                exit: None,
+            });
+        })
+        .await;
+        let adopter = FakeAdopter::default();
+        let staged = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap();
+        assert_eq!(*adopter.0.reclaims.lock().unwrap(), [excluded_dojo]);
+        let committed = staged.commit();
+        assert_eq!(committed.reclaimed_slices, [excluded_dojo]);
+        shut_down(committed).await;
+    }
+
+    /// Each excluded Splint gets its real exit: its reaped child's status,
+    /// else the one the old actor recorded, else the adoption default; a
+    /// record of an older incarnation changes nothing.
+    #[test]
+    fn excluded_splints_are_finalized_with_their_real_exit() {
+        let mut topology = Topology::new();
+        let mut splint_ids = Vec::new();
+        for name in ["reaped", "recorded", "unknown", "stale"] {
+            let lair = topology.create_lair(name, PathBuf::from("/tmp")).unwrap();
+            let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+                panic!("a new Lair has one Splint");
+            };
+            splint_ids.push(splint.id);
+        }
+        for splint_id in &splint_ids {
+            topology.set_splint_last_incarnation(*splint_id, 5);
+            topology.set_splint_state(*splint_id, SplintState::Exited(0));
+        }
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .unwrap()
+            .id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !child_has_exited(child) {
+            assert!(Instant::now() < deadline, "the child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // PID 1 is never this process's child: its status cannot be reaped.
+        let record = |index: usize, child_pid, incarnation, exit| ManifestExcludedSplint {
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            splint_id: splint_ids[index],
+            incarnation,
+            child_pid,
+            exit,
+        };
+        let killed = Some(crate::handoff_manifest::ManifestProcessExit {
+            code: None,
+            signal: Some(9),
+        });
+        let records = [
+            record(0, child, 5, None),
+            record(1, 1, 5, killed),
+            record(2, 1, 5, None),
+            record(3, 1, 4, killed),
+        ];
+        let finalized = finalize_excluded(&mut topology, &records);
+        let state = |index: usize| topology.find_splint(splint_ids[index]).unwrap().state;
+        assert_eq!(state(0), SplintState::Exited(3));
+        assert_eq!(state(1), SplintState::Exited(137));
+        assert_eq!(state(2), SplintState::Exited(0));
+        assert_eq!(state(3), SplintState::Exited(0));
+        assert_eq!(finalized[0].1.and_then(|exit| exit.code), Some(3));
+        assert_eq!(finalized[1].1.and_then(|exit| exit.signal), Some(9));
+        assert!(finalized[2].1.is_none() && finalized[3].1.is_none());
+        assert!(!child_has_exited(child), "the child was reaped");
     }
 
     /// A thread that exits between listing the tasks and reading its
