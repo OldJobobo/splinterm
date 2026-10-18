@@ -568,6 +568,13 @@ impl WorkloadUnitManager {
                 if !is_unit_exists(&error) {
                     let _ = self.adapter.stop_unit(&names.dojo_slice);
                 }
+                if !known {
+                    // Forget a Dojo this call first saw. A known entry at zero
+                    // makes the next prepare stop the slice first, and a slice
+                    // that already existed (one a previous generation left,
+                    // with its Splints still running) must never be stopped.
+                    state.dojo_references.remove(&dojo_id);
+                }
                 return Err(error);
             }
         }
@@ -601,6 +608,16 @@ impl WorkloadUnitManager {
     /// [`WorkloadUnitManager`]. Every failure leaves systemd and the counts
     /// untouched: it stops nothing, so the caller still decides the
     /// process's fate.
+    ///
+    /// Callers must keep two contracts:
+    /// - A failed adoption of a process that is still running leaves it
+    ///   uncounted, so this manager stops its Dojo slice, killing that
+    ///   process, once the adopted Splints of the same Dojo release. The
+    ///   caller must roll back, or kill or exclude that Splint, and never
+    ///   continue with it running uncounted.
+    /// - Each retained identity is adopted into exactly one manager per
+    ///   process. Holds are per manager, so two managers would each count the
+    ///   scope and each stop it.
     ///
     /// # Errors
     /// [`WorkloadUnitError::RetainedScopeMismatch`] for an invalid PID, a
@@ -1001,6 +1018,24 @@ mod tests {
         format!("/org/freedesktop/systemd1/unit/{name}")
     }
 
+    /// The error systemd returns when a transient unit name is taken, as
+    /// [`is_unit_exists`] classifies it.
+    fn unit_exists_error() -> WorkloadUnitError {
+        let reply = zbus::Message::method_call("/", "StartTransientUnit")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        let error = WorkloadUnitError::Request(zbus::Error::MethodError(
+            zbus::names::ErrorName::try_from("org.freedesktop.systemd1.UnitExists")
+                .unwrap()
+                .into(),
+            None,
+            reply,
+        ));
+        assert!(is_unit_exists(&error));
+        error
+    }
+
     impl FakeAdapter {
         fn calls(&self) -> Vec<AdapterCall> {
             self.calls.lock().unwrap().clone()
@@ -1073,11 +1108,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(AdapterCall::StartDojo(name.to_owned()));
-            self.systemd
-                .lock()
-                .unwrap()
-                .units
-                .insert(name.to_owned(), None);
+            let mut systemd = self.systemd.lock().unwrap();
+            if systemd.units.contains_key(name) {
+                return Err(unit_exists_error());
+            }
+            systemd.units.insert(name.to_owned(), None);
             Ok(())
         }
 
@@ -1100,6 +1135,10 @@ mod tests {
                 Err(WorkloadUnitError::IdentityMismatch)
             } else {
                 let mut systemd = self.systemd.lock().unwrap();
+                if systemd.units.contains_key(&names.splint_scope) {
+                    // As the real adapter does, an existing unit is left alone.
+                    return Err(unit_exists_error());
+                }
                 systemd
                     .units
                     .insert(names.splint_scope.clone(), Some(names.dojo_slice.clone()));
@@ -1511,6 +1550,39 @@ mod tests {
         drop(adopted);
         assert_eq!(manager.dojo_references(dojo_id), 0);
         assert_eq!(adapter.slice_stops(retained[0].dojo_slice()), 1);
+    }
+
+    #[test]
+    fn prepare_never_stops_a_slice_a_previous_generation_left() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let old = fake_manager(&adapter);
+        let dojo_id = DojoId::new();
+        let retained = placed(&old, dojo_id, 241).retain_for_handoff();
+        drop(old);
+
+        // Until the leftover slice is adopted, every prepare into its Dojo
+        // fails on the existing unit and stops nothing.
+        let fresh = fake_manager(&adapter);
+        for _ in 0..3 {
+            let Err(error) = fresh.prepare(dojo_id, SplintId::new(), 1) else {
+                panic!("prepare into a leftover slice must fail");
+            };
+            assert!(is_unit_exists(&error));
+            assert_eq!(fresh.dojo_references(dojo_id), 0);
+        }
+        assert!(adapter.stops().is_empty());
+        assert!(adapter.is_loaded(retained.dojo_slice()));
+        assert!(adapter.is_loaded(retained.splint_scope()));
+
+        let adopted = fresh.adopt_scope(&retained).unwrap();
+        assert_eq!(fresh.dojo_references(dojo_id), 1);
+        let sibling = placed(&fresh, dojo_id, 242);
+        assert_eq!(fresh.dojo_references(dojo_id), 2);
+        assert!(adapter.stops().is_empty());
+
+        adopted.release().unwrap();
+        sibling.release().unwrap();
+        assert_eq!(adapter.slice_stops(retained.dojo_slice()), 1);
     }
 
     #[test]
