@@ -3,6 +3,7 @@ mod audit;
 mod candidate_acquire;
 mod cgroup;
 mod consent;
+mod handoff_requests;
 mod omarchy_environment;
 mod persistence;
 
@@ -714,6 +715,10 @@ impl RuntimeRegistry {
         self.entries.get(&id).map(LiveSplintRuntime::handle)
     }
 
+    fn live_count(&self) -> usize {
+        self.entries.len()
+    }
+
     fn handles(&self) -> HashMap<SplintId, LiveSplintHandle> {
         self.entries
             .iter()
@@ -1007,7 +1012,9 @@ struct DaemonState {
     shared_kitty_upload_budget: SharedKittyUploadBudget,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
-    _rollback_handoff: Option<splinterd::handoff_coordinator::RollbackHandoffAuthority>,
+    rollback_handoff: handoff_requests::RollbackAuthority,
+    /// Generation this daemon serves; reported in every `Hello`.
+    daemon_generation: u64,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
     agent_status: Arc<agent_status::AgentStatusService>,
@@ -1187,7 +1194,8 @@ struct DaemonStateInputs {
     shared_kitty_upload_budget: SharedKittyUploadBudget,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
-    rollback_handoff: Option<splinterd::handoff_coordinator::RollbackHandoffAuthority>,
+    rollback_handoff: handoff_requests::RollbackAuthority,
+    daemon_generation: u64,
 }
 
 fn run_daemon(source: StartupSource) -> Result<()> {
@@ -1251,17 +1259,7 @@ async fn start_fresh(
     shared_kitty_upload_budget: SharedKittyUploadBudget,
 ) -> Result<StartedDaemon> {
     init_tracing();
-    let rollback_handoff = match rollback_handoff {
-        Ok(authority) => Some(authority),
-        Err(splinterd::handoff_coordinator::HandoffCoordinatorError::NotPackaged) => {
-            debug!("development daemon has no packaged rollback handoff authority");
-            None
-        }
-        Err(error) => {
-            warn!(%error, "packaged rollback handoff authority is unavailable");
-            None
-        }
-    };
+    let rollback_handoff = handoff_requests::RollbackAuthority::from_startup(rollback_handoff);
 
     let signals = DaemonSignals::install()?;
 
@@ -1285,6 +1283,9 @@ async fn start_fresh(
         pty_backend: LinuxPtyBackend::installed()?,
         workload_units,
         rollback_handoff,
+        // A fresh start serves the first generation; adoption (M3.8) will
+        // publish the one after its predecessor's.
+        daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
     });
     let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
@@ -1408,6 +1409,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         pty_backend,
         workload_units,
         rollback_handoff,
+        daemon_generation,
     } = inputs;
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
@@ -1452,7 +1454,8 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         shared_kitty_upload_budget,
         pty_backend,
         workload_units,
-        _rollback_handoff: rollback_handoff,
+        rollback_handoff,
+        daemon_generation,
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
@@ -2281,6 +2284,7 @@ async fn serve_authenticated(
             limits: server_limits(),
             development_terminal_access: state.development_terminal_access,
             daemon_hostname: daemon_hostname(),
+            daemon_generation: state.daemon_generation,
         },
     )
     .await?;
@@ -2858,6 +2862,7 @@ async fn require_current_topology_revision(
         code: ErrorCode::StaleTopology,
         message: "topology revision is stale".into(),
         current_topology_revision: Some(current),
+        handoff_blocking_reasons: Vec::new(),
     })
 }
 
@@ -2867,6 +2872,7 @@ fn model_error(error: TopologyError) -> ProtocolError {
             code: ErrorCode::StaleTopology,
             message: "topology revision is stale".into(),
             current_topology_revision: Some(current),
+            handoff_blocking_reasons: Vec::new(),
         },
         TopologyError::SplintNotFound(_)
         | TopologyError::LairNotFound(_)
@@ -4119,6 +4125,8 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::Detach { .. }
             | Request::KillSplint { .. }
             | Request::ReportAgentStatus { .. }
+            | Request::PrepareDaemonHandoff { .. }
+            | Request::ClaimHandoffControl { .. }
     )
 }
 
@@ -4138,6 +4146,8 @@ fn interactive_bypass(
                 | Request::RequestImageContent { .. }
                 | Request::ForceControlTransfer { .. }
                 | Request::MaterializePreset { .. }
+                | Request::PrepareDaemonHandoff { .. }
+                | Request::ClaimHandoffControl { .. }
         );
     trusted_local || remote_human
 }
@@ -4746,7 +4756,9 @@ async fn request_policy_resources(
         | Request::PublishGraphicalFocus { .. }
         | Request::DecideControlTransfer { .. }
         | Request::ReleaseControl { .. }
-        | Request::Detach { .. } => Vec::new(),
+        | Request::Detach { .. }
+        | Request::PrepareDaemonHandoff { .. }
+        | Request::ClaimHandoffControl { .. } => Vec::new(),
         Request::ListLairs
         | Request::InspectTopology
         | Request::SubscribeTopology
@@ -5260,7 +5272,10 @@ async fn append_request_result_audit(
     let denied = result.as_ref().err().is_some_and(|error| {
         matches!(
             error.code,
-            ErrorCode::Unauthorized | ErrorCode::ConsentDenied | ErrorCode::ConsentUnavailable
+            ErrorCode::Unauthorized
+                | ErrorCode::ConsentDenied
+                | ErrorCode::ConsentUnavailable
+                | ErrorCode::InvalidHandoffTicket
         )
     });
     let revoked = result.is_ok() && matches!(request, Request::RevokeAccess { .. });
@@ -7854,11 +7869,51 @@ async fn handle_authorized_request(
                 page: state.audit.lock().await.page(after_audit_id, max_records),
             }
         }
+        Request::PrepareDaemonHandoff { mode } => {
+            require_trusted_local_ui(trusted_ui_client, peer)?;
+            handoff_requests::prepare_daemon_handoff(mode, daemon_handoff_report(state).await?)?
+        }
+        Request::ClaimHandoffControl { .. } => {
+            require_trusted_local_ui(trusted_ui_client, peer)?;
+            return Err(handoff_requests::invalid_handoff_ticket());
+        }
     };
     Ok(Handled {
         response,
         subscription: None,
     })
+}
+
+/// Handoff requests are trusted-UI-only in the authorization table; this
+/// re-checks the role and executable at the handler.
+fn require_trusted_local_ui(
+    trusted_ui_client: bool,
+    peer: &PeerIdentity,
+) -> Result<(), ProtocolError> {
+    if trusted_ui_client && peer.is_matching_splinterm() {
+        Ok(())
+    } else {
+        Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "request requires the installed trusted graphical client",
+        ))
+    }
+}
+
+/// A point-in-time dry-run report. It reads topology and the live registry
+/// one after the other, without a topology transaction, so it fences and
+/// captures nothing.
+async fn daemon_handoff_report(
+    state: &DaemonState,
+) -> Result<splinterm_protocol::HandoffReport, ProtocolError> {
+    let live_splints = state.runtimes.lock().await.live_count();
+    let topology = state.topology.read().await;
+    handoff_requests::handoff_report(
+        state.daemon_generation,
+        &topology,
+        live_splints,
+        &state.rollback_handoff,
+    )
 }
 
 async fn subscribe_topology(
@@ -10661,7 +10716,8 @@ mod tests {
             ),
             pty_backend,
             workload_units: None,
-            _rollback_handoff: None,
+            rollback_handoff: handoff_requests::RollbackAuthority::NotPackaged,
+            daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
             agent_status: Arc::default(),
@@ -12202,6 +12258,126 @@ mod tests {
             &peer,
             &[AccessScope::Input, AccessScope::Resize]
         ));
+    }
+
+    #[tokio::test]
+    async fn daemon_handoff_requests_reach_only_the_installed_local_graphical_client() {
+        let handoff_requests = [
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::DryRun,
+            },
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::Execute,
+            },
+            Request::ClaimHandoffControl {
+                ticket: [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+            },
+        ];
+        // Development terminal access and remote human roles never stand in
+        // for the trusted local graphical client.
+        let state = test_state(true);
+        let mut peer = PeerIdentity::for_test();
+        peer.install_persistent_executable(
+            executable_identity::ExecutableIdentity::from_pid(std::process::id())
+                .expect("snapshot test executable"),
+        );
+        for request in &handoff_requests {
+            assert!(trusted_ui_request(request));
+            assert!(interactive_bypass(true, true, false, request));
+            assert!(!interactive_bypass(true, false, false, request));
+            assert!(!interactive_bypass(false, true, false, request));
+            assert!(!interactive_bypass(false, false, true, request));
+            assert!(!interactive_bypass(false, true, true, request));
+            for (trusted_ui, remote_interactive) in [(false, false), (false, true), (true, false)] {
+                let error =
+                    authorize_request(request, &state, &peer, 0, trusted_ui, remote_interactive)
+                        .await
+                        .unwrap_err();
+                assert_eq!(error.code, ErrorCode::Unauthorized, "{request:?}");
+            }
+        }
+        // The handler repeats the role and executable check.
+        assert_eq!(
+            require_trusted_local_ui(true, &peer).unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+
+        // Denials are audited like every other refused trusted operation,
+        // and the ticket body is never recorded.
+        for request in handoff_requests {
+            let error = handle_request(request, &state, &peer, 1, 0, false, false)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unauthorized);
+        }
+        let audit = state.audit.lock().await.page(None, 16);
+        let denied = audit
+            .records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.operation,
+                    splinterm_protocol::AuditOperation::PrepareDaemonHandoff
+                        | splinterm_protocol::AuditOperation::ClaimHandoffControl
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(denied.len(), 3);
+        for record in denied {
+            assert_eq!(record.decision, splinterm_protocol::AuditDecision::Denied);
+            assert_eq!(record.reason, "policy_rejected");
+            assert_eq!(
+                record.outcome,
+                Some(splinterm_protocol::AuditOutcome::Failed)
+            );
+            assert!(record.resource.is_none());
+            assert!(record.requested_scopes.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_reports_current_state_and_refused_execute_changes_nothing() {
+        let state = test_state(false);
+        let transient = Lair::transient("transient", PathBuf::from("/tmp"));
+        let transient_id = transient.id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, transient).unwrap();
+        }
+        let report = daemon_handoff_report(&state).await.unwrap();
+        report.validate().unwrap();
+        assert_eq!(report.daemon_generation, state.daemon_generation);
+        assert_eq!(
+            (report.lairs, report.transient_lairs, report.dojos),
+            (1, 1, 1)
+        );
+        assert_eq!(report.live_splints, 0);
+        assert!(!report.rollback_available);
+        assert_eq!(
+            report.blocking_reasons,
+            [
+                splinterm_protocol::HandoffBlockingReason::TransientLairsOpen {
+                    count: 1,
+                    lair_ids: vec![transient_id],
+                },
+                splinterm_protocol::HandoffBlockingReason::NotPackaged,
+                splinterm_protocol::HandoffBlockingReason::Unsupported,
+            ]
+        );
+        let revision = state.topology.read().await.revision();
+        let refused = handoff_requests::prepare_daemon_handoff(
+            splinterm_protocol::DaemonHandoffMode::Execute,
+            report.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
+        assert_eq!(
+            state.topology.read().await.revision(),
+            revision,
+            "a refused handoff changes nothing"
+        );
     }
 
     #[test]

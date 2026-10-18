@@ -435,6 +435,7 @@ mod tests {
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
                         daemon_hostname: None,
+                        daemon_generation: 1,
                     })
                     .unwrap(),
                 )
@@ -522,6 +523,7 @@ mod tests {
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
                         daemon_hostname: None,
+                        daemon_generation: 1,
                     })
                     .unwrap(),
                 )

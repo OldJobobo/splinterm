@@ -396,7 +396,10 @@ pub(crate) fn map_client_error(error: &Error) -> DispatchFailure {
         | ErrorCode::FrameTooLarge
         | ErrorCode::InvalidRequestId
         | ErrorCode::DuplicateRequestId
-        | ErrorCode::UnsupportedOperation => {
+        | ErrorCode::UnsupportedOperation
+        // Trusted-UI-only handoff outcomes; automation is refused before them.
+        | ErrorCode::HandoffUnavailable
+        | ErrorCode::InvalidHandoffTicket => {
             ("invalid_argument", "the daemon rejected the request", false)
         }
         ErrorCode::TooManyOutstandingRequests | ErrorCode::ResourceLimit => (
@@ -407,6 +410,11 @@ pub(crate) fn map_client_error(error: &Error) -> DispatchFailure {
         ErrorCode::RateLimited => (
             "resource_limit",
             "the daemon request rate limit was reached; retry later",
+            true,
+        ),
+        ErrorCode::HandoffInProgress => (
+            "resource_limit",
+            "the daemon is upgrading; retry later",
             true,
         ),
         ErrorCode::Cancelled => ("cancelled", "the daemon request was cancelled", true),

@@ -117,7 +117,11 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         Request::Ping | Request::ReadGraphicalFocus => RequestAuthorization::Authenticated,
         Request::PublishGraphicalFocus { .. }
         | Request::CreateTransientLair { .. }
-        | Request::MaterializePreset { .. } => RequestAuthorization::TrustedUi,
+        | Request::MaterializePreset { .. }
+        // Daemon handoff and resume tickets belong to the local graphical client
+        // only (ADR 0011); automation and remote clients never reach them.
+        | Request::PrepareDaemonHandoff { .. }
+        | Request::ClaimHandoffControl { .. } => RequestAuthorization::TrustedUi,
         Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
@@ -294,6 +298,25 @@ mod tests {
                 },
                 dojos: Vec::new(),
                 directory_identities: Vec::new(),
+            }),
+            RequestAuthorization::TrustedUi
+        );
+    }
+
+    #[test]
+    fn daemon_handoff_requests_are_trusted_ui_only() {
+        for mode in [
+            splinterm_protocol::DaemonHandoffMode::DryRun,
+            splinterm_protocol::DaemonHandoffMode::Execute,
+        ] {
+            assert_eq!(
+                for_request(&Request::PrepareDaemonHandoff { mode }),
+                RequestAuthorization::TrustedUi
+            );
+        }
+        assert_eq!(
+            for_request(&Request::ClaimHandoffControl {
+                ticket: [1; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
             }),
             RequestAuthorization::TrustedUi
         );

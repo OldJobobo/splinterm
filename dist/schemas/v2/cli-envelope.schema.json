@@ -2969,7 +2969,9 @@
             "process_exit",
             "audit_inspect",
             "policy_reload",
-            "agent_status_report"
+            "agent_status_report",
+            "prepare_daemon_handoff",
+            "claim_handoff_control"
           ]
         },
         "resource": {

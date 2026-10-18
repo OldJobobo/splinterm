@@ -77,7 +77,8 @@ pub(in crate::app) fn classify_subscription_event(
         | SubscriptionEvent::ControlStatusChanged { .. }
         | SubscriptionEvent::ControlTransferRequested { .. }
         | SubscriptionEvent::ControlTransferResolved { .. }
-        | SubscriptionEvent::AgentStatusChanged { .. } => EventAction::Ignore,
+        | SubscriptionEvent::AgentStatusChanged { .. }
+        | SubscriptionEvent::HandoffStatus { .. } => EventAction::Ignore,
     }
 }
 

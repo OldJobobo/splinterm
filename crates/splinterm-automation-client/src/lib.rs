@@ -1975,7 +1975,14 @@ pub const fn public_error_code(code: ErrorCode) -> (CliErrorCodeV2, bool) {
             (CliErrorCodeV2::StaleIncarnation, true)
         }
         ErrorCode::InvalidArgument => (CliErrorCodeV2::InvalidArgument, false),
-        ErrorCode::ResourceLimit | ErrorCode::RateLimited => (CliErrorCodeV2::ResourceLimit, true),
+        // A handoff fence lifts when the handoff completes or is cancelled.
+        ErrorCode::ResourceLimit | ErrorCode::RateLimited | ErrorCode::HandoffInProgress => {
+            (CliErrorCodeV2::ResourceLimit, true)
+        }
+        // Trusted-UI-only handoff outcomes; automation is refused before them.
+        ErrorCode::HandoffUnavailable | ErrorCode::InvalidHandoffTicket => {
+            (CliErrorCodeV2::InvalidRequest, false)
+        }
         ErrorCode::Cancelled => (CliErrorCodeV2::Cancelled, true),
         ErrorCode::Internal => (CliErrorCodeV2::Internal, true),
     }
@@ -3122,6 +3129,7 @@ pub struct Connection {
     queued_event_bytes: usize,
     limits: ServerLimits,
     daemon_hostname: Option<String>,
+    daemon_generation: u64,
     socket_path: Option<PathBuf>,
     trusted_ui: bool,
     unusable: bool,
@@ -3265,11 +3273,13 @@ impl Connection {
             },
         )
         .await?;
-        let (limits, daemon_hostname) = match read_frame(reader.as_mut()).await? {
+        let (limits, daemon_hostname, daemon_generation) = match read_frame(reader.as_mut()).await?
+        {
             ServerFrame::Hello {
                 version,
                 limits,
                 daemon_hostname,
+                daemon_generation,
                 ..
             } if version == PROTOCOL_VERSION => {
                 if let Err(error) = limits.validate_terminal_transport() {
@@ -3278,7 +3288,7 @@ impl Connection {
                         error.message
                     );
                 }
-                (limits, daemon_hostname)
+                (limits, daemon_hostname, daemon_generation)
             }
             ServerFrame::Error { error, .. } => {
                 return Err(anyhow::Error::new(DaemonProtocolFailure(error)));
@@ -3298,6 +3308,7 @@ impl Connection {
             queued_event_bytes: 0,
             limits,
             daemon_hostname,
+            daemon_generation,
             socket_path,
             trusted_ui: role == ClientRole::TrustedUi,
             unusable: false,
@@ -3308,6 +3319,12 @@ impl Connection {
     #[must_use]
     pub fn daemon_hostname(&self) -> Option<&str> {
         self.daemon_hostname.as_deref()
+    }
+
+    /// Generation of the daemon that answered the handshake.
+    #[must_use]
+    pub const fn daemon_generation(&self) -> u64 {
+        self.daemon_generation
     }
 
     /// Returns the bounds negotiated during the daemon handshake.
@@ -3629,6 +3646,12 @@ impl Connection {
                         .push(frame)
                         .map_err(|error| anyhow::anyhow!(error.message))?
                     {
+                        // This client takes part in no handoff. It reads with
+                        // plain reads, so the kernel already closed any
+                        // descriptors sent beside the frame.
+                        Some(ServerFrame::HandoffPrepare { .. }) => {
+                            bail!("splinterd sent a handoff prepare frame outside a handoff")
+                        }
                         Some(frame) => return Ok(frame),
                         None => continue,
                     }
@@ -4204,6 +4227,7 @@ mod tests {
             queued_event_bytes: 0,
             limits: ServerLimits::default(),
             daemon_hostname: None,
+            daemon_generation: 1,
             socket_path: None,
             trusted_ui: false,
             unusable: false,
@@ -4929,6 +4953,7 @@ mod tests {
             code: ErrorCode::StaleTopology,
             message: "topology revision is stale".to_owned(),
             current_topology_revision: Some(TopologyRevision::new(9)),
+            handoff_blocking_reasons: Vec::new(),
         };
         let document = serialized(
             &CliEnvelopeV2::protocol_failure(
@@ -5152,6 +5177,7 @@ mod tests {
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
                         daemon_hostname: None,
+                        daemon_generation: 1,
                     })
                     .unwrap(),
                 )
@@ -5229,6 +5255,7 @@ mod tests {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: advertised.map(str::to_owned),
+                daemon_generation: 1,
             };
             let (client, mut server) = UnixStream::pair().unwrap();
             let server_task = tokio::spawn(async move {
@@ -5244,6 +5271,91 @@ mod tests {
             assert_eq!(connection.daemon_hostname(), expected);
             server_task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn negotiation_stores_daemon_generation_and_rejects_unexpected_handoff_prepare() {
+        use std::os::fd::{AsFd as _, OwnedFd};
+
+        use splinterm_protocol::handoff_prepare::{
+            HandoffPrepareDescriptors, encode_handoff_prepare, send_handoff_prepare,
+        };
+
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = read_client_frame(&mut server).await;
+            let hello = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: 4,
+            };
+            server
+                .write_all(&encode_frame(&hello).unwrap())
+                .await
+                .unwrap();
+            let status = ServerFrame::Event {
+                subscription_id: 1,
+                sequence: 1,
+                event: SubscriptionEvent::HandoffStatus {
+                    daemon_generation: 4,
+                    phase: splinterm_protocol::HandoffStatusPhase::Fenced,
+                },
+            };
+            server
+                .write_all(&encode_frame(&status).unwrap())
+                .await
+                .unwrap();
+            // A frame with descriptors attached, sent to a client that takes
+            // part in no handoff.
+            let snapshot = rustix::fs::memfd_create(
+                "unexpected-snapshot",
+                rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+            )
+            .unwrap();
+            rustix::io::write(&snapshot, b"snapshot").unwrap();
+            let (continuation, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let encoded = encode_handoff_prepare(&splinterm_protocol::HandoffPrepare {
+                daemon_generation: 4,
+                descriptors: splinterm_protocol::HANDOFF_PREPARE_DESCRIPTORS,
+                client_snapshot: splinterm_protocol::HandoffClientSnapshot {
+                    device: 1,
+                    inode: 2,
+                    size: 8,
+                    sha256: [3; 32],
+                },
+            })
+            .unwrap();
+            let descriptors = HandoffPrepareDescriptors::new(snapshot, OwnedFd::from(continuation));
+            server.writable().await.unwrap();
+            let sent = send_handoff_prepare(server.as_fd(), &encoded, &descriptors).unwrap();
+            server.write_all(&encoded[sent..]).await.unwrap();
+            server
+        });
+        let mut connection = Connection::connect_stream(client, ClientRole::TrustedUi)
+            .await
+            .unwrap();
+        assert_eq!(connection.daemon_generation(), 4);
+        assert!(matches!(
+            connection.next_server_frame().await.unwrap(),
+            ServerFrame::Event {
+                event: SubscriptionEvent::HandoffStatus {
+                    daemon_generation: 4,
+                    ..
+                },
+                ..
+            }
+        ));
+        let error = connection.next_server_frame().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("handoff prepare frame outside a handoff"),
+            "{error:#}"
+        );
+        assert!(connection.request(Request::Ping).await.is_err());
+        drop(server_task.await.unwrap());
     }
 
     #[tokio::test]
@@ -5265,6 +5377,7 @@ mod tests {
                 limits: expected_limits,
                 development_terminal_access: false,
                 daemon_hostname: None,
+                daemon_generation: 1,
             };
             server
                 .write_all(&encode_frame(&frame).unwrap())
@@ -5306,6 +5419,7 @@ mod tests {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: None,
+                daemon_generation: 1,
             };
             server
                 .write_all(&encode_frame(&frame).unwrap())
@@ -5347,6 +5461,7 @@ mod tests {
                     limits,
                     development_terminal_access: false,
                     daemon_hostname: None,
+                    daemon_generation: 1,
                 };
                 server
                     .write_all(&encode_frame(&frame).unwrap())
@@ -5385,6 +5500,7 @@ mod tests {
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
                         daemon_hostname: None,
+                        daemon_generation: 1,
                     })
                     .unwrap(),
                 )
@@ -5418,6 +5534,7 @@ mod tests {
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
                         daemon_hostname: None,
+                        daemon_generation: 1,
                     })
                     .unwrap(),
                 )
@@ -5810,6 +5927,7 @@ mod tests {
             limits: ServerLimits::default(),
             development_terminal_access: true,
             daemon_hostname: None,
+            daemon_generation: 1,
         };
         let second = ServerFrame::Response {
             request_id: 7,
@@ -5874,6 +5992,7 @@ mod tests {
             limits: ServerLimits::default(),
             development_terminal_access: true,
             daemon_hostname: None,
+            daemon_generation: 1,
         };
         let encoded = encode_frame(&expected).unwrap();
         let (prefix_sent, prefix_received) = tokio::sync::oneshot::channel();

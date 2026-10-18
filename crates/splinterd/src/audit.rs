@@ -107,6 +107,8 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::KillSplint { .. } => AuditOperation::KillSplint,
         Request::AuditInspect { .. } => AuditOperation::AuditInspect,
         Request::ReportAgentStatus { .. } => AuditOperation::AgentStatusReport,
+        Request::PrepareDaemonHandoff { .. } => AuditOperation::PrepareDaemonHandoff,
+        Request::ClaimHandoffControl { .. } => AuditOperation::ClaimHandoffControl,
     }
 }
 

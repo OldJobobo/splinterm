@@ -201,11 +201,13 @@ async fn run_topology_subscription(
         if event_subscription != subscription_id {
             bail!("splinterd sent an event for the wrong subscription");
         }
-        // Agent status events carry no topology revision and are not part of
-        // the public v2 topology event stream; in order they only advance the
+        // Agent and handoff status events carry no topology revision and are not
+        // part of the public v2 topology event stream; in order they only advance the
         // private sequence, out of order they resynchronize like any gap.
-        if matches!(event, SubscriptionEvent::AgentStatusChanged { .. })
-            && sequence == private_sequence
+        if matches!(
+            event,
+            SubscriptionEvent::AgentStatusChanged { .. } | SubscriptionEvent::HandoffStatus { .. }
+        ) && sequence == private_sequence
         {
             private_sequence = private_sequence
                 .checked_add(1)
@@ -217,7 +219,8 @@ async fn run_topology_subscription(
             .context("public sequence exhausted")?;
         let event_revision = match &event {
             SubscriptionEvent::TopologyChanged { change } => change.revision,
-            SubscriptionEvent::AgentStatusChanged { .. } => revision,
+            SubscriptionEvent::AgentStatusChanged { .. }
+            | SubscriptionEvent::HandoffStatus { .. } => revision,
             SubscriptionEvent::TopologyResyncRequired { current_revision } => *current_revision,
             _ => bail!("splinterd sent a non-topology event on a topology subscription"),
         };

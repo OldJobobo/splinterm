@@ -3,6 +3,7 @@
 //! Terminal DTOs in this crate are intentionally distinct from the borrowed
 //! `splinterm-terminal` and daemon runtime representations.
 
+pub mod handoff_prepare;
 pub mod perf_trace;
 
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 40;
+pub const PROTOCOL_VERSION: u16 = 41;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -69,6 +70,27 @@ pub const MAX_AGENT_STATUS_DETAIL_BYTES: usize = 240;
 pub const MIN_AGENT_STATUS_TTL_SECONDS: u32 = 10;
 pub const MAX_AGENT_STATUS_TTL_SECONDS: u32 = 900;
 pub const DEFAULT_AGENT_STATUS_ACTIVE_TTL_SECONDS: u32 = 120;
+/// Bytes in one opaque, single-use, generation-bound handoff resume ticket
+/// (ADR 0011). The fixed-size wire array bounds decoding.
+pub const HANDOFF_RESUME_TICKET_BYTES: usize = 32;
+/// Bytes in one immutable daemon/client pair build identity.
+pub const HANDOFF_BUILD_IDENTITY_BYTES: usize = 32;
+/// Maximum UTF-8 byte length of a reported daemon build version.
+pub const MAX_HANDOFF_BUILD_VERSION_BYTES: usize = 64;
+/// Maximum blocking reasons in one handoff report: at most one of each kind.
+pub const MAX_HANDOFF_BLOCKING_REASONS: usize = 4;
+/// Maximum transient Lair identities one blocking reason names; its count
+/// stays exact when more are open.
+pub const MAX_HANDOFF_REPORTED_LAIRS: usize = 16;
+/// Maximum controllers one handoff control claim restores: one per live
+/// Splint a daemon can own.
+pub const MAX_HANDOFF_CLAIMED_CONTROLLERS: usize = 256;
+/// Exact descriptor count of a [`ServerFrame::HandoffPrepare`] frame: the
+/// sealed forward client snapshot, then the client end of the continuation
+/// channel.
+pub const HANDOFF_PREPARE_DESCRIPTORS: usize = 2;
+/// Largest sealed forward client snapshot a handoff may pass.
+pub const MAX_HANDOFF_CLIENT_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
 
 #[must_use]
 pub fn image_content_socket_path(control_socket: &Path) -> PathBuf {
@@ -192,6 +214,9 @@ pub enum ServerFrame {
             deserialize_with = "deserialize_daemon_hostname"
         )]
         daemon_hostname: Option<String>,
+        /// Generation of the daemon serving this connection. A fresh daemon
+        /// start is generation 1; each adopted handoff publishes a later one.
+        daemon_generation: u64,
     },
     Response {
         request_id: u64,
@@ -213,6 +238,14 @@ pub enum ServerFrame {
     TerminalTransactionChunk {
         index: usize,
         data: String,
+    },
+    /// Sent by a handing-off daemon to an eligible trusted local Window with
+    /// exactly [`HANDOFF_PREPARE_DESCRIPTORS`] descriptors attached through
+    /// `SCM_RIGHTS`; see [`handoff_prepare`]. It is valid only inside a
+    /// handoff the Window participates in; any other receipt is a protocol
+    /// violation.
+    HandoffPrepare {
+        prepare: HandoffPrepare,
     },
 }
 
@@ -790,6 +823,30 @@ pub enum Request {
         incarnation: u64,
         status: Option<AgentStatusReport>,
     },
+    /// Trusted local graphical UI only. `DryRun` reports whether this daemon
+    /// could hand off to its installed build without fencing or capturing
+    /// anything; `Execute` starts a handoff, or fails with
+    /// [`ErrorCode::HandoffUnavailable`] naming every blocking reason.
+    PrepareDaemonHandoff {
+        mode: DaemonHandoffMode,
+    },
+    /// Trusted local graphical UI only. A relaunched Window claims its exact
+    /// pre-fence controller disposition with the single-use resume ticket the
+    /// adopted daemon issued it (ADR 0011). Every invalid, expired, replayed,
+    /// or mismatched ticket fails with [`ErrorCode::InvalidHandoffTicket`].
+    ClaimHandoffControl {
+        ticket: [u8; HANDOFF_RESUME_TICKET_BYTES],
+    },
+}
+
+/// What [`Request::PrepareDaemonHandoff`] asks the daemon to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonHandoffMode {
+    /// Report compatibility and blocking reasons; change nothing.
+    DryRun,
+    /// Start the handoff when nothing blocks it.
+    Execute,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -962,6 +1019,16 @@ pub enum Response {
         dojo_id: DojoId,
         outcome: UnusedDojoCloseOutcome,
     },
+    /// Result of a [`DaemonHandoffMode::DryRun`] handoff preparation.
+    HandoffReport {
+        report: HandoffReport,
+    },
+    /// Result of a valid [`Request::ClaimHandoffControl`]: the controllers
+    /// restored to this connection, one per pre-fence controlled Splint.
+    HandoffControlClaimed {
+        #[serde(deserialize_with = "deserialize_claimed_controllers")]
+        controllers: Vec<HandoffClaimedController>,
+    },
 }
 
 /// Result of [`Request::CloseUnusedDojo`].
@@ -1044,6 +1111,16 @@ pub enum SubscriptionEvent {
         incarnation: u64,
         status: Option<AgentStatusSummary>,
         sequence: u64,
+    },
+    /// Delivered on topology subscriptions while the serving daemon prepares
+    /// a handoff, without a topology revision bump. The outcome after exec
+    /// reaches a participating Window through its continuation channel, and
+    /// every other client through the next connection's
+    /// `ServerFrame::Hello::daemon_generation`.
+    HandoffStatus {
+        /// Generation of the daemon that is handing off.
+        daemon_generation: u64,
+        phase: HandoffStatusPhase,
     },
 }
 
@@ -1725,6 +1802,14 @@ pub struct ProtocolError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_topology_revision: Option<TopologyRevision>,
+    /// Every reason a [`ErrorCode::HandoffUnavailable`] handoff was refused;
+    /// empty for every other error.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_blocking_reasons"
+    )]
+    pub handoff_blocking_reasons: Vec<HandoffBlockingReason>,
 }
 
 impl ProtocolError {
@@ -1734,6 +1819,19 @@ impl ProtocolError {
             code,
             message: message.into(),
             current_topology_revision: None,
+            handoff_blocking_reasons: Vec::new(),
+        }
+    }
+
+    /// A refused handoff that names every reason it cannot start.
+    #[must_use]
+    pub fn handoff_unavailable(reasons: Vec<HandoffBlockingReason>) -> Self {
+        Self {
+            handoff_blocking_reasons: reasons,
+            ..Self::new(
+                ErrorCode::HandoffUnavailable,
+                "daemon handoff is unavailable",
+            )
         }
     }
 }
@@ -1811,6 +1909,8 @@ pub enum AuditOperation {
     AuditInspect,
     PolicyReload,
     AgentStatusReport,
+    PrepareDaemonHandoff,
+    ClaimHandoffControl,
 }
 
 impl AuditOperation {
@@ -1863,6 +1963,8 @@ impl AuditOperation {
             Self::AuditInspect => "audit_inspect",
             Self::PolicyReload => "policy_reload",
             Self::AgentStatusReport => "agent_status_report",
+            Self::PrepareDaemonHandoff => "prepare_daemon_handoff",
+            Self::ClaimHandoffControl => "claim_handoff_control",
         }
     }
 }
@@ -2078,6 +2180,368 @@ pub enum ErrorCode {
     Cancelled,
     RequestNotFound,
     Internal,
+    /// The daemon is handing off: mutations, input, resize, and control
+    /// transfer are fenced until the handoff completes or is cancelled.
+    HandoffInProgress,
+    /// A daemon handoff cannot start; `ProtocolError::handoff_blocking_reasons`
+    /// names every reason.
+    HandoffUnavailable,
+    /// A handoff resume ticket is invalid, expired, replayed, or mismatched.
+    InvalidHandoffTicket,
+}
+
+/// Deserializes a sequence, failing as soon as it exceeds `MAX` elements so
+/// decoding never allocates beyond the bound.
+fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVec<T, const MAX: usize>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const MAX: usize> serde::de::Visitor<'de> for BoundedVec<T, MAX> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence of at most {MAX} elements")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Vec<T>, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX));
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == MAX {
+                    return Err(serde::de::Error::invalid_length(MAX + 1, &self));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVec::<T, MAX>(std::marker::PhantomData))
+}
+
+fn deserialize_blocking_reasons<'de, D>(
+    deserializer: D,
+) -> Result<Vec<HandoffBlockingReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_HANDOFF_BLOCKING_REASONS>(deserializer)
+}
+
+fn deserialize_reported_lairs<'de, D>(deserializer: D) -> Result<Vec<LairId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_HANDOFF_REPORTED_LAIRS>(deserializer)
+}
+
+fn deserialize_claimed_controllers<'de, D>(
+    deserializer: D,
+) -> Result<Vec<HandoffClaimedController>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_HANDOFF_CLAIMED_CONTROLLERS>(deserializer)
+}
+
+/// One inclusive, nonzero version range a daemon build supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffVersionRange {
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
+impl HandoffVersionRange {
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.minimum != 0 && self.minimum <= self.maximum
+    }
+}
+
+/// How a daemon build was produced, as compiled into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffBuildProvenance {
+    Unpackaged,
+    LocalCommittedHead,
+    ReleaseCandidate,
+    NixStore,
+}
+
+/// The running daemon build, as it reports itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffBuild {
+    /// Package version, such as `0.2.0-dev`; at most
+    /// [`MAX_HANDOFF_BUILD_VERSION_BYTES`] of ASCII alphanumerics, `.`, `-`,
+    /// and `+`.
+    pub version: String,
+    /// Immutable daemon/client pair identity, shared with packaging and
+    /// sealed preflight. Never all zero.
+    pub identity: [u8; HANDOFF_BUILD_IDENTITY_BYTES],
+    pub provenance: HandoffBuildProvenance,
+}
+
+/// Why a daemon handoff cannot start now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum HandoffBlockingReason {
+    /// Transient Lairs never cross a handoff (operator decision D1), so each
+    /// must close first. `count` is exact; `lair_ids` names at most
+    /// [`MAX_HANDOFF_REPORTED_LAIRS`] of them, so a Window can tell whether
+    /// its own transient Lair blocks the upgrade.
+    TransientLairsOpen {
+        count: usize,
+        #[serde(deserialize_with = "deserialize_reported_lairs")]
+        lair_ids: Vec<LairId>,
+    },
+    /// The running daemon is not installed from a package: there is no
+    /// installed build to hand off to and no rollback authority.
+    NotPackaged,
+    /// The running daemon is packaged, but its startup rollback snapshot pair
+    /// could not be retained, so a failed handoff could not roll back.
+    RollbackUnavailable,
+    /// This daemon build cannot perform a live handoff.
+    Unsupported,
+}
+
+impl HandoffBlockingReason {
+    const fn kind(&self) -> u8 {
+        match self {
+            Self::TransientLairsOpen { .. } => 0,
+            Self::NotPackaged => 1,
+            Self::RollbackUnavailable => 2,
+            Self::Unsupported => 3,
+        }
+    }
+}
+
+/// Validates one bounded blocking-reason set: at most one reason of each
+/// kind, and an exact, consistent transient Lair reason.
+///
+/// # Errors
+/// Returns `InvalidArgument` for an oversized, duplicated, or inconsistent set.
+pub fn validate_handoff_blocking_reasons(
+    reasons: &[HandoffBlockingReason],
+) -> Result<(), ProtocolError> {
+    let invalid = || {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "handoff blocking reasons are invalid",
+        )
+    };
+    if reasons.len() > MAX_HANDOFF_BLOCKING_REASONS {
+        return Err(invalid());
+    }
+    let mut kinds = 0_u8;
+    for reason in reasons {
+        let bit = 1_u8 << reason.kind();
+        if kinds & bit != 0 {
+            return Err(invalid());
+        }
+        kinds |= bit;
+        if let HandoffBlockingReason::TransientLairsOpen { count, lair_ids } = reason {
+            let mut unique = lair_ids.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            if *count == 0
+                || lair_ids.len() > MAX_HANDOFF_REPORTED_LAIRS.min(*count)
+                || unique.len() != lair_ids.len()
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a running daemon knows cheaply about a handoff, without opening,
+/// sealing, or preflighting an installed candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffReport {
+    pub daemon_generation: u64,
+    pub build: HandoffBuild,
+    pub private_protocol: HandoffVersionRange,
+    pub handoff_protocol: HandoffVersionRange,
+    pub terminal_checkpoint: HandoffVersionRange,
+    pub descriptor_manifest: HandoffVersionRange,
+    pub lairs: usize,
+    pub transient_lairs: usize,
+    pub dojos: usize,
+    /// Registered live Splint runtimes, transient Lairs' included.
+    pub live_splints: usize,
+    /// Whether this daemon retained its startup rollback snapshot pair.
+    pub rollback_available: bool,
+    /// Every reason a handoff cannot start now; empty only when it could.
+    #[serde(deserialize_with = "deserialize_blocking_reasons")]
+    pub blocking_reasons: Vec<HandoffBlockingReason>,
+}
+
+impl HandoffReport {
+    /// Validates identity, ranges, and blocking-reason consistency.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for a malformed or self-contradictory report.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_handoff_blocking_reasons(&self.blocking_reasons)?;
+        let version = &self.build.version;
+        let transient_count = self
+            .blocking_reasons
+            .iter()
+            .find_map(|reason| match reason {
+                HandoffBlockingReason::TransientLairsOpen { count, .. } => Some(*count),
+                _ => None,
+            });
+        let rollback_reasons = self
+            .blocking_reasons
+            .iter()
+            .filter(|reason| {
+                matches!(
+                    reason,
+                    HandoffBlockingReason::NotPackaged | HandoffBlockingReason::RollbackUnavailable
+                )
+            })
+            .count();
+        if self.daemon_generation == 0
+            || version.is_empty()
+            || version.len() > MAX_HANDOFF_BUILD_VERSION_BYTES
+            || !version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+            || self.build.identity == [0; HANDOFF_BUILD_IDENTITY_BYTES]
+            || ![
+                self.private_protocol,
+                self.handoff_protocol,
+                self.terminal_checkpoint,
+                self.descriptor_manifest,
+            ]
+            .into_iter()
+            .all(HandoffVersionRange::is_valid)
+            || self.transient_lairs > self.lairs
+            || transient_count != (self.transient_lairs > 0).then_some(self.transient_lairs)
+            // Exactly one rollback reason explains missing rollback authority.
+            || rollback_reasons != usize::from(!self.rollback_available)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "handoff report is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One phase of a handoff the serving daemon broadcasts before exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum HandoffStatusPhase {
+    /// The daemon is building checkpoint and descriptor authority and still
+    /// serves normally.
+    Preparing,
+    /// Mutations, input, resize, and control transfer are paused.
+    Fenced,
+    /// The handoff stopped before exec. The same generation keeps serving and
+    /// the fence is lifted.
+    Cancelled { reason: HandoffCancelReason },
+}
+
+/// Why a handoff stopped before exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffCancelReason {
+    /// The requesting Window cancelled it.
+    Requested,
+    /// A blocking condition appeared after it started.
+    Blocked,
+    /// Preparation failed; nothing changed.
+    Failed,
+    /// A participant or step missed its deadline.
+    TimedOut,
+}
+
+/// One controller a valid handoff control claim restored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffClaimedController {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub controller_id: u64,
+    pub modes: Vec<ControlMode>,
+}
+
+/// Validates a bounded claim result with one controller per Splint.
+///
+/// # Errors
+/// Returns `InvalidArgument` for an oversized, duplicated, or malformed set.
+pub fn validate_handoff_claimed_controllers(
+    controllers: &[HandoffClaimedController],
+) -> Result<(), ProtocolError> {
+    let invalid = || {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "handoff claimed controllers are invalid",
+        )
+    };
+    if controllers.len() > MAX_HANDOFF_CLAIMED_CONTROLLERS {
+        return Err(invalid());
+    }
+    let mut splints = std::collections::HashSet::with_capacity(controllers.len());
+    let mut controller_ids = std::collections::HashSet::with_capacity(controllers.len());
+    for controller in controllers {
+        validate_control_modes(&controller.modes)?;
+        if controller.incarnation == 0
+            || controller.controller_id == 0
+            || !splints.insert(controller.splint_id)
+            || !controller_ids.insert(controller.controller_id)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Identity of the sealed forward client snapshot a
+/// [`ServerFrame::HandoffPrepare`] frame passes as its first descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffClientSnapshot {
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
+/// Metadata of a [`ServerFrame::HandoffPrepare`] frame. Its descriptors
+/// travel beside the frame bytes; see [`handoff_prepare`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffPrepare {
+    /// Generation of the daemon that is handing off.
+    pub daemon_generation: u64,
+    /// Attached descriptor count; always [`HANDOFF_PREPARE_DESCRIPTORS`].
+    pub descriptors: usize,
+    pub client_snapshot: HandoffClientSnapshot,
+}
+
+impl HandoffPrepare {
+    /// Validates generation, descriptor count, and snapshot bounds.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for a malformed or out-of-bounds frame.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.daemon_generation == 0
+            || self.descriptors != HANDOFF_PREPARE_DESCRIPTORS
+            || !(1..=MAX_HANDOFF_CLIENT_SNAPSHOT_BYTES).contains(&self.client_snapshot.size)
+            || self.client_snapshot.sha256 == [0; 32]
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "handoff prepare frame is invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3420,6 +3884,9 @@ mod tests {
             AuditOperation::ProcessExit,
             AuditOperation::AuditInspect,
             AuditOperation::PolicyReload,
+            AuditOperation::AgentStatusReport,
+            AuditOperation::PrepareDaemonHandoff,
+            AuditOperation::ClaimHandoffControl,
         ] {
             assert_eq!(
                 serde_json::to_string(&operation).unwrap(),
@@ -3444,6 +3911,7 @@ mod tests {
             limits: ServerLimits::default(),
             development_terminal_access: false,
             daemon_hostname: None,
+            daemon_generation: 1,
         };
         let old_json = serde_json::to_value(&old).unwrap();
         assert!(old_json.get("daemon_hostname").is_none());
@@ -3484,6 +3952,7 @@ mod tests {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: Some(hostname),
+                daemon_generation: 1,
             };
             let decoded: ServerFrame =
                 serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
@@ -4092,7 +4561,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 40);
+        assert_eq!(PROTOCOL_VERSION, 41);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -5160,5 +5629,375 @@ mod tests {
             ..done
         };
         assert_eq!(timed_done.effective_ttl_seconds(), Some(30));
+    }
+
+    fn handoff_report() -> HandoffReport {
+        HandoffReport {
+            daemon_generation: 1,
+            build: HandoffBuild {
+                version: "0.2.0-dev".into(),
+                identity: [9; HANDOFF_BUILD_IDENTITY_BYTES],
+                provenance: HandoffBuildProvenance::Unpackaged,
+            },
+            private_protocol: HandoffVersionRange {
+                minimum: PROTOCOL_VERSION,
+                maximum: PROTOCOL_VERSION,
+            },
+            handoff_protocol: HandoffVersionRange {
+                minimum: 1,
+                maximum: 1,
+            },
+            terminal_checkpoint: HandoffVersionRange {
+                minimum: 2,
+                maximum: 2,
+            },
+            descriptor_manifest: HandoffVersionRange {
+                minimum: 1,
+                maximum: 1,
+            },
+            lairs: 3,
+            transient_lairs: 1,
+            dojos: 4,
+            live_splints: 5,
+            rollback_available: false,
+            blocking_reasons: vec![
+                HandoffBlockingReason::TransientLairsOpen {
+                    count: 1,
+                    lair_ids: vec![LairId::new()],
+                },
+                HandoffBlockingReason::NotPackaged,
+                HandoffBlockingReason::Unsupported,
+            ],
+        }
+    }
+
+    #[test]
+    fn daemon_handoff_requests_and_hello_generation_have_explicit_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(Request::PrepareDaemonHandoff {
+                mode: DaemonHandoffMode::DryRun,
+            })
+            .unwrap(),
+            serde_json::json!({"type": "prepare_daemon_handoff", "mode": "dry_run"})
+        );
+        let execute: Request = serde_json::from_value(
+            serde_json::json!({"type": "prepare_daemon_handoff", "mode": "execute"}),
+        )
+        .unwrap();
+        assert_eq!(
+            execute,
+            Request::PrepareDaemonHandoff {
+                mode: DaemonHandoffMode::Execute,
+            }
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                serde_json::json!({"type": "prepare_daemon_handoff", "mode": "force"})
+            )
+            .is_err()
+        );
+
+        let claim = Request::ClaimHandoffControl {
+            ticket: [0xa5; HANDOFF_RESUME_TICKET_BYTES],
+        };
+        let value = serde_json::to_value(&claim).unwrap();
+        assert_eq!(value["type"], "claim_handoff_control");
+        assert_eq!(value["ticket"].as_array().unwrap().len(), 32);
+        assert_eq!(serde_json::from_value::<Request>(value).unwrap(), claim);
+        for length in [
+            0,
+            HANDOFF_RESUME_TICKET_BYTES - 1,
+            HANDOFF_RESUME_TICKET_BYTES + 1,
+            4096,
+        ] {
+            assert!(
+                serde_json::from_value::<Request>(serde_json::json!({
+                    "type": "claim_handoff_control",
+                    "ticket": vec![1_u8; length],
+                }))
+                .is_err(),
+                "a {length}-byte ticket is rejected while decoding"
+            );
+        }
+
+        let hello = ServerFrame::Hello {
+            version: PROTOCOL_VERSION,
+            limits: ServerLimits::default(),
+            development_terminal_access: false,
+            daemon_hostname: None,
+            daemon_generation: 7,
+        };
+        let mut value = serde_json::to_value(&hello).unwrap();
+        assert_eq!(value["daemon_generation"], 7);
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(value.clone()).unwrap(),
+            hello
+        );
+        value.as_object_mut().unwrap().remove("daemon_generation");
+        assert!(
+            serde_json::from_value::<ServerFrame>(value).is_err(),
+            "protocol 41 hello always names the daemon generation"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every report invariant and decoding bound is reviewed together"
+    )]
+    fn handoff_report_is_bounded_and_self_consistent() {
+        let report = handoff_report();
+        report.validate().unwrap();
+        let response = Response::HandoffReport {
+            report: report.clone(),
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["type"], "handoff_report");
+        assert_eq!(value["report"]["build"]["provenance"], "unpackaged");
+        assert_eq!(
+            value["report"]["blocking_reasons"][0]["reason"],
+            "transient_lairs_open"
+        );
+        assert_eq!(
+            value["report"]["blocking_reasons"][1],
+            serde_json::json!({"reason": "not_packaged"})
+        );
+        assert_eq!(
+            value["report"]["blocking_reasons"][2],
+            serde_json::json!({"reason": "unsupported"})
+        );
+        assert_eq!(serde_json::from_value::<Response>(value).unwrap(), response);
+
+        let ready = HandoffReport {
+            transient_lairs: 0,
+            rollback_available: true,
+            build: HandoffBuild {
+                provenance: HandoffBuildProvenance::ReleaseCandidate,
+                ..report.build.clone()
+            },
+            blocking_reasons: Vec::new(),
+            ..report
+        };
+        ready.validate().unwrap();
+
+        let invalid = |mutate: fn(&mut HandoffReport)| {
+            let mut candidate = handoff_report();
+            mutate(&mut candidate);
+            candidate.validate().unwrap_err().code
+        };
+        for mutate in [
+            |report: &mut HandoffReport| report.daemon_generation = 0,
+            |report: &mut HandoffReport| report.build.identity = [0; HANDOFF_BUILD_IDENTITY_BYTES],
+            |report: &mut HandoffReport| report.build.version = String::new(),
+            |report: &mut HandoffReport| report.build.version = "0.2.0 dev".into(),
+            |report: &mut HandoffReport| report.build.version = "0.2.0\u{202e}".into(),
+            |report: &mut HandoffReport| {
+                report.build.version = "1".repeat(MAX_HANDOFF_BUILD_VERSION_BYTES + 1);
+            },
+            |report: &mut HandoffReport| {
+                report.handoff_protocol = HandoffVersionRange {
+                    minimum: 2,
+                    maximum: 1,
+                };
+            },
+            |report: &mut HandoffReport| {
+                report.private_protocol = HandoffVersionRange {
+                    minimum: 0,
+                    maximum: 1,
+                };
+            },
+            |report: &mut HandoffReport| report.transient_lairs = 2,
+            |report: &mut HandoffReport| report.lairs = 0,
+            |report: &mut HandoffReport| {
+                report.blocking_reasons.remove(0);
+            },
+            |report: &mut HandoffReport| report.rollback_available = true,
+            |report: &mut HandoffReport| {
+                report
+                    .blocking_reasons
+                    .push(HandoffBlockingReason::RollbackUnavailable);
+            },
+            |report: &mut HandoffReport| {
+                report
+                    .blocking_reasons
+                    .push(HandoffBlockingReason::Unsupported);
+            },
+            |report: &mut HandoffReport| {
+                report.blocking_reasons[0] = HandoffBlockingReason::TransientLairsOpen {
+                    count: 1,
+                    lair_ids: vec![LairId::new(), LairId::new()],
+                };
+            },
+            |report: &mut HandoffReport| {
+                let lair_id = LairId::new();
+                report.transient_lairs = 2;
+                report.blocking_reasons[0] = HandoffBlockingReason::TransientLairsOpen {
+                    count: 2,
+                    lair_ids: vec![lair_id, lair_id],
+                };
+            },
+        ] {
+            assert_eq!(invalid(mutate), ErrorCode::InvalidArgument);
+        }
+
+        // Many transient Lairs keep an exact count but name a bounded subset.
+        let mut many = handoff_report();
+        many.lairs = 40;
+        many.transient_lairs = 40;
+        many.blocking_reasons[0] = HandoffBlockingReason::TransientLairsOpen {
+            count: 40,
+            lair_ids: (0..MAX_HANDOFF_REPORTED_LAIRS)
+                .map(|_| LairId::new())
+                .collect(),
+        };
+        many.validate().unwrap();
+
+        // Decoding stops at the list bounds instead of allocating past them.
+        let mut value = serde_json::to_value(&many).unwrap();
+        value["blocking_reasons"][0]["lair_ids"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(LairId::new()).unwrap());
+        assert!(serde_json::from_value::<HandoffReport>(value).is_err());
+        let mut value = serde_json::to_value(handoff_report()).unwrap();
+        let reasons = value["blocking_reasons"].as_array_mut().unwrap();
+        reasons.push(serde_json::json!({"reason": "rollback_unavailable"}));
+        reasons.push(serde_json::json!({"reason": "unsupported"}));
+        assert_eq!(reasons.len(), MAX_HANDOFF_BLOCKING_REASONS + 1);
+        assert!(serde_json::from_value::<HandoffReport>(value).is_err());
+    }
+
+    #[test]
+    fn handoff_errors_and_status_events_have_explicit_wire_shapes() {
+        for (code, name) in [
+            (ErrorCode::HandoffInProgress, "handoff_in_progress"),
+            (ErrorCode::HandoffUnavailable, "handoff_unavailable"),
+            (ErrorCode::InvalidHandoffTicket, "invalid_handoff_ticket"),
+        ] {
+            assert_eq!(serde_json::to_value(code).unwrap(), name);
+        }
+        let plain = ProtocolError::new(ErrorCode::HandoffInProgress, "daemon handoff in progress");
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("handoff_blocking_reasons")
+                .is_none()
+        );
+        let refused = ProtocolError::handoff_unavailable(vec![
+            HandoffBlockingReason::NotPackaged,
+            HandoffBlockingReason::Unsupported,
+        ]);
+        assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        let value = serde_json::to_value(ServerFrame::Error {
+            request_id: Some(4),
+            error: refused.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            value["error"]["handoff_blocking_reasons"],
+            serde_json::json!([{"reason": "not_packaged"}, {"reason": "unsupported"}])
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerFrame>(value).unwrap(),
+            ServerFrame::Error { error, .. } if error == refused
+        ));
+        let oversized = serde_json::json!({
+            "code": "handoff_unavailable",
+            "message": "daemon handoff is unavailable",
+            "handoff_blocking_reasons": vec![serde_json::json!({"reason": "unsupported"}); 5],
+        });
+        assert!(serde_json::from_value::<ProtocolError>(oversized).is_err());
+
+        for (phase, expected) in [
+            (
+                HandoffStatusPhase::Preparing,
+                serde_json::json!({"state": "preparing"}),
+            ),
+            (
+                HandoffStatusPhase::Fenced,
+                serde_json::json!({"state": "fenced"}),
+            ),
+            (
+                HandoffStatusPhase::Cancelled {
+                    reason: HandoffCancelReason::TimedOut,
+                },
+                serde_json::json!({"state": "cancelled", "reason": "timed_out"}),
+            ),
+        ] {
+            let event = SubscriptionEvent::HandoffStatus {
+                daemon_generation: 2,
+                phase,
+            };
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "type": "handoff_status",
+                    "daemon_generation": 2,
+                    "phase": expected,
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<SubscriptionEvent>(value).unwrap(),
+                event
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_claimed_controllers_are_bounded_and_unique() {
+        let controller = |controller_id| HandoffClaimedController {
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            controller_id,
+            modes: vec![ControlMode::Input, ControlMode::Resize],
+        };
+        let response = Response::HandoffControlClaimed {
+            controllers: vec![controller(1), controller(2)],
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["type"], "handoff_control_claimed");
+        assert_eq!(
+            value["controllers"][0]["modes"],
+            serde_json::json!(["input", "resize"])
+        );
+        assert_eq!(serde_json::from_value::<Response>(value).unwrap(), response);
+        let Response::HandoffControlClaimed { controllers } = response else {
+            unreachable!();
+        };
+        validate_handoff_claimed_controllers(&controllers).unwrap();
+        validate_handoff_claimed_controllers(&[]).unwrap();
+
+        let duplicate_splint = HandoffClaimedController {
+            controller_id: 3,
+            ..controllers[0].clone()
+        };
+        for invalid in [
+            vec![controller(0)],
+            vec![HandoffClaimedController {
+                incarnation: 0,
+                ..controller(1)
+            }],
+            vec![HandoffClaimedController {
+                modes: Vec::new(),
+                ..controller(1)
+            }],
+            vec![controller(1), controller(1)],
+            vec![controllers[0].clone(), duplicate_splint],
+        ] {
+            assert_eq!(
+                validate_handoff_claimed_controllers(&invalid)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        let oversized = serde_json::json!({
+            "type": "handoff_control_claimed",
+            "controllers": (1..=MAX_HANDOFF_CLAIMED_CONTROLLERS as u64 + 1)
+                .map(|id| serde_json::to_value(controller(id)).unwrap())
+                .collect::<Vec<_>>(),
+        });
+        assert!(serde_json::from_value::<Response>(oversized).is_err());
     }
 }

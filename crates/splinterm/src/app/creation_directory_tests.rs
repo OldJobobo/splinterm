@@ -31,6 +31,7 @@ async fn scripted<T>(
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: None,
+                daemon_generation: 1,
             };
             writer
                 .write_all(&splinterm_protocol::encode_frame(&hello).unwrap())

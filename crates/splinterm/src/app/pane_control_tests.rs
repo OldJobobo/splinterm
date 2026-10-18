@@ -51,6 +51,7 @@ const fn server_hello(limits: ServerLimits) -> ServerFrame {
         limits,
         development_terminal_access: false,
         daemon_hostname: None,
+        daemon_generation: 1,
     }
 }
 
