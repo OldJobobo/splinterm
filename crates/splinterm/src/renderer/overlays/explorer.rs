@@ -25,6 +25,23 @@ const HEADER_HEIGHT: u32 = 104;
 const FILTER_HEIGHT: u32 = 28;
 const FOOTER_HEIGHT: u32 = 30;
 const ROW_HEIGHT: u32 = 48;
+/// The fewest terminal columns the docked Explorer leaves beside itself.
+const MINIMUM_DOCKED_TERMINAL_COLUMNS: u16 = 20;
+
+/// The narrowest terminal width, in logical pixels, that keeps the Explorer
+/// docked beside the terminal; narrower Windows get the drawer.
+///
+/// The drawer's opaque panel covers the terminal's leftmost columns, where
+/// every prompt and line starts, so a terminal under it looks blank while it
+/// still takes input. Docking therefore needs only a small usable terminal,
+/// not the configured initial grid (80 columns by default), which sent an
+/// ordinary half-width tiled Window to the drawer.
+#[must_use]
+pub(crate) fn explorer_minimum_docked_terminal_width(cell_width: u32, initial_columns: u16) -> u32 {
+    cell_width.max(1).saturating_mul(u32::from(
+        initial_columns.min(MINIMUM_DOCKED_TERMINAL_COLUMNS),
+    ))
+}
 
 const fn explorer_header_text(focused: bool) -> &'static str {
     if focused {
@@ -890,6 +907,75 @@ mod tests {
             lair_explorer_disclosure_hit_test(&drawer, &rows, (100.0, row_y)),
             None
         );
+    }
+
+    /// VM report F5/R1: a 628 px half-width tile on a 1280 px output leaves a
+    /// 622 px canvas. With the 80-column docking floor the Explorer fell back
+    /// to the drawer, covering the terminal's left 288 px where all of its
+    /// text was, so the visible terminal area painted nothing.
+    #[test]
+    fn half_width_tile_docks_beside_a_visible_terminal() {
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let content = Rect {
+            x: 0,
+            y: 34,
+            width: 622,
+            height: 716,
+        };
+        for cell_width in [7, 8, 9] {
+            let layout = lair_explorer_layout(
+                content,
+                explorer_minimum_docked_terminal_width(cell_width, 80),
+                &rows,
+                Some(id),
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                layout.mode,
+                LairExplorerPresentationMode::Docked,
+                "cell width {cell_width}"
+            );
+            // The terminal starts where the panel ends: nothing covers it.
+            assert_eq!(layout.terminal.x, layout.panel.x + layout.panel.width);
+            assert_eq!(
+                layout.terminal.x + layout.terminal.width,
+                content.x + content.width
+            );
+            assert!(layout.terminal.width / cell_width >= 20);
+        }
+    }
+
+    #[test]
+    fn docking_floor_is_bounded_and_tiny_windows_keep_the_drawer() {
+        assert_eq!(explorer_minimum_docked_terminal_width(8, 80), 160);
+        assert_eq!(explorer_minimum_docked_terminal_width(8, 12), 96);
+        assert_eq!(explorer_minimum_docked_terminal_width(0, 80), 20);
+        let id = NavigationNodeId::Lair(LairId::new());
+        let rows = [row(id)];
+        let content = |width| Rect {
+            x: 0,
+            y: 34,
+            width,
+            height: 716,
+        };
+        let minimum = explorer_minimum_docked_terminal_width(8, 80);
+        let docked =
+            lair_explorer_layout(content(PREFERRED_WIDTH + minimum), minimum, &rows, None, 0)
+                .unwrap();
+        assert_eq!(docked.mode, LairExplorerPresentationMode::Docked);
+        assert_eq!(docked.terminal.width, minimum);
+        let drawer = lair_explorer_layout(
+            content(PREFERRED_WIDTH + minimum - 1),
+            minimum,
+            &rows,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(drawer.mode, LairExplorerPresentationMode::Drawer);
+        assert_eq!(drawer.terminal, content(PREFERRED_WIDTH + minimum - 1));
     }
 
     /// Paints one unselected row and returns the canvas and its label clip.
