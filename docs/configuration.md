@@ -122,10 +122,10 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `cursor.style` | `block`, `beam`, or `underline` | block |
 | `cursor.blink` | permit cursor blink | yes |
 | `multiplexer.persistent-by-default` | ordinary unnamed local graphical terminals create persistent (`yes`) or Window-owned transient (`no`) Lairs | yes |
-| `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically | yes |
-| `multiplexer.new-dojo-directory` | where a Dojo or Lair created inside a Window starts: `inherit`, `home`, an absolute path, or `~/path` | home |
-| `multiplexer.new-splint-directory` | where a Splint split inside a Dojo starts; same values | inherit |
-| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it | no |
+| `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically; configuration reload applies it | yes |
+| `multiplexer.new-dojo-directory` | where a Dojo or Lair created inside a Window starts: `inherit`, `home`, an absolute path, or `~/path`; configuration reload applies it | home |
+| `multiplexer.new-splint-directory` | where a Splint split inside a Dojo starts; same values; configuration reload applies it | inherit |
+| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it; configuration reload applies it to the next Close Tab or Window close | no |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 | `explorer.agent-status` | show explicitly reported agent status in the Explorer, on Dojo tabs, and in navigation accessibility; `no` hides it all; configuration reload applies it | yes |
@@ -136,6 +136,18 @@ A smaller font or larger surface can exceed that envelope; Splinterm then keeps
 the actual terminal top-left anchored, leaves remaining right/bottom pixels
 outside terminal hit-testing, and emits one bounded `grid_capped` diagnostic for
 the pane instead of silently treating the residual as terminal cells.
+
+**Reload configuration** (`app.config-reload`, also in the command palette)
+reads `config.ini` and its keymap file again for the Window it runs in and
+applies exactly these settings: the `[key-bindings]` keymap (profile, overlay
+file, and `prefix-timeout-ms`), `clipboard.image-directory` (an in-flight save
+is cancelled), `explorer.agent-status`, `multiplexer.close-unused`,
+`multiplexer.persist-on-tab-organization`, `multiplexer.new-dojo-directory`,
+and `multiplexer.new-splint-directory`. The four multiplexer settings take
+effect at the Window's next close, tab organization, or Dojo, Lair, or Splint
+creation; one already under way keeps the value it started with. A file with
+errors is rejected and changes nothing. Every other setting keeps the value
+the Window started with.
 
 Malformed supported values fail startup. Unknown sections and keys print
 line-numbered diagnostics. When `main.font` is unset, each graphical client
@@ -318,8 +330,9 @@ the client. When nothing usable remains, creation fails with "source working
 directory is unavailable" for `inherit`, or "configured launch directory and
 home directory are unavailable" for the other choices. A missing source is
 rejected rather than replaced by another Window's focus. This is a point-in-time
-default: the shell can change directory again before launch. The settings are
-read when a Window starts.
+default: the shell can change directory again before launch. A Window reads
+the settings when it starts, and **Reload configuration** applies changes to
+its later creations.
 Explicit `--cwd`, fresh desktop and CLI launches, presets, and saved layouts are
 unchanged; shell, login-shell, scrollback, and command settings are unchanged.
 
@@ -605,6 +618,11 @@ is refused because the close won. Likewise a Window attaching during the close
 either attaches first and keeps the Dojo, or is refused. A used Dojo is
 detached as before, and so is every Dojo when the daemon gives no answer.
 **Detach Window** (`window.detach`) always detaches.
+
+**Reload configuration** (`app.config-reload`) applies a changed
+`close-unused` to the Window's next Close Tab or Window close, including for
+tabs that were already open. A close already in progress keeps the value it
+started with.
 
 When the closed Dojo was the last one in a Lair the user never named, the Lair
 is removed in the same step. Such a Lair was created in the running daemon

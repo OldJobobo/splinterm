@@ -742,27 +742,9 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         viewport.set_destination(width, height);
     }
     let controller_active = options.controlled && options.commands.is_some();
+    window.set_title(initial_window_title(&options));
     let trusted_consent = options.trusted_consent;
     let session_picker = options.session_picker;
-    let title = if trusted_consent.is_some() {
-        "Splinterm — Trusted Access Request".to_owned()
-    } else if let Some(picker) = &session_picker {
-        picker.standalone_title().to_owned()
-    } else {
-        window_title(
-            options.title.as_deref().or_else(|| {
-                options
-                    .snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.title.as_str())
-            }),
-            controller_active,
-            &options.authority,
-            false,
-            None,
-        )
-    };
-    window.set_title(title);
     window.set_app_id(options.app_id.clone());
     window
         .set_buffer_scale(1)
@@ -864,7 +846,10 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             rejected_text_size: None,
             cursor_style: options.cursor_style,
             cursor_blink: options.cursor_blink,
-            title_override: options.title,
+            title: TitleSettings {
+                text: options.title,
+                controller_label: options.controller_title,
+            },
             theme: options.theme,
             pane_divider_style: options.pane_divider_style,
             frame_title_mode: options.frame_title_mode,
@@ -989,6 +974,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             tab_new_text: None,
             topology_updates: options.topology_updates,
             topology_commands: options.topology_commands,
+            topology_settings: options.topology_settings,
             session_switch_pending: false,
             deferred_topology_updates: Vec::new(),
             agent: agent_status::TabAgentStatus::new(options.agent_status_presentation),
@@ -1975,6 +1961,14 @@ struct SurfaceState {
     mapped_notify: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+/// The Window's fixed title settings from its options.
+struct TitleSettings {
+    /// Replaces the terminal's own title when set.
+    text: Option<String>,
+    /// Whether the title may say "local controller"; input gating ignores it.
+    controller_label: bool,
+}
+
 struct PresentationState {
     render_context: RenderContext,
     text_row: Option<TextRow>,
@@ -1988,7 +1982,7 @@ struct PresentationState {
     rejected_text_size: Option<(Option<u16>, i16)>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
-    title_override: Option<String>,
+    title: TitleSettings,
     theme: ResolvedTheme,
     pane_divider_style: PaneDividerStyle,
     frame_title_mode: FrameTitleMode,
@@ -2465,6 +2459,19 @@ fn try_topology_command(
     })
 }
 
+/// Publishes the settings the topology manager reads after an accepted
+/// configuration reload. This is shared state, not a queued command: it never
+/// takes a command-queue slot, and a busy manager still sees the latest value
+/// at its next decision. A Window without a manager has nothing to update.
+fn publish_topology_settings(
+    settings: Option<&tokio::sync::watch::Sender<crate::config::TopologyReloadSettings>>,
+    config: &crate::config::AppConfig,
+) {
+    if let Some(settings) = settings {
+        settings.send_replace(crate::config::TopologyReloadSettings::from_config(config));
+    }
+}
+
 fn try_topology_command_with_rollback(
     commands: Option<&Sender<WindowTopologyCommand>>,
     command: WindowTopologyCommand,
@@ -2803,6 +2810,28 @@ fn search_paint_rect(content: Rect, explorer: Option<&LairExplorerLayout>) -> Op
         width: right.saturating_sub(left),
         ..content
     })
+}
+
+/// The title a Window maps with, before any snapshot or modal updates it.
+fn initial_window_title(options: &WindowOptions) -> String {
+    if options.trusted_consent.is_some() {
+        "Splinterm — Trusted Access Request".to_owned()
+    } else if let Some(picker) = &options.session_picker {
+        picker.standalone_title().to_owned()
+    } else {
+        window_title(
+            options.title.as_deref().or_else(|| {
+                options
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.title.as_str())
+            }),
+            options.controlled && options.commands.is_some() && options.controller_title,
+            &options.authority,
+            false,
+            None,
+        )
+    }
 }
 
 fn window_title(
@@ -5440,6 +5469,10 @@ impl App {
         match crate::config::load_default() {
             Ok(loaded) => {
                 self.cancel_clipboard_image();
+                publish_topology_settings(
+                    self.tab_state.topology_settings.as_ref(),
+                    &loaded.config,
+                );
                 self.clipboard.image_directory = loaded.config.clipboard_image_directory;
                 self.input.keymap = loaded.config.keymap;
                 self.input.prefix_timeout =
@@ -7616,18 +7649,25 @@ impl App {
             self.surface.window.set_title("Splinterm — Key bindings");
             return;
         }
-        if let Some(snapshot) = &self.panes.pane.snapshot {
-            self.surface.window.set_title(window_title(
-                self.presentation
-                    .title_override
-                    .as_deref()
-                    .or(Some(&snapshot.title)),
-                self.panes.pane.controller_active,
-                &self.panes.pane.authority,
-                self.panes.pane.pending_control_transfer.is_some(),
-                Some(&self.panes.pane.search),
-            ));
+        if let Some(title) = self.terminal_window_title() {
+            self.surface.window.set_title(title);
         }
+    }
+
+    /// The focused pane's terminal title, or `None` before it has a snapshot.
+    fn terminal_window_title(&self) -> Option<String> {
+        let snapshot = self.panes.pane.snapshot.as_ref()?;
+        Some(window_title(
+            self.presentation
+                .title
+                .text
+                .as_deref()
+                .or(Some(&snapshot.title)),
+            self.panes.pane.controller_active && self.presentation.title.controller_label,
+            &self.panes.pane.authority,
+            self.panes.pane.pending_control_transfer.is_some(),
+            Some(&self.panes.pane.search),
+        ))
     }
 
     fn refresh_search_overlay(&mut self, queue_handle: &QueueHandle<Self>) {
@@ -8214,17 +8254,8 @@ impl App {
                     self.send_command(WindowCommand::RevokeAccess(id));
                 }
                 self.panes.pane.authority.grants.clear();
-                if let Some(snapshot) = &self.panes.pane.snapshot {
-                    self.surface.window.set_title(window_title(
-                        self.presentation
-                            .title_override
-                            .as_deref()
-                            .or(Some(&snapshot.title)),
-                        self.panes.pane.controller_active,
-                        &self.panes.pane.authority,
-                        self.panes.pane.pending_control_transfer.is_some(),
-                        Some(&self.panes.pane.search),
-                    ));
+                if let Some(title) = self.terminal_window_title() {
+                    self.surface.window.set_title(title);
                 }
                 return;
             }
@@ -8266,17 +8297,8 @@ impl App {
             }
             Some(ActionId::ReleaseControl) => {
                 self.request_active_pane_control_release();
-                if let Some(snapshot) = &self.panes.pane.snapshot {
-                    self.surface.window.set_title(window_title(
-                        self.presentation
-                            .title_override
-                            .as_deref()
-                            .or(Some(&snapshot.title)),
-                        self.panes.pane.controller_active,
-                        &self.panes.pane.authority,
-                        self.panes.pane.pending_control_transfer.is_some(),
-                        Some(&self.panes.pane.search),
-                    ));
+                if let Some(title) = self.terminal_window_title() {
+                    self.surface.window.set_title(title);
                 }
                 return;
             }
@@ -9982,22 +10004,10 @@ impl App {
             && !self.modal.input_modal_open()
             && !self.modal.session_picker_reconcile_pending
         {
-            let snapshot = self
-                .panes
-                .pane
-                .snapshot
-                .as_ref()
+            let title = self
+                .terminal_window_title()
                 .context("updated snapshot exists")?;
-            self.surface.window.set_title(window_title(
-                self.presentation
-                    .title_override
-                    .as_deref()
-                    .or(Some(&snapshot.title)),
-                self.panes.pane.controller_active,
-                &self.panes.pane.authority,
-                self.panes.pane.pending_control_transfer.is_some(),
-                Some(&self.panes.pane.search),
-            ));
+            self.surface.window.set_title(title);
         }
         if picker_reconcile_pending {
             self.modal.session_picker_reconcile_pending = false;
@@ -13528,6 +13538,41 @@ mod tests {
         let options = WindowOptions::default();
         assert_eq!(options.app_id, crate::config::APP_ID);
         assert!(options.initial_tab_strip_visible);
+        assert!(options.controller_title);
+    }
+
+    #[test]
+    fn controller_title_only_drops_the_local_controller_suffix() {
+        let mut snapshot = valid_snapshot(SplintId::new());
+        snapshot.title = "shell".into();
+        let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+        let terminal = WindowOptions {
+            snapshot: Some(snapshot),
+            commands: Some(commands),
+            ..WindowOptions::default()
+        };
+        assert_eq!(
+            initial_window_title(&terminal),
+            "Splinterm — shell — local controller"
+        );
+        let status = WindowOptions {
+            controller_title: false,
+            ..terminal
+        };
+        assert!(status.controlled, "input gating is unchanged");
+        assert_eq!(initial_window_title(&status), "Splinterm — shell");
+        let external = WindowOptions {
+            authority: AuthorityStatus {
+                grants: vec![(1, "agent".into())],
+                development_bypass: false,
+            },
+            ..status
+        };
+        assert_eq!(
+            initial_window_title(&external),
+            "Splinterm — shell — EXTERNAL ACCESS ACTIVE",
+            "authority labels stay visible"
+        );
     }
 
     #[test]
@@ -15981,6 +16026,38 @@ mod tests {
         .expect_err("closed pending split queue");
         assert!(error.to_string().contains("closed"));
         assert_eq!(rolled_back, Some((target, pending)));
+    }
+
+    #[test]
+    fn a_reload_reaches_the_topology_manager_even_with_a_full_command_queue() {
+        use crate::config::{AppConfig, TopologyReloadSettings};
+
+        let startup = AppConfig::default();
+        let (settings, mut manager_view) =
+            tokio::sync::watch::channel(TopologyReloadSettings::from_config(&startup));
+        // A busy manager: its bounded command queue is full.
+        let (commands, mut queued) = tokio::sync::mpsc::channel(1);
+        try_topology_command(&commands, WindowTopologyCommand::RequestSessionPicker).unwrap();
+        assert!(
+            try_topology_command(&commands, WindowTopologyCommand::RequestSessionPicker).is_err()
+        );
+
+        let mut reloaded = AppConfig::default();
+        reloaded.multiplexer_lifetime.close_unused = true;
+        reloaded.multiplexer_lifetime.persist_on_tab_organization = false;
+        reloaded.new_dojo_directory = splinterm_protocol::LaunchDirectory::Inherit;
+        reloaded.new_splint_directory = splinterm_protocol::LaunchDirectory::Home;
+        publish_topology_settings(Some(&settings), &reloaded);
+
+        assert!(manager_view.has_changed().unwrap());
+        assert_eq!(
+            *manager_view.borrow_and_update(),
+            TopologyReloadSettings::from_config(&reloaded)
+        );
+        // The reload took no queue slot: only the original command is queued.
+        assert!(queued.try_recv().is_ok());
+        assert!(queued.try_recv().is_err());
+        publish_topology_settings(None, &reloaded);
     }
 
     #[test]

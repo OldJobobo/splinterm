@@ -5,7 +5,7 @@ use std::{future::Future, io::IsTerminal as _, time::Duration};
 use anyhow::{Context, Result, bail};
 use splinterm::{
     WindowCommand, WindowOptions, WindowUpdate,
-    config::AppConfig,
+    config::{AppConfig, ResolvedTheme},
     diagnostics::{DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global},
     endpoint::ConnectionFactory,
     remote::{RemoteCatalog, RemoteProfile},
@@ -22,7 +22,7 @@ use splinterm::{
 };
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::SplintId;
-use splinterm_protocol::{Request, Response};
+use splinterm_protocol::{Request, Response, TerminalSnapshot};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
@@ -448,6 +448,37 @@ fn report_failure(failure: &RemoteStatusFailure) {
     }
 }
 
+/// The status Window's options. It keeps the default control so R, Enter, and
+/// the password field reach the flow, but it controls no terminal, so its
+/// title does not call it the local controller.
+fn status_window_options(
+    config: &AppConfig,
+    theme: ResolvedTheme,
+    snapshot: TerminalSnapshot,
+    updates: mpsc::Receiver<WindowUpdate>,
+    commands: mpsc::Sender<WindowCommand>,
+    mapped: oneshot::Sender<()>,
+) -> WindowOptions {
+    WindowOptions {
+        snapshot: Some(snapshot),
+        updates: Some(updates),
+        commands: Some(commands),
+        controller_title: false,
+        app_id: resolved_window_app_id(None),
+        initial_columns: config.initial_columns,
+        initial_rows: config.initial_rows,
+        cursor_style: config.cursor_style,
+        cursor_blink: false,
+        theme,
+        keymap: config.keymap.clone(),
+        prefix_timeout_ms: config.prefix_timeout_ms,
+        // The status Window may hold a password field: no IME composition.
+        input_method: false,
+        mapped: Some(mapped),
+        ..WindowOptions::default()
+    }
+}
+
 /// Maps a status Window, connects to `profile_name`, and returns the connected
 /// endpoint once the Window has closed.
 ///
@@ -476,23 +507,14 @@ pub(in crate::app) async fn connect_with_status(
     let window_task = tokio::task::spawn_blocking(move || {
         let theme = load_startup_theme(&window_config);
         configure_picker_renderer(&window_config, theme)?;
-        run_window(WindowOptions {
-            snapshot: Some(snapshot),
-            updates: Some(update_receiver),
-            commands: Some(command_sender),
-            app_id: resolved_window_app_id(None),
-            initial_columns: window_config.initial_columns,
-            initial_rows: window_config.initial_rows,
-            cursor_style: window_config.cursor_style,
-            cursor_blink: false,
+        run_window(status_window_options(
+            &window_config,
             theme,
-            keymap: window_config.keymap.clone(),
-            prefix_timeout_ms: window_config.prefix_timeout_ms,
-            // The status Window may hold a password field: no IME composition.
-            input_method: false,
-            mapped: Some(mapped_sender),
-            ..WindowOptions::default()
-        })
+            snapshot,
+            update_receiver,
+            command_sender,
+            mapped_sender,
+        ))
     });
     // Without a usable executable path, OpenSSH cannot run the helper; the
     // sender then drops and the flow stops listening for prompts.
@@ -528,9 +550,32 @@ mod tests {
     };
 
     use splinterm::remote_session::RemoteFailure;
-    use splinterm_protocol::TerminalSnapshot;
 
     use super::*;
+
+    #[test]
+    fn the_status_window_keeps_control_but_not_the_controller_title() {
+        let (_updates, update_receiver) = mpsc::channel(STATUS_UPDATE_CAPACITY);
+        let (command_sender, _commands) = mpsc::channel(STATUS_COMMAND_CAPACITY);
+        let (mapped_sender, _mapped) = oneshot::channel();
+        let status = RemoteStatus::new("work", "work.example");
+        let options = status_window_options(
+            &AppConfig::default(),
+            ResolvedTheme::default(),
+            status.snapshot(SplintId::new(), 1),
+            update_receiver,
+            command_sender,
+            mapped_sender,
+        );
+        assert!(!options.controller_title);
+        assert!(
+            options.controlled,
+            "R, Enter, and the password field still work"
+        );
+        assert!(options.commands.is_some());
+        assert!(!options.input_method);
+        assert!(WindowOptions::default().controller_title);
+    }
 
     struct Harness {
         updates: mpsc::Receiver<WindowUpdate>,

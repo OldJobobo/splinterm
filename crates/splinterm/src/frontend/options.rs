@@ -13,7 +13,10 @@ use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS, TerminalSnapshot};
 
 use crate::{
-    config::{APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme},
+    config::{
+        APP_ID, CursorStyle, FrameTitleMode, PaneDividerStyle, ResolvedTheme,
+        TopologyReloadSettings,
+    },
     keymap::ResolvedKeymap,
 };
 
@@ -77,6 +80,10 @@ pub struct WindowOptions {
     pub authority: AuthorityStatus,
     /// Whether the legacy single-pane command channel already owns control.
     pub controlled: bool,
+    /// Whether the title names a controlling Window "local controller". Only
+    /// the title: input still follows `controlled`. The remote connection
+    /// status Window turns it off because it controls no terminal.
+    pub controller_title: bool,
     /// Endpoint-local terminal limits for the legacy or activated focused pane.
     pub terminal_grid_limits: TerminalGridLimits,
     /// Initial terminal dimensions from the supported configuration subset.
@@ -108,6 +115,9 @@ pub struct WindowOptions {
     pub active_splint: Option<SplintId>,
     pub topology_updates: Option<Receiver<WindowTopologyUpdate>>,
     pub topology_commands: Option<Sender<WindowTopologyCommand>>,
+    /// Where Reload configuration publishes the settings the topology manager
+    /// reads; shared state, so a busy command queue cannot drop a reload.
+    pub topology_settings: Option<WatchSender<TopologyReloadSettings>>,
     /// Coalesced ephemeral keyboard/pane focus publication for the supported adapter API.
     pub graphical_focus: Option<WatchSender<Option<SplintId>>>,
     /// Whether trusted graphical force-transfer actions may be offered or dispatched.
@@ -145,6 +155,7 @@ impl Default for WindowOptions {
             session_picker: None,
             authority: AuthorityStatus::default(),
             controlled: true,
+            controller_title: true,
             terminal_grid_limits: TerminalGridLimits::default(),
             initial_columns: 80,
             initial_rows: 24,
@@ -164,6 +175,7 @@ impl Default for WindowOptions {
             active_splint: None,
             topology_updates: None,
             topology_commands: None,
+            topology_settings: None,
             graphical_focus: None,
             forced_control_transfer: true,
             optimistic_remote_splits: false,
