@@ -1,15 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly OMARCHY_LAUNCHER=/usr/share/omarchy/bin/omarchy-launch-screensaver
+# Omarchy's launcher is found under the session's $OMARCHY_PATH, which a
+# development checkout sets, and otherwise in the packaged location.
+readonly DEFAULT_OMARCHY_PATH=/usr/share/omarchy
 readonly SPLINTERM_PROFILE=/usr/share/splinterm/omarchy/screensaver.ini
 readonly SCREENSAVER_APP_ID=org.omarchy.screensaver
 readonly PROC_ROOT=/proc
 readonly RANDOM_UUID=/proc/sys/kernel/random/uuid
 
+# Print Omarchy's own launcher, never this adapter, even if a PATH or link
+# arrangement makes the two resolve to the same file.
+omarchy_launcher() {
+  local self root candidate
+  self=$(readlink -f -- "${BASH_SOURCE[0]}")
+  for root in "${OMARCHY_PATH:-}" "$DEFAULT_OMARCHY_PATH"; do
+    [[ $root == /* ]] || continue
+    candidate=$root/bin/omarchy-launch-screensaver
+    [[ -f $candidate && -x $candidate ]] || continue
+    [[ $(readlink -f -- "$candidate") != "$self" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 terminal=$(xdg-terminal-exec --print-id)
 if [[ $terminal != *com.oldjobobo.splinterm* ]]; then
-  exec "$OMARCHY_LAUNCHER" "$@"
+  launcher=$(omarchy_launcher) || {
+    printf "Omarchy's screensaver launcher is unavailable under \$OMARCHY_PATH or %s\n" \
+      "$DEFAULT_OMARCHY_PATH" >&2
+    exit 1
+  }
+  exec "$launcher" "$@"
 fi
 
 [[ -r $SPLINTERM_PROFILE ]] || {
@@ -38,14 +61,24 @@ hypr_focus_monitor() {
     hyprctl dispatch focusmonitor "$1" >/dev/null
 }
 
+# Launch on the given workspace through a Hyprland exec rule, as Omarchy's own
+# launcher does. Hyprland matches the rule through a token it puts in the
+# spawned environment, falling back to the pid. Both survive the exec chain
+# from xdg-terminal-exec through splinterm-xdg-terminal-exec to the
+# `splinterm xdg-launch` process that owns the window. The rule outranks
+# Omarchy's static rule, which parks screensaver windows in a hidden special
+# workspace.
 hypr_exec() {
-  local command
+  local workspace=$1 command
+  shift
   printf -v command '%q ' "$@"
-  hyprctl dispatch "hl.dsp.exec_cmd([[$command]])" >/dev/null 2>&1 ||
-    hyprctl dispatch exec -- bash -lc "$command" >/dev/null
+  hyprctl dispatch "hl.dsp.exec_cmd([[[workspace $workspace] $command]])" >/dev/null 2>&1 ||
+    hyprctl dispatch exec -- "[workspace $workspace] $command" >/dev/null
 }
 
 socket="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+# Listen before spawning anything, so a quickly mapped window cannot emit its
+# openwindow event first.
 exec {events}< <(socat -U - "UNIX-CONNECT:$socket")
 
 normalize_address() {
@@ -112,6 +145,21 @@ cleanup_launched_windows() {
   return 1
 }
 
+# Emptying a special workspace focuses its monitor, so the last screensaver to
+# close would take focus with it. Hand focus back to the monitor that had it
+# once they are all gone. The class goes through the environment, since in
+# argv the screensaver's pgrep and pkill would match it.
+return_focus_after_screensavers() {
+  (
+    trap - EXIT
+    while hyprctl clients -j |
+      SCREENSAVER=$SCREENSAVER_APP_ID jq -e 'any(.[]; .mapped and .class == env.SCREENSAVER)' >/dev/null; do
+      IFS= read -r -u "$events" _ || exit 0
+    done
+    hypr_focus_monitor "$focused"
+  ) >/dev/null 2>&1 &
+}
+
 finish() {
   local status=$?
   trap - EXIT
@@ -130,10 +178,13 @@ launched_addresses=()
 launch_complete=false
 trap finish EXIT
 
-while IFS= read -r monitor; do
+while read -r monitor special; do
   [[ -n $monitor ]] || continue
   hypr_focus_monitor "$monitor"
-  hypr_exec env \
+  # Share a special workspace that is already showing, like the scratchpad,
+  # so it is still open afterwards.
+  workspace=${special:-special:screensaver-$monitor}
+  hypr_exec "$workspace" env \
     SPLINTERM_CONFIG="$SPLINTERM_PROFILE" \
     SPLINTERM_SCREENSAVER_INVOCATION="$invocation_token" \
     xdg-terminal-exec \
@@ -143,6 +194,7 @@ while IFS= read -r monitor; do
     printf 'Splinterm screensaver window did not map on %s\n' "$monitor" >&2
     exit 1
   }
-done < <(hyprctl monitors -j | jq -r '.[] | .name')
+done < <(hyprctl monitors -j | jq -r '.[] | "\(.name) \(.specialWorkspace.name // "")"')
 
 launch_complete=true
+return_focus_after_screensavers

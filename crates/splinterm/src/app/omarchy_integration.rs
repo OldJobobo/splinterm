@@ -210,10 +210,8 @@ impl Runtime for SystemRuntime {
         roots: &Roots,
         output: &mut dyn Write,
     ) -> Result<()> {
-        if action == IntegrationAction::Enable
-            && !Path::new("/usr/share/omarchy/bin/omarchy-launch-screensaver").is_file()
-        {
-            bail!("Omarchy's canonical screensaver launcher is unavailable");
+        if action == IntegrationAction::Enable {
+            super::integrations::omarchy_screensaver_launcher()?;
         }
         super::integrations::run_omarchy_screensaver(
             action,
