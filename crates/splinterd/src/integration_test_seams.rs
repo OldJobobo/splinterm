@@ -43,12 +43,15 @@ pub const BUILD_SALT_BYTES: usize = 16;
 /// builds.
 pub const PACKAGED_OWNER_UID_ENV: &str = "SPLINTERD_INTEGRATION_TEST_PACKAGED_OWNER_UID";
 
-const SALT_CELLS: usize = BUILD_SALT_MARKER.len() + BUILD_SALT_BYTES;
+/// The marker's length, as a constant, so no runtime code refers to the
+/// marker bytes themselves.
+const MARKER_BYTES: usize = BUILD_SALT_MARKER.len();
+const SALT_CELLS: usize = MARKER_BYTES + BUILD_SALT_BYTES;
 
 const fn salt_cells() -> [AtomicU8; SALT_CELLS] {
     let mut cells = [const { AtomicU8::new(0) }; SALT_CELLS];
     let mut index = 0;
-    while index < BUILD_SALT_MARKER.len() {
+    while index < MARKER_BYTES {
         cells[index] = AtomicU8::new(BUILD_SALT_MARKER[index]);
         index += 1;
     }
@@ -56,18 +59,41 @@ const fn salt_cells() -> [AtomicU8; SALT_CELLS] {
 }
 
 /// The marker followed by the salt, as one contiguous run of bytes in the
-/// binary's writable data. Only the salt half is ever read, so the marker
-/// appears in the binary exactly once.
+/// binary's writable data. Only the salt half is ever read at run time. A
+/// compiler or debug-info copy of the marker constant may still appear
+/// elsewhere in a binary, so locate this static with [`salt_slot_offset`],
+/// never by the first raw marker match.
 #[used]
 static BUILD_SALT: [AtomicU8; SALT_CELLS] = salt_cells();
 
 /// The salt this image carries; all zero unless a test patched its file.
 fn build_salt() -> [u8; BUILD_SALT_BYTES] {
     let mut salt = [0; BUILD_SALT_BYTES];
-    for (byte, cell) in salt.iter_mut().zip(&BUILD_SALT[BUILD_SALT_MARKER.len()..]) {
+    for (byte, cell) in salt.iter_mut().zip(&BUILD_SALT[MARKER_BYTES..]) {
         *byte = cell.load(Ordering::Relaxed);
     }
     salt
+}
+
+/// The file offset of the patchable salt slot in an `integration-test`
+/// binary's bytes: just after the one occurrence of [`BUILD_SALT_MARKER`]
+/// followed by [`BUILD_SALT_BYTES`] zero bytes, as an unpatched image
+/// carries it. `None` unless exactly one occurrence has that shape.
+///
+/// A test that salts a copy of the binary writes its salt at this offset;
+/// the packaging guard only needs the marker present at all.
+#[must_use]
+pub fn salt_slot_offset(binary: &[u8]) -> Option<usize> {
+    let mut slots = binary
+        .windows(SALT_CELLS)
+        .enumerate()
+        .filter(|(_, window)| {
+            window[..MARKER_BYTES] == BUILD_SALT_MARKER[..]
+                && window[MARKER_BYTES..].iter().all(|byte| *byte == 0)
+        })
+        .map(|(offset, _)| offset + MARKER_BYTES);
+    let slot = slots.next()?;
+    slots.next().is_none().then_some(slot)
 }
 
 /// The pair identity an image with `salt` reports for an unsalted
@@ -108,6 +134,25 @@ mod tests {
         let identity = BuildIdentity::new([7; 32]).unwrap();
         assert_eq!(build_salt(), [0; BUILD_SALT_BYTES]);
         assert_eq!(salt_compiled_identity(identity), identity);
+    }
+
+    /// The slot is the one marker followed by an all-zero salt; a separate
+    /// copy of the marker constant elsewhere does not confuse it.
+    #[test]
+    fn the_salt_slot_is_the_marker_followed_by_a_zero_salt() {
+        let mut binary = b"head".to_vec();
+        binary.extend_from_slice(BUILD_SALT_MARKER);
+        binary.extend_from_slice(b"other constant data");
+        let slot = binary.len() + MARKER_BYTES;
+        binary.extend_from_slice(BUILD_SALT_MARKER);
+        binary.extend_from_slice(&[0; BUILD_SALT_BYTES]);
+        binary.extend_from_slice(b"tail");
+        assert_eq!(salt_slot_offset(&binary), Some(slot));
+        let mut ambiguous = binary.clone();
+        ambiguous.extend_from_slice(BUILD_SALT_MARKER);
+        ambiguous.extend_from_slice(&[0; BUILD_SALT_BYTES]);
+        assert_eq!(salt_slot_offset(&ambiguous), None);
+        assert_eq!(salt_slot_offset(b"no marker"), None);
     }
 
     #[test]

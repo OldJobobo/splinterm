@@ -362,8 +362,9 @@ pub struct AdoptedSplint {
 /// The committed adoption: everything the binary's daemon state needs.
 ///
 /// Rollback is closed. The rollback snapshot pair and both manifest memfds
-/// closed at commit; the forward client snapshot stays pinned for trusted
-/// relaunch (M3.13 onward).
+/// closed at commit. The forward client snapshot is handed out for the
+/// trusted relaunch M3.13 and M3.14 build; until then the daemon closes it,
+/// and no peer executing it is trusted UI (AGENTS.md §4.4).
 #[derive(Debug)]
 pub struct CommittedAdoption {
     pub handoff_id: [u8; 16],
@@ -399,6 +400,7 @@ pub struct CommittedAdoption {
     /// The registered listeners' numbers, which the daemon holds for its
     /// life and a later handoff manifest names.
     pub handoff_listeners: ListenerDescriptors,
+    /// The sealed forward client snapshot (see the type documentation).
     pub forward_client: OwnedFd,
     /// Carried Splints whose child had already exited when adoption staged
     /// them; each committed actor reaps it and publishes its exit.

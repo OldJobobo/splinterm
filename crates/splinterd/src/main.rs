@@ -1047,10 +1047,6 @@ struct DaemonState {
     /// clients, the rollback pair) derives from it, never from the running
     /// image, which after a memfd exec has no installed path.
     install_prefix: Arc<InstallPrefix>,
-    /// The sealed forward client snapshot a handoff adoption pinned for
-    /// trusted relaunch, held open for the daemon's life; `None` in a fresh
-    /// daemon. A peer executing exactly it is a trusted client too.
-    pinned_client: Option<Arc<consent::PinnedClientSnapshot>>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
     /// Whether the daemon runs with `--require-workload-cgroups`. Without a
@@ -1324,7 +1320,6 @@ struct DaemonStateInputs {
     rollback_handoff: Arc<handoff_requests::RollbackAuthority>,
     daemon_generation: u64,
     handoff_listeners: Option<ListenerDescriptors>,
-    pinned_client: Option<Arc<consent::PinnedClientSnapshot>>,
 }
 
 /// The runtime `#[tokio::main(worker_threads = 2)]` built, owned by
@@ -1750,22 +1745,13 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
         listener,
         image_listener,
         handoff_listeners,
-        forward_client,
         ..
     } = committed;
-    // A forward adoption pins the forward client snapshot for trusted
-    // relaunch; a rollback image trusts only its installed prefix.
-    let pinned_client = if rollback {
-        None
-    } else {
-        match consent::PinnedClientSnapshot::pin(forward_client) {
-            Ok(pinned) => Some(Arc::new(pinned)),
-            Err(error) => {
-                error!(%error, "cannot pin the forward client snapshot; only the installed client is trusted");
-                None
-            }
-        }
-    };
+    // The forward client snapshot closes here: nothing relaunches from it
+    // before M3.14, and no peer executing it is trusted UI. The adopted
+    // daemon trusts exactly `<prefix>/splinterm`, as a fresh daemon does
+    // (AGENTS.md §4.4); matching the pinned snapshot needs an approved §4.4
+    // amendment first.
     let install_prefix = Arc::new(install_prefix);
     let daemon_audit_peer = adopted_daemon_audit_peer(&install_prefix, daemon_image);
     let state = build_daemon_state(DaemonStateInputs {
@@ -1788,10 +1774,12 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
         rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::Unavailable),
         daemon_generation,
         handoff_listeners: Some(handoff_listeners),
-        pinned_client,
     });
     record_policy_reload(&state, &policy_generation).await;
     record_handoff_adoption_audit(&state, rollback).await;
+    // Durable before anything serves: the excluded Splints' real exits and
+    // the adopted states exist only in memory until saved.
+    persist_adopted_topology(&state).await;
     // Registered and observed before serve accepts anyone. A committed actor
     // may already have published its exit (a child that exited before
     // adoption is reaped by its actor): the exit status is level-triggered,
@@ -1825,6 +1813,26 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
         signals,
         agent_status_timer,
     })
+}
+
+/// Saves the adopted Topology through the daemon's normal save path, under
+/// the topology transaction permit, so the exits adoption recorded for
+/// excluded Splints survive a crash before the next mutation.
+///
+/// Post-commit, so it cannot fail the round: a failed save is logged and
+/// the daemon serves on; the next mutation or the ordered shutdown saves
+/// again. Returns whether the save succeeded.
+async fn persist_adopted_topology(state: &DaemonState) -> bool {
+    let Ok(_transaction) = state.topology_transactions.acquire().await else {
+        warn!("topology transaction barrier closed; the adopted Topology is not saved yet");
+        return false;
+    };
+    let topology = state.topology.read().await.clone();
+    if persist_topology(state, &topology).await.is_err() {
+        warn!("cannot save the adopted Topology; serving on, the next save retries");
+        return false;
+    }
+    true
 }
 
 /// The adopted daemon's own audit identity: the installed daemon file the
@@ -2254,7 +2262,6 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         rollback_handoff: Arc::clone(&previous.rollback_handoff),
         daemon_generation: previous.daemon_generation,
         handoff_listeners: previous.handoff_listeners,
-        pinned_client: previous.pinned_client.clone(),
     });
     *state.audit.lock().await = audit;
     carry_unused_provenance(&previous, &state, &topology);
@@ -2547,9 +2554,6 @@ async fn start_fresh(
             listener: listeners.listener.as_raw_fd(),
             image_listener: listeners.image_listener.as_raw_fd(),
         }),
-        // A fresh daemon pins no client snapshot: only `<prefix>/splinterm`
-        // is a trusted client (AGENTS.md §4.4).
-        pinned_client: None,
     });
     let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
@@ -2683,7 +2687,6 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         rollback_handoff,
         daemon_generation,
         handoff_listeners,
-        pinned_client,
     } = inputs;
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
@@ -2728,7 +2731,6 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         shared_image_budget,
         shared_kitty_upload_budget,
         install_prefix,
-        pinned_client,
         pty_backend,
         workload_units,
         workload_cgroups_required,
@@ -3121,8 +3123,7 @@ async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> R
 }
 
 async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let (peer, peer_monitor) =
-        verify_peer(&stream, &state.install_prefix, state.pinned_client.clone()).await?;
+    let (peer, peer_monitor) = verify_peer(&stream, &state.install_prefix).await?;
     let transfer_peer = peer
         .transfer_peer()
         .context("persistent image content peer identity is unavailable")?;
@@ -3294,8 +3295,7 @@ async fn send_image_content_chunks(
 }
 
 async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let (peer, peer_monitor) =
-        verify_peer(&stream, &state.install_prefix, state.pinned_client.clone()).await?;
+    let (peer, peer_monitor) = verify_peer(&stream, &state.install_prefix).await?;
     let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
@@ -12075,10 +12075,8 @@ fn wire_color_source(source: TerminalColorSource) -> ColorSource {
 async fn verify_peer(
     stream: &UnixStream,
     install_prefix: &Arc<InstallPrefix>,
-    pinned_client: Option<Arc<consent::PinnedClientSnapshot>>,
 ) -> Result<(PeerIdentity, Option<consent::PeerMonitor>)> {
-    let mut identity =
-        PeerIdentity::from_stream(stream, Arc::clone(install_prefix), pinned_client)?;
+    let mut identity = PeerIdentity::from_stream(stream, Arc::clone(install_prefix))?;
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
@@ -13293,7 +13291,6 @@ mod tests {
                 DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
             ),
             install_prefix: Arc::new(consent::test_install_prefix()),
-            pinned_client: None,
             pty_backend,
             workload_units: None,
             workload_cgroups_required: false,
@@ -13316,6 +13313,38 @@ mod tests {
             .unwrap()
             .as_nanos();
         env::temp_dir().join(format!("splinterd-test-{}-{nonce}", std::process::id()))
+    }
+
+    /// An adopted daemon saves its Topology, with the exit adoption recorded
+    /// for an excluded Splint, before it serves; a failed save only degrades.
+    #[tokio::test]
+    async fn the_adopted_topology_is_saved_before_serving() {
+        let directory = temp_dir();
+        let metadata = MetadataStore::from_base(&directory);
+        let state =
+            test_state_with_backend_and_metadata(false, test_pty_backend(), Some(metadata.clone()));
+        let mut topology = Topology::new();
+        let lair = topology
+            .create_lair("adopted", PathBuf::from("/tmp"))
+            .unwrap();
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("a new Lair has one Splint");
+        };
+        let splint_id = splint.id;
+        topology.set_splint_state(splint_id, SplintState::Exited(3));
+        *state.topology.write().await = topology;
+
+        assert!(persist_adopted_topology(&state).await);
+        let saved = metadata.load().unwrap().unwrap().into_topology().unwrap();
+        assert_eq!(
+            saved.find_splint(splint_id).unwrap().state,
+            SplintState::Exited(3)
+        );
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        assert!(!persist_adopted_topology(&state).await);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     fn test_launch(command: &[&str]) -> splinterm_protocol::LaunchParameters {

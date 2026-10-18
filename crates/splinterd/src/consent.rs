@@ -53,10 +53,6 @@ pub struct PeerIdentity {
     /// The daemon's installed-prefix authority, attached at verification.
     /// It is not a property of the peer: adjacency is matched against it.
     install_prefix: Arc<InstallPrefix>,
-    /// The sealed forward client snapshot an adopted daemon pinned, if any:
-    /// a client relaunched from it executes that memfd, which has no
-    /// installed path. Also attached at verification.
-    pinned_client: Option<Arc<PinnedClientSnapshot>>,
     persistent_executable: Option<ExecutableIdentity>,
     /// The peer's start time in clock ticks since boot, recorded when the
     /// connection is verified, so a reused PID is never mistaken for it.
@@ -64,11 +60,7 @@ pub struct PeerIdentity {
 }
 
 impl PeerIdentity {
-    pub fn from_stream(
-        stream: &UnixStream,
-        install_prefix: Arc<InstallPrefix>,
-        pinned_client: Option<Arc<PinnedClientSnapshot>>,
-    ) -> Result<Self> {
+    pub fn from_stream(stream: &UnixStream, install_prefix: Arc<InstallPrefix>) -> Result<Self> {
         let credentials = stream.peer_cred().context("cannot read peer credentials")?;
         let pid = credentials.pid().context("peer credentials omit pid")?;
         let pid = u32::try_from(pid).context("peer pid is negative")?;
@@ -82,7 +74,6 @@ impl PeerIdentity {
             executable_device,
             executable_inode,
             install_prefix,
-            pinned_client,
             persistent_executable: None,
             start_time: None,
         })
@@ -103,7 +94,6 @@ impl PeerIdentity {
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
             install_prefix: Arc::new(test_install_prefix()),
-            pinned_client: None,
             persistent_executable: None,
             start_time: None,
         }
@@ -155,17 +145,10 @@ impl PeerIdentity {
 
     /// Whether the peer executes exactly the file now installed as
     /// `<prefix>/splinterm` (same device and inode), the trusted-UI rule of
-    /// AGENTS.md §4.4, or, in a daemon adopted from a handoff, exactly the
-    /// sealed forward client snapshot that handoff pinned (Plan 0061 M3.5b
-    /// review): a client relaunched from that memfd has no installed path.
-    /// Both match by device and inode only, never by content hash. A client
-    /// still running a replaced or unlinked image keeps its old inode and
-    /// never matches, and a fresh daemon pins nothing.
+    /// AGENTS.md §4.4. A client still running a replaced or unlinked image
+    /// keeps its old inode and never matches.
     pub fn is_matching_splinterm(&self) -> bool {
         self.matches_installed_executable(&self.install_prefix.client())
-            || self.pinned_client.as_deref().is_some_and(|pinned| {
-                pinned.device == self.executable_device && pinned.inode == self.executable_inode
-            })
     }
 
     pub fn is_matching_graphical_relay(&self) -> bool {
@@ -190,54 +173,18 @@ impl PeerIdentity {
         executable_matches && graphical_mode
     }
 
+    // An adopted daemon (M3.10) trusts exactly this too: no peer executing
+    // the sealed forward client snapshot is trusted UI. M3.14, which first
+    // relaunches a Window from that snapshot, reintroduces matching its
+    // pinned device and inode, and only after the operator approves the
+    // matching AGENTS.md §4.4 amendment. Stale-inode clients never regain
+    // authority either way.
     fn matches_installed_executable(&self, expected: &Path) -> bool {
         fs::metadata(expected).is_ok_and(|metadata| {
             metadata.dev() == self.executable_device && metadata.ino() == self.executable_inode
         })
     }
 }
-
-/// The sealed forward client snapshot a handoff pinned for trusted
-/// relaunch (Plan 0037 "Authority reset"; Plan 0061 M3.5b review).
-///
-/// The daemon holds the descriptor for its whole life: while any descriptor
-/// holds the memfd its inode cannot be freed and reused, so a device and
-/// inode match always names this exact sealed image. Anyone who executes the
-/// snapshot executes the genuine forward client, as executing the installed
-/// `splinterm` would be.
-#[derive(Debug)]
-pub struct PinnedClientSnapshot {
-    _descriptor: OwnedFd,
-    device: u64,
-    inode: u64,
-}
-
-impl PinnedClientSnapshot {
-    /// Pins `descriptor`, which must be a regular file.
-    ///
-    /// # Errors
-    /// Fails when the descriptor cannot be examined or is not a regular file.
-    pub fn pin(descriptor: OwnedFd) -> Result<Self> {
-        let status = rustix::fs::fstat(&descriptor).context("cannot identify the pinned client")?;
-        if rustix::fs::FileType::from_raw_mode(status.st_mode) != rustix::fs::FileType::RegularFile
-        {
-            bail!("pinned client snapshot is not a regular file");
-        }
-        Ok(Self {
-            _descriptor: descriptor,
-            device: status.st_dev,
-            inode: status.st_ino,
-        })
-    }
-}
-
-impl PartialEq for PinnedClientSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        (self.device, self.inode) == (other.device, other.inode)
-    }
-}
-
-impl Eq for PinnedClientSnapshot {}
 
 /// Identifies the file object process `pid` executes: its device and inode.
 ///
@@ -1286,36 +1233,6 @@ mod tests {
             "{}",
             peer.requester_label()
         );
-    }
-
-    /// An adopted daemon also trusts a client executing exactly the pinned
-    /// forward client snapshot, by device and inode: never another memfd
-    /// with the same bytes, and never once the peer runs something else.
-    #[test]
-    fn a_client_relaunched_from_the_pinned_snapshot_matches_by_inode() {
-        let sleep = fs::read(system_sleep()).unwrap();
-        let snapshot = |name: &str| {
-            let memfd = rustix::fs::memfd_create(name, rustix::fs::MemfdFlags::CLOEXEC).unwrap();
-            let mut image = fs::File::from(memfd);
-            image.write_all(&sleep).unwrap();
-            image
-        };
-        let pinned = snapshot("splinterm-forward");
-        let twin = snapshot("splinterm-twin");
-        let child = spawn_sleep(Path::new(&format!("/proc/self/fd/{}", pinned.as_raw_fd())));
-        let twin_child = spawn_sleep(Path::new(&format!("/proc/self/fd/{}", twin.as_raw_fd())));
-        let pin = Arc::new(PinnedClientSnapshot::pin(OwnedFd::from(pinned)).unwrap());
-        let with_pin = |pid| PeerIdentity {
-            pinned_client: Some(Arc::clone(&pin)),
-            ..peer_for(pid, &test_install_prefix())
-        };
-        assert!(with_pin(child.pid()).is_matching_splinterm());
-        assert!(!peer_for(child.pid(), &test_install_prefix()).is_matching_splinterm());
-        // Same bytes, another inode: not the pinned snapshot.
-        assert!(!with_pin(twin_child.pid()).is_matching_splinterm());
-        assert!(!with_pin(std::process::id()).is_matching_splinterm());
-        assert!(!with_pin(child.pid()).is_matching_graphical_relay());
-        assert!(PinnedClientSnapshot::pin(OwnedFd::from(fs::File::open("/").unwrap())).is_err());
     }
 
     #[test]

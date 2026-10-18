@@ -428,19 +428,26 @@ fn the_retired_activation_environment_variable_is_ignored() {
 }
 
 /// The packaging guard refuses a binary containing the build-salt marker, so
-/// every `integration-test` daemon must contain it, and exactly once (the
-/// exec test patches the salt after it). A refactor that dropped `#[used]`
-/// or the static's only reference would otherwise let the guard pass a
-/// feature build silently.
+/// every `integration-test` daemon must contain it; and a salted copy needs
+/// exactly one patchable slot, the static: the marker followed by an
+/// all-zero salt. Other copies of the marker constant (debug info, a
+/// materialized constant) may appear and are allowed. A refactor that
+/// dropped `#[used]` or the static's only reference would otherwise let the
+/// guard pass a feature build silently.
 #[test]
-fn the_integration_test_daemon_carries_the_salt_marker_exactly_once() {
-    let marker = splinterd::integration_test_seams::BUILD_SALT_MARKER;
+fn the_integration_test_daemon_carries_the_salt_marker_and_one_salt_slot() {
+    use splinterd::integration_test_seams::{BUILD_SALT_MARKER, salt_slot_offset};
+
     let daemon = fs::read(env!("CARGO_BIN_EXE_splinterd")).unwrap();
     let occurrences = daemon
-        .windows(marker.len())
-        .filter(|window| *window == marker.as_slice())
+        .windows(BUILD_SALT_MARKER.len())
+        .filter(|window| *window == BUILD_SALT_MARKER.as_slice())
         .count();
-    assert_eq!(occurrences, 1);
+    assert!(occurrences >= 1, "the packaging guard's marker is missing");
+    assert!(
+        salt_slot_offset(&daemon).is_some(),
+        "{occurrences} marker occurrences, but not exactly one patchable salt slot"
+    );
 }
 
 fn activation(manifest_fd: RawFd) -> String {
