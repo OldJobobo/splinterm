@@ -28,7 +28,7 @@ class ProvisioningGuards(unittest.TestCase):
         result = self.invoke("--force", "host", "operator", "/archive", "/key")
         self.assertEqual(result.returncode, 2)
 
-    def test_wrong_host_stops_before_any_archive_or_account_action(self):
+    def test_check_stops_before_any_archive_or_account_action(self):
         result = self.invoke(
             "--check",
             socket.gethostname() + "-not-this-host",
@@ -37,7 +37,13 @@ class ProvisioningGuards(unittest.TestCase):
             "/key",
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Host mismatch", result.stderr)
+        # Root must stop at the earlier caller guard, before hostname validation.
+        diagnostic = (
+            "Run the check as the operator, not root."
+            if os.geteuid() == 0
+            else "Host mismatch"
+        )
+        self.assertIn(diagnostic, result.stderr)
         self.assertNotIn("staging:", result.stderr)
 
     @unittest.skipIf(
