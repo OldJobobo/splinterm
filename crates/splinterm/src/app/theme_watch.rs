@@ -17,7 +17,9 @@ use tokio::sync::mpsc;
 
 static NEXT_THEME_UPDATE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-type ThemeFileFingerprint = (u64, u64, u64, i64, i64);
+/// Device, inode, length, mtime and ctime. The ctime catches a permission or
+/// ACL change that makes an unreadable file readable without rewriting it.
+type ThemeFileFingerprint = (u64, u64, u64, (i64, i64), (i64, i64));
 
 /// What `config.ini` overrides in the active theme.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,8 +154,8 @@ fn theme_file_fingerprint(path: &Path) -> Option<ThemeFileFingerprint> {
         metadata.dev(),
         metadata.ino(),
         metadata.len(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
+        (metadata.mtime(), metadata.mtime_nsec()),
+        (metadata.ctime(), metadata.ctime_nsec()),
     ))
 }
 
@@ -901,6 +903,30 @@ mod tests {
         assert_eq!(theme_file_fingerprint(&path), Some(first));
         std::fs::write(&path, b"different-length").unwrap();
         assert_ne!(theme_file_fingerprint(&path), Some(first));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn theme_fingerprint_changes_when_read_access_is_restored() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "splinterm-theme-fingerprint-access-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"[menu]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = theme_file_fingerprint(&path).unwrap();
+        // ctime comes from the kernel's coarse clock; step past one tick.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // Only the mode changed: same device, inode, length and mtime.
+        let readable = theme_file_fingerprint(&path).unwrap();
+        assert_eq!(
+            (readable.0, readable.1, readable.2, readable.3),
+            (unreadable.0, unreadable.1, unreadable.2, unreadable.3)
+        );
+        assert_ne!(readable, unreadable);
         std::fs::remove_file(path).unwrap();
     }
 
