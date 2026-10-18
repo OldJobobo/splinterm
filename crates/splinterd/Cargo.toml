@@ -49,6 +49,12 @@ toml.workspace = true
 name = "handoff_runtime_stop"
 harness = false
 
+# The exec boundary takes the same process guard, so its stages need the same
+# main-thread-only child processes.
+[[test]]
+name = "handoff_exec_resume"
+harness = false
+
 # A workspace `unsafe_code = "forbid"` cannot be overridden locally. The package
 # has exactly two audited post-exec invocations of the inherited-FD leaf crate
 # (the candidate claim and the sealed-preflight launcher's closure), so it

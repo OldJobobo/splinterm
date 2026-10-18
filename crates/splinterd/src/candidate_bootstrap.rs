@@ -955,7 +955,7 @@ fn expected_raw_descriptors(
         .collect()
 }
 
-fn read_immutable_descriptor(
+pub(crate) fn read_immutable_descriptor(
     descriptor: BorrowedFd<'_>,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, CandidateBootstrapError> {

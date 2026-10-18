@@ -49,6 +49,11 @@ pub const BLOCKING_THREAD_NAME: &str = "splinterd-dbusb";
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 /// Longest panic message logged for a failed request.
 const PANIC_MESSAGE_LIMIT: usize = 256;
+/// How many method timeouts connecting may take in all. zbus applies the
+/// method timeout only to method calls, not to the socket connect and SASL
+/// handshake in `Builder::build`, so a bus that stalls in authentication would
+/// otherwise hold [`DbusWorker::connect_session`] (and its caller) forever.
+const CONNECT_TIMEOUT_MULTIPLE: u32 = 4;
 
 type Job = Box<dyn FnOnce(zbus::Connection) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
@@ -63,6 +68,8 @@ pub enum DbusWorkerError {
     Start(#[source] io::Error),
     #[error("D-Bus session connection failed: {0}")]
     Connect(#[source] zbus::Error),
+    #[error("D-Bus session connection did not complete within {0:?}")]
+    ConnectTimedOut(Duration),
     #[error("the D-Bus worker is shut down")]
     Closed,
     #[error("the D-Bus worker thread panicked")]
@@ -90,12 +97,14 @@ impl fmt::Debug for DbusWorker {
 impl DbusWorker {
     /// Starts the worker thread and connects it to the session bus.
     ///
-    /// Blocks until the connection is ready or has failed. It may be called
-    /// from any thread, including a Tokio worker.
+    /// Blocks until the connection is ready or has failed, at most
+    /// `CONNECT_TIMEOUT_MULTIPLE` method timeouts for the connect and
+    /// handshake. It may be called from any thread, including a Tokio worker.
     ///
     /// # Errors
-    /// Fails if the thread or its runtime cannot start or the session bus
-    /// cannot be reached. A failed start leaves no thread behind.
+    /// Fails if the thread or its runtime cannot start, the session bus
+    /// cannot be reached, or connecting does not complete in time. A failed
+    /// start leaves no thread behind.
     pub fn connect_session(method_timeout: Duration) -> Result<Self, DbusWorkerError> {
         let (ready, readiness) = mpsc::sync_channel(1);
         let (jobs, queue) = job_channel::unbounded_channel();
@@ -224,10 +233,14 @@ async fn serve(
     ready: mpsc::SyncSender<Result<(), DbusWorkerError>>,
     mut queue: job_channel::UnboundedReceiver<Command>,
 ) {
-    let connection = match connect(method_timeout).await {
+    let connected = match zbus::connection::Builder::session() {
+        Ok(builder) => connect_within(builder, method_timeout).await,
+        Err(error) => Err(DbusWorkerError::Connect(error)),
+    };
+    let connection = match connected {
         Ok(connection) => connection,
         Err(error) => {
-            let _ = ready.send(Err(DbusWorkerError::Connect(error)));
+            let _ = ready.send(Err(error));
             return;
         }
     };
@@ -296,9 +309,57 @@ fn log_request_outcome(outcome: Result<(), JoinError>) {
     warn!(panic = %message, "D-Bus worker request panicked");
 }
 
-async fn connect(method_timeout: Duration) -> zbus::Result<zbus::Connection> {
-    zbus::connection::Builder::session()?
-        .method_timeout(method_timeout)
-        .build()
-        .await
+/// Connects and authenticates within `CONNECT_TIMEOUT_MULTIPLE` method
+/// timeouts. A timed-out attempt is dropped, which closes its socket.
+async fn connect_within(
+    builder: zbus::connection::Builder<'_>,
+    method_timeout: Duration,
+) -> Result<zbus::Connection, DbusWorkerError> {
+    let limit = method_timeout.saturating_mul(CONNECT_TIMEOUT_MULTIPLE);
+    match timeout(limit, builder.method_timeout(method_timeout).build()).await {
+        Ok(connected) => connected.map_err(DbusWorkerError::Connect),
+        Err(_) => Err(DbusWorkerError::ConnectTimedOut(limit)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{os::unix::net::UnixListener, time::Instant};
+
+    use super::*;
+
+    /// A peer that accepts the socket but never answers the SASL handshake
+    /// fails the connect at the bound instead of holding it forever.
+    #[tokio::test]
+    async fn a_bus_that_stalls_in_authentication_times_the_connect_out() {
+        let directory = std::env::temp_dir().join(format!(
+            "splinterd-dbus-stall-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("bus");
+        // Listening without accepting: the kernel completes the connect and
+        // nothing ever answers.
+        let silent = UnixListener::bind(&path).unwrap();
+        let method_timeout = Duration::from_millis(50);
+        let limit = method_timeout * CONNECT_TIMEOUT_MULTIPLE;
+        let started = Instant::now();
+        let builder =
+            zbus::connection::Builder::address(format!("unix:path={}", path.display()).as_str())
+                .unwrap();
+        let result = connect_within(builder, method_timeout).await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Err(DbusWorkerError::ConnectTimedOut(bound)) if bound == limit),
+            "{result:?}"
+        );
+        assert!(elapsed >= limit, "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        drop(silent);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
