@@ -10488,13 +10488,30 @@ async fn verify_peer(
     if let Some(start_time) = agent_status::process_start_time(identity.pid) {
         identity.install_start_time(start_time);
     }
-    let monitor = match consent::PeerMonitor::initialize(stream, identity.pid).await {
-        Ok((monitor, executable)) => {
-            identity.install_persistent_executable(executable);
+    // A pidfd that proves the peer exited or names another process rejects
+    // the connection: the identity read above may describe a process that
+    // reused the PID. Only a kernel without SO_PEERPIDFD proceeds unpinned.
+    let monitor = match consent::PeerMonitor::initialize(stream, identity.pid)
+        .await
+        .context("socket peer identity could not be pinned")?
+    {
+        consent::PeerPinning::Pinned {
+            monitor,
+            executable,
+        } => {
+            match executable {
+                Ok(executable) => identity.install_persistent_executable(executable),
+                Err(error) => warn!(
+                    %error,
+                    "persistent peer identity unavailable; policy authorization disabled"
+                ),
+            }
             Some(monitor)
         }
-        Err(error) => {
-            warn!(%error, "persistent peer identity unavailable; policy authorization disabled");
+        consent::PeerPinning::Unsupported => {
+            warn!(
+                "SO_PEERPIDFD is unsupported; persistent peer identity unavailable; policy authorization disabled"
+            );
             None
         }
     };

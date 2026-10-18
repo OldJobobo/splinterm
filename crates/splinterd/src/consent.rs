@@ -12,7 +12,7 @@ use std::{
         fd::{AsFd, AsRawFd, OwnedFd},
         unix::{fs::MetadataExt, net::UnixStream as StdUnixStream},
     },
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -42,9 +42,10 @@ const MAX_AUDIT_RECORDS: usize = 256;
 pub struct PeerIdentity {
     pub uid: u32,
     pub pid: u32,
-    /// The kernel's `/proc/<pid>/exe` link text: a display label only, never
-    /// resolved. It may be `/memfd:… (deleted)` or a `(deleted)` path.
-    executable: PathBuf,
+    /// The requester label shown in consent dialogs: the kernel's
+    /// `/proc/<pid>/exe` link text, marked unless it resolves here to the
+    /// executing file. Display only; never an identity.
+    executable_label: String,
     /// Device and inode of the file object the peer executes, from the opened
     /// executable link itself.
     executable_device: u64,
@@ -64,12 +65,12 @@ impl PeerIdentity {
         let pid = credentials.pid().context("peer credentials omit pid")?;
         let pid = u32::try_from(pid).context("peer pid is negative")?;
         let (executable_device, executable_inode) = executable_file_identity(pid)?;
-        let executable =
+        let link_text =
             fs::read_link(format!("/proc/{pid}/exe")).context("cannot label peer executable")?;
         Ok(Self {
             uid: credentials.uid(),
             pid,
-            executable,
+            executable_label: executable_label(&link_text, executable_device, executable_inode),
             executable_device,
             executable_inode,
             install_prefix,
@@ -79,11 +80,7 @@ impl PeerIdentity {
     }
 
     pub fn requester_label(&self) -> String {
-        self.executable
-            .to_string_lossy()
-            .chars()
-            .take(1024)
-            .collect()
+        self.executable_label.clone()
     }
 
     #[cfg(test)]
@@ -93,7 +90,7 @@ impl PeerIdentity {
         Self {
             uid: rustix::process::geteuid().as_raw(),
             pid: std::process::id(),
-            executable,
+            executable_label: executable_label(&executable, metadata.dev(), metadata.ino()),
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
             install_prefix: Arc::new(test_install_prefix()),
@@ -213,6 +210,41 @@ fn executable_file_identity(pid: u32) -> Result<(u64, u64)> {
     Ok((status.st_dev, status.st_ino))
 }
 
+/// The longest requester label, in characters, markers included.
+const MAX_REQUESTER_LABEL_CHARS: usize = 1024;
+
+/// Labels a peer executable for a human from its link text, never presenting
+/// an unverified path as fact.
+///
+/// The text is shown plain only when it resolves, in the daemon's mount
+/// namespace, to the executing file's device and inode. Otherwise (a memfd
+/// image, a deleted or replaced file, or a path that names another file here,
+/// such as a binary in another mount namespace) it carries a marker naming
+/// the executing file by device and inode. The marker always survives the
+/// length bound.
+fn executable_label(link_text: &Path, device: u64, inode: u64) -> String {
+    let verified = link_text.is_absolute()
+        && fs::metadata(link_text)
+            .is_ok_and(|metadata| metadata.dev() == device && metadata.ino() == inode);
+    let text = link_text.to_string_lossy();
+    let marker = if verified {
+        String::new()
+    } else {
+        let kind = if text.starts_with("/memfd:") {
+            "memory image, "
+        } else if text.ends_with(" (deleted)") {
+            "deleted or replaced file, "
+        } else {
+            ""
+        };
+        format!(" [{kind}path unverified; executable device {device} inode {inode}]")
+    };
+    let budget = MAX_REQUESTER_LABEL_CHARS.saturating_sub(marker.chars().count());
+    let mut label = text.chars().take(budget).collect::<String>();
+    label.push_str(&marker);
+    label
+}
+
 /// A prefix for unit tests: the test binary's own directory, which holds no
 /// `splinterm`, so no test peer is a trusted client.
 #[cfg(test)]
@@ -232,21 +264,52 @@ pub struct PeerMonitor {
     pidfd: AsyncFd<OwnedFd>,
 }
 
+/// What a pidfd-pinned peer verification established.
+#[derive(Debug)]
+pub enum PeerPinning {
+    /// The kernel predates `SO_PEERPIDFD` (Linux 6.5): nothing pins the peer,
+    /// so persistent identity, and with it policy authorization, is
+    /// unavailable.
+    Unsupported,
+    /// The peer was live at a point after every identity read, so its PID was
+    /// not reused meanwhile. The persistent snapshot is `Err` when the
+    /// executable has no bindable path (a memfd, deleted, or replaced image),
+    /// which disables only policy authorization.
+    Pinned {
+        monitor: PeerMonitor,
+        executable: Result<ExecutableIdentity>,
+    },
+}
+
 impl PeerMonitor {
-    pub async fn initialize(stream: &UnixStream, pid: u32) -> Result<(Self, ExecutableIdentity)> {
-        let pidfd = getsockopt(stream, PeerPidfd).context("SO_PEERPIDFD is unavailable")?;
+    /// Pins the connected peer with its `SO_PEERPIDFD` and snapshots its
+    /// persistent executable identity.
+    ///
+    /// Every identity read for this connection, including the earlier
+    /// [`PeerIdentity::from_stream`], happened before the final liveness
+    /// check, so a live pidfd proves those reads described this peer.
+    ///
+    /// # Errors
+    /// Fails closed, and the caller rejects the connection, when the pidfd
+    /// names a different process than `SO_PEERCRED`, cannot be inspected, or
+    /// shows the peer has exited (its PID may already be reused), and when
+    /// `SO_PEERPIDFD` fails for any reason but being unsupported.
+    pub async fn initialize(stream: &UnixStream, pid: u32) -> Result<PeerPinning> {
+        let Some(pidfd) = supported_peer_pidfd(getsockopt(stream, PeerPidfd))? else {
+            return Ok(PeerPinning::Unsupported);
+        };
         verify_pidfd_pid(&pidfd, pid)?;
         require_live_pidfd(&pidfd)?;
         let executable = tokio::task::spawn_blocking(move || ExecutableIdentity::from_pid(pid))
             .await
-            .context("peer executable snapshot task failed")??;
+            .context("peer executable snapshot task failed")?;
         require_live_pidfd(&pidfd)?;
-        Ok((
-            Self {
+        Ok(PeerPinning::Pinned {
+            monitor: Self {
                 pidfd: AsyncFd::new(pidfd).context("cannot monitor peer pidfd")?,
             },
             executable,
-        ))
+        })
     }
 
     pub async fn exited(&self) -> Result<()> {
@@ -256,6 +319,17 @@ impl PeerMonitor {
             .await
             .context("peer pidfd monitor failed")?;
         Ok(())
+    }
+}
+
+/// Tolerates only an unsupported `SO_PEERPIDFD`: an older kernel answers an
+/// unknown socket option with `ENOPROTOOPT`. Any other failure fails closed;
+/// on Linux 6.5+ `EINVAL` or `ESRCH` means the peer has no live process left.
+fn supported_peer_pidfd(result: nix::Result<OwnedFd>) -> Result<Option<OwnedFd>> {
+    match result {
+        Ok(pidfd) => Ok(Some(pidfd)),
+        Err(nix::errno::Errno::ENOPROTOOPT) => Ok(None),
+        Err(error) => Err(error).context("cannot pin the socket peer with SO_PEERPIDFD"),
     }
 }
 
@@ -984,6 +1058,8 @@ fn unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[tokio::test]
@@ -992,7 +1068,14 @@ mod tests {
         let credentials = first.peer_cred().unwrap();
         let pid = u32::try_from(credentials.pid().unwrap()).unwrap();
 
-        let (_monitor, executable) = PeerMonitor::initialize(&first, pid).await.unwrap();
+        let PeerPinning::Pinned {
+            monitor: _monitor,
+            executable,
+        } = PeerMonitor::initialize(&first, pid).await.unwrap()
+        else {
+            panic!("this kernel supports SO_PEERPIDFD");
+        };
+        let executable = executable.unwrap();
 
         assert_eq!(pid, std::process::id());
         assert!(executable.path.is_absolute());
@@ -1064,7 +1147,11 @@ mod tests {
         let (executable_device, executable_inode) = executable_file_identity(pid).unwrap();
         PeerIdentity {
             pid,
-            executable: fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+            executable_label: executable_label(
+                &fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+                executable_device,
+                executable_inode,
+            ),
             executable_device,
             executable_inode,
             install_prefix: Arc::new(install_prefix.clone()),
@@ -1087,6 +1174,7 @@ mod tests {
         );
         assert!(peer.is_matching_splinterm());
         assert!(!peer.is_matching_graphical_relay());
+        assert_eq!(peer.requester_label(), client.to_string_lossy());
 
         // An upgrade replaces the installed client: the running client keeps
         // its old inode, is still identified by it, and no longer matches.
@@ -1094,7 +1182,15 @@ mod tests {
         let replaced = fs::metadata(&client).unwrap();
         assert_ne!(replaced.ino(), original.ino());
         let stale = peer_for(child.pid(), &prefix);
-        assert!(stale.executable.to_string_lossy().ends_with(" (deleted)"));
+        assert_eq!(
+            stale.requester_label(),
+            format!(
+                "{} (deleted) [deleted or replaced file, path unverified; executable device {} inode {}]",
+                client.display(),
+                original.dev(),
+                original.ino()
+            )
+        );
         assert_eq!(
             (stale.executable_device, stale.executable_inode),
             (original.dev(), original.ino())
@@ -1126,12 +1222,91 @@ mod tests {
         );
         let peer = peer_for(child.pid(), &test_install_prefix());
         assert!(!peer.is_matching_splinterm());
+        assert!(
+            peer.requester_label().ends_with(&format!(
+                " (deleted) [memory image, path unverified; executable device {} inode {}]",
+                expected.dev(),
+                expected.ino()
+            )),
+            "{}",
+            peer.requester_label()
+        );
     }
 
     #[test]
     fn peer_identity_fails_closed_without_an_executing_process() {
         // Above every Linux pid_max: no such process.
         assert!(executable_file_identity(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn consent_labels_mark_every_path_that_does_not_name_the_executing_file() {
+        let running = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let identity = fs::metadata(&running).unwrap();
+        let (device, inode) = (identity.dev(), identity.ino());
+        let marker = format!(" [path unverified; executable device {device} inode {inode}]");
+
+        // Resolves here to the executing file: shown plain.
+        assert_eq!(
+            executable_label(&running, device, inode),
+            running.to_string_lossy()
+        );
+        // Resolves here to a different file, as a binary at the same path in
+        // another mount namespace would.
+        let elsewhere = running.parent().unwrap();
+        assert_eq!(
+            executable_label(elsewhere, device, inode),
+            format!("{}{marker}", elsewhere.display())
+        );
+        // Resolves nowhere, or relative.
+        assert_eq!(
+            executable_label(Path::new("/nonexistent/splinterm"), device, inode),
+            format!("/nonexistent/splinterm{marker}")
+        );
+        assert_eq!(
+            executable_label(Path::new("splinterm"), device, inode),
+            format!("splinterm{marker}")
+        );
+        // The marker survives the length bound.
+        let long = PathBuf::from(format!("/{}", "a".repeat(2 * MAX_REQUESTER_LABEL_CHARS)));
+        let label = executable_label(&long, device, inode);
+        assert_eq!(label.chars().count(), MAX_REQUESTER_LABEL_CHARS);
+        assert!(label.ends_with(&marker));
+    }
+
+    #[test]
+    fn pidfd_pinning_tolerates_only_an_unsupported_socket_option() {
+        use nix::errno::Errno;
+
+        assert!(matches!(
+            supported_peer_pidfd(Err(Errno::ENOPROTOOPT)),
+            Ok(None)
+        ));
+        for refused in [Errno::EINVAL, Errno::ESRCH, Errno::ENODATA, Errno::EMFILE] {
+            assert!(supported_peer_pidfd(Err(refused)).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_pidfd_for_another_or_exited_process_fails_closed() {
+        let mut child = Command::new(system_sleep()).arg("30").spawn().unwrap();
+        let child_pid = child.id();
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(i32::try_from(child_pid).unwrap()).unwrap(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+
+        verify_pidfd_pid(&pidfd, child_pid).unwrap();
+        require_live_pidfd(&pidfd).unwrap();
+        // SO_PEERCRED naming another process than the pidfd.
+        assert!(verify_pidfd_pid(&pidfd, std::process::id()).is_err());
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Exited and reaped: its PID may already belong to another process.
+        assert!(require_live_pidfd(&pidfd).is_err());
+        assert!(verify_pidfd_pid(&pidfd, child_pid).is_err());
     }
 
     #[test]

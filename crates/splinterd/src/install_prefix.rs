@@ -32,12 +32,14 @@ pub const DAEMON_EXECUTABLE: &str = "splinterd";
 pub const CLIENT_EXECUTABLE: &str = "splinterm";
 /// The installed graphical relay's file name.
 pub const GRAPHICAL_RELAY_EXECUTABLE: &str = "splinterm-relay";
-/// The longest executable path the daemon records.
-const MAX_EXECUTABLE_PATH_BYTES: usize = 4096;
-/// The longest prefix: every executable named inside it still fits the
-/// executable path bound.
+/// The kernel's `PATH_MAX`, which counts the terminating NUL.
+const PATH_MAX: usize = 4096;
+/// The longest prefix: `<prefix>/<longest executable>` plus its NUL still fits
+/// `PATH_MAX`.
 pub const MAX_INSTALL_PREFIX_BYTES: usize =
-    MAX_EXECUTABLE_PATH_BYTES - 1 - splinterm_pty::HELPER_EXECUTABLE.len();
+    PATH_MAX - 1 - 1 - splinterm_pty::HELPER_EXECUTABLE.len();
+const _: () =
+    assert!(MAX_INSTALL_PREFIX_BYTES + 1 + splinterm_pty::HELPER_EXECUTABLE.len() < PATH_MAX);
 const _: () = assert!(splinterm_pty::HELPER_EXECUTABLE.len() >= GRAPHICAL_RELAY_EXECUTABLE.len());
 const _: () = assert!(splinterm_pty::HELPER_EXECUTABLE.len() >= DAEMON_EXECUTABLE.len());
 const _: () = assert!(splinterm_pty::HELPER_EXECUTABLE.len() >= CLIENT_EXECUTABLE.len());
@@ -81,7 +83,10 @@ impl InstallPrefix {
     /// (same device and inode as the kernel's executable link), so the prefix
     /// provably names this daemon's installation at the moment it is recorded.
     /// A deleted, replaced, or memfd-backed running image fails closed: its
-    /// link text resolves to no file or to a different one.
+    /// link text resolves to no file or to a different one. In development, a
+    /// daemon started through an explicit `ld.so` likewise refuses to start
+    /// (its running image is the loader), and valgrind or qemu-user may too,
+    /// depending on how they present `/proc/self/exe`.
     ///
     /// The other executables are not required to exist here: a missing
     /// `splinterm` or helper fails closed where it is used (no trusted client
@@ -110,6 +115,11 @@ impl InstallPrefix {
     }
 
     /// Accepts an existing directory already in canonical form.
+    ///
+    /// This validates the path's form and on-disk canonicality only. It is
+    /// not an authority check by itself: only [`Self::of_running_daemon`]
+    /// (and, from M3.8/M3.10, the authenticated sealed manifest bound to its
+    /// executable pairs) may supply the daemon's prefix.
     ///
     /// # Errors
     /// Rejects an invalid path form, or a path that does not resolve to itself
@@ -223,7 +233,8 @@ mod tests {
         let longest = format!("/{}", "a".repeat(MAX_INSTALL_PREFIX_BYTES - 1));
         validate_install_prefix_path(Path::new(&longest)).unwrap();
         let helper = Path::new(&longest).join(splinterm_pty::HELPER_EXECUTABLE);
-        assert_eq!(helper.as_os_str().len(), MAX_EXECUTABLE_PATH_BYTES);
+        // The longest derived path plus its NUL is exactly `PATH_MAX`.
+        assert_eq!(helper.as_os_str().len(), PATH_MAX - 1);
     }
 
     #[test]
