@@ -490,6 +490,7 @@ async fn apply_topology_command(
         }
         WindowTopologyCommand::Close { .. } => unreachable!("close handled above"),
         WindowTopologyCommand::CloseWindow
+        | WindowTopologyCommand::ReloadConfiguration { .. }
         | WindowTopologyCommand::ExplorerContext { .. }
         | WindowTopologyCommand::RequestDojoPrompt { .. }
         | WindowTopologyCommand::RequestSessionPicker
@@ -3293,12 +3294,34 @@ enum TopologyManagerWake {
     Shutdown,
 }
 
+/// Applies a configuration reload to the manager's settings, consuming the
+/// command; any other command is returned unchanged.
+fn apply_configuration_reload(
+    config: &mut AppConfig,
+    command: WindowTopologyCommand,
+) -> Option<WindowTopologyCommand> {
+    match command {
+        WindowTopologyCommand::ReloadConfiguration { close_unused } => {
+            config.multiplexer_lifetime.close_unused = close_unused;
+            None
+        }
+        command => Some(command),
+    }
+}
+
 /// Drains commands left after the Window dropped its sender, reporting
-/// whether a close notice was among them. Nothing else can apply now.
-fn close_notice_queued(commands: &mut mpsc::Receiver<WindowTopologyCommand>) -> bool {
+/// whether a close notice was among them. Only a configuration reload, which
+/// the close still honours, can apply now.
+fn close_notice_queued(
+    commands: &mut mpsc::Receiver<WindowTopologyCommand>,
+    config: &mut AppConfig,
+) -> bool {
     let mut queued = false;
     while let Ok(command) = commands.try_recv() {
-        queued |= matches!(command, WindowTopologyCommand::CloseWindow);
+        queued |= matches!(
+            apply_configuration_reload(config, command),
+            Some(WindowTopologyCommand::CloseWindow)
+        );
     }
     queued
 }
@@ -3344,7 +3367,7 @@ async fn next_topology_manager_wake(
 )]
 pub(in crate::app) async fn run_topology_manager(
     factory: ConnectionFactory,
-    config: AppConfig,
+    mut config: AppConfig,
     image_cache: SharedImageContentCache,
     initial_identity: WindowDojoIdentity,
     root: LayoutNode,
@@ -3387,11 +3410,16 @@ pub(in crate::app) async fn run_topology_manager(
                     window_closing = true;
                     break;
                 }
-                TopologyManagerWake::Command(command) => Some(command),
+                TopologyManagerWake::Command(command) => {
+                    let Some(command) = apply_configuration_reload(&mut config, command) else {
+                        continue;
+                    };
+                    Some(command)
+                }
                 TopologyManagerWake::Poll => None,
                 TopologyManagerWake::Shutdown => {
                     // The Window exits right after sending its close notice.
-                    window_closing |= close_notice_queued(&mut commands);
+                    window_closing |= close_notice_queued(&mut commands, &mut config);
                     break;
                 }
             };

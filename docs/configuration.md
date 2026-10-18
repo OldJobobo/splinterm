@@ -125,7 +125,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `multiplexer.persist-on-tab-organization` | creating or explicitly naming/renaming a Dojo promotes its Window-owned transient Lair atomically | yes |
 | `multiplexer.new-dojo-directory` | where a Dojo or Lair created inside a Window starts: `inherit`, `home`, an absolute path, or `~/path` | home |
 | `multiplexer.new-splint-directory` | where a Splint split inside a Dojo starts; same values | inherit |
-| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it | no |
+| `multiplexer.close-unused` | Close Tab and Window close terminate a Dojo that was never used instead of detaching from it; configuration reload applies it to the next Close Tab or Window close | no |
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 | `explorer.agent-status` | show explicitly reported agent status in the Explorer, on Dojo tabs, and in navigation accessibility; `no` hides it all; configuration reload applies it | yes |
@@ -605,6 +605,11 @@ is refused because the close won. Likewise a Window attaching during the close
 either attaches first and keeps the Dojo, or is refused. A used Dojo is
 detached as before, and so is every Dojo when the daemon gives no answer.
 **Detach Window** (`window.detach`) always detaches.
+
+**Reload configuration** (`app.config-reload`) applies a changed
+`close-unused` to the Window's next Close Tab or Window close, including for
+tabs that were already open. A close already in progress keeps the value it
+started with.
 
 When the closed Dojo was the last one in a Lair the user never named, the Lair
 is removed in the same step. Such a Lair was created in the running daemon

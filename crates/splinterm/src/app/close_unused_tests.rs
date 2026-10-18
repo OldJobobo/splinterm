@@ -388,10 +388,68 @@ fn a_close_notice_queued_before_the_window_exits_is_seen() {
         .unwrap();
     sender.try_send(WindowTopologyCommand::CloseWindow).unwrap();
     drop(sender);
-    assert!(close_notice_queued(&mut receiver));
+    let mut config = AppConfig::default();
+    assert!(close_notice_queued(&mut receiver, &mut config));
     let (sender, mut receiver) = mpsc::channel::<WindowTopologyCommand>(4);
     drop(sender);
-    assert!(!close_notice_queued(&mut receiver));
+    assert!(!close_notice_queued(&mut receiver, &mut config));
+}
+
+#[test]
+fn a_configuration_reload_is_consumed_and_others_pass_through() {
+    let mut config = close_unused_config(false);
+    assert_eq!(
+        apply_configuration_reload(
+            &mut config,
+            WindowTopologyCommand::ReloadConfiguration { close_unused: true }
+        ),
+        None
+    );
+    assert!(config.multiplexer_lifetime.close_unused);
+    assert_eq!(
+        apply_configuration_reload(&mut config, WindowTopologyCommand::RequestSessionPicker),
+        Some(WindowTopologyCommand::RequestSessionPicker)
+    );
+    assert!(config.multiplexer_lifetime.close_unused);
+}
+
+#[tokio::test]
+async fn close_tab_after_a_reload_uses_the_reloaded_close_unused() {
+    let mut config = close_unused_config(false);
+    apply_configuration_reload(
+        &mut config,
+        WindowTopologyCommand::ReloadConfiguration { close_unused: true },
+    );
+    let (requests, detached) = close_second_tab(config, vec![Ok(closed(DojoId::new()))]).await;
+    assert!(detached, "the reloaded setting asks the pane to detach");
+    assert!(matches!(
+        requests[..],
+        [(Request::CloseUnusedDojo { .. }, true)]
+    ));
+
+    let mut config = close_unused_config(true);
+    apply_configuration_reload(
+        &mut config,
+        WindowTopologyCommand::ReloadConfiguration {
+            close_unused: false,
+        },
+    );
+    let (requests, detached) = close_second_tab(config, Vec::new()).await;
+    assert!(requests.is_empty(), "the reload turned close-unused off");
+    assert!(!detached);
+}
+
+#[test]
+fn a_reload_queued_before_the_window_exits_still_applies_to_the_close() {
+    let (sender, mut receiver) = mpsc::channel(4);
+    sender
+        .try_send(WindowTopologyCommand::ReloadConfiguration { close_unused: true })
+        .unwrap();
+    sender.try_send(WindowTopologyCommand::CloseWindow).unwrap();
+    drop(sender);
+    let mut config = close_unused_config(false);
+    assert!(close_notice_queued(&mut receiver, &mut config));
+    assert!(config.multiplexer_lifetime.close_unused);
 }
 
 // Waits out the real three-second detach bound.

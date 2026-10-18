@@ -2465,6 +2465,20 @@ fn try_topology_command(
     })
 }
 
+/// Hands the settings the topology manager owns to it after an accepted
+/// configuration reload. A Window without a manager has nothing to update.
+fn send_configuration_reload(
+    commands: Option<&Sender<WindowTopologyCommand>>,
+    close_unused: bool,
+) -> Result<()> {
+    commands.map_or(Ok(()), |commands| {
+        try_topology_command(
+            commands,
+            WindowTopologyCommand::ReloadConfiguration { close_unused },
+        )
+    })
+}
+
 fn try_topology_command_with_rollback(
     commands: Option<&Sender<WindowTopologyCommand>>,
     command: WindowTopologyCommand,
@@ -5447,6 +5461,14 @@ impl App {
                 self.input.prefix_state.clear();
                 if self.set_agent_status_presentation(loaded.config.explorer_agent_status) {
                     self.presentation.full_redraw = true;
+                }
+                if send_configuration_reload(
+                    self.tab_state.topology_commands.as_ref(),
+                    loaded.config.multiplexer_lifetime.close_unused,
+                )
+                .is_err()
+                {
+                    eprintln!("splinterm config reload could not update close-unused");
                 }
                 for _ in loaded.diagnostics {
                     eprintln!("splinterm configuration warning");
@@ -15981,6 +16003,21 @@ mod tests {
         .expect_err("closed pending split queue");
         assert!(error.to_string().contains("closed"));
         assert_eq!(rolled_back, Some((target, pending)));
+    }
+
+    #[test]
+    fn configuration_reload_hands_close_unused_to_the_topology_manager() {
+        assert!(send_configuration_reload(None, true).is_ok());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        for close_unused in [true, false] {
+            send_configuration_reload(Some(&sender), close_unused).unwrap();
+            assert_eq!(
+                receiver.try_recv().unwrap(),
+                WindowTopologyCommand::ReloadConfiguration { close_unused }
+            );
+        }
+        drop(receiver);
+        assert!(send_configuration_reload(Some(&sender), true).is_err());
     }
 
     #[test]
