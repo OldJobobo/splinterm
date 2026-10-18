@@ -74,4 +74,15 @@ The installer does not:
 - enable persistent systemd user lingering; or
 - opt a fresh installation into the optional MCP package.
 
+## Recommended on Omarchy
+
+Omarchy's Hyprland rule that marks windows as terminals does not list Splinterm. Until it does, Omarchy's universal `Super+C` sends `Ctrl+C` (interrupt) and `Super+V` sends `Ctrl+V` to Splinterm instead of copying and pasting, and Omarchy's terminal transparency and `Ctrl+Space` input-method rules skip it. Run this once to fix that:
+
+```bash
+splinterm integration omarchy enable
+splinterm integration omarchy status
+```
+
+It adds the `terminal` tag through a small user-owned Hyprland module, makes Splinterm your default terminal, and runs the Omarchy screensaver in Splinterm. `splinterm integration omarchy disable` reverses all of it exactly. The package install message recommends it, and the first Splinterm Window under Omarchy 4 shows one desktop notification until the tag is present; set `omarchy-integration-hint=no` under `[main]` in `config.ini` to silence it.
+
 Continue to the [quickstart](/docs/quickstart/) after installation. If an MCP host needs bounded access, follow the separate [MCP adapter setup](/docs/mcp/); installing the adapter alone grants no authority.
