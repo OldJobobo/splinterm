@@ -350,6 +350,21 @@ fn descriptor_flags(descriptor: HandoffDescriptor<'_>) -> Result<FdFlags, Descri
     })
 }
 
+/// Fails if any descriptor above standard error is inheritable across exec.
+///
+/// This only observes: it changes no descriptor and needs no process guard.
+/// While other threads create or close descriptors it is detection only. A
+/// descriptor that closes during the scan is skipped, and one made inheritable
+/// after the scan is missed, so callers must not rely on it to bound what a
+/// child inherits.
+///
+/// # Errors
+///
+/// Returns the first inheritable descriptor observed, or a procfs failure.
+pub fn audit_inheritable_descriptors() -> Result<(), DescriptorHandoffError> {
+    audit_process_descriptors(&[])
+}
+
 fn audit_process_descriptors(
     allowlist: &[HandoffDescriptor<'_>],
 ) -> Result<(), DescriptorHandoffError> {

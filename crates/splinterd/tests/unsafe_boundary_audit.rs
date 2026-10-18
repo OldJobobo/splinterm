@@ -1,10 +1,15 @@
-//! Source audit of the `splinterd` package's one audited unsafe exception.
+//! Source audit of the `splinterd` package's two audited unsafe exceptions.
 //!
 //! The workspace forbids `unsafe_code`, which no package can relax locally,
 //! so this package copies the workspace lint table with `deny`. This audit
-//! proves the copy is exact and that the only unsafe construct and the only
-//! `unsafe_code` waiver anywhere in the package's sources are the post-exec
-//! acquisition in `src/candidate_acquire.rs`.
+//! proves the copy is exact and that the only unsafe constructs and the only
+//! `unsafe_code` waivers anywhere in the package's sources are the two
+//! post-exec invocations of the inherited-FD leaf crate: the candidate
+//! acquisition in `src/candidate_acquire.rs`, and the sealed-preflight
+//! launcher's closure of inherited descriptors in `src/handoff_preflight.rs`,
+//! which keeps descriptors made inheritable by other daemon threads out of the
+//! sealed image while forward preflight runs beside a serving daemon (Plan
+//! 0061 D2).
 
 use std::{fs, path::Path};
 
@@ -330,7 +335,7 @@ fn nested_attribute_waivers_and_unsafe_attributes_are_detected() {
 }
 
 #[test]
-fn splinterd_keeps_one_exact_unsafe_bootstrap_invocation_and_policy() {
+fn splinterd_keeps_two_exact_unsafe_post_exec_invocations_and_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(has_exact_lint_policy(&cargo));
@@ -342,16 +347,25 @@ fn splinterd_keeps_one_exact_unsafe_bootstrap_invocation_and_policy() {
     for directory in ["src", "tests", "examples"] {
         audit_sources(root, &root.join(directory), &mut audit);
     }
-    let expected_construct = Finding {
-        file: "src/candidate_acquire.rs".to_owned(),
-        function: Some("acquire_before_tokio".to_owned()),
-        kind: "unsafe block",
+    let finding = |file: &str, function: &str, kind| Finding {
+        file: file.to_owned(),
+        function: Some(function.to_owned()),
+        kind,
     };
-    let expected_waiver = Finding {
-        file: "src/candidate_acquire.rs".to_owned(),
-        function: Some("acquire_before_tokio".to_owned()),
-        kind: "allow unsafe_code",
-    };
-    assert_eq!(audit.constructs, [expected_construct]);
-    assert_eq!(audit.waivers, [expected_waiver]);
+    let candidate = ("src/candidate_acquire.rs", "acquire_before_tokio");
+    let launcher = ("src/handoff_preflight.rs", "close_inherited_descriptors");
+    assert_eq!(
+        audit.constructs,
+        [
+            finding(candidate.0, candidate.1, "unsafe block"),
+            finding(launcher.0, launcher.1, "unsafe block"),
+        ]
+    );
+    assert_eq!(
+        audit.waivers,
+        [
+            finding(candidate.0, candidate.1, "allow unsafe_code"),
+            finding(launcher.0, launcher.1, "allow unsafe_code"),
+        ]
+    );
 }

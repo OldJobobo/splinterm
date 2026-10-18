@@ -1,11 +1,12 @@
 //! First-operation candidate descriptor acquisition before Tokio.
 //!
-//! This binary-only module owns the sole audited unsafe invocation in
+//! This binary-only module owns the candidate's audited unsafe invocation in
 //! `splinterd`: it composes the two unsafe entrypoints of the
 //! `splinterm-inherited-fd` leaf crate, which holds every raw borrow,
 //! conversion, and closure. Private manifest decoding and typed binding remain
 //! in the library behind opaque safe values. `tests/unsafe_boundary_audit.rs`
-//! pins this block as the package's only unsafe construct.
+//! pins this block and the sealed-preflight launcher's descriptor closure in
+//! `handoff_preflight.rs` as the package's only unsafe constructs.
 
 use std::{env, os::fd::RawFd};
 
@@ -28,7 +29,7 @@ const CANDIDATE_MANIFEST_FD_ENV: &str = "SPLINTERM_INTERNAL_HANDOFF_MANIFEST_FD"
 /// guard until staging releases it at the runtime boundary.
 #[allow(
     unsafe_code,
-    reason = "sole audited invocation of the post-exec inherited-FD leaf boundary"
+    reason = "audited candidate invocation of the post-exec inherited-FD leaf boundary"
 )]
 pub fn acquire_before_tokio() -> Result<Option<splinterd::CandidateBootstrap>> {
     let Some(raw) = env::var_os(CANDIDATE_MANIFEST_FD_ENV) else {
