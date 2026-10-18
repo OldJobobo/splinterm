@@ -4551,17 +4551,52 @@ impl WriteQueue {
     }
 }
 
+/// How long a shutdown still waits for EOF after the child exited and its
+/// process group emptied, when something outside the group holds the PTY.
+///
+/// A job-control shell runs every job, foreground ones included (an editor,
+/// `ssh`, a dev server), in its own process group. Those jobs get the
+/// kernel's hangup when the shell exits, and this window lets their hangup
+/// handlers save recovery state or tear down a connection, which takes well
+/// under a second in practice. It stays far below the escalation graces, so
+/// a job that ignores the hangup holds daemon shutdown for seconds, not the
+/// full hangup and terminate graces it cannot be signalled through.
+const SHUTDOWN_SETTLE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long output may keep extending the exit drain once a shutdown has
+/// finished escalating (killed, or settled and past its grace).
+///
+/// Every read pushes the drain deadline back, so a process outside the group
+/// that keeps writing would otherwise hold the actor, and ordered daemon
+/// shutdown, open indefinitely. After this cap the actor ends anyway and
+/// closes the master.
+const SHUTDOWN_DRAIN_CAP: Duration = Duration::from_secs(2);
+
 #[derive(Clone, Copy)]
 enum ShutdownStage {
     Hangup(Instant),
     Terminate(Instant),
-    Kill,
+    /// SIGKILL was sent to the process group at this instant.
+    Kill(Instant),
     /// The child has exited and its process group is empty, so no escalation
     /// signal can reach anything. Whatever still holds the PTY open is
-    /// outside the group (a job the shell moved to its own group, or a
-    /// process that left the session); waiting through the remaining grace
-    /// for its EOF would only delay shutdown.
-    Settled,
+    /// outside the group: a job a job-control shell ran in its own group,
+    /// foreground (an editor, `ssh`) or background, or a process that left
+    /// the session. It keeps EOF pending until this deadline
+    /// ([`SHUTDOWN_SETTLE_GRACE`], or the stage deadline it replaced if that
+    /// is sooner); waiting through the remaining escalation grace would only
+    /// delay shutdown.
+    Settled(Instant),
+}
+
+impl ShutdownStage {
+    /// When escalation is over and only the exit drain remains, if it is.
+    const fn escalation_end(self) -> Option<Instant> {
+        match self {
+            Self::Kill(at) | Self::Settled(at) => Some(at),
+            Self::Hangup(_) | Self::Terminate(_) => None,
+        }
+    }
 }
 
 /// Test-only action run on one Splint's PTY session between sealing its
@@ -4921,15 +4956,15 @@ async fn run_actor_body(
             continue;
         }
 
-        let shutdown_settled = matches!(
-            shutdown,
-            None | Some(ShutdownStage::Kill | ShutdownStage::Settled)
-        );
-        if child_exit.is_some()
-            && (eof
-                || (shutdown_settled
-                    && drain_deadline.is_some_and(|deadline| Instant::now() >= deadline)))
-        {
+        let now = Instant::now();
+        let escalation_end = shutdown.and_then(ShutdownStage::escalation_end);
+        let shutdown_settled = shutdown.is_none() || escalation_end.is_some_and(|end| now >= end);
+        // Output extends the drain, but only up to a fixed cap once
+        // escalation is over, so a writer outside the group cannot hold
+        // shutdown open.
+        let drained = drain_deadline.is_some_and(|deadline| now >= deadline)
+            || escalation_end.is_some_and(|end| now >= end + SHUTDOWN_DRAIN_CAP);
+        if child_exit.is_some() && (eof || (shutdown_settled && drained)) {
             break;
         }
 
@@ -5857,26 +5892,27 @@ fn publish_exit(
 ///
 /// Escalation keeps going after the child exits while members it left in its
 /// process group may still hold the PTY. Once the child has exited and the
-/// group is empty there is nothing left to signal, so the shutdown settles
-/// immediately instead of waiting out the remaining grace for an EOF that a
-/// process outside the group withholds.
+/// group is empty there is nothing left to signal, so the shutdown settles:
+/// whatever outside the group still holds the PTY gets at most
+/// [`SHUTDOWN_SETTLE_GRACE`] (never more than the current stage had left) to
+/// close it, instead of the remaining escalation grace.
 fn advance_shutdown(
     session: &LinuxPtySession,
     shutdown: &mut Option<ShutdownStage>,
     config: &LiveSplintConfig,
     child_exited: bool,
 ) {
+    let now = Instant::now();
     if child_exited
-        && matches!(
-            *shutdown,
-            Some(ShutdownStage::Hangup(_) | ShutdownStage::Terminate(_))
-        )
+        && let Some(ShutdownStage::Hangup(deadline) | ShutdownStage::Terminate(deadline)) =
+            *shutdown
         && !session.process_group_has_members()
     {
-        *shutdown = Some(ShutdownStage::Settled);
+        *shutdown = Some(ShutdownStage::Settled(
+            deadline.min(now + SHUTDOWN_SETTLE_GRACE),
+        ));
         return;
     }
-    let now = Instant::now();
     match *shutdown {
         Some(ShutdownStage::Hangup(deadline)) if now >= deadline => {
             let _ = session.signal_process_group(PtySignal::Terminate);
@@ -5884,7 +5920,7 @@ fn advance_shutdown(
         }
         Some(ShutdownStage::Terminate(deadline)) if now >= deadline => {
             let _ = session.signal_process_group(PtySignal::Kill);
-            *shutdown = Some(ShutdownStage::Kill);
+            *shutdown = Some(ShutdownStage::Kill(now));
         }
         _ => {}
     }
@@ -11002,25 +11038,26 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_settles_when_only_a_process_outside_the_group_holds_the_pty() {
-        // A process in its own session keeps the PTY slave open and ignores
-        // hangup, as a shell's background job can. Once the child exits on
-        // the hangup and its group is empty, no escalation signal reaches
-        // that process, so shutdown must not wait out the grace for its EOF.
+    /// Spawns a child that starts `holder` in its own session, where it keeps
+    /// the PTY slave open and ignores hangup (as a shell's job in its own
+    /// group can), then becomes the only member of its process group. The
+    /// escalation graces are long, so only settling ends shutdown early.
+    async fn spawn_with_holder_outside_the_group(holder: &str) -> (LiveSplintRuntime, KillOnDrop) {
         let marker = std::env::temp_dir().join(format!(
             "splinterd-pty-holder-{}-{}",
             std::process::id(),
             SplintId::new()
         ));
         let marker_path = marker.display();
+        // `exec` leaves the child alone in its group: a looping shell would
+        // leave an orphaned `sleep` that only PID 1 reaps.
         let runtime = LiveSplintRuntime::spawn(
             SplintId::new(),
             backend(),
             shell(&format!(
-                "setsid sh -c 'trap \"\" HUP; echo $$ > {marker_path}; exec sleep 30' & \
+                "setsid sh -c 'trap \"\" HUP; echo $$ > {marker_path}; {holder}' & \
                  while [ ! -s {marker_path} ]; do sleep 0.01; done; \
-                 printf ready; while :; do sleep 1; done"
+                 printf ready; exec sleep 30"
             )),
             LiveSplintConfig {
                 hangup_grace: Duration::from_secs(10),
@@ -11043,19 +11080,50 @@ mod tests {
         })
         .await
         .unwrap();
-        let _holder = KillOnDrop(holder);
         let _ = std::fs::remove_file(&marker);
         time::sleep(Duration::from_millis(50)).await;
+        (runtime, KillOnDrop(holder))
+    }
 
-        let status = time::timeout(Duration::from_secs(3), runtime.shutdown())
-            .await
-            .expect("shutdown waited out the grace for a holder outside the process group")
-            .unwrap();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_settles_when_only_a_process_outside_the_group_holds_the_pty() {
+        // Once the child exits on the hangup and its group is empty, no
+        // escalation signal reaches the holder: shutdown keeps only the short
+        // settle grace for its EOF, not the escalation graces.
+        let (runtime, holder) = spawn_with_holder_outside_the_group("exec sleep 30").await;
+        let started = Instant::now();
+        let status = time::timeout(
+            SHUTDOWN_SETTLE_GRACE + Duration::from_secs(2),
+            runtime.shutdown(),
+        )
+        .await
+        .expect("shutdown waited out the grace for a holder outside the process group")
+        .unwrap();
+        assert!(
+            started.elapsed() >= SHUTDOWN_SETTLE_GRACE,
+            "a job outside the group keeps its hangup cleanup window"
+        );
         assert_eq!(status.signal, Some(1), "the hangup ended the child");
         assert!(
-            PathBuf::from(format!("/proc/{holder}")).exists(),
+            PathBuf::from(format!("/proc/{}", holder.0)).exists(),
             "the holder outside the group is out of the escalation's reach"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_caps_the_drain_for_a_writer_outside_the_group() {
+        // Every read extends the exit drain, so a holder that keeps writing
+        // would hold shutdown open forever without the cap.
+        let (runtime, _holder) =
+            spawn_with_holder_outside_the_group("while :; do echo x; sleep 0.01; done").await;
+        let status = time::timeout(
+            SHUTDOWN_SETTLE_GRACE + SHUTDOWN_DRAIN_CAP + Duration::from_secs(2),
+            runtime.shutdown(),
+        )
+        .await
+        .expect("output from outside the group kept extending the drain")
+        .unwrap();
+        assert_eq!(status.signal, Some(1), "the hangup ended the child");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
