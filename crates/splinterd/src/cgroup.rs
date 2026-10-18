@@ -1,16 +1,19 @@
+//! Nested systemd workload units: one transient slice per Dojo and one
+//! transient scope per Splint process incarnation, on the user manager.
+
 use std::{
     collections::HashMap,
     future::Future,
     io,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
 
-use splinterd::{
+use crate::{
     ProcessPlacement,
     dbus_worker::{DbusWorker, DbusWorkerError},
 };
@@ -28,8 +31,9 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const VERIFY_INTERVAL: Duration = Duration::from_millis(25);
 static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Nested `MemoryHigh` percentages for Dojo slices and Splint scopes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WorkloadMemoryPolicy {
+pub struct WorkloadMemoryPolicy {
     pub(crate) dojo_memory_high_percent: u32,
     pub(crate) splint_memory_high_percent: u32,
 }
@@ -85,8 +89,9 @@ fn percent_scale(percent: u32) -> u32 {
     u32::try_from(scaled).expect("bounded percentage scale fits u32")
 }
 
+/// A systemd workload unit request or its bookkeeping failed.
 #[derive(Debug, Error)]
-pub(crate) enum WorkloadUnitError {
+pub enum WorkloadUnitError {
     #[error("workload memory policy is invalid")]
     InvalidPolicy,
     #[error("systemd user-manager connection failed")]
@@ -101,10 +106,25 @@ pub(crate) enum WorkloadUnitError {
     StopTimeout,
     #[error("workload unit state lock is unavailable")]
     State,
+    #[error("systemd does not hold the retained Splint process in its expected workload units")]
+    RetainedScopeMismatch,
+    #[error("this workload unit manager already holds the Splint scope")]
+    ScopeAlreadyHeld,
 }
 
 trait SystemdUnitAdapter: Send + Sync {
     fn probe(&self) -> Result<(), WorkloadUnitError>;
+
+    /// Object path of the loaded unit `name`, or `None` when systemd has no
+    /// such unit loaded.
+    fn loaded_unit(&self, name: &str) -> Result<Option<String>, WorkloadUnitError>;
+
+    /// Object path of the unit whose cgroup holds `pid` (`GetUnitByPID`), or
+    /// `None` when systemd has no unit for it.
+    fn unit_of_pid(&self, pid: u32) -> Result<Option<String>, WorkloadUnitError>;
+
+    /// The slice that the loaded scope unit at `scope_path` runs in.
+    fn scope_slice(&self, scope_path: &str) -> Result<String, WorkloadUnitError>;
 
     fn start_dojo_slice(
         &self,
@@ -189,6 +209,39 @@ impl SystemdUserManager {
 }
 
 impl SystemdUnitAdapter for SystemdUserManager {
+    fn loaded_unit(&self, name: &str) -> Result<Option<String>, WorkloadUnitError> {
+        match self.unit_path(name) {
+            Ok(path) => Ok(Some(path.to_string())),
+            Err(WorkloadUnitError::Request(error)) if is_no_such_unit(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn unit_of_pid(&self, pid: u32) -> Result<Option<String>, WorkloadUnitError> {
+        match self.pid_unit_path(pid) {
+            Ok(path) => Ok(Some(path.to_string())),
+            Err(WorkloadUnitError::Request(error)) if is_no_unit_for_pid(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn scope_slice(&self, scope_path: &str) -> Result<String, WorkloadUnitError> {
+        let path = OwnedObjectPath::try_from(scope_path.to_owned())
+            .map_err(WorkloadUnitError::Property)?;
+        self.bus
+            .call(move |connection| async move {
+                SystemdScopeProxy::builder(&connection)
+                    .path(path)?
+                    .cache_properties(CacheProperties::No)
+                    .build()
+                    .await?
+                    .slice()
+                    .await
+            })
+            .map_err(WorkloadUnitError::Connection)?
+            .map_err(WorkloadUnitError::Request)
+    }
+
     fn probe(&self) -> Result<(), WorkloadUnitError> {
         let probe_id = NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!("app-splinterm-probe{}i{probe_id}.slice", std::process::id());
@@ -283,6 +336,14 @@ fn is_no_such_unit(error: &zbus::Error) -> bool {
         error,
         zbus::Error::MethodError(name, _, _)
             if name.as_str() == "org.freedesktop.systemd1.NoSuchUnit"
+    )
+}
+
+fn is_no_unit_for_pid(error: &zbus::Error) -> bool {
+    matches!(
+        error,
+        zbus::Error::MethodError(name, _, _)
+            if name.as_str() == "org.freedesktop.systemd1.NoUnitForPID"
     )
 }
 
@@ -384,20 +445,79 @@ trait SystemdManager {
     fn get_unit_by_pid(&self, pid: u32) -> zbus::Result<OwnedObjectPath>;
 }
 
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Scope",
+    default_service = "org.freedesktop.systemd1"
+)]
+trait SystemdScope {
+    #[zbus(property)]
+    fn slice(&self) -> zbus::Result<String>;
+}
+
 #[derive(Default)]
 struct WorkloadUnitState {
     dojo_references: HashMap<DojoId, usize>,
 }
 
+/// How this manager holds one Splint scope's Dojo reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScopeHold {
+    dojo_id: DojoId,
+    /// The reference is still counted, but the [`ActiveWorkloadScope`] that
+    /// owned it was retained for a handoff, so no live value releases it.
+    retained: bool,
+}
+
+/// Scopes this manager holds a Dojo reference for, keyed by scope unit name.
+///
+/// Its lock is never held across a systemd request, so retaining a scope
+/// cannot block on the session bus.
+type ScopeHolds = HashMap<String, ScopeHold>;
+
+/// Places Splint processes in reference-counted Dojo slices and per-Splint
+/// scopes on the systemd user manager.
+///
+/// # Dojo reference counts across a handoff
+///
+/// Each Splint scope holds one reference on its Dojo slice, and the last
+/// release stops the slice. The manager also records which scopes hold those
+/// references, by scope unit name:
+///
+/// - [`ActiveWorkloadScope::retain_for_handoff`] keeps the reference counted,
+///   because the retained process still occupies the slice, and marks the
+///   scope retained.
+/// - [`WorkloadUnitManager::adopt_scope`] transfers a reference this manager
+///   already counts for a retained scope (in-process re-adoption: a resume
+///   after a failed exec, or a rollback) instead of counting it again, and
+///   counts a new reference for a scope it has never held (a fresh manager,
+///   such as the forward daemon's). Adopting `N` retained scopes of one Dojo
+///   into a fresh manager therefore yields `N` references, and re-adopting
+///   them in process leaves the count unchanged.
+/// - Adopting a scope that a live [`ActiveWorkloadScope`] of this manager still
+///   holds fails with [`WorkloadUnitError::ScopeAlreadyHeld`].
+///
+/// A retained scope that is never adopted again in this process keeps its
+/// reference, so the manager never stops its Dojo slice: the failure leaks a
+/// slice rather than killing a Splint. A process that resumes after
+/// [`WorkloadUnitManager::shutdown`] cannot make systemd requests on this
+/// manager, so it connects a fresh one, adopts every retained scope into it,
+/// and drops this one with its retained references.
 #[derive(Clone)]
-pub(crate) struct WorkloadUnitManager {
+pub struct WorkloadUnitManager {
     adapter: Arc<dyn SystemdUnitAdapter>,
     policy: WorkloadMemoryPolicy,
     state: Arc<Mutex<WorkloadUnitState>>,
+    holds: Arc<Mutex<ScopeHolds>>,
 }
 
 impl WorkloadUnitManager {
-    pub(crate) fn connect(
+    /// Connects to the session's systemd user manager and probes that it can
+    /// create transient memory-limited units.
+    ///
+    /// # Errors
+    /// Reports an invalid policy, an unavailable session bus, or a failed
+    /// capability probe.
+    pub fn connect(
         policy: WorkloadMemoryPolicy,
         owner_unit: Option<&str>,
     ) -> Result<Self, WorkloadUnitError> {
@@ -414,10 +534,20 @@ impl WorkloadUnitManager {
             adapter,
             policy,
             state: Arc::new(Mutex::new(WorkloadUnitState::default())),
+            holds: Arc::new(Mutex::new(ScopeHolds::default())),
         })
     }
 
-    pub(crate) fn prepare(
+    /// Takes a Dojo slice reference for one Splint incarnation, starting the
+    /// slice when it has no other reference.
+    ///
+    /// # Errors
+    /// Reports a poisoned state lock or a failed slice start.
+    ///
+    /// # Panics
+    /// Never in practice: the live Splint bound keeps Dojo reference counts
+    /// far below `usize::MAX`.
+    pub fn prepare(
         &self,
         dojo_id: DojoId,
         splint_id: SplintId,
@@ -438,6 +568,13 @@ impl WorkloadUnitManager {
                 if !is_unit_exists(&error) {
                     let _ = self.adapter.stop_unit(&names.dojo_slice);
                 }
+                if !known {
+                    // Forget a Dojo this call first saw. A known entry at zero
+                    // makes the next prepare stop the slice first, and a slice
+                    // that already existed (one a previous generation left,
+                    // with its Splints still running) must never be stopped.
+                    state.dojo_references.remove(&dojo_id);
+                }
                 return Err(error);
             }
         }
@@ -449,8 +586,117 @@ impl WorkloadUnitManager {
         Ok(PreparedWorkloadScope {
             manager: self.clone(),
             dojo_id,
+            splint_id,
+            incarnation,
             names,
             committed: false,
+        })
+    }
+
+    /// Takes ownership of a Splint scope that a previous owner retained with
+    /// [`ActiveWorkloadScope::retain_for_handoff`], after checking that
+    /// systemd still holds the process in exactly that scope and Dojo slice.
+    ///
+    /// The checks, all under the reference-count lock so no slice stop can
+    /// interleave, are:
+    /// - the scope unit is loaded;
+    /// - `GetUnitByPID(child_pid)` names that exact unit;
+    /// - the scope runs in the Dojo slice named by the retained Dojo, and that
+    ///   slice is loaded.
+    ///
+    /// Then the Dojo reference is transferred or counted as described on
+    /// [`WorkloadUnitManager`]. Every failure leaves systemd and the counts
+    /// untouched: it stops nothing, so the caller still decides the
+    /// process's fate.
+    ///
+    /// Callers must keep two contracts:
+    /// - A failed adoption of a process that is still running leaves it
+    ///   uncounted, so this manager stops its Dojo slice, killing that
+    ///   process, once the adopted Splints of the same Dojo release. The
+    ///   caller must roll back, or kill or exclude that Splint, and never
+    ///   continue with it running uncounted.
+    /// - Each retained identity is adopted into exactly one manager per
+    ///   process. Holds are per manager, so two managers would each count the
+    ///   scope and each stop it.
+    ///
+    /// # Errors
+    /// [`WorkloadUnitError::RetainedScopeMismatch`] for an invalid PID, a
+    /// process in another unit or in none (an exited process), a missing
+    /// scope or slice, or a scope in another slice;
+    /// [`WorkloadUnitError::ScopeAlreadyHeld`] when a live scope of this
+    /// manager already holds the unit; a failed systemd request; or a
+    /// poisoned state lock, or a Dojo whose last slice stop failed.
+    ///
+    /// # Panics
+    /// Never in practice: the live Splint bound keeps Dojo reference counts
+    /// far below `usize::MAX`.
+    pub fn adopt_scope(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<ActiveWorkloadScope, WorkloadUnitError> {
+        let names = &retained.names;
+        if retained.child_pid == 0 || i32::try_from(retained.child_pid).is_err() {
+            return Err(WorkloadUnitError::RetainedScopeMismatch);
+        }
+        let mut state = self.state.lock().map_err(|_| WorkloadUnitError::State)?;
+        let scope_path = self
+            .adapter
+            .loaded_unit(&names.splint_scope)?
+            .ok_or(WorkloadUnitError::RetainedScopeMismatch)?;
+        if self.adapter.unit_of_pid(retained.child_pid)?.as_ref() != Some(&scope_path)
+            || self.adapter.scope_slice(&scope_path)? != names.dojo_slice
+            || self.adapter.loaded_unit(&names.dojo_slice)?.is_none()
+        {
+            return Err(WorkloadUnitError::RetainedScopeMismatch);
+        }
+
+        let mut holds = lock_holds(&self.holds);
+        match holds.get(&names.splint_scope).copied() {
+            Some(ScopeHold {
+                dojo_id,
+                retained: true,
+            }) if dojo_id == retained.dojo_id => {
+                if state
+                    .dojo_references
+                    .get(&dojo_id)
+                    .is_none_or(|references| *references == 0)
+                {
+                    return Err(WorkloadUnitError::State);
+                }
+            }
+            Some(ScopeHold { retained: true, .. }) => {
+                return Err(WorkloadUnitError::RetainedScopeMismatch);
+            }
+            Some(ScopeHold {
+                retained: false, ..
+            }) => return Err(WorkloadUnitError::ScopeAlreadyHeld),
+            None => {
+                let known = state.dojo_references.contains_key(&retained.dojo_id);
+                let references = state.dojo_references.entry(retained.dojo_id).or_default();
+                if known && *references == 0 {
+                    // The last release's slice stop failed, so the slice may
+                    // still be stopping. Counting it again would hide that.
+                    return Err(WorkloadUnitError::State);
+                }
+                *references = references
+                    .checked_add(1)
+                    .expect("live Splint bound prevents Dojo reference overflow");
+            }
+        }
+        holds.insert(
+            names.splint_scope.clone(),
+            ScopeHold {
+                dojo_id: retained.dojo_id,
+                retained: false,
+            },
+        );
+        drop(holds);
+        drop(state);
+
+        Ok(ActiveWorkloadScope {
+            manager: self.clone(),
+            scope: retained.clone(),
+            released: false,
         })
     }
 
@@ -458,7 +704,7 @@ impl WorkloadUnitManager {
     /// thread, so the daemon can return to one thread for upgrade handoff.
     ///
     /// Running requests get up to
-    /// [`SHUTDOWN_GRACE`](splinterd::dbus_worker::SHUTDOWN_GRACE) to finish
+    /// [`SHUTDOWN_GRACE`](crate::dbus_worker::SHUTDOWN_GRACE) to finish
     /// before they are aborted, and closing is bounded the same way, so a
     /// wedged session bus cannot hold this forever.
     ///
@@ -470,11 +716,7 @@ impl WorkloadUnitManager {
     ///
     /// # Errors
     /// Reports a D-Bus worker thread that panicked.
-    #[allow(
-        dead_code,
-        reason = "the handoff coordinator calls this once its runtime-stop slice lands"
-    )]
-    pub(crate) fn shutdown(self) -> Result<(), WorkloadUnitError> {
+    pub fn shutdown(self) -> Result<(), WorkloadUnitError> {
         self.adapter.shutdown()
     }
 
@@ -493,26 +735,75 @@ impl WorkloadUnitManager {
         }
         Ok(())
     }
+
+    fn set_hold(&self, scope: &RetainedWorkloadScope, retained: bool) {
+        lock_holds(&self.holds).insert(
+            scope.names.splint_scope.clone(),
+            ScopeHold {
+                dojo_id: scope.dojo_id,
+                retained,
+            },
+        );
+    }
+
+    fn clear_hold(&self, scope: &RetainedWorkloadScope) {
+        lock_holds(&self.holds).remove(&scope.names.splint_scope);
+    }
+
+    #[cfg(test)]
+    fn dojo_references(&self, dojo_id: DojoId) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .dojo_references
+            .get(&dojo_id)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
-pub(crate) struct PreparedWorkloadScope {
+/// Locks the scope holds. Every holder makes one map insertion or removal, so
+/// a panicking holder cannot leave the map inconsistent, and poisoning is
+/// ignored: retaining a scope must not fail.
+fn lock_holds(holds: &Mutex<ScopeHolds>) -> MutexGuard<'_, ScopeHolds> {
+    holds.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A Dojo slice reference waiting for its Splint process; dropping it unplaced
+/// returns the reference.
+pub struct PreparedWorkloadScope {
     manager: WorkloadUnitManager,
     dojo_id: DojoId,
+    splint_id: SplintId,
+    incarnation: u64,
     names: WorkloadUnitNames,
     committed: bool,
 }
 
 impl PreparedWorkloadScope {
-    pub(crate) fn place(mut self, identity: LinuxPtyIdentity) -> io::Result<ActiveWorkloadScope> {
+    /// Starts the Splint scope around the PTY child and verifies systemd
+    /// placed the child in it.
+    ///
+    /// # Errors
+    /// Reports a failed scope start or an unverified placement; the Dojo
+    /// reference is returned when the prepared scope drops.
+    pub fn place(mut self, identity: LinuxPtyIdentity) -> io::Result<ActiveWorkloadScope> {
         self.manager
             .adapter
             .start_splint_scope(&self.names, identity.child_pid(), self.manager.policy)
             .map_err(io::Error::other)?;
         self.committed = true;
+        let scope = RetainedWorkloadScope {
+            dojo_id: self.dojo_id,
+            splint_id: self.splint_id,
+            incarnation: self.incarnation,
+            child_pid: identity.child_pid(),
+            names: self.names.clone(),
+        };
+        self.manager.set_hold(&scope, false);
         Ok(ActiveWorkloadScope {
             manager: self.manager.clone(),
-            dojo_id: self.dojo_id,
-            names: self.names.clone(),
+            scope,
             released: false,
         })
     }
@@ -528,31 +819,65 @@ impl Drop for PreparedWorkloadScope {
     }
 }
 
-pub(crate) struct ActiveWorkloadScope {
+/// A placed Splint scope holding one Dojo slice reference; releasing or
+/// dropping it stops the scope and returns the reference, unless it is
+/// retained for a handoff.
+pub struct ActiveWorkloadScope {
     manager: WorkloadUnitManager,
-    dojo_id: DojoId,
-    names: WorkloadUnitNames,
+    scope: RetainedWorkloadScope,
     released: bool,
 }
 
 impl ActiveWorkloadScope {
     pub(crate) fn release(mut self) -> Result<(), WorkloadUnitError> {
-        let scope_result = self.manager.adapter.stop_unit(&self.names.splint_scope);
+        self.released = true;
+        self.stop()
+    }
+
+    fn stop(&self) -> Result<(), WorkloadUnitError> {
+        self.manager.clear_hold(&self.scope);
+        let scope_result = self
+            .manager
+            .adapter
+            .stop_unit(&self.scope.names.splint_scope);
         let dojo_result = self
             .manager
-            .release_dojo(self.dojo_id, &self.names.dojo_slice);
-        self.released = true;
+            .release_dojo(self.scope.dojo_id, &self.scope.names.dojo_slice);
         scope_result.and(dojo_result)
+    }
+
+    /// Gives up this scope for a daemon handoff without stopping anything:
+    /// the Splint scope keeps running, and its Dojo slice reference stays
+    /// counted in this manager, so this manager never stops the slice under
+    /// the retained process.
+    ///
+    /// The manager records the scope as retained, so a later
+    /// [`WorkloadUnitManager::adopt_scope`] on it (or a clone) transfers the
+    /// reference instead of counting it twice. This makes no systemd request,
+    /// never blocks on the session bus, and cannot fail, so the live actor
+    /// may call it inline.
+    ///
+    /// The returned value is plain data with no manager or connection, so
+    /// dropping it stops nothing. A new owner rebuilds an equal value from
+    /// handoff manifest fields with [`RetainedWorkloadScope::new`].
+    #[must_use = "the retained scope identity is what a new owner adopts"]
+    pub fn retain_for_handoff(mut self) -> RetainedWorkloadScope {
+        self.released = true;
+        self.manager.set_hold(&self.scope, true);
+        self.scope.clone()
+    }
+
+    /// The identity of this scope.
+    #[must_use]
+    pub fn identity(&self) -> &RetainedWorkloadScope {
+        &self.scope
     }
 }
 
 impl Drop for ActiveWorkloadScope {
     fn drop(&mut self) {
         if !self.released {
-            let _ = self.manager.adapter.stop_unit(&self.names.splint_scope);
-            let _ = self
-                .manager
-                .release_dojo(self.dojo_id, &self.names.dojo_slice);
+            let _ = self.stop();
         }
     }
 }
@@ -560,6 +885,80 @@ impl Drop for ActiveWorkloadScope {
 impl ProcessPlacement for ActiveWorkloadScope {
     fn release(self) {
         let _ = ActiveWorkloadScope::release(self);
+    }
+
+    /// The live actor's handoff path: retains the scope as
+    /// [`ActiveWorkloadScope::retain_for_handoff`] does and discards the
+    /// identity, which the handoff manifest already carries.
+    fn retain_for_handoff(self) {
+        let _ = ActiveWorkloadScope::retain_for_handoff(self);
+    }
+}
+
+/// The identity of a Splint workload scope that outlives the value that
+/// placed it: a running process in a named scope inside a Dojo slice.
+///
+/// It owns nothing: dropping it makes no systemd request and changes no
+/// reference count. [`WorkloadUnitManager::adopt_scope`] turns it back into
+/// an [`ActiveWorkloadScope`] after verifying systemd still agrees.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedWorkloadScope {
+    dojo_id: DojoId,
+    splint_id: SplintId,
+    incarnation: u64,
+    child_pid: u32,
+    names: WorkloadUnitNames,
+}
+
+impl RetainedWorkloadScope {
+    /// Rebuilds a retained scope identity from the fields a handoff manifest
+    /// records for a live Splint. The unit names are derived exactly as
+    /// [`WorkloadUnitManager::prepare`] derived them.
+    #[must_use]
+    pub fn new(dojo_id: DojoId, splint_id: SplintId, incarnation: u64, child_pid: u32) -> Self {
+        Self {
+            dojo_id,
+            splint_id,
+            incarnation,
+            child_pid,
+            names: WorkloadUnitNames::new(dojo_id, splint_id, incarnation),
+        }
+    }
+
+    /// The Dojo whose slice holds the scope.
+    #[must_use]
+    pub fn dojo_id(&self) -> DojoId {
+        self.dojo_id
+    }
+
+    /// The Splint the scope runs.
+    #[must_use]
+    pub fn splint_id(&self) -> SplintId {
+        self.splint_id
+    }
+
+    /// The Splint process incarnation the scope is named after.
+    #[must_use]
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// The PTY child placed in the scope.
+    #[must_use]
+    pub fn child_pid(&self) -> u32 {
+        self.child_pid
+    }
+
+    /// The Dojo slice unit name.
+    #[must_use]
+    pub fn dojo_slice(&self) -> &str {
+        &self.names.dojo_slice
+    }
+
+    /// The Splint scope unit name.
+    #[must_use]
+    pub fn splint_scope(&self) -> &str {
+        &self.names.splint_scope
     }
 }
 
@@ -604,15 +1003,94 @@ mod tests {
         fail_scope: Mutex<bool>,
         stop_gate: Mutex<Option<Arc<StopGate>>>,
         shutdowns: Mutex<usize>,
+        systemd: Mutex<FakeSystemd>,
+    }
+
+    /// The user manager's view: loaded units (each scope with its slice) and
+    /// the unit holding each process.
+    #[derive(Default)]
+    struct FakeSystemd {
+        units: HashMap<String, Option<String>>,
+        pids: HashMap<u32, String>,
+    }
+
+    fn fake_unit_path(name: &str) -> String {
+        format!("/org/freedesktop/systemd1/unit/{name}")
+    }
+
+    /// The error systemd returns when a transient unit name is taken, as
+    /// [`is_unit_exists`] classifies it.
+    fn unit_exists_error() -> WorkloadUnitError {
+        let reply = zbus::Message::method_call("/", "StartTransientUnit")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        let error = WorkloadUnitError::Request(zbus::Error::MethodError(
+            zbus::names::ErrorName::try_from("org.freedesktop.systemd1.UnitExists")
+                .unwrap()
+                .into(),
+            None,
+            reply,
+        ));
+        assert!(is_unit_exists(&error));
+        error
     }
 
     impl FakeAdapter {
         fn calls(&self) -> Vec<AdapterCall> {
             self.calls.lock().unwrap().clone()
         }
+
+        fn stops(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    AdapterCall::Stop(name) => Some(name),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn slice_stops(&self, slice: &str) -> usize {
+            self.stops().iter().filter(|name| *name == slice).count()
+        }
+
+        fn is_loaded(&self, name: &str) -> bool {
+            self.systemd.lock().unwrap().units.contains_key(name)
+        }
     }
 
     impl SystemdUnitAdapter for FakeAdapter {
+        fn loaded_unit(&self, name: &str) -> Result<Option<String>, WorkloadUnitError> {
+            Ok(self
+                .systemd
+                .lock()
+                .unwrap()
+                .units
+                .contains_key(name)
+                .then(|| fake_unit_path(name)))
+        }
+
+        fn unit_of_pid(&self, pid: u32) -> Result<Option<String>, WorkloadUnitError> {
+            Ok(self
+                .systemd
+                .lock()
+                .unwrap()
+                .pids
+                .get(&pid)
+                .map(|name| fake_unit_path(name)))
+        }
+
+        fn scope_slice(&self, scope_path: &str) -> Result<String, WorkloadUnitError> {
+            let systemd = self.systemd.lock().unwrap();
+            systemd
+                .units
+                .iter()
+                .find(|(name, _)| fake_unit_path(name) == scope_path)
+                .and_then(|(_, slice)| slice.clone())
+                .ok_or(WorkloadUnitError::RetainedScopeMismatch)
+        }
+
         fn probe(&self) -> Result<(), WorkloadUnitError> {
             if *self.fail_probe.lock().unwrap() {
                 Err(WorkloadUnitError::IdentityMismatch)
@@ -630,6 +1108,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(AdapterCall::StartDojo(name.to_owned()));
+            let mut systemd = self.systemd.lock().unwrap();
+            if systemd.units.contains_key(name) {
+                return Err(unit_exists_error());
+            }
+            systemd.units.insert(name.to_owned(), None);
             Ok(())
         }
 
@@ -651,6 +1134,15 @@ mod tests {
                     .push(AdapterCall::Stop(names.splint_scope.clone()));
                 Err(WorkloadUnitError::IdentityMismatch)
             } else {
+                let mut systemd = self.systemd.lock().unwrap();
+                if systemd.units.contains_key(&names.splint_scope) {
+                    // As the real adapter does, an existing unit is left alone.
+                    return Err(unit_exists_error());
+                }
+                systemd
+                    .units
+                    .insert(names.splint_scope.clone(), Some(names.dojo_slice.clone()));
+                systemd.pids.insert(child_pid, names.splint_scope.clone());
                 Ok(())
             }
         }
@@ -660,6 +1152,20 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(AdapterCall::Stop(name.to_owned()));
+            {
+                // Stopping a unit stops its child scopes and their processes.
+                let mut systemd = self.systemd.lock().unwrap();
+                let mut stopped = vec![name.to_owned()];
+                stopped.extend(
+                    systemd
+                        .units
+                        .iter()
+                        .filter(|(_, slice)| slice.as_deref() == Some(name))
+                        .map(|(scope, _)| scope.clone()),
+                );
+                systemd.units.retain(|unit, _| !stopped.contains(unit));
+                systemd.pids.retain(|_, unit| !stopped.contains(unit));
+            }
             let gate = self.stop_gate.lock().unwrap().clone();
             if is_slice_unit(name)
                 && let Some(gate) = gate
@@ -898,6 +1404,294 @@ mod tests {
         };
         assert!(matches!(&calls[2], AdapterCall::Stop(name) if name == expected_scope));
         assert!(matches!(&calls[3], AdapterCall::Stop(name) if is_slice_unit(name)));
+    }
+
+    fn fake_manager(adapter: &Arc<FakeAdapter>) -> WorkloadUnitManager {
+        WorkloadUnitManager::new(adapter.clone(), WorkloadMemoryPolicy::default()).unwrap()
+    }
+
+    fn placed(manager: &WorkloadUnitManager, dojo_id: DojoId, pid: u32) -> ActiveWorkloadScope {
+        manager
+            .prepare(dojo_id, SplintId::new(), u64::from(pid))
+            .unwrap()
+            .place(identity(pid))
+            .unwrap()
+    }
+
+    fn dojo_starts(adapter: &FakeAdapter) -> usize {
+        adapter
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, AdapterCall::StartDojo(_)))
+            .count()
+    }
+
+    #[test]
+    fn retained_scopes_stop_nothing_and_keep_their_dojo_references() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let manager = fake_manager(&adapter);
+        let dojo_id = DojoId::new();
+        let first = placed(&manager, dojo_id, 201);
+        let second = placed(&manager, dojo_id, 202);
+        let survivor = placed(&manager, dojo_id, 203);
+        let survivor_scope = survivor.identity().splint_scope().to_owned();
+
+        let retained = first.retain_for_handoff();
+        let second_scope = second.identity().splint_scope().to_owned();
+        // The live actor's path discards the identity.
+        ProcessPlacement::retain_for_handoff(second);
+        assert!(adapter.stops().is_empty());
+        assert!(adapter.is_loaded(retained.splint_scope()));
+        assert!(adapter.is_loaded(&second_scope));
+        assert_eq!(manager.dojo_references(dojo_id), 3);
+
+        // The last live scope leaves the Dojo, but retained processes still
+        // occupy its slice.
+        survivor.release().unwrap();
+        assert_eq!(adapter.stops(), [survivor_scope]);
+        assert_eq!(manager.dojo_references(dojo_id), 2);
+        assert!(adapter.is_loaded(retained.dojo_slice()));
+
+        drop(retained);
+        drop(manager);
+        assert_eq!(adapter.stops().len(), 1);
+    }
+
+    #[test]
+    fn a_fresh_manager_adopts_retained_scopes_with_exact_dojo_counts() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let old = fake_manager(&adapter);
+        let (busy, quiet) = (DojoId::new(), DojoId::new());
+        let retained = [
+            placed(&old, busy, 211),
+            placed(&old, busy, 212),
+            placed(&old, busy, 213),
+            placed(&old, quiet, 214),
+        ]
+        .map(ActiveWorkloadScope::retain_for_handoff);
+        drop(old);
+        let busy_slice = retained[0].dojo_slice().to_owned();
+        let quiet_slice = retained[3].dojo_slice().to_owned();
+
+        let fresh = fake_manager(&adapter);
+        let adopted = retained
+            .iter()
+            .map(|scope| fresh.adopt_scope(scope).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(fresh.dojo_references(busy), 3);
+        assert_eq!(fresh.dojo_references(quiet), 1);
+        assert!(matches!(
+            fresh.adopt_scope(&retained[0]),
+            Err(WorkloadUnitError::ScopeAlreadyHeld)
+        ));
+        assert_eq!(fresh.dojo_references(busy), 3);
+        assert!(adapter.stops().is_empty());
+        assert_eq!(dojo_starts(&adapter), 2);
+
+        let mut adopted = adopted.into_iter();
+        adopted.next().unwrap().release().unwrap();
+        adopted.next().unwrap().release().unwrap();
+        assert_eq!(adapter.slice_stops(&busy_slice), 0);
+        adopted.next().unwrap().release().unwrap();
+        assert_eq!(adapter.slice_stops(&busy_slice), 1);
+        assert_eq!(fresh.dojo_references(busy), 0);
+        // Dropping the last adopted scope stops its scope and slice too.
+        drop(adopted);
+        assert_eq!(adapter.slice_stops(&quiet_slice), 1);
+        assert_eq!(adapter.slice_stops(&busy_slice), 1);
+        assert_eq!(adapter.stops().len(), 6);
+    }
+
+    #[test]
+    fn in_process_readoption_transfers_retained_references() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let manager = fake_manager(&adapter);
+        let dojo_id = DojoId::new();
+        let live = placed(&manager, dojo_id, 221);
+        let retained = [
+            placed(&manager, dojo_id, 222),
+            placed(&manager, dojo_id, 223),
+        ]
+        .map(ActiveWorkloadScope::retain_for_handoff);
+        assert_eq!(manager.dojo_references(dojo_id), 3);
+
+        // A clone shares the bookkeeping, as the daemon state's clones do.
+        let resumed = manager.clone();
+        let adopted = retained
+            .iter()
+            .map(|scope| resumed.adopt_scope(scope).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(manager.dojo_references(dojo_id), 3);
+        assert!(matches!(
+            resumed.adopt_scope(&retained[0]),
+            Err(WorkloadUnitError::ScopeAlreadyHeld)
+        ));
+        assert!(matches!(
+            resumed.adopt_scope(live.identity()),
+            Err(WorkloadUnitError::ScopeAlreadyHeld)
+        ));
+        assert_eq!(manager.dojo_references(dojo_id), 3);
+
+        // A second retain and re-adopt round trip does not drift either.
+        let again = adopted
+            .into_iter()
+            .map(ActiveWorkloadScope::retain_for_handoff)
+            .collect::<Vec<_>>();
+        assert_eq!(again, retained);
+        let adopted = again
+            .iter()
+            .map(|scope| manager.adopt_scope(scope).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(manager.dojo_references(dojo_id), 3);
+        assert!(adapter.stops().is_empty());
+        assert_eq!(dojo_starts(&adapter), 1);
+
+        live.release().unwrap();
+        drop(adopted);
+        assert_eq!(manager.dojo_references(dojo_id), 0);
+        assert_eq!(adapter.slice_stops(retained[0].dojo_slice()), 1);
+    }
+
+    #[test]
+    fn prepare_never_stops_a_slice_a_previous_generation_left() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let old = fake_manager(&adapter);
+        let dojo_id = DojoId::new();
+        let retained = placed(&old, dojo_id, 241).retain_for_handoff();
+        drop(old);
+
+        // Until the leftover slice is adopted, every prepare into its Dojo
+        // fails on the existing unit and stops nothing.
+        let fresh = fake_manager(&adapter);
+        for _ in 0..3 {
+            let Err(error) = fresh.prepare(dojo_id, SplintId::new(), 1) else {
+                panic!("prepare into a leftover slice must fail");
+            };
+            assert!(is_unit_exists(&error));
+            assert_eq!(fresh.dojo_references(dojo_id), 0);
+        }
+        assert!(adapter.stops().is_empty());
+        assert!(adapter.is_loaded(retained.dojo_slice()));
+        assert!(adapter.is_loaded(retained.splint_scope()));
+
+        let adopted = fresh.adopt_scope(&retained).unwrap();
+        assert_eq!(fresh.dojo_references(dojo_id), 1);
+        let sibling = placed(&fresh, dojo_id, 242);
+        assert_eq!(fresh.dojo_references(dojo_id), 2);
+        assert!(adapter.stops().is_empty());
+
+        adopted.release().unwrap();
+        sibling.release().unwrap();
+        assert_eq!(adapter.slice_stops(retained.dojo_slice()), 1);
+    }
+
+    #[test]
+    fn adoption_fails_closed_without_stopping_anything() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let old = fake_manager(&adapter);
+        let dojo_id = DojoId::new();
+        let retained = placed(&old, dojo_id, 231).retain_for_handoff();
+        let other = placed(&old, dojo_id, 232).retain_for_handoff();
+        let fresh = fake_manager(&adapter);
+        let mismatch = |scope: &RetainedWorkloadScope| {
+            matches!(
+                fresh.adopt_scope(scope),
+                Err(WorkloadUnitError::RetainedScopeMismatch)
+            )
+        };
+        let set_pid_unit = |unit: Option<&str>| {
+            let pids = &mut adapter.systemd.lock().unwrap().pids;
+            match unit {
+                Some(unit) => pids.insert(231, unit.to_owned()),
+                None => pids.remove(&231),
+            };
+        };
+        let splint_id = retained.splint_id();
+        let incarnation = retained.incarnation();
+
+        // The process is in another Splint's scope.
+        set_pid_unit(Some(other.splint_scope()));
+        assert!(mismatch(&retained));
+        // The process exited, so systemd has no unit for it.
+        set_pid_unit(None);
+        assert!(mismatch(&retained));
+        set_pid_unit(Some(retained.splint_scope()));
+        // Invalid PIDs never reach GetUnitByPID, which reads 0 as the caller.
+        for pid in [0, u32::MAX] {
+            assert!(mismatch(&RetainedWorkloadScope::new(
+                dojo_id,
+                splint_id,
+                incarnation,
+                pid
+            )));
+        }
+        // Another Dojo names another slice than the scope runs in.
+        assert!(mismatch(&RetainedWorkloadScope::new(
+            DojoId::new(),
+            splint_id,
+            incarnation,
+            231
+        )));
+        // Another incarnation names a scope that is not loaded.
+        assert!(mismatch(&RetainedWorkloadScope::new(
+            dojo_id,
+            splint_id,
+            incarnation + 1,
+            231
+        )));
+        // The Dojo slice is gone.
+        adapter
+            .systemd
+            .lock()
+            .unwrap()
+            .units
+            .remove(retained.dojo_slice());
+        assert!(mismatch(&retained));
+
+        assert!(adapter.stops().is_empty());
+        assert_eq!(fresh.dojo_references(dojo_id), 0);
+        assert!(adapter.is_loaded(retained.splint_scope()));
+        assert!(adapter.is_loaded(other.splint_scope()));
+    }
+
+    #[test]
+    #[ignore = "requires a running systemd user manager and creates disposable transient units"]
+    fn systemd_retained_scope_survives_and_is_adopted_by_a_fresh_manager() {
+        let old = WorkloadUnitManager::connect(WorkloadMemoryPolicy::default(), None).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let retained = old
+            .prepare(DojoId::new(), SplintId::new(), 1)
+            .unwrap()
+            .place(identity(pid))
+            .unwrap()
+            .retain_for_handoff();
+        old.shutdown().unwrap();
+
+        let fresh = WorkloadUnitManager::connect(WorkloadMemoryPolicy::default(), None).unwrap();
+        let elsewhere = RetainedWorkloadScope::new(
+            DojoId::new(),
+            retained.splint_id(),
+            retained.incarnation(),
+            pid,
+        );
+        assert!(matches!(
+            fresh.adopt_scope(&elsewhere),
+            Err(WorkloadUnitError::RetainedScopeMismatch)
+        ));
+        let adopted = fresh.adopt_scope(&retained).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+
+        adopted.release().unwrap();
+        child.wait().unwrap();
+        fresh.shutdown().unwrap();
+        let systemd = SystemdUserManager::connect(None).unwrap();
+        assert_systemd_unit_absent(&systemd, retained.splint_scope());
+        assert_systemd_unit_absent(&systemd, retained.dojo_slice());
+        systemd.shutdown().unwrap();
     }
 
     #[test]

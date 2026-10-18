@@ -1,7 +1,6 @@
 mod agent_status;
 mod audit;
 mod candidate_acquire;
-mod cgroup;
 mod consent;
 mod handoff_requests;
 mod omarchy_environment;
@@ -26,7 +25,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager};
 use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
@@ -34,7 +32,9 @@ use splinterd::{
     CompactSubscription, HandoffCheckpointBudget, LiveError, LiveEvent, LiveScrollbackPage,
     LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
     MAX_LIVE_SPLINTS, ProcessExit, ProcessIncarnation, SubscriptionReceive,
-    TerminalPublicationMemoryLease, authorization, executable_identity,
+    TerminalPublicationMemoryLease, authorization,
+    cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager},
+    executable_identity,
     handoff_coordinator::ForwardHandoffAuthority,
     handoff_prepare::{
         CaptureLimits, HandoffCaptures, ListenerDescriptors, ManifestInputs, PreparedManifests,
