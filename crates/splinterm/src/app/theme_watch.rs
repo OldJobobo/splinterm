@@ -9,7 +9,7 @@ use splinterm::{
     ThemeUpdate, WindowTopologyUpdate, WindowUpdate,
     config::{
         AppConfig, OmarchyThemeSelection, ResolvedTheme, ThemeSource, load_live_omarchy_theme,
-        load_theme, load_theme_source,
+        load_omarchy_shell, load_theme, load_theme_source,
     },
 };
 use tokio::sync::mpsc;
@@ -22,7 +22,11 @@ type ThemeFileFingerprint = (u64, u64, u64, i64, i64);
 /// ordered roots per poll, so a migration or root change is followed live.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveThemeSource<'a> {
-    Omarchy { index: usize, theme_dir: &'a Path },
+    Omarchy {
+        index: usize,
+        theme_dir: &'a Path,
+        user_shell: Option<&'a Path>,
+    },
     Json(&'a Path),
 }
 
@@ -36,6 +40,7 @@ fn active_theme_source<'a>(
             ActiveThemeSource::Omarchy {
                 index,
                 theme_dir: &roots.candidates()[index],
+                user_shell: roots.user_shell(),
             }
         }
         ThemeSource::Json(path) => ActiveThemeSource::Json(path),
@@ -54,7 +59,7 @@ fn theme_file_fingerprint(path: &Path) -> Option<ThemeFileFingerprint> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum ThemeSourceFingerprint {
+enum PaletteFingerprint {
     Omarchy {
         root: PathBuf,
         directory: Option<ThemeFileFingerprint>,
@@ -64,29 +69,67 @@ enum ThemeSourceFingerprint {
     Json(Option<ThemeFileFingerprint>),
 }
 
-fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerprint {
-    match source {
-        ActiveThemeSource::Omarchy { theme_dir, .. } => ThemeSourceFingerprint::Omarchy {
-            root: theme_dir.to_path_buf(),
-            directory: theme_file_fingerprint(theme_dir),
-            colors: theme_file_fingerprint(&theme_dir.join("colors.toml")),
-            foot: theme_file_fingerprint(&theme_dir.join("foot.ini")),
-        },
-        ActiveThemeSource::Json(path) => ThemeSourceFingerprint::Json(theme_file_fingerprint(path)),
+/// The theme's own `shell.toml` and the user's override.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShellFingerprint {
+    theme: Option<ThemeFileFingerprint>,
+    user: Option<ThemeFileFingerprint>,
+}
+
+impl ShellFingerprint {
+    fn of(theme_dir: &Path, user_shell: Option<&Path>) -> Self {
+        Self {
+            theme: theme_file_fingerprint(&theme_dir.join("shell.toml")),
+            user: user_shell.and_then(theme_file_fingerprint),
+        }
     }
 }
 
-fn resolve_configured_theme(
-    source: &ThemeSource,
-    alpha_override: Option<u16>,
-    blur_override: Option<bool>,
-) -> Result<ResolvedTheme> {
-    load_theme_source(source).map(|theme| theme.with_color_overrides(alpha_override, blur_override))
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ThemeSourceFingerprint {
+    palette: PaletteFingerprint,
+    shell: Option<ShellFingerprint>,
+}
+
+fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerprint {
+    match source {
+        ActiveThemeSource::Omarchy {
+            theme_dir,
+            user_shell,
+            ..
+        } => ThemeSourceFingerprint {
+            palette: PaletteFingerprint::Omarchy {
+                root: theme_dir.to_path_buf(),
+                directory: theme_file_fingerprint(theme_dir),
+                colors: theme_file_fingerprint(&theme_dir.join("colors.toml")),
+                foot: theme_file_fingerprint(&theme_dir.join("foot.ini")),
+            },
+            shell: Some(ShellFingerprint::of(theme_dir, user_shell)),
+        },
+        ActiveThemeSource::Json(path) => ThemeSourceFingerprint {
+            palette: PaletteFingerprint::Json(theme_file_fingerprint(path)),
+            shell: None,
+        },
+    }
+}
+
+/// Layers the Omarchy shell settings for `theme_dir` onto a resolved palette.
+fn with_omarchy_shell(
+    mut theme: ResolvedTheme,
+    theme_dir: &Path,
+    user_shell: Option<&Path>,
+    previous_text_size_px: Option<u8>,
+    diagnostics: &mut Vec<String>,
+) -> ResolvedTheme {
+    let load = load_omarchy_shell(theme_dir, user_shell, previous_text_size_px);
+    diagnostics.extend(load.diagnostics);
+    theme.shell = load.settings;
+    theme
 }
 
 struct StartupThemeLoad {
     theme: ResolvedTheme,
-    diagnostic: Option<String>,
+    diagnostics: Vec<String>,
 }
 
 fn prepare_startup_theme(
@@ -94,17 +137,27 @@ fn prepare_startup_theme(
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
 ) -> StartupThemeLoad {
-    match resolve_configured_theme(source, alpha_override, blur_override) {
-        Ok(theme) => StartupThemeLoad {
+    let mut diagnostics = Vec::new();
+    let theme = load_theme_source(source).unwrap_or_else(|error| {
+        diagnostics.push(format!("{error:#}; using safe fallback palette"));
+        ResolvedTheme::default()
+    });
+    let theme = match source {
+        ThemeSource::Omarchy(roots) => with_omarchy_shell(
             theme,
-            diagnostic: None,
-        },
-        Err(error) => StartupThemeLoad {
-            theme: ResolvedTheme::default().with_color_overrides(alpha_override, blur_override),
-            diagnostic: Some(format!(
-                "splinterm theme: {error:#}; using safe fallback palette"
-            )),
-        },
+            roots.select(),
+            roots.user_shell(),
+            None,
+            &mut diagnostics,
+        ),
+        ThemeSource::Json(_) => theme,
+    };
+    StartupThemeLoad {
+        theme: theme.with_color_overrides(alpha_override, blur_override),
+        diagnostics: diagnostics
+            .into_iter()
+            .map(|diagnostic| format!("splinterm theme: {diagnostic}"))
+            .collect(),
     }
 }
 
@@ -117,8 +170,8 @@ fn load_startup_theme_with_reporter(
         config.background_alpha,
         config.background_blur,
     );
-    if let Some(diagnostic) = loaded.diagnostic {
-        report(&diagnostic);
+    for diagnostic in &loaded.diagnostics {
+        report(diagnostic);
     }
     loaded.theme
 }
@@ -129,18 +182,31 @@ pub(in crate::app) fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
 
 /// Loads the active source. A coherent Omarchy load records its root as the
 /// last good one, which `OmarchyThemeSelection` holds through transient gaps.
+/// Rejected shell settings are reported through `shell_diagnostics` and never
+/// reject the palette.
 fn resolve_live_theme_update(
     source: ActiveThemeSource<'_>,
     selection: &mut OmarchyThemeSelection,
     alpha_override: Option<u16>,
     blur_override: Option<bool>,
     current: ResolvedTheme,
+    shell_diagnostics: &mut Vec<String>,
 ) -> Result<Option<ResolvedTheme>> {
     let next = match source {
-        ActiveThemeSource::Omarchy { index, theme_dir } => {
+        ActiveThemeSource::Omarchy {
+            index,
+            theme_dir,
+            user_shell,
+        } => {
             let theme = load_live_omarchy_theme(theme_dir)?;
             selection.accepted(index);
-            theme
+            with_omarchy_shell(
+                theme,
+                theme_dir,
+                user_shell,
+                current.shell.text_size_px,
+                shell_diagnostics,
+            )
         }
         ActiveThemeSource::Json(path) => load_theme(path)?,
     }
@@ -151,6 +217,7 @@ fn resolve_live_theme_update(
 #[derive(Default)]
 struct ThemeReloadDiagnostics {
     rejection_reported: bool,
+    shell_reported: Vec<String>,
 }
 
 impl ThemeReloadDiagnostics {
@@ -164,6 +231,18 @@ impl ThemeReloadDiagnostics {
         }
         self.rejection_reported = true;
         Some(format!("splinterm theme reload rejected: {error:#}"))
+    }
+
+    /// Returns the shell diagnostics not already reported by the previous
+    /// load, so a persisting invalid value is reported once.
+    fn shell(&mut self, diagnostics: Vec<String>) -> Vec<String> {
+        let fresh = diagnostics
+            .iter()
+            .filter(|diagnostic| !self.shell_reported.contains(diagnostic))
+            .map(|diagnostic| format!("splinterm theme: {diagnostic}"))
+            .collect();
+        self.shell_reported = diagnostics;
+        fresh
     }
 }
 
@@ -192,13 +271,21 @@ pub(in crate::app) async fn watch_theme(
             continue;
         }
         observed = Some(next_fingerprint);
-        match resolve_live_theme_update(
+        let mut shell_diagnostics = Vec::new();
+        let resolved = resolve_live_theme_update(
             active,
             &mut selection,
             alpha_override,
             blur_override,
             current,
-        ) {
+            &mut shell_diagnostics,
+        );
+        if resolved.is_ok() {
+            for diagnostic in diagnostics.shell(shell_diagnostics) {
+                eprintln!("{diagnostic}");
+            }
+        }
+        match resolved {
             Ok(Some(next)) => {
                 current = next;
                 diagnostics.accepted();
@@ -258,6 +345,7 @@ mod tests {
             alpha_override,
             blur_override,
             current,
+            &mut Vec::new(),
         )
     }
 
@@ -284,14 +372,20 @@ mod tests {
         let ActiveThemeSource::Omarchy { theme_dir, .. } = active else {
             unreachable!("Omarchy source");
         };
-        let loaded =
-            resolve_live_theme_update(active, selection, None, None, ResolvedTheme::default())
-                .map(|theme| {
-                    theme.map_or(ResolvedTheme::default().background, |theme| {
-                        theme.background
-                    })
-                })
-                .ok();
+        let loaded = resolve_live_theme_update(
+            active,
+            selection,
+            None,
+            None,
+            ResolvedTheme::default(),
+            &mut Vec::new(),
+        )
+        .map(|theme| {
+            theme.map_or(ResolvedTheme::default().background, |theme| {
+                theme.background
+            })
+        })
+        .ok();
         (theme_dir.to_path_buf(), loaded)
     }
 
@@ -346,6 +440,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded on-off-on scenario per fixture"
+    )]
     fn glassy_windows_on_off_on_is_followed_live_through_in_place_edits() {
         // Each glassy fixture is the plain one after Omarchy's
         // omarchy-theme-set-glass (4a9c83de) with Glassy Windows on; turning
@@ -430,9 +528,16 @@ mod tests {
                 assert_ne!(next_fingerprint, observed, "{name} step {step}");
                 observed = next_fingerprint;
                 let active = active_theme_source(&source, &mut selection);
-                let next = resolve_live_theme_update(active, &mut selection, None, None, current)
-                    .unwrap()
-                    .expect("a glass toggle publishes a theme update");
+                let next = resolve_live_theme_update(
+                    active,
+                    &mut selection,
+                    None,
+                    None,
+                    current,
+                    &mut Vec::new(),
+                )
+                .unwrap()
+                .expect("a glass toggle publishes a theme update");
                 assert_eq!(
                     (next.background_alpha, next.background_blur),
                     effect,
@@ -660,5 +765,123 @@ mod tests {
         assert_eq!(next.background_alpha, 2468);
         assert!(!next.background_blur);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn shell_toml_layers_are_fingerprinted_and_followed_live() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-shell-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("home/.config/omarchy/shell.toml");
+        write_theme(&theme, 0x10_10_10);
+        let source = ThemeSource::Omarchy(
+            OmarchyThemeRoots::fixed(theme.clone()).with_user_shell(user.clone()),
+        );
+        let mut selection = OmarchyThemeSelection::default();
+        let mut current = ResolvedTheme::default();
+        let mut observed = fingerprint(&source);
+        let mut step = |edit: &dyn Fn(), expected: (u16, u16, Option<u8>), diagnostics: usize| {
+            edit();
+            let next_fingerprint = fingerprint(&source);
+            assert_ne!(next_fingerprint, observed);
+            observed = next_fingerprint;
+            let mut reported = Vec::new();
+            let active = active_theme_source(&source, &mut selection);
+            if let Some(next) = resolve_live_theme_update(
+                active,
+                &mut selection,
+                None,
+                None,
+                current,
+                &mut reported,
+            )
+            .unwrap()
+            {
+                current = next;
+            }
+            let shell = current.shell;
+            assert_eq!(
+                (shell.menu_alpha, shell.popup_alpha, shell.text_size_px),
+                expected
+            );
+            assert_eq!(reported.len(), diagnostics, "{reported:?}");
+        };
+        let half = splinterm::config::parse("[colors]\nalpha=0.5\n")
+            .unwrap()
+            .config
+            .background_alpha
+            .unwrap();
+        let rewrite = |path: &Path, contents: &str| {
+            // omarchy-display-text-size writes a temporary file and renames it.
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let staged = path.with_extension("tmp");
+            std::fs::write(&staged, contents).unwrap();
+            std::fs::rename(&staged, path).unwrap();
+        };
+        step(
+            &|| {
+                rewrite(
+                    &theme.join("shell.toml"),
+                    "[menu]\nbackground-alpha = 0.5\n[font]\nbase-size = 12\n",
+                );
+            },
+            (half, u16::MAX, Some(12)),
+            0,
+        );
+        step(
+            &|| rewrite(&user, "[font]\nbase-size = 16\n"),
+            (half, u16::MAX, Some(16)),
+            0,
+        );
+        step(
+            &|| {
+                rewrite(
+                    &user,
+                    "[font]\nbase-size = 42\n[popups]\nbackground-alpha = 0.5\n",
+                );
+            },
+            (half, half, Some(16)),
+            1,
+        );
+        // omarchy-display-text-size reset drops the user key; the theme's
+        // base-size applies again.
+        step(&|| rewrite(&user, ""), (half, u16::MAX, Some(12)), 0);
+        step(
+            &|| std::fs::remove_file(theme.join("shell.toml")).unwrap(),
+            (u16::MAX, u16::MAX, None),
+            0,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_shell_diagnostics_are_reported_once_until_they_change() {
+        let mut diagnostics = ThemeReloadDiagnostics::default();
+        let invalid = vec!["user/shell.toml: bad".to_owned()];
+        assert_eq!(diagnostics.shell(invalid.clone()).len(), 1);
+        assert_eq!(diagnostics.shell(invalid.clone()), Vec::<String>::new());
+        assert_eq!(diagnostics.shell(Vec::new()), Vec::<String>::new());
+        assert_eq!(diagnostics.shell(invalid).len(), 1);
+    }
+
+    #[test]
+    fn startup_theme_layers_shell_settings_and_reports_rejections() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-shell-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("user-shell.toml");
+        write_theme(&theme, 0x20_20_20);
+        std::fs::write(theme.join("shell.toml"), "[font]\nbase-size = 13\n").unwrap();
+        std::fs::write(&user, "[menu]\nbackground-alpha = 2\n").unwrap();
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme).with_user_shell(user));
+        let loaded = prepare_startup_theme(&source, None, None);
+        assert_eq!(loaded.theme.background, 0x20_20_20);
+        assert_eq!(loaded.theme.shell.text_size_px, Some(13));
+        assert_eq!(loaded.theme.shell.menu_alpha, u16::MAX);
+        assert_eq!(loaded.diagnostics.len(), 1);
+        assert!(loaded.diagnostics[0].starts_with("splinterm theme: "));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

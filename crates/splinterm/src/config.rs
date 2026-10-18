@@ -228,6 +228,9 @@ impl AppConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OmarchyThemeRoots {
     candidates: Vec<PathBuf>,
+    /// The machine-level `~/.config/omarchy/shell.toml` override, layered over
+    /// the active theme's `shell.toml`. Omarchy hard-codes `$HOME/.config`.
+    user_shell: Option<PathBuf>,
 }
 
 /// Consecutive polls a live watcher keeps its last good root while the walk
@@ -241,13 +244,29 @@ impl OmarchyThemeRoots {
     pub fn fixed(theme_dir: PathBuf) -> Self {
         Self {
             candidates: vec![theme_dir],
+            user_shell: None,
         }
     }
 
     /// Explicit candidates, highest priority first; `None` when empty.
     #[must_use]
     pub fn ordered(candidates: Vec<PathBuf>) -> Option<Self> {
-        (!candidates.is_empty()).then_some(Self { candidates })
+        (!candidates.is_empty()).then_some(Self {
+            candidates,
+            user_shell: None,
+        })
+    }
+
+    /// Layers an explicit user `shell.toml` override over the theme's.
+    #[must_use]
+    pub fn with_user_shell(mut self, path: PathBuf) -> Self {
+        self.user_shell = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn user_shell(&self) -> Option<&Path> {
+        self.user_shell.as_deref()
     }
 
     #[must_use]
@@ -269,7 +288,10 @@ impl OmarchyThemeRoots {
         }
         candidates.push(home_state);
         candidates.push(home.join(".config/omarchy/current/theme"));
-        Self { candidates }
+        Self {
+            candidates,
+            user_shell: Some(home.join(".config/omarchy/shell.toml")),
+        }
     }
 
     #[must_use]
@@ -330,6 +352,210 @@ impl OmarchyThemeSelection {
         self.last_good = Some(index);
         self.demotion_polls = 0;
     }
+}
+
+/// Omarchy's `omarchy-display-text-size` range for `[font] base-size`, in px.
+pub const OMARCHY_TEXT_SIZE_PX: std::ops::RangeInclusive<u8> = 9..=20;
+
+/// The Omarchy shell settings Splinterm follows from the layered `shell.toml`
+/// (the active theme's file, then the user's `~/.config/omarchy/shell.toml`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OmarchyShellSettings {
+    /// `[menu] background-alpha`, as Foot-style 16-bit coverage.
+    pub menu_alpha: u16,
+    /// `[popups] background-alpha`, as Foot-style 16-bit coverage.
+    pub popup_alpha: u16,
+    /// Validated `[font] base-size` in px, or `None` when no layer sets it.
+    pub text_size_px: Option<u8>,
+}
+
+impl Default for OmarchyShellSettings {
+    /// Omarchy's template defaults: opaque menus and popups, no text size.
+    fn default() -> Self {
+        Self {
+            menu_alpha: u16::MAX,
+            popup_alpha: u16::MAX,
+            text_size_px: None,
+        }
+    }
+}
+
+/// Effective shell settings plus diagnostics for rejected values.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OmarchyShellLoad {
+    pub settings: OmarchyShellSettings,
+    pub diagnostics: Vec<String>,
+}
+
+/// One `shell.toml` layer: its path, for diagnostics, and its contents when
+/// the file exists.
+#[derive(Clone, Copy, Debug)]
+pub struct OmarchyShellLayer<'a> {
+    pub path: &'a Path,
+    pub contents: Option<&'a str>,
+}
+
+/// Parses `shell.toml` the way the Omarchy shell's `Color.parseShell` does:
+/// `[section]` headers and `key = value` lines, with keys and sections of
+/// `[A-Za-z0-9_-]`, a quoted or bare value, and an optional trailing
+/// `# comment`. Keys outside a section and malformed lines are ignored. The
+/// result maps `section.key` to its raw value; a later line wins.
+fn omarchy_shell_values(raw: &str) -> HashMap<String, String> {
+    fn is_name(text: &str) -> bool {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }
+    let mut values = HashMap::new();
+    let mut section = None;
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            let Some((name, tail)) = rest.split_once(']') else {
+                continue;
+            };
+            let tail = tail.trim_start();
+            if is_name(name) && (tail.is_empty() || tail.starts_with('#')) {
+                section = Some(name.to_owned());
+            }
+            continue;
+        }
+        let Some(section) = section.as_deref() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        let value = if let Some(quoted) = value.strip_prefix(['"', '\'']) {
+            let Some(end) = quoted.find(['"', '\'']) else {
+                continue;
+            };
+            let tail = quoted[end + 1..].trim_start();
+            if !(tail.is_empty() || tail.starts_with('#')) {
+                continue;
+            }
+            &quoted[..end]
+        } else {
+            value
+                .split_once('#')
+                .map_or(value, |(value, _)| value)
+                .trim()
+        };
+        if is_name(key) && !value.is_empty() {
+            values.insert(format!("{section}.{key}"), value.to_owned());
+        }
+    }
+    values
+}
+
+/// Resolves the effective shell settings from the theme layer and the user
+/// override. Like the shell's `mergeShell`, layering is per key: a user key
+/// replaces the theme's value for that key only.
+///
+/// An invalid alpha falls back to Omarchy's opaque default. An invalid
+/// base-size keeps `previous_text_size_px`, so a live edit never drops the
+/// size already in use.
+#[must_use]
+pub fn resolve_omarchy_shell(
+    theme: OmarchyShellLayer<'_>,
+    user: Option<OmarchyShellLayer<'_>>,
+    previous_text_size_px: Option<u8>,
+) -> OmarchyShellLoad {
+    let theme_values = theme.contents.map(omarchy_shell_values).unwrap_or_default();
+    let user_values = user
+        .and_then(|layer| layer.contents)
+        .map(omarchy_shell_values)
+        .unwrap_or_default();
+    let lookup = |key: &str| {
+        user_values
+            .get(key)
+            .map(|value| (user.map_or(theme.path, |layer| layer.path), value.as_str()))
+            .or_else(|| {
+                theme_values
+                    .get(key)
+                    .map(|value| (theme.path, value.as_str()))
+            })
+    };
+    let mut load = OmarchyShellLoad::default();
+    for (section, slot) in [
+        ("menu", &mut load.settings.menu_alpha),
+        ("popups", &mut load.settings.popup_alpha),
+    ] {
+        let Some((origin, raw)) = lookup(&format!("{section}.background-alpha")) else {
+            continue;
+        };
+        match raw.parse::<f32>() {
+            Ok(alpha) if alpha.is_finite() && (0.0..=1.0).contains(&alpha) => {
+                *slot = foot_alpha(alpha);
+            }
+            _ => load.diagnostics.push(format!(
+                "{}: [{section}] background-alpha {raw:?} must be a number from 0.0 to 1.0; using 1.0",
+                origin.display()
+            )),
+        }
+    }
+    load.settings.text_size_px = match lookup("font.base-size") {
+        None => None,
+        Some((origin, raw)) => match raw.parse::<u8>() {
+            Ok(size) if OMARCHY_TEXT_SIZE_PX.contains(&size) => Some(size),
+            _ => {
+                load.diagnostics.push(format!(
+                    "{}: [font] base-size {raw:?} must be a whole number of px from {} to {}; keeping the previous text size",
+                    origin.display(),
+                    OMARCHY_TEXT_SIZE_PX.start(),
+                    OMARCHY_TEXT_SIZE_PX.end()
+                ));
+                previous_text_size_px
+            }
+        },
+    };
+    load
+}
+
+fn read_omarchy_shell_layer(path: &Path, diagnostics: &mut Vec<String>) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            diagnostics.push(format!("read {}: {error}", path.display()));
+            None
+        }
+    }
+}
+
+/// Loads the effective shell settings for one theme directory and an optional
+/// user override. Missing files are ordinary; unreadable ones are reported and
+/// treated as missing.
+#[must_use]
+pub fn load_omarchy_shell(
+    theme_dir: &Path,
+    user_shell: Option<&Path>,
+    previous_text_size_px: Option<u8>,
+) -> OmarchyShellLoad {
+    let theme_path = theme_dir.join("shell.toml");
+    let mut diagnostics = Vec::new();
+    let theme = read_omarchy_shell_layer(&theme_path, &mut diagnostics);
+    let user = user_shell.map(|path| (path, read_omarchy_shell_layer(path, &mut diagnostics)));
+    let mut load = resolve_omarchy_shell(
+        OmarchyShellLayer {
+            path: &theme_path,
+            contents: theme.as_deref(),
+        },
+        user.as_ref().map(|(path, contents)| OmarchyShellLayer {
+            path,
+            contents: contents.as_deref(),
+        }),
+        previous_text_size_px,
+    );
+    diagnostics.append(&mut load.diagnostics);
+    load.diagnostics = diagnostics;
+    load
 }
 
 pub fn default_config_dir() -> PathBuf {
@@ -824,6 +1050,9 @@ pub struct ResolvedTheme {
     pub background_alpha: u16,
     pub background_blur: bool,
     pub ansi: [u32; 16],
+    /// Omarchy shell settings layered from `shell.toml`; Omarchy's defaults
+    /// for other theme sources.
+    pub shell: OmarchyShellSettings,
 }
 
 impl Default for ResolvedTheme {
@@ -848,6 +1077,7 @@ impl Default for ResolvedTheme {
                 0x1d2021, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0xa89984,
                 0x928374, 0xfb4934, 0xb8bb26, 0xfabd2f, 0x83a598, 0xd3869b, 0x8ec07c, 0xebdbb2,
             ],
+            shell: OmarchyShellSettings::default(),
         }
     }
 }
@@ -1004,6 +1234,7 @@ impl ThemePalette {
             background_alpha: foot_alpha(self.alpha),
             background_blur: self.blur,
             ansi,
+            shell: OmarchyShellSettings::default(),
         })
     }
 }
@@ -1187,6 +1418,7 @@ fn resolve_omarchy_theme(colors_raw: &str, foot_raw: &str) -> Result<ResolvedThe
         background_alpha: foot_alpha(alpha),
         background_blur: blur,
         ansi,
+        shell: OmarchyShellSettings::default(),
     })
 }
 
@@ -2508,5 +2740,182 @@ mod tests {
         assert!(inactive_contrast(&faint) >= INACTIVE_TAB_MIN_CONTRAST);
 
         assert!(resolve_omarchy_theme("muted=\"nope\"\n", &foot).is_err());
+    }
+
+    fn shell_layer<'a>(path: &'a str, contents: &'a str) -> OmarchyShellLayer<'a> {
+        OmarchyShellLayer {
+            path: Path::new(path),
+            contents: Some(contents),
+        }
+    }
+
+    #[test]
+    fn omarchy_shell_parser_mirrors_the_shell_line_grammar() {
+        let values = omarchy_shell_values(
+            "top = 1\n# comment\n[menu] # trailing comment\nbackground-alpha = 0.9 # note\ntext = \"#ffffff\" # quoted hash\nborder='hyprland.active-border'\nnot a key\n[bad section]\nbackground-alpha = 0.1\n[popups]\nbackground-alpha=0.5\nbackground-alpha=0.6\n",
+        );
+        // The malformed header keeps [menu], so its key replaces the earlier one.
+        assert_eq!(values.get("menu.background-alpha").unwrap(), "0.1");
+        assert_eq!(values.get("menu.text").unwrap(), "#ffffff");
+        assert_eq!(values.get("menu.border").unwrap(), "hyprland.active-border");
+        // Keys outside a section are ignored, and a malformed header keeps the
+        // previous section, as in the shell's parseShell.
+        assert!(!values.contains_key(".top") && !values.contains_key("top"));
+        assert_eq!(values.get("popups.background-alpha").unwrap(), "0.6");
+        assert_eq!(values.len(), 4);
+    }
+
+    #[test]
+    fn omarchy_shell_layers_user_keys_over_the_theme_with_omarchy_defaults() {
+        let template =
+            include_str!("../tests/fixtures/omarchy4/shell/rendered-template.shell.toml");
+        // The rendered stock template: opaque menus and popups, base-size 12.
+        let stock = resolve_omarchy_shell(shell_layer("theme/shell.toml", template), None, None);
+        assert!(stock.diagnostics.is_empty(), "{:?}", stock.diagnostics);
+        assert_eq!(
+            stock.settings,
+            OmarchyShellSettings {
+                menu_alpha: u16::MAX,
+                popup_alpha: u16::MAX,
+                text_size_px: Some(12),
+            }
+        );
+
+        // A missing theme file and no user file give Omarchy's defaults and no
+        // text size, so Splinterm keeps its own default size.
+        let missing = resolve_omarchy_shell(
+            OmarchyShellLayer {
+                path: Path::new("theme/shell.toml"),
+                contents: None,
+            },
+            None,
+            Some(14),
+        );
+        assert_eq!(missing, OmarchyShellLoad::default());
+
+        // omarchy-display-text-size writes only [font] base-size; every other
+        // key still comes from the theme.
+        let theme = "[menu]\nbackground-alpha = 0.8\n[popups]\nbackground-alpha = 0.9\n[font]\nbase-size = 12\n";
+        let layered = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", theme),
+            Some(shell_layer("user/shell.toml", "[font]\nbase-size = 16\n")),
+            None,
+        );
+        assert_eq!(layered.diagnostics, Vec::<String>::new());
+        assert_eq!(layered.settings.menu_alpha, foot_alpha(0.8));
+        assert_eq!(layered.settings.popup_alpha, foot_alpha(0.9));
+        assert_eq!(layered.settings.text_size_px, Some(16));
+
+        let user_alpha = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", theme),
+            Some(shell_layer(
+                "user/shell.toml",
+                "[menu]\nbackground-alpha = 0.5\n",
+            )),
+            None,
+        );
+        assert_eq!(user_alpha.settings.menu_alpha, foot_alpha(0.5));
+        assert_eq!(user_alpha.settings.popup_alpha, foot_alpha(0.9));
+        assert_eq!(user_alpha.settings.text_size_px, Some(12));
+
+        // A theme base-size applies when the user sets none.
+        let theme_size = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", "[font]\nbase-size = 14\n"),
+            Some(OmarchyShellLayer {
+                path: Path::new("user/shell.toml"),
+                contents: None,
+            }),
+            None,
+        );
+        assert_eq!(theme_size.settings.text_size_px, Some(14));
+    }
+
+    #[test]
+    fn omarchy_shell_rejects_invalid_values_with_diagnostics() {
+        for raw in ["1.5", "-0.1", "nan", "inf", "opaque", "\"0.5x\""] {
+            let load = resolve_omarchy_shell(
+                shell_layer("theme/shell.toml", "[popups]\nbackground-alpha = 0.7\n"),
+                Some(shell_layer(
+                    "user/shell.toml",
+                    &format!("[popups]\nbackground-alpha = {raw}\n"),
+                )),
+                None,
+            );
+            assert_eq!(load.settings.popup_alpha, u16::MAX, "{raw}");
+            assert_eq!(load.diagnostics.len(), 1, "{raw}");
+            assert!(load.diagnostics[0].starts_with("user/shell.toml: [popups]"));
+        }
+        for (raw, accepted) in [
+            ("9", Some(9)),
+            ("20", Some(20)),
+            ("8", None),
+            ("21", None),
+            ("12.5", None),
+            ("-12", None),
+            ("big", None),
+            ("\"16\"", Some(16)),
+        ] {
+            let load = resolve_omarchy_shell(
+                shell_layer("theme/shell.toml", &format!("[font]\nbase-size = {raw}\n")),
+                None,
+                Some(13),
+            );
+            assert_eq!(load.settings.text_size_px, accepted.or(Some(13)), "{raw}");
+            assert_eq!(
+                load.diagnostics.len(),
+                usize::from(accepted.is_none()),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn omarchy_shell_files_load_from_the_theme_dir_and_user_override() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-omarchy-shell-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("user/shell.toml");
+        fs::create_dir_all(&theme).unwrap();
+        assert_eq!(
+            load_omarchy_shell(&theme, Some(&user), None),
+            OmarchyShellLoad::default()
+        );
+        fs::write(theme.join("shell.toml"), "[font]\nbase-size = 12\n").unwrap();
+        fs::create_dir_all(user.parent().unwrap()).unwrap();
+        fs::write(&user, "[font]\nbase-size = 18\n").unwrap();
+        assert_eq!(
+            load_omarchy_shell(&theme, Some(&user), None)
+                .settings
+                .text_size_px,
+            Some(18)
+        );
+        assert_eq!(
+            load_omarchy_shell(&theme, None, None).settings.text_size_px,
+            Some(12)
+        );
+        // An unreadable layer is reported and treated as missing.
+        fs::remove_file(&user).unwrap();
+        fs::create_dir(&user).unwrap();
+        let unreadable = load_omarchy_shell(&theme, Some(&user), None);
+        assert_eq!(unreadable.settings.text_size_px, Some(12));
+        assert_eq!(unreadable.diagnostics.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn omarchy_theme_roots_layer_the_hard_coded_home_shell_override() {
+        let roots = OmarchyThemeRoots::from_values(
+            Some(OsString::from("/srv/state")),
+            Some(OsString::from("/home/test")),
+        );
+        assert_eq!(
+            roots.user_shell(),
+            Some(Path::new("/home/test/.config/omarchy/shell.toml"))
+        );
+        assert_eq!(
+            OmarchyThemeRoots::fixed(PathBuf::from("/theme")).user_shell(),
+            None
+        );
     }
 }
