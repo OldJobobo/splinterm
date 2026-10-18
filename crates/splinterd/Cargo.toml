@@ -55,6 +55,12 @@ harness = false
 name = "handoff_exec_resume"
 harness = false
 
+# The full two-generation handoff crosses the same guarded boundary, then
+# really execs: its old-generation stages need main-thread-only processes too.
+[[test]]
+name = "handoff_exec_adoption"
+harness = false
+
 # A workspace `unsafe_code = "forbid"` cannot be overridden locally. The package
 # has exactly two audited post-exec invocations of the inherited-FD leaf crate
 # (the candidate claim and the sealed-preflight launcher's closure), so it
