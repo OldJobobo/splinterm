@@ -1658,6 +1658,7 @@ struct ResumedRound {
 /// It reuses the recorded install prefix and audit identity (never
 /// `start_fresh`, whose prefix derivation refuses after an upgrade), the
 /// retained rollback authority, the persisted Topology, the policy store,
+/// the unused-close provenance ([`carry_unused_provenance`]),
 /// and the audit records. The policy file is reloaded once, as candidate
 /// adoption reloads it: a reload signalled during the handoff was abandoned
 /// under the fence and would otherwise never happen. Connection-owned state (controllers,
@@ -1702,6 +1703,7 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         handoff_listeners: previous.handoff_listeners,
     });
     *state.audit.lock().await = audit;
+    carry_unused_provenance(&previous, &state, &topology);
     drop(previous);
     refresh_resumed_state(&state, &topology, policy_path, &boundary_failure).await;
 
@@ -1762,6 +1764,24 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         listeners,
         agent_status_timer,
     }
+}
+
+/// Moves the unused-close provenance (plain default-shell Dojos and Lairs
+/// with a generated name) into the resumed state, pruned to what the
+/// resumed Topology still holds, so `CloseUnusedDojo` judges each Dojo by
+/// what it recorded rather than as a launch it never saw.
+///
+/// The entries are kept as recorded. Capture marked every captured Splint
+/// used, and its resumed actor starts with that latch set, so a captured
+/// plain Dojo still reports `Input` rather than closing; that latch is not
+/// undone here.
+fn carry_unused_provenance(previous: &DaemonState, state: &DaemonState, topology: &Topology) {
+    let mut plain_dojos = std::mem::take(&mut *previous.plain_dojos.lock().unwrap());
+    plain_dojos.retain(|dojo_id, _| topology.find_dojo(*dojo_id).is_some());
+    *state.plain_dojos.lock().unwrap() = plain_dojos;
+    let mut generated_lairs = std::mem::take(&mut *previous.generated_lairs.lock().unwrap());
+    generated_lairs.retain(|lair_id| topology.find_lair(*lair_id).is_some());
+    *state.generated_lairs.lock().unwrap() = generated_lairs;
 }
 
 /// Brings a resumed state up to date before any Splint is served again.
@@ -15531,8 +15551,43 @@ mod tests {
         /// Each live Splint's identity before the handoff.
         live: Vec<(SplintId, ProcessIncarnation, u32)>,
         exited: SplintId,
+        /// A plain default-shell Dojo in a Lair with a generated name.
+        plain: (LairId, DojoId),
         socket: PathBuf,
         directory: PathBuf,
+    }
+
+    /// Creates a plain default-shell Lair whose name the client generated,
+    /// which an unused close would remove with its only Dojo, and checks both
+    /// provenance marks are recorded.
+    async fn generated_plain_lair(
+        state: &Arc<DaemonState>,
+    ) -> ((LairId, DojoId), LiveSplintHandle) {
+        let revision = state.topology.read().await.revision();
+        let Response::LairCreated { lair, .. } = trusted_request(
+            state,
+            81,
+            Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "Lair 9".into(),
+                launch: plain_shell_launch(),
+                generated_name: true,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("plain create response was not returned");
+        };
+        let dojo_id = lair.dojos[0].id;
+        assert!(state.plain_dojos.lock().unwrap().contains_key(&dojo_id));
+        assert!(state.generated_lairs.lock().unwrap().contains(&lair.id));
+        let handle = state
+            .runtimes
+            .lock()
+            .await
+            .handle(lair.dojos[0].default_focus)
+            .unwrap();
+        ((lair.id, dojo_id), handle)
     }
 
     /// A valid owner-only policy file with one rule naming `splint_id`.
@@ -15555,7 +15610,8 @@ mod tests {
     }
 
     /// Plays one handoff round on its own runtime, with serve's part played
-    /// here: two live `cat` Splints and one that exited, an `Execute` with
+    /// here: two live `cat` Splints, a plain default shell in a Lair with a
+    /// generated name, and one Splint that exited, an `Execute` with
     /// exec authority, its request task aborted as serve aborts every
     /// connection task, the actors ended for handoff, the runtime stopped,
     /// and the exec boundary crossed. The state records the listeners at
@@ -15572,11 +15628,21 @@ mod tests {
             image_listener: listeners.image_listener.as_raw_fd(),
         };
         let runtime = daemon_runtime();
-        let (stopped, live, exited) = runtime.block_on(async {
+        let (stopped, live, exited, plain) = runtime.block_on(async {
             let mut state = test_state_with_backend(false, test_pty_backend());
             Arc::get_mut(&mut state).unwrap().handoff_listeners = Some(recorded);
             let handles = live_cat_splints(&state, 2).await;
             let exited = exited_splint(&state, 3).await;
+            let (plain, plain_handle) = generated_plain_lair(&state).await;
+            // Provenance for a Dojo the resumed Topology no longer holds.
+            state.plain_dojos.lock().unwrap().insert(
+                DojoId::new(),
+                PlainDojo {
+                    splint_id: SplintId::new(),
+                    incarnation: 1,
+                    organized: None,
+                },
+            );
             let report = gated_handoff_report(&state).await;
             let execute = tokio::spawn({
                 let state = Arc::clone(&state);
@@ -15608,14 +15674,15 @@ mod tests {
             let stopped =
                 stop_for_handoff(Arc::clone(&state), ServeHandoff { exec, listeners }).await;
             assert!(stopped.actors_handed_off);
-            assert_eq!(stopped.handed_off.len(), 2);
+            assert_eq!(stopped.handed_off.len(), 3);
             assert_eq!(stopped.uncaptured.len(), 1);
             assert!(state.runtimes.lock().await.handles().is_empty());
             let live = handles
                 .iter()
+                .chain([&plain_handle])
                 .map(|handle| (handle.splint_id, handle.incarnation, handle.child_pid()))
                 .collect::<Vec<_>>();
-            (stopped, live, exited)
+            (stopped, live, exited, plain)
         });
         let mut resumed = stop_runtime_and_cross(runtime, stopped);
         assert!(!resumed.workload_cgroups_required);
@@ -15629,9 +15696,61 @@ mod tests {
             resumed,
             live,
             exited,
+            plain,
             socket,
             directory,
         }
+    }
+
+    /// The unused-close provenance survived the resume, pruned to the
+    /// resumed Topology.
+    async fn assert_unused_provenance_survived(state: &Arc<DaemonState>, plain: (LairId, DojoId)) {
+        let (plain_lair, plain_dojo) = plain;
+        assert_eq!(
+            state
+                .plain_dojos
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [plain_dojo]
+        );
+        assert_eq!(
+            state
+                .generated_lairs
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [plain_lair]
+        );
+        // Capture marked the plain Splint used, and its resumed actor
+        // keeps that latch, so the close reports input rather than the
+        // `Launch` a lost provenance entry would report; the Dojo stays.
+        let close = trusted_request(
+            state,
+            81,
+            Request::CloseUnusedDojo {
+                dojo_id: plain_dojo,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                close,
+                Response::UnusedDojoClose {
+                    outcome: UnusedDojoCloseOutcome::Used {
+                        reason: DojoUse::Input
+                    },
+                    ..
+                }
+            ),
+            "{close:?}"
+        );
+        assert!(state.topology.read().await.find_dojo(plain_dojo).is_some());
     }
 
     /// Serves the resumed round on a new runtime and checks the D5 outcome:
@@ -15643,6 +15762,7 @@ mod tests {
             resumed,
             live,
             exited,
+            plain,
             socket,
             directory,
         } = round;
@@ -15660,6 +15780,7 @@ mod tests {
             let policy = state.policy.lock().await.snapshot();
             assert!(policy.diagnostic.is_none(), "{:?}", policy.diagnostic);
             assert_eq!(policy.document.rule_count(), 1);
+            assert_unused_provenance_survived(&round.state, plain).await;
             let registered = state.runtimes.lock().await.handles();
             assert_eq!(registered.len(), live.len());
             assert!(!registered.contains_key(&exited));
@@ -15703,9 +15824,11 @@ mod tests {
                     .state,
                 SplintState::Exited(3)
             );
-            // The resumed actor reaps its child, and its exit is recorded.
-            handles[0].input(vec![0x04]).await.unwrap();
-            wait_for_splint_state(state, handles[0].splint_id, SplintState::Exited(0)).await;
+            // The resumed actor reaps its child, and its exit is recorded; a
+            // `cat` exits 0 at end of input.
+            let cat = &registered[&live[0].0];
+            cat.input(vec![0x04]).await.unwrap();
+            wait_for_splint_state(state, cat.splint_id, SplintState::Exited(0)).await;
 
             let listener = UnixListener::from_std(round.listeners.listener).unwrap();
             let client = UnixStream::connect(&socket).await.unwrap();
