@@ -1982,7 +1982,7 @@ struct PresentationState {
     pending_font_update: Option<FontUpdate>,
     /// The followed Omarchy text size the render context last applied. A theme
     /// whose text size differs is reconciled through the font path.
-    applied_text_size_px: Option<u8>,
+    applied_text_size_px: Option<u16>,
     cursor_style: CursorStyle,
     cursor_blink: bool,
     title_override: Option<String>,

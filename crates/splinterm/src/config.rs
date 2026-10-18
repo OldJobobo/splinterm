@@ -231,15 +231,6 @@ impl AppConfig {
     }
 }
 
-/// Omarchy's terminal point size for a shell text size, as
-/// `omarchy-display-text-size` writes it for alacritty, kitty, ghostty and
-/// foot: `px × 9/12`, rounded half up to a whole point (12 px → 9 pt,
-/// 16 px → 12 pt).
-#[must_use]
-pub fn omarchy_terminal_point_size(px: u8) -> f32 {
-    f32::from((u16::from(px) * 9 + 6) / 12)
-}
-
 /// The active Omarchy theme directories Splinterm may read, highest priority
 /// first:
 ///
@@ -382,8 +373,14 @@ impl OmarchyThemeSelection {
     }
 }
 
-/// Omarchy's `omarchy-display-text-size` range for `[font] base-size`, in px.
-pub const OMARCHY_TEXT_SIZE_PX: std::ops::RangeInclusive<u8> = 9..=20;
+/// The Omarchy shell's `[font] base-size` default and floor, in px. The shell
+/// uses the default when no layer sets a parseable value and floors smaller
+/// values at 1 px; only `omarchy-display-text-size` restricts input to 9–20.
+pub const OMARCHY_DEFAULT_TEXT_SIZE_PX: u16 = 12;
+const OMARCHY_MIN_TEXT_SIZE_PX: u16 = 1;
+
+/// The point sizes Splinterm's renderer accepts for a base font size.
+const RENDERER_POINT_SIZES: std::ops::RangeInclusive<u16> = 6..=96;
 
 /// The Omarchy shell settings Splinterm follows from the layered `shell.toml`
 /// (the active theme's file, then the user's `~/.config/omarchy/shell.toml`).
@@ -393,8 +390,8 @@ pub struct OmarchyShellSettings {
     pub menu_alpha: u16,
     /// `[popups] background-alpha`, as Foot-style 16-bit coverage.
     pub popup_alpha: u16,
-    /// Validated `[font] base-size` in px, or `None` when no layer sets it.
-    pub text_size_px: Option<u8>,
+    /// Effective `[font] base-size` in px, or `None` when no layer sets it.
+    pub text_size_px: Option<u16>,
 }
 
 impl Default for OmarchyShellSettings {
@@ -408,11 +405,23 @@ impl Default for OmarchyShellSettings {
     }
 }
 
-/// Effective shell settings plus diagnostics for rejected values.
+/// Which followed setting a shell diagnostic concerns, so a caller can drop
+/// diagnostics for settings it ignores.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OmarchyShellConcern {
+    /// A `shell.toml` layer could not be read.
+    Read,
+    /// `[menu]` or `[popups]` `background-alpha`.
+    PanelAlpha,
+    /// `[font] base-size`.
+    TextSize,
+}
+
+/// Effective shell settings plus diagnostics for rejected or adjusted values.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OmarchyShellLoad {
     pub settings: OmarchyShellSettings,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<(OmarchyShellConcern, String)>,
 }
 
 /// One `shell.toml` layer: its path, for diagnostics, and its contents when
@@ -423,11 +432,38 @@ pub struct OmarchyShellLayer<'a> {
     pub contents: Option<&'a str>,
 }
 
+/// `-?\d+(\.\d+)?`: the shell's numeric value shape.
+fn is_shell_number(text: &str) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    match unsigned.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(unsigned),
+    }
+}
+
+/// Whether a bare (unquoted) value has one of the shapes the shell's
+/// `parseShell` accepts: a number, a border-width list of two to four numbers,
+/// or a word `[A-Za-z][A-Za-z0-9_-]*`.
+fn is_shell_bare_value(value: &str) -> bool {
+    let numbers = value.split_whitespace().collect::<Vec<_>>();
+    let word = value
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    word || ((1..=4).contains(&numbers.len()) && numbers.iter().all(|part| is_shell_number(part)))
+}
+
 /// Parses `shell.toml` the way the Omarchy shell's `Color.parseShell` does:
 /// `[section]` headers and `key = value` lines, with keys and sections of
-/// `[A-Za-z0-9_-]`, a quoted or bare value, and an optional trailing
-/// `# comment`. Keys outside a section and malformed lines are ignored. The
-/// result maps `section.key` to its raw value; a later line wins.
+/// `[A-Za-z0-9_-]` and an optional trailing `# comment`. A value is a quoted
+/// string without quotes inside, or a bare number, border-width list or word.
+/// Any other line is dropped, so its key stays unset and a lower layer still
+/// applies. Keys outside a section are ignored. The result maps `section.key`
+/// to its raw value; a later line wins.
 fn omarchy_shell_values(raw: &str) -> HashMap<String, String> {
     fn is_name(text: &str) -> bool {
         !text.is_empty()
@@ -470,10 +506,14 @@ fn omarchy_shell_values(raw: &str) -> HashMap<String, String> {
             }
             &quoted[..end]
         } else {
-            value
+            let bare = value
                 .split_once('#')
                 .map_or(value, |(value, _)| value)
-                .trim()
+                .trim();
+            if !is_shell_bare_value(bare) {
+                continue;
+            }
+            bare
         };
         if is_name(key) && !value.is_empty() {
             values.insert(format!("{section}.{key}"), value.to_owned());
@@ -482,18 +522,64 @@ fn omarchy_shell_values(raw: &str) -> HashMap<String, String> {
     values
 }
 
+/// JavaScript `parseInt(value, 10)`, which the shell uses for `base-size`:
+/// leading whitespace, an optional sign and the leading digits; `None` when
+/// there are no digits. Saturates instead of growing without bound.
+fn js_parse_int(value: &str) -> Option<i64> {
+    let value = value.trim_start();
+    let (negative, digits) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let end = digits
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return None;
+    }
+    let magnitude = digits[..end].bytes().fold(0_i64, |total, digit| {
+        total
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit - b'0'))
+    });
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+/// Omarchy's terminal point size for a shell text size, as
+/// `omarchy-display-text-size` writes it for alacritty, kitty, ghostty and
+/// foot: `px × 9/12`, rounded half up to a whole point (12 px → 9 pt,
+/// 16 px → 12 pt), before Splinterm's renderer bounds.
+fn omarchy_unbounded_point_size(px: u16) -> u32 {
+    (u32::from(px) * 9 + 6) / 12
+}
+
+/// The followed point size for a shell text size: Omarchy's terminal mapping,
+/// clamped to the 6–96 pt Splinterm's renderer accepts.
+#[must_use]
+pub fn omarchy_terminal_point_size(px: u16) -> f32 {
+    let points = omarchy_unbounded_point_size(px).clamp(
+        u32::from(*RENDERER_POINT_SIZES.start()),
+        u32::from(*RENDERER_POINT_SIZES.end()),
+    );
+    f32::from(u16::try_from(points).unwrap_or(u16::MAX))
+}
+
 /// Resolves the effective shell settings from the theme layer and the user
 /// override. Like the shell's `mergeShell`, layering is per key: a user key
 /// replaces the theme's value for that key only.
 ///
-/// An invalid alpha falls back to Omarchy's opaque default. An invalid
-/// base-size keeps `previous_text_size_px`, so a live edit never drops the
-/// size already in use.
+/// Alpha follows the shell's `pickAlpha`: a number is clamped to 0.0–1.0 and
+/// anything else falls back to Omarchy's opaque default. `base-size` follows
+/// the shell's `parseInt` and its 1 px floor. A `base-size` with no digits
+/// keeps `previous_text_size_px`, so a live edit never drops the size in use,
+/// or falls back to Omarchy's 12 px when there is none.
 #[must_use]
 pub fn resolve_omarchy_shell(
     theme: OmarchyShellLayer<'_>,
     user: Option<OmarchyShellLayer<'_>>,
-    previous_text_size_px: Option<u8>,
+    previous_text_size_px: Option<u16>,
 ) -> OmarchyShellLoad {
     let theme_values = theme.contents.map(omarchy_shell_values).unwrap_or_default();
     let user_values = user
@@ -518,40 +604,75 @@ pub fn resolve_omarchy_shell(
         let Some((origin, raw)) = lookup(&format!("{section}.background-alpha")) else {
             continue;
         };
-        match raw.parse::<f32>() {
-            Ok(alpha) if alpha.is_finite() && (0.0..=1.0).contains(&alpha) => {
-                *slot = foot_alpha(alpha);
+        match raw.trim().parse::<f32>() {
+            Ok(alpha) if alpha.is_finite() => {
+                let clamped = alpha.clamp(0.0, 1.0);
+                if !(0.0..=1.0).contains(&alpha) {
+                    load.diagnostics.push((
+                        OmarchyShellConcern::PanelAlpha,
+                        format!(
+                            "{}: [{section}] background-alpha {raw:?} is outside 0.0 to 1.0; using {clamped:.1}",
+                            origin.display()
+                        ),
+                    ));
+                }
+                *slot = foot_alpha(clamped);
             }
-            _ => load.diagnostics.push(format!(
-                "{}: [{section}] background-alpha {raw:?} must be a number from 0.0 to 1.0; using 1.0",
-                origin.display()
+            _ => load.diagnostics.push((
+                OmarchyShellConcern::PanelAlpha,
+                format!(
+                    "{}: [{section}] background-alpha {raw:?} is not a number; using 1.0",
+                    origin.display()
+                ),
             )),
         }
     }
     load.settings.text_size_px = match lookup("font.base-size") {
         None => None,
-        Some((origin, raw)) => match raw.parse::<u8>() {
-            Ok(size) if OMARCHY_TEXT_SIZE_PX.contains(&size) => Some(size),
-            _ => {
-                load.diagnostics.push(format!(
-                    "{}: [font] base-size {raw:?} must be a whole number of px from {} to {}; keeping the previous text size",
-                    origin.display(),
-                    OMARCHY_TEXT_SIZE_PX.start(),
-                    OMARCHY_TEXT_SIZE_PX.end()
+        Some((origin, raw)) => {
+            if let Some(size) = js_parse_int(raw) {
+                let px = u16::try_from(size.max(i64::from(OMARCHY_MIN_TEXT_SIZE_PX)))
+                    .unwrap_or(u16::MAX);
+                let points = omarchy_unbounded_point_size(px);
+                if !RENDERER_POINT_SIZES.contains(&u16::try_from(points).unwrap_or(u16::MAX)) {
+                    load.diagnostics.push((
+                        OmarchyShellConcern::TextSize,
+                        format!(
+                            "{}: [font] base-size {raw:?} maps to {points} pt; using {} pt, the nearest size Splinterm renders",
+                            origin.display(),
+                            omarchy_terminal_point_size(px)
+                        ),
+                    ));
+                }
+                Some(px)
+            } else {
+                let fallback = previous_text_size_px.unwrap_or(OMARCHY_DEFAULT_TEXT_SIZE_PX);
+                load.diagnostics.push((
+                    OmarchyShellConcern::TextSize,
+                    format!(
+                        "{}: [font] base-size {raw:?} is not a whole number of px; using {fallback} px",
+                        origin.display()
+                    ),
                 ));
-                previous_text_size_px
+                Some(fallback)
             }
-        },
+        }
     };
     load
 }
 
-fn read_omarchy_shell_layer(path: &Path, diagnostics: &mut Vec<String>) -> Option<String> {
+fn read_omarchy_shell_layer(
+    path: &Path,
+    diagnostics: &mut Vec<(OmarchyShellConcern, String)>,
+) -> Option<String> {
     match fs::read_to_string(path) {
         Ok(contents) => Some(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            diagnostics.push(format!("read {}: {error}", path.display()));
+            diagnostics.push((
+                OmarchyShellConcern::Read,
+                format!("read {}: {error}", path.display()),
+            ));
             None
         }
     }
@@ -564,7 +685,7 @@ fn read_omarchy_shell_layer(path: &Path, diagnostics: &mut Vec<String>) -> Optio
 pub fn load_omarchy_shell(
     theme_dir: &Path,
     user_shell: Option<&Path>,
-    previous_text_size_px: Option<u8>,
+    previous_text_size_px: Option<u16>,
 ) -> OmarchyShellLoad {
     let theme_path = theme_dir.join("shell.toml");
     let mut diagnostics = Vec::new();
@@ -2834,7 +2955,7 @@ mod tests {
             Some(shell_layer("user/shell.toml", "[font]\nbase-size = 16\n")),
             None,
         );
-        assert_eq!(layered.diagnostics, Vec::<String>::new());
+        assert_eq!(layered.diagnostics, Vec::new());
         assert_eq!(layered.settings.menu_alpha, foot_alpha(0.8));
         assert_eq!(layered.settings.popup_alpha, foot_alpha(0.9));
         assert_eq!(layered.settings.text_size_px, Some(16));
@@ -2865,41 +2986,98 @@ mod tests {
 
     #[test]
     fn omarchy_shell_rejects_invalid_values_with_diagnostics() {
-        for raw in ["1.5", "-0.1", "nan", "inf", "opaque", "\"0.5x\""] {
-            let load = resolve_omarchy_shell(
+        let user_alpha = |raw: &str| {
+            resolve_omarchy_shell(
                 shell_layer("theme/shell.toml", "[popups]\nbackground-alpha = 0.7\n"),
                 Some(shell_layer(
                     "user/shell.toml",
                     &format!("[popups]\nbackground-alpha = {raw}\n"),
                 )),
                 None,
-            );
+            )
+        };
+        // Bare values outside parseShell's number, width-list and word shapes
+        // drop the line, so the theme's value still applies, silently.
+        for raw in [".5", "1.", "+0.5", "1e-1", "0.5x", "-", "1 2 3 4 5"] {
+            let load = user_alpha(raw);
+            assert_eq!(load.settings.popup_alpha, foot_alpha(0.7), "{raw}");
+            assert!(load.diagnostics.is_empty(), "{raw}: {:?}", load.diagnostics);
+        }
+        // Numbers are clamped to 0..1 like the shell's pickAlpha, and reported.
+        for (raw, alpha, diagnostics) in [
+            ("-0.2", 0.0, 1),
+            ("1.5", 1.0, 1),
+            ("\"1e-1\"", 0.1, 0),
+            ("\".5\"", 0.5, 0),
+        ] {
+            let load = user_alpha(raw);
+            assert_eq!(load.settings.popup_alpha, foot_alpha(alpha), "{raw}");
+            assert_eq!(load.diagnostics.len(), diagnostics, "{raw}");
+        }
+        // Stored values that are not numbers fall back to the opaque default.
+        for raw in ["opaque", "\"0.5x\"", "\"inf\"", "0.5 0.5"] {
+            let load = user_alpha(raw);
             assert_eq!(load.settings.popup_alpha, u16::MAX, "{raw}");
             assert_eq!(load.diagnostics.len(), 1, "{raw}");
-            assert!(load.diagnostics[0].starts_with("user/shell.toml: [popups]"));
+            assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::PanelAlpha);
+            assert!(
+                load.diagnostics[0]
+                    .1
+                    .starts_with("user/shell.toml: [popups]")
+            );
         }
-        for (raw, accepted) in [
-            ("9", Some(9)),
-            ("20", Some(20)),
-            ("8", None),
-            ("21", None),
-            ("12.5", None),
-            ("-12", None),
-            ("big", None),
-            ("\"16\"", Some(16)),
+
+        // base-size follows the shell's parseInt and its 1 px floor; only the
+        // rendered point size is bounded, and that is reported.
+        let user_size = |raw: &str, previous: Option<u16>| {
+            resolve_omarchy_shell(
+                shell_layer("theme/shell.toml", "[font]\nbase-size = 14\n"),
+                Some(shell_layer(
+                    "user/shell.toml",
+                    &format!("[font]\nbase-size = {raw}\n"),
+                )),
+                previous,
+            )
+        };
+        for (raw, px, diagnostics) in [
+            ("12.0", 12, 0),
+            ("\"12px\"", 12, 0),
+            ("\"+16\"", 16, 0),
+            ("8", 8, 0),
+            ("21", 21, 0),
+            ("120", 120, 0),
+            ("2", 2, 1),
+            ("0", 1, 1),
+            ("-12", 1, 1),
+            ("200", 200, 1),
+            ("1 2", 1, 1),
         ] {
-            let load = resolve_omarchy_shell(
-                shell_layer("theme/shell.toml", &format!("[font]\nbase-size = {raw}\n")),
-                None,
-                Some(13),
-            );
-            assert_eq!(load.settings.text_size_px, accepted.or(Some(13)), "{raw}");
-            assert_eq!(
-                load.diagnostics.len(),
-                usize::from(accepted.is_none()),
-                "{raw}"
-            );
+            let load = user_size(raw, Some(13));
+            assert_eq!(load.settings.text_size_px, Some(px), "{raw}");
+            assert_eq!(load.diagnostics.len(), diagnostics, "{raw}");
         }
+        // Dropped lines leave the theme's base-size in place.
+        for raw in ["+12", "1e1", ".5"] {
+            let load = user_size(raw, Some(13));
+            assert_eq!(load.settings.text_size_px, Some(14), "{raw}");
+            assert!(load.diagnostics.is_empty(), "{raw}");
+        }
+        // A stored value without digits keeps the previous size, or Omarchy's
+        // 12 px default when there is none.
+        for (previous, px) in [(Some(13), 13), (None, 12)] {
+            let load = user_size("big", previous);
+            assert_eq!(load.settings.text_size_px, Some(px));
+            assert_eq!(load.diagnostics.len(), 1);
+            assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::TextSize);
+        }
+    }
+
+    #[test]
+    fn omarchy_text_size_points_are_bounded_to_the_renderer_range() {
+        for (px, points) in [(1, 6.0), (8, 6.0), (9, 7.0), (120, 90.0), (128, 96.0)] {
+            assert_eq!(omarchy_terminal_point_size(px), points, "{px} px");
+        }
+        assert_eq!(omarchy_terminal_point_size(u16::MAX), 96.0);
     }
 
     #[test]

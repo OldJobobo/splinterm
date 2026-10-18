@@ -30,7 +30,7 @@ use super::{
         resolve_update_images, resynchronize, run_controller, terminal_grid_limits,
         update_advances_from, validate_attached_snapshot,
     },
-    theme_watch::{ThemeOverrides, ThemeUpdateSink, load_startup_theme, watch_theme},
+    theme_watch::{ThemeOverrides, ThemeUpdateSink, load_startup_theme_for_watch, watch_theme},
     topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
 };
 
@@ -188,7 +188,8 @@ async fn run_live_multipane_window_inner(
     }
     let (initial_identity, remote_display_identity) =
         initial_window_dojo_identity(&factory, dojo_model.id).await?;
-    let theme = load_startup_theme(&config);
+    let startup_theme = load_startup_theme_for_watch(&config);
+    let theme = startup_theme.theme;
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_ligatures: config.font_ligatures,
@@ -229,7 +230,7 @@ async fn run_live_multipane_window_inner(
     let theme_task = AbortOnDropTask::new(tokio::spawn(watch_theme(
         config.theme_source(),
         ThemeOverrides::from_config(&config),
-        theme,
+        startup_theme,
         ThemeUpdateSink::Topology(topology_update_sender.clone()),
     )));
     let font_task = (config.font_authority == FontAuthority::NativeOmarchy).then(|| {
@@ -322,7 +323,8 @@ pub(super) async fn run_live_window(
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(None, Some(splint_id));
     }
-    let theme = load_startup_theme(&config);
+    let startup_theme = load_startup_theme_for_watch(&config);
+    let theme = startup_theme.theme;
     renderer::configure(RendererOptions {
         font: config.font.clone(),
         font_ligatures: config.font_ligatures,
@@ -386,7 +388,7 @@ pub(super) async fn run_live_window(
     let _theme_watcher = AbortOnDropTask::new(tokio::spawn(watch_theme(
         config.theme_source(),
         ThemeOverrides::from_config(&config),
-        theme,
+        startup_theme,
         ThemeUpdateSink::Panes(vec![updates.clone()]),
     )));
     let _font_watcher = (config.font_authority == FontAuthority::NativeOmarchy).then(|| {

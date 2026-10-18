@@ -8,8 +8,9 @@ use anyhow::Result;
 use splinterm::{
     ThemeUpdate, WindowTopologyUpdate, WindowUpdate,
     config::{
-        AppConfig, OmarchyShellSettings, OmarchyThemeRoots, OmarchyThemeSelection, ResolvedTheme,
-        ThemeSource, load_live_omarchy_theme, load_omarchy_shell, load_theme, load_theme_source,
+        AppConfig, OmarchyShellConcern, OmarchyShellSettings, OmarchyThemeRoots,
+        OmarchyThemeSelection, ResolvedTheme, ThemeSource, load_live_omarchy_theme,
+        load_omarchy_shell, load_theme, load_theme_source,
     },
 };
 use tokio::sync::mpsc;
@@ -179,14 +180,30 @@ fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerp
 
 /// Layers the Omarchy shell settings onto a resolved palette. A JSON palette
 /// takes only the text size and keeps Omarchy's opaque panel defaults.
+/// Diagnostics for a setting Splinterm ignores are dropped: alpha for a JSON
+/// palette, and the text size while `config.ini` sets a font size.
 fn with_omarchy_shell(
     mut theme: ResolvedTheme,
     layers: ShellLayers<'_>,
-    previous_text_size_px: Option<u8>,
+    follow_text_size: bool,
+    previous_text_size_px: Option<u16>,
     diagnostics: &mut Vec<String>,
 ) -> ResolvedTheme {
+    if !layers.panels && !follow_text_size {
+        theme.shell = OmarchyShellSettings::default();
+        return theme;
+    }
     let load = load_omarchy_shell(layers.theme_dir, layers.user, previous_text_size_px);
-    diagnostics.extend(load.diagnostics);
+    diagnostics.extend(
+        load.diagnostics
+            .into_iter()
+            .filter(|(concern, _)| match concern {
+                OmarchyShellConcern::Read => true,
+                OmarchyShellConcern::PanelAlpha => layers.panels,
+                OmarchyShellConcern::TextSize => follow_text_size,
+            })
+            .map(|(_, diagnostic)| diagnostic),
+    );
     theme.shell = if layers.panels {
         load.settings
     } else {
@@ -200,7 +217,10 @@ fn with_omarchy_shell(
 
 struct StartupThemeLoad {
     theme: ResolvedTheme,
+    /// Everything to print at startup, prefixed.
     diagnostics: Vec<String>,
+    /// The raw shell diagnostics among them, which seed the live watcher.
+    shell_diagnostics: Vec<String>,
 }
 
 fn prepare_startup_theme(source: &ThemeSource, overrides: ThemeOverrides) -> StartupThemeLoad {
@@ -217,31 +237,62 @@ fn prepare_startup_theme(source: &ThemeSource, overrides: ThemeOverrides) -> Sta
         }),
         ThemeSource::Json { shell, .. } => json_shell_layers(shell.as_ref()),
     };
+    let mut shell_diagnostics = Vec::new();
     let theme = match layers {
-        Some(layers) => with_omarchy_shell(theme, layers, None, &mut diagnostics),
+        Some(layers) => with_omarchy_shell(
+            theme,
+            layers,
+            overrides.follow_text_size,
+            None,
+            &mut shell_diagnostics,
+        ),
         None => theme,
     };
+    diagnostics.extend(shell_diagnostics.iter().cloned());
     StartupThemeLoad {
         theme: overrides.apply(theme),
         diagnostics: diagnostics
             .into_iter()
             .map(|diagnostic| format!("splinterm theme: {diagnostic}"))
             .collect(),
+        shell_diagnostics,
     }
+}
+
+/// The startup theme a live watcher continues from, with the shell
+/// diagnostics startup already printed so the watcher's first poll does not
+/// print them again.
+pub(in crate::app) struct StartupTheme {
+    pub(in crate::app) theme: ResolvedTheme,
+    shell_reported: Vec<String>,
 }
 
 fn load_startup_theme_with_reporter(
     config: &AppConfig,
     mut report: impl FnMut(&str),
-) -> ResolvedTheme {
+) -> StartupTheme {
     let loaded = prepare_startup_theme(&config.theme_source(), ThemeOverrides::from_config(config));
     for diagnostic in &loaded.diagnostics {
         report(diagnostic);
     }
-    loaded.theme
+    StartupTheme::from(loaded)
+}
+
+impl From<StartupThemeLoad> for StartupTheme {
+    fn from(loaded: StartupThemeLoad) -> Self {
+        Self {
+            theme: loaded.theme,
+            shell_reported: loaded.shell_diagnostics,
+        }
+    }
 }
 
 pub(in crate::app) fn load_startup_theme(config: &AppConfig) -> ResolvedTheme {
+    load_startup_theme_for_watch(config).theme
+}
+
+/// Loads the startup theme for a Window that also starts `watch_theme`.
+pub(in crate::app) fn load_startup_theme_for_watch(config: &AppConfig) -> StartupTheme {
     load_startup_theme_with_reporter(config, |diagnostic| eprintln!("{diagnostic}"))
 }
 
@@ -270,6 +321,7 @@ fn resolve_live_theme_update(
         Some(layers) => with_omarchy_shell(
             palette,
             layers,
+            overrides.follow_text_size,
             current.shell.text_size_px,
             shell_diagnostics,
         ),
@@ -285,6 +337,14 @@ struct ThemeReloadDiagnostics {
 }
 
 impl ThemeReloadDiagnostics {
+    /// Continues from startup, which already printed its shell diagnostics.
+    fn after_startup(startup: &StartupTheme) -> Self {
+        Self {
+            rejection_reported: false,
+            shell_reported: startup.shell_reported.clone(),
+        }
+    }
+
     fn accepted(&mut self) {
         self.rejection_reported = false;
     }
@@ -318,12 +378,13 @@ pub(in crate::app) enum ThemeUpdateSink {
 pub(in crate::app) async fn watch_theme(
     source: ThemeSource,
     overrides: ThemeOverrides,
-    mut current: ResolvedTheme,
+    startup: StartupTheme,
     sink: ThemeUpdateSink,
 ) {
+    let mut current = startup.theme;
     let mut observed = None;
     let mut selection = OmarchyThemeSelection::default();
-    let mut diagnostics = ThemeReloadDiagnostics::default();
+    let mut diagnostics = ThemeReloadDiagnostics::after_startup(&startup);
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -795,13 +856,17 @@ mod tests {
             theme_path: Some(path.clone()),
             background_alpha: Some(1234),
             background_blur: Some(true),
+            // An explicit size and a JSON palette ignore every shell.toml
+            // setting, so this host's own Omarchy files cannot add output.
+            font_size_authority: splinterm::config::FontAuthority::Explicit,
             ..AppConfig::default()
         };
         for _launch_path in ["single-pane", "multi-pane"] {
             let mut startup_diagnostics = Vec::new();
             let startup = load_startup_theme_with_reporter(&config, |diagnostic| {
                 startup_diagnostics.push(diagnostic.to_owned());
-            });
+            })
+            .theme;
             assert_eq!(startup_diagnostics.len(), 1);
             assert_eq!(startup.background_alpha, 1234);
             assert!(startup.background_blur);
@@ -810,7 +875,7 @@ mod tests {
         std::fs::write(&path, valid_theme_json(0.25, true)).unwrap();
         config.background_alpha = None;
         config.background_blur = None;
-        let current = load_startup_theme_with_reporter(&config, |_| {});
+        let current = load_startup_theme_with_reporter(&config, |_| {}).theme;
         assert_eq!(current.background, 1);
         assert_eq!(current.foreground, 3);
         assert!(current.background_blur);
@@ -853,7 +918,7 @@ mod tests {
         let mut selection = OmarchyThemeSelection::default();
         let mut current = ResolvedTheme::default();
         let mut observed = fingerprint(&source);
-        let mut step = |edit: &dyn Fn(), expected: (u16, u16, Option<u8>), diagnostics: usize| {
+        let mut step = |edit: &dyn Fn(), expected: (u16, u16, Option<u16>), diagnostics: usize| {
             edit();
             let next_fingerprint = fingerprint(&source);
             assert_ne!(next_fingerprint, observed);
@@ -909,7 +974,7 @@ mod tests {
             &|| {
                 rewrite(
                     &user,
-                    "[font]\nbase-size = 42\n[popups]\nbackground-alpha = 0.5\n",
+                    "[font]\nbase-size = big\n[popups]\nbackground-alpha = 0.5\n",
                 );
             },
             (half, half, Some(16)),
@@ -1031,6 +1096,110 @@ mod tests {
             .expect("a text size edit publishes an update");
         assert_eq!(next.shell.text_size_px, Some(16));
         assert_eq!(next.shell.menu_alpha, u16::MAX);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_first_live_poll_does_not_repeat_startup_shell_diagnostics() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-shell-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("user-shell.toml");
+        write_theme(&theme, 0x40_40_40);
+        std::fs::write(&user, "[menu]\nbackground-alpha = opaque\n").unwrap();
+        let source =
+            ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme).with_user_shell(user.clone()));
+        let loaded = prepare_startup_theme(&source, NO_OVERRIDES);
+        assert_eq!(loaded.diagnostics.len(), 1, "startup prints the problem");
+        let startup = StartupTheme::from(loaded);
+        let mut diagnostics = ThemeReloadDiagnostics::after_startup(&startup);
+
+        // The watcher's first tick fires at once with nothing observed yet and
+        // reloads the same files.
+        let mut selection = OmarchyThemeSelection::default();
+        let mut reported = Vec::new();
+        let active = active_theme_source(&source, &mut selection);
+        assert!(
+            resolve_live_theme_update(
+                active,
+                &mut selection,
+                NO_OVERRIDES,
+                startup.theme,
+                &mut reported
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(reported.len(), 1);
+        assert_eq!(diagnostics.shell(reported), Vec::<String>::new());
+
+        // A new problem is still reported.
+        std::fs::write(&user, "[menu]\nbackground-alpha = never\n").unwrap();
+        let mut reported = Vec::new();
+        let active = active_theme_source(&source, &mut selection);
+        resolve_live_theme_update(
+            active,
+            &mut selection,
+            NO_OVERRIDES,
+            startup.theme,
+            &mut reported,
+        )
+        .unwrap();
+        assert_eq!(diagnostics.shell(reported).len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_for_ignored_shell_settings_are_dropped() {
+        let root =
+            std::env::temp_dir().join(format!("splinterm-shell-ignored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("user-shell.toml");
+        let json = root.join("theme.json");
+        write_theme(&theme, 0x50_50_50);
+        std::fs::write(&json, valid_theme_json(1.0, false)).unwrap();
+        std::fs::write(
+            &user,
+            "[menu]\nbackground-alpha = opaque\n[font]\nbase-size = big\n",
+        )
+        .unwrap();
+        let roots = OmarchyThemeRoots::fixed(theme).with_user_shell(user);
+        let explicit = ThemeOverrides {
+            follow_text_size: false,
+            ..NO_OVERRIDES
+        };
+        let omarchy = ThemeSource::Omarchy(roots.clone());
+        let json_source = ThemeSource::Json {
+            path: json,
+            shell: Some(roots),
+        };
+        for (source, overrides, expected) in [
+            // Both settings are followed and both are reported.
+            (&omarchy, NO_OVERRIDES, 2),
+            // An explicit font size ignores the text size.
+            (&omarchy, explicit, 1),
+            // A JSON palette ignores panel alpha.
+            (&json_source, NO_OVERRIDES, 1),
+            // A JSON palette with an explicit size ignores both.
+            (&json_source, explicit, 0),
+        ] {
+            let loaded = prepare_startup_theme(source, overrides);
+            assert_eq!(loaded.shell_diagnostics.len(), expected, "{overrides:?}");
+            let mut selection = OmarchyThemeSelection::default();
+            let mut reported = Vec::new();
+            let active = active_theme_source(source, &mut selection);
+            resolve_live_theme_update(
+                active,
+                &mut selection,
+                overrides,
+                ResolvedTheme::default(),
+                &mut reported,
+            )
+            .unwrap();
+            assert_eq!(reported.len(), expected, "{overrides:?}");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }
