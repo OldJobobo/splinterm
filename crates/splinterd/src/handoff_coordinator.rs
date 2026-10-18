@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
+    thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -30,6 +32,8 @@ use crate::{
 };
 
 static HANDOFF_PROCESS_GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
+const PROCESS_GUARD_RETRY_INITIAL: Duration = Duration::from_millis(1);
+const PROCESS_GUARD_RETRY_MAX: Duration = Duration::from_millis(10);
 
 /// One explicit handoff generation phase.
 ///
@@ -167,6 +171,42 @@ impl HandoffProcessGuard {
     /// process with other live threads.
     pub fn acquire() -> Result<Self, HandoffCoordinatorError> {
         Self::acquire_with(process_thread_count)
+    }
+
+    /// Acquires the guard like [`Self::acquire`], retrying until `deadline`
+    /// while other threads are still exiting.
+    ///
+    /// The kernel reaps a thread shortly after `pthread_join` returns, so a
+    /// joined thread can stay listed in `/proc/self/task` for a moment. Only
+    /// an observed thread count above one is retried, with a short backoff.
+    /// A competing guard or an unreadable thread table fails at once. The
+    /// guard is never held between attempts, and at least one observation is
+    /// made even when `deadline` has already passed.
+    ///
+    /// # Errors
+    /// As [`Self::acquire`]; a timeout reports the last observed count.
+    pub fn acquire_until(deadline: Instant) -> Result<Self, HandoffCoordinatorError> {
+        Self::acquire_until_with(deadline, process_thread_count)
+    }
+
+    pub(crate) fn acquire_until_with(
+        deadline: Instant,
+        mut observe_threads: impl FnMut() -> io::Result<usize>,
+    ) -> Result<Self, HandoffCoordinatorError> {
+        let mut pause = PROCESS_GUARD_RETRY_INITIAL;
+        loop {
+            match Self::acquire_with(&mut observe_threads) {
+                Err(HandoffCoordinatorError::ProcessNotSingleThreaded { observed }) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(HandoffCoordinatorError::ProcessNotSingleThreaded { observed });
+                    }
+                    thread::sleep(pause.min(remaining));
+                    pause = pause.saturating_mul(2).min(PROCESS_GUARD_RETRY_MAX);
+                }
+                result => return result,
+            }
+        }
     }
 
     pub(crate) fn acquire_with(
@@ -614,6 +654,90 @@ mod tests {
 
         let reacquired = HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap();
         drop(reacquired);
+    }
+
+    #[test]
+    fn process_guard_retries_until_exiting_threads_are_gone() {
+        let _serial = PROCESS_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut observations = vec![1, 2, 3];
+        let guard = HandoffProcessGuard::acquire_until_with(
+            Instant::now() + Duration::from_secs(5),
+            || Ok(observations.pop().expect("no observation after success")),
+        )
+        .unwrap();
+        assert_eq!(observations, Vec::<usize>::new());
+        assert!(matches!(
+            HandoffProcessGuard::acquire_with(|| Ok(1)),
+            Err(HandoffCoordinatorError::ProcessGuardActive)
+        ));
+        drop(guard);
+    }
+
+    #[test]
+    fn process_guard_retry_times_out_with_the_last_observation() {
+        let _serial = PROCESS_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started = Instant::now();
+        let mut calls = 0_usize;
+        let result =
+            HandoffProcessGuard::acquire_until_with(started + Duration::from_millis(30), || {
+                calls += 1;
+                Ok(1 + calls)
+            });
+        let Err(HandoffCoordinatorError::ProcessNotSingleThreaded { observed }) = result else {
+            panic!("expected a retry timeout, got {result:?}");
+        };
+        assert!(calls >= 2, "retried only {calls} times");
+        assert_eq!(observed, 1 + calls);
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        // A timeout leaves the guard free.
+        drop(HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap());
+
+        // A passed deadline still observes exactly once.
+        let mut calls = 0_usize;
+        let passed = Instant::now();
+        assert!(matches!(
+            HandoffProcessGuard::acquire_until_with(passed, || {
+                calls += 1;
+                Ok(2)
+            }),
+            Err(HandoffCoordinatorError::ProcessNotSingleThreaded { observed: 2 })
+        ));
+        assert_eq!(calls, 1);
+        drop(HandoffProcessGuard::acquire_until_with(passed, || Ok(1)).unwrap());
+    }
+
+    #[test]
+    fn process_guard_retry_does_not_wait_out_a_guard_or_procfs_failure() {
+        let _serial = PROCESS_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let guard = HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap();
+        let mut calls = 0_usize;
+        assert!(matches!(
+            HandoffProcessGuard::acquire_until_with(deadline, || {
+                calls += 1;
+                Ok(1)
+            }),
+            Err(HandoffCoordinatorError::ProcessGuardActive)
+        ));
+        assert_eq!(calls, 0);
+        drop(guard);
+
+        assert!(matches!(
+            HandoffProcessGuard::acquire_until_with(deadline, || {
+                calls += 1;
+                Err(io::Error::other("procfs"))
+            }),
+            Err(HandoffCoordinatorError::InspectProcessThreads(_))
+        ));
+        assert_eq!(calls, 1);
+        assert!(Instant::now() < deadline);
+        drop(HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap());
     }
 
     #[test]

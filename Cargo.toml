@@ -56,7 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-casefold = "0.2"
 unicode-width = "0.2"
 uuid = { version = "1.18", features = ["serde", "v4"] }
-zbus = "5.12.0"
+zbus = { version = "5.12.0", default-features = false }
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
 

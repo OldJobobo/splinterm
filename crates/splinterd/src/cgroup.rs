@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    future::Future,
     io,
     sync::{
         Arc, Mutex,
@@ -9,12 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use splinterd::ProcessPlacement;
+use splinterd::{
+    ProcessPlacement,
+    dbus_worker::{DbusWorker, DbusWorkerError},
+};
 use splinterm_core::{DojoId, SplintId};
 use splinterm_pty::LinuxPtyIdentity;
 use thiserror::Error;
 use zbus::{
-    blocking::{Connection, connection},
+    proxy::CacheProperties,
     zvariant::{OwnedObjectPath, OwnedValue, Str, Value},
 };
 
@@ -86,7 +90,7 @@ pub(crate) enum WorkloadUnitError {
     #[error("workload memory policy is invalid")]
     InvalidPolicy,
     #[error("systemd user-manager connection failed")]
-    Connection(#[source] zbus::Error),
+    Connection(#[source] DbusWorkerError),
     #[error("systemd transient unit request failed")]
     Request(#[source] zbus::Error),
     #[error("systemd transient unit property is invalid")]
@@ -116,51 +120,71 @@ trait SystemdUnitAdapter: Send + Sync {
     ) -> Result<(), WorkloadUnitError>;
 
     fn stop_unit(&self, name: &str) -> Result<(), WorkloadUnitError>;
+
+    /// Closes the systemd connection and joins any thread it owns.
+    fn shutdown(&self) -> Result<(), WorkloadUnitError>;
 }
 
 struct SystemdUserManager {
-    connection: Connection,
+    bus: DbusWorker,
     owner_unit: Option<String>,
 }
 
 impl SystemdUserManager {
     fn connect(owner_unit: Option<&str>) -> Result<Self, WorkloadUnitError> {
-        let connection = connection::Builder::session()
-            .map_err(WorkloadUnitError::Connection)?
-            .method_timeout(METHOD_TIMEOUT)
-            .build()
-            .map_err(WorkloadUnitError::Connection)?;
+        let bus =
+            DbusWorker::connect_session(METHOD_TIMEOUT).map_err(WorkloadUnitError::Connection)?;
         Ok(Self {
-            connection,
+            bus,
             owner_unit: owner_unit.map(str::to_owned),
         })
     }
 
-    fn manager(&self) -> Result<SystemdManagerProxyBlocking<'_>, WorkloadUnitError> {
-        SystemdManagerProxyBlocking::new(&self.connection).map_err(WorkloadUnitError::Request)
+    /// Runs one systemd manager request on the owned D-Bus worker.
+    fn manager<T, F, Fut>(&self, request: F) -> Result<T, WorkloadUnitError>
+    where
+        T: Send + 'static,
+        F: FnOnce(SystemdManagerProxy<'static>) -> Fut + Send + 'static,
+        Fut: Future<Output = zbus::Result<T>> + Send,
+    {
+        self.bus
+            .call(move |connection| async move {
+                let proxy = SystemdManagerProxy::builder(&connection)
+                    .cache_properties(CacheProperties::No)
+                    .build()
+                    .await?;
+                request(proxy).await
+            })
+            .map_err(WorkloadUnitError::Connection)?
+            .map_err(WorkloadUnitError::Request)
     }
 
     fn start_transient_unit(
         &self,
         name: &str,
-        properties: Vec<(&str, OwnedValue)>,
+        properties: Vec<UnitProperty>,
     ) -> Result<(), WorkloadUnitError> {
-        self.manager()?
-            .start_transient_unit(name, "fail", properties, Vec::new())
-            .map(|_| ())
-            .map_err(WorkloadUnitError::Request)
+        let name = name.to_owned();
+        self.manager(move |manager| async move {
+            manager
+                .start_transient_unit(&name, "fail", properties, Vec::new())
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn stop_unit_request(&self, name: &str) -> Result<OwnedObjectPath, WorkloadUnitError> {
+        let name = name.to_owned();
+        self.manager(move |manager| async move { manager.stop_unit(&name, "replace").await })
     }
 
     fn unit_path(&self, name: &str) -> Result<OwnedObjectPath, WorkloadUnitError> {
-        self.manager()?
-            .get_unit(name)
-            .map_err(WorkloadUnitError::Request)
+        let name = name.to_owned();
+        self.manager(move |manager| async move { manager.get_unit(&name).await })
     }
 
     fn pid_unit_path(&self, pid: u32) -> Result<OwnedObjectPath, WorkloadUnitError> {
-        self.manager()?
-            .get_unit_by_pid(pid)
-            .map_err(WorkloadUnitError::Request)
+        self.manager(move |manager| async move { manager.get_unit_by_pid(pid).await })
     }
 }
 
@@ -222,10 +246,11 @@ impl SystemdUnitAdapter for SystemdUserManager {
     }
 
     fn stop_unit(&self, name: &str) -> Result<(), WorkloadUnitError> {
-        let request_error = match self.manager()?.stop_unit(name, "replace") {
+        let request_error = match self.stop_unit_request(name) {
             Ok(_) => None,
-            Err(error) if is_no_such_unit(&error) => return Ok(()),
-            Err(error) => Some(error),
+            Err(WorkloadUnitError::Request(error)) if is_no_such_unit(&error) => return Ok(()),
+            Err(WorkloadUnitError::Request(error)) => Some(error),
+            Err(error) => return Err(error),
         };
         let deadline = Instant::now() + VERIFY_TIMEOUT;
         while Instant::now() < deadline {
@@ -238,6 +263,10 @@ impl SystemdUnitAdapter for SystemdUserManager {
         request_error.map_or(Err(WorkloadUnitError::StopTimeout), |error| {
             Err(WorkloadUnitError::Request(error))
         })
+    }
+
+    fn shutdown(&self) -> Result<(), WorkloadUnitError> {
+        self.bus.shutdown().map_err(WorkloadUnitError::Connection)
     }
 }
 
@@ -425,6 +454,30 @@ impl WorkloadUnitManager {
         })
     }
 
+    /// Closes the systemd user-manager connection and joins its D-Bus worker
+    /// thread, so the daemon can return to one thread for upgrade handoff.
+    ///
+    /// Running requests get up to
+    /// [`SHUTDOWN_GRACE`](splinterd::dbus_worker::SHUTDOWN_GRACE) to finish
+    /// before they are aborted, and closing is bounded the same way, so a
+    /// wedged session bus cannot hold this forever.
+    ///
+    /// Clones of this manager and any outstanding scopes stay valid values,
+    /// but every later systemd request fails with
+    /// [`WorkloadUnitError::Connection`]. Dropping a scope after shutdown
+    /// therefore leaves its systemd unit running. Calling this again is a
+    /// no-op.
+    ///
+    /// # Errors
+    /// Reports a D-Bus worker thread that panicked.
+    #[allow(
+        dead_code,
+        reason = "the handoff coordinator calls this once its runtime-stop slice lands"
+    )]
+    pub(crate) fn shutdown(self) -> Result<(), WorkloadUnitError> {
+        self.adapter.shutdown()
+    }
+
     fn release_dojo(&self, dojo_id: DojoId, dojo_slice: &str) -> Result<(), WorkloadUnitError> {
         let mut state = self.state.lock().map_err(|_| WorkloadUnitError::State)?;
         let Some(references) = state.dojo_references.get_mut(&dojo_id) else {
@@ -550,6 +603,7 @@ mod tests {
         fail_probe: Mutex<bool>,
         fail_scope: Mutex<bool>,
         stop_gate: Mutex<Option<Arc<StopGate>>>,
+        shutdowns: Mutex<usize>,
     }
 
     impl FakeAdapter {
@@ -619,6 +673,11 @@ mod tests {
             }
             Ok(())
         }
+
+        fn shutdown(&self) -> Result<(), WorkloadUnitError> {
+            *self.shutdowns.lock().unwrap() += 1;
+            Ok(())
+        }
     }
 
     fn identity(pid: u32) -> LinuxPtyIdentity {
@@ -655,6 +714,21 @@ mod tests {
         let adapter = Arc::new(FakeAdapter::default());
         *adapter.fail_probe.lock().unwrap() = true;
         assert!(WorkloadUnitManager::new(adapter, WorkloadMemoryPolicy::default()).is_err());
+    }
+
+    #[test]
+    fn manager_shutdown_closes_the_adapter_once() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let manager =
+            WorkloadUnitManager::new(adapter.clone(), WorkloadMemoryPolicy::default()).unwrap();
+        let prepared = manager.prepare(DojoId::new(), SplintId::new(), 1).unwrap();
+
+        manager.shutdown().unwrap();
+
+        assert_eq!(*adapter.shutdowns.lock().unwrap(), 1);
+        // Shutdown issues no systemd unit request of its own.
+        assert_eq!(adapter.calls().len(), 1);
+        drop(prepared);
     }
 
     #[test]
@@ -850,9 +924,11 @@ mod tests {
 
         active.release().unwrap();
         child.wait().unwrap();
+        manager.shutdown().unwrap();
         let systemd = SystemdUserManager::connect(None).unwrap();
         assert_systemd_unit_absent(&systemd, &names.splint_scope);
         assert_systemd_unit_absent(&systemd, &names.dojo_slice);
+        systemd.shutdown().unwrap();
     }
 
     #[test]

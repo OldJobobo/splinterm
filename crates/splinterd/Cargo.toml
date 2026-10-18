@@ -31,7 +31,7 @@ tokio = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-zbus.workspace = true
+zbus = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
 proc-macro2 = "1.0"
@@ -41,6 +41,13 @@ splinterm-mcp = { path = "../splinterm-mcp", features = ["integration-test"] }
 syn = { version = "2.0", features = ["full", "visit"] }
 tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true
+
+# Proving that the daemon returns to one thread needs a process where only the
+# main thread runs, which the libtest harness never provides: it runs each test
+# on a spawned thread.
+[[test]]
+name = "handoff_runtime_stop"
+harness = false
 
 # A workspace `unsafe_code = "forbid"` cannot be overridden locally. The daemon
 # binary has exactly one audited post-exec invocation of the inherited-FD leaf
