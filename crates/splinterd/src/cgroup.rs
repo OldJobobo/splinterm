@@ -68,13 +68,17 @@ pub(crate) struct WorkloadUnitNames {
 impl WorkloadUnitNames {
     fn new(dojo_id: DojoId, splint_id: SplintId, incarnation: u64) -> Self {
         Self {
-            dojo_slice: format!("app-splinterm-dojo{}.slice", compact_id(&dojo_id)),
+            dojo_slice: dojo_slice_name(dojo_id),
             splint_scope: format!(
                 "splinterm-splint{}-i{incarnation}.scope",
                 compact_id(&splint_id)
             ),
         }
     }
+}
+
+fn dojo_slice_name(dojo_id: DojoId) -> String {
+    format!("app-splinterm-dojo{}.slice", compact_id(&dojo_id))
 }
 
 fn compact_id(id: &impl ToString) -> String {
@@ -125,6 +129,10 @@ trait SystemdUnitAdapter: Send + Sync {
 
     /// The slice that the loaded scope unit at `scope_path` runs in.
     fn scope_slice(&self, scope_path: &str) -> Result<String, WorkloadUnitError>;
+
+    /// How many processes run anywhere in the cgroup subtree of the loaded
+    /// unit `name` (`GetUnitProcesses`), or `None` when it is not loaded.
+    fn unit_process_count(&self, name: &str) -> Result<Option<usize>, WorkloadUnitError>;
 
     fn start_dojo_slice(
         &self,
@@ -206,6 +214,11 @@ impl SystemdUserManager {
     fn pid_unit_path(&self, pid: u32) -> Result<OwnedObjectPath, WorkloadUnitError> {
         self.manager(move |manager| async move { manager.get_unit_by_pid(pid).await })
     }
+
+    fn unit_processes(&self, name: &str) -> Result<Vec<(String, u32, String)>, WorkloadUnitError> {
+        let name = name.to_owned();
+        self.manager(move |manager| async move { manager.get_unit_processes(&name).await })
+    }
 }
 
 impl SystemdUnitAdapter for SystemdUserManager {
@@ -221,6 +234,14 @@ impl SystemdUnitAdapter for SystemdUserManager {
         match self.pid_unit_path(pid) {
             Ok(path) => Ok(Some(path.to_string())),
             Err(WorkloadUnitError::Request(error)) if is_no_unit_for_pid(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn unit_process_count(&self, name: &str) -> Result<Option<usize>, WorkloadUnitError> {
+        match self.unit_processes(name) {
+            Ok(processes) => Ok(Some(processes.len())),
+            Err(WorkloadUnitError::Request(error)) if is_no_such_unit(&error) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -443,6 +464,10 @@ trait SystemdManager {
 
     #[zbus(name = "GetUnitByPID")]
     fn get_unit_by_pid(&self, pid: u32) -> zbus::Result<OwnedObjectPath>;
+
+    /// Every process in the unit's cgroup subtree: cgroup path, PID, and
+    /// command line.
+    fn get_unit_processes(&self, name: &str) -> zbus::Result<Vec<(String, u32, String)>>;
 }
 
 #[zbus::proxy(
@@ -700,6 +725,63 @@ impl WorkloadUnitManager {
         })
     }
 
+    /// Stops a Dojo slice a previous generation left loaded, only when
+    /// systemd proves it holds no process at all.
+    ///
+    /// A handoff that adopts none of a Dojo's carried scopes (every carried
+    /// Splint of it exited in the exec window) leaves that Dojo's slice
+    /// loaded and uncounted here, and [`Self::prepare`] then fails with
+    /// `UnitExists` for every later launch in the Dojo. This reclaims such a
+    /// slice when `GetUnitProcesses` reports an empty cgroup subtree, under
+    /// the reference-count lock, so no prepare in this manager can interleave.
+    /// A slice that still holds any process (a scope this generation did not
+    /// adopt, or an exited Splint's surviving background job) is left alone:
+    /// stopping it would kill that process.
+    ///
+    /// # Errors
+    /// Reports a poisoned state lock or a failed systemd request; nothing is
+    /// stopped then.
+    pub fn reclaim_empty_dojo_slice(
+        &self,
+        dojo_id: DojoId,
+    ) -> Result<DojoSliceReclaim, WorkloadUnitError> {
+        let state = self.state.lock().map_err(|_| WorkloadUnitError::State)?;
+        if state.dojo_references.contains_key(&dojo_id) {
+            return Ok(DojoSliceReclaim::Referenced);
+        }
+        let slice = dojo_slice_name(dojo_id);
+        let reclaim = match self.adapter.unit_process_count(&slice)? {
+            None => DojoSliceReclaim::Absent,
+            Some(0) => {
+                self.adapter.stop_unit(&slice)?;
+                DojoSliceReclaim::Stopped
+            }
+            Some(_) => DojoSliceReclaim::Occupied,
+        };
+        drop(state);
+        Ok(reclaim)
+    }
+
+    /// Whether systemd has neither the retained scope nor its Dojo slice
+    /// loaded: the evidence that the generation which placed this process
+    /// ran it uncontained, so no slice exists that could stop under it.
+    ///
+    /// # Errors
+    /// Reports a failed systemd request.
+    pub fn retained_units_absent(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<bool, WorkloadUnitError> {
+        Ok(self
+            .adapter
+            .loaded_unit(&retained.names.splint_scope)?
+            .is_none()
+            && self
+                .adapter
+                .loaded_unit(&retained.names.dojo_slice)?
+                .is_none())
+    }
+
     /// Closes the systemd user-manager connection and joins its D-Bus worker
     /// thread, so the daemon can return to one thread for upgrade handoff.
     ///
@@ -767,6 +849,19 @@ impl WorkloadUnitManager {
 /// ignored: retaining a scope must not fail.
 fn lock_holds(holds: &Mutex<ScopeHolds>) -> MutexGuard<'_, ScopeHolds> {
     holds.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What [`WorkloadUnitManager::reclaim_empty_dojo_slice`] found and did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DojoSliceReclaim {
+    /// This manager counts the Dojo, so its slice is not a leftover.
+    Referenced,
+    /// No slice for the Dojo is loaded.
+    Absent,
+    /// The slice still holds a process, so it was left running.
+    Occupied,
+    /// The slice held no process and was stopped.
+    Stopped,
 }
 
 /// A Dojo slice reference waiting for its Splint process; dropping it unplaced
@@ -1061,6 +1156,24 @@ mod tests {
     }
 
     impl SystemdUnitAdapter for FakeAdapter {
+        fn unit_process_count(&self, name: &str) -> Result<Option<usize>, WorkloadUnitError> {
+            let systemd = self.systemd.lock().unwrap();
+            if !systemd.units.contains_key(name) {
+                return Ok(None);
+            }
+            // A process counts for its own unit and for the slice it runs in.
+            Ok(Some(
+                systemd
+                    .pids
+                    .values()
+                    .filter(|unit| {
+                        *unit == name
+                            || systemd.units.get(*unit).and_then(Option::as_deref) == Some(name)
+                    })
+                    .count(),
+            ))
+        }
+
         fn loaded_unit(&self, name: &str) -> Result<Option<String>, WorkloadUnitError> {
             Ok(self
                 .systemd
@@ -1583,6 +1696,64 @@ mod tests {
         adopted.release().unwrap();
         sibling.release().unwrap();
         assert_eq!(adapter.slice_stops(retained.dojo_slice()), 1);
+    }
+
+    #[test]
+    fn only_a_provably_empty_leftover_slice_is_reclaimed() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let old = fake_manager(&adapter);
+        let (emptied, occupied, counted) = (DojoId::new(), DojoId::new(), DojoId::new());
+        let exited = placed(&old, emptied, 251).retain_for_handoff();
+        let running = placed(&old, occupied, 252).retain_for_handoff();
+        let adoptable = placed(&old, counted, 253).retain_for_handoff();
+        drop(old);
+        // The first Dojo's only carried Splint exited: systemd collected its
+        // empty scope, and its slice stays loaded with no process.
+        {
+            let mut systemd = adapter.systemd.lock().unwrap();
+            systemd.units.remove(exited.splint_scope());
+            systemd.pids.remove(&251);
+        }
+
+        let fresh = fake_manager(&adapter);
+        let _adopted = fresh.adopt_scope(&adoptable).unwrap();
+        assert_eq!(
+            fresh.reclaim_empty_dojo_slice(counted).unwrap(),
+            DojoSliceReclaim::Referenced
+        );
+        assert_eq!(
+            fresh.reclaim_empty_dojo_slice(occupied).unwrap(),
+            DojoSliceReclaim::Occupied
+        );
+        assert_eq!(
+            fresh.reclaim_empty_dojo_slice(DojoId::new()).unwrap(),
+            DojoSliceReclaim::Absent
+        );
+        assert!(adapter.stops().is_empty());
+        assert!(adapter.is_loaded(running.splint_scope()));
+        // A process no generation placed has neither unit; one in a loaded
+        // scope does not qualify.
+        assert!(
+            fresh
+                .retained_units_absent(&RetainedWorkloadScope::new(
+                    DojoId::new(),
+                    SplintId::new(),
+                    1,
+                    259
+                ))
+                .unwrap()
+        );
+        assert!(!fresh.retained_units_absent(&running).unwrap());
+
+        assert_eq!(
+            fresh.reclaim_empty_dojo_slice(emptied).unwrap(),
+            DojoSliceReclaim::Stopped
+        );
+        assert_eq!(adapter.stops(), [exited.dojo_slice()]);
+        // The reclaimed Dojo launches again instead of failing on UnitExists.
+        let relaunched = placed(&fresh, emptied, 254);
+        assert_eq!(fresh.dojo_references(emptied), 1);
+        drop(relaunched);
     }
 
     #[test]

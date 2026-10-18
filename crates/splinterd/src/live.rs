@@ -163,6 +163,18 @@ impl ProcessIncarnation {
         INCARNATIONS.adopt(value).then_some(Self(value))
     }
 
+    /// A carried incarnation for in-process adoption tests, whose test
+    /// binary has allocated incarnations long before any adoption runs:
+    /// it reserves allocation beyond `value` like [`Self::adopted`] but
+    /// does not refuse after the first allocation.
+    #[cfg(test)]
+    pub(crate) fn carried_for_test(value: u64) -> Option<Self> {
+        (value != 0).then(|| {
+            INCARNATIONS.reserve_after(value);
+            Self(value)
+        })
+    }
+
     /// Allocates the next process-wide incarnation. After the first call,
     /// [`Self::adopted`] refuses every value.
     ///
@@ -4227,6 +4239,13 @@ fn stage_adopted_io(
 /// Test-only Splints whose next staged adoption fails reader registration.
 #[cfg(test)]
 static ADOPTION_READER_FAULTS: std::sync::Mutex<Vec<SplintId>> = std::sync::Mutex::new(Vec::new());
+
+/// Makes the next staged adoption of `splint_id` fail its reader
+/// registration, for adoption-core failure tests.
+#[cfg(test)]
+pub(crate) fn inject_adoption_reader_fault(splint_id: SplintId) {
+    ADOPTION_READER_FAULTS.lock().unwrap().push(splint_id);
+}
 
 #[cfg(test)]
 fn take_adoption_reader_fault(splint_id: SplintId) -> bool {

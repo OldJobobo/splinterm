@@ -6,6 +6,7 @@ pub mod cgroup;
 #[doc(hidden)]
 pub mod dbus_worker;
 pub mod executable_snapshot;
+pub mod handoff_adoption;
 pub mod handoff_checkpoint;
 pub mod handoff_compatibility;
 pub mod handoff_coordinator;

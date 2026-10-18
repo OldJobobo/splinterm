@@ -522,33 +522,95 @@ impl LinuxPtyIdentity {
         expected_size: PtySize,
         expected_foreground_process_group: u32,
     ) -> Result<()> {
+        match self.verify_inherited_allowing_exit(
+            master,
+            expected_size,
+            expected_foreground_process_group,
+        )? {
+            InheritedChild::Running => Ok(()),
+            InheritedChild::Exited => Err(PtyError::ProcessExited),
+        }
+    }
+
+    /// Verifies one inherited master like [`Self::verify_inherited`], but
+    /// accepts a direct child that exited after the running manifest was
+    /// written and is still unreaped.
+    ///
+    /// A daemon handoff tolerates a shell that exits in the exec window: the
+    /// adopting generation reaps it and publishes its exit like any other
+    /// (Plan 0061 M3.8). For an exited child this still requires a PTY master,
+    /// this process's unreaped direct child with the recorded process group
+    /// and session, and the recorded kernel size. It cannot check the
+    /// controlling-terminal session or the foreground process group: the
+    /// session leader's exit detached the terminal from its session. A child
+    /// that exits during the terminal checks is reported as exited, not as a
+    /// mismatch.
+    ///
+    /// # Errors
+    /// Rejects a non-master descriptor, a process that is not this process's
+    /// unreaped child with the recorded group and session, a changed kernel
+    /// size, or, for a running child, a changed controlling-terminal session
+    /// or foreground process group.
+    pub fn verify_inherited_allowing_exit(
+        self,
+        master: BorrowedFd<'_>,
+        expected_size: PtySize,
+        expected_foreground_process_group: u32,
+    ) -> Result<InheritedChild> {
         verify_pty_master(master)?;
         self.validate_process()?;
-        if process::waitid(
+        let observed_size = termios::tcgetwinsize(master)
+            .map(PtySize::from_winsize)
+            .map_err(|error| PtyError::io("validate inherited PTY size", error))?;
+        if observed_size != expected_size {
+            return Err(PtyError::IdentityMismatch);
+        }
+        if self.child_exited()? {
+            return Ok(InheritedChild::Exited);
+        }
+        match self.validate_running_terminal(master, expected_foreground_process_group) {
+            Ok(()) => Ok(InheritedChild::Running),
+            // The terminal checks fail once the session leader exits; that
+            // race is an exit, not a substituted terminal.
+            Err(_) if self.child_exited()? => Ok(InheritedChild::Exited),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the direct child has exited, without consuming its status.
+    fn child_exited(self) -> Result<bool> {
+        Ok(process::waitid(
             process::WaitId::Pid(self.child),
             process::WaitIdOptions::EXITED
                 | process::WaitIdOptions::NOHANG
                 | process::WaitIdOptions::NOWAIT,
         )
         .map_err(|error| PtyError::io("validate inherited child state", error))?
-        .is_some()
-        {
-            return Err(PtyError::ProcessExited);
-        }
+        .is_some())
+    }
+
+    fn validate_running_terminal(
+        self,
+        master: BorrowedFd<'_>,
+        expected_foreground_process_group: u32,
+    ) -> Result<()> {
         self.validate_terminal(&master)?;
-        let observed_size = termios::tcgetwinsize(master)
-            .map(PtySize::from_winsize)
-            .map_err(|error| PtyError::io("validate inherited PTY size", error))?;
         let observed_foreground = termios::tcgetpgrp(master)
             .map(pid_to_u32)
             .map_err(|error| PtyError::io("validate inherited PTY foreground group", error))?;
-        if observed_size != expected_size
-            || observed_foreground != expected_foreground_process_group
-        {
+        if observed_foreground != expected_foreground_process_group {
             return Err(PtyError::IdentityMismatch);
         }
         Ok(())
     }
+}
+
+/// Whether an inherited PTY child was still running when it was verified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InheritedChild {
+    Running,
+    /// The child exited and is still an unreaped zombie of this process.
+    Exited,
 }
 
 /// Requires `descriptor` to be the master side of a Unix98 PTY.
@@ -677,15 +739,28 @@ impl AdoptableLinuxPtySession {
                 ));
             }
         };
-        if !child_exited && let Err(error) = identity.validate_terminal(&master) {
-            return Err((
-                error,
-                AdoptableLinuxPtySession {
-                    identity,
-                    master: master.into(),
-                },
-            ));
-        }
+        let child_exited = if !child_exited && let Err(error) = identity.validate_terminal(&master)
+        {
+            // A child that exits between the wait above and the terminal check
+            // detaches the terminal from its session. That race is an exit, as
+            // in `verify_inherited_allowing_exit`, not a substituted terminal.
+            match identity.child_exited() {
+                Ok(true) => true,
+                // Still running: the terminal mismatch stands. A failed
+                // query reports its own error.
+                running_or_failed => {
+                    return Err((
+                        running_or_failed.err().unwrap_or(error),
+                        AdoptableLinuxPtySession {
+                            identity,
+                            master: master.into(),
+                        },
+                    ));
+                }
+            }
+        } else {
+            child_exited
+        };
         let observed_exit = match restore_descriptor_before_status_consumption(
             || ensure_close_on_exec(&master),
             || {
