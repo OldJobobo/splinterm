@@ -39,7 +39,7 @@ use crate::handoff_checkpoint::{
     CheckpointBodyIdentity, CheckpointStorageError, SealedCheckpointBody,
 };
 
-static NEXT_INCARNATION: AtomicU64 = AtomicU64::new(1);
+static INCARNATIONS: IncarnationAllocator = IncarnationAllocator::new();
 const PARSE_BATCH: usize = 256;
 const READ_BUFFER: usize = 16 * 1024;
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -81,6 +81,66 @@ impl Drop for TerminalPublicationMemoryLease {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProcessIncarnation(u64);
 
+/// Process-wide incarnation allocation: the next value and whether any value
+/// has been allocated yet. One lock covers both, so "adopt only before the
+/// first allocation" is a single decision. Allocation happens once per Splint
+/// spawn, so the uncontended lock costs nothing that matters.
+struct IncarnationAllocator(Mutex<IncarnationState>);
+
+struct IncarnationState {
+    next: u64,
+    allocation_started: bool,
+}
+
+impl IncarnationAllocator {
+    const fn new() -> Self {
+        Self(Mutex::new(IncarnationState {
+            next: 1,
+            allocation_started: false,
+        }))
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, IncarnationState> {
+        // No code panics while holding the lock, and the state stays valid
+        // even if a holder did.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn reserve_after(&self, incarnation: u64) {
+        let next = incarnation
+            .checked_add(1)
+            .expect("process incarnation space exhausted");
+        let mut state = self.state();
+        state.next = state.next.max(next);
+    }
+
+    fn adopt(&self, incarnation: u64) -> bool {
+        let Some(next) = incarnation.checked_add(1).filter(|_| incarnation != 0) else {
+            return false;
+        };
+        let mut state = self.state();
+        if state.allocation_started {
+            return false;
+        }
+        state.next = state.next.max(next);
+        true
+    }
+
+    fn allocate(&self) -> u64 {
+        let mut state = self.state();
+        let current = state.next;
+        let Some(next) = current.checked_add(1) else {
+            drop(state);
+            panic!("process incarnation space exhausted");
+        };
+        state.next = next;
+        state.allocation_started = true;
+        current
+    }
+}
+
 impl ProcessIncarnation {
     /// Advances process-wide allocation beyond a persisted incarnation.
     ///
@@ -88,47 +148,30 @@ impl ProcessIncarnation {
     ///
     /// Panics if the persisted value has exhausted the `u64` incarnation space.
     pub fn reserve_after(incarnation: u64) {
-        let next = incarnation
-            .checked_add(1)
-            .expect("process incarnation space exhausted");
-        NEXT_INCARNATION.fetch_max(next, Ordering::Relaxed);
+        INCARNATIONS.reserve_after(incarnation);
     }
 
     /// Reconstructs an incarnation carried across a daemon handoff and
     /// reserves allocation beyond it, so this generation never reissues it.
     ///
-    /// Returns `None` for a value allocation can never produce.
+    /// Every carried incarnation must be adopted before this generation
+    /// allocates its first one; otherwise allocation may already have issued
+    /// the carried value. Returns `None` once any incarnation was allocated,
+    /// and for a value allocation can never produce.
     #[must_use]
     pub fn adopted(value: u64) -> Option<Self> {
-        if value == 0 || value == u64::MAX {
-            return None;
-        }
-        Self::reserve_after(value);
-        Some(Self(value))
+        INCARNATIONS.adopt(value).then_some(Self(value))
     }
 
-    /// Allocates the next process-wide incarnation.
+    /// Allocates the next process-wide incarnation. After the first call,
+    /// [`Self::adopted`] refuses every value.
     ///
     /// # Panics
     ///
     /// Panics if the process has exhausted the `u64` incarnation space.
     #[must_use]
     pub fn allocate() -> Self {
-        let mut current = NEXT_INCARNATION.load(Ordering::Relaxed);
-        loop {
-            let next = current
-                .checked_add(1)
-                .expect("process incarnation space exhausted");
-            match NEXT_INCARNATION.compare_exchange_weak(
-                current,
-                next,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Self(current),
-                Err(observed) => current = observed,
-            }
-        }
+        Self(INCARNATIONS.allocate())
     }
 
     #[must_use]
@@ -3574,13 +3617,22 @@ pub trait ProcessPlacement: Send + 'static {
     /// Keeps the external placement alive across a daemon handoff, after the
     /// actor ended while its process kept running.
     ///
+    /// The actor calls this inline, with no await point, so cancellation
+    /// cannot drop the placement instead. Implementations must therefore not
+    /// block and cannot fail: they only disarm whatever `Drop` would tear
+    /// down, and leave every external call to the generation that adopts the
+    /// placement.
+    ///
     /// This default is the minimal hook: it forgets `self` without running
     /// [`Self::release`] or `Drop`, so nothing the placement names (such as a
-    /// systemd scope that `Drop` would stop) is torn down. In-process
-    /// bookkeeping it holds is leaked, which is bounded because a handoff
-    /// replaces this process image. Plan 0061 slice M3.4 implements scope
-    /// retention for workload scopes, so the next generation can adopt the
-    /// scope and rebuild its reference counts.
+    /// systemd scope that `Drop` would stop) is torn down. Any in-process
+    /// bookkeeping it holds, such as a Dojo reference count, leaks. A
+    /// successful exec discards that leak, but this process image keeps it
+    /// when exec fails after the runtime stopped and the old daemon resumes
+    /// in process (Plan 0061 D5), and on an in-process rollback. Plan 0061
+    /// slice M3.4 implements scope retention for workload scopes, and must
+    /// reconcile Dojo reference counts for retained scopes when they are
+    /// re-adopted in process.
     fn retain_for_handoff(self)
     where
         Self: Sized,
@@ -3617,11 +3669,6 @@ impl<P: ProcessPlacement> Drop for SpawnOutcome<P> {
 
 async fn release_placement<P: ProcessPlacement>(placement: P) -> Result<(), LiveError> {
     tokio::task::spawn_blocking(move || placement.release()).await?;
-    Ok(())
-}
-
-async fn retain_placement<P: ProcessPlacement>(placement: P) -> Result<(), LiveError> {
-    tokio::task::spawn_blocking(move || placement.retain_for_handoff()).await?;
     Ok(())
 }
 
@@ -3855,7 +3902,7 @@ impl LiveSplintRuntime {
                 // nothing consumed the child's status.
                 return Err(failure(
                     error,
-                    adopted.into_unvalidated_adoptable(),
+                    unstage_session(adopted),
                     terminal,
                     config,
                     placement,
@@ -3981,7 +4028,7 @@ impl<P: ProcessPlacement> StagedLiveSplint<P> {
         } = self.actor;
         drop(io);
         LiveAdoptionInputs {
-            session: session.into_unvalidated_adoptable(),
+            session: unstage_session(session),
             terminal,
             config,
             placement,
@@ -4013,6 +4060,17 @@ fn validate_adopted_terminal(
         return Err(LiveError::HandoffStateUnsupported);
     }
     Ok(())
+}
+
+/// Returns a staged session's master and identity for rollback.
+///
+/// Staging adopts through [`AdoptableLinuxPtySession::try_adopt_unreaped`],
+/// and nothing polls the child before commit, so a staged session never holds
+/// a consumed exit status and the conversion cannot be refused.
+fn unstage_session(session: LinuxPtySession) -> AdoptableLinuxPtySession {
+    session
+        .try_into_unvalidated_adoptable()
+        .unwrap_or_else(|_| unreachable!("staging never consumes the child's exit status"))
 }
 
 /// Runs the fallible I/O staging for an adopted session: the kernel size
@@ -4164,9 +4222,11 @@ impl<P: ProcessPlacement> ActorStart<P> {
                     Ok(status)
                 }
                 // The process lives on in the next generation, so its
-                // placement must outlive this actor.
+                // placement must outlive this actor. Retain inline: an await
+                // point here would let cancellation drop the placement, and a
+                // workload scope's Drop stops the Splint.
                 Ok(ActorEnd::HandedOff) => {
-                    retain_placement(placement).await?;
+                    placement.retain_for_handoff();
                     Err(LiveError::HandedOff)
                 }
                 Err(error) => {
@@ -6075,13 +6135,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adopted_incarnation_is_never_reissued() {
-        assert_eq!(ProcessIncarnation::adopted(0), None);
-        assert_eq!(ProcessIncarnation::adopted(u64::MAX), None);
-        let carried = ProcessIncarnation::allocate().value() + 1_000;
-        let adopted = ProcessIncarnation::adopted(carried).unwrap();
-        assert_eq!(adopted.value(), carried);
-        assert!(ProcessIncarnation::allocate().value() > carried);
+    fn adopted_incarnations_precede_allocation_and_are_never_reissued() {
+        let allocator = IncarnationAllocator::new();
+        assert!(!allocator.adopt(0));
+        assert!(!allocator.adopt(u64::MAX));
+        assert!(allocator.adopt(41));
+        assert!(
+            allocator.adopt(7),
+            "a lower carried value never lowers allocation"
+        );
+        allocator.reserve_after(9);
+        assert_eq!(allocator.allocate(), 42);
+        assert!(
+            !allocator.adopt(100),
+            "adoption after the first allocation could collide"
+        );
+        allocator.reserve_after(99);
+        assert_eq!(allocator.allocate(), 100);
+        assert_eq!(allocator.allocate(), 101);
+
+        let _ = ProcessIncarnation::allocate();
+        assert_eq!(ProcessIncarnation::adopted(1 << 40), None);
     }
 
     #[test]
@@ -10130,6 +10204,60 @@ mod tests {
         )
     }
 
+    /// Polls `condition` every few milliseconds until it holds, failing with
+    /// `what` after a generous deadline.
+    async fn poll_until(what: &str, mut condition: impl FnMut() -> bool) {
+        time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    /// Waits until direct child `pid` exited, without consuming its status.
+    async fn wait_until_exited_unreaped(pid: u32) {
+        let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+        poll_until("the child to exit", || {
+            rustix::process::waitid(
+                rustix::process::WaitId::Pid(pid),
+                rustix::process::WaitIdOptions::EXITED
+                    | rustix::process::WaitIdOptions::NOHANG
+                    | rustix::process::WaitIdOptions::NOWAIT,
+            )
+            .unwrap()
+            .is_some()
+        })
+        .await;
+    }
+
+    /// Waits until at least `bytes` of child output are pending on the PTY
+    /// master, without reading any of it.
+    async fn wait_for_pending_output(master: &OwnedFd, bytes: u64) {
+        let mut pending = 0;
+        poll_until(&format!("{bytes} pending output bytes"), || {
+            pending = rustix::io::ioctl_fionread(master).unwrap();
+            pending >= bytes
+        })
+        .await;
+        assert_eq!(pending, bytes, "unexpected extra child output");
+    }
+
+    /// Waits until `pid` is in interruptible sleep, such as a blocking read.
+    async fn wait_for_sleeping(pid: u32) {
+        poll_until("the child to sleep", || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let (_, fields) = stat.rsplit_once(')')?;
+                    fields.split_whitespace().next().map(|state| state == "S")
+                })
+                .unwrap_or(false)
+        })
+        .await;
+    }
+
     /// Descriptors this process holds for the PTY master with `tty_index`.
     fn pty_descriptor_count(tty_index: &str) -> usize {
         std::fs::read_dir("/proc/self/fd")
@@ -10216,9 +10344,13 @@ mod tests {
         // output while no reader exists. It never reads.
         let writer = rustix::io::fcntl_dupfd_cloexec(handed_off.session.master(), 3).unwrap();
 
-        // Output produced between the old actor's end and staging.
+        // Output produced between the old actor's end and staging: the echoed
+        // "gap-a\r\n" (7 bytes), 50 tokens (200) and "\r\n" (2). Waiting for
+        // all of it to be pending proves the run is complete, so the next echo
+        // cannot interleave with it.
         rustix::io::write(&writer, b"gap-a\n").unwrap();
-        time::sleep(Duration::from_millis(100)).await;
+        wait_for_pending_output(&writer, 209).await;
+        wait_for_sleeping(child_pid).await;
         let terminal = restore_handed_off_terminal(&handed_off, config.terminal.clone());
         let new_placement = RecordingPlacement::default();
         let staged = LiveSplintRuntime::adopt_staged(
@@ -10232,8 +10364,10 @@ mod tests {
         .unwrap();
         let handle = staged.handle();
 
-        // Output produced while staged, behind the closed read gate.
+        // Output produced while staged, behind the closed read gate. All of
+        // it is pending before the gate is checked.
         rustix::io::write(&writer, b"gap-b\n").unwrap();
+        wait_for_pending_output(&writer, 418).await;
         let queued_handle = handle.clone();
         let mut queued_snapshot = tokio::spawn(async move { queued_handle.snapshot().await });
         assert!(
@@ -10463,7 +10597,8 @@ mod tests {
         // The child exits before the next staging. Staging must leave it
         // unreaped; the committed actor reaps and publishes it.
         rustix::io::write(inputs.session.master(), b"go\n").unwrap();
-        time::sleep(Duration::from_millis(150)).await;
+        wait_until_exited_unreaped(child_pid).await;
+        assert!(PathBuf::from(format!("/proc/{child_pid}")).exists());
         let staged = LiveSplintRuntime::adopt_staged(
             evidence.splint_id,
             evidence.incarnation,

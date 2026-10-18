@@ -621,7 +621,7 @@ impl AdoptableLinuxPtySession {
     /// session's ordinary [`PtySession::try_wait`]. Staged adoption uses this so
     /// that no irreversible process step happens before its commit, and a
     /// failed later staging step can return the descriptor through
-    /// [`LinuxPtySession::into_unvalidated_adoptable`] with reaping authority
+    /// [`LinuxPtySession::try_into_unvalidated_adoptable`] with reaping authority
     /// intact.
     ///
     /// # Errors
@@ -815,20 +815,27 @@ impl LinuxPtySession {
     }
 
     /// Regroups this session's canonical master and identity without
-    /// validation or any process operation.
+    /// revalidation or any process operation.
     ///
-    /// This is the infallible inverse of
-    /// [`AdoptableLinuxPtySession::try_adopt_unreaped`] for a staged adoption
-    /// that fails before it starts reading. Callers must first drop every cloned
-    /// reader. A session that already consumed its child's exit status yields
-    /// a value whose next adoption fails closed, because direct-child authority
-    /// is revalidated there.
-    #[must_use]
-    pub fn into_unvalidated_adoptable(self) -> AdoptableLinuxPtySession {
-        AdoptableLinuxPtySession {
+    /// This is the inverse of [`AdoptableLinuxPtySession::try_adopt_unreaped`]
+    /// for a staged adoption that fails before it starts reading. Callers must
+    /// first drop every cloned reader. The next adoption revalidates the
+    /// identity.
+    ///
+    /// # Errors
+    /// Returns the unchanged session when it already consumed its child's
+    /// exit status: without an unreaped child, the result could not carry
+    /// reaping authority.
+    pub fn try_into_unvalidated_adoptable(
+        self,
+    ) -> std::result::Result<AdoptableLinuxPtySession, Self> {
+        if self.exit_status.is_some() {
+            return Err(self);
+        }
+        Ok(AdoptableLinuxPtySession {
             identity: self.identity,
             master: self.master.into(),
-        }
+        })
     }
 
     /// Sends a lifecycle signal to the original child process group.
