@@ -65,12 +65,21 @@ pub(super) fn run(command: IntegrationCommand) -> Result<()> {
 /// Omarchy's own screensaver launcher, which the packaged adapter delegates to
 /// for other terminals. It is resolved the same way the adapter resolves it:
 /// the session's absolute `$OMARCHY_PATH` (a development checkout on some
-/// systems) first, then packaged Omarchy.
+/// systems) first, then packaged Omarchy, never the packaged adapter itself.
 pub(super) fn omarchy_screensaver_launcher() -> Result<PathBuf> {
-    resolve_omarchy_launcher(env::var_os("OMARCHY_PATH"), Path::new(DEFAULT_OMARCHY_PATH))
+    resolve_omarchy_launcher(
+        env::var_os("OMARCHY_PATH"),
+        Path::new(DEFAULT_OMARCHY_PATH),
+        Path::new(PACKAGED_HELPER),
+    )
 }
 
-fn resolve_omarchy_launcher(omarchy_path: Option<OsString>, default: &Path) -> Result<PathBuf> {
+fn resolve_omarchy_launcher(
+    omarchy_path: Option<OsString>,
+    default: &Path,
+    adapter: &Path,
+) -> Result<PathBuf> {
+    let adapter = fs::canonicalize(adapter).ok();
     omarchy_path
         .map(PathBuf::from)
         .filter(|root| root.is_absolute())
@@ -80,6 +89,7 @@ fn resolve_omarchy_launcher(omarchy_path: Option<OsString>, default: &Path) -> R
         .find(|candidate| {
             fs::metadata(candidate)
                 .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+                && (adapter.is_none() || fs::canonicalize(candidate).ok() != adapter)
         })
         .with_context(|| {
             format!(
@@ -703,8 +713,10 @@ mod tests {
         let session_launcher = omarchy_launcher(&session);
         let packaged_launcher = omarchy_launcher(&packaged);
 
-        let resolve =
-            |value: Option<&str>| resolve_omarchy_launcher(value.map(OsString::from), &packaged);
+        let adapter = root.0.join("missing-adapter");
+        let resolve = |value: Option<&str>| {
+            resolve_omarchy_launcher(value.map(OsString::from), &packaged, &adapter)
+        };
         assert_eq!(
             resolve(Some(session.to_str().unwrap())).unwrap(),
             session_launcher
@@ -737,6 +749,27 @@ mod tests {
                 .contains("unavailable under $OMARCHY_PATH or"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn omarchy_launcher_is_never_the_packaged_adapter() {
+        let root = TestRoot::new();
+        let session = root.0.join("session-omarchy");
+        let packaged = root.0.join("packaged-omarchy");
+        let adapter = omarchy_launcher(&root.0.join("splinterm"));
+        let session_launcher = omarchy_launcher(&session);
+        let packaged_launcher = omarchy_launcher(&packaged);
+        fs::remove_file(&session_launcher).unwrap();
+        symlink(&adapter, &session_launcher).unwrap();
+        let session = OsString::from(session.as_os_str());
+
+        assert_eq!(
+            resolve_omarchy_launcher(Some(session.clone()), &packaged, &adapter).unwrap(),
+            packaged_launcher
+        );
+        fs::remove_file(&packaged_launcher).unwrap();
+        symlink(&adapter, &packaged_launcher).unwrap();
+        assert!(resolve_omarchy_launcher(Some(session), &packaged, &adapter).is_err());
     }
 
     #[test]

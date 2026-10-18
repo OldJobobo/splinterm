@@ -105,7 +105,8 @@ class OmarchyScreensaverIntegrationTest(unittest.TestCase):
                 "exit 0\n"
             ),
             # -e --arg: one launched window still exists until it is closed.
-            # -e alone: whether any screensaver window is still mapped.
+            # -e alone: whether any screensaver window is still mapped, which
+            # holds for the first $SCREENSAVERS_MAPPED_CALLS calls.
             "jq": (
                 "#!/bin/sh\n"
                 "case $1 in\n"
@@ -115,7 +116,11 @@ class OmarchyScreensaverIntegrationTest(unittest.TestCase):
                 "      address=$4; grep -Fq \"window = \\\"address:$address\\\"\" \"$CALL_LOG\" && exit 1; exit 0\n"
                 "    fi\n"
                 "    [ \"$SCREENSAVER\" = org.omarchy.screensaver ] || exit 2\n"
-                "    exit \"${SCREENSAVERS_MAPPED:-1}\" ;;\n"
+                "    count=$(cat \"$MAPPED_COUNTER\" 2>/dev/null || echo 0)\n"
+                "    count=$((count + 1))\n"
+                "    echo \"$count\" >\"$MAPPED_COUNTER\"\n"
+                "    [ \"$count\" -le \"${SCREENSAVERS_MAPPED_CALLS:-0}\" ] && exit 0\n"
+                "    exit 1 ;;\n"
                 "  -r) printf '%b' \"$MONITORS\" ;;\n"
                 "esac\n"
             ),
@@ -134,6 +139,7 @@ class OmarchyScreensaverIntegrationTest(unittest.TestCase):
                 "XDG_RUNTIME_DIR": str(directory / "runtime"),
                 "HYPRLAND_INSTANCE_SIGNATURE": "test",
                 "MONITORS": monitors,
+                "MAPPED_COUNTER": str(directory / "mapped-calls"),
                 "SCREENSAVER_EVENTS": events
                 or "openwindow>>0xa,org.omarchy.screensaver,title\nopenwindow>>0xb,org.omarchy.screensaver,title\n",
             }
@@ -243,16 +249,41 @@ class OmarchyScreensaverIntegrationTest(unittest.TestCase):
                 any(line.startswith(("session:", "packaged:")) for line in calls)
             )
 
-    def test_focus_returns_only_after_every_screensaver_closes(self) -> None:
+    def test_focus_returns_after_the_last_screensaver_closes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-omarchy-helper-") as value:
+            root = Path(value)
             launcher, environment, log = self.harness(
-                Path(value), "com.oldjobobo.splinterm.desktop"
+                root,
+                "com.oldjobobo.splinterm.desktop",
+                "openwindow>>0xa,org.omarchy.screensaver,title\n"
+                "openwindow>>0xb,org.omarchy.screensaver,title\n"
+                "closewindow>>0xb\n",
             )
-            environment["SCREENSAVERS_MAPPED"] = "0"
+            # Still mapped at the first check, gone after the close event.
+            environment["SCREENSAVERS_MAPPED_CALLS"] = "1"
+            subprocess.run([launcher, "force"], env=environment, check=True, timeout=5)
+            focus_calls = self.focus_calls(log, 4)
+            self.assertEqual(len(focus_calls), 4, focus_calls)
+            self.assertIn("DP-3", focus_calls[-1])
+            self.assertEqual(
+                (root / "mapped-calls").read_text(encoding="utf-8").strip(), "2"
+            )
+
+    def test_focus_stays_put_while_a_screensaver_is_still_mapped(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="splinterm-omarchy-helper-") as value:
+            root = Path(value)
+            launcher, environment, log = self.harness(
+                root, "com.oldjobobo.splinterm.desktop"
+            )
+            environment["SCREENSAVERS_MAPPED_CALLS"] = "99"
             subprocess.run([launcher, "force"], env=environment, check=True, timeout=5)
             time.sleep(0.3)
             focus_calls = self.focus_calls(log, 3)
             self.assertEqual(len(focus_calls), 3, focus_calls)
+            # The event stream ended while a window was still mapped.
+            self.assertEqual(
+                (root / "mapped-calls").read_text(encoding="utf-8").strip(), "1"
+            )
 
     def test_exec_rule_survives_the_legacy_dispatcher_fallback(self) -> None:
         with tempfile.TemporaryDirectory(prefix="splinterm-omarchy-helper-") as value:

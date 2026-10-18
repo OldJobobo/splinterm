@@ -1,14 +1,14 @@
-omarchy_integration_message() {
-  echo 'On Omarchy, run: splinterm integration omarchy enable'
+omarchy_integration_reason() {
   echo '  Omarchy tags only the terminals it knows. Until this runs, Super+C and Super+V send Ctrl+C (interrupt) and Ctrl+V to Splinterm instead of copying and pasting,'
   echo '  and Splinterm misses the terminal opacity and input-method rules. It also makes Splinterm the default terminal and the screensaver terminal; splinterm integration omarchy disable reverses it.'
-  echo '  Check it with: splinterm integration omarchy status'
 }
 
 post_install() {
   echo 'Splinterm installed for the documented Arch/Omarchy target.'
   echo 'Active Omarchy Quattro themes are discovered and reloaded automatically; no theme hook is required.'
-  omarchy_integration_message
+  echo 'On Omarchy, run: splinterm integration omarchy enable'
+  omarchy_integration_reason
+  echo '  Check it with: splinterm integration omarchy status'
   echo 'Outside Omarchy, add com.oldjobobo.splinterm.desktop to ~/.config/xdg-terminals.list when ready to make it preferred.'
 }
 
@@ -16,9 +16,9 @@ post_upgrade() {
   echo 'Beta 3 removes terminal workload TasksMax overrides; existing daemon and workload units keep their old policy until recreated.'
   echo 'From an external terminal, stop splinterd.service, run systemctl --user daemon-reload, then start splinterd.service; stopping ends active Dojos.'
   echo 'This package does not restart user services automatically.'
-  omarchy_integration_message
-  echo 'Check Omarchy screensaver integration: splinterm integration omarchy-screensaver status'
-  echo 'On Omarchy 4, if status reports a shadowed legacy launcher, re-run splinterm integration omarchy enable (or omarchy-screensaver enable), then run omarchy-restart-shell or log in again.'
+  echo 'On Omarchy, check the integration with: splinterm integration omarchy status'
+  echo '  If it is not yet enabled, run splinterm integration omarchy enable; without it, Super+C sends Ctrl+C (interrupt) to Splinterm.'
+  echo '  On Omarchy 4, if splinterm integration omarchy-screensaver status reports a shadowed legacy launcher, re-run splinterm integration omarchy enable, then run omarchy-restart-shell or log in again.'
 }
 
 post_remove() {

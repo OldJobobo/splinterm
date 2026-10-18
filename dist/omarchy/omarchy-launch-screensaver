@@ -61,13 +61,15 @@ hypr_focus_monitor() {
     hyprctl dispatch focusmonitor "$1" >/dev/null
 }
 
-# Launch on the given workspace through a Hyprland exec rule, as Omarchy's own
-# launcher does. Hyprland matches the rule through a token it puts in the
-# spawned environment, falling back to the pid. Both survive the exec chain
-# from xdg-terminal-exec through splinterm-xdg-terminal-exec to the
-# `splinterm xdg-launch` process that owns the window. The rule outranks
-# Omarchy's static rule, which parks screensaver windows in a hidden special
-# workspace.
+# Launch on the given workspace through a Hyprland exec rule, as Omarchy's
+# launcher on its `quattro` branch does since bf44355a (after 4.0.4). That
+# branch also adds a static rule parking screensaver windows in a hidden
+# special workspace, which the exec rule outranks. Released Omarchy 4.0.0-4.0.4
+# launches with a plain exec_cmd and has no parking rule; the workspace rule
+# is meant to work there too. Hyprland matches the rule through a token it
+# puts in the spawned environment, falling back to the pid. Both survive the
+# exec chain from xdg-terminal-exec through splinterm-xdg-terminal-exec to the
+# `splinterm xdg-launch` process that owns the window.
 hypr_exec() {
   local workspace=$1 command
   shift
