@@ -3,15 +3,19 @@
 //! A dry run reports what the running daemon knows cheaply. It never fences,
 //! captures, or opens the installed candidate. `Execute` is refused before
 //! the old-side gate (Plan 0061 M3.6) runs whenever anything but
-//! `Unsupported` blocks it; the gate itself always ends cancelled until
-//! capture and exec land (M3.7–M3.10). Every resume ticket claim fails closed
+//! `Unsupported` blocks it. The gate then prepares the installed forward pair
+//! beside the retained rollback pair (M3.7) and fences, and always ends
+//! cancelled until capture and exec land (M3.7–M3.10). Every resume ticket
+//! claim fails closed
 //! because this daemon issues no tickets (M3.16). No handoff prepare is ever
 //! pending, so every Window acknowledgement finds nothing to acknowledge
 //! (M3.13).
 
 use splinterd::{
     handoff_compatibility::{HandoffCapabilities, VersionRange},
-    handoff_coordinator::{HandoffCoordinatorError, RollbackHandoffAuthority},
+    handoff_coordinator::{
+        ForwardHandoffAuthority, HandoffCoordinatorError, RollbackHandoffAuthority,
+    },
     handoff_preflight::compiled_handoff_generation,
     package_provenance::{BuildProvenanceKind, compiled_build_provenance},
 };
@@ -28,10 +32,11 @@ pub(crate) const FRESH_DAEMON_GENERATION: u64 = 1;
 
 /// What startup learned about the daemon's rollback authority.
 pub(crate) enum RollbackAuthority {
-    /// The sealed packaged daemon/client rollback pair is retained. It is
-    /// held, unread, until a handoff (M3.7) borrows it.
+    /// The sealed packaged daemon/client rollback pair is retained for the
+    /// daemon's life. Each handoff attempt borrows it to prepare the forward
+    /// pair and never consumes it.
     Retained {
-        _authority: Box<RollbackHandoffAuthority>,
+        authority: Box<RollbackHandoffAuthority>,
     },
     /// The daemon is not installed from a package.
     NotPackaged,
@@ -45,7 +50,7 @@ impl RollbackAuthority {
     ) -> Self {
         match prepared {
             Ok(authority) => Self::Retained {
-                _authority: Box::new(authority),
+                authority: Box::new(authority),
             },
             Err(HandoffCoordinatorError::NotPackaged) => {
                 debug!("development daemon has no packaged rollback handoff authority");
@@ -63,6 +68,65 @@ impl RollbackAuthority {
             Self::Retained { .. } => None,
             Self::NotPackaged => Some(HandoffBlockingReason::NotPackaged),
             Self::Unavailable => Some(HandoffBlockingReason::RollbackUnavailable),
+        }
+    }
+
+    /// Discovers, seals, preflights, and authenticates the installed forward
+    /// pair beside the retained rollback pair, which stays retained whatever
+    /// the outcome.
+    ///
+    /// Blocks on sealed preflight; the gate runs it on a blocking thread while
+    /// the daemon keeps serving (Plan 0061 D2).
+    ///
+    /// # Errors
+    /// `NoInstalledUpgrade` when the installed pair is the running build;
+    /// `NoPackageRecord` when no package record is installed beside it;
+    /// `Failed` for any other failure, or without retained authority, which
+    /// `Execute` refuses before the gate in any case.
+    pub(crate) fn prepare_forward(&self) -> Result<ForwardHandoffAuthority, ForwardRefusal> {
+        let Self::Retained { authority } = self else {
+            return Err(ForwardRefusal::Failed);
+        };
+        authority
+            .prepare_forward_installed()
+            .map_err(|error| match error {
+                HandoffCoordinatorError::NoInstalledUpgrade => ForwardRefusal::NoInstalledUpgrade,
+                HandoffCoordinatorError::NoInstalledPackageRecord => {
+                    warn!(
+                        "installed daemon has no package record; handoff needs a packaged install"
+                    );
+                    ForwardRefusal::NoPackageRecord
+                }
+                error => {
+                    warn!(%error, "installed forward daemon pair cannot be prepared for handoff");
+                    ForwardRefusal::Failed
+                }
+            })
+    }
+}
+
+/// Why a handoff attempt stopped before it fenced: the installed forward pair
+/// could not be prepared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ForwardRefusal {
+    /// The installed pair is the running build, so there is nothing to hand
+    /// off to. The attempt cancels as `Blocked`: nothing failed, and
+    /// installing an upgrade lifts the condition.
+    NoInstalledUpgrade,
+    /// No package record is installed beside the forward pair, as after a
+    /// dirty-tree install over a packaged daemon. The attempt cancels as
+    /// `Failed`, but the answer names the cause.
+    NoPackageRecord,
+    /// The forward pair is missing, changing, unsafe, unauthenticated, or
+    /// incompatible, or its preparation could not run.
+    Failed,
+}
+
+impl ForwardRefusal {
+    pub(crate) const fn cancel_reason(self) -> HandoffCancelReason {
+        match self {
+            Self::NoInstalledUpgrade => HandoffCancelReason::Blocked,
+            Self::NoPackageRecord | Self::Failed => HandoffCancelReason::Failed,
         }
     }
 }
@@ -161,10 +225,10 @@ fn report_from(
 /// Refuses `Execute` before the handoff gate runs when the report names any
 /// reason other than `Unsupported`.
 ///
-/// `Unsupported` alone lets the gate fence, re-check, drain, and persist; the
-/// attempt then cancels, because capture and exec do not exist yet. Every
-/// other reason (transient Lairs, no rollback authority) refuses without
-/// fencing anything.
+/// `Unsupported` alone lets the gate prepare the forward pair, then fence,
+/// re-check, drain, and persist; the attempt then cancels, because capture
+/// and exec do not exist yet. Every other reason (transient Lairs, no
+/// rollback authority) refuses without preparing or fencing anything.
 ///
 /// # Errors
 /// Returns `HandoffUnavailable` naming every reason the report names.
@@ -197,6 +261,29 @@ pub(crate) fn cancelled_handoff(
     ProtocolError {
         message: format!("daemon handoff is unavailable: {reason}"),
         ..ProtocolError::handoff_unavailable(blocking_reasons)
+    }
+}
+
+/// The answer to an `Execute` whose forward preparation stopped. A failure
+/// reads like any cancelled attempt. An installed pair that is the running
+/// build, or one without a package record, says so, since the cancel reason
+/// alone (`Blocked` or `Failed`) cannot.
+pub(crate) fn refused_forward_handoff(
+    refusal: ForwardRefusal,
+    blocking_reasons: Vec<HandoffBlockingReason>,
+) -> ProtocolError {
+    match refusal {
+        ForwardRefusal::NoInstalledUpgrade => ProtocolError {
+            message: "daemon handoff is unavailable: the installed daemon is the running build"
+                .to_owned(),
+            ..ProtocolError::handoff_unavailable(blocking_reasons)
+        },
+        ForwardRefusal::NoPackageRecord => ProtocolError {
+            message: "daemon handoff is unavailable: the installed daemon has no package record"
+                .to_owned(),
+            ..ProtocolError::handoff_unavailable(blocking_reasons)
+        },
+        ForwardRefusal::Failed => cancelled_handoff(refusal.cancel_reason(), blocking_reasons),
     }
 }
 
@@ -430,5 +517,33 @@ mod tests {
             invalid_handoff_ticket().code,
             ErrorCode::InvalidHandoffTicket
         );
+    }
+
+    #[test]
+    fn each_forward_refusal_names_its_cause_and_cancel_reason() {
+        let reasons = vec![HandoffBlockingReason::Unsupported];
+        for (refusal, cancel, message) in [
+            (
+                ForwardRefusal::NoInstalledUpgrade,
+                HandoffCancelReason::Blocked,
+                "daemon handoff is unavailable: the installed daemon is the running build",
+            ),
+            (
+                ForwardRefusal::NoPackageRecord,
+                HandoffCancelReason::Failed,
+                "daemon handoff is unavailable: the installed daemon has no package record",
+            ),
+            (
+                ForwardRefusal::Failed,
+                HandoffCancelReason::Failed,
+                "daemon handoff is unavailable: preparation could not complete",
+            ),
+        ] {
+            assert_eq!(refusal.cancel_reason(), cancel);
+            let error = refused_forward_handoff(refusal, reasons.clone());
+            assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+            assert_eq!(error.message, message);
+            assert_eq!(error.handoff_blocking_reasons, reasons);
+        }
     }
 }

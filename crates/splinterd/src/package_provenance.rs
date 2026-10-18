@@ -653,7 +653,7 @@ mod tests {
             let rollback =
                 RetainedRollbackExecutables::capture_declared_for_test(&pair, policy).unwrap();
             let snapshots =
-                HandoffExecutableSnapshots::materialize(&pair, rollback, policy).unwrap();
+                HandoffExecutableSnapshots::materialize(&pair, &rollback, policy).unwrap();
             let capabilities = capabilities();
             let identity = derive_pair_build_identity(
                 "1234567890abcdef1234567890abcdef12345678",

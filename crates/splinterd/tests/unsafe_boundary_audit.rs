@@ -1,10 +1,15 @@
-//! Source audit of the `splinterd` package's one audited unsafe exception.
+//! Source audit of the `splinterd` package's two audited unsafe exceptions.
 //!
 //! The workspace forbids `unsafe_code`, which no package can relax locally,
 //! so this package copies the workspace lint table with `deny`. This audit
-//! proves the copy is exact and that the only unsafe construct and the only
-//! `unsafe_code` waiver anywhere in the package's sources are the post-exec
-//! acquisition in `src/candidate_acquire.rs`.
+//! proves the copy is exact and that the only unsafe constructs and the only
+//! `unsafe_code` waivers anywhere in the package's sources are the two
+//! post-exec invocations of the inherited-FD leaf crate: the candidate
+//! acquisition in `src/candidate_acquire.rs`, and the sealed-preflight
+//! launcher's closure of inherited descriptors in `src/handoff_preflight.rs`,
+//! which keeps descriptors made inheritable by other daemon threads out of the
+//! sealed image while forward preflight runs beside a serving daemon (Plan
+//! 0061 D2).
 
 use std::{fs, path::Path};
 
@@ -330,7 +335,7 @@ fn nested_attribute_waivers_and_unsafe_attributes_are_detected() {
 }
 
 #[test]
-fn splinterd_keeps_one_exact_unsafe_bootstrap_invocation_and_policy() {
+fn splinterd_keeps_two_exact_unsafe_post_exec_invocations_and_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     assert!(has_exact_lint_policy(&cargo));
@@ -342,16 +347,137 @@ fn splinterd_keeps_one_exact_unsafe_bootstrap_invocation_and_policy() {
     for directory in ["src", "tests", "examples"] {
         audit_sources(root, &root.join(directory), &mut audit);
     }
-    let expected_construct = Finding {
-        file: "src/candidate_acquire.rs".to_owned(),
-        function: Some("acquire_before_tokio".to_owned()),
-        kind: "unsafe block",
+    let finding = |file: &str, function: &str, kind| Finding {
+        file: file.to_owned(),
+        function: Some(function.to_owned()),
+        kind,
     };
-    let expected_waiver = Finding {
-        file: "src/candidate_acquire.rs".to_owned(),
-        function: Some("acquire_before_tokio".to_owned()),
-        kind: "allow unsafe_code",
-    };
-    assert_eq!(audit.constructs, [expected_construct]);
-    assert_eq!(audit.waivers, [expected_waiver]);
+    let candidate = ("src/candidate_acquire.rs", "acquire_before_tokio");
+    let launcher = ("src/handoff_preflight.rs", "close_inherited_descriptors");
+    assert_eq!(
+        audit.constructs,
+        [
+            finding(candidate.0, candidate.1, "unsafe block"),
+            finding(launcher.0, launcher.1, "unsafe block"),
+        ]
+    );
+    assert_eq!(
+        audit.waivers,
+        [
+            finding(candidate.0, candidate.1, "allow unsafe_code"),
+            finding(launcher.0, launcher.1, "allow unsafe_code"),
+        ]
+    );
+}
+
+/// Returns the `main` function of one binary source file.
+fn main_function(path: &Path) -> ItemFn {
+    let source = fs::read_to_string(path).unwrap();
+    let syntax = syn::parse_file(&source)
+        .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+    syntax
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "main" => Some(function),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{} has no main function", path.display()))
+}
+
+/// Requires `main` to open with exactly `expected`, in order, with no
+/// attribute (such as a runtime macro) and no statement before them.
+fn assert_main_opens_with(path: &Path, expected: &[&str]) {
+    let main = main_function(path);
+    assert!(
+        main.attrs.is_empty(),
+        "{}: main must carry no attribute that runs code first",
+        path.display()
+    );
+    assert!(
+        main.block.stmts.len() >= expected.len(),
+        "{}: main is shorter than its pinned opening",
+        path.display()
+    );
+    for (index, (actual, expected)) in main.block.stmts.iter().zip(expected).enumerate() {
+        let expected = syn::parse_str::<syn::Stmt>(expected).unwrap();
+        assert!(
+            *actual == expected,
+            "{}: statement {index} of main is not the pinned descriptor-ordering statement",
+            path.display()
+        );
+    }
+}
+
+/// `close_inherited_descriptors` in `src/handoff_preflight.rs` is sound only
+/// because `dispatch_internal_preflight`, a safe public function, runs before
+/// anything in either binary can own a descriptor. Pin the opening of both
+/// `main` functions so that no statement can slip in ahead of it. Candidate
+/// acquisition in `splinterd` and the askpass helper in `splinterm` come first;
+/// each either finds no activation, owning nothing, or never reaches the
+/// preflight dispatch.
+#[test]
+fn both_mains_dispatch_sealed_preflight_before_any_descriptor_owner() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_main_opens_with(
+        &root.join("src/main.rs"),
+        &[
+            "let candidate = candidate_acquire::acquire_before_tokio()?;",
+            "if candidate.is_none()
+                && splinterd::handoff_preflight::dispatch_internal_preflight(
+                    splinterd::handoff_preflight::PreflightRole::Daemon,
+                )?
+            {
+                return Ok(());
+            }",
+        ],
+    );
+    assert_main_opens_with(
+        &root.join("../splinterm/src/main.rs"),
+        &[
+            "if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+                std::process::exit(code);
+            }",
+            r#"match splinterd::handoff_preflight::dispatch_internal_preflight(
+                splinterd::handoff_preflight::PreflightRole::Client,
+            ) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("sealed preflight failed: {error}");
+                    std::process::exit(1);
+                }
+            }"#,
+        ],
+    );
+}
+
+#[test]
+fn the_main_ordering_pin_rejects_an_inserted_statement() {
+    let directory =
+        std::env::temp_dir().join(format!("splinterd-main-ordering-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("main.rs");
+    fs::write(
+        &path,
+        "fn main() {
+            let early = std::fs::File::open(\"/dev/null\");
+            if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+                std::process::exit(code);
+            }
+        }",
+    )
+    .unwrap();
+    let inserted = std::panic::catch_unwind(|| {
+        assert_main_opens_with(
+            &path,
+            &[
+                "if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+                std::process::exit(code);
+            }",
+            ],
+        );
+    });
+    fs::remove_dir_all(&directory).unwrap();
+    assert!(inserted.is_err(), "an inserted statement must fail the pin");
 }

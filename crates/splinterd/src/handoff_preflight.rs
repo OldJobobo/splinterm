@@ -3,6 +3,34 @@
 //! The live daemon owns process creation and exact snapshot identities. A fresh
 //! private Unix packet channel carries one challenge and one fixed-size report;
 //! argv, environment, stdout text, and package paths carry no authority.
+//!
+//! # Descriptor discipline
+//!
+//! Forward preflight runs while the daemon serves (Plan 0061 D2), so other
+//! threads may create, duplicate, or close descriptors at any moment,
+//! including between the audit and the spawn. The child descriptor set is
+//! therefore fixed by construction, not by the audit:
+//!
+//! - every descriptor this module creates in the daemon is close-on-exec, and
+//!   the spawn places exactly the report socket, `/dev/null`, and the sealed
+//!   target on standard input, output, and error;
+//! - the launcher, a fresh exec of the running daemon's own image, reaches
+//!   `dispatch_internal_preflight` before anything in its `main` can own a
+//!   descriptor (`tests/unsafe_boundary_audit.rs` pins both binaries' `main`),
+//!   and closes every inherited descriptor above standard error through the
+//!   audited `splinterm-inherited-fd` boundary before it installs its seccomp
+//!   filter, so a descriptor another daemon thread made inheritable while the
+//!   spawn copied the descriptor table never reaches the sealed image;
+//! - the sealed image then starts with standard input and output only, the
+//!   target descriptor being close-on-exec, and its child mode refuses to
+//!   report if it observes any inherited descriptor above standard error.
+//!
+//! The daemon-side scan before each spawn is detection only: it logs each
+//! inheritable descriptor it observes and continues. A same-user peer can make
+//! the daemon hold one, for example by passing descriptors in a message its
+//! session-bus library receives without close-on-exec, so failing on it would
+//! let that peer deny handoff, and the child's descriptor set does not depend
+//! on it.
 
 use std::{
     ffi::CString,
@@ -21,7 +49,7 @@ use nix::{
     },
 };
 use rustix::{
-    io::{FdFlags, fcntl_getfd, fcntl_setfd},
+    io::{FdFlags, fcntl_dupfd_cloexec, fcntl_getfd, fcntl_setfd},
     rand::{GetRandomFlags, getrandom},
 };
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch, apply_filter};
@@ -35,7 +63,9 @@ use crate::{
         BuildIdentity, BuildVersion, ExecutablePairBinding, ExecutablePairPreflight,
         HandoffCapabilities, RunningHandoffGeneration, VersionRange,
     },
-    handoff_descriptors::{DescriptorHandoffError, PreparedDescriptorInheritance},
+    handoff_descriptors::{
+        DescriptorHandoffError, audit_inheritable_descriptors, inheritable_descriptors,
+    },
     package_provenance::compiled_build_provenance,
 };
 
@@ -46,6 +76,10 @@ const WIRE_VERSION: u16 = 1;
 const CHALLENGE_BYTES: usize = 44;
 const REPORT_BYTES: usize = 98;
 const DEFAULT_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Inheritable daemon descriptors named in one detection log.
+const MAX_LOGGED_INHERITABLE_DESCRIPTORS: usize = 16;
+/// Bytes of one descriptor's link target kept in that log.
+const MAX_LOGGED_DESCRIPTOR_TARGET_BYTES: usize = 256;
 const HANDOFF_PROTOCOL_VERSION: u16 = 1;
 // A literal, because package tooling reads it from source; the assertion keeps
 // it equal to the schema the terminal crate writes.
@@ -65,6 +99,9 @@ const TEST_ROLE: &str = "SPLINTERM_PREFLIGHT_TEST_ROLE";
 #[cfg(test)]
 const TEST_SECCOMP_NAME: &str =
     "handoff_preflight::tests::sealed_launcher_denies_descendant_creation";
+#[cfg(test)]
+const TEST_INHERITED_NAME: &str =
+    "handoff_preflight::tests::sealed_child_refuses_a_descriptor_its_launcher_kept";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -150,10 +187,22 @@ pub enum PreflightError {
 /// Returns `Ok(true)` only after completing one internal mode. Normal user
 /// invocations return `Ok(false)`.
 ///
+/// # Contract
+///
+/// This must be the first descriptor-relevant call in the binary's `main`:
+/// nothing before it may open, duplicate, close, or own a descriptor, or
+/// start a thread. Launcher mode closes every inheritable descriptor above
+/// standard error through an audited unsafe claim whose soundness rests on
+/// that ordering. `splinterd` and `splinterm` call it only after activation
+/// checks that own nothing when they return, and
+/// `tests/unsafe_boundary_audit.rs` pins the opening of both `main`
+/// functions. No other caller is supported.
+///
 /// # Errors
 ///
 /// Returns an error for a malformed challenge, role mismatch, transport
 /// failure, or invalid compiled contract while handling an internal mode.
+#[doc(hidden)]
 pub fn dispatch_internal_preflight(expected_role: PreflightRole) -> Result<bool, PreflightError> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments.len() != 2 {
@@ -172,8 +221,9 @@ pub fn dispatch_internal_preflight(expected_role: PreflightRole) -> Result<bool,
 /// Executes both roles from both sealed generations and returns authority only
 /// after all four reports are authenticated and pair-consistent.
 ///
-/// The caller must quiesce process-wide descriptor creation and closure for the
-/// descriptor audit and process-spawn boundary.
+/// Safe while other threads create or close descriptors; see the module's
+/// descriptor discipline. Each child is waited for synchronously, so async
+/// callers run this on a blocking thread.
 ///
 /// # Errors
 ///
@@ -189,8 +239,10 @@ pub fn preflight_sealed_snapshots(
 ///
 /// The rollback coordinator uses this at startup, before forward sources exist,
 /// so package replacement cannot remove the running generation's rollback pair.
-/// The caller must ensure process-wide descriptor creation and closure are
-/// quiescent for the descriptor audit and process-spawn boundary.
+/// A handoff then runs it for the forward pair while the daemon serves (Plan
+/// 0061 D2). Both are safe while other threads create or close descriptors;
+/// see the module's descriptor discipline. Each child is waited for
+/// synchronously, so async callers run this on a blocking thread.
 ///
 /// # Errors
 ///
@@ -216,12 +268,34 @@ pub fn preflight_sealed_snapshot_for_integration_test(
     role: PreflightRole,
     launcher: &Path,
 ) -> Result<(), PreflightError> {
+    preflight_sealed_snapshot_after_audit_for_integration_test(snapshot, role, launcher, || {})
+}
+
+/// Runs one actual binary entrypoint like
+/// [`preflight_sealed_snapshot_for_integration_test`], calling `after_audit`
+/// between the daemon-side descriptor audit and the spawn. A test uses it to
+/// make a descriptor inheritable where only the launcher can stop it, as a
+/// concurrent daemon thread could.
+///
+/// # Errors
+///
+/// Returns the same bounded execution and authentication failures as the
+/// production four-snapshot boundary.
+#[cfg(feature = "integration-test")]
+#[doc(hidden)]
+pub fn preflight_sealed_snapshot_after_audit_for_integration_test(
+    snapshot: &SealedExecutableSnapshot,
+    role: PreflightRole,
+    launcher: &Path,
+    after_audit: impl FnOnce(),
+) -> Result<(), PreflightError> {
     preflight_one_with_launcher(
         snapshot,
         role,
         PreflightGeneration::Forward,
         Duration::from_secs(10),
         launcher,
+        after_audit,
     )
     .map(|_| ())
 }
@@ -279,6 +353,7 @@ fn preflight_one(
         generation,
         timeout,
         Path::new("/proc/self/exe"),
+        || {},
     )
 }
 
@@ -288,8 +363,13 @@ fn preflight_one_with_launcher(
     generation: PreflightGeneration,
     timeout: Duration,
     launcher: &Path,
+    after_audit: impl FnOnce(),
 ) -> Result<ChildReport, PreflightError> {
-    let _audit = PreparedDescriptorInheritance::prepare([])?;
+    // Detection only: the launcher, not this scan, keeps an inheritable
+    // descriptor out of the sealed image, so one observed here is logged and
+    // the preflight goes on.
+    log_inheritable_descriptors();
+    after_audit();
     let (parent, child_endpoint) = socketpair(
         AddressFamily::Unix,
         SockType::SeqPacket,
@@ -302,7 +382,10 @@ fn preflight_one_with_launcher(
         .map_err(errno_io)
         .map_err(PreflightError::CreateTransport)?;
 
-    let target = rustix::io::dup(snapshot.descriptor())
+    // Close-on-exec, like the socket pair: the spawn installs both on
+    // standard streams in the child, and neither may leak into a child that
+    // another daemon thread spawns meanwhile.
+    let target = fcntl_dupfd_cloexec(snapshot.descriptor(), 0)
         .map_err(rustix_errno_io)
         .map_err(PreflightError::CreateTransport)?;
 
@@ -358,7 +441,46 @@ fn preflight_one_with_launcher(
     result
 }
 
+/// Logs, without failing, the inheritable descriptors the daemon holds before
+/// a spawn. The launcher closes them; a same-user peer can cause one (a
+/// session-bus message can carry descriptors received without close-on-exec),
+/// so failing here would let that peer deny handoff.
+fn log_inheritable_descriptors() {
+    match inheritable_descriptors(MAX_LOGGED_INHERITABLE_DESCRIPTORS) {
+        Ok(found) => {
+            for (fd, target) in found {
+                let target = target.map_or_else(
+                    || "<unreadable>".to_owned(),
+                    |target| {
+                        let target = target.to_string_lossy();
+                        let mut end = target.len().min(MAX_LOGGED_DESCRIPTOR_TARGET_BYTES);
+                        while !target.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        target[..end].to_owned()
+                    },
+                );
+                tracing::warn!(
+                    fd,
+                    target = %target,
+                    "inheritable daemon descriptor observed before sealed preflight; its launcher closes it"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "cannot scan daemon descriptors before sealed preflight");
+        }
+    }
+}
+
 fn launch_sealed_target() -> ! {
+    // The libtest launcher stage is multi-threaded, so only production
+    // launchers can take the post-exec claim; the unit test generation is
+    // started with a clean descriptor table instead.
+    #[cfg(not(test))]
+    if close_inherited_descriptors().is_err() {
+        std::process::exit(125);
+    }
     let target = std::io::stderr();
     if let Ok(flags) = fcntl_getfd(&target) {
         let _ = fcntl_setfd(&target, flags | FdFlags::CLOEXEC);
@@ -407,6 +529,45 @@ fn launch_sealed_target() -> ! {
     std::process::exit(126)
 }
 
+/// Closes every inherited descriptor above standard error in the freshly
+/// executed launcher.
+///
+/// The daemon spawned this process while its other threads kept running, so
+/// whatever they held inheritable at that instant was copied in. Closing it
+/// here, before the sealed image runs, is what bounds the preflight child to
+/// its standard streams.
+///
+/// # Errors
+///
+/// Fails closed, closing nothing, when the process has another thread or its
+/// descriptor table cannot be read.
+#[cfg(not(test))]
+#[allow(
+    unsafe_code,
+    reason = "audited invocation of the inherited-FD leaf boundary in the freshly executed preflight launcher"
+)]
+fn close_inherited_descriptors() -> Result<(), splinterm_inherited_fd::InheritedFdError> {
+    // SAFETY: only `launch_sealed_target` calls this, first, and only
+    // `dispatch_internal_preflight` reaches that. The proof does not depend on
+    // who started the process or with which argv and environment: whatever
+    // they say, each binary's `main` reaches the dispatch having created no
+    // descriptor owner and no thread (`tests/unsafe_boundary_audit.rs` pins
+    // the opening of both). In `splinterd`, candidate acquisition runs first:
+    // without its activation variable it only reads the environment, a valid
+    // activation skips the dispatch entirely, and an invalid one returns an
+    // error that ends `main`. In `splinterm`, the askpass check runs first:
+    // without both broker variables it only reads the environment, and with
+    // them it runs the helper and exits without returning. Before `main`, std
+    // startup only reopens descriptors 0 to 2 on `/dev/null`, and nothing else
+    // before `main` owns a descriptor. So the process is single-threaded, no
+    // Rust value owns or borrows a descriptor above standard error, and every
+    // such descriptor with FD_CLOEXEC clear crossed exec without a surviving
+    // Rust owner. Nothing opens, closes, or replaces a descriptor until the
+    // claim returns. An empty expected set claims nothing and closes every
+    // such descriptor. The leaf also rejects a second thread.
+    unsafe { splinterm_inherited_fd::claim_post_exec_inherited(&[]) }.map(drop)
+}
+
 fn install_no_descendants_filter() -> Result<(), String> {
     #[cfg(not(any(
         target_arch = "x86_64",
@@ -443,6 +604,9 @@ fn install_no_descendants_filter() -> Result<(), String> {
 }
 
 fn run_child(expected_role: PreflightRole) -> Result<(), PreflightError> {
+    // Nothing above standard error may cross into the sealed image; a report
+    // from a child that inherited one would vouch for a leaky launcher.
+    audit_inheritable_descriptors()?;
     let mut challenge_frame = [0_u8; CHALLENGE_BYTES];
     receive_exact_packet(std::io::stdin().as_raw_fd(), &mut challenge_frame)?;
     let (challenge, role, generation) = decode_challenge(&challenge_frame)?;
@@ -796,7 +960,7 @@ mod tests {
             let rollback =
                 RetainedRollbackExecutables::capture_declared_for_test(&rollback, policy).unwrap();
             let snapshots =
-                HandoffExecutableSnapshots::materialize(&forward, rollback, policy).unwrap();
+                HandoffExecutableSnapshots::materialize(&forward, &rollback, policy).unwrap();
             Self {
                 directory,
                 snapshots,
@@ -842,14 +1006,14 @@ mod tests {
         }
     }
 
-    fn clean_test_generation() {
+    fn clean_test_generation(name: &str) {
         let status = Command::new("python3")
             .arg("-c")
             .arg(
                 "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
             )
             .arg(std::env::current_exe().unwrap())
-            .arg(TEST_EXEC_NAME)
+            .arg(name)
             .arg("--exact")
             .arg("--nocapture")
             .arg("--test-threads=1")
@@ -862,7 +1026,7 @@ mod tests {
     #[test]
     fn sealed_exec_authenticates_all_four_snapshots() {
         if std::env::var_os(TEST_CLEAN_STAGE).is_none() && std::env::var_os(TEST_STAGE).is_none() {
-            clean_test_generation();
+            clean_test_generation(TEST_EXEC_NAME);
             return;
         }
         match std::env::var(TEST_STAGE).as_deref() {
@@ -904,6 +1068,40 @@ mod tests {
             retained.snapshots,
             ExecutablePairBinding::from_snapshots(fixture.snapshots.rollback())
         );
+    }
+
+    /// The negative control for the launcher's descriptor closure: the unit
+    /// test launcher cannot take the post-exec claim (libtest is
+    /// multi-threaded), so a descriptor made inheritable after the daemon-side
+    /// audit reaches the sealed child, which must refuse to report.
+    /// `tests/sealed_preflight_binary.rs` proves the production launcher closes
+    /// the same descriptor.
+    #[test]
+    fn sealed_child_refuses_a_descriptor_its_launcher_kept() {
+        if std::env::var_os(TEST_CLEAN_STAGE).is_none() {
+            clean_test_generation(TEST_INHERITED_NAME);
+            return;
+        }
+        let fixture = Fixture::new();
+        let leaked = fs::File::open("/dev/null").unwrap();
+        let flags = fcntl_getfd(&leaked).unwrap();
+        let preflight = |after_audit: &dyn Fn()| {
+            preflight_one_with_launcher(
+                fixture.snapshots.forward().daemon(),
+                PreflightRole::Daemon,
+                PreflightGeneration::Forward,
+                Duration::from_secs(10),
+                Path::new("/proc/self/exe"),
+                after_audit,
+            )
+        };
+        // As a concurrent daemon thread could, after the audit's scan.
+        assert!(
+            preflight(&|| fcntl_setfd(&leaked, flags - FdFlags::CLOEXEC).unwrap()).is_err(),
+            "a child that inherited a descriptor must not report"
+        );
+        fcntl_setfd(&leaked, flags).unwrap();
+        preflight(&|| {}).unwrap();
     }
 
     #[test]

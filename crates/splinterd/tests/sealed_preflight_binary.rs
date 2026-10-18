@@ -9,13 +9,18 @@ use std::{
 
 const CLEAN_STAGE: &str = "SPLINTERM_PREFLIGHT_BINARY_TEST_CLEAN_STAGE";
 const TEST_NAME: &str = "actual_splinterd_entrypoint_runs_sealed_preflight_before_runtime";
+const INHERITED_TEST_NAME: &str =
+    "production_launcher_closes_a_descriptor_inherited_after_the_audit";
 
 use splinterd::{
     executable_snapshot::{
         ExecutableSnapshotPolicy, ExecutableSourcePair, HandoffExecutableSnapshots,
         RetainedRollbackExecutables,
     },
-    handoff_preflight::{PreflightRole, preflight_sealed_snapshot_for_integration_test},
+    handoff_preflight::{
+        PreflightRole, preflight_sealed_snapshot_after_audit_for_integration_test,
+        preflight_sealed_snapshot_for_integration_test,
+    },
 };
 
 struct Fixture {
@@ -42,7 +47,7 @@ impl Fixture {
         let rollback =
             RetainedRollbackExecutables::capture_declared_for_test(&rollback, policy).unwrap();
         let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, rollback, policy).unwrap();
+            HandoffExecutableSnapshots::materialize(&forward, &rollback, policy).unwrap();
         Self {
             directory,
             snapshots,
@@ -68,14 +73,14 @@ fn pair(root: &Path, generation: &str, executable: &Path) -> ExecutableSourcePai
     ExecutableSourcePair::new(daemon, client).unwrap()
 }
 
-fn run_clean_test_generation() {
+fn run_clean_test_generation(name: &str) {
     let status = std::process::Command::new("python3")
         .arg("-c")
         .arg(
             "import subprocess, sys; raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True).returncode)",
         )
         .arg(std::env::current_exe().unwrap())
-        .arg(TEST_NAME)
+        .arg(name)
         .arg("--exact")
         .arg("--nocapture")
         .arg("--test-threads=1")
@@ -88,7 +93,7 @@ fn run_clean_test_generation() {
 #[test]
 fn actual_splinterd_entrypoint_runs_sealed_preflight_before_runtime() {
     if std::env::var_os(CLEAN_STAGE).is_none() {
-        run_clean_test_generation();
+        run_clean_test_generation(TEST_NAME);
         return;
     }
     let executable = Path::new(env!("CARGO_BIN_EXE_splinterd"));
@@ -99,4 +104,47 @@ fn actual_splinterd_entrypoint_runs_sealed_preflight_before_runtime() {
         executable,
     )
     .unwrap();
+}
+
+/// A descriptor another daemon thread makes inheritable after the daemon-side
+/// audit is copied into the launcher by the spawn. The production launcher
+/// closes it before the sealed image runs, whose child mode would otherwise
+/// refuse to report (the unit-test negative control in `handoff_preflight.rs`).
+#[test]
+fn production_launcher_closes_a_descriptor_inherited_after_the_audit() {
+    use std::os::fd::AsFd;
+
+    use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
+
+    if std::env::var_os(CLEAN_STAGE).is_none() {
+        run_clean_test_generation(INHERITED_TEST_NAME);
+        return;
+    }
+    let executable = Path::new(env!("CARGO_BIN_EXE_splinterd"));
+    let fixture = Fixture::new(executable);
+    let leaked = fs::File::open("/dev/null").unwrap();
+    let flags = fcntl_getfd(leaked.as_fd()).unwrap();
+    preflight_sealed_snapshot_after_audit_for_integration_test(
+        fixture.snapshots.forward().daemon(),
+        PreflightRole::Daemon,
+        executable,
+        || fcntl_setfd(leaked.as_fd(), flags - FdFlags::CLOEXEC).unwrap(),
+    )
+    .expect("the launcher keeps the inherited descriptor out of the sealed image");
+    assert!(
+        !fcntl_getfd(leaked.as_fd())
+            .unwrap()
+            .contains(FdFlags::CLOEXEC),
+        "the descriptor really was inheritable at the spawn"
+    );
+    // Inheritable before the daemon-side scan too: the scan only logs it, so
+    // a descriptor a peer can make the daemon hold cannot fail preparation,
+    // and the sealed child still never sees it.
+    preflight_sealed_snapshot_for_integration_test(
+        fixture.snapshots.forward().daemon(),
+        PreflightRole::Daemon,
+        executable,
+    )
+    .expect("an inheritable daemon descriptor is logged, not fatal");
+    fcntl_setfd(leaked.as_fd(), flags).unwrap();
 }

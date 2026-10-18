@@ -1015,8 +1015,12 @@ fn wait_for_child_ready(master: &mut File) -> bool {
     received == CHILD_READY_MARKER
 }
 
+/// Duplicates the slave close-on-exec. The spawn installs each copy on a
+/// standard stream in the helper, which clears the flag there; a plain `dup`
+/// would leave the slave inheritable by any child another daemon thread
+/// spawns before this one completes.
 fn duplicate_file(fd: &OwnedFd) -> Result<File> {
-    rustix::io::dup(fd)
+    rustix::io::fcntl_dupfd_cloexec(fd, 0)
         .map(File::from)
         .map_err(|error| PtyError::io("duplicate slave", error))
 }

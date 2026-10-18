@@ -38,7 +38,7 @@ proc-macro2 = "1.0"
 splinterm-automation-client = { path = "../splinterm-automation-client" }
 splinterm-inherited-fd = { path = "../splinterm-inherited-fd", features = ["test-support"] }
 splinterm-mcp = { path = "../splinterm-mcp", features = ["integration-test"] }
-syn = { version = "2.0", features = ["full", "visit"] }
+syn = { version = "2.0", features = ["extra-traits", "full", "visit"] }
 tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true
 
@@ -49,10 +49,11 @@ toml.workspace = true
 name = "handoff_runtime_stop"
 harness = false
 
-# A workspace `unsafe_code = "forbid"` cannot be overridden locally. The daemon
-# binary has exactly one audited post-exec invocation of the inherited-FD leaf
-# crate, so this package copies the workspace policy with `deny` instead.
-# tests/unsafe_boundary_audit.rs pins this exact table and that one exception.
+# A workspace `unsafe_code = "forbid"` cannot be overridden locally. The package
+# has exactly two audited post-exec invocations of the inherited-FD leaf crate
+# (the candidate claim and the sealed-preflight launcher's closure), so it
+# copies the workspace policy with `deny` instead.
+# tests/unsafe_boundary_audit.rs pins this exact table and those two exceptions.
 [lints.rust]
 unsafe_code = "deny"
 

@@ -2,7 +2,7 @@
 
 use std::{
     fs::{File, Metadata},
-    io::{self, Read, Seek, SeekFrom},
+    io,
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
         unix::{
@@ -18,7 +18,7 @@ use rustix::{
         CWD, MemfdFlags, Mode, OFlags, ResolveFlags, SealFlags, fcntl_add_seals, fcntl_get_seals,
         fstat, memfd_create, openat2,
     },
-    io::write,
+    io::{fcntl_dupfd_cloexec, write},
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -122,6 +122,33 @@ impl SealedExecutableSnapshot {
     pub fn into_descriptor(self) -> OwnedFd {
         self.descriptor
     }
+
+    /// Shares this sealed image through a second close-on-exec descriptor.
+    ///
+    /// Both descriptors name one sealed memfd, so the identities are copied,
+    /// not recomputed. The duplicate is still checked to name the same sealed
+    /// inode before it is returned.
+    fn try_clone(&self) -> Result<Self, ExecutableSnapshotError> {
+        let descriptor =
+            duplicate(&self.descriptor).map_err(ExecutableSnapshotError::VerifySnapshot)?;
+        let stat = fstat(&descriptor)
+            .map_err(errno_error)
+            .map_err(ExecutableSnapshotError::VerifySnapshot)?;
+        let seals = fcntl_get_seals(&descriptor)
+            .map_err(errno_error)
+            .map_err(ExecutableSnapshotError::VerifySnapshot)?;
+        if stat.st_dev != self.snapshot.device
+            || stat.st_ino != self.snapshot.inode
+            || seals != self.snapshot.seals
+        {
+            return Err(ExecutableSnapshotError::SnapshotMismatch);
+        }
+        Ok(Self {
+            source: self.source.clone(),
+            snapshot: self.snapshot,
+            descriptor,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -139,6 +166,13 @@ impl SealedExecutablePair {
     #[must_use]
     pub const fn client(&self) -> &SealedExecutableSnapshot {
         &self.client
+    }
+
+    fn try_clone(&self) -> Result<Self, ExecutableSnapshotError> {
+        Ok(Self {
+            daemon: self.daemon.try_clone()?,
+            client: self.client.try_clone()?,
+        })
     }
 }
 
@@ -195,12 +229,16 @@ pub struct HandoffExecutableSnapshots {
 }
 
 impl HandoffExecutableSnapshots {
-    /// Materializes complete forward and rollback daemon/client snapshot pairs.
+    /// Materializes a complete forward daemon/client snapshot pair and shares
+    /// the retained rollback pair beside it.
     ///
     /// Rollback authority must have been retained before package replacement was
     /// allowed to begin. Both rollback images are already sealed inside that
     /// opaque authority, so later replacement or writes cannot affect either image.
-    /// No partial authority escapes when any of the four sources fails.
+    /// The authority is only borrowed: the result holds its own close-on-exec
+    /// descriptors for the same sealed rollback memfds, so a failed attempt or
+    /// a dropped result leaves the retained pair intact for the next attempt.
+    /// No partial forward authority escapes when either forward source fails.
     /// Compatibility preflight remains a separate coordinator step.
     ///
     /// # Errors
@@ -208,15 +246,13 @@ impl HandoffExecutableSnapshots {
     /// Rejects invalid source identity, mutation, copy, digest, descriptor, or seal state.
     pub fn materialize(
         forward: &ExecutableSourcePair,
-        rollback: RetainedRollbackExecutables,
+        rollback: &RetainedRollbackExecutables,
         policy: ExecutableSnapshotPolicy,
     ) -> Result<Self, ExecutableSnapshotError> {
         validate_pair_paths(forward)?;
         let forward = materialize_pair(forward, policy, &mut |_| Ok(()))?;
-        Ok(Self {
-            forward,
-            rollback: rollback.pair,
-        })
+        let rollback = rollback.pair.try_clone()?;
+        Ok(Self { forward, rollback })
     }
 
     #[must_use]
@@ -310,9 +346,8 @@ fn materialize_running_pair(
     policy: ExecutableSnapshotPolicy,
     after_copy: &mut impl FnMut(&Path) -> io::Result<()>,
 ) -> Result<SealedExecutablePair, ExecutableSnapshotError> {
-    let descriptor = rustix::io::dup(running_daemon)
-        .map_err(errno_error)
-        .map_err(|source| ExecutableSnapshotError::InspectSource {
+    let descriptor =
+        duplicate(running_daemon).map_err(|source| ExecutableSnapshotError::InspectSource {
             path: pair.daemon.clone(),
             source,
         })?;
@@ -325,9 +360,8 @@ fn materialize_running_pair(
         &descriptor,
         false,
     )?;
-    let descriptor = rustix::io::dup(running_client)
-        .map_err(errno_error)
-        .map_err(|source| ExecutableSnapshotError::InspectSource {
+    let descriptor =
+        duplicate(running_client).map_err(|source| ExecutableSnapshotError::InspectSource {
             path: pair.client.clone(),
             source,
         })?;
@@ -502,12 +536,12 @@ fn validate_descriptor(
     descriptor: &OwnedFd,
     policy: ExecutableSnapshotPolicy,
 ) -> Result<(), ExecutableSnapshotError> {
-    let metadata = File::from(rustix::io::dup(descriptor).map_err(errno_error).map_err(
-        |source| ExecutableSnapshotError::InspectSource {
+    let metadata = File::from(duplicate(descriptor).map_err(|source| {
+        ExecutableSnapshotError::InspectSource {
             path: path.to_path_buf(),
             source,
-        },
-    )?)
+        }
+    })?)
     .metadata()
     .map_err(|source| ExecutableSnapshotError::InspectSource {
         path: path.to_path_buf(),
@@ -548,12 +582,12 @@ fn descriptor_fingerprint(
     descriptor: &OwnedFd,
     path: &Path,
 ) -> Result<MetadataFingerprint, ExecutableSnapshotError> {
-    let metadata = File::from(rustix::io::dup(descriptor).map_err(errno_error).map_err(
-        |source| ExecutableSnapshotError::InspectSource {
+    let metadata = File::from(duplicate(descriptor).map_err(|source| {
+        ExecutableSnapshotError::InspectSource {
             path: path.to_path_buf(),
             source,
-        },
-    )?)
+        }
+    })?)
     .metadata()
     .map_err(|source| ExecutableSnapshotError::InspectSource {
         path: path.to_path_buf(),
@@ -638,20 +672,18 @@ fn write_all(fd: &OwnedFd, mut bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Hashes a snapshot with positioned reads, so the shared file offset of a
+/// sealed memfd that other descriptors also name is neither used nor moved.
 fn hash_descriptor(fd: &OwnedFd, expected_size: u64) -> Result<[u8; 32], ExecutableSnapshotError> {
-    let duplicate = rustix::io::dup(fd)
-        .map_err(errno_error)
-        .map_err(ExecutableSnapshotError::VerifySnapshot)?;
-    let mut file = File::from(duplicate);
-    file.seek(SeekFrom::Start(0))
-        .map_err(ExecutableSnapshotError::VerifySnapshot)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES].into_boxed_slice();
     let mut total = 0_u64;
     loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(ExecutableSnapshotError::VerifySnapshot)?;
+        let count = match rustix::io::pread(fd, &mut buffer[..], total) {
+            Ok(count) => count,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(ExecutableSnapshotError::VerifySnapshot(errno_error(error))),
+        };
         if count == 0 {
             break;
         }
@@ -688,6 +720,13 @@ fn metadata_fingerprint(metadata: &Metadata) -> MetadataFingerprint {
     )
 }
 
+/// Duplicates a descriptor close-on-exec. Forward materialization runs while
+/// the daemon serves, so a plain `dup` could be inherited by a child another
+/// thread spawns at the same moment.
+fn duplicate(descriptor: impl AsFd) -> io::Result<OwnedFd> {
+    fcntl_dupfd_cloexec(descriptor, 0).map_err(errno_error)
+}
+
 fn errno_error(error: rustix::io::Errno) -> io::Error {
     io::Error::from_raw_os_error(error.raw_os_error())
 }
@@ -697,7 +736,7 @@ mod tests {
     use std::{
         collections::BTreeSet,
         fs::{self, OpenOptions},
-        io::Write,
+        io::{Read, Seek, SeekFrom, Write},
         os::{fd::AsRawFd, unix::fs::PermissionsExt},
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -753,8 +792,8 @@ mod tests {
     }
 
     fn snapshot_bytes(snapshot: &SealedExecutableSnapshot) -> Vec<u8> {
-        let duplicate = rustix::io::dup(snapshot.descriptor()).unwrap();
-        let mut file = File::from(duplicate);
+        let descriptor = duplicate(snapshot.descriptor()).unwrap();
+        let mut file = File::from(descriptor);
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -784,7 +823,7 @@ mod tests {
         policy: ExecutableSnapshotPolicy,
     ) -> Result<HandoffExecutableSnapshots, ExecutableSnapshotError> {
         let rollback = retain(rollback, policy)?;
-        HandoffExecutableSnapshots::materialize(forward, rollback, policy)
+        HandoffExecutableSnapshots::materialize(forward, &rollback, policy)
     }
 
     #[test]
@@ -866,7 +905,7 @@ mod tests {
         write_executable(rollback.client(), b"incoming-client");
 
         let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, retained, policy()).unwrap();
+            HandoffExecutableSnapshots::materialize(&forward, &retained, policy()).unwrap();
         assert_eq!(
             snapshot_bytes(snapshots.rollback().daemon()),
             b"running-daemon"
@@ -898,7 +937,7 @@ mod tests {
         fs::write(rollback.client(), b"incoming-client").unwrap();
 
         let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, retained, policy()).unwrap();
+            HandoffExecutableSnapshots::materialize(&forward, &retained, policy()).unwrap();
         assert_eq!(
             snapshot_bytes(snapshots.rollback().daemon()),
             b"running-daemon"
@@ -970,6 +1009,79 @@ mod tests {
         assert_eq!(descriptors_under(&directory.0), 0);
         assert!(materialize(&forward, &rollback, policy()).is_err());
         assert_eq!(descriptors_under(&directory.0), 0);
+    }
+
+    #[test]
+    fn a_failed_forward_attempt_leaves_rollback_authority_usable() {
+        let directory = TestDirectory::new();
+        let forward = directory.pair("forward", b"forward-daemon", b"forward-client");
+        let rollback = directory.pair("rollback", b"running-daemon", b"rollback-client");
+        let retained = retain(&rollback, policy()).unwrap();
+        let retained_daemon = retained.pair().daemon().snapshot();
+        let retained_client = retained.pair().client().snapshot();
+        let retained_raw = [
+            retained.pair().daemon().descriptor().as_raw_fd(),
+            retained.pair().client().descriptor().as_raw_fd(),
+        ];
+
+        // A forward source with writable mode, then a missing one, fails the
+        // attempt without consuming the retained pair.
+        fs::set_permissions(forward.daemon(), fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(matches!(
+            HandoffExecutableSnapshots::materialize(&forward, &retained, policy()),
+            Err(ExecutableSnapshotError::InvalidAuthority { .. })
+        ));
+        fs::set_permissions(forward.daemon(), fs::Permissions::from_mode(0o755)).unwrap();
+        let displaced = forward.client().with_file_name("displaced");
+        fs::rename(forward.client(), &displaced).unwrap();
+        assert!(matches!(
+            HandoffExecutableSnapshots::materialize(&forward, &retained, policy()),
+            Err(ExecutableSnapshotError::OpenSource { .. })
+        ));
+        fs::rename(&displaced, forward.client()).unwrap();
+
+        for _ in 0..2 {
+            let snapshots =
+                HandoffExecutableSnapshots::materialize(&forward, &retained, policy()).unwrap();
+            // The attempt shares the same sealed memfds through its own
+            // close-on-exec descriptors.
+            assert_eq!(snapshots.rollback().daemon().snapshot(), retained_daemon);
+            assert_eq!(snapshots.rollback().client().snapshot(), retained_client);
+            assert_eq!(
+                snapshots.rollback().daemon().source(),
+                retained.pair().daemon().source()
+            );
+            for (shared, retained_fd) in [
+                snapshots.rollback().daemon().descriptor(),
+                snapshots.rollback().client().descriptor(),
+            ]
+            .into_iter()
+            .zip(retained_raw)
+            {
+                assert_ne!(shared.as_raw_fd(), retained_fd);
+                assert!(
+                    rustix::io::fcntl_getfd(shared)
+                        .unwrap()
+                        .contains(rustix::io::FdFlags::CLOEXEC)
+                );
+            }
+            assert_eq!(
+                snapshot_bytes(snapshots.rollback().daemon()),
+                b"running-daemon"
+            );
+            assert_eq!(
+                snapshot_bytes(snapshots.forward().daemon()),
+                b"forward-daemon"
+            );
+            // Dropping a successful attempt also leaves the authority intact.
+            drop(snapshots);
+        }
+        assert_eq!(retained.pair().daemon().snapshot(), retained_daemon);
+        assert_eq!(
+            retained.pair().daemon().descriptor().as_raw_fd(),
+            retained_raw[0]
+        );
+        assert_eq!(snapshot_bytes(retained.pair().client()), b"rollback-client");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use rustix::{
@@ -350,9 +350,58 @@ fn descriptor_flags(descriptor: HandoffDescriptor<'_>) -> Result<FdFlags, Descri
     })
 }
 
+/// Fails if any descriptor above standard error is inheritable across exec.
+///
+/// This only observes: it changes no descriptor and needs no process guard.
+/// While other threads create or close descriptors it is detection only. A
+/// descriptor that closes during the scan is skipped, and one made inheritable
+/// after the scan is missed, so callers must not rely on it to bound what a
+/// child inherits.
+///
+/// # Errors
+///
+/// Returns the first inheritable descriptor observed, or a procfs failure.
+pub fn audit_inheritable_descriptors() -> Result<(), DescriptorHandoffError> {
+    audit_process_descriptors(&[])
+}
+
+/// Lists at most `limit` descriptors above standard error that are
+/// inheritable across exec, each with its `/proc/self/fd` link target when it
+/// is still readable.
+///
+/// Like [`audit_inheritable_descriptors`] this only observes, and while other
+/// threads create or close descriptors it can miss one or name one that has
+/// just closed. It is for diagnostics, never for bounding what a child
+/// inherits.
+///
+/// # Errors
+///
+/// Returns a procfs failure.
+pub fn inheritable_descriptors(
+    limit: usize,
+) -> Result<Vec<(RawFd, Option<PathBuf>)>, DescriptorHandoffError> {
+    Ok(inheritable_process_descriptors(&[], limit)?
+        .into_iter()
+        .map(|fd| {
+            let target = fs::read_link(Path::new("/proc/self/fd").join(fd.to_string())).ok();
+            (fd, target)
+        })
+        .collect())
+}
+
 fn audit_process_descriptors(
     allowlist: &[HandoffDescriptor<'_>],
 ) -> Result<(), DescriptorHandoffError> {
+    match inheritable_process_descriptors(allowlist, 1)?.first() {
+        Some(fd) => Err(DescriptorHandoffError::UnexpectedInheritableDescriptor(*fd)),
+        None => Ok(()),
+    }
+}
+
+fn inheritable_process_descriptors(
+    allowlist: &[HandoffDescriptor<'_>],
+    limit: usize,
+) -> Result<Vec<RawFd>, DescriptorHandoffError> {
     let allowed = allowlist
         .iter()
         .map(|descriptor| descriptor.raw_fd())
@@ -380,17 +429,19 @@ fn audit_process_descriptors(
         }
     }
 
+    let mut inheritable = Vec::new();
     for fd in entries {
+        if inheritable.len() >= limit {
+            break;
+        }
         match descriptor_is_close_on_exec(fd) {
             Ok(true) => {}
-            Ok(false) => {
-                return Err(DescriptorHandoffError::UnexpectedInheritableDescriptor(fd));
-            }
+            Ok(false) => inheritable.push(fd),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(DescriptorHandoffError::InspectProcessDescriptors(error)),
         }
     }
-    Ok(())
+    Ok(inheritable)
 }
 
 fn descriptor_is_close_on_exec(fd: RawFd) -> io::Result<bool> {

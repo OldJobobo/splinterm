@@ -35,6 +35,7 @@ use splinterd::{
     LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime, MAX_LIVE_SPLINTS, ProcessExit,
     ProcessIncarnation, SubscriptionReceive, TerminalPublicationMemoryLease, authorization,
     executable_identity,
+    handoff_coordinator::ForwardHandoffAuthority,
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
@@ -1487,9 +1488,164 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
     })
 }
 
+/// Re-reads the persistent policy, publishes it under the topology
+/// transaction permit, and disconnects automation clients.
+///
+/// It runs in its own task, off the serve loop: the permit can be held for
+/// seconds, by a long transaction or a handoff fence, and the loop must keep
+/// accepting, reaping, and acting on termination meanwhile.
+async fn apply_policy_reload(state: Arc<DaemonState>) -> Result<()> {
+    let state = &state;
+    let policy_path = policy::configured_path();
+    let candidate = reloaded_policy_candidate(
+        tokio::task::spawn_blocking(move || policy::prepare(policy_path)).await,
+    );
+    let _transaction = state
+        .topology_transactions
+        .acquire()
+        .await
+        .context("topology transaction barrier closed during policy reload")?;
+    let topology_snapshot = state.topology.read().await.clone();
+    let generation = state
+        .policy
+        .lock()
+        .await
+        .publish(candidate, &topology_snapshot);
+    record_policy_reload(state, &generation).await;
+    let automation_connections = Arc::new(state.automation_connections.lock().await.clone());
+    state
+        .topology_hub
+        .lock()
+        .await
+        .remove_connections(&automation_connections);
+    let (leases, transfers) = state
+        .controller
+        .lock()
+        .await
+        .release_connections(&automation_connections);
+    let _ = state.policy_reloads.send(generation.id);
+    for lease in &leases {
+        append_daemon_splint_audit(
+            state,
+            splinterm_protocol::AuditOperation::AcquireControl,
+            lease.splint_id,
+            lease.incarnation,
+            splinterm_protocol::AuditDecision::Revoked,
+            "policy_reload_revoked",
+            splinterm_protocol::AuditOutcome::Cancelled,
+        )
+        .await;
+        publish_control_status_excluding(
+            state,
+            lease.splint_id,
+            lease.incarnation,
+            Some(Arc::clone(&automation_connections)),
+        )
+        .await;
+    }
+    for transfer in &transfers {
+        append_daemon_splint_audit(
+            state,
+            splinterm_protocol::AuditOperation::RequestControlTransfer,
+            transfer.splint_id,
+            transfer.incarnation,
+            splinterm_protocol::AuditDecision::Revoked,
+            "policy_reload_revoked",
+            splinterm_protocol::AuditOutcome::Cancelled,
+        )
+        .await;
+        publish_control_notice(
+            state,
+            ControlNotice::TransferResolved {
+                transfer: *transfer,
+                outcome: ControlTransferOutcome::Cancelled,
+                controller_id: None,
+                excluded_connections: Some(Arc::clone(&automation_connections)),
+            },
+        );
+    }
+    if let Some(diagnostic) = &generation.diagnostic {
+        warn!(generation = generation.id, %diagnostic, disconnected_automation_connections = automation_connections.len(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reload rejected; installed deny-all generation and disconnected automation clients");
+    } else {
+        info!(
+            generation = generation.id,
+            rules = generation.document.rule_count(),
+            disconnected_automation_connections = automation_connections.len(),
+            released_controllers = leases.len(),
+            cancelled_transfers = transfers.len(),
+            "persistent policy reloaded atomically; disconnected automation clients"
+        );
+    }
+    Ok(())
+}
+
+/// Runs at most one policy reload at a time, off the serve loop.
+///
+/// A reload signal that arrives while one runs queues exactly one more,
+/// which starts when the running one finishes and reads the policy file
+/// then, so the last signal is always followed by a complete reload and
+/// reloads publish in signal order.
+#[derive(Default)]
+struct PolicyReloadQueue {
+    running: Option<tokio::task::JoinHandle<Result<()>>>,
+    queued: bool,
+}
+
+impl PolicyReloadQueue {
+    /// Starts a reload with `start`, or queues one behind the running one.
+    fn request(&mut self, start: impl FnOnce() -> tokio::task::JoinHandle<Result<()>>) {
+        if self.running.is_some() {
+            self.queued = true;
+        } else {
+            self.running = Some(start());
+        }
+    }
+
+    const fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// Waits for the running reload. Pending forever when none runs, so a
+    /// `select!` arm guards it with [`Self::is_running`].
+    async fn finished(&mut self) -> Result<Result<()>, tokio::task::JoinError> {
+        match self.running.as_mut() {
+            Some(running) => running.await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Records the end of the running reload and starts the queued one. A
+    /// failed or panicked reload stops the daemon, as it did when reloads ran
+    /// inside the serve loop.
+    fn complete(
+        &mut self,
+        finished: Result<Result<()>, tokio::task::JoinError>,
+        start: impl FnOnce() -> tokio::task::JoinHandle<Result<()>>,
+    ) -> Result<()> {
+        self.running = None;
+        finished.context("policy reload task failed")??;
+        if std::mem::take(&mut self.queued) {
+            self.running = Some(start());
+        }
+        Ok(())
+    }
+
+    /// Lets a running reload finish, dropping any queued one, so shutdown
+    /// never cuts a reload between publishing and disconnecting clients.
+    async fn drain(&mut self) -> Result<()> {
+        self.queued = false;
+        if self.is_running() {
+            let finished = self.finished().await;
+            self.running = None;
+            finished.context("policy reload task failed")??;
+        }
+        Ok(())
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "the accept loop keeps every select arm, policy reload included, at one boundary"
+    reason = "the accept loop keeps every select arm at one boundary"
 )]
 async fn serve(
     state: &Arc<DaemonState>,
@@ -1513,6 +1669,7 @@ async fn serve(
     let image_transfer_expiry =
         time::sleep_until(image_transfer_expiry_deadline(state, false).await);
     tokio::pin!(image_transfer_expiry);
+    let mut policy_reloads = PolicyReloadQueue::default();
 
     loop {
         tokio::select! {
@@ -1543,80 +1700,12 @@ async fn serve(
                 if received.is_none() {
                     bail!("policy reload signal stream closed");
                 }
-                let policy_path = policy::configured_path();
-                let candidate = reloaded_policy_candidate(
-                    tokio::task::spawn_blocking(move || policy::prepare(policy_path)).await,
-                );
-                let _transaction = state
-                    .topology_transactions
-                    .acquire()
-                    .await
-                    .context("topology transaction barrier closed during policy reload")?;
-                let topology_snapshot = state.topology.read().await.clone();
-                let generation = state
-                    .policy
-                    .lock()
-                    .await
-                    .publish(candidate, &topology_snapshot);
-                record_policy_reload(state, &generation).await;
-                let automation_connections =
-                    Arc::new(state.automation_connections.lock().await.clone());
-                state
-                    .topology_hub
-                    .lock()
-                    .await
-                    .remove_connections(&automation_connections);
-                let (leases, transfers) = state
-                    .controller
-                    .lock()
-                    .await
-                    .release_connections(&automation_connections);
-                let _ = state.policy_reloads.send(generation.id);
-                for lease in &leases {
-                    append_daemon_splint_audit(
-                        state,
-                        splinterm_protocol::AuditOperation::AcquireControl,
-                        lease.splint_id,
-                        lease.incarnation,
-                        splinterm_protocol::AuditDecision::Revoked,
-                        "policy_reload_revoked",
-                        splinterm_protocol::AuditOutcome::Cancelled,
-                    )
-                    .await;
-                    publish_control_status_excluding(
-                        state,
-                        lease.splint_id,
-                        lease.incarnation,
-                        Some(Arc::clone(&automation_connections)),
-                    )
-                    .await;
-                }
-                for transfer in &transfers {
-                    append_daemon_splint_audit(
-                        state,
-                        splinterm_protocol::AuditOperation::RequestControlTransfer,
-                        transfer.splint_id,
-                        transfer.incarnation,
-                        splinterm_protocol::AuditDecision::Revoked,
-                        "policy_reload_revoked",
-                        splinterm_protocol::AuditOutcome::Cancelled,
-                    )
-                    .await;
-                    publish_control_notice(
-                        state,
-                        ControlNotice::TransferResolved {
-                            transfer: *transfer,
-                            outcome: ControlTransferOutcome::Cancelled,
-                            controller_id: None,
-                            excluded_connections: Some(Arc::clone(&automation_connections)),
-                        },
-                    );
-                }
-                if let Some(diagnostic) = &generation.diagnostic {
-                    warn!(generation = generation.id, %diagnostic, disconnected_automation_connections = automation_connections.len(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reload rejected; installed deny-all generation and disconnected automation clients");
-                } else {
-                    info!(generation = generation.id, rules = generation.document.rule_count(), disconnected_automation_connections = automation_connections.len(), released_controllers = leases.len(), cancelled_transfers = transfers.len(), "persistent policy reloaded atomically; disconnected automation clients");
-                }
+                policy_reloads.request(|| tokio::spawn(apply_policy_reload(Arc::clone(state))));
+            }
+            finished = policy_reloads.finished(), if policy_reloads.is_running() => {
+                policy_reloads.complete(finished, || {
+                    tokio::spawn(apply_policy_reload(Arc::clone(state)))
+                })?;
             }
             accepted = image_listener.accept() => {
                 let Some(stream) = accepted_stream(accepted, "image content").await else {
@@ -1660,6 +1749,9 @@ async fn serve(
 
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    // A reload signalled before termination still completes, never cut
+    // between publishing a policy and disconnecting automation clients.
+    policy_reloads.drain().await?;
     Ok(ServeOutcome::Shutdown(ServingListeners {
         socket,
         image_socket,
@@ -8236,6 +8328,39 @@ impl HandoffAttempt {
         Ok(())
     }
 
+    /// Runs `work` in its own task, which owns this attempt until `work`
+    /// finishes, then hands the attempt back.
+    ///
+    /// Work the request future cannot cancel, a blocking preparation or a
+    /// metadata save, keeps the gate and any fence held for as long as it
+    /// runs: if the request future is dropped meanwhile, the task still owns
+    /// the attempt, and dropping it once `work` is done cancels as
+    /// `Requested`. So no later transaction or attempt can overtake work that
+    /// is still running.
+    ///
+    /// # Errors
+    /// `Failed` when the task panicked. Its unwinding already dropped the
+    /// attempt, which cancelled it as `Failed`, so the caller's `cancel` is a
+    /// no-op.
+    async fn run_held<T: Send + 'static>(
+        &mut self,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> Result<T, HandoffCancelReason> {
+        let held = Self {
+            hold: self.hold.take(),
+        };
+        let (returned, returning) = tokio::sync::oneshot::channel();
+        drop(tokio::spawn(async move {
+            let output = work.await;
+            // An attempt that cannot be returned, or is never received, drops
+            // here or with the channel, cancelling it as `Requested`.
+            let _ = returned.send((held, output));
+        }));
+        let (mut held, output) = returning.await.map_err(|_| HandoffCancelReason::Failed)?;
+        self.hold = held.hold.take();
+        Ok(output)
+    }
+
     /// Lifts the fence, returns the gate to `Idle`, and broadcasts
     /// `Cancelled`.
     ///
@@ -8345,8 +8470,12 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
         return Err(HandoffCancelReason::TimedOut);
     }
     let topology = state.topology.read().await.clone();
-    persist_topology(&state, &topology)
-        .await
+    // The save runs on a blocking thread that a dropped request cannot stop,
+    // so the fence stays up until it lands: a later save cannot be
+    // overwritten by this older snapshot.
+    attempt
+        .run_held(async move { persist_topology(&state, &topology).await })
+        .await?
         .map_err(|_| HandoffCancelReason::Failed)
 }
 
@@ -8354,15 +8483,31 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
 /// with.
 ///
 /// A second `Execute` while a handoff runs is refused as in progress, and a
-/// report naming anything but `Unsupported` refuses before fencing. Otherwise
-/// the gate fences, re-checks, drains, and persists. Capture, manifests, and
-/// exec (M3.7–M3.10) start where the fence is still held below; until they
-/// exist every attempt cancels with `Failed` and answers `HandoffUnavailable`
-/// with a fresh report's reasons, which name `Unsupported`.
+/// report naming anything but `Unsupported` refuses before the gate.
+/// Otherwise, while still `Preparing` and serving, the gate prepares the
+/// installed forward pair beside the borrowed rollback pair; then it fences,
+/// re-checks, drains, and persists. Capture, manifests, and exec
+/// (M3.7–M3.10) start where the fence is still held below; until they exist
+/// every attempt cancels and answers `HandoffUnavailable` with a fresh
+/// report's reasons, which name `Unsupported`.
 async fn execute_daemon_handoff(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
 ) -> ProtocolError {
+    execute_daemon_handoff_with(state, report, prepare_forward_handoff).await
+}
+
+/// [`execute_daemon_handoff`] with the forward preparation step supplied, so
+/// tests can drive the gate past it without a packaged installation.
+async fn execute_daemon_handoff_with<F, Prepared>(
+    state: &Arc<DaemonState>,
+    report: &splinterm_protocol::HandoffReport,
+    prepare_forward: impl FnOnce(Arc<DaemonState>) -> F,
+) -> ProtocolError
+where
+    F: Future<Output = Result<Prepared, handoff_requests::ForwardRefusal>> + Send + 'static,
+    Prepared: Send + 'static,
+{
     if state.handoff_gate.phase() != HandoffGatePhase::Idle {
         return handoff_in_progress();
     }
@@ -8373,16 +8518,45 @@ async fn execute_daemon_handoff(
         Ok(attempt) => attempt,
         Err(in_progress) => return in_progress,
     };
-    let reason = match fence_for_handoff(&mut attempt).await {
-        // M3.7 captures here, while `attempt` holds the fence.
-        Ok(()) => HandoffCancelReason::Failed,
-        Err(reason) => reason,
+    // Preparation borrows the retained rollback authority and runs before
+    // the fence (Plan 0061 D2), so PTY reads and requests continue meanwhile.
+    let (reason, refusal) = match attempt.run_held(prepare_forward(Arc::clone(state))).await {
+        Ok(Ok(forward)) => {
+            let reason = match fence_for_handoff(&mut attempt).await {
+                // M3.7b captures here, while `attempt` holds the fence and
+                // `forward` the sealed forward and rollback pairs.
+                Ok(()) => HandoffCancelReason::Failed,
+                Err(reason) => reason,
+            };
+            drop(forward);
+            (reason, None)
+        }
+        Ok(Err(refusal)) => (refusal.cancel_reason(), Some(refusal)),
+        Err(reason) => (reason, None),
     };
     attempt.cancel(reason).await;
     match daemon_handoff_report(state).await {
-        Ok(report) => handoff_requests::cancelled_handoff(reason, report.blocking_reasons),
+        Ok(report) => match refusal {
+            Some(refusal) => {
+                handoff_requests::refused_forward_handoff(refusal, report.blocking_reasons)
+            }
+            None => handoff_requests::cancelled_handoff(reason, report.blocking_reasons),
+        },
         Err(error) => error,
     }
+}
+
+/// Prepares the installed forward pair on a blocking thread: sealed
+/// preflight waits for its children, and the daemon keeps serving meanwhile.
+async fn prepare_forward_handoff(
+    state: Arc<DaemonState>,
+) -> Result<ForwardHandoffAuthority, handoff_requests::ForwardRefusal> {
+    tokio::task::spawn_blocking(move || state.rollback_handoff.prepare_forward())
+        .await
+        .unwrap_or_else(|error| {
+            error!(%error, "forward handoff preparation task failed");
+            Err(handoff_requests::ForwardRefusal::Failed)
+        })
 }
 
 async fn subscribe_topology(
@@ -12925,6 +13099,15 @@ mod tests {
         report
     }
 
+    /// Runs `Execute` as a packaged daemon with an installed upgrade would:
+    /// forward preparation succeeds at once, so the gate goes on to fence.
+    async fn execute_with_forward_prepared(
+        state: &Arc<DaemonState>,
+        report: &splinterm_protocol::HandoffReport,
+    ) -> ProtocolError {
+        execute_daemon_handoff_with(state, report, |_| async { Ok(()) }).await
+    }
+
     /// Every handoff status phase queued for a topology hub subscriber.
     fn handoff_status_phases(subscription: &mut TopologySubscription) -> Vec<HandoffStatusPhase> {
         let mut phases = Vec::new();
@@ -13485,7 +13668,7 @@ mod tests {
         attempt.cancel(HandoffCancelReason::Blocked).await;
 
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff(&state, &report).await;
+        let error = execute_with_forward_prepared(&state, &report).await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.handoff_blocking_reasons[0],
@@ -13512,7 +13695,7 @@ mod tests {
         let report = gated_handoff_report(&state).await;
         let retiring = state.retiring.tasks.spawn(std::future::pending::<()>());
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff(&state, &report).await;
+        let error = execute_with_forward_prepared(&state, &report).await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             handoff_status_phases(&mut subscription),
@@ -13542,7 +13725,7 @@ mod tests {
         let report = gated_handoff_report(&state).await;
         let transaction = state.topology_transactions.acquire().await.unwrap();
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff(&state, &report).await;
+        let error = execute_with_forward_prepared(&state, &report).await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             handoff_status_phases(&mut subscription),
@@ -13582,7 +13765,7 @@ mod tests {
         let subscription = state.topology_hub.lock().await.subscribe(7, 41);
         let (outbound, mut frames) = mpsc::channel(8);
         let task = AbortOnDrop::new(spawn_topology_subscription(7, subscription, outbound, None));
-        let error = execute_daemon_handoff(&state, &report).await;
+        let error = execute_with_forward_prepared(&state, &report).await;
         // Capture and exec do not exist yet: the attempt cancels as failed
         // and the answer still names `Unsupported`.
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
@@ -13662,7 +13845,7 @@ mod tests {
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let execute = tokio::spawn({
             let state = Arc::clone(&state);
-            async move { execute_daemon_handoff(&state, &report).await }
+            async move { execute_with_forward_prepared(&state, &report).await }
         });
         time::timeout(Duration::from_secs(5), async {
             while !state.handoff_gate.is_fenced() {
@@ -13774,6 +13957,213 @@ mod tests {
             ]
         );
         assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_prepares_the_forward_pair_while_serving_then_fences() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let forward = Arc::new(());
+        let error = execute_daemon_handoff_with(&state, &report, {
+            let forward = Arc::clone(&forward);
+            move |state: Arc<DaemonState>| async move {
+                // Still `Preparing`: nothing is fenced and requests run.
+                assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Preparing);
+                assert!(state.topology_transactions.try_acquire().is_ok());
+                Ok(forward)
+            }
+        })
+        .await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Failed),
+            ]
+        );
+        assert_eq!(
+            Arc::strong_count(&forward),
+            1,
+            "the cancelled attempt released its forward authority"
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_forward_preparation_failure_cancels_before_the_fence() {
+        // The production step: a development daemon retains no rollback
+        // authority, so preparation fails. (`Execute` refuses such a daemon
+        // before the gate; the gated report lets it through here.)
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let error = execute_daemon_handoff(&state, &report).await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            error.message,
+            "daemon handoff is unavailable: preparation could not complete"
+        );
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                cancelled(HandoffCancelReason::Failed),
+            ]
+        );
+        assert!(matches!(
+            state.rollback_handoff,
+            handoff_requests::RollbackAuthority::NotPackaged
+        ));
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_installed_running_build_cancels_as_blocked_and_says_so() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let error = execute_daemon_handoff_with(&state, &report, |_| async {
+            Err::<(), _>(handoff_requests::ForwardRefusal::NoInstalledUpgrade)
+        })
+        .await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            error.message,
+            "daemon handoff is unavailable: the installed daemon is the running build"
+        );
+        assert_eq!(
+            error.handoff_blocking_reasons,
+            [
+                splinterm_protocol::HandoffBlockingReason::NotPackaged,
+                splinterm_protocol::HandoffBlockingReason::Unsupported,
+            ]
+        );
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                cancelled(HandoffCancelReason::Blocked),
+            ]
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_request_dropped_during_held_work_keeps_the_fence_until_the_work_ends() {
+        let state = test_state(false);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let (started, started_signal) = tokio::sync::oneshot::channel();
+        let (finish, finish_signal) = tokio::sync::oneshot::channel::<()>();
+        let caller = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+                attempt.fence().await.unwrap();
+                // Stands in for the fence's metadata save.
+                let _ = attempt
+                    .run_held(async move {
+                        started.send(()).unwrap();
+                        let _ = finish_signal.await;
+                    })
+                    .await;
+                attempt.cancel(HandoffCancelReason::Failed).await;
+            }
+        });
+        started_signal.await.unwrap();
+        // The initiating connection goes away mid-save.
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            state.handoff_gate.is_fenced(),
+            "the running work keeps the gate fenced"
+        );
+        assert!(
+            state.topology_transactions.try_acquire().is_err(),
+            "no transaction can overtake the running work"
+        );
+        assert_eq!(
+            HandoffAttempt::begin(&state).await.err().unwrap().code,
+            ErrorCode::HandoffInProgress
+        );
+        finish.send(()).unwrap();
+        wait_for_idle_gate(&state).await;
+        let mut phases = Vec::new();
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                phases.extend(handoff_status_phases(&mut subscription));
+                if phases.last() == Some(&cancelled(HandoffCancelReason::Requested)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the work's end cancels the orphaned attempt");
+        assert_eq!(
+            phases,
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Requested),
+            ]
+        );
+        assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_policy_reload_waits_for_the_permit_off_the_serve_loop_and_coalesces() {
+        let state = test_state(false);
+        let generation = || async { state.policy.lock().await.snapshot().id };
+        let before = generation().await;
+        let start = || tokio::spawn(apply_policy_reload(Arc::clone(&state)));
+        // A fence, or any long transaction, holds the permit.
+        let fence = state.topology_transactions.acquire().await.unwrap();
+        let mut queue = PolicyReloadQueue::default();
+        // Each signal returns to the serve loop at once.
+        for _ in 0..3 {
+            queue.request(start);
+        }
+        assert!(queue.is_running() && queue.queued);
+        assert!(
+            time::timeout(Duration::from_millis(50), queue.finished())
+                .await
+                .is_err(),
+            "the reload waits for the permit"
+        );
+        assert_eq!(generation().await, before);
+        drop(fence);
+        let finished = time::timeout(Duration::from_secs(5), queue.finished())
+            .await
+            .unwrap();
+        queue.complete(finished, start).unwrap();
+        assert_eq!(generation().await, before + 1);
+        assert!(
+            queue.is_running() && !queue.queued,
+            "the queued reload starts"
+        );
+        let finished = time::timeout(Duration::from_secs(5), queue.finished())
+            .await
+            .unwrap();
+        queue.complete(finished, start).unwrap();
+        assert!(!queue.is_running());
+        assert_eq!(generation().await, before + 2, "three signals, two reloads");
+
+        // Shutdown lets a running reload finish and drops a queued one.
+        queue.request(start);
+        queue.request(start);
+        time::timeout(Duration::from_secs(5), queue.drain())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!queue.is_running() && !queue.queued);
+        assert_eq!(generation().await, before + 3);
     }
 
     #[tokio::test]

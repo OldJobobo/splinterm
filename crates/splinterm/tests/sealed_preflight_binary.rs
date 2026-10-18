@@ -40,7 +40,7 @@ impl Fixture {
         let rollback =
             RetainedRollbackExecutables::capture_declared_for_test(&rollback, policy).unwrap();
         let snapshots =
-            HandoffExecutableSnapshots::materialize(&forward, rollback, policy).unwrap();
+            HandoffExecutableSnapshots::materialize(&forward, &rollback, policy).unwrap();
         Self {
             directory,
             snapshots,
