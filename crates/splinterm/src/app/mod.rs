@@ -11,6 +11,7 @@ mod integrations;
 mod keymap_cli;
 mod local_service;
 mod machine;
+mod omarchy_hint;
 mod omarchy_integration;
 mod pane_bridge;
 mod presets;

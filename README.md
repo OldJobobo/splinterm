@@ -142,7 +142,9 @@ prefixes, searchable `Prefix+?` resolved-key help, `Prefix+[` vi copy mode, and
 Lair. In copy mode, navigate with vi keys or arrows, press `v` to select, `y` to
 publish to the Wayland clipboard, or Escape to cancel. Outside copy mode,
 `Ctrl+Shift+C/V` provide compositor-safe terminal copy/paste; `Super+C/V` and
-Omarchy's `Ctrl+Insert`/`Shift+Insert` translation remain aliases. Splinterm-owned fields additionally provide bounded local
+`Ctrl+Insert`/`Shift+Insert` remain aliases. On Omarchy, run
+`splinterm integration omarchy enable` once so Omarchy tags Splinterm as a
+terminal; until then its universal `Super+C` sends `Ctrl+C` (interrupt). Splinterm-owned fields additionally provide bounded local
 selection, cut, and undo without claiming universal terminal `Super+X/Z`.
 Packaged atomic Dojo presets and optional collision-safe Bash helpers cover the
 standard Omarchy `t`, `tdl`, `tds`, `tdlm`, and `tsl` workflows under
