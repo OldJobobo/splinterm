@@ -168,18 +168,27 @@ enum PaletteFingerprint {
     Json(Option<ThemeFileFingerprint>),
 }
 
-/// The theme's own `shell.toml` and the user's override.
+/// Everything a shell load depends on: the selected theme directory, like the
+/// native palette's root and directory identity, its `shell.toml`, the user's
+/// override, and whether the selected root is held through a gap. A root
+/// transition is observed even when neither root has a `shell.toml`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ShellFingerprint {
+    root: PathBuf,
+    directory: Option<ThemeFileFingerprint>,
     theme: Option<ThemeFileFingerprint>,
     user: Option<ThemeFileFingerprint>,
+    gap: bool,
 }
 
 impl ShellFingerprint {
-    fn of(layers: ShellLayers<'_>) -> Self {
+    fn of(layers: ShellLayers<'_>, gap: bool) -> Self {
         Self {
+            root: layers.theme_dir.to_path_buf(),
+            directory: theme_file_fingerprint(layers.theme_dir),
             theme: theme_file_fingerprint(&layers.theme_dir.join("shell.toml")),
             user: layers.user.and_then(theme_file_fingerprint),
+            gap,
         }
     }
 }
@@ -204,7 +213,14 @@ fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerp
     };
     ThemeSourceFingerprint {
         palette,
-        shell: source.shell().map(ShellFingerprint::of),
+        shell: match source {
+            ActiveThemeSource::Omarchy { .. } => source
+                .shell()
+                .map(|layers| ShellFingerprint::of(layers, false)),
+            ActiveThemeSource::Json { shell, .. } => {
+                shell.map(|root| ShellFingerprint::of(root.layers, root.gap))
+            }
+        },
     }
 }
 
@@ -1409,6 +1425,62 @@ mod tests {
         std::fs::rename(&displaced, &high).unwrap();
         std::fs::write(high.join("shell.toml"), "[font]\nbase-size = 18\n").unwrap();
         assert_eq!(poll(&mut current), Some(18));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_json_shell_root_demotion_is_observed_without_any_shell_toml() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-shell-json-demote-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let high = root.join("state/omarchy/current/theme");
+        let low = root.join("legacy/omarchy/current/theme");
+        let json = root.join("theme.json");
+        std::fs::create_dir_all(&high).unwrap();
+        std::fs::write(high.join("shell.toml"), "[font]\nbase-size = 16\n").unwrap();
+        // An Omarchy 3.x root has no shell.toml.
+        std::fs::create_dir_all(&low).unwrap();
+        std::fs::write(&json, valid_theme_json(1.0, false)).unwrap();
+        let source = ThemeSource::Json {
+            path: json,
+            shell: OmarchyThemeRoots::ordered(vec![high.clone(), low]),
+        };
+        // Poll as watch_theme does: resolve only when the fingerprint changes.
+        let mut selection = OmarchyThemeSelection::default();
+        let mut observed = None;
+        let mut current = ResolvedTheme::default();
+        let mut poll = |current: &mut ResolvedTheme| {
+            let active = active_theme_source(&source, &mut selection);
+            let fingerprint = theme_source_fingerprint(active);
+            if observed.as_ref() != Some(&fingerprint) {
+                observed = Some(fingerprint);
+                if let Some(next) = resolve_live_theme_update(
+                    active,
+                    &mut selection,
+                    NO_OVERRIDES,
+                    *current,
+                    &mut Vec::new(),
+                )
+                .unwrap()
+                {
+                    *current = next;
+                }
+            }
+            current.shell.text_size_px
+        };
+        assert_eq!(poll(&mut current), Some(16));
+
+        // The higher root is held through the grace polls...
+        std::fs::remove_dir_all(&high).unwrap();
+        for _ in 0..OMARCHY_ROOT_DEMOTION_GRACE_POLLS {
+            assert_eq!(poll(&mut current), Some(16));
+        }
+        // ...then the demotion to the shell-less lower root is observed and
+        // its (absent) base-size applies, so Splinterm's fallback returns.
+        assert_eq!(poll(&mut current), None);
+        assert_eq!(poll(&mut current), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
