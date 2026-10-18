@@ -10,9 +10,11 @@
 //! executable authority into one validated forward/rollback manifest pair.
 //!
 //! Nothing here clears close-on-exec, prepares inheritance, seals a manifest,
-//! or stops the runtime; exec does that (M3.9). A capture is a lease: dropping
-//! [`HandoffCaptures`], on any path, only resumes each actor. It never ends an
-//! actor, signals a child, or releases a placement.
+//! or stops the runtime; [`crate::handoff_exec`] does that (M3.9). A capture
+//! is a lease: dropping [`HandoffCaptures`], on any path, only resumes each
+//! actor. It never ends an actor, signals a child, or releases a placement.
+//! Only [`HandoffCaptures::hand_off`] ends the actors, and it ends them for
+//! handoff: no child is signalled and every placement is retained.
 //!
 //! Agent status is connection-owned and dropped across a handoff (Plan 0061
 //! D6), so no manifest carries it.
@@ -40,8 +42,8 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    ActorHandoffEvidence, HandoffCheckpointBudget, LiveError, LiveSplintHandle, MAX_LIVE_SPLINTS,
-    PreparedPtyHandoff,
+    ActorHandoffEvidence, HandedOffSplint, HandoffCheckpointBudget, LiveError, LiveSplintHandle,
+    MAX_LIVE_SPLINTS, PreparedPtyHandoff,
     executable_snapshot::HandoffExecutableSnapshots,
     handoff_checkpoint::{CheckpointStorageError, LinkedCheckpointBody, SealedCheckpointBody},
     handoff_compatibility::{NegotiatedHandoff, RunningHandoffGeneration},
@@ -275,6 +277,28 @@ impl HandoffCaptures {
         self.checkpoint_bytes
     }
 
+    /// Ends every captured actor for handoff and returns each Splint's
+    /// canonical PTY master, capture evidence and linked checkpoint, in slot
+    /// order, with the excluded Splints.
+    ///
+    /// Each actor leaves through its handoff path
+    /// ([`PreparedPtyHandoff::into_handed_off`]): it neither signals nor
+    /// reaps its child and retains its placement, so no workload scope stops.
+    /// The caller awaits each runtime's [`LiveError::HandedOff`] before it
+    /// stops the Tokio runtime. Nothing here can fail.
+    #[must_use]
+    pub fn hand_off(self) -> (Vec<HandedOffCapture>, Vec<SplintId>) {
+        let handed_off = self
+            .captured
+            .into_iter()
+            .map(|CapturedSplint { lease, checkpoint }| HandedOffCapture {
+                handed_off: lease.into_handed_off(),
+                checkpoint,
+            })
+            .collect();
+        (handed_off, self.excluded)
+    }
+
     /// Resumes every captured actor and waits, within the capture's per-actor
     /// deadline, until each has its reader back. An actor that does not
     /// acknowledge in time still resumes: its lease sent the resume, or sends
@@ -325,6 +349,26 @@ impl HandoffCaptures {
             checkpoint_bytes,
             release_timeout,
         })
+    }
+}
+
+/// One captured Splint whose actor ended for handoff: the canonical PTY
+/// master and evidence, and the sealed checkpoint linked to the slot the
+/// manifest names for both.
+///
+/// Dropping it closes the master, which hangs up the child's terminal, so the
+/// exec boundary keeps it until exec or resume.
+#[derive(Debug)]
+pub struct HandedOffCapture {
+    pub handed_off: HandedOffSplint,
+    pub checkpoint: LinkedCheckpointBody,
+}
+
+impl HandedOffCapture {
+    /// The slot this Splint's PTY master and checkpoint share in the manifest.
+    #[must_use]
+    pub const fn slot(&self) -> u16 {
+        self.checkpoint.slot()
     }
 }
 
@@ -523,8 +567,9 @@ pub struct ManifestInputs<'a> {
 /// A validated forward/rollback manifest pair, its canonical encodings, and
 /// the two empty manifest memfds the manifests name.
 ///
-/// Exec (M3.9) writes and seals each encoding into its memfd, then prepares
-/// inheritance. Dropping this closes both memfds.
+/// The exec boundary ([`crate::handoff_exec`]) writes and seals each encoding
+/// into its memfd, then prepares inheritance. Dropping this closes both
+/// memfds.
 #[derive(Debug)]
 pub struct PreparedManifests {
     forward: HandoffManifestV1,
@@ -580,6 +625,25 @@ impl PreparedManifests {
             self.forward.source_daemon_generation,
             self.forward.target_daemon_generation,
         )
+    }
+
+    /// Every descriptor slot the manifests record, with the descriptor number
+    /// recorded for it, in canonical manifest order. Both manifests record the
+    /// same set, so exec inherits exactly these numbers.
+    #[must_use]
+    pub fn recorded_descriptors(&self) -> Vec<(HandoffDescriptorSlot, RawFd)> {
+        self.forward
+            .descriptors
+            .iter()
+            // Every recorded number came from a `RawFd` of at least 3; an
+            // impossible one maps to -1, which matches no owner.
+            .map(|entry| {
+                (
+                    entry.slot,
+                    RawFd::try_from(entry.inherited_fd).unwrap_or(-1),
+                )
+            })
+            .collect()
     }
 
     /// Whether the rollback manifest returns to the forward manifest's source.

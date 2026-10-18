@@ -488,10 +488,10 @@ impl<S: ProcessPlacement> Drop for StagedSplint<S> {
 
 /// A placement that retains, rather than drops, when it goes out of scope
 /// before adoption hands it to an actor.
-struct RetainOnDrop<P: ProcessPlacement>(Option<P>);
+pub(crate) struct RetainOnDrop<P: ProcessPlacement>(Option<P>);
 
 impl<P: ProcessPlacement> RetainOnDrop<P> {
-    const fn new(placement: P) -> Self {
+    pub(crate) const fn new(placement: P) -> Self {
         Self(Some(placement))
     }
 
@@ -499,7 +499,7 @@ impl<P: ProcessPlacement> RetainOnDrop<P> {
         self.0.as_ref()
     }
 
-    fn take(&mut self) -> Option<P> {
+    pub(crate) fn take(&mut self) -> Option<P> {
         self.0.take()
     }
 }
@@ -1283,7 +1283,7 @@ fn retained_scope(evidence: &ManifestSplint) -> RetainedWorkloadScope {
 /// Whether `pid` is this process's child and has exited, without consuming
 /// its status. Anything else, including a query failure, reads as running,
 /// so a doubtful scope failure fails closed.
-fn child_has_exited(pid: u32) -> bool {
+pub(crate) fn child_has_exited(pid: u32) -> bool {
     let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
         return false;
     };

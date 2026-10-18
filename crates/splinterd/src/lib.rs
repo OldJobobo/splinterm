@@ -11,6 +11,7 @@ pub mod handoff_checkpoint;
 pub mod handoff_compatibility;
 pub mod handoff_coordinator;
 pub mod handoff_descriptors;
+pub mod handoff_exec;
 #[allow(
     dead_code,
     reason = "the bounded manifest ABI lands before its coordinator adoption slice"
