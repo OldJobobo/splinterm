@@ -3746,13 +3746,12 @@ pub trait ProcessPlacement: Send + 'static {
     /// This default is the minimal hook: it forgets `self` without running
     /// [`Self::release`] or `Drop`, so nothing the placement names (such as a
     /// systemd scope that `Drop` would stop) is torn down. Any in-process
-    /// bookkeeping it holds, such as a Dojo reference count, leaks. A
-    /// successful exec discards that leak, but this process image keeps it
-    /// when exec fails after the runtime stopped and the old daemon resumes
-    /// in process (Plan 0061 D5), and on an in-process rollback. Plan 0061
-    /// slice M3.4 implements scope retention for workload scopes, and must
-    /// reconcile Dojo reference counts for retained scopes when they are
-    /// re-adopted in process.
+    /// bookkeeping it holds leaks. Workload scopes override it with
+    /// [`crate::cgroup::ActiveWorkloadScope::retain_for_handoff`], which
+    /// records the scope as retained so that
+    /// [`crate::cgroup::WorkloadUnitManager::adopt_scope`] reconciles its
+    /// Dojo reference when the scope is re-adopted in process (Plan 0061 D5
+    /// resume, or a rollback).
     fn retain_for_handoff(self)
     where
         Self: Sized,
