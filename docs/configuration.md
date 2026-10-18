@@ -100,7 +100,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `main.font` | explicit fontconfig pattern; when unset, follow Omarchy's effective `monospace` family | unset |
 | `main.font-ligatures` | startup-only cross-cell shaping: `off`, `on`, or `cursor` | off |
 | `main.font-features` | startup-only comma-separated OpenType `tag=value` settings | empty; at most 64 unique tags |
-| `main.font-pixelsize` | configured pixel font size | 6–96; 14 |
+| `main.font-pixelsize` | configured pixel font size; any size key stops Splinterm following Omarchy's text size | 6–96; Omarchy's text size, otherwise 14 |
 | `main.font-point-size` | mutually exclusive point-size alternative | 6–96; unset |
 | `main.font-size` | deprecated alias for `main.font-pixelsize` | unset |
 | `main.font-sizing-policy` | `output-scale` or `physical-dpi` (no auto mode) | output-scale |
@@ -163,7 +163,9 @@ fallback metadata off the Wayland dispatch path, publishes the generation
 atomically, rebuilds active and hidden pane frames, and lets only an
 existing pane controller issue the final PTY resize. Observer panes prepare a
 future size without acquiring control. Font changes do not imply live reload of
-font size, padding, shell, scrollback, cursor, or keymap settings.
+`config.ini` font size, padding, shell, scrollback, cursor, or keymap settings.
+While no size key is set, the size instead follows Omarchy's text size, live
+in terminal windows through the same path; see "Omarchy shell settings" below.
 
 ### Opt-in terminal font shaping
 
@@ -779,8 +781,9 @@ Splinterm sees each edit within one 500 ms poll. It applies the change through
 * A theme that declares its own `alpha` keeps it. Glass then adds only `blur`,
   which updates the compositor effect without repainting.
 
-Only the default terminal background, the padding, and the tab strip become
-translucent; Splinterm premultiplies them by the alpha. Text, explicit cell
+The default terminal background, the padding, and the tab strip become
+translucent; Splinterm premultiplies them by the alpha. Panels follow the shell
+alpha described under "Omarchy shell settings" below. Text, explicit cell
 backgrounds, and the cursor stay opaque, so text remains crisp over the blur. An
 explicit `[colors] alpha` or `blur` in Splinterm's own `config.ini` overrides
 the theme value and therefore also overrides Glassy Windows.
@@ -815,3 +818,105 @@ selected-tab body comes from `lighter_background`, then `lighter_bg`, then
 merge as above. It leaves `inactive_tab_foreground` unset, so that role is
 derived from ANSI color 8, which the exporter fills from `muted`, when the theme
 loads.
+
+### Omarchy shell settings
+
+Splinterm also follows two settings from the Omarchy 4 shell's `shell.toml`:
+panel alpha and text size.
+The shell reads two layers: the active theme's `shell.toml`, rendered from
+Omarchy's template or shipped by the theme, and the user's
+`~/.config/omarchy/shell.toml`. Omarchy hard-codes that user path under `$HOME`.
+Splinterm layers them the same way, key by key: a key in the user file replaces
+the theme's value for that key only, and a key in neither file takes Omarchy's
+default. Terminal windows poll both files with the theme every 500 ms, so
+edits apply live there. Standalone Dojo and session picker windows and
+remote-status windows read the theme, palette and shell settings alike, once
+when they open.
+
+Splinterm reads values the way the shell's `parseShell` does: a non-empty quoted
+string without quotes inside, opened and closed by either `"` or `'`, or a bare
+number such as `0.9` or `-1`, a list of two to four numbers, or a word.
+The shell drops any other line, such as `background-alpha = .5` or
+`base-size = +12`, so that key stays unset and the theme's value applies.
+
+#### Panel alpha
+
+Panels follow the shell's own card alpha:
+
+| Splinterm panel | Follows | Omarchy default |
+| --- | --- | --- |
+| Action palette, Dojo and session picker, Lair Explorer | `[menu] background-alpha` | 1.0 |
+| Tab context menu, Dojo prompt, search bar, history overlay | `[popups] background-alpha` | 1.0 |
+
+The action palette and pickers are list cards with a selected row, like the
+shell's menus. The docked Lair Explorer is Splinterm's navigation menu and has
+the same rows and selected-row treatment, so it follows `[menu]` too. The tab
+context menu, the Dojo prompt, the search bar and the history overlay are
+small flyouts and status cards, which the shell draws with `[popups]`.
+
+A panel uses the theme background, the same colour as the window's own glass,
+so Splinterm draws it as that glass with the shell alpha layered over it. Its
+coverage is `1 - (1 - shell alpha) × (1 - terminal alpha)`:
+
+* With Glassy Windows off the terminal is opaque, so panels stay opaque and the
+  window never shows holes.
+* With Glassy Windows on, a panel shows the blurred backdrop no more than the
+  terminal around it does. Omarchy's default of 1.0 keeps panels opaque.
+
+Panel borders, dividers, selected rows and text stay opaque. Because the
+backdrop is an unknown wallpaper, Splinterm raises a panel's coverage to the
+lowest value at which every foreground drawn on it keeps WCAG 4.5:1 contrast
+against both a black and a white backdrop: primary and secondary text, text
+on a row under the translucent hover or press highlight, and on popups also the
+accent the Dojo prompt uses for its destructive choice. Those two backdrops
+bound every other one. Row text under a highlight is first corrected to 4.5:1
+against every highlight state, so a pressed row stays readable too. A theme
+whose secondary text already sits at the 4.5:1 floor on the opaque panel, as
+many light themes do, keeps its panels opaque. As in the
+shell, a number outside 0.0–1.0 is clamped into that range, and a value that is
+not a number is treated as Omarchy's opaque default; both are reported once. An
+explicit `main.theme` JSON keeps all panels opaque and ignores these values.
+Splinterm has no separate panel alpha key.
+
+#### Text size
+
+`omarchy-display-text-size <9-20>` writes `[font] base-size` to the user
+`shell.toml` and sets every terminal it knows to `px × 9/12` points, rounded to
+a whole point: 12 px gives 9 pt and 16 px gives 12 pt. While Splinterm's own
+`config.ini` sets none of `main.font-pixelsize`, `main.font-point-size` or the
+deprecated `main.font-size`, Splinterm follows the same text size:
+
+1. The user `~/.config/omarchy/shell.toml` `[font] base-size`, when set.
+2. Otherwise the active theme's `shell.toml` `[font] base-size`. Omarchy's
+   rendered template sets 12, so a stock Omarchy 4 desktop gives 9 pt.
+3. Otherwise Splinterm's own default of 14 px.
+
+Splinterm uses Omarchy's point size, so it matches Foot at the same text size:
+Foot's default `dpi-aware=no` and Splinterm's default
+`main.font-sizing-policy=output-scale` both size points at 96 DPI times the
+output scale. 9 pt is 12 px at scale 1 and 24 px at scale 2. With
+`main.font-sizing-policy=physical-dpi`, points use the output's physical DPI,
+as Foot does with `dpi-aware=yes`.
+
+A text size change rescales open terminal windows live, without a restart,
+through the same reconciliation as a font family change. Runtime zoom stays a
+half-point offset from the followed size, and `omarchy-display-text-size reset`
+returns to the theme's size. Splinterm reads `base-size` as the shell does, with
+JavaScript's `parseInt` and a 1 px floor, so `12.0` and `"12px"` both mean
+12 px and any positive size is accepted, not only the command's 9–20. The
+resulting point size is clamped to the 6–96 pt Splinterm renders, which is
+reported once. A value with no leading digits, such as `big`, is reported once:
+an open window keeps its current size, and at startup Splinterm uses 12 px
+(9 pt), as the shell falls back to its 12 px default. An explicit `main.theme`
+JSON palette still follows the text size from the Omarchy `shell.toml` layers,
+choosing the theme directory with the same order and brief-gap grace as the
+native theme.
+While `config.ini` sets a font size, Splinterm does not report `base-size`
+problems, and with a JSON palette it does not report panel alpha problems.
+
+To opt out, set a size in `config.ini`, for example:
+
+```ini
+[main]
+font-pixelsize=14
+```

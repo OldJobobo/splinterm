@@ -102,10 +102,12 @@ pub(crate) use overlays::history::{
     HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout, paint_history_overlay,
     paint_snapshot_overlays,
 };
+#[cfg(test)]
+pub(crate) use overlays::picker::session_picker_palette;
 pub(crate) use overlays::picker::{
-    SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
-    SessionPickerTextItem, paint_search_overlay, paint_session_picker_overlay,
-    session_picker_hit_test, session_picker_overlay_layout, session_picker_palette,
+    ChromeSurface, SessionPickerOverlayLayout, SessionPickerPurpose, SessionPickerTextCache,
+    SessionPickerTextItem, chrome_panel_fill, chrome_panel_palette, paint_search_overlay,
+    paint_session_picker_overlay, session_picker_hit_test, session_picker_overlay_layout,
 };
 #[cfg(test)]
 use raster::pixel_index;
