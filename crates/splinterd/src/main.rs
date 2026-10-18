@@ -1094,6 +1094,11 @@ async fn image_transfer_expiry_deadline(state: &DaemonState, expire: bool) -> ti
     )
 }
 
+/// Parses the daemon's own arguments.
+///
+/// Candidate acquisition calls this before it claims inherited descriptors,
+/// and its SAFETY argument relies on that: this must stay memory-only and
+/// never open, close, or replace a descriptor.
 fn parse_daemon_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<bool> {
     let mut arguments = arguments.into_iter();
     match arguments.next() {
@@ -1107,8 +1112,12 @@ fn parse_daemon_arguments(arguments: impl IntoIterator<Item = OsString>) -> Resu
     }
 }
 
+/// Parses the ordinary daemon arguments. A candidate's leading activation
+/// flag belongs to `candidate_acquire`, which already validated it and these
+/// arguments before claiming anything; this parser itself accepts no
+/// activation, so a normal start can never carry one.
 fn require_workload_cgroups() -> Result<bool> {
-    parse_daemon_arguments(env::args_os().skip(1))
+    parse_daemon_arguments(candidate_acquire::daemon_arguments()?)
 }
 
 fn main() -> Result<()> {

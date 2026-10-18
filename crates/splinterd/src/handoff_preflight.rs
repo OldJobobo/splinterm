@@ -553,9 +553,9 @@ fn close_inherited_descriptors() -> Result<(), splinterm_inherited_fd::Inherited
     // they say, each binary's `main` reaches the dispatch having created no
     // descriptor owner and no thread (`tests/unsafe_boundary_audit.rs` pins
     // the opening of both). In `splinterd`, candidate acquisition runs first:
-    // without its activation variable it only reads the environment, a valid
-    // activation skips the dispatch entirely, and an invalid one returns an
-    // error that ends `main`. In `splinterm`, the askpass check runs first:
+    // without its activation argument it only reads argv, a valid activation
+    // skips the dispatch entirely, and an invalid one returns an error that
+    // ends `main`. In `splinterm`, the askpass check runs first:
     // without both broker variables it only reads the environment, and with
     // them it runs the helper and exits without returning. Before `main`, std
     // startup only reopens descriptors 0 to 2 on `/dev/null`, and nothing else
