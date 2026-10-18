@@ -54,8 +54,65 @@ Python, rather than installing a global interpreter:
 nix develop --command tools/agents/remote --host wintermute doctor
 ```
 
-The worker service uses `/usr/local/bin:/usr/bin:/bin`; configure a Pi executable
-whose runtime is available there rather than relying on interactive shell setup.
+The worker service defaults to `/usr/local/bin:/usr/bin:/bin`; configure a Pi
+executable whose runtime is available there rather than relying on interactive
+shell setup. A trusted private host profile can set `service_path` to 1–8 plain
+absolute directories (colon-separated) and `python` to an absolute SSH-bootstrap
+Python executable. Use root-owned system/Nix profile paths, never an interactive
+mise shim or a writable runtime directory. Doctor checks Pi authentication, Git,
+and the user manager with this same service PATH and passively checks the
+`systemd-run` executable. The same PATH also covers request-side dispatch,
+status, and cancellation commands, not only the launched service. It reports the
+selected PATH and resource limits.
+
+This supports **read-only Nix workers**, not Nix build namespaces. Install a
+pinned compatible Pi and Python/Git/search tools declaratively for the restricted
+worker, and use that account's profile paths. The Arch-only build prerequisites
+and sandbox mounts are unchanged; do not opt a Nix host into `build_uid` merely
+because its read-only doctor succeeds.
+
+Profiles can lower `cpu_percent` (integer 25–200) and `memory_mib` (integer
+256–4096). Omitted fields retain two CPUs/4 GiB. These are per-job ceilings, not
+reservations, aggregate host admission, or evidence that a task will fit. Start
+with one job at a time: a small infrastructure host might use 50%/1024 MiB,
+a secondary reader 100%/1536 MiB, and a larger worker 200%/4096 MiB. Preserve
+production-service headroom and inspect actual resource use before increasing
+limits. Host profiles cannot raise the original ceilings. Lowered limits apply
+to validators too; compiler jobs may fail when given a reader-sized budget.
+
+## Restricted Arch account bootstrap
+
+`tools/agents/provision-arch-worker.sh` is an explicit, one-time operator bootstrap,
+not a package manager or automatic recovery tool. Supply the pinned upstream
+Pi 1.3.0 Linux x64 archive and one plain controller Ed25519 **public** key. It
+checks their identity, the exact target hostname, private operator home, absent
+worker destinations, and system tools. It never downloads packages or credentials.
+
+```sh
+bash tools/agents/provision-arch-worker.sh --check TARGET_HOST OPERATOR /private/pi-linux-x64.tar.gz /private/controller.pub
+sudo bash tools/agents/provision-arch-worker.sh --apply TARGET_HOST OPERATOR /private/pi-linux-x64.tar.gz /private/controller.pub
+```
+
+Run `--check` as the operator first: it checksums/unpacks only into a private
+temporary directory and runs `--version` with an empty private HOME and offline
+mode, catching CPU/runtime incompatibility before root changes. `--apply`
+requires normal interactive sudo and working SSH PAM account checks; never use
+package-manager privileges or passwordless-sudo changes as a workaround.
+
+Apply creates only a root-owned pinned runtime, a locked-password
+`splinterm-worker` account/private home without supplementary groups or sudo,
+`restrict`-prefixed controller authorization, credential-free initial settings,
+and user-manager lingering. Pi is never run as root. Existing accounts or runtime
+paths cause refusal; partial installed state is retained for inspection instead
+of overwritten/deleted on retry. Only a successful invocation's own temporary
+staging directory is cleaned automatically.
+
+The coordinator must verify ownership, SSH, privilege boundaries, user manager,
+and passive doctor before operator login. Authenticate **under the worker UID**
+through the normal Pi login flow; never copy an operator/another host's auth file.
+A `restrict` key deliberately cannot allocate a PTY, so interactive login uses
+operator SSH and `sudo -iu splinterm-worker`, not a weakened worker SSH key.
+No model jobs are launched by provisioning. A live pilot remains a separate gate.
 
 ## Submit, observe, retrieve
 
@@ -83,9 +140,10 @@ Submission transfers this reviewed runner and task over SSH stdin; there is no
 remote installation or shell interpolation of task text. The worker stores a
 private copy of the runner with the job and starts it as a transient **user
 service**, not an SSH-bound process or scope. The service owns its process tree,
-with a 4 GiB memory ceiling, 64-task ceiling (256 for validators), two-CPU quota,
-task deadline plus 180 seconds for setup, and bounded stdout/stderr logs. The task
-deadline covers the model run and, for validators, dependency fetching and checks;
+with profile-selected memory/CPU ceilings (default 4 GiB/two CPUs), a 64-task
+ceiling (256 for validators), task deadline plus 180 seconds for setup, and
+bounded stdout/stderr logs. The task deadline covers the model run and, for
+validators, dependency fetching and checks;
 checkout setup has its own bounded subprocess timeouts.
 
 Each job initializes its own Git checkout, fetches only the requested authority
@@ -138,9 +196,9 @@ root mount. A sandbox setup failure aborts; there is no unsandboxed fallback.
 This is tested with the system Arch toolchain; user-local Rustup/mise toolchains
 and Nix store toolchains are not exposed automatically.
 
-The existing two-CPU/4-GiB service limit remains; validators allow 256 tasks instead
-of 64 for compiler threads. The task deadline covers dependency fetching, all
-checks, and Sol's analysis together. Each output stream remains capped at 16 MiB.
+The existing maximum two-CPU/4-GiB service limit remains; profiles may lower it.
+Validators allow 256 tasks instead of 64 for compiler threads. The task deadline
+covers dependency fetching, all checks, and Sol's analysis together. Each output stream remains capped at 16 MiB.
 Caches and outputs are per-job, not shared. They are retained and have **no disk
 quota or automatic pruning**; account for disk use before large/repeated builds.
 

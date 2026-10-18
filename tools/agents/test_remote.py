@@ -127,6 +127,7 @@ class PrivateStateTests(unittest.TestCase):
     def test_rejects_public_directory_and_symlink(self):
         public = self.root / "public"
         public.mkdir(mode=0o755)
+        public.chmod(0o755)  # This fixture must remain public under a private umask.
         with self.assertRaises(ValueError):
             remote.private_directory(public)
         link = self.root / "link"

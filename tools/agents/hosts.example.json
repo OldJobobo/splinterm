@@ -8,6 +8,19 @@
     "provider": "YOUR_PROVIDER",
     "model": "YOUR_MODEL_ID"
   },
+  "nixos-reader": {
+    "ssh_target": "YOUR_RESTRICTED_WORKER@YOUR_NIX_HOST",
+    "state_dir": "/home/YOUR_RESTRICTED_WORKER/.local/state/splinterm-agents",
+    "repo_url": "https://github.com/OldJobobo/splinterm.git",
+    "pi": "/etc/profiles/per-user/YOUR_RESTRICTED_WORKER/bin/pi",
+    "pi_version": "1.3.0",
+    "python": "/etc/profiles/per-user/YOUR_RESTRICTED_WORKER/bin/python3",
+    "service_path": "/etc/profiles/per-user/YOUR_RESTRICTED_WORKER/bin:/run/current-system/sw/bin",
+    "cpu_percent": 100,
+    "memory_mib": 1536,
+    "provider": "YOUR_PROVIDER",
+    "model": "YOUR_MODEL_ID"
+  },
   "wintermute-build": {
     "ssh_target": "YOUR_RESTRICTED_WORKER@wintermute",
     "state_dir": "/home/YOUR_RESTRICTED_WORKER/.local/state/splinterm-builds",

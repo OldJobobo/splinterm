@@ -72,14 +72,33 @@ def validate_host(host):
         "provider",
         "model",
     }
+    optional = {"build_uid", "python", "service_path", "cpu_percent", "memory_mib"}
     if (
         not isinstance(host, dict)
         or not required <= set(host)
-        or set(host) - required - {"build_uid"}
+        or set(host) - required - optional
     ):
         raise ValueError(
-            f"host requires: {', '.join(sorted(required))}; optional: build_uid"
+            f"host requires: {', '.join(sorted(required))}; optional: {', '.join(sorted(optional))}"
         )
+    for key, minimum, maximum in (("cpu_percent", 25, 200), ("memory_mib", 256, 4096)):
+        if key in host and (
+            type(host[key]) is not int or not minimum <= host[key] <= maximum
+        ):
+            raise ValueError(f"{key} must be an integer from {minimum} to {maximum}")
+    if "python" in host:
+        absolute(host["python"], "python")
+    if "service_path" in host:
+        checked_text(host["service_path"], "service_path")
+        entries = host["service_path"].split(":")
+        if not 1 <= len(entries) <= 8:
+            raise ValueError("service_path requires 1-8 absolute directories")
+        for entry in entries:
+            absolute(entry, "service_path entry")
+            if not re.fullmatch(r"/[A-Za-z0-9_./+-]+", entry):
+                raise ValueError(
+                    "service_path entries must be plain absolute directories"
+                )
     if "build_uid" in host and (
         type(host["build_uid"]) is not int or host["build_uid"] < 1000
     ):
@@ -168,8 +187,21 @@ def validate_task(task):
     return task
 
 
-def run(argv, *, cwd=None, timeout=30, check=True):
+def service_path(host):
+    return host.get("service_path", "/usr/local/bin:/usr/bin:/bin")
+
+
+def service_limits(host):
+    return {
+        "CPUQuota": f"{host.get('cpu_percent', 200)}%",
+        "MemoryMax": f"{host['memory_mib']}M" if "memory_mib" in host else "4G",
+    }
+
+
+def run(argv, *, cwd=None, timeout=30, check=True, path=None):
     environment = os.environ.copy()
+    if path is not None:
+        environment["PATH"] = path
     if Path(argv[0]).name == "git":
         # Do not inherit a production worktree or execute ambient Git hooks/helpers.
         environment = {k: v for k, v in environment.items() if not k.startswith("GIT_")}
@@ -278,7 +310,8 @@ def update(job, state, **extra):
 
 
 def doctor(host):
-    version = run([host["pi"], "--version"]).stdout.strip()
+    path = service_path(host)
+    version = run([host["pi"], "--version"], path=path).stdout.strip()
     auth = run(
         [
             host["pi"],
@@ -290,14 +323,17 @@ def doctor(host):
             "--no-refresh",
         ],
         check=False,
+        path=path,
     )
     auth_status = json.loads(auth.stdout).get("status")
-    manager = run(["systemctl", "--user", "show-environment"], check=False)
+    manager = run(["systemctl", "--user", "show-environment"], check=False, path=path)
     linger = run(
         ["loginctl", "show-user", str(os.getuid()), "-p", "Linger", "--value"],
         check=False,
+        path=path,
     )
-    git = run(["git", "--version"]).returncode == 0
+    git = run(["git", "--version"], path=path).returncode == 0
+    dispatcher = run(["systemd-run", "--version"], path=path).returncode == 0
     ready = (
         version == host["pi_version"]
         and auth_status == "ready"
@@ -305,6 +341,7 @@ def doctor(host):
         and manager.returncode == 0
         and linger.stdout.strip() == "yes"
         and git
+        and dispatcher
     )
     build = {"state": "disabled"}
     if "build_uid" in host:
@@ -322,6 +359,8 @@ def doctor(host):
         "auth": auth_status,
         "user_manager": manager.returncode == 0,
         "linger": linger.stdout.strip() == "yes",
+        "service_path": path,
+        "limits": service_limits(host),
         "note": "No model request, job, checkout, or service was created.",
     }
 
@@ -389,11 +428,11 @@ def submit(host, task):
                         "--property=Type=exec",
                         "--property=KillMode=control-group",
                         "--property=TimeoutStopSec=10",
-                        "--property=MemoryMax=4G",
+                        f"--property=MemoryMax={service_limits(host)['MemoryMax']}",
                         f"--property=TasksMax={256 if task['role'] == 'validator' else 64}",
-                        "--property=CPUQuota=200%",
+                        f"--property=CPUQuota={service_limits(host)['CPUQuota']}",
                         f"--property=RuntimeMaxSec={task['timeout_seconds'] + 180}",
-                        "--setenv=PATH=/usr/local/bin:/usr/bin:/bin",
+                        f"--setenv=PATH={service_path(host)}",
                         sys.executable,
                         str(job / "runner.py"),
                         "_execute",
@@ -841,9 +880,29 @@ def execute(job):
         return 1
 
 
+@contextlib.contextmanager
+def request_environment(host):
+    # One request per SSH process. Cover dispatch, status, cancel and future
+    # request-side subprocesses, not just the environment of the launched unit.
+    previous_path = os.environ.get("PATH")
+    os.environ["PATH"] = service_path(host)
+    try:
+        yield
+    finally:
+        if previous_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous_path
+
+
 def serve(request):
     os.umask(0o077)
     host = validate_host(request["host"])
+    with request_environment(host):
+        return serve_action(host, request)
+
+
+def serve_action(host, request):
     action = request["action"]
     if action == "doctor":
         return doctor(host)
@@ -918,7 +977,7 @@ def transport(host, request):
         "ConnectTimeout=10",
         "--",
         host["ssh_target"],
-        "python3 -c " + shlex.quote(BOOTSTRAP),
+        shlex.quote(host.get("python", "python3")) + " -c " + shlex.quote(BOOTSTRAP),
     ]
     try:
         result = subprocess.run(
