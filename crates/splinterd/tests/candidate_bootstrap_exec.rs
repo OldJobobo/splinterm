@@ -31,7 +31,8 @@ use splinterd::{
     handoff_descriptors::HandoffDescriptorSlot,
 };
 
-const MANIFEST_ENV: &str = "SPLINTERM_INTERNAL_HANDOFF_MANIFEST_FD";
+/// The candidate activation flag `candidate_acquire` owns in the binary.
+const ACTIVATION_ARGUMENT: &str = "--splinterm-internal-handoff-manifest-fd-v1";
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct TestDirectory(PathBuf);
@@ -237,9 +238,15 @@ impl Fixture {
         }
     }
 
-    /// Runs the candidate with every role inherited, restoring close-on-exec
-    /// on the fixture owners afterward.
+    /// Runs the candidate activated on `activation_fd` with no daemon
+    /// arguments.
     fn launch(&self, activation_fd: RawFd) -> Output {
+        self.launch_with(&[activation(activation_fd)], &[])
+    }
+
+    /// Runs the binary with exactly `arguments` and every role inherited,
+    /// restoring close-on-exec on the fixture owners afterward.
+    fn launch_with(&self, arguments: &[String], environment: &[(&str, &str)]) -> Output {
         let original_flags = self
             .inherited
             .iter()
@@ -253,7 +260,8 @@ impl Fixture {
             "/proc/self/fd/{}",
             self.daemon.as_raw_fd()
         )))
-        .env(MANIFEST_ENV, activation_fd.to_string())
+        .args(arguments)
+        .envs(environment.iter().copied())
         .env("SPLINTERM_SOCKET", &self.listener_path)
         .env_remove("RUST_LOG")
         .current_dir(&self.directory.0)
@@ -303,4 +311,90 @@ fn candidate_rejects_an_activation_descriptor_that_was_not_inherited() {
         &output,
         &format!("manifest descriptor {absent} was not inherited"),
     );
+}
+
+const CANDIDATE_REFUSAL: &str = "started as an upgrade-handoff candidate and will not serve";
+
+#[test]
+fn candidate_accepts_the_packaged_daemon_argument_after_activation() {
+    let fixture = Fixture::new(None);
+    let output = fixture.launch_with(
+        &[
+            activation(fixture.forward_manifest_fd),
+            "--require-workload-cgroups".to_owned(),
+        ],
+        &[],
+    );
+    assert_candidate_error(&output, "candidate runtime adoption is not wired");
+}
+
+#[test]
+fn malformed_activation_fails_closed_as_a_candidate_before_claiming() {
+    let fixture = Fixture::new(None);
+    let valid = activation(fixture.forward_manifest_fd);
+    for (arguments, expected) in [
+        (
+            vec![format!("{ACTIVATION_ARGUMENT}=2")],
+            "candidate manifest descriptor is a standard stream",
+        ),
+        (
+            vec![format!(
+                "{ACTIVATION_ARGUMENT}=0{}",
+                fixture.forward_manifest_fd
+            )],
+            "candidate manifest descriptor is not a canonical decimal number",
+        ),
+        (
+            vec![ACTIVATION_ARGUMENT.to_owned()],
+            "candidate activation names no manifest descriptor",
+        ),
+        (
+            vec![valid.clone(), valid.clone()],
+            "candidate activation appears more than once",
+        ),
+        (
+            vec!["--require-workload-cgroups".to_owned(), valid.clone()],
+            "candidate activation is not the first argument",
+        ),
+        (
+            vec![format!(
+                "--splinterm-internal-handoff-manifest-fd={}",
+                fixture.forward_manifest_fd
+            )],
+            "candidate activation argument is not recognized",
+        ),
+        // The daemon arguments are judged before any descriptor is claimed.
+        (
+            vec![valid.clone(), "--unknown".to_owned()],
+            "unsupported splinterd argument",
+        ),
+    ] {
+        let output = fixture.launch_with(&arguments, &[]);
+        assert_candidate_error(&output, CANDIDATE_REFUSAL);
+        assert_candidate_error(&output, expected);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("not inherited") && !stderr.contains("adoption is not wired"),
+            "{arguments:?} reached the manifest: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn the_retired_activation_environment_variable_is_ignored() {
+    let fixture = Fixture::new(None);
+    // The removed variable once failed closed as a candidate on this invalid
+    // value; now only argv activates, so the stray argument fails ordinary
+    // startup before anything else runs.
+    let output = fixture.launch_with(
+        &["--unknown".to_owned()],
+        &[("SPLINTERM_INTERNAL_HANDOFF_MANIFEST_FD", "2")],
+    );
+    assert_candidate_error(&output, "unsupported splinterd argument");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("candidate"), "{stderr}");
+}
+
+fn activation(manifest_fd: RawFd) -> String {
+    format!("{ACTIVATION_ARGUMENT}={manifest_fd}")
 }

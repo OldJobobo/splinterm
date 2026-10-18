@@ -354,10 +354,12 @@ fn under_guard(
 
     // ---- The exec call site (Plan 0061 M3.10) ----
     // M3.10 replaces the `Ok(())` arm with `execveat` of the sealed forward
-    // daemon (`AT_EMPTY_PATH`, argv and `SPLINTERM_POLICY` preserved), which
-    // returns only when exec fails; that failure takes this same
-    // restore-and-resume path. Until the candidate adopts instead of
-    // rejecting, execing would end every Splint, so nothing is executed.
+    // daemon (`AT_EMPTY_PATH`, `SPLINTERM_POLICY` preserved, argv the
+    // candidate activation flag naming the forward manifest followed by the
+    // ordinary daemon arguments), which returns only when exec fails; that
+    // failure takes this same restore-and-resume path. Until the candidate
+    // adopts instead of rejecting, execing would end every Splint, so nothing
+    // is executed.
     let failure = match stage(&mut hook, ExecBoundaryStage::Exec) {
         Err(failure) => failure,
         Ok(()) => ExecBoundaryError::ExecNotWired,
