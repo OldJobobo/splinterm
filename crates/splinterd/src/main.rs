@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     io::{ErrorKind, IoSlice},
     os::{
-        fd::AsFd,
+        fd::{AsFd, AsRawFd},
         unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -36,6 +36,10 @@ use splinterd::{
     ProcessIncarnation, SubscriptionReceive, TerminalPublicationMemoryLease, authorization,
     executable_identity,
     handoff_coordinator::ForwardHandoffAuthority,
+    handoff_prepare::{
+        CaptureLimits, HandoffCaptures, ListenerDescriptors, ManifestInputs, PreparedManifests,
+        build_handoff_manifests, capture_live_splints,
+    },
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     policy,
 };
@@ -1037,6 +1041,13 @@ struct DaemonState {
     rollback_handoff: handoff_requests::RollbackAuthority,
     /// Generation this daemon serves; reported in every `Hello`.
     daemon_generation: u64,
+    /// The listening sockets serve holds open at these numbers for the
+    /// daemon's life, named by handoff manifests; `None` in unit tests.
+    handoff_listeners: Option<ListenerDescriptors>,
+    #[cfg(test)]
+    handoff_faults: StdMutex<Vec<HandoffFault>>,
+    #[cfg(test)]
+    handoff_capture_limits: StdMutex<CaptureLimits>,
     owner_home: Option<PathBuf>,
     development_terminal_access: bool,
     agent_status: Arc<agent_status::AgentStatusService>,
@@ -1218,6 +1229,7 @@ struct DaemonStateInputs {
     workload_units: Option<WorkloadUnitManager>,
     rollback_handoff: handoff_requests::RollbackAuthority,
     daemon_generation: u64,
+    handoff_listeners: Option<ListenerDescriptors>,
 }
 
 fn run_daemon(source: StartupSource) -> Result<()> {
@@ -1308,6 +1320,10 @@ async fn start_fresh(
         // A fresh start serves the first generation; adoption (M3.8) will
         // publish the one after its predecessor's.
         daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
+        handoff_listeners: Some(ListenerDescriptors {
+            listener: listeners.listener.as_raw_fd(),
+            image_listener: listeners.image_listener.as_raw_fd(),
+        }),
     });
     let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
@@ -1432,6 +1448,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         workload_units,
         rollback_handoff,
         daemon_generation,
+        handoff_listeners,
     } = inputs;
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
@@ -1479,6 +1496,11 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         workload_units,
         rollback_handoff,
         daemon_generation,
+        handoff_listeners,
+        #[cfg(test)]
+        handoff_faults: StdMutex::default(),
+        #[cfg(test)]
+        handoff_capture_limits: StdMutex::new(CaptureLimits::DEFAULT),
         owner_home: env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && !path.as_os_str().is_empty()),
@@ -8486,10 +8508,12 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
 /// report naming anything but `Unsupported` refuses before the gate.
 /// Otherwise, while still `Preparing` and serving, the gate prepares the
 /// installed forward pair beside the borrowed rollback pair; then it fences,
-/// re-checks, drains, and persists. Capture, manifests, and exec
-/// (M3.7–M3.10) start where the fence is still held below; until they exist
-/// every attempt cancels and answers `HandoffUnavailable` with a fresh
-/// report's reasons, which name `Unsupported`.
+/// re-checks, drains, and persists; then it captures every live Splint and
+/// builds the validated manifests ([`prepare_fenced_handoff`]). Exec
+/// (M3.9–M3.10) starts where that preparation completes; until it exists
+/// every attempt releases what it prepared, cancels, and answers
+/// `HandoffUnavailable` with a fresh report's reasons, which name
+/// `Unsupported`.
 async fn execute_daemon_handoff(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
@@ -8506,7 +8530,7 @@ async fn execute_daemon_handoff_with<F, Prepared>(
 ) -> ProtocolError
 where
     F: Future<Output = Result<Prepared, handoff_requests::ForwardRefusal>> + Send + 'static,
-    Prepared: Send + 'static,
+    Prepared: ForwardPreparation,
 {
     if state.handoff_gate.phase() != HandoffGatePhase::Idle {
         return handoff_in_progress();
@@ -8523,12 +8547,21 @@ where
     let (reason, refusal) = match attempt.run_held(prepare_forward(Arc::clone(state))).await {
         Ok(Ok(forward)) => {
             let reason = match fence_for_handoff(&mut attempt).await {
-                // M3.7b captures here, while `attempt` holds the fence and
-                // `forward` the sealed forward and rollback pairs.
-                Ok(()) => HandoffCancelReason::Failed,
-                Err(reason) => reason,
+                Ok(()) => match prepare_fenced_handoff(state, forward).await {
+                    // M3.9 stops the runtime and execs the forward daemon
+                    // here, still under the fence. Until it lands, a
+                    // complete preparation releases everything it holds.
+                    Ok(prepared) => {
+                        prepared.release().await;
+                        HandoffCancelReason::Failed
+                    }
+                    Err(reason) => reason,
+                },
+                Err(reason) => {
+                    drop(forward);
+                    reason
+                }
             };
-            drop(forward);
             (reason, None)
         }
         Ok(Err(refusal)) => (refusal.cancel_reason(), Some(refusal)),
@@ -8557,6 +8590,246 @@ async fn prepare_forward_handoff(
             error!(%error, "forward handoff preparation task failed");
             Err(handoff_requests::ForwardRefusal::Failed)
         })
+}
+
+/// One attempt's forward preparation, which builds the attempt's manifests
+/// once the fenced capture completes.
+trait ForwardPreparation: Send + 'static {
+    /// What exec (M3.9) seals into the inherited manifest memfds.
+    type Manifests: Send + 'static;
+
+    fn build_manifests(
+        &self,
+        state: &DaemonState,
+        topology: &Topology,
+        captures: &HandoffCaptures,
+    ) -> Result<Self::Manifests, HandoffCancelReason>;
+}
+
+impl ForwardPreparation for ForwardHandoffAuthority {
+    type Manifests = PreparedManifests;
+
+    fn build_manifests(
+        &self,
+        state: &DaemonState,
+        topology: &Topology,
+        captures: &HandoffCaptures,
+    ) -> Result<PreparedManifests, HandoffCancelReason> {
+        // Forward preparation already required retained rollback authority.
+        let handoff_requests::RollbackAuthority::Retained { authority } = &state.rollback_handoff
+        else {
+            return Err(HandoffCancelReason::Failed);
+        };
+        let Some(listeners) = state.handoff_listeners else {
+            error!("handoff manifests need the daemon's listening sockets");
+            return Err(HandoffCancelReason::Failed);
+        };
+        let inputs = ManifestInputs {
+            topology,
+            listeners,
+            daemon_generation: state.daemon_generation,
+        };
+        build_handoff_manifests(authority, self, captures, &inputs).map_err(|error| {
+            warn!(%error, "handoff manifests could not be built");
+            HandoffCancelReason::Failed
+        })
+    }
+}
+
+/// Test forward preparations hold no executable authority, so their attempts
+/// build no manifests and stop where exec would start.
+#[cfg(test)]
+impl ForwardPreparation for () {
+    type Manifests = ();
+
+    fn build_manifests(
+        &self,
+        _: &DaemonState,
+        _: &Topology,
+        _: &HandoffCaptures,
+    ) -> Result<(), HandoffCancelReason> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl<T: Send + Sync + 'static> ForwardPreparation for Arc<T> {
+    type Manifests = ();
+
+    fn build_manifests(
+        &self,
+        _: &DaemonState,
+        _: &Topology,
+        _: &HandoffCaptures,
+    ) -> Result<(), HandoffCancelReason> {
+        Ok(())
+    }
+}
+
+/// A fenced attempt ready for exec: the forward preparation, every live
+/// Splint's capture lease, and the validated manifests that name them.
+///
+/// Exec (M3.9) consumes it. Dropping it closes the manifest memfds, resumes
+/// every captured actor without waiting, and closes this attempt's
+/// executable snapshots; the retained rollback authority keeps its own.
+struct PreparedHandoff<F: ForwardPreparation> {
+    forward: F,
+    captures: HandoffCaptures,
+    manifests: F::Manifests,
+}
+
+impl<F: ForwardPreparation> PreparedHandoff<F> {
+    /// Cancels before exec: closes the manifests, waits until every captured
+    /// actor reads its PTY again, then releases the forward preparation.
+    async fn release(self) {
+        let Self {
+            forward,
+            captures,
+            manifests,
+        } = self;
+        drop(manifests);
+        captures.release().await;
+        drop(forward);
+    }
+}
+
+/// Captures every live Splint and builds the manifests while the attempt
+/// holds the fence (Plan 0061 M3.7).
+///
+/// It only takes leases and waits: no actor ends and no Splint is signalled.
+/// Every failure has released what it acquired before it returns: each lease
+/// resumes its actor and manifest storage closes.
+async fn prepare_fenced_handoff<F: ForwardPreparation>(
+    state: &Arc<DaemonState>,
+    forward: F,
+) -> Result<PreparedHandoff<F>, HandoffCancelReason> {
+    #[cfg(test)]
+    if take_handoff_fault(state, HandoffFault::AfterFence) {
+        return Err(HandoffCancelReason::Failed);
+    }
+    let handles = {
+        let runtimes = state.runtimes.lock().await;
+        // Launches reserve under the topology permit the fence holds, so a
+        // reservation still held here belongs to a launch that could register
+        // a Splint after this capture.
+        if runtimes.reserved.load(Ordering::Acquire) != 0 {
+            warn!("handoff capture found a launch still holding a live slot");
+            return Err(HandoffCancelReason::Failed);
+        }
+        runtimes.handles().into_values().collect::<Vec<_>>()
+    };
+    #[cfg(test)]
+    let faults = Arc::clone(state);
+    let prepare = move |handle: LiveSplintHandle| {
+        #[cfg(test)]
+        let faults = Arc::clone(&faults);
+        async move {
+            let lease = handle.prepare_pty_handoff().await?;
+            #[cfg(test)]
+            let lease = inject_capture_fault(&faults, handle.splint_id, lease).await?;
+            Ok(lease)
+        }
+    };
+    let captures = capture_live_splints(handles, handoff_capture_limits(state), prepare)
+        .await
+        .map_err(|failure| {
+            warn!(%failure, "handoff capture cancelled");
+            failure.cancel_reason()
+        })?;
+    match build_fenced_manifests(state, &forward, &captures).await {
+        Ok(manifests) => {
+            info!(
+                captured = captures.captured().len(),
+                excluded = captures.excluded().len(),
+                checkpoint_bytes = captures.checkpoint_bytes(),
+                "handoff capture and manifests prepared"
+            );
+            Ok(PreparedHandoff {
+                forward,
+                captures,
+                manifests,
+            })
+        }
+        Err(reason) => {
+            captures.release().await;
+            Err(reason)
+        }
+    }
+}
+
+/// Builds the manifests from the Topology as the fence persisted it.
+async fn build_fenced_manifests<F: ForwardPreparation>(
+    state: &DaemonState,
+    forward: &F,
+    captures: &HandoffCaptures,
+) -> Result<F::Manifests, HandoffCancelReason> {
+    #[cfg(test)]
+    if take_handoff_fault(state, HandoffFault::AfterCapture) {
+        return Err(HandoffCancelReason::Failed);
+    }
+    let manifests = forward.build_manifests(state, &*state.topology.read().await, captures)?;
+    #[cfg(test)]
+    if take_handoff_fault(state, HandoffFault::ManifestValidation) {
+        drop(manifests);
+        return Err(HandoffCancelReason::Failed);
+    }
+    Ok(manifests)
+}
+
+#[cfg(not(test))]
+const fn handoff_capture_limits(_: &DaemonState) -> CaptureLimits {
+    CaptureLimits::DEFAULT
+}
+
+/// Tests narrow the capture deadline and the aggregate cap per state.
+#[cfg(test)]
+fn handoff_capture_limits(state: &DaemonState) -> CaptureLimits {
+    *state.handoff_capture_limits.lock().unwrap()
+}
+
+/// A test-armed failure at one point of a fenced attempt. Each fires once.
+/// Only test builds have these hooks.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HandoffFault {
+    /// Cancels as soon as the fence and its steps complete.
+    AfterFence,
+    /// Captures this Splint, then fails its capture as no exit explains.
+    CaptureFails(SplintId),
+    /// Captures this Splint, then holds its lease past the actor deadline.
+    CaptureStalls(SplintId),
+    /// Cancels once every capture completed, before any manifest is built.
+    AfterCapture,
+    /// Refuses the built manifests as a validation failure would.
+    ManifestValidation,
+}
+
+#[cfg(test)]
+fn take_handoff_fault(state: &DaemonState, fault: HandoffFault) -> bool {
+    let mut faults = state.handoff_faults.lock().unwrap();
+    faults
+        .iter()
+        .position(|armed| *armed == fault)
+        .map(|index| faults.swap_remove(index))
+        .is_some()
+}
+
+#[cfg(test)]
+async fn inject_capture_fault(
+    state: &DaemonState,
+    splint_id: SplintId,
+    lease: splinterd::PreparedPtyHandoff,
+) -> Result<splinterd::PreparedPtyHandoff, LiveError> {
+    if take_handoff_fault(state, HandoffFault::CaptureFails(splint_id)) {
+        drop(lease);
+        return Err(LiveError::Io(std::io::Error::other(
+            "injected handoff capture fault",
+        )));
+    }
+    if take_handoff_fault(state, HandoffFault::CaptureStalls(splint_id)) {
+        time::sleep(Duration::from_secs(3600)).await;
+    }
+    Ok(lease)
 }
 
 async fn subscribe_topology(
@@ -11362,6 +11635,9 @@ mod tests {
             workload_units: None,
             rollback_handoff: handoff_requests::RollbackAuthority::NotPackaged,
             daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
+            handoff_listeners: None,
+            handoff_faults: StdMutex::default(),
+            handoff_capture_limits: StdMutex::new(CaptureLimits::DEFAULT),
             owner_home: Some(PathBuf::from("/home/test")),
             development_terminal_access,
             agent_status: Arc::default(),
@@ -14050,6 +14326,189 @@ mod tests {
             ]
         );
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    /// Starts `count` live Splints running `cat`, each in its own Lair.
+    async fn live_cat_splints(state: &Arc<DaemonState>, count: usize) -> Vec<LiveSplintHandle> {
+        for index in 0..count {
+            let revision = state.topology.read().await.revision();
+            let response = trusted_request(
+                state,
+                81,
+                Request::CreateLair {
+                    expected_topology_revision: revision,
+                    name: format!("handoff-{index}"),
+                    launch: test_launch(&["/bin/sh", "-c", "exec cat"]),
+                    generated_name: false,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(response, Response::LairCreated { .. }));
+        }
+        let handles = state
+            .runtimes
+            .lock()
+            .await
+            .handles()
+            .into_values()
+            .collect::<Vec<_>>();
+        assert_eq!(handles.len(), count);
+        handles
+    }
+
+    /// Every Splint takes input and reads its PTY again: the terminal echo of
+    /// `token` reaches its screen.
+    async fn assert_actors_echo(handles: &[LiveSplintHandle], token: &str) {
+        for handle in handles {
+            time::timeout(Duration::from_secs(5), async {
+                handle
+                    .input(format!("{token}\n").into_bytes())
+                    .await
+                    .unwrap();
+                loop {
+                    let snapshot = handle.snapshot().await.unwrap();
+                    let text = snapshot
+                        .visible_rows
+                        .iter()
+                        .flat_map(|row| row.cells.iter())
+                        .map(|cell| cell.content.as_str())
+                        .collect::<String>();
+                    if text.contains(token) {
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("every actor reads its PTY again after the handoff cancels");
+        }
+    }
+
+    /// The gate after a cancelled attempt: idle, unfenced, and every Splint
+    /// still the same live incarnation, reading its PTY.
+    async fn assert_released(state: &DaemonState, handles: &[LiveSplintHandle], token: &str) {
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(state.topology_transactions.try_acquire().is_ok());
+        let live = state.runtimes.lock().await.handles();
+        for handle in handles {
+            assert!(handle.root_process_is_live());
+            assert_eq!(live[&handle.splint_id].incarnation, handle.incarnation);
+        }
+        assert_actors_echo(handles, token).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn execute_captures_every_live_splint_then_releases_them_all() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let handles = live_cat_splints(&state, 3).await;
+        assert!(handles.iter().all(|handle| !handle.has_received_input()));
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+
+        let error = execute_with_forward_prepared(&state, &report).await;
+
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Failed),
+            ]
+        );
+        // Capture counts as use, so each actor reached its handoff boundary.
+        assert!(handles.iter().all(LiveSplintHandle::has_received_input));
+        assert_released(&state, &handles, "after-execute").await;
+    }
+
+    /// Runs `Execute` over two live Splints with one fault armed and checks
+    /// that the attempt cancels with `reason` and releases everything.
+    async fn assert_fault_cancels(
+        fault: impl FnOnce(&[LiveSplintHandle]) -> HandoffFault,
+        limits: CaptureLimits,
+        reason: HandoffCancelReason,
+    ) {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let handles = live_cat_splints(&state, 2).await;
+        let fault = fault(&handles);
+        state.handoff_faults.lock().unwrap().push(fault);
+        *state.handoff_capture_limits.lock().unwrap() = limits;
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+
+        let error = execute_with_forward_prepared(&state, &report).await;
+
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable, "{fault:?}");
+        assert_eq!(
+            handoff_status_phases(&mut subscription).last(),
+            Some(&cancelled(reason)),
+            "{fault:?}"
+        );
+        assert!(
+            state.handoff_faults.lock().unwrap().is_empty(),
+            "{fault:?} fired"
+        );
+        assert_released(&state, &handles, "after-fault").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_handoff_fault_cancels_and_releases_every_actor() {
+        let short = CaptureLimits {
+            actor_timeout: Duration::from_millis(300),
+            ..CaptureLimits::DEFAULT
+        };
+        assert_fault_cancels(
+            |_| HandoffFault::AfterFence,
+            CaptureLimits::DEFAULT,
+            HandoffCancelReason::Failed,
+        )
+        .await;
+        assert_fault_cancels(
+            |handles| HandoffFault::CaptureFails(handles[0].splint_id),
+            CaptureLimits::DEFAULT,
+            HandoffCancelReason::Failed,
+        )
+        .await;
+        assert_fault_cancels(
+            |handles| HandoffFault::CaptureStalls(handles[1].splint_id),
+            short,
+            HandoffCancelReason::TimedOut,
+        )
+        .await;
+        assert_fault_cancels(
+            |_| HandoffFault::AfterCapture,
+            CaptureLimits::DEFAULT,
+            HandoffCancelReason::Failed,
+        )
+        .await;
+        assert_fault_cancels(
+            |_| HandoffFault::ManifestValidation,
+            CaptureLimits::DEFAULT,
+            HandoffCancelReason::Failed,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn passing_the_aggregate_checkpoint_cap_cancels_and_releases_every_actor() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let handles = live_cat_splints(&state, 2).await;
+        *state.handoff_capture_limits.lock().unwrap() = CaptureLimits {
+            aggregate_checkpoint_bytes: 1,
+            ..CaptureLimits::DEFAULT
+        };
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+
+        let error = execute_with_forward_prepared(&state, &report).await;
+
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription).last(),
+            Some(&cancelled(HandoffCancelReason::Failed))
+        );
+        assert_released(&state, &handles, "after-cap").await;
     }
 
     #[tokio::test]

@@ -1160,6 +1160,8 @@ mod tests {
             handoff_id: HandoffId::new([9; 16]).unwrap(),
             source_generation: generation(1),
             target_generation: generation(2),
+            source_daemon_generation: 1,
+            target_daemon_generation: 2,
             topology_revision: 0,
             durable_state_generation: 0,
             private_protocol: splinterm_protocol::PROTOCOL_VERSION,

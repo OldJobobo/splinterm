@@ -15,6 +15,7 @@ pub mod handoff_descriptors;
 )]
 pub(crate) mod handoff_manifest;
 pub mod handoff_preflight;
+pub mod handoff_prepare;
 pub mod image_transport;
 mod live;
 pub mod package_provenance;

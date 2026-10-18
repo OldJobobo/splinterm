@@ -4,10 +4,10 @@
 //! captures, or opens the installed candidate. `Execute` is refused before
 //! the old-side gate (Plan 0061 M3.6) runs whenever anything but
 //! `Unsupported` blocks it. The gate then prepares the installed forward pair
-//! beside the retained rollback pair (M3.7) and fences, and always ends
-//! cancelled until capture and exec land (M3.7–M3.10). Every resume ticket
-//! claim fails closed
-//! because this daemon issues no tickets (M3.16). No handoff prepare is ever
+//! beside the retained rollback pair, fences, captures every live Splint, and
+//! builds the manifests (M3.7), and always ends cancelled until exec lands
+//! (M3.9–M3.10). Every resume ticket claim fails closed because this daemon
+//! issues no tickets (M3.16). No handoff prepare is ever
 //! pending, so every Window acknowledgement finds nothing to acknowledge
 //! (M3.13).
 

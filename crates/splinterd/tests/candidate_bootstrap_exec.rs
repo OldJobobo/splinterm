@@ -202,6 +202,8 @@ impl Fixture {
             "handoff_id": vec![7; 16],
             "source_generation": source.clone(),
             "target_generation": target.clone(),
+            "source_daemon_generation": 1,
+            "target_daemon_generation": 2,
             "topology_revision": 1,
             "durable_state_generation": 1,
             "private_protocol": compiled.capabilities.private_protocol.maximum(),
@@ -217,6 +219,8 @@ impl Fixture {
         rollback["kind"] = json!("rollback");
         rollback["source_generation"] = target;
         rollback["target_generation"] = source;
+        rollback["source_daemon_generation"] = json!(2);
+        rollback["target_daemon_generation"] = json!(1);
         rollback["counterpart_manifest_slot"] = json!(HandoffDescriptorSlot::CheckpointManifest);
         let (forward_bytes, rollback_bytes) =
             encode_manifest_pair_for_integration_test(forward, rollback).unwrap();
