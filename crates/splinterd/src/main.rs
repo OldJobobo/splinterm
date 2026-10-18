@@ -46,13 +46,13 @@ use splinterm_core::{
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
     ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    DojoUse, ErrorCode, HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES,
-    MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS,
-    MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
-    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
-    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch, PresetLayoutLaunch,
-    PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError, Request, Response,
-    RestoreLeafResult, ScrollDirection as WireScrollDirection,
+    DojoUse, ErrorCode, HandoffCancelReason, HandoffStatusPhase, HistoryTransition,
+    ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON,
+    MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES,
+    MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
+    MAX_UPDATE_SCROLLS, MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch,
+    PresetLayoutLaunch, PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError,
+    Request, Response, RestoreLeafResult, ScrollDirection as WireScrollDirection,
     ScrollbackPage as WireScrollbackPage, SearchMatch as WireSearchMatch,
     SearchPage as WireSearchPage, ServerFrame, ServerLimits, SplintLifecycle, SplintRuntimeSummary,
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
@@ -107,6 +107,22 @@ const CONTROL_TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
 const EXIT_OBSERVER_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_EVENT_QUEUE: usize = 32;
 const SEARCH_DEADLINE: Duration = Duration::from_millis(10);
+/// Plan 0037 requires a bounded handoff pause, so every wait in the handoff
+/// gate has a deadline, and a missed one cancels the attempt (which the user
+/// may retry) instead of stretching the pause.
+///
+/// This bounds how long an attempt stays `Preparing`, when launches are
+/// refused, while the fence waits for the topology permit. Topology
+/// transactions are short: one mutation, its persist, and its publication.
+/// One still running after this long is stuck or spawning a large preset,
+/// and the handoff yields to it.
+const HANDOFF_FENCE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+/// This bounds the fenced pause, when input, resize, and mutations are
+/// refused, before the Topology is persisted. A retiring shell exits within
+/// milliseconds of its hangup; one that ignores it waits through a 30-second
+/// hangup grace, far beyond an acceptable input pause, so the handoff yields
+/// rather than kill it.
+const HANDOFF_RETIRING_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 static NEXT_SUBSCRIPTION: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
@@ -735,12 +751,13 @@ impl RuntimeRegistry {
     }
 }
 
-/// Ordered topology subscription traffic: snapshots and agent status events
-/// share one queue so a status event never overtakes an older snapshot.
+/// Ordered topology subscription traffic: snapshots and revision-free status
+/// events (agent status and handoff status) share one queue so a status event
+/// never overtakes an older snapshot.
 #[derive(Debug)]
 enum TopologyHubEvent {
     Change(Arc<TopologyChange>),
-    AgentStatus(Arc<SubscriptionEvent>),
+    Status(Arc<SubscriptionEvent>),
 }
 
 /// Runtimes removed from the registry whose processes are still shutting down.
@@ -922,15 +939,16 @@ impl TopologyHub {
 
     /// Publishes a status event without a revision bump. A full queue asks
     /// the subscriber to resynchronize at the current revision, whose
-    /// snapshot carries the latest status.
-    fn publish_agent_status(
+    /// snapshot carries the latest agent status; a handoff status event lost
+    /// to a full queue is not replayed.
+    fn publish_status(
         &mut self,
         event: SubscriptionEvent,
         current_revision: splinterm_core::TopologyRevision,
     ) {
         let event = Arc::new(event);
         self.broadcast(current_revision, || {
-            TopologyHubEvent::AgentStatus(Arc::clone(&event))
+            TopologyHubEvent::Status(Arc::clone(&event))
         });
     }
 
@@ -986,7 +1004,10 @@ struct DaemonState {
     transient_leases: Arc<StdMutex<TransientLeaseRegistry>>,
     graphical_focus: Mutex<Option<GraphicalFocusClaim>>,
     topology_hub: Mutex<TopologyHub>,
-    topology_transactions: Semaphore,
+    /// The single topology transaction permit. Shared so the handoff fence
+    /// can hold it as an owned permit for the fence's whole lifetime.
+    topology_transactions: Arc<Semaphore>,
+    handoff_gate: HandoffGate,
     terminal_transaction_memory: Arc<Semaphore>,
     terminal_publication_memory: Arc<Semaphore>,
     terminal_splint_publication_memory: Mutex<HashMap<SplintId, std::sync::Weak<Semaphore>>>,
@@ -1426,7 +1447,8 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
         graphical_focus: Mutex::new(None),
         topology_hub: Mutex::new(TopologyHub::default()),
-        topology_transactions: Semaphore::new(1),
+        topology_transactions: Arc::new(Semaphore::new(1)),
+        handoff_gate: HandoffGate::default(),
         terminal_transaction_memory: Arc::new(Semaphore::new(
             TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES,
         )),
@@ -2440,7 +2462,17 @@ async fn serve_authenticated(
                     continue;
                 }
                 let diagnostic_event = diagnostic_lifecycle_event(&request);
-                let transient_creation = matches!(request, Request::CreateTransientLair { .. });
+                // Each is bound to its connection: a transient Lair is owned
+                // by it, and a handoff attempt is dropped, and so cancelled
+                // with `Requested`, as soon as its initiator disconnects. The
+                // client must send no other frame while either is in flight.
+                let in_flight_exclusive = match request {
+                    Request::CreateTransientLair { .. } => Some("transient creation"),
+                    Request::PrepareDaemonHandoff {
+                        mode: splinterm_protocol::DaemonHandoffMode::Execute,
+                    } => Some("a daemon handoff"),
+                    _ => None,
+                };
                 let handled = handle_request(
                     request,
                     state,
@@ -2450,7 +2482,7 @@ async fn serve_authenticated(
                     trusted_ui_client,
                     remote_interactive_client,
                 );
-                let handled = if transient_creation {
+                let handled = if let Some(operation) = in_flight_exclusive {
                     tokio::pin!(handled);
                     tokio::select! {
                         result = &mut handled => Some(result),
@@ -2461,7 +2493,7 @@ async fn serve_authenticated(
                                     protocol_error(
                                         None,
                                         ErrorCode::InvalidFrame,
-                                        "another frame arrived while transient creation was in flight",
+                                        &format!("another frame arrived while {operation} was in flight"),
                                     ),
                                 )
                                 .await?;
@@ -3241,8 +3273,16 @@ impl Drop for RuntimeCreationGuard {
     }
 }
 
-/// Reserves a live-registry slot before a launch spawns its process.
+/// Reserves a live-registry slot before a launch spawns its process, or
+/// refuses while a handoff is in progress.
+///
+/// Every launch reserves while holding the topology transaction permit, so a
+/// reservation admitted just before a handoff starts finishes its launch
+/// before the fence can take the permit.
 async fn reserve_launch_slot(state: &DaemonState) -> Result<LaunchSlot, ProtocolError> {
+    if state.handoff_gate.phase() != HandoffGatePhase::Idle {
+        return Err(handoff_in_progress());
+    }
     state
         .runtimes
         .lock()
@@ -5698,16 +5738,24 @@ async fn handle_request(
             return Err(error);
         }
     };
-    let mut result = handle_authorized_request(
-        request.clone(),
-        state,
-        peer,
-        connection_id,
-        trusted_ui_client,
-        remote_interactive_client,
-        &authorization,
-    )
-    .await;
+    // The handoff fence's one choke point: after authorization, so a peer the
+    // policy would refuse learns nothing about a handoff, and before any
+    // handler side effect. The refusal is audited as an authorized request
+    // that failed, never as a denial.
+    let mut result = if handoff_fenced(&request) && state.handoff_gate.is_fenced() {
+        Err(handoff_in_progress())
+    } else {
+        handle_authorized_request(
+            request.clone(),
+            state,
+            peer,
+            connection_id,
+            trusted_ui_client,
+            remote_interactive_client,
+            &authorization,
+        )
+        .await
+    };
     if let (Ok(handled), Some(maximum)) = (&result, authorization.maximum_returned_bytes()) {
         let encoded_bytes = serde_json::to_vec(&handled.response)
             .map_err(|_| internal())?
@@ -7874,7 +7922,14 @@ async fn handle_authorized_request(
         }
         Request::PrepareDaemonHandoff { mode } => {
             require_trusted_local_ui(trusted_ui_client, peer)?;
-            handoff_requests::prepare_daemon_handoff(mode, daemon_handoff_report(state).await?)?
+            let report = daemon_handoff_report(state).await?;
+            match mode {
+                // A point-in-time report, answered during a handoff too.
+                splinterm_protocol::DaemonHandoffMode::DryRun => Response::HandoffReport { report },
+                splinterm_protocol::DaemonHandoffMode::Execute => {
+                    return Err(execute_daemon_handoff(state, &report).await);
+                }
+            }
         }
         Request::ClaimHandoffControl { .. } => {
             require_trusted_local_ui(trusted_ui_client, peer)?;
@@ -7909,7 +7964,7 @@ fn require_trusted_local_ui(
 
 /// A point-in-time dry-run report. It reads topology and the live registry
 /// one after the other, without a topology transaction, so it fences and
-/// captures nothing.
+/// captures nothing, and answers while a handoff holds the fence.
 async fn daemon_handoff_report(
     state: &DaemonState,
 ) -> Result<splinterm_protocol::HandoffReport, ProtocolError> {
@@ -7921,6 +7976,357 @@ async fn daemon_handoff_report(
         live_splints,
         &state.rollback_handoff,
     )
+}
+
+/// Where the old daemon's handoff gate stands; at most one handoff runs at a
+/// time. Entering `Preparing` or `Fenced` broadcasts the `HandoffStatusPhase`
+/// of the same name, and returning to `Idle` broadcasts `Cancelled`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum HandoffGatePhase {
+    /// No handoff: every request and launch is admitted.
+    #[default]
+    Idle,
+    /// A handoff started. The daemon still serves normally, but refuses new
+    /// launch reservations while the fence waits for the topology permit.
+    Preparing,
+    /// The fence holds the topology transaction permit, so no topology
+    /// transaction or unused-close claim runs, and every request
+    /// [`handoff_fenced`] names is refused with `HandoffInProgress`.
+    Fenced,
+}
+
+/// The old side's handoff gate. Only [`HandoffAttempt::begin`] moves it out
+/// of `Idle`, and only dropping that attempt's [`HandoffHold`] returns it.
+#[derive(Default)]
+struct HandoffGate(StdMutex<HandoffGatePhase>);
+
+impl HandoffGate {
+    fn phase(&self) -> HandoffGatePhase {
+        *self.0.lock().unwrap()
+    }
+
+    fn is_fenced(&self) -> bool {
+        self.phase() == HandoffGatePhase::Fenced
+    }
+
+    /// Moves `Idle` to `Preparing`, or returns false while a handoff runs.
+    fn try_begin(&self) -> bool {
+        let mut phase = self.0.lock().unwrap();
+        if *phase != HandoffGatePhase::Idle {
+            return false;
+        }
+        *phase = HandoffGatePhase::Preparing;
+        true
+    }
+
+    fn set(&self, next: HandoffGatePhase) {
+        *self.0.lock().unwrap() = next;
+    }
+}
+
+fn handoff_in_progress() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::HandoffInProgress,
+        "daemon handoff in progress; retry once it completes or is cancelled",
+    )
+}
+
+/// Whether a request is refused with `HandoffInProgress` while the handoff
+/// fence is held.
+///
+/// Plan 0037 fences mutations, input, resize, control transfer, consent, and
+/// subscriptions. The rule, per request:
+///
+/// - **Fenced:** every change to Topology or the live registry (creates,
+///   splits, relaunches, restores, presets, renames, retention, focus
+///   defaults, closes, kills, terminations, and the unused-Dojo close);
+///   terminal input and resize; acquiring, transferring, deciding, or forcing
+///   control; consent and new grants; and every new subscription or
+///   attachment (topology, terminal, control), which would need
+///   resnapshot authority on the next generation and changes attachment
+///   counts an unused close reads.
+/// - **Admitted:** read-only queries (including the mutation preflight and
+///   image content for an existing attachment); advisory, connection-owned
+///   state no handoff captures (the published graphical focus and agent
+///   status, which Plan 0061 D6 drops across a handoff); requests that only
+///   reduce authority (detach, release control, revoke a grant); and the
+///   handoff requests themselves, so a dry run still reports, a Window can
+///   acknowledge, and the gate answers a second `Execute` itself.
+///
+/// Admitted requests that take the topology permit (topology inspection,
+/// the mutation preflight, grant revocation) wait for the fence to lift.
+///
+/// Every variant is named and there is no wildcard arm, so a new request
+/// does not compile until it is classified here.
+const fn handoff_fenced(request: &Request) -> bool {
+    match request {
+        Request::Ping
+        | Request::ListLairs
+        | Request::InspectTopology
+        | Request::InspectSplint { .. }
+        | Request::ResolveLaunchDirectory { .. }
+        | Request::ReadGraphicalFocus
+        | Request::AuthorizationStatus { .. }
+        | Request::PrepareMutation { .. }
+        | Request::RequestImageContent { .. }
+        | Request::StartScrollbackPage { .. }
+        | Request::ScrollbackPage { .. }
+        | Request::StartSearchScrollback { .. }
+        | Request::SearchScrollback { .. }
+        | Request::AuditInspect { .. }
+        | Request::PublishGraphicalFocus { .. }
+        | Request::ReportAgentStatus { .. }
+        | Request::Detach { .. }
+        | Request::ReleaseControl { .. }
+        | Request::RevokeAccess { .. }
+        | Request::PrepareDaemonHandoff { .. }
+        | Request::ClaimHandoffControl { .. }
+        | Request::AcknowledgeHandoffPrepare { .. } => false,
+        Request::CreateLair { .. }
+        | Request::CreateLairAutomation { .. }
+        | Request::CreateTransientLair { .. }
+        | Request::SplitSplint { .. }
+        | Request::SplitSplintAutomation { .. }
+        | Request::RelaunchSplint { .. }
+        | Request::RelaunchSplintAutomation { .. }
+        | Request::NewDojo { .. }
+        | Request::NewDojoAutomation { .. }
+        | Request::RestoreSplint { .. }
+        | Request::RestoreDojo { .. }
+        | Request::RestoreLair { .. }
+        | Request::MaterializePreset { .. }
+        | Request::SetLairRetention { .. }
+        | Request::SetSplitRatio { .. }
+        | Request::SetDojoDefaultFocus { .. }
+        | Request::RenameLair { .. }
+        | Request::RenameDojo { .. }
+        | Request::RenameSplint { .. }
+        | Request::CloseSplint { .. }
+        | Request::CloseDojo { .. }
+        | Request::CloseUnusedDojo { .. }
+        | Request::TerminateLair { .. }
+        | Request::KillSplint { .. }
+        | Request::Input { .. }
+        | Request::Resize { .. }
+        | Request::AcquireControl { .. }
+        | Request::RequestControlTransfer { .. }
+        | Request::DecideControlTransfer { .. }
+        | Request::ForceControlTransfer { .. }
+        | Request::RequestAccess { .. }
+        | Request::RequestLairAccess { .. }
+        | Request::SubscribeTopology
+        | Request::SubscribeControl { .. }
+        | Request::Attach { .. } => true,
+    }
+}
+
+/// What one handoff attempt holds: the gate, out of `Idle` for as long as
+/// this lives, and, once fenced, the topology transaction permit.
+///
+/// Dropping it is the only way the gate returns to `Idle` and the fence
+/// lifts, so no exit path, panic, or dropped task can leave the gate fenced.
+struct HandoffHold {
+    state: Arc<DaemonState>,
+    fence: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl Drop for HandoffHold {
+    fn drop(&mut self) {
+        // The permit drops after this body, lifting the fence.
+        self.state.handoff_gate.set(HandoffGatePhase::Idle);
+    }
+}
+
+/// One running handoff, as an RAII guard over the gate.
+///
+/// [`Self::cancel`] lifts the fence and broadcasts `Cancelled`. Dropping an
+/// attempt that was not cancelled, because its request future was dropped
+/// when the initiating connection went away or the daemon stopped, or because
+/// its task panicked, cancels it from a spawned task: `Requested` for a
+/// dropped future and `Failed` during a panic.
+struct HandoffAttempt {
+    hold: Option<HandoffHold>,
+}
+
+impl HandoffAttempt {
+    /// Starts a handoff and broadcasts `Preparing`.
+    async fn begin(state: &Arc<DaemonState>) -> Result<Self, ProtocolError> {
+        if !state.handoff_gate.try_begin() {
+            return Err(handoff_in_progress());
+        }
+        let attempt = Self {
+            hold: Some(HandoffHold {
+                state: Arc::clone(state),
+                fence: None,
+            }),
+        };
+        publish_handoff_status(state, HandoffStatusPhase::Preparing).await;
+        Ok(attempt)
+    }
+
+    fn hold(&mut self) -> &mut HandoffHold {
+        self.hold
+            .as_mut()
+            .expect("an attempt keeps its hold until it is cancelled or dropped")
+    }
+
+    /// Takes and holds the topology transaction permit, then broadcasts
+    /// `Fenced`. Taking it waits out the running topology transaction or
+    /// unused-close claim; holding it starts no new one until the attempt
+    /// ends.
+    async fn fence(&mut self) -> Result<(), HandoffCancelReason> {
+        let hold = self.hold();
+        let state = Arc::clone(&hold.state);
+        let permit = time::timeout(
+            HANDOFF_FENCE_ACQUIRE_TIMEOUT,
+            Arc::clone(&state.topology_transactions).acquire_owned(),
+        )
+        .await
+        .map_err(|_| HandoffCancelReason::TimedOut)?
+        .map_err(|_| HandoffCancelReason::Failed)?;
+        hold.fence = Some(permit);
+        state.handoff_gate.set(HandoffGatePhase::Fenced);
+        publish_handoff_status(&state, HandoffStatusPhase::Fenced).await;
+        Ok(())
+    }
+
+    /// Lifts the fence, returns the gate to `Idle`, and broadcasts
+    /// `Cancelled`.
+    async fn cancel(mut self, reason: HandoffCancelReason) {
+        if let Some(hold) = self.hold.take() {
+            release_handoff(hold, reason).await;
+        }
+    }
+}
+
+impl Drop for HandoffAttempt {
+    fn drop(&mut self) {
+        let Some(hold) = self.hold.take() else {
+            return;
+        };
+        let reason = if std::thread::panicking() {
+            HandoffCancelReason::Failed
+        } else {
+            HandoffCancelReason::Requested
+        };
+        // Without a runtime, or when the runtime drops the spawned task
+        // unrun, the hold drops with it: the gate and fence still lift, only
+        // the broadcast is lost.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn(release_handoff(hold, reason)));
+        }
+    }
+}
+
+async fn publish_handoff_status(state: &DaemonState, phase: HandoffStatusPhase) {
+    let revision = state.topology.read().await.revision();
+    state.topology_hub.lock().await.publish_status(
+        SubscriptionEvent::HandoffStatus {
+            daemon_generation: state.daemon_generation,
+            phase,
+        },
+        revision,
+    );
+}
+
+/// Lifts the fence and broadcasts `Cancelled` under the topology hub lock, so
+/// a later attempt's `Preparing` never reaches a subscriber before this
+/// attempt's `Cancelled`.
+async fn release_handoff(hold: HandoffHold, reason: HandoffCancelReason) {
+    let state = Arc::clone(&hold.state);
+    let revision = state.topology.read().await.revision();
+    let mut hub = state.topology_hub.lock().await;
+    drop(hold);
+    hub.publish_status(
+        SubscriptionEvent::HandoffStatus {
+            daemon_generation: state.daemon_generation,
+            phase: HandoffStatusPhase::Cancelled { reason },
+        },
+        revision,
+    );
+}
+
+/// Reopens a task tracker when dropped, so a drain that finishes, times out,
+/// or is dropped leaves the tracker open as it found it.
+struct ReopenTracker<'a>(&'a TaskTracker);
+
+impl Drop for ReopenTracker<'_> {
+    fn drop(&mut self) {
+        self.0.reopen();
+    }
+}
+
+/// Waits until every retiring Splint is reaped, or `timeout` passes.
+///
+/// Nothing is signalled or killed. Closing the tracker only lets `wait`
+/// finish once it is empty; retirement may still spawn into it meanwhile.
+async fn drain_retiring_runtimes(retiring: &RetiringRuntimes, timeout: Duration) -> bool {
+    retiring.tasks.close();
+    let _reopen = ReopenTracker(&retiring.tasks);
+    time::timeout(timeout, retiring.tasks.wait()).await.is_ok()
+}
+
+/// Runs the gate up to where capture will start: fence, then, in order,
+/// re-check transient Lairs (operator decision D1), drain retiring Splints,
+/// and persist the fenced Topology.
+///
+/// It only waits: it never kills a Splint or changes runtime state. On
+/// success the attempt still holds the fence.
+async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCancelReason> {
+    attempt.fence().await?;
+    let state = Arc::clone(&attempt.hold().state);
+    // A transient Lair opened since the report blocks the handoff.
+    if state
+        .topology
+        .read()
+        .await
+        .lairs()
+        .any(|lair| lair.lifetime == LairLifetime::Transient)
+    {
+        return Err(HandoffCancelReason::Blocked);
+    }
+    if !drain_retiring_runtimes(&state.retiring, HANDOFF_RETIRING_DRAIN_TIMEOUT).await {
+        return Err(HandoffCancelReason::TimedOut);
+    }
+    let topology = state.topology.read().await.clone();
+    persist_topology(&state, &topology)
+        .await
+        .map_err(|_| HandoffCancelReason::Failed)
+}
+
+/// Runs `Execute` through the handoff gate and returns the error it ends
+/// with.
+///
+/// A second `Execute` while a handoff runs is refused as in progress, and a
+/// report naming anything but `Unsupported` refuses before fencing. Otherwise
+/// the gate fences, re-checks, drains, and persists. Capture, manifests, and
+/// exec (M3.7–M3.10) start where the fence is still held below; until they
+/// exist every attempt cancels with `Failed` and answers `HandoffUnavailable`
+/// with a fresh report's reasons, which name `Unsupported`.
+async fn execute_daemon_handoff(
+    state: &Arc<DaemonState>,
+    report: &splinterm_protocol::HandoffReport,
+) -> ProtocolError {
+    if state.handoff_gate.phase() != HandoffGatePhase::Idle {
+        return handoff_in_progress();
+    }
+    if let Err(refused) = handoff_requests::refuse_blocked_execute(report) {
+        return refused;
+    }
+    let mut attempt = match HandoffAttempt::begin(state).await {
+        Ok(attempt) => attempt,
+        Err(in_progress) => return in_progress,
+    };
+    let reason = match fence_for_handoff(&mut attempt).await {
+        // M3.7 captures here, while `attempt` holds the fence.
+        Ok(()) => HandoffCancelReason::Failed,
+        Err(reason) => reason,
+    };
+    attempt.cancel(reason).await;
+    match daemon_handoff_report(state).await {
+        Ok(report) => handoff_requests::cancelled_handoff(reason, report.blocking_reasons),
+        Err(error) => error,
+    }
 }
 
 async fn subscribe_topology(
@@ -8366,7 +8772,7 @@ fn spawn_topology_subscription(
                         TopologyHubEvent::Change(change) => SubscriptionEvent::TopologyChanged {
                             change: (*change).clone(),
                         },
-                        TopologyHubEvent::AgentStatus(event) => (*event).clone(),
+                        TopologyHubEvent::Status(event) => (*event).clone(),
                     };
                     (event, false)
                 }
@@ -10687,7 +11093,8 @@ mod tests {
             transient_leases: Arc::new(StdMutex::new(TransientLeaseRegistry::default())),
             graphical_focus: Mutex::new(None),
             topology_hub: Mutex::new(TopologyHub::default()),
-            topology_transactions: Semaphore::new(1),
+            topology_transactions: Arc::new(Semaphore::new(1)),
+            handoff_gate: HandoffGate::default(),
             terminal_transaction_memory: Arc::new(Semaphore::new(
                 TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES,
             )),
@@ -12441,11 +12848,8 @@ mod tests {
             ]
         );
         let revision = state.topology.read().await.revision();
-        let refused = handoff_requests::prepare_daemon_handoff(
-            splinterm_protocol::DaemonHandoffMode::Execute,
-            report.clone(),
-        )
-        .unwrap_err();
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let refused = execute_daemon_handoff(&state, &report).await;
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
         assert_eq!(
@@ -12453,6 +12857,812 @@ mod tests {
             revision,
             "a refused handoff changes nothing"
         );
+        // Refused before the gate: nothing was fenced or broadcast.
+        assert!(handoff_status_phases(&mut subscription).is_empty());
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    /// The `Execute` report that lets the gate run: `Unsupported` alone.
+    async fn gated_handoff_report(state: &DaemonState) -> splinterm_protocol::HandoffReport {
+        let mut report = daemon_handoff_report(state).await.unwrap();
+        report.blocking_reasons = vec![splinterm_protocol::HandoffBlockingReason::Unsupported];
+        report
+    }
+
+    /// Every handoff status phase queued for a topology hub subscriber.
+    fn handoff_status_phases(subscription: &mut TopologySubscription) -> Vec<HandoffStatusPhase> {
+        let mut phases = Vec::new();
+        while let Ok(event) = subscription.changes.try_recv() {
+            if let TopologyHubEvent::Status(event) = event
+                && let SubscriptionEvent::HandoffStatus {
+                    daemon_generation,
+                    phase,
+                } = *event
+            {
+                assert_eq!(daemon_generation, handoff_requests::FRESH_DAEMON_GENERATION);
+                phases.push(phase);
+            }
+        }
+        phases
+    }
+
+    /// Waits for a dropped attempt's spawned cancellation to return the gate.
+    async fn wait_for_idle_gate(state: &DaemonState) {
+        time::timeout(Duration::from_secs(5), async {
+            while state.handoff_gate.phase() != HandoffGatePhase::Idle {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a dropped handoff attempt returns the gate to idle");
+    }
+
+    fn cancelled(reason: HandoffCancelReason) -> HandoffStatusPhase {
+        HandoffStatusPhase::Cancelled { reason }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one sample of every request keeps reclassification a deliberate diff"
+    )]
+    #[test]
+    fn handoff_fence_classifies_every_request() {
+        let revision = Topology::new().revision();
+        let (lair_id, dojo_id, splint_id) = (LairId::new(), DojoId::new(), SplintId::new());
+        let launch = splinterm_protocol::LaunchParameters {
+            cwd: PathBuf::from("/tmp"),
+            command: Vec::new(),
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 1_000,
+        };
+        let automation = splinterm_protocol::AutomationLaunch {
+            cwd: None,
+            argv: Vec::new(),
+        };
+        let ratio = splinterm_core::SplitRatio::new(500).unwrap();
+        let axis = splinterm_core::Axis::Horizontal;
+        let side = splinterm_core::SplitSide::Second;
+        let admitted = [
+            Request::Ping,
+            Request::ListLairs,
+            Request::InspectTopology,
+            Request::InspectSplint { splint_id },
+            Request::ResolveLaunchDirectory {
+                source_splint_id: splint_id,
+                directory: splinterm_protocol::LaunchDirectory::Home,
+            },
+            Request::ReadGraphicalFocus,
+            Request::AuthorizationStatus {
+                splint_id,
+                incarnation: None,
+            },
+            Request::PrepareMutation {
+                mutation: splinterm_protocol::MutationPreflight::CreateLair,
+            },
+            Request::RequestImageContent {
+                request: splinterm_protocol::ImageContentRequest {
+                    splint_id,
+                    incarnation: 1,
+                    content_id: 1,
+                    generation: 1,
+                    digest: [1; 32],
+                    accepted_transfers: Vec::new(),
+                },
+            },
+            Request::StartScrollbackPage {
+                splint_id,
+                incarnation: None,
+                max_rows: 1,
+            },
+            Request::ScrollbackPage {
+                splint_id,
+                incarnation: 1,
+                terminal_revision: 1,
+                history_generation: 1,
+                before_row_id: 1,
+                max_rows: 1,
+            },
+            Request::StartSearchScrollback {
+                splint_id,
+                incarnation: None,
+                query: "x".into(),
+                case_sensitive: false,
+                max_results: 1,
+            },
+            Request::SearchScrollback {
+                splint_id,
+                incarnation: 1,
+                terminal_revision: 1,
+                history_generation: 1,
+                query: "x".into(),
+                case_sensitive: false,
+                cursor: None,
+                max_results: 1,
+            },
+            Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 1,
+            },
+            Request::PublishGraphicalFocus {
+                focused_splint_id: None,
+            },
+            Request::ReportAgentStatus {
+                splint_id,
+                incarnation: 1,
+                status: None,
+            },
+            Request::Detach { subscription_id: 1 },
+            Request::ReleaseControl { controller_id: 1 },
+            Request::RevokeAccess { grant_id: 1 },
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::Execute,
+            },
+            Request::ClaimHandoffControl {
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ),
+            },
+            Request::AcknowledgeHandoffPrepare {
+                daemon_generation: 1,
+            },
+        ];
+        let fenced = [
+            Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "lair".into(),
+                launch: launch.clone(),
+                generated_name: false,
+            },
+            Request::CreateLairAutomation {
+                expected_topology_revision: revision,
+                name: "lair".into(),
+                launch: automation.clone(),
+                generated_name: false,
+            },
+            Request::CreateTransientLair {
+                expected_topology_revision: revision,
+                name: "lair".into(),
+                launch: launch.clone(),
+                generated_name: false,
+            },
+            Request::SplitSplint {
+                expected_topology_revision: revision,
+                target_splint_id: splint_id,
+                axis,
+                side,
+                ratio,
+                launch: launch.clone(),
+            },
+            Request::SplitSplintAutomation {
+                expected_topology_revision: revision,
+                target_splint_id: splint_id,
+                axis,
+                side,
+                ratio,
+                launch: automation.clone(),
+            },
+            Request::RelaunchSplint {
+                expected_topology_revision: revision,
+                splint_id,
+                launch: launch.clone(),
+            },
+            Request::RelaunchSplintAutomation {
+                expected_topology_revision: revision,
+                splint_id,
+                launch: automation.clone(),
+            },
+            Request::NewDojo {
+                expected_topology_revision: revision,
+                lair_id,
+                name: "dojo".into(),
+                launch,
+                promote_transient_lair: false,
+                generated_name: false,
+            },
+            Request::NewDojoAutomation {
+                expected_topology_revision: revision,
+                lair_id,
+                name: "dojo".into(),
+                launch: automation,
+                generated_name: false,
+            },
+            Request::RestoreSplint {
+                expected_topology_revision: revision,
+                splint_id,
+            },
+            Request::RestoreDojo {
+                expected_topology_revision: revision,
+                dojo_id,
+            },
+            Request::RestoreLair {
+                expected_topology_revision: revision,
+                lair_id,
+            },
+            Request::MaterializePreset {
+                expected_topology_revision: revision,
+                target: PresetTarget::NewLair {
+                    name: "preset".into(),
+                },
+                dojos: Vec::new(),
+                directory_identities: Vec::new(),
+            },
+            Request::SetLairRetention {
+                expected_topology_revision: revision,
+                lair_id,
+                retention: LairRetention::Saved,
+            },
+            Request::SetSplitRatio {
+                expected_topology_revision: revision,
+                target_splint_id: splint_id,
+                ancestor: 0,
+                ratio,
+            },
+            Request::SetDojoDefaultFocus {
+                expected_topology_revision: revision,
+                dojo_id,
+                splint_id,
+            },
+            Request::RenameLair {
+                expected_topology_revision: revision,
+                lair_id,
+                name: "lair".into(),
+            },
+            Request::RenameDojo {
+                expected_topology_revision: revision,
+                dojo_id,
+                name: "dojo".into(),
+                promote_transient_lair: false,
+            },
+            Request::RenameSplint {
+                expected_topology_revision: revision,
+                splint_id,
+                title: "splint".into(),
+            },
+            Request::CloseSplint {
+                expected_topology_revision: revision,
+                splint_id,
+            },
+            Request::CloseDojo {
+                expected_topology_revision: revision,
+                dojo_id,
+            },
+            Request::CloseUnusedDojo { dojo_id },
+            Request::TerminateLair {
+                expected_topology_revision: revision,
+                lair_id,
+                targets: Vec::new(),
+            },
+            Request::KillSplint {
+                splint_id,
+                incarnation: 1,
+            },
+            Request::Input {
+                controller_id: 1,
+                splint_id,
+                incarnation: 1,
+                bytes: b"x".to_vec(),
+                focus_report: false,
+            },
+            Request::Resize {
+                controller_id: 1,
+                splint_id,
+                incarnation: 1,
+                columns: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            Request::AcquireControl {
+                splint_id,
+                incarnation: 1,
+                modes: vec![splinterm_protocol::ControlMode::Input],
+            },
+            Request::RequestControlTransfer {
+                splint_id,
+                incarnation: 1,
+                modes: vec![splinterm_protocol::ControlMode::Input],
+            },
+            Request::DecideControlTransfer {
+                transfer_id: 1,
+                decision: ControlTransferDecision::Deny,
+            },
+            Request::ForceControlTransfer {
+                splint_id,
+                incarnation: 1,
+            },
+            Request::RequestAccess {
+                splint_id,
+                incarnation: 1,
+                scopes: vec![AccessScope::Input],
+            },
+            Request::RequestLairAccess {
+                lair_id,
+                scopes: vec![AccessScope::Input],
+            },
+            Request::SubscribeTopology,
+            Request::SubscribeControl {
+                splint_id,
+                incarnation: 1,
+            },
+            Request::Attach {
+                splint_id,
+                incarnation: None,
+                scrollback_rows: 0,
+            },
+        ];
+        let mut kinds = HashSet::new();
+        for (requests, expected) in [(&admitted[..], false), (&fenced[..], true)] {
+            for request in requests {
+                assert_eq!(handoff_fenced(request), expected, "{request:?}");
+                let kind = serde_json::to_value(request).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                assert!(kinds.insert(kind), "one sample per request: {request:?}");
+            }
+        }
+        // The DryRun mode is admitted like Execute.
+        assert!(!handoff_fenced(&Request::PrepareDaemonHandoff {
+            mode: splinterm_protocol::DaemonHandoffMode::DryRun,
+        }));
+        assert_eq!(kinds.len(), admitted.len() + fenced.len());
+    }
+
+    #[tokio::test]
+    async fn a_second_execute_is_refused_while_a_handoff_runs_and_a_dry_run_still_reports() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Preparing);
+        assert_eq!(
+            execute_daemon_handoff(&state, &report).await.code,
+            ErrorCode::HandoffInProgress
+        );
+        assert_eq!(
+            HandoffAttempt::begin(&state).await.err().unwrap().code,
+            ErrorCode::HandoffInProgress
+        );
+        attempt.fence().await.unwrap();
+        assert_eq!(
+            execute_daemon_handoff(&state, &report).await.code,
+            ErrorCode::HandoffInProgress
+        );
+        // A dry run takes no topology permit, so it answers under the fence.
+        let dry_run = time::timeout(Duration::from_secs(1), daemon_handoff_report(&state))
+            .await
+            .expect("a dry run never waits for the fence")
+            .unwrap();
+        assert!(
+            dry_run
+                .blocking_reasons
+                .contains(&splinterm_protocol::HandoffBlockingReason::Unsupported)
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn fenced_requests_are_refused_while_fenced_and_admitted_after_cancel() {
+        let state = test_state(true);
+        let mut peer = PeerIdentity::for_test();
+        peer.install_persistent_executable(
+            executable_identity::ExecutableIdentity::from_pid(std::process::id())
+                .expect("snapshot test executable"),
+        );
+        let lair = Lair::new("durable", PathBuf::from("/tmp"));
+        let lair_id = lair.id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, lair).unwrap();
+        }
+        let rename = |name: &str, revision| Request::RenameLair {
+            expected_topology_revision: revision,
+            lair_id,
+            name: name.into(),
+        };
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        // Preparing still serves normally.
+        let revision = state.topology.read().await.revision();
+        handle_request(
+            rename("preparing", revision),
+            &state,
+            &peer,
+            1,
+            0,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        attempt.fence().await.unwrap();
+        let revision = state.topology.read().await.revision();
+        let refused = handle_request(
+            rename("fenced", revision),
+            &state,
+            &peer,
+            1,
+            0,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::HandoffInProgress);
+        assert_eq!(state.topology.read().await.revision(), revision);
+        let input = Request::Input {
+            controller_id: 1,
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            bytes: b"x".to_vec(),
+            focus_report: false,
+        };
+        assert_eq!(
+            handle_request(input, &state, &peer, 1, 0, false, false)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::HandoffInProgress
+        );
+        // Read-only queries are admitted under the fence.
+        let listed = handle_request(Request::ListLairs, &state, &peer, 1, 0, false, false)
+            .await
+            .unwrap();
+        assert!(matches!(listed.response, Response::Lairs { .. }));
+
+        // The refusal is audited as an authorized request that failed.
+        let page = state.audit.lock().await.page(None, 16);
+        let refused_record = page
+            .records
+            .iter()
+            .find(|record| {
+                record.operation == splinterm_protocol::AuditOperation::RenameLair
+                    && record.outcome == Some(splinterm_protocol::AuditOutcome::Failed)
+            })
+            .expect("the fenced rename is audited");
+        assert_eq!(
+            refused_record.decision,
+            splinterm_protocol::AuditDecision::Allowed
+        );
+        assert_eq!(refused_record.reason, "trusted_or_owned_authority");
+
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        handle_request(
+            rename("admitted", revision),
+            &state,
+            &peer,
+            1,
+            0,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.topology.read().await.find_lair(lair_id).unwrap().name,
+            "admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_reservations_are_refused_until_the_gate_is_idle() {
+        let state = test_state(false);
+        drop(reserve_launch_slot(&state).await.unwrap());
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            reserve_launch_slot(&state).await.err().unwrap().code,
+            ErrorCode::HandoffInProgress
+        );
+        attempt.fence().await.unwrap();
+        assert_eq!(
+            reserve_launch_slot(&state).await.err().unwrap().code,
+            ErrorCode::HandoffInProgress
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        drop(reserve_launch_slot(&state).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_fence_holds_the_topology_permit_and_fences_unused_close_until_cancel() {
+        let state = test_state(false);
+        let lair = Lair::new("durable", PathBuf::from("/tmp"));
+        let dojo_id = lair.dojos[0].id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, lair).unwrap();
+        }
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert!(
+            state.topology_transactions.try_acquire().is_ok(),
+            "preparing does not hold the permit"
+        );
+        attempt.fence().await.unwrap();
+        assert!(state.topology_transactions.try_acquire().is_err());
+        // Even past the request choke point, an unused-close claim waits for
+        // the permit the fence holds (Plan 0061 D13).
+        let peer = PeerIdentity::for_test();
+        let authorization = RequestAuthorizationContext::default();
+        let close = handle_authorized_request(
+            Request::CloseUnusedDojo { dojo_id },
+            &state,
+            &peer,
+            1,
+            false,
+            false,
+            &authorization,
+        );
+        tokio::pin!(close);
+        assert!(
+            time::timeout(Duration::from_millis(100), &mut close)
+                .await
+                .is_err(),
+            "the unused close cannot run under the fence"
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        let closed = time::timeout(Duration::from_secs(5), close)
+            .await
+            .expect("the unused close runs once the fence lifts")
+            .unwrap();
+        assert!(matches!(closed.response, Response::UnusedDojoClose { .. }));
+        assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_transient_lair_under_the_fence_cancels_the_handoff_as_blocked() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        // The transient Lair opens after the report, before the fence.
+        let transient = Lair::transient("transient", PathBuf::from("/tmp"));
+        let transient_id = transient.id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, transient).unwrap();
+        }
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            fence_for_handoff(&mut attempt).await,
+            Err(HandoffCancelReason::Blocked)
+        );
+        attempt.cancel(HandoffCancelReason::Blocked).await;
+
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let error = execute_daemon_handoff(&state, &report).await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            error.handoff_blocking_reasons[0],
+            splinterm_protocol::HandoffBlockingReason::TransientLairsOpen {
+                count: 1,
+                lair_ids: vec![transient_id],
+            }
+        );
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Blocked),
+            ]
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retiring_splint_past_the_drain_deadline_cancels_the_handoff_as_timed_out() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let retiring = state.retiring.tasks.spawn(std::future::pending::<()>());
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let error = execute_daemon_handoff(&state, &report).await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::TimedOut),
+            ]
+        );
+        // Nothing was killed, and the tracker is open again.
+        assert!(!retiring.is_finished());
+        assert!(!state.retiring.tasks.is_closed());
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        retiring.abort();
+        // Once the Splint is reaped the drain completes at once.
+        while !state.retiring.tasks.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(fence_for_handoff(&mut attempt).await, Ok(()));
+        attempt.cancel(HandoffCancelReason::Failed).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_running_topology_transaction_past_the_fence_deadline_times_out() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let transaction = state.topology_transactions.acquire().await.unwrap();
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let error = execute_daemon_handoff(&state, &report).await;
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                cancelled(HandoffCancelReason::TimedOut),
+            ]
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        drop(transaction);
+    }
+
+    #[tokio::test]
+    async fn a_failed_persist_at_the_fence_cancels_the_handoff_as_failed() {
+        let state = test_state(false);
+        state
+            .topology_save_failure_countdown
+            .store(0, Ordering::SeqCst);
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            fence_for_handoff(&mut attempt).await,
+            Err(HandoffCancelReason::Failed)
+        );
+        // The failure hook fired at the fence.
+        assert_eq!(
+            state.topology_save_failure_countdown.load(Ordering::SeqCst),
+            u64::MAX
+        );
+        attempt.cancel(HandoffCancelReason::Failed).await;
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn execute_runs_the_gate_and_reaches_topology_subscribers_in_sequence() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let subscription = state.topology_hub.lock().await.subscribe(7, 41);
+        let (outbound, mut frames) = mpsc::channel(8);
+        let task = AbortOnDrop::new(spawn_topology_subscription(7, subscription, outbound, None));
+        let error = execute_daemon_handoff(&state, &report).await;
+        // Capture and exec do not exist yet: the attempt cancels as failed
+        // and the answer still names `Unsupported`.
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            error.handoff_blocking_reasons,
+            [
+                splinterm_protocol::HandoffBlockingReason::NotPackaged,
+                splinterm_protocol::HandoffBlockingReason::Unsupported,
+            ]
+        );
+        for (expected_sequence, expected_phase) in [
+            (1, HandoffStatusPhase::Preparing),
+            (2, HandoffStatusPhase::Fenced),
+            (3, cancelled(HandoffCancelReason::Failed)),
+        ] {
+            let frame = time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .frame;
+            let ServerFrame::Event {
+                subscription_id: 7,
+                sequence,
+                event:
+                    SubscriptionEvent::HandoffStatus {
+                        daemon_generation,
+                        phase,
+                    },
+            } = frame
+            else {
+                panic!("expected a handoff status event: {frame:?}");
+            };
+            assert_eq!(sequence, expected_sequence);
+            assert_eq!(daemon_generation, state.daemon_generation);
+            assert_eq!(phase, expected_phase);
+        }
+        drop(task);
+        // The gate is idle, the fence lifted, and launches are admitted.
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(state.topology_transactions.try_acquire().is_ok());
+        drop(reserve_launch_slot(&state).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_attempt_cancels_as_requested_and_lifts_the_fence() {
+        let state = test_state(false);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        attempt.fence().await.unwrap();
+        drop(attempt);
+        wait_for_idle_gate(&state).await;
+        // The broadcast follows the release under the hub lock.
+        time::timeout(Duration::from_secs(5), async {
+            while state.topology_hub.try_lock().is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Requested),
+            ]
+        );
+        assert!(state.topology_transactions.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_initiator_that_goes_away_mid_handoff_cancels_it_as_requested() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        // A retiring Splint keeps the attempt fenced in its drain.
+        let retiring = state.retiring.tasks.spawn(std::future::pending::<()>());
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let execute = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { execute_daemon_handoff(&state, &report).await }
+        });
+        time::timeout(Duration::from_secs(5), async {
+            while !state.handoff_gate.is_fenced() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Dropping the connection drops its request future like this abort.
+        execute.abort();
+        assert!(execute.await.unwrap_err().is_cancelled());
+        wait_for_idle_gate(&state).await;
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                let phases = handoff_status_phases(&mut subscription);
+                if phases.contains(&cancelled(HandoffCancelReason::Requested)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a dropped attempt broadcasts its cancellation");
+        assert!(state.topology_transactions.try_acquire().is_ok());
+        assert!(!state.retiring.tasks.is_closed());
+        assert!(!retiring.is_finished());
+        retiring.abort();
+    }
+
+    #[tokio::test]
+    async fn a_panic_under_the_fence_cancels_the_handoff_as_failed() {
+        let state = test_state(false);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let panicked = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+                attempt.fence().await.unwrap();
+                panic!("a fenced step panicked");
+            }
+        })
+        .await;
+        assert!(panicked.unwrap_err().is_panic());
+        wait_for_idle_gate(&state).await;
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                let phases = handoff_status_phases(&mut subscription);
+                if phases.contains(&cancelled(HandoffCancelReason::Failed)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a panicked attempt broadcasts its cancellation");
+        assert!(state.topology_transactions.try_acquire().is_ok());
     }
 
     #[test]
