@@ -70,7 +70,11 @@ pub(crate) enum HandoffPhase {
 }
 
 /// Fail-closed state machine for one side of a daemon handoff exec boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Deliberately neither `Clone` nor `Copy`: the lifecycle is uniquely owned,
+/// so committing advances the only rollback-capable value and no stale copy
+/// can later roll back.
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct HandoffLifecycle {
     phase: HandoffPhase,
 }
@@ -91,7 +95,7 @@ impl HandoffLifecycle {
     }
 
     #[must_use]
-    pub(crate) const fn phase(self) -> HandoffPhase {
+    pub(crate) const fn phase(&self) -> HandoffPhase {
         self.phase
     }
 
