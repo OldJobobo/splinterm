@@ -978,6 +978,75 @@ mod tests {
         assert_eq!(drawer.terminal, content(PREFERRED_WIDTH + minimum - 1));
     }
 
+    /// VM case E6: at maximum zoom every Explorer line still holds a whole
+    /// chrome glyph, and a long label is ellipsized to the panel width.
+    #[test]
+    fn maximum_zoom_text_fits_every_explorer_line_and_ellipsizes_long_labels() {
+        use super::super::super::{ChromeText, text::chrome_maximum_cell_height};
+        use super::super::picker::truncate_picker_text;
+
+        let id = NavigationNodeId::Lair(LairId::new());
+        let mut long = row(id);
+        long.label = "e-long-label-lair-with-a-very-long-name".into();
+        let rows = [long];
+        let layout = lair_explorer_layout(
+            Rect {
+                x: 0,
+                y: 34,
+                width: 1268,
+                height: 754,
+            },
+            160,
+            &rows,
+            Some(id),
+            0,
+        )
+        .unwrap();
+        for scale in [120, 150, 180, 240] {
+            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let text = ChromeText::load_source_styled_with_context(
+                &row_label_source(&rows[0], true),
+                scale,
+                ChromeTextStyle::Regular,
+                &context,
+            )
+            .unwrap();
+            assert!(text.pixel_height() <= chrome_maximum_cell_height(scale));
+            let inset = 12_u32.saturating_mul(scale).div_ceil(120);
+            let (label, status) = row_text_clips(
+                buffer_rect(layout.rows[0].rect, scale),
+                rows[0].level,
+                inset,
+            );
+            let header = buffer_rect(layout.header, scale);
+            let header_line = (HEADER_HEIGHT - FILTER_HEIGHT)
+                .saturating_mul(scale)
+                .div_ceil(120)
+                .min(header.height)
+                / 2;
+            for (what, height) in [
+                ("label", label.height),
+                ("status", status.height),
+                ("header", header_line),
+                ("filter", buffer_rect(layout.filters[0].1, scale).height),
+                ("footer", buffer_rect(layout.footer, scale).height),
+            ] {
+                assert!(
+                    text.pixel_height() <= height,
+                    "{what} line at scale {scale}: {} > {height}",
+                    text.pixel_height()
+                );
+            }
+            // The label line is ellipsized to whole cells within its clip.
+            assert!(text.pixel_width() > label.width);
+            let cells = usize::try_from(label.width / text.frame.cell_width).unwrap();
+            let fitted = truncate_picker_text(&rows[0].label, cells);
+            assert!(fitted.ends_with('…'));
+            let fitted = ChromeText::load_with_context(&fitted, scale, &context).unwrap();
+            assert!(fitted.pixel_width() <= label.width);
+        }
+    }
+
     /// Paints one unselected row and returns the canvas and its label clip.
     fn paint_row(
         context: &RenderContext,

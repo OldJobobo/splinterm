@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     super::{ChromeText, ChromeTextStyle, RenderContext, blend_rect, fill_rect},
-    picker::{ROW_HOVER_ALPHA, ROW_PRESS_ALPHA, SessionPickerPalette},
+    picker::{ROW_HOVER_ALPHA, ROW_PRESS_ALPHA, SessionPickerPalette, truncate_picker_text},
 };
 
 const HEADER_HEIGHT: u32 = 52;
@@ -463,6 +463,32 @@ fn rgba(color: u32) -> [u8; 4] {
     ]
 }
 
+/// `source` as chrome text, ended with `…` where it is wider than
+/// `clip_width` buffer pixels, so a long label is never cut off silently.
+fn fitted_text<'a>(
+    cache: &'a mut CommandPaletteTextCache,
+    context: &RenderContext,
+    source: &str,
+    style: ChromeTextStyle,
+    scale_120: u32,
+    renderer_generation: u64,
+    clip_width: u32,
+) -> Result<&'a ChromeText> {
+    let (fits, cell_width) = {
+        let text = cache.text(context, source, style, scale_120, renderer_generation)?;
+        (
+            text.pixel_width() <= clip_width,
+            text.frame.cell_width.max(1),
+        )
+    };
+    if fits {
+        return cache.text(context, source, style, scale_120, renderer_generation);
+    }
+    let maximum_cells = usize::try_from(clip_width / cell_width).unwrap_or(usize::MAX);
+    let truncated = truncate_picker_text(source, maximum_cells);
+    cache.text(context, &truncated, style, scale_120, renderer_generation)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_text(
     cache: &mut CommandPaletteTextCache,
@@ -478,7 +504,15 @@ fn paint_text(
     color: u32,
     right_aligned: bool,
 ) -> Result<()> {
-    let text = cache.text(context, source, style, scale_120, renderer_generation)?;
+    let text = fitted_text(
+        cache,
+        context,
+        source,
+        style,
+        scale_120,
+        renderer_generation,
+        clip.width,
+    )?;
     let x = if right_aligned {
         clip.x
             .saturating_add(clip.width.saturating_sub(text.pixel_width()))
@@ -1871,6 +1905,101 @@ mod tests {
         }
     }
 
+    /// VM case E6: at maximum zoom "Preview saved layout" was clipped into
+    /// fragments. It must fit its menu row whole or end in an ellipsis.
+    #[test]
+    fn maximum_zoom_menu_labels_fit_their_rows_or_end_in_an_ellipsis() {
+        use super::super::super::text::{CHROME_MAXIMUM_LINE_HEIGHT, chrome_maximum_cell_height};
+
+        for height in [
+            TAB_MENU_ROW_HEIGHT,
+            ROW_HEIGHT - ROW_GUTTER_Y * 2,
+            HEADER_HEIGHT,
+            PREVIEW_LINE_HEIGHT,
+            PROMPT_TITLE_HEIGHT,
+            PROMPT_INPUT_HEIGHT,
+            PROMPT_BUTTON_HEIGHT,
+            FOOTER_HEIGHT,
+        ] {
+            assert!(height >= CHROME_MAXIMUM_LINE_HEIGHT);
+        }
+        let action = tab_menu_descriptor(TabMenuActionId::PreviewLair);
+        for scale in [120, 150, 180, 240] {
+            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let mut cache = CommandPaletteTextCache::default();
+            for width in [120, 160, 240, 640, 1268] {
+                let bounds = Rect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height: 754,
+                };
+                let label_width = cache
+                    .tab_menu_label_width(&context, &[action], scale, 1)
+                    .unwrap();
+                let layout =
+                    tab_context_menu_layout(bounds, (width / 2, 300), &[action], label_width)
+                        .unwrap();
+                let row = buffer_rect(layout.rows[0].rect, scale);
+                let clip = buffer_rect(layout.rows[0].title, scale);
+                for style in [ChromeTextStyle::Regular, ChromeTextStyle::Bold] {
+                    let full_width = cache
+                        .text(&context, action.title, style, scale, 1)
+                        .unwrap()
+                        .pixel_width();
+                    let text = fitted_text(
+                        &mut cache,
+                        &context,
+                        action.title,
+                        style,
+                        scale,
+                        1,
+                        clip.width,
+                    )
+                    .unwrap();
+                    assert!(text.pixel_height() <= chrome_maximum_cell_height(scale));
+                    assert!(
+                        text.pixel_height() <= row.height,
+                        "scale {scale}, width {width}: {} > {}",
+                        text.pixel_height(),
+                        row.height
+                    );
+                    assert!(
+                        text.pixel_width() <= clip.width,
+                        "scale {scale}, width {width}"
+                    );
+                    if full_width > clip.width {
+                        assert!(
+                            cache.entries.keys().any(|(source, entry_style)| {
+                                *entry_style == style
+                                    && source.ends_with('…')
+                                    && action.title.starts_with(source.trim_end_matches('…'))
+                            }),
+                            "scale {scale}, width {width}: no ellipsized label"
+                        );
+                    }
+                }
+            }
+            // A wide Window shows the whole label at maximum zoom.
+            let label_width = cache
+                .tab_menu_label_width(&context, &[action], scale, 1)
+                .unwrap();
+            let bounds = Rect {
+                x: 0,
+                y: 0,
+                width: 1268,
+                height: 754,
+            };
+            let layout =
+                tab_context_menu_layout(bounds, (600, 300), &[action], label_width).unwrap();
+            let clip = buffer_rect(layout.rows[0].title, scale);
+            let full = cache
+                .text(&context, action.title, ChromeTextStyle::Bold, scale, 1)
+                .unwrap();
+            assert!(full.pixel_width() <= clip.width, "scale {scale}");
+        }
+    }
+
     #[test]
     fn context_menu_narrow_viewports_bound_labels_and_action_hits() {
         for width in [1, 6, 7, 12, 40, 156, 223, 224, 230, 240, 640] {
@@ -2173,7 +2302,9 @@ mod tests {
                 &canvas[top_edge..top_edge + 4]
             );
         }
-        assert!(cache.len() <= TAB_MENU_ACTIONS.len() + 1);
+        // Repaints reuse entries: each label at most once whole and once
+        // ellipsized to a row too narrow for it.
+        assert!(cache.len() <= TAB_MENU_ACTIONS.len() * 2 + 1);
         for viewport_width in [7, 12, 40, 230] {
             let narrow = Rect {
                 width: viewport_width,

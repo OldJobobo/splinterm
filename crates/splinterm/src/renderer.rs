@@ -120,6 +120,8 @@ use settings::{
 pub use settings::{
     RenderContext, RendererOptions, RendererResources, configure, effective_font_resolution,
 };
+#[cfg(test)]
+pub(crate) use text::CHROME_MAXIMUM_LINE_HEIGHT;
 pub(crate) use text::{ChromeSource, ChromeText, ChromeTextStyle};
 
 pub(crate) fn premultiplied_theme_rgba(color: u32, alpha: u16) -> [u8; 4] {

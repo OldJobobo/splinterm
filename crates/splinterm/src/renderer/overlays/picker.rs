@@ -938,7 +938,7 @@ pub(super) enum PickerTextAlignment {
     Right,
 }
 
-fn truncate_picker_text(source: &str, maximum_cells: usize) -> String {
+pub(super) fn truncate_picker_text(source: &str, maximum_cells: usize) -> String {
     let total_cells = source
         .chars()
         .map(|character| character.width().unwrap_or(0).min(2))

@@ -20,9 +20,10 @@ use crate::{
 };
 
 use super::{
-    BOX_DRAWING_FACE, CachedGlyph, FontFace, FontGeneration, GlyphKey, RenderContext, SNAPSHOT_CJK,
-    SNAPSHOT_EMOJI, SNAPSHOT_FALLBACK_START, SNAPSHOT_PRIMARY_BOLD, SNAPSHOT_PRIMARY_BOLD_ITALIC,
-    SNAPSHOT_PRIMARY_ITALIC, SNAPSHOT_PRIMARY_REGULAR, cell_metrics, compatibility_render_context,
+    BOX_DRAWING_FACE, CachedGlyph, CellMetrics, FontFace, FontGeneration, GlyphKey, RenderContext,
+    SNAPSHOT_CJK, SNAPSHOT_EMOJI, SNAPSHOT_FALLBACK_START, SNAPSHOT_PRIMARY_BOLD,
+    SNAPSHOT_PRIMARY_BOLD_ITALIC, SNAPSHOT_PRIMARY_ITALIC, SNAPSHOT_PRIMARY_REGULAR, cell_metrics,
+    compatibility_render_context,
     decorations::{DecorationMetrics, DecorationSpan},
     images::{SnapshotImage, prepare_snapshot_images},
     snapshot_color_advance, snapshot_glyph, u32_to_f32, with_font_ref,
@@ -317,15 +318,43 @@ impl SnapshotFrame {
         Self::load_scaled_with_sources_and_context(snapshot, scale_120, sources, &context)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "bounded text and image source preparation share one immutable frame transaction"
-    )]
     pub(crate) fn load_scaled_with_sources_and_context(
         snapshot: &TerminalSnapshot,
         scale_120: u32,
         sources: Option<&ImageContentLeaseSet>,
         context: &RenderContext,
+    ) -> Result<Self> {
+        Self::load_bounded(snapshot, scale_120, sources, context, None)
+    }
+
+    /// Loads like [`Self::load_scaled_with_context`] but shrinks the font,
+    /// never grows it, until a cell is at most `maximum_cell_height` buffer
+    /// pixels tall. Trusted chrome uses this to stay inside its fixed rows.
+    pub(super) fn load_scaled_with_maximum_cell_height(
+        snapshot: &TerminalSnapshot,
+        scale_120: u32,
+        context: &RenderContext,
+        maximum_cell_height: u32,
+    ) -> Result<Self> {
+        Self::load_bounded(
+            snapshot,
+            scale_120,
+            None,
+            context,
+            Some(maximum_cell_height),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "bounded text and image source preparation share one immutable frame transaction"
+    )]
+    fn load_bounded(
+        snapshot: &TerminalSnapshot,
+        scale_120: u32,
+        sources: Option<&ImageContentLeaseSet>,
+        context: &RenderContext,
+        maximum_cell_height: Option<u32>,
     ) -> Result<Self> {
         if snapshot.columns > usize::from(MAX_COLUMNS) || snapshot.rows > usize::from(MAX_ROWS) {
             bail!(
@@ -343,7 +372,10 @@ impl SnapshotFrame {
         let font_size = context.effective_font_size(u32::from(scale_120))?;
         let font_generation = Arc::clone(context.font_generation()?);
         let faces = &font_generation.faces;
-        let metrics = cell_metrics(&faces[0], font_size)?;
+        let (font_size, metrics) = match maximum_cell_height {
+            Some(maximum) => bounded_cell_metrics(&faces[0], font_size, maximum)?,
+            None => (font_size, cell_metrics(&faces[0], font_size)?),
+        };
         let cell_width = metrics.width;
         let cell_height = metrics.height;
         let baseline = metrics.baseline;
@@ -721,6 +753,34 @@ pub(super) fn snapshot_cursor(
         (Ok(column), Ok(row)) if column < columns && row < rows => Some((column, row)),
         _ => None,
     }
+}
+
+/// The smallest pixel size the `FreeType` raster policy accepts.
+const MINIMUM_BOUNDED_PIXEL_SIZE: f32 = 6.0;
+
+/// Shrinks `font_size` until the primary face's cell is at most
+/// `maximum_cell_height` pixels tall, or the raster floor is reached. A size
+/// already within the bound is returned unchanged.
+fn bounded_cell_metrics(
+    primary_face: &FontFace,
+    font_size: f32,
+    maximum_cell_height: u32,
+) -> Result<(f32, CellMetrics)> {
+    let mut size = font_size;
+    let mut metrics = cell_metrics(primary_face, size)?;
+    // Cell height is close to linear in pixel size, so a proportional step
+    // lands at or just above the bound; quarter-pixel steps absorb hinting.
+    for _ in 0..16 {
+        if metrics.height <= maximum_cell_height || size <= MINIMUM_BOUNDED_PIXEL_SIZE {
+            break;
+        }
+        let proportional = size * u32_to_f32(maximum_cell_height) / u32_to_f32(metrics.height);
+        size = proportional
+            .min(size - 0.25)
+            .max(MINIMUM_BOUNDED_PIXEL_SIZE);
+        metrics = cell_metrics(primary_face, size)?;
+    }
+    Ok((size, metrics))
 }
 
 pub(super) fn primary_decoration_metrics(

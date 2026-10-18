@@ -197,6 +197,12 @@ fn paint_remote_host(
     Ok(())
 }
 
+/// How many chrome cells of `cell_width` fit a tab label `buffer_width`
+/// pixels wide; at least one, so a label always keeps its ellipsis.
+fn tab_label_maximum_cells(buffer_width: u32, cell_width: u32) -> u32 {
+    (buffer_width / cell_width.max(1)).max(1)
+}
+
 fn host_label_rect(rect: Rect) -> Rect {
     let inset = 8.min(rect.width / 8);
     Rect {
@@ -709,8 +715,19 @@ impl App {
         self.tab_state
             .tab_label_cache
             .retain(|dojo_id, _| visible.contains(dojo_id));
+        self.prepare_tab_action_text()?;
+        // Labels are bounded by the chrome cell they are drawn with, which
+        // follows the terminal font up to the chrome line cap.
+        let cell_width = self
+            .tab_state
+            .tab_close_text
+            .as_ref()
+            .map_or(8, |(_, text)| text.pixel_width() / text.cells().max(1));
         for tab in &layout.tabs {
-            let maximum_cells = (tab.label_rect.width / 8).max(1);
+            let maximum_cells = tab_label_maximum_cells(
+                Self::buffer_rect(tab.label_rect, self.surface.scale_120)?.width,
+                cell_width,
+            );
             // The badge takes width from the label, never from the close control.
             let source = crate::frontend::badged_tab_label(
                 self.tab_state.agent.badge(tab.dojo_id).as_ref(),
@@ -751,6 +768,10 @@ impl App {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn prepare_tab_action_text(&mut self) -> Result<()> {
         if self
             .tab_state
             .tab_close_text
@@ -1450,6 +1471,44 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// VM case E6: at maximum zoom tab labels were clipped mid-glyph with
+    /// no ellipsis. They now fit the strip and end in `…` when too long.
+    #[test]
+    fn maximum_zoom_tab_labels_fit_the_strip_and_end_in_an_ellipsis() {
+        use super::{ChromeText, ChromeTextStyle, tab_label_maximum_cells};
+        use crate::frontend::badged_tab_label;
+        use crate::renderer::RenderContext;
+
+        const { assert!(TAB_STRIP_LOGICAL_HEIGHT >= crate::renderer::CHROME_MAXIMUM_LINE_HEIGHT) };
+        let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
+        for scale in [120, 150, 180, 240] {
+            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+            let close = ChromeText::load_with_context("×", scale, &context).unwrap();
+            let cell = close.pixel_width() / close.cells().max(1);
+            let layout = tab_strip_layout(640, &ids, 0).unwrap();
+            let strip = App::buffer_rect(layout.rect, scale).unwrap();
+            for tab in &layout.tabs {
+                let label = App::buffer_rect(tab.label_rect, scale).unwrap();
+                let maximum = tab_label_maximum_cells(label.width, cell);
+                let source = badged_tab_label(
+                    None,
+                    "a long Dojo label name",
+                    usize::try_from(maximum).unwrap(),
+                );
+                assert!(source.text().ends_with('…'), "scale {scale}");
+                let text = ChromeText::load_source_styled_with_context(
+                    &source,
+                    scale,
+                    ChromeTextStyle::Bold,
+                    &context,
+                )
+                .unwrap();
+                assert!(text.pixel_width() <= label.width, "scale {scale}");
+                assert!(text.pixel_height() <= strip.height, "scale {scale}");
             }
         }
     }
