@@ -341,8 +341,9 @@ Outside copy mode, both built-in profiles map `Ctrl+Shift+C/V` and `Super+C/V`
 to terminal-selection copy and the existing safe/bracketed paste. The
 `omarchy-tmux` profile advertises `Ctrl+Shift+C/V` first so its generated help
 remains usable when the compositor reserves Super chords; `splinterm` keeps
-`Super+C/V` primary. Omarchy 4's universal binding injects `Ctrl+Shift+C/V`
-into windows carrying its `terminal` tag. Omarchy 3.x injected
+`Super+C/V` primary. Into windows carrying its `terminal` tag, current
+Omarchy's universal binding (`quattro` since `129c67e2`, after 4.0.4) injects
+`Ctrl+Shift+C/V`, while Omarchy 3.x and 4.0.x inject
 `Ctrl+Insert`/`Shift+Insert`; Splinterm accepts both. Omarchy must classify
 `com.oldjobobo.splinterm` as a terminal, which
 `splinterm integration omarchy enable` arranges

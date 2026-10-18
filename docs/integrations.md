@@ -22,8 +22,9 @@ The lifecycle manages three independently verified components:
 1. the `xdg-terminal-exec` preference, preserving the previous
    `xdg-terminals.list` object exactly;
 2. an exact user-owned Hyprland module that applies Omarchy's `terminal` tag to
-   `com.oldjobobo.splinterm`, so universal `Super+C/V` arrives as
-   `Ctrl+Shift+C/V`; and
+   `com.oldjobobo.splinterm`, so universal `Super+C/V` arrives as copy and
+   paste (`Ctrl+Insert`/`Shift+Insert` or `Ctrl+Shift+C/V`, depending on the
+   Omarchy revision; see below); and
 3. the guarded Omarchy screensaver adapter described below.
 
 Enable preflights every destination before mutation, records a versioned pending
@@ -55,9 +56,11 @@ Splinterm Window as an ordinary application:
   method to direct input so a multiplexer prefix, such as the `omarchy-tmux`
   profile's, reaches the terminal.
 
-With the tag, Omarchy sends `Ctrl+Shift+C/V`, which both built-in keymap
-profiles bind to copy and paste. Omarchy 3.x sent `Ctrl+Insert` and
-`Shift+Insert` instead, which Splinterm also accepts. The tag comes from the
+With the tag, Omarchy sends a terminal copy and paste chord instead. Omarchy
+3.x and the released 4.0.0–4.0.4 send `Ctrl+Insert`/`Shift+Insert`. Current
+Omarchy, on its `quattro` branch since commit `129c67e2` (after 4.0.4), sends
+`Ctrl+Shift+C/V`. Both built-in keymap profiles bind both forms to copy and
+paste. The tag comes from the
 integration's Hyprland module above. Status also counts the same rule, with the
 module's exact text, in any other `~/.config/hypr/*.lua` file.
 
@@ -65,16 +68,24 @@ Because the integration stays opt-in, Splinterm points to it in two places:
 
 * The Pacman and AUR install and upgrade messages recommend
   `splinterm integration omarchy enable` and explain what it fixes.
-* The first local graphical Window under Omarchy shows one desktop
-  notification when no terminal tag rule is present. "Under Omarchy" means a
-  Hyprland session with `$OMARCHY_PATH` set or `~/.config/hypr/hyprland.lua`
-  present. The check only reads files and never delays opening the Window.
-  Windows with another app ID, such as the screensaver, never show it. Once
-  the notification is sent, Splinterm creates
+* The first local graphical Window under Omarchy 4 shows one desktop
+  notification when no terminal tag rule is present. "Under Omarchy 4" means a
+  Hyprland session in which both the Lua entrypoint
+  `~/.config/hypr/hyprland.lua` and Omarchy's terminal rule
+  (`default/hypr/apps/terminals.lua` under `$OMARCHY_PATH`, or under
+  `/usr/share/omarchy` when that is unset) exist. A plain Hyprland Lua setup
+  without Omarchy, and Omarchy 3.x with its `hyprland.conf`, which the
+  integration cannot extend, never show it. Neither does a client connected
+  to a private or development daemon through `SPLINTERM_SOCKET`, as graphical
+  test harnesses are, nor a Window with another app ID, such as the
+  screensaver. The check only reads files and never delays opening the
+  Window. When the notification is handed to `notify-send`, Splinterm creates
   `${XDG_STATE_HOME:-~/.local/state}/splinterm/integrations/omarchy-hint-shown`
-  and never shows it again; delete that file to see it once more. Set
-  `[main] omarchy-integration-hint=no` to never show it. If no notification
-  could be sent, a later launch tries again.
+  and never shows it again; delete that file to see it once more. If
+  `notify-send` cannot start or exits with an error, for example because no
+  notification service is running, the file is removed again and a later
+  launch tries again. Set `[main] omarchy-integration-hint=no` to never show
+  it.
 
 ## Omarchy screensaver component
 
@@ -139,13 +150,17 @@ env SPLINTERM_CONFIG=/usr/share/splinterm/omarchy/screensaver.ini \
   xdg-terminal-exec --app-id=org.omarchy.screensaver -- omarchy-screensaver
 ```
 
-The helper follows Omarchy 4's own launcher. Omarchy's static rule sends every
+The helper follows the launcher on Omarchy's `quattro` branch since commit
+`bf44355a` (after 4.0.4). That revision adds a static rule that sends every
 `org.omarchy.screensaver` Window to the hidden `special:screensaver` workspace,
 and `omarchy-screensaver` exits as soon as its Window loses focus. So the helper
 focuses each monitor in turn and starts that monitor's Window through a
 Hyprland exec rule, `[workspace special:screensaver-<monitor>]`, which outranks
 the static rule. If the monitor already shows a special workspace, such as the
-scratchpad, the Window joins it instead, so it is still open afterwards. Before
+scratchpad, the Window joins it instead, so it is still open afterwards. The
+released Omarchy 4.0.0–4.0.4 launcher uses a plain exec without a workspace
+rule and has no parking rule; the helper uses the same per-monitor special
+workspace there, which is meant to work the same way. Before
 moving on, the helper waits up to five seconds for a Window that carries this
 launch's private invocation token. If one never appears, it closes only the
 Windows this launch opened. Afterwards it focuses the original monitor again,

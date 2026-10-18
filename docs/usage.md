@@ -338,10 +338,10 @@ forwards these keys, pointer input, paste, or IME text to the terminal
 application. Outside copy mode, both built-in profiles provide terminal
 `Ctrl+Shift+C/V` and `Super+C/V` copy/paste. The `omarchy-tmux` profile advertises
 `Ctrl+Shift+C/V` as its primary compositor-safe shortcuts; the `splinterm`
-profile retains `Super+C/V` as primary. Omarchy 4's universal shortcuts arrive
-as `Ctrl+Shift+C/V` when `com.oldjobobo.splinterm` carries Omarchy's
-`terminal` tag, and Omarchy 3.x sent `Ctrl+Insert`/`Shift+Insert`; both
-profiles accept both. Run `splinterm integration omarchy enable` once to get
+profile retains `Super+C/V` as primary. When `com.oldjobobo.splinterm` carries
+Omarchy's `terminal` tag, current Omarchy's universal shortcuts (`quattro` since
+`129c67e2`, after 4.0.4) arrive as `Ctrl+Shift+C/V`, and Omarchy 3.x and 4.0.x
+send `Ctrl+Insert`/`Shift+Insert`; both profiles accept both. Run `splinterm integration omarchy enable` once to get
 the tag ([why](integrations.md#why-the-terminal-tag-matters)). Without the
 terminal classification Omarchy injects ordinary `Ctrl+C`, which remains
 terminal interrupt. These Super shortcuts work only when the compositor
