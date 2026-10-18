@@ -1,5 +1,6 @@
 //! A complete two-generation daemon handoff through a real exec (Plan 0061
-//! slice M3.10b).
+//! slice M3.10b), and its cooperative rollback through a second real exec
+//! (M3.11a).
 //!
 //! The old generation runs in a stage process: it installs an unsalted copy
 //! of the `splinterd` it was built with at a private prefix and retains that
@@ -13,6 +14,21 @@
 //! forward daemon, in the same process. The forward daemon claims, stages,
 //! adopts, commits, and serves as generation 2. The parent then checks the
 //! adopted daemon over its real sockets and shuts it down.
+//!
+//! # Rollback
+//!
+//! The other cases make the forward candidate fail before its commit: the
+//! forward client disappears from the prefix after the manifests are built
+//! (adoption refuses the prefix), or a test-only fault point fires
+//! (`CANDIDATE_FAULT_ENV`, one case per pre-commit step). The candidate's
+//! rollback executor then re-executes the sealed rollback daemon snapshot
+//! (the unsalted copy) with the unchanged descriptors and the rollback
+//! manifest, in the same process again, and the parent checks that the
+//! original generation 1 serves every carried Splint with its process and
+//! incarnation. A failure on the rollback generation's own adoption has no
+//! rollback edge and exits loudly with no further exec. Two cases leave a
+//! SIGTERM pending across exec, which must become an ordered shutdown once
+//! the adopting generation installed its handler, never a killed candidate.
 //!
 //! # Why the boundary is driven at the function level
 //!
@@ -82,13 +98,14 @@ use splinterd::{
     handoff_compatibility::{BuildIdentity, BuildVersion},
     handoff_descriptors::{HandoffDescriptor, HandoffDescriptorSlot, inheritable_descriptors},
     handoff_exec::{
-        ExecInheritancePlan, ManifestSeal, cross_exec_boundary, exec_environment,
-        forward_daemon_arguments,
+        ExecInheritancePlan, ManifestSeal, candidate_daemon_arguments, cross_exec_boundary,
+        exec_environment,
     },
     handoff_preflight::compiled_handoff_generation,
     handoff_prepare::{CaptureLimits, HandedOffCapture, capture_live_splints},
     integration_test_seams::{
-        BUILD_SALT_BYTES, PACKAGED_OWNER_UID_ENV, salt_slot_offset, salted_pair_build_identity,
+        BUILD_SALT_BYTES, CANDIDATE_FAULT_ENV, CandidateFaultPoint, PACKAGED_OWNER_UID_ENV,
+        salt_slot_offset, salted_pair_build_identity,
     },
 };
 use splinterm_core::{
@@ -112,7 +129,26 @@ use tokio::{
 
 const STAGE: &str = "SPLINTERD_EXEC_ADOPTION_STAGE";
 const DIRECTORY: &str = "SPLINTERD_EXEC_ADOPTION_DIRECTORY";
-const CASES: [&str; 2] = ["adopt", "adoption-failure"];
+/// The stage removes the forward client after building the manifests.
+const REMOVE_FORWARD_CLIENT: &str = "SPLINTERD_EXEC_ADOPTION_REMOVE_FORWARD_CLIENT";
+/// The stage leaves a SIGTERM pending (blocked) across its exec.
+const PENDING_SIGTERM: &str = "SPLINTERD_EXEC_ADOPTION_PENDING_SIGTERM";
+/// Every pre-commit step the fault matrix fails the forward candidate at.
+const FAULT_POINTS: [CandidateFaultPoint; 6] = [
+    CandidateFaultPoint::Staging,
+    CandidateFaultPoint::RuntimeEntry,
+    CandidateFaultPoint::Startup,
+    CandidateFaultPoint::ListenerRegistration,
+    CandidateFaultPoint::ScopeAdoption,
+    CandidateFaultPoint::ActorStaging,
+];
+const CASES: [&str; 5] = [
+    "adopt",
+    "rollback",
+    "rollback-of-rollback",
+    "pending-sigterm",
+    "fault-matrix",
+];
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 /// The salt the forward image carries: any nonzero value makes its pair
 /// identity differ from the rollback image's.
@@ -167,8 +203,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     match env::var(STAGE).ok().as_deref() {
-        Some("adopt") => old_generation_stage(false),
-        Some("adoption-failure") => old_generation_stage(true),
+        Some("old-generation") => old_generation_stage(&StageOptions {
+            remove_forward_client: env::var_os(REMOVE_FORWARD_CLIENT).is_some(),
+            pending_sigterm: env::var_os(PENDING_SIGTERM).is_some(),
+            fault: None,
+        }),
         Some(stage) => panic!("unknown stage {stage:?}"),
         None => {
             // A harness may leak an inheritable descriptor into this process
@@ -179,13 +218,41 @@ fn main() -> ExitCode {
             rustix::io::fcntl_setfd(&stray, flags - rustix::io::FdFlags::CLOEXEC).unwrap();
             adopt_case();
             println!("handoff_exec_adoption: adopt passed");
-            adoption_failure_case();
-            println!("handoff_exec_adoption: adoption-failure passed");
+            rollback_case();
+            println!("handoff_exec_adoption: rollback passed");
+            rollback_of_rollback_case();
+            println!("handoff_exec_adoption: rollback-of-rollback passed");
+            pending_sigterm_case(false);
+            println!("handoff_exec_adoption: pending-sigterm (adopt) passed");
+            pending_sigterm_case(true);
+            println!("handoff_exec_adoption: pending-sigterm (rollback) passed");
+            for point in FAULT_POINTS {
+                fault_case(point);
+                println!(
+                    "handoff_exec_adoption: fault-matrix {} passed",
+                    point.name()
+                );
+            }
             drop(stray);
             println!("handoff_exec_adoption: ok");
         }
     }
     ExitCode::SUCCESS
+}
+
+/// How one stage's old generation behaves, and what fails its forward
+/// candidate.
+#[derive(Clone, Debug, Default)]
+struct StageOptions {
+    /// Remove the forward client after building the manifests, so forward
+    /// adoption refuses the prefix (rollback adoption only reports it).
+    remove_forward_client: bool,
+    /// Block SIGTERM and raise it just before the exec boundary, so it is
+    /// pending across exec.
+    pending_sigterm: bool,
+    /// Candidate fault points, as `CANDIDATE_FAULT_ENV` spells them; the
+    /// parent sets the variable, and it crosses both execs.
+    fault: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,14 +299,12 @@ fn assert_single_threaded() {
 }
 
 /// Runs the old generation and crosses the exec boundary; returns only by
-/// panicking. With `remove_forward_client`, the forward client disappears
-/// from the prefix after the manifests are built, so the forward daemon
-/// refuses adoption before its commit.
+/// panicking. See [`StageOptions`].
 #[allow(
     clippy::too_many_lines,
     reason = "one old generation, from install through the exec call, in production order"
 )]
-fn old_generation_stage(remove_forward_client: bool) -> ! {
+fn old_generation_stage(options: &StageOptions) -> ! {
     assert_single_threaded();
     let directory = PathBuf::from(env::var_os(DIRECTORY).expect("stage directory"));
     let owner = geteuid().as_raw();
@@ -348,14 +413,14 @@ fn old_generation_stage(remove_forward_client: bool) -> ! {
     // Exactly what the binary's `arm_forward_exec` passes: argv rebuilt from
     // state (no workload cgroups required here), the environment unchanged.
     let arguments =
-        forward_daemon_arguments(daemon_path.as_os_str(), forward_manifest, false).unwrap();
+        candidate_daemon_arguments(daemon_path.as_os_str(), forward_manifest, false).unwrap();
     let plan = plan.with_forward_daemon(
         snapshots.forward().daemon().descriptor(),
         arguments,
         exec_environment(),
     );
 
-    if remove_forward_client {
+    if options.remove_forward_client {
         fs::remove_file(&client_path).unwrap();
     }
     let record = StageRecord {
@@ -371,6 +436,14 @@ fn old_generation_stage(remove_forward_client: bool) -> ! {
         &serde_json::to_vec(&record).unwrap(),
     );
 
+    if options.pending_sigterm {
+        // As if `systemctl stop` arrived in the exec window: blocked here,
+        // so it stays pending across exec instead of killing this stage.
+        let mut terminate = nix::sys::signal::SigSet::empty();
+        terminate.add(nix::sys::signal::Signal::SIGTERM);
+        terminate.thread_block().unwrap();
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).unwrap();
+    }
     let reason = cross_exec_boundary(&plan, Instant::now() + GUARD_WAIT);
     panic!("the exec boundary returned instead of executing the forward daemon: {reason}");
 }
@@ -800,15 +873,28 @@ struct Stage {
 }
 
 impl Stage {
-    fn launch(directory: &TestDirectory, case: &str) -> Self {
+    fn launch(directory: &TestDirectory, options: StageOptions) -> Self {
         let stdout = fs::File::create(directory.0.join(STDOUT)).unwrap();
         let stderr = fs::File::create(directory.0.join(STDERR)).unwrap();
-        let launcher = Command::new("python3")
+        let mut command = Command::new("python3");
+        command.env_remove(REMOVE_FORWARD_CLIENT);
+        command.env_remove(PENDING_SIGTERM);
+        command.env_remove(CANDIDATE_FAULT_ENV);
+        if options.remove_forward_client {
+            command.env(REMOVE_FORWARD_CLIENT, "1");
+        }
+        if options.pending_sigterm {
+            command.env(PENDING_SIGTERM, "1");
+        }
+        if let Some(fault) = options.fault {
+            command.env(CANDIDATE_FAULT_ENV, fault);
+        }
+        let launcher = command
             .arg("-c")
             .arg(LAUNCHER)
             .arg(env::current_exe().unwrap())
             .env(PARENT, std::process::id().to_string())
-            .env(STAGE, case)
+            .env(STAGE, "old-generation")
             .env(DIRECTORY, &directory.0)
             .env("SPLINTERM_SOCKET", directory.socket())
             .env("XDG_STATE_HOME", directory.0.join("state"))
@@ -1190,7 +1276,7 @@ async fn connect_adopted(stage: &mut Stage, socket: &Path) -> (Client, u64) {
 /// adopts, commits, and serves as generation 2 in the same process.
 fn adopt_case() {
     let directory = TestDirectory::new();
-    let mut stage = Stage::launch(&directory, "adopt");
+    let mut stage = Stage::launch(&directory, StageOptions::default());
     let record = stage.record();
     let pid = record.pid;
     // The stage is the launcher's only child.
@@ -1345,40 +1431,290 @@ async fn assert_listeners_accept(directory: &TestDirectory, daemon_generation: u
     assert_eq!(generation, daemon_generation);
 }
 
+/// The one log line containing `marker`.
+fn log_line<'a>(logs: &'a str, marker: &str) -> &'a str {
+    let mut lines = logs.lines().filter(|line| line.contains(marker));
+    let line = lines
+        .next()
+        .unwrap_or_else(|| panic!("no {marker:?} line\n{logs}"));
+    assert!(
+        lines.next().is_none(),
+        "more than one {marker:?} line\n{logs}"
+    );
+    line
+}
+
+/// Every `closed_unexpected=` the logs report is zero: neither exec leaked
+/// an unmanifested descriptor into the next image.
+fn assert_no_stray_descriptors(logs: &str) {
+    const FIELD: &str = "closed_unexpected=";
+    for (index, _) in logs.match_indices(FIELD) {
+        let value = logs[index + FIELD.len()..]
+            .split(|character: char| !character.is_ascii_digit())
+            .next()
+            .unwrap_or_default();
+        assert_eq!(value, "0", "a stray descriptor crossed exec\n{logs}");
+    }
+}
+
+/// The checks every rollback makes: the same process, now executing the
+/// sealed rollback daemon snapshot, serves the original generation 1; every
+/// carried Splint kept its process (still this daemon's child) and its
+/// incarnation, shows its captured screen, and echoes; the excluded
+/// Splint's zombie was reaped and its exit recorded; both listeners accept;
+/// exactly one rollback exec happened and only the rollback generation
+/// committed.
+fn assert_rolled_back(
+    stage: &mut Stage,
+    directory: &TestDirectory,
+    record: &StageRecord,
+    install_pair_mismatch: bool,
+) {
+    let pid = record.pid;
+    assert_eq!(children_of(stage.launcher.id()), [pid]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (mut client, daemon_generation) = connect_adopted(stage, &directory.socket()).await;
+        assert_eq!(
+            daemon_generation, record.source_daemon_generation,
+            "rollback serves the original generation"
+        );
+        assert_same_process(&client, stage, pid);
+        for splint in &record.carried {
+            assert!(
+                is_live_child(splint.child_pid, pid),
+                "carried Splint {} lost its process in rollback",
+                splint.splint_id
+            );
+            let Response::Splint { runtime, .. } = client
+                .request(Request::InspectSplint {
+                    splint_id: splint.splint_id,
+                })
+                .await
+            else {
+                panic!("no Splint response");
+            };
+            assert_eq!(runtime.live_incarnation, Some(splint.incarnation));
+            client
+                .wait_for_text(splint.splint_id, splint.incarnation, "ready")
+                .await;
+            client
+                .echo(splint.splint_id, splint.incarnation, "echo-after-rollback")
+                .await;
+        }
+        assert_exits_recorded(&mut client, directory, record).await;
+        assert_listeners_accept(directory, daemon_generation).await;
+    });
+
+    let logs = stage.logs();
+    for expected in [
+        "daemon handoff candidate failed before its adoption commit",
+        "rollback_edge=true",
+        "rolling back to the previous generation with the unchanged descriptors",
+        "daemon handoff: adopted generation published",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
+    log_line(
+        &logs,
+        "daemon handoff: executing the sealed rollback daemon",
+    );
+    let committed = log_line(&logs, "daemon handoff: adoption committed");
+    for expected in [
+        "daemon_generation=1",
+        "source_daemon_generation=2",
+        "rollback=true",
+        "carried=2",
+        "excluded=1",
+        "excluded_exit_unknown=0",
+    ] {
+        assert!(
+            committed.contains(expected),
+            "missing {expected:?} in {committed:?}\n{logs}"
+        );
+    }
+    assert_eq!(
+        logs.contains("install_pair_mismatch=true"),
+        install_pair_mismatch,
+        "{logs}"
+    );
+    assert_no_stray_descriptors(&logs);
+}
+
+/// An ordered shutdown of the serving daemon ends it and its Splints.
+fn shut_down(stage: &mut Stage, record: &StageRecord) {
+    signal(record.pid, Signal::TERM);
+    let status = stage.wait(WAIT * 3);
+    assert!(status.success(), "{status}\n{}", stage.logs());
+    for splint in &record.carried {
+        wait_until_exited(splint.child_pid, "carried Splint");
+    }
+}
+
 /// The forward client is gone from the prefix when the forward daemon
-/// adopts, so adoption refuses before its commit. Before Plan 0061 M3.11
-/// that reaches the marked pre-commit hand-off point and exits loudly,
-/// closing every carried PTY master; M3.11 replaces the exit with the
-/// cooperative rollback executor, which re-executes the sealed rollback
-/// daemon with the unchanged PTYs, and this case then asserts rollback.
-fn adoption_failure_case() {
+/// adopts, so adoption refuses before its commit and the candidate rolls
+/// back (Plan 0061 M3.11a): the rollback daemon adopts the unchanged PTYs
+/// and only reports the changed install pair.
+fn rollback_case() {
     let directory = TestDirectory::new();
-    let mut stage = Stage::launch(&directory, "adoption-failure");
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            remove_forward_client: true,
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    assert_rolled_back(&mut stage, &directory, &record, true);
+    let logs = stage.logs();
+    for expected in [
+        // The forward exec happened: the forward daemon claimed and staged.
+        "daemon handoff candidate: inherited descriptors claimed",
+        "every inherited descriptor and checkpoint verified",
+        // It refused at adoption and said why.
+        "phase=\"adoption\"",
+        "the install prefix does not hold the forward pair the manifest recorded",
+        // The rollback daemon adopts despite the changed pair.
+        "installed pair changed since handoff preparation; rollback adopts anyway",
+        "the installed pair changed since preparation",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
+    assert!(!logs.contains("rollback failed"), "{logs}");
+    shut_down(&mut stage, &record);
+}
+
+/// The rollback daemon's own adoption fails too. A rollback generation has
+/// no rollback edge: it exits loudly and nothing is executed again.
+fn rollback_of_rollback_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            remove_forward_client: true,
+            fault: Some(format!("{}@rollback", CandidateFaultPoint::Startup.name())),
+            ..StageOptions::default()
+        },
+    );
     let record = stage.record();
     let status = stage.wait(STAGE_WAIT);
     let logs = stage.logs();
-    assert!(!status.success(), "the refused candidate exited 0\n{logs}");
+    assert!(!status.success(), "the refused rollback exited 0\n{logs}");
     for expected in [
-        // The exec happened: the forward daemon claimed and staged.
-        "daemon handoff candidate: inherited descriptors claimed",
-        "every inherited descriptor and checkpoint verified",
-        // It refused at adoption and said why, at the M3.11 hand-off point.
-        "failed before its adoption commit (adoption)",
         "the install prefix does not hold the forward pair the manifest recorded",
-        "no rollback executor exists yet (Plan 0061 M3.11)",
+        "rollback_edge=true",
+        "injected candidate fault at startup",
+        "rollback_edge=false",
+        "this daemon is itself a rollback generation, so a failure before its commit has no rollback edge",
         "live-process continuity is not guaranteed",
     ] {
         assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
     }
+    // Exactly one rollback exec: the failed rollback generation executed
+    // nothing, and nothing committed.
+    log_line(
+        &logs,
+        "daemon handoff: executing the sealed rollback daemon",
+    );
     assert!(!logs.contains("adoption committed"), "{logs}");
     // Exiting closed the carried masters, which hung up each carried shell.
     for splint in &record.carried {
-        wait_until_exited(splint.child_pid, "carried Splint after a refused adoption");
+        wait_until_exited(splint.child_pid, "carried Splint after a refused rollback");
     }
-    // Adoption ran no further than the prefix check: the durable Topology is
-    // exactly what the old generation persisted.
+    // Neither generation committed, so the durable Topology is exactly what
+    // the old generation persisted.
     assert_eq!(
         fs::read(directory.0.join("state/splinterm/topology.json")).unwrap(),
         fs::read(directory.0.join(STAGED_TOPOLOGY)).unwrap()
     );
+}
+
+/// A SIGTERM pending across the handoff exec (as `systemctl stop` in the
+/// exec window) must not kill the candidate: the exec carries it blocked,
+/// the candidate unblocks it once its handler exists, and the adopted
+/// daemon then shuts down in order. With `rollback`, the forward candidate
+/// fails after its handler took the signal, and the rollback executor makes
+/// it pending again across the rollback exec, so the rollback daemon shuts
+/// down in order once it adopted.
+fn pending_sigterm_case(rollback: bool) {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            remove_forward_client: rollback,
+            pending_sigterm: true,
+            fault: None,
+        },
+    );
+    let record = stage.record();
+    let status = stage.wait(STAGE_WAIT);
+    let logs = stage.logs();
+    assert!(
+        status.success(),
+        "a pending SIGTERM must become an ordered shutdown, not kill the candidate: {status}\n{logs}"
+    );
+    let committed = log_line(&logs, "daemon handoff: adoption committed");
+    let generation = if rollback {
+        "daemon_generation=1"
+    } else {
+        "daemon_generation=2"
+    };
+    assert!(committed.contains(generation), "{committed:?}\n{logs}");
+    assert!(
+        logs.contains("daemon handoff: adopted generation published"),
+        "{logs}"
+    );
+    if rollback {
+        log_line(
+            &logs,
+            "daemon handoff: executing the sealed rollback daemon",
+        );
+        assert!(logs.contains("terminate: true"), "{logs}");
+    } else {
+        assert!(
+            !logs.contains("executing the sealed rollback daemon"),
+            "{logs}"
+        );
+    }
+    for splint in &record.carried {
+        wait_until_exited(splint.child_pid, "carried Splint after an ordered shutdown");
+    }
+}
+
+/// The forward candidate fails at one pre-commit step and rolls back with
+/// every Splint alive (Plan 0061 M3.11a fault matrix).
+fn fault_case(point: CandidateFaultPoint) {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            fault: Some(format!("{}@forward", point.name())),
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    assert_rolled_back(&mut stage, &directory, &record, false);
+    let (phase, cause) = match point {
+        CandidateFaultPoint::Staging => ("staging", "injected candidate fault at staging"),
+        CandidateFaultPoint::RuntimeEntry => ("runtime entry", "candidate runtime entry refused"),
+        CandidateFaultPoint::Startup => ("startup", "injected candidate fault at startup"),
+        CandidateFaultPoint::ListenerRegistration => (
+            "adoption",
+            "injected candidate fault at listener registration",
+        ),
+        CandidateFaultPoint::ScopeAdoption => {
+            ("adoption", "injected candidate fault at scope adoption")
+        }
+        CandidateFaultPoint::ActorStaging => {
+            ("adoption", "injected candidate fault at actor staging")
+        }
+    };
+    let logs = stage.logs();
+    for expected in [format!("phase=\"{phase}\""), cause.to_owned()] {
+        assert!(logs.contains(&expected), "missing {expected:?}\n{logs}");
+    }
+    shut_down(&mut stage, &record);
 }

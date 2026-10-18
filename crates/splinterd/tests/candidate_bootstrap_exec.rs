@@ -4,12 +4,16 @@
 //! forward/rollback manifest pair and every idle descriptor role inherited.
 //! The candidate claims, verifies, and stages them, then adopts: the
 //! fixture's forward pair is not installed at its recorded prefix, so
-//! adoption refuses before its commit. Until the rollback executor exists
-//! (Plan 0061 M3.11) that refusal is a loud, non-zero exit with diagnostics,
-//! which these cases pin as the pre-commit failure behaviour. The candidate
-//! never accepts on the fixture listeners, and it runs with a private state
-//! and configuration home and no session bus, so it touches no installed
-//! daemon, user state, or systemd manager.
+//! adoption refuses before its commit. The rollback executor (Plan 0061
+//! M3.11a) then binds every descriptor to the rollback manifest and executes
+//! the fixture's sealed rollback daemon, which is not an executable image:
+//! exec fails before the kernel's point of no return, there is nothing older
+//! to fall back to, and the candidate exits non-zero with both failures in
+//! its diagnostics. These cases pin that loud end of a failed rollback (the
+//! successful rollback is `handoff_exec_adoption`'s). The candidate never
+//! accepts on the fixture listeners, and it runs with a private state and
+//! configuration home and no session bus, so it touches no installed daemon,
+//! user state, or systemd manager.
 
 #![cfg(feature = "integration-test")]
 
@@ -298,10 +302,17 @@ fn assert_candidate_error(output: &Output, expected: &str) {
 /// The pre-commit refusal every case below reaches once staging succeeds.
 const ADOPTION_REFUSAL: &str = "failed before its adoption commit (adoption)";
 
+/// The fixture's rollback daemon is not an executable image, so the rollback
+/// executor reaches exec, and exec returns.
+const ROLLBACK_EXEC_REFUSAL: &str = "rollback failed: exec of the rollback daemon failed";
+
 /// Staging accepts every role, and adoption then refuses the fixture's
-/// uninstalled forward pair. Before Plan 0061 M3.11 the refusal exits
-/// non-zero, naming the failed phase and cause; exiting closes the claimed
-/// descriptors, which is all it ends (the fixture carries no Splint).
+/// uninstalled forward pair. The rollback executor binds every role to the
+/// rollback manifest at its recorded number and executes the fixture's
+/// rollback daemon, which fails; the candidate exits non-zero naming the
+/// failed phase, its cause, and the failed rollback. Exiting closes the
+/// claimed descriptors, which is all it ends (the fixture carries no
+/// Splint).
 #[test]
 fn sealed_idle_candidate_stages_every_role_then_fails_adoption_loudly() {
     let fixture = Fixture::new(None);
@@ -311,6 +322,7 @@ fn sealed_idle_candidate_stages_every_role_then_fails_adoption_loudly() {
         &output,
         "the install prefix does not hold the forward pair the manifest recorded",
     );
+    assert_candidate_error(&output, ROLLBACK_EXEC_REFUSAL);
     assert_candidate_error(&output, "live-process continuity is not guaranteed");
     // Adoption ran no further than its first check: nothing was persisted.
     assert!(
@@ -331,6 +343,10 @@ fn candidate_rejects_a_sealed_body_in_the_listener_role() {
     let output = fixture.launch(fixture.forward_manifest_fd);
     assert_candidate_error(&output, "Listener");
     assert_candidate_error(&output, "wrong kernel object type");
+    // A staging failure still owns the claimed table: the executor reads and
+    // pairs the rollback manifest itself and reaches exec.
+    assert_candidate_error(&output, "failed before its adoption commit (staging)");
+    assert_candidate_error(&output, ROLLBACK_EXEC_REFUSAL);
 }
 
 #[test]
