@@ -3,9 +3,10 @@
 //! The handing-off daemon writes the complete length-prefixed frame with one
 //! `sendmsg` whose ancillary data carries exactly
 //! [`HANDOFF_PREPARE_DESCRIPTORS`] descriptors in a fixed order: the sealed
-//! forward client snapshot, then the client end of the continuation channel.
-//! A Unix stream socket attaches ancillary data to the first byte of that
-//! write and never merges it into an earlier write, so a receiver that reads
+//! forward client snapshot, then the client end of the continuation channel,
+//! a Unix `SOCK_SEQPACKET` socket. The Unix stream socket the frame travels
+//! on attaches ancillary data to the first byte of that write and never
+//! merges it into an earlier write, so a receiver that reads
 //! each frame header and body with exact-length [`recv_with_descriptors`]
 //! calls receives the descriptors with that frame's header read and with no
 //! other read. Such a receiver passes them to [`accept_handoff_prepare`]
@@ -26,8 +27,9 @@ use rustix::{
     fs::{FileType, SealFlags, fcntl_get_seals, fstat},
     io::Errno,
     net::{
-        RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
-        SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
+        AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags,
+        SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketType, recvmsg, sendmsg,
+        sockopt::{socket_domain, socket_type},
     },
 };
 
@@ -96,7 +98,7 @@ pub enum HandoffDescriptorError {
     InvalidFrame,
     #[error("the client snapshot descriptor is not the sealed snapshot the frame names")]
     ClientSnapshot,
-    #[error("the continuation descriptor is not a socket")]
+    #[error("the continuation descriptor is not a Unix sequenced-packet socket")]
     Continuation,
     #[error("handoff prepare frame encoding failed")]
     Encode(#[source] FrameEncodeError),
@@ -272,7 +274,16 @@ fn verify_descriptors(
     }
     let continuation =
         fstat(descriptors.continuation()).map_err(|_| HandoffDescriptorError::Continuation)?;
-    if FileType::from_raw_mode(continuation.st_mode) != FileType::Socket {
+    let domain = socket_domain(descriptors.continuation())
+        .map_err(|_| HandoffDescriptorError::Continuation)?;
+    let kind = socket_type(descriptors.continuation())
+        .map_err(|_| HandoffDescriptorError::Continuation)?;
+    // The continuation channel is a bounded message channel (ADR 0011), never
+    // a byte stream or a network socket.
+    if FileType::from_raw_mode(continuation.st_mode) != FileType::Socket
+        || domain != AddressFamily::UNIX
+        || kind != SocketType::SEQPACKET
+    {
         return Err(HandoffDescriptorError::Continuation);
     }
     Ok(())
@@ -280,7 +291,7 @@ fn verify_descriptors(
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::{fs::MetadataExt as _, net::UnixStream};
 
     use rustix::fs::{MemfdFlags, fcntl_add_seals, memfd_create};
 
@@ -318,8 +329,29 @@ mod tests {
     }
 
     fn continuation() -> OwnedFd {
-        let (local, _peer) = UnixStream::pair().unwrap();
-        OwnedFd::from(local)
+        let (local, _peer) = rustix::net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        local
+    }
+
+    /// Whether this process still holds any descriptor for the open file with
+    /// this device and inode. Inodes of memfds and sockets are unique, so
+    /// concurrent tests cannot alias them.
+    fn still_open(identity: (u64, u64)) -> bool {
+        std::fs::read_dir("/proc/self/fd").unwrap().any(|entry| {
+            std::fs::metadata(entry.unwrap().path())
+                .is_ok_and(|target| (target.dev(), target.ino()) == identity)
+        })
+    }
+
+    fn identity(descriptor: &OwnedFd) -> (u64, u64) {
+        let stat = fstat(descriptor).unwrap();
+        (stat.st_dev, stat.st_ino)
     }
 
     fn send_rights(socket: &UnixStream, bytes: &[u8], rights: &[BorrowedFd<'_>]) {
@@ -524,6 +556,39 @@ mod tests {
             Err(HandoffDescriptorError::Continuation)
         ));
         assert!(accept(snapshot, continuation()).unwrap().is_some());
+    }
+
+    #[test]
+    fn continuation_must_be_a_unix_seqpacket_socket_and_rejection_closes_both() {
+        let (stream, stream_peer) = UnixStream::pair().unwrap();
+        let datagram = rustix::net::socket(AddressFamily::UNIX, SocketType::DGRAM, None).unwrap();
+        // A network socket needs no network: an unbound IPv4 datagram socket.
+        let network = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None).unwrap();
+        for wrong in [OwnedFd::from(stream), datagram, network] {
+            let snapshot = sealed_snapshot(REQUIRED_CLIENT_SNAPSHOT_SEALS);
+            let frame = ServerFrame::HandoffPrepare {
+                prepare: prepare_for(&snapshot),
+            };
+            let held = [identity(&snapshot), identity(&wrong)];
+            assert!(held.iter().all(|descriptor| still_open(*descriptor)));
+            assert!(matches!(
+                accept_handoff_prepare(
+                    &frame,
+                    Some(HandoffPrepareDescriptors::new(snapshot, wrong))
+                ),
+                Err(HandoffDescriptorError::Continuation)
+            ));
+            assert!(
+                held.iter().all(|descriptor| !still_open(*descriptor)),
+                "a rejected frame closes both descriptors"
+            );
+        }
+        // The stream's own end is closed, so its peer reads end of stream.
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            std::io::Read::read(&mut &stream_peer, &mut byte).unwrap(),
+            0
+        );
     }
 
     #[test]

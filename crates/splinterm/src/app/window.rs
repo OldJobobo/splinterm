@@ -516,6 +516,7 @@ pub(super) async fn run_live_window(
                         event,
                     ) {
                         EventAction::Ignore => {}
+                        EventAction::Skip { sequence } => last_sequence = sequence,
                         EventAction::Snapshot { sequence, snapshot } => {
                             validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                             last_revision = snapshot.revision;

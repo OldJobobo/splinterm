@@ -109,6 +109,7 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::ReportAgentStatus { .. } => AuditOperation::AgentStatusReport,
         Request::PrepareDaemonHandoff { .. } => AuditOperation::PrepareDaemonHandoff,
         Request::ClaimHandoffControl { .. } => AuditOperation::ClaimHandoffControl,
+        Request::AcknowledgeHandoffPrepare { .. } => AuditOperation::AcknowledgeHandoffPrepare,
     }
 }
 

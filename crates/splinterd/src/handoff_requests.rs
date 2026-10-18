@@ -4,7 +4,8 @@
 //! captures, or opens the installed candidate. `Execute` is refused with the
 //! same blocking reasons until the old-side gate lands (Plan 0061 M3.6), and
 //! every resume ticket claim fails closed because this daemon issues no
-//! tickets (M3.16).
+//! tickets (M3.16). No handoff prepare is ever pending, so every Window
+//! acknowledgement finds nothing to acknowledge (M3.13).
 
 use splinterd::{
     handoff_compatibility::{HandoffCapabilities, VersionRange},
@@ -167,6 +168,16 @@ pub(crate) fn prepare_daemon_handoff(
     }
 }
 
+/// This daemon never sends a handoff prepare frame, so no acknowledgement
+/// matches a pending one. The old-side preparation (M3.13) keeps this answer
+/// for a stale, cancelled, or mismatched acknowledgement.
+pub(crate) fn no_pending_handoff_prepare() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::NotFound,
+        "no handoff prepare is pending for this generation",
+    )
+}
+
 /// This daemon issued no resume tickets, so every claim fails closed with
 /// the same error an invalid, expired, or replayed ticket gets.
 pub(crate) fn invalid_handoff_ticket() -> ProtocolError {
@@ -302,6 +313,16 @@ mod tests {
             report
                 .blocking_reasons
                 .contains(&HandoffBlockingReason::Unsupported)
+        );
+    }
+
+    #[test]
+    fn every_acknowledgement_finds_no_pending_prepare() {
+        assert_eq!(no_pending_handoff_prepare().code, ErrorCode::NotFound);
+        assert!(
+            no_pending_handoff_prepare()
+                .handoff_blocking_reasons
+                .is_empty()
         );
     }
 

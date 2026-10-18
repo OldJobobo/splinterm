@@ -126,7 +126,8 @@
         "policy_reload",
         "agent_status_report",
         "prepare_daemon_handoff",
-        "claim_handoff_control"
+        "claim_handoff_control",
+        "acknowledge_handoff_prepare"
       ]
     },
     "peer": {

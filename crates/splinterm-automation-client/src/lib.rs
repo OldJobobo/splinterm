@@ -3282,6 +3282,10 @@ impl Connection {
                 daemon_generation,
                 ..
             } if version == PROTOCOL_VERSION => {
+                // Every serving daemon generation is nonzero.
+                if daemon_generation == 0 {
+                    bail!("splinterd sent an invalid handshake");
+                }
                 if let Err(error) = limits.validate_terminal_transport() {
                     bail!(
                         "splinterd advertised invalid terminal transport limits: {}",
@@ -5271,6 +5275,31 @@ mod tests {
             assert_eq!(connection.daemon_hostname(), expected);
             server_task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn negotiation_rejects_daemon_generation_zero() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = read_client_frame(&mut server).await;
+            let hello = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: 0,
+            };
+            server
+                .write_all(&encode_frame(&hello).unwrap())
+                .await
+                .unwrap();
+            server
+        });
+        let error = Connection::connect_stream(client, ClientRole::Automation)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid handshake"), "{error:#}");
+        drop(server_task.await.unwrap());
     }
 
     #[tokio::test]

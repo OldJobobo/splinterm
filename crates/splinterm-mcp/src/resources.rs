@@ -747,14 +747,12 @@ async fn subscription_task(
             break;
         }
         private_sequence = private_sequence.saturating_add(1);
-        // Agent and handoff status ride the topology subscription without a
-        // revision; the public topology resource does not project them yet.
-        if uri == ResourceUri::Topology
-            && matches!(
-                event,
-                SubscriptionEvent::AgentStatusChanged { .. }
-                    | SubscriptionEvent::HandoffStatus { .. }
-            )
+        // Agent status rides the topology subscription without a revision;
+        // the public topology resource does not project it yet. Handoff status
+        // may ride any subscription and no public resource projects it.
+        if matches!(event, SubscriptionEvent::HandoffStatus { .. })
+            || (uri == ResourceUri::Topology
+                && matches!(event, SubscriptionEvent::AgentStatusChanged { .. }))
         {
             continue;
         }

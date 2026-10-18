@@ -1035,6 +1035,10 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one isolated scenario proves every handoff request refusal and its audit"
+)]
 async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited() {
     time::timeout(Duration::from_secs(30), async {
         // Development terminal access is on, so audit inspection needs no
@@ -1069,7 +1073,12 @@ async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited()
                 mode: splinterm_protocol::DaemonHandoffMode::Execute,
             },
             Request::ClaimHandoffControl {
-                ticket: [0x5a; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [0x5a; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ),
+            },
+            Request::AcknowledgeHandoffPrepare {
+                daemon_generation: 1,
             },
         ] {
             let denied = automation.request_result(request).await.unwrap_err();
@@ -1097,6 +1106,7 @@ async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited()
                     record.operation,
                     splinterm_protocol::AuditOperation::PrepareDaemonHandoff
                         | splinterm_protocol::AuditOperation::ClaimHandoffControl
+                        | splinterm_protocol::AuditOperation::AcknowledgeHandoffPrepare
                 )
             })
             .map(|record| {
@@ -1122,6 +1132,7 @@ async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited()
                 denied(splinterm_protocol::AuditOperation::PrepareDaemonHandoff),
                 denied(splinterm_protocol::AuditOperation::PrepareDaemonHandoff),
                 denied(splinterm_protocol::AuditOperation::ClaimHandoffControl),
+                denied(splinterm_protocol::AuditOperation::AcknowledgeHandoffPrepare),
             ]
         );
         // Refusal leaves the connection usable.

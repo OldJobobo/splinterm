@@ -121,7 +121,8 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         // Daemon handoff and resume tickets belong to the local graphical client
         // only (ADR 0011); automation and remote clients never reach them.
         | Request::PrepareDaemonHandoff { .. }
-        | Request::ClaimHandoffControl { .. } => RequestAuthorization::TrustedUi,
+        | Request::ClaimHandoffControl { .. }
+        | Request::AcknowledgeHandoffPrepare { .. } => RequestAuthorization::TrustedUi,
         Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }
@@ -316,7 +317,15 @@ mod tests {
         }
         assert_eq!(
             for_request(&Request::ClaimHandoffControl {
-                ticket: [1; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [1; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES]
+                ),
+            }),
+            RequestAuthorization::TrustedUi
+        );
+        assert_eq!(
+            for_request(&Request::AcknowledgeHandoffPrepare {
+                daemon_generation: 1,
             }),
             RequestAuthorization::TrustedUi
         );

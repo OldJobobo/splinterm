@@ -835,8 +835,46 @@ pub enum Request {
     /// adopted daemon issued it (ADR 0011). Every invalid, expired, replayed,
     /// or mismatched ticket fails with [`ErrorCode::InvalidHandoffTicket`].
     ClaimHandoffControl {
-        ticket: [u8; HANDOFF_RESUME_TICKET_BYTES],
+        ticket: HandoffResumeTicket,
     },
+    /// Trusted local graphical UI only. A Window that received a
+    /// [`ServerFrame::HandoffPrepare`] frame acknowledges it once it holds
+    /// the descriptors and its resume record, naming the generation the frame
+    /// came from. An acknowledgement that matches no pending handoff prepare,
+    /// because none was sent, it was cancelled, or the generation differs,
+    /// fails with [`ErrorCode::NotFound`] and changes nothing.
+    AcknowledgeHandoffPrepare {
+        daemon_generation: u64,
+    },
+}
+
+/// One opaque, single-use, generation-bound handoff resume ticket (ADR 0011).
+///
+/// On the wire it is exactly [`HANDOFF_RESUME_TICKET_BYTES`] bytes, so
+/// decoding rejects any other length. `Debug` never prints the bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HandoffResumeTicket([u8; HANDOFF_RESUME_TICKET_BYTES]);
+
+impl HandoffResumeTicket {
+    #[must_use]
+    pub const fn new(bytes: [u8; HANDOFF_RESUME_TICKET_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; HANDOFF_RESUME_TICKET_BYTES] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for HandoffResumeTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "HandoffResumeTicket(<{HANDOFF_RESUME_TICKET_BYTES} bytes redacted>)"
+        )
+    }
 }
 
 /// What [`Request::PrepareDaemonHandoff`] asks the daemon to do.
@@ -1112,11 +1150,14 @@ pub enum SubscriptionEvent {
         status: Option<AgentStatusSummary>,
         sequence: u64,
     },
-    /// Delivered on topology subscriptions while the serving daemon prepares
-    /// a handoff, without a topology revision bump. The outcome after exec
-    /// reaches a participating Window through its continuation channel, and
-    /// every other client through the next connection's
-    /// `ServerFrame::Hello::daemon_generation`.
+    /// Sent while the serving daemon prepares a handoff, without a topology
+    /// revision bump. It may arrive on any subscription, terminal, control,
+    /// or topology, and every client must tolerate it anywhere: it consumes
+    /// one subscription sequence number and changes no subscribed state. The
+    /// graphical "input paused" banner (Plan 0061 M3.12) decides which
+    /// subscriptions carry it. The outcome after exec reaches a participating
+    /// Window through its continuation channel, and every other client
+    /// through the next connection's `ServerFrame::Hello::daemon_generation`.
     HandoffStatus {
         /// Generation of the daemon that is handing off.
         daemon_generation: u64,
@@ -1911,6 +1952,7 @@ pub enum AuditOperation {
     AgentStatusReport,
     PrepareDaemonHandoff,
     ClaimHandoffControl,
+    AcknowledgeHandoffPrepare,
 }
 
 impl AuditOperation {
@@ -1965,6 +2007,7 @@ impl AuditOperation {
             Self::AgentStatusReport => "agent_status_report",
             Self::PrepareDaemonHandoff => "prepare_daemon_handoff",
             Self::ClaimHandoffControl => "claim_handoff_control",
+            Self::AcknowledgeHandoffPrepare => "acknowledge_handoff_prepare",
         }
     }
 }
@@ -2190,8 +2233,13 @@ pub enum ErrorCode {
     InvalidHandoffTicket,
 }
 
-/// Deserializes a sequence, failing as soon as it exceeds `MAX` elements so
-/// decoding never allocates beyond the bound.
+/// Deserializes a sequence, failing as soon as it holds more than `MAX`
+/// elements, so the resulting `Vec` never grows past the bound.
+///
+/// This caps the decoded list, not peak decoding memory: the enclosing
+/// `#[serde(tag = "type")]` frame enums buffer the whole frame body into
+/// serde content before any visitor runs, so peak memory is bounded by
+/// [`MAX_FRAME_BYTES`].
 fn deserialize_bounded_vec<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -3887,6 +3935,7 @@ mod tests {
             AuditOperation::AgentStatusReport,
             AuditOperation::PrepareDaemonHandoff,
             AuditOperation::ClaimHandoffControl,
+            AuditOperation::AcknowledgeHandoffPrepare,
         ] {
             assert_eq!(
                 serde_json::to_string(&operation).unwrap(),
@@ -5672,6 +5721,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every handoff request shape and decoding bound is reviewed together"
+    )]
     fn daemon_handoff_requests_and_hello_generation_have_explicit_wire_shapes() {
         assert_eq!(
             serde_json::to_value(Request::PrepareDaemonHandoff {
@@ -5698,11 +5751,28 @@ mod tests {
         );
 
         let claim = Request::ClaimHandoffControl {
-            ticket: [0xa5; HANDOFF_RESUME_TICKET_BYTES],
+            ticket: HandoffResumeTicket::new([0xa5; HANDOFF_RESUME_TICKET_BYTES]),
         };
         let value = serde_json::to_value(&claim).unwrap();
         assert_eq!(value["type"], "claim_handoff_control");
-        assert_eq!(value["ticket"].as_array().unwrap().len(), 32);
+        assert_eq!(
+            value["ticket"],
+            serde_json::json!(vec![0xa5_u8; HANDOFF_RESUME_TICKET_BYTES]),
+            "the newtype keeps the plain fixed-size array wire shape"
+        );
+        // Neither the ticket nor a request holding it prints the bytes.
+        for debug in [
+            format!(
+                "{:?}",
+                HandoffResumeTicket::new([0xa5; HANDOFF_RESUME_TICKET_BYTES])
+            ),
+            format!("{claim:?}"),
+            format!("{claim:#?}"),
+        ] {
+            assert!(debug.contains("32 bytes redacted"), "{debug}");
+            assert!(!debug.contains("165"), "{debug}");
+            assert!(!debug.to_ascii_lowercase().contains("a5"), "{debug}");
+        }
         assert_eq!(serde_json::from_value::<Request>(value).unwrap(), claim);
         for length in [
             0,
@@ -5719,6 +5789,19 @@ mod tests {
                 "a {length}-byte ticket is rejected while decoding"
             );
         }
+
+        let acknowledge = Request::AcknowledgeHandoffPrepare {
+            daemon_generation: 3,
+        };
+        let value = serde_json::to_value(&acknowledge).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"type": "acknowledge_handoff_prepare", "daemon_generation": 3})
+        );
+        assert_eq!(
+            serde_json::from_value::<Request>(value).unwrap(),
+            acknowledge
+        );
 
         let hello = ServerFrame::Hello {
             version: PROTOCOL_VERSION,
@@ -5852,7 +5935,8 @@ mod tests {
         };
         many.validate().unwrap();
 
-        // Decoding stops at the list bounds instead of allocating past them.
+        // Decoding rejects a list one element past its bound. (The whole frame
+        // is still parsed first; `MAX_FRAME_BYTES` bounds that.)
         let mut value = serde_json::to_value(&many).unwrap();
         value["blocking_reasons"][0]["lair_ids"]
             .as_array_mut()

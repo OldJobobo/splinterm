@@ -4127,6 +4127,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::ReportAgentStatus { .. }
             | Request::PrepareDaemonHandoff { .. }
             | Request::ClaimHandoffControl { .. }
+            | Request::AcknowledgeHandoffPrepare { .. }
     )
 }
 
@@ -4148,6 +4149,7 @@ fn interactive_bypass(
                 | Request::MaterializePreset { .. }
                 | Request::PrepareDaemonHandoff { .. }
                 | Request::ClaimHandoffControl { .. }
+                | Request::AcknowledgeHandoffPrepare { .. }
         );
     trusted_local || remote_human
 }
@@ -4758,7 +4760,8 @@ async fn request_policy_resources(
         | Request::ReleaseControl { .. }
         | Request::Detach { .. }
         | Request::PrepareDaemonHandoff { .. }
-        | Request::ClaimHandoffControl { .. } => Vec::new(),
+        | Request::ClaimHandoffControl { .. }
+        | Request::AcknowledgeHandoffPrepare { .. } => Vec::new(),
         Request::ListLairs
         | Request::InspectTopology
         | Request::SubscribeTopology
@@ -7876,6 +7879,10 @@ async fn handle_authorized_request(
         Request::ClaimHandoffControl { .. } => {
             require_trusted_local_ui(trusted_ui_client, peer)?;
             return Err(handoff_requests::invalid_handoff_ticket());
+        }
+        Request::AcknowledgeHandoffPrepare { .. } => {
+            require_trusted_local_ui(trusted_ui_client, peer)?;
+            return Err(handoff_requests::no_pending_handoff_prepare());
         }
     };
     Ok(Handled {
@@ -12270,7 +12277,12 @@ mod tests {
                 mode: splinterm_protocol::DaemonHandoffMode::Execute,
             },
             Request::ClaimHandoffControl {
-                ticket: [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ),
+            },
+            Request::AcknowledgeHandoffPrepare {
+                daemon_generation: 1,
             },
         ];
         // Development terminal access and remote human roles never stand in
@@ -12283,11 +12295,25 @@ mod tests {
         );
         for request in &handoff_requests {
             assert!(trusted_ui_request(request));
-            assert!(interactive_bypass(true, true, false, request));
-            assert!(!interactive_bypass(true, false, false, request));
-            assert!(!interactive_bypass(false, true, false, request));
-            assert!(!interactive_bypass(false, false, true, request));
-            assert!(!interactive_bypass(false, true, true, request));
+            // Every combination of role and executable inputs: only a trusted
+            // UI role from the installed graphical client bypasses policy.
+            for trusted_ui in [false, true] {
+                for matching_splinterm in [false, true] {
+                    for remote_interactive in [false, true] {
+                        assert_eq!(
+                            interactive_bypass(
+                                trusted_ui,
+                                matching_splinterm,
+                                remote_interactive,
+                                request
+                            ),
+                            trusted_ui && matching_splinterm,
+                            "{request:?} trusted_ui={trusted_ui} \
+                             matching={matching_splinterm} remote={remote_interactive}"
+                        );
+                    }
+                }
+            }
             for (trusted_ui, remote_interactive) in [(false, false), (false, true), (true, false)] {
                 let error =
                     authorize_request(request, &state, &peer, 0, trusted_ui, remote_interactive)
@@ -12319,10 +12345,11 @@ mod tests {
                     record.operation,
                     splinterm_protocol::AuditOperation::PrepareDaemonHandoff
                         | splinterm_protocol::AuditOperation::ClaimHandoffControl
+                        | splinterm_protocol::AuditOperation::AcknowledgeHandoffPrepare
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(denied.len(), 3);
+        assert_eq!(denied.len(), 4);
         for record in denied {
             assert_eq!(record.decision, splinterm_protocol::AuditDecision::Denied);
             assert_eq!(record.reason, "policy_rejected");
@@ -12333,6 +12360,54 @@ mod tests {
             assert!(record.resource.is_none());
             assert!(record.requested_scopes.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_handoff_ticket_is_audited_as_a_denial_without_the_ticket() {
+        let state = test_state(false);
+        let mut peer = PeerIdentity::for_test();
+        peer.install_persistent_executable(
+            executable_identity::ExecutableIdentity::from_pid(std::process::id())
+                .expect("snapshot test executable"),
+        );
+        let request = Request::ClaimHandoffControl {
+            ticket: splinterm_protocol::HandoffResumeTicket::new(
+                [0xa7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+            ),
+        };
+        // The trusted UI passed authorization; the claim itself failed.
+        let authorization = RequestAuthorizationContext {
+            interactive_bypass: true,
+            ..RequestAuthorizationContext::default()
+        };
+        append_request_result_audit(
+            &state,
+            &peer,
+            &request,
+            &authorization,
+            None,
+            &Err(handoff_requests::invalid_handoff_ticket()),
+        )
+        .await;
+        let page = state.audit.lock().await.page(None, 16);
+        let [record] = page.records.as_slice() else {
+            panic!("exactly one audit record: {:?}", page.records);
+        };
+        assert_eq!(
+            record.operation,
+            splinterm_protocol::AuditOperation::ClaimHandoffControl
+        );
+        assert_eq!(record.decision, splinterm_protocol::AuditDecision::Denied);
+        assert_eq!(record.reason, "authorization_denied");
+        assert_eq!(
+            record.outcome,
+            Some(splinterm_protocol::AuditOutcome::Failed)
+        );
+        assert!(record.resource.is_none());
+        assert!(record.policy_rule_id.is_none());
+        let encoded = serde_json::to_string(record).unwrap();
+        assert!(!encoded.contains("167,167"), "{encoded}");
+        assert!(!encoded.contains("ticket"), "{encoded}");
     }
 
     #[tokio::test]

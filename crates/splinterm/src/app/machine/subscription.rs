@@ -16,6 +16,28 @@ async fn next_private_event(connection: &mut Connection) -> Result<(u64, u64, Su
     }
 }
 
+/// Handoff status may ride any subscription and is part of no public v2
+/// stream. In order it only advances the private sequence; out of order it
+/// falls through and resynchronizes like any other gap. Returns whether the
+/// event was consumed.
+fn skip_handoff_status(
+    subscription_matches: bool,
+    event: &SubscriptionEvent,
+    sequence: u64,
+    private_sequence: &mut u64,
+) -> Result<bool> {
+    if !subscription_matches
+        || !matches!(event, SubscriptionEvent::HandoffStatus { .. })
+        || sequence != *private_sequence
+    {
+        return Ok(false);
+    }
+    *private_sequence = private_sequence
+        .checked_add(1)
+        .context("private sequence exhausted")?;
+    Ok(true)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "terminal sequence, revision, history, and termination state stay adjacent"
@@ -69,6 +91,14 @@ async fn run_terminal_subscription(
             result = next_private_event(connection) => result?,
             _ = tokio::signal::ctrl_c() => return Ok(()),
         };
+        if skip_handoff_status(
+            event_subscription == subscription_id,
+            &event,
+            sequence,
+            &mut private_sequence,
+        )? {
+            continue;
+        }
         public_sequence = public_sequence
             .checked_add(1)
             .context("public sequence exhausted")?;
@@ -266,6 +296,10 @@ async fn run_topology_subscription(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "control sequence, transfer-ID mapping, and resynchronization stay adjacent"
+)]
 async fn run_control_subscription(
     connection: &mut Connection,
     splint_id: SplintId,
@@ -308,6 +342,14 @@ async fn run_control_subscription(
             result = next_private_event(connection) => result?,
             _ = tokio::signal::ctrl_c() => return Ok(()),
         };
+        if skip_handoff_status(
+            event_subscription == subscription_id,
+            &event,
+            sequence,
+            &mut private_sequence,
+        )? {
+            continue;
+        }
         public_sequence = public_sequence
             .checked_add(1)
             .context("public sequence exhausted")?;
@@ -411,5 +453,32 @@ pub(in crate::app) async fn run_machine_subscription(
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoff_status_is_skipped_on_every_subscription_kind_without_a_public_event() {
+        let status = SubscriptionEvent::HandoffStatus {
+            daemon_generation: 1,
+            phase: splinterm_protocol::HandoffStatusPhase::Preparing,
+        };
+        let mut private_sequence = 4;
+        assert!(skip_handoff_status(true, &status, 4, &mut private_sequence).unwrap());
+        assert_eq!(private_sequence, 5);
+        // Out of order, or for another subscription, it is left to the gap and
+        // ownership checks every other event gets.
+        assert!(!skip_handoff_status(true, &status, 9, &mut private_sequence).unwrap());
+        assert!(!skip_handoff_status(false, &status, 5, &mut private_sequence).unwrap());
+        assert_eq!(private_sequence, 5);
+        let exited = SubscriptionEvent::Exited {
+            code: Some(0),
+            signal: None,
+        };
+        assert!(!skip_handoff_status(true, &exited, 5, &mut private_sequence).unwrap());
+        assert_eq!(private_sequence, 5);
     }
 }
