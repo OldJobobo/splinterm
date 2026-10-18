@@ -343,6 +343,16 @@ const fn offers_omarchy_hint(command: &Command) -> bool {
             | Command::Window { .. }
             | Command::Launch { .. }
             | Command::XdgLaunch { app_id: None, .. }
+    ) || matches!(
+        // A preset that opens a Window is a local graphical launch too.
+        command,
+        Command::Preset {
+            command: PresetCommand::Run {
+                dry_run: false,
+                no_open: false,
+                ..
+            }
+        }
     )
 }
 
@@ -1266,6 +1276,21 @@ mod tests {
         assert!(offers(&["splinterm", "dojos"]));
         assert!(offers(&["splinterm", "reopen"]));
         assert!(offers(&["splinterm", "launch"]));
+        assert!(offers(&["splinterm", "preset", "run", "work"]));
+        assert!(!offers(&[
+            "splinterm",
+            "preset",
+            "run",
+            "work",
+            "--no-open"
+        ]));
+        assert!(!offers(&[
+            "splinterm",
+            "preset",
+            "run",
+            "work",
+            "--dry-run"
+        ]));
         assert!(!offers(&[
             "splinterm",
             "xdg-launch",
