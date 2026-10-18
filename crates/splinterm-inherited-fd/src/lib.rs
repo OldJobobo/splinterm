@@ -5,28 +5,35 @@
 //! the only Plan 0037 boundary permitted to perform that conversion. Its unsafe
 //! entrypoint is intentionally narrow and valid only in the new daemon image,
 //! before threads or ordinary runtime objects are created, so its caller must
-//! prove the temporal ownership contract. The entrypoint independently rejects
-//! a multi-threaded process before it observes or mutates any descriptor.
+//! prove the temporal ownership contract. Both entrypoints, the pre-claim
+//! sealed manifest read and the claim itself, independently reject a
+//! multi-threaded process before they observe or mutate any descriptor.
 
 #![deny(unsafe_code)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
-    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     path::Path,
 };
 
 #[cfg(any(test, feature = "test-support"))]
 use rustix::io::fcntl_getfd;
 use rustix::{
-    fs::OFlags,
-    io::{FdFlags, fcntl_setfd},
+    fs::{FileType, OFlags, SealFlags, fcntl_get_seals, fstat},
+    io::{Errno, FdFlags, fcntl_setfd, pread},
 };
 use thiserror::Error;
 
 /// Hard ceiling shared with the daemon descriptor manifest.
 pub const MAX_INHERITED_DESCRIPTORS: usize = 1024;
+
+/// Seals that make an anonymous body immutable in content, extent, and seals.
+pub const REQUIRED_SEALED_BODY_SEALS: SealFlags = SealFlags::WRITE
+    .union(SealFlags::GROW)
+    .union(SealFlags::SHRINK)
+    .union(SealFlags::SEAL);
 
 /// Owned descriptors in the exact order supplied by the validated manifest.
 ///
@@ -120,6 +127,14 @@ pub enum InheritedFdError {
     OwnedDescriptorInheritable(RawFd),
     #[error("cannot inspect the post-exec descriptor table: {0}")]
     Inspect(#[source] io::Error),
+    #[error("inherited sealed descriptor {fd} has invalid type, extent, or seals")]
+    InvalidSealedDescriptor { fd: RawFd },
+    #[error("cannot read inherited sealed descriptor {fd}: {source}")]
+    ReadSealedDescriptor {
+        fd: RawFd,
+        #[source]
+        source: io::Error,
+    },
     #[error("cannot restore close-on-exec on inherited descriptor {fd}: {source}")]
     RestoreCloseOnExec {
         fd: RawFd,
@@ -128,6 +143,109 @@ pub enum InheritedFdError {
     },
     #[error("fatal post-exec claim failure left descriptor flags indeterminate: {0}")]
     FatalRollbackCloseOnExec(#[source] io::Error),
+}
+
+/// Reads one bounded sealed descriptor before the post-exec ownership claim.
+///
+/// This is the manifest-before-claim half of the audited startup boundary.
+/// After input validation it rejects a process with more than one thread, then
+/// requires `fd` to be open and intentionally inherited (`FD_CLOEXEC` clear)
+/// before borrowing it. The borrowed descriptor must be a nonempty regular file
+/// no larger than `maximum_bytes` carrying every seal in
+/// [`REQUIRED_SEALED_BODY_SEALS`]. Positioned reads leave the inherited
+/// open-file-description offset unchanged, and nothing is claimed, closed, or
+/// flag-mutated.
+///
+/// # Safety
+///
+/// The caller must be the single-threaded daemon bootstrap immediately after
+/// exec, and an inherited `fd` must have no live Rust owner. No descriptor may
+/// be opened, closed, duplicated, or otherwise replaced between this call and
+/// the matching [`claim_post_exec_inherited`]. The function borrows but never
+/// takes ownership of `fd`. The thread and inheritance checks are fail-closed
+/// backstops; they do not relieve the caller of this contract.
+///
+/// # Errors
+/// Rejects a standard descriptor or zero bound, a multi-threaded process, an
+/// absent or close-on-exec descriptor, invalid type, extent, or seals,
+/// short or long reads, and I/O failures.
+#[allow(
+    unsafe_code,
+    reason = "audited temporary borrow of a post-exec raw manifest descriptor"
+)]
+pub unsafe fn read_post_exec_sealed_descriptor(
+    fd: RawFd,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, InheritedFdError> {
+    if fd < 3 {
+        return Err(InheritedFdError::StandardDescriptor(fd));
+    }
+    if maximum_bytes == 0 {
+        return Err(InheritedFdError::InvalidSealedDescriptor { fd });
+    }
+    let threads = process_thread_count()?;
+    if threads != 1 {
+        return Err(InheritedFdError::MultiThreaded(threads));
+    }
+    match descriptor_is_close_on_exec(fd) {
+        Ok(false) => {}
+        Ok(true) => return Err(InheritedFdError::DescriptorWasNotInherited(fd)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(InheritedFdError::MissingDescriptor(fd));
+        }
+        Err(error) => return Err(InheritedFdError::Inspect(error)),
+    }
+    // SAFETY: the fdinfo pass proved the descriptor open and inherited, and the
+    // caller guarantees the single-threaded post-exec process cannot close or
+    // replace it before this non-owning borrow ends.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    read_sealed_body(borrowed, maximum_bytes)
+}
+
+fn read_sealed_body(
+    descriptor: BorrowedFd<'_>,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, InheritedFdError> {
+    let fd = descriptor.as_raw_fd();
+    let read_error = |error: Errno| InheritedFdError::ReadSealedDescriptor {
+        fd,
+        source: io::Error::from_raw_os_error(error.raw_os_error()),
+    };
+    let invalid = || InheritedFdError::InvalidSealedDescriptor { fd };
+    let stat = fstat(descriptor).map_err(read_error)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(invalid());
+    }
+    let size = usize::try_from(stat.st_size)
+        .ok()
+        .filter(|size| *size > 0 && *size <= maximum_bytes)
+        .ok_or_else(invalid)?;
+    // Regular files without sealing support report EINVAL: an invalid type,
+    // not an I/O failure.
+    let seals = match fcntl_get_seals(descriptor) {
+        Ok(seals) => seals,
+        Err(Errno::INVAL) => return Err(invalid()),
+        Err(error) => return Err(read_error(error)),
+    };
+    if !seals.contains(REQUIRED_SEALED_BODY_SEALS) {
+        return Err(invalid());
+    }
+    let mut bytes = vec![0_u8; size];
+    let mut read = 0_usize;
+    while read < size {
+        let offset = u64::try_from(read).map_err(|_| invalid())?;
+        let count = pread(descriptor, &mut bytes[read..], offset).map_err(read_error)?;
+        if count == 0 {
+            return Err(invalid());
+        }
+        // `pread` never returns more than the remaining slice length.
+        read += count;
+    }
+    let trailing_offset = u64::try_from(size).map_err(|_| invalid())?;
+    if pread(descriptor, &mut [0_u8; 1], trailing_offset).map_err(read_error)? != 0 {
+        return Err(invalid());
+    }
+    Ok(bytes)
 }
 
 /// Claims one completely validated post-exec descriptor set.
@@ -391,5 +509,86 @@ mod tests {
 
         assert!(matches!(result, Err(InheritedFdError::MultiThreaded(threads)) if threads >= 2));
         assert!(fcntl_getfd(&inheritable).unwrap().is_empty());
+    }
+
+    fn memfd(bytes: &[u8], seals: SealFlags) -> OwnedFd {
+        use rustix::fs::{MemfdFlags, fcntl_add_seals, memfd_create};
+        let fd = memfd_create(
+            "inherited-fd-test",
+            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        let mut written = 0;
+        while written < bytes.len() {
+            written += rustix::io::write(&fd, &bytes[written..]).unwrap();
+        }
+        rustix::fs::seek(&fd, rustix::fs::SeekFrom::Start(0)).unwrap();
+        if !seals.is_empty() {
+            fcntl_add_seals(&fd, seals).unwrap();
+        }
+        fd
+    }
+
+    fn assert_invalid_body(result: &Result<Vec<u8>, InheritedFdError>) {
+        assert!(
+            matches!(
+                result,
+                Err(InheritedFdError::InvalidSealedDescriptor { .. })
+            ),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn sealed_body_reader_accepts_only_bounded_sealed_regular_files() {
+        use std::os::fd::AsFd;
+
+        let body = b"sealed manifest body";
+        let sealed = memfd(body, REQUIRED_SEALED_BODY_SEALS);
+        assert_eq!(read_sealed_body(sealed.as_fd(), body.len()).unwrap(), body);
+        // Positioned reads leave the shared file offset untouched.
+        assert_eq!(
+            rustix::fs::seek(&sealed, rustix::fs::SeekFrom::Current(0)).unwrap(),
+            0
+        );
+        assert_invalid_body(&read_sealed_body(sealed.as_fd(), body.len() - 1));
+
+        assert_invalid_body(&read_sealed_body(
+            memfd(b"", REQUIRED_SEALED_BODY_SEALS).as_fd(),
+            body.len(),
+        ));
+        assert_invalid_body(&read_sealed_body(
+            memfd(body, SealFlags::empty()).as_fd(),
+            body.len(),
+        ));
+        assert_invalid_body(&read_sealed_body(
+            memfd(body, SealFlags::WRITE | SealFlags::SHRINK | SealFlags::SEAL).as_fd(),
+            body.len(),
+        ));
+        let (reader, _writer) = io::pipe().unwrap();
+        assert_invalid_body(&read_sealed_body(reader.as_fd(), body.len()));
+        let null = File::open("/dev/null").unwrap();
+        assert_invalid_body(&read_sealed_body(null.as_fd(), body.len()));
+    }
+
+    #[test]
+    #[allow(unsafe_code, reason = "test exercises the explicit post-exec contract")]
+    fn raw_sealed_read_rejects_malformed_input_and_threads_before_inspection() {
+        // SAFETY (all calls): input validation or the thread check rejects
+        // each call before any descriptor is borrowed or inspected.
+        assert!(matches!(
+            unsafe { read_post_exec_sealed_descriptor(2, 1) },
+            Err(InheritedFdError::StandardDescriptor(2))
+        ));
+        assert!(matches!(
+            unsafe { read_post_exec_sealed_descriptor(i32::MAX, 0) },
+            Err(InheritedFdError::InvalidSealedDescriptor { fd: i32::MAX })
+        ));
+        let (release, parked) = mpsc::channel::<()>();
+        let helper = thread::spawn(move || parked.recv());
+        let result = unsafe { read_post_exec_sealed_descriptor(i32::MAX, 1) };
+        release.send(()).unwrap();
+        helper.join().unwrap().unwrap();
+        assert!(matches!(result, Err(InheritedFdError::MultiThreaded(threads)) if threads >= 2));
     }
 }

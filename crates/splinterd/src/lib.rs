@@ -1,6 +1,7 @@
 //! Daemon-owned runtime components.
 
 pub mod authorization;
+mod candidate_bootstrap;
 pub mod executable_snapshot;
 pub mod handoff_checkpoint;
 pub mod handoff_compatibility;
@@ -16,6 +17,15 @@ pub mod image_transport;
 mod live;
 pub mod package_provenance;
 
+pub use candidate_bootstrap::{CandidateBootstrap, CandidateRuntimeStage, CandidateStageFailure};
+#[doc(hidden)]
+pub use candidate_bootstrap::{
+    CandidateManifestAcquisition, bind_candidate_manifest, decode_candidate_manifest,
+    handoff_manifest_max_bytes,
+};
+#[cfg(feature = "integration-test")]
+#[doc(hidden)]
+pub use handoff_manifest::encode_manifest_pair_for_integration_test;
 pub use live::{
     ActorHandoffEvidence, CompactSubscription, LiveCell, LiveError, LiveEvent, LiveRow,
     LiveRuntimeMetrics, LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig,

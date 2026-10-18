@@ -21,7 +21,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
         linux::net::SocketAddrExt,
         unix::{
             net::{SocketAddr, UnixListener, UnixStream},
@@ -484,13 +484,76 @@ impl LinuxPtyIdentity {
         Ok(())
     }
 
-    fn validate_terminal(self, master: &File) -> Result<()> {
+    fn validate_terminal(self, master: &impl AsFd) -> Result<()> {
         let terminal_session = termios::tcgetsid(master)
             .map_err(|error| PtyError::io("validate controlling terminal session", error))?;
         if terminal_session != self.session {
             return Err(PtyError::IdentityMismatch);
         }
         Ok(())
+    }
+
+    /// Verifies one inherited master against complete running-manifest evidence.
+    ///
+    /// The descriptor must be a PTY master, not its slave or another terminal:
+    /// a slave answers the session, size, and foreground queries identically.
+    /// This performs no PTY read, descriptor duplication, ownership transfer, or
+    /// child reap. It is intended for candidate staging before the first
+    /// post-checkpoint read.
+    ///
+    /// # Errors
+    /// Rejects a non-master descriptor, or changed direct-child, process-group,
+    /// session, controlling-terminal, running-child, kernel-size, or
+    /// foreground-process-group state.
+    pub fn verify_inherited(
+        self,
+        master: BorrowedFd<'_>,
+        expected_size: PtySize,
+        expected_foreground_process_group: u32,
+    ) -> Result<()> {
+        verify_pty_master(master)?;
+        self.validate_process()?;
+        if process::waitid(
+            process::WaitId::Pid(self.child),
+            process::WaitIdOptions::EXITED
+                | process::WaitIdOptions::NOHANG
+                | process::WaitIdOptions::NOWAIT,
+        )
+        .map_err(|error| PtyError::io("validate inherited child state", error))?
+        .is_some()
+        {
+            return Err(PtyError::ProcessExited);
+        }
+        self.validate_terminal(&master)?;
+        let observed_size = termios::tcgetwinsize(master)
+            .map(PtySize::from_winsize)
+            .map_err(|error| PtyError::io("validate inherited PTY size", error))?;
+        let observed_foreground = termios::tcgetpgrp(master)
+            .map(pid_to_u32)
+            .map_err(|error| PtyError::io("validate inherited PTY foreground group", error))?;
+        if observed_size != expected_size
+            || observed_foreground != expected_foreground_process_group
+        {
+            return Err(PtyError::IdentityMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Requires `descriptor` to be the master side of a Unix98 PTY.
+///
+/// `TIOCGPTN` succeeds only on a master; a slave or any other descriptor
+/// fails with `ENOTTY` or `EINVAL`.
+///
+/// # Errors
+/// Returns [`PtyError::IdentityMismatch`] for any non-master descriptor.
+pub fn verify_pty_master(descriptor: BorrowedFd<'_>) -> Result<()> {
+    match pty::ptsname(descriptor, Vec::new()) {
+        Ok(_) => Ok(()),
+        Err(rustix::io::Errno::NOTTY | rustix::io::Errno::INVAL | rustix::io::Errno::BADF) => {
+            Err(PtyError::IdentityMismatch)
+        }
+        Err(error) => Err(PtyError::io("validate PTY master", error)),
     }
 }
 
@@ -513,6 +576,11 @@ impl AdoptableLinuxPtySession {
     #[must_use]
     pub fn master_raw_fd(&self) -> i32 {
         self.master.as_raw_fd()
+    }
+
+    #[must_use]
+    pub fn master(&self) -> BorrowedFd<'_> {
+        self.master.as_fd()
     }
 
     #[must_use]

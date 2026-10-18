@@ -238,6 +238,72 @@ impl ConfigEvidence {
     fn matches(&self, config: &TerminalConfig) -> bool {
         *self == Self::from_config(config)
     }
+
+    /// Reconstructs the exact encoded configuration around the receiving
+    /// generation's process-wide budget handles.
+    ///
+    /// Shared budgets are runtime handles, so only their limits are evidence;
+    /// both must be present and equal to the supplied handles' limits.
+    fn handoff_config(
+        &self,
+        shared_image_budget: SharedImageBudget,
+        shared_kitty_upload_budget: SharedKittyUploadBudget,
+    ) -> Result<TerminalConfig, CheckpointError> {
+        // Exhaustive destructuring: a new evidence field must be restored here.
+        let Self {
+            scrollback_lines,
+            tab_width,
+            osc_limit,
+            dcs_limit,
+            composed_limit,
+            event_limit,
+            update_history_limit,
+            image_bytes_per_content,
+            image_bytes_per_terminal,
+            image_contents_per_terminal,
+            image_placements_per_terminal,
+            image_maximum_dimension,
+            image_maximum_pixels,
+            shared_image_budget_limit,
+            shared_kitty_upload_budget_limit,
+            sixel_enabled,
+            sixel_private_palette,
+            sixel_palette,
+        } = self;
+        if *shared_image_budget_limit != Some(shared_image_budget.limit())
+            || *shared_kitty_upload_budget_limit != Some(shared_kitty_upload_budget.limit())
+        {
+            return Err(CheckpointError::IncompatibleConfig);
+        }
+        let config = TerminalConfig {
+            scrollback_lines: *scrollback_lines,
+            tab_width: *tab_width,
+            osc_limit: *osc_limit,
+            dcs_limit: *dcs_limit,
+            composed_limit: *composed_limit,
+            event_limit: *event_limit,
+            update_history_limit: *update_history_limit,
+            image_limits: crate::ImageLimits {
+                bytes_per_content: *image_bytes_per_content,
+                bytes_per_terminal: *image_bytes_per_terminal,
+                contents_per_terminal: *image_contents_per_terminal,
+                placements_per_terminal: *image_placements_per_terminal,
+                maximum_dimension: *image_maximum_dimension,
+                maximum_pixels: *image_maximum_pixels,
+            },
+            shared_image_budget: Some(shared_image_budget),
+            shared_kitty_upload_budget: Some(shared_kitty_upload_budget),
+            sixel: crate::SixelConfig {
+                enabled: *sixel_enabled,
+                private_palette: *sixel_private_palette,
+                palette: *sixel_palette,
+            },
+        };
+        if !self.matches(&config) {
+            return Err(CheckpointError::IncompatibleConfig);
+        }
+        Ok(config)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -648,6 +714,13 @@ impl DecodedCheckpoint {
         }
     }
 
+    const fn config(&self) -> &ConfigEvidence {
+        match self {
+            Self::V1(body) => &body.config,
+            Self::V2(body) => &body.terminal.config,
+        }
+    }
+
     fn restore(self, config: TerminalConfig) -> Result<Terminal, CheckpointError> {
         match self {
             Self::V1(body) => body.restore(config, None),
@@ -694,6 +767,28 @@ impl Terminal {
         config: TerminalConfig,
     ) -> Result<Self, CheckpointError> {
         decode_checkpoint(bytes)?.restore(config)
+    }
+
+    /// Restores a transient handoff checkpoint using its sealed configuration
+    /// evidence and the receiving generation's exact process-wide budgets.
+    ///
+    /// The checkpoint remains authority for per-terminal parser, image, and
+    /// resource limits. Shared budget identities are reconstructed runtime
+    /// handles whose limits must exactly match the encoded evidence.
+    ///
+    /// # Errors
+    /// Rejects malformed state, absent shared-budget evidence, or any
+    /// shared-budget limit mismatch before publishing a partial terminal.
+    pub fn restore_handoff_checkpoint(
+        bytes: &[u8],
+        shared_image_budget: SharedImageBudget,
+        shared_kitty_upload_budget: SharedKittyUploadBudget,
+    ) -> Result<Self, CheckpointError> {
+        let checkpoint = decode_checkpoint(bytes)?;
+        let config = checkpoint
+            .config()
+            .handoff_config(shared_image_budget, shared_kitty_upload_budget)?;
+        checkpoint.restore(config)
     }
 }
 

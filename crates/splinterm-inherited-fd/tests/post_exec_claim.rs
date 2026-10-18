@@ -22,15 +22,27 @@ use std::{
 };
 
 use rustix::{
-    fs::OFlags,
-    io::{FdFlags, fcntl_getfd, fcntl_setfd},
+    fs::{MemfdFlags, OFlags, fcntl_add_seals, memfd_create},
+    io::{FdFlags, fcntl_getfd, fcntl_setfd, write},
 };
-use splinterm_inherited_fd::{InheritedFdError, claim_post_exec_inherited};
+use splinterm_inherited_fd::{
+    InheritedFdError, REQUIRED_SEALED_BODY_SEALS, claim_post_exec_inherited,
+    read_post_exec_sealed_descriptor,
+};
 
 const STAGE: &str = "SPLINTERM_INHERITED_FD_STAGE";
 const EXPECTED: &str = "SPLINTERM_INHERITED_FD_EXPECTED";
 const UNKNOWN: &str = "SPLINTERM_INHERITED_FD_UNKNOWN";
-const STAGES: [&str; 4] = ["missing", "not-inherited", "multi-threaded", "success"];
+const SEALED: &str = "SPLINTERM_INHERITED_FD_SEALED";
+const UNSEALED: &str = "SPLINTERM_INHERITED_FD_UNSEALED";
+const SEALED_BODY: &[u8] = b"sealed post-exec manifest body";
+const STAGES: [&str; 5] = [
+    "missing",
+    "not-inherited",
+    "multi-threaded",
+    "sealed-read",
+    "success",
+];
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct TestDirectory(PathBuf);
@@ -102,6 +114,80 @@ fn assert_untouched(fds: &[i32]) {
         assert!(is_open(*fd), "descriptor {fd} was closed");
         assert!(!is_close_on_exec(*fd), "descriptor {fd} lost inheritance");
     }
+}
+
+fn file_position(fd: i32) -> u64 {
+    fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("pos:\t"))
+        .map(|position| position.parse().unwrap())
+        .unwrap()
+}
+
+fn sealed_memfd(bytes: &[u8], sealed: bool) -> File {
+    let fd = memfd_create(
+        "post-exec-sealed-body",
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+    )
+    .unwrap();
+    let mut written = 0;
+    while written < bytes.len() {
+        written += write(&fd, &bytes[written..]).unwrap();
+    }
+    if sealed {
+        fcntl_add_seals(&fd, REQUIRED_SEALED_BODY_SEALS).unwrap();
+    }
+    File::from(fd)
+}
+
+fn env_fd(name: &str) -> i32 {
+    env::var(name).unwrap().parse().unwrap()
+}
+
+fn sealed_read_generation(fixtures: &[i32]) {
+    let sealed = env_fd(SEALED);
+    let unsealed = env_fd(UNSEALED);
+    let position = file_position(sealed);
+    let read = |fd, maximum| {
+        // SAFETY: this process has just exec'd, runs only its main thread, and
+        // holds no Rust owner for any inherited fixture. The read only borrows.
+        unsafe { read_post_exec_sealed_descriptor(fd, maximum) }
+    };
+    assert_eq!(read(sealed, SEALED_BODY.len()).unwrap(), SEALED_BODY);
+    assert_eq!(file_position(sealed), position);
+    assert!(matches!(
+        read(sealed, SEALED_BODY.len() - 1),
+        Err(InheritedFdError::InvalidSealedDescriptor { fd }) if fd == sealed
+    ));
+    assert!(matches!(
+        read(unsealed, 1024),
+        Err(InheritedFdError::InvalidSealedDescriptor { fd }) if fd == unsealed
+    ));
+    // An ordinary file is unsealable or lacks the required seals.
+    assert!(matches!(
+        read(fixtures[0], 1024),
+        Err(InheritedFdError::InvalidSealedDescriptor { .. })
+    ));
+    assert!(matches!(
+        read(i32::MAX, 1024),
+        Err(InheritedFdError::MissingDescriptor(i32::MAX))
+    ));
+    let local = File::open("/dev/null").unwrap();
+    assert!(matches!(
+        read(local.as_raw_fd(), 1024),
+        Err(InheritedFdError::DescriptorWasNotInherited(fd)) if fd == local.as_raw_fd()
+    ));
+
+    let (release, parked) = mpsc::channel::<()>();
+    let helper = thread::spawn(move || parked.recv());
+    let result = read(sealed, SEALED_BODY.len());
+    release.send(()).unwrap();
+    helper.join().unwrap().unwrap();
+    assert!(matches!(result, Err(InheritedFdError::MultiThreaded(2))));
+
+    assert_untouched(fixtures);
+    assert_untouched(&[sealed, unsealed]);
 }
 
 fn replacement_generation(stage: &str) {
@@ -180,11 +266,14 @@ fn replacement_generation(stage: &str) {
             assert!(matches!(result, Err(InheritedFdError::MultiThreaded(2))));
             assert_untouched(&fixtures);
         }
+        "sealed-read" => sealed_read_generation(&fixtures),
         stage => panic!("unexpected stage {stage}"),
     }
 }
 
-fn run_replacement(stage: &str, expected: &[File], unknown: &File) {
+/// Every stage inherits the sealed-read fixtures too; claiming stages close
+/// them as unexpected descriptors.
+fn run_replacement(stage: &str, expected: &[File], unknown: &File, sealed: [&File; 2]) {
     let expected = expected
         .iter()
         .map(|file| file.as_raw_fd().to_string())
@@ -194,6 +283,8 @@ fn run_replacement(stage: &str, expected: &[File], unknown: &File) {
         .env(STAGE, stage)
         .env(EXPECTED, expected)
         .env(UNKNOWN, unknown.as_raw_fd().to_string())
+        .env(SEALED, sealed[0].as_raw_fd().to_string())
+        .env(UNSEALED, sealed[1].as_raw_fd().to_string())
         .status()
         .unwrap();
     assert!(
@@ -213,22 +304,23 @@ fn main() {
         .map(|index| fixture(&directory.0.join(format!("expected-{index}"))))
         .collect::<Vec<_>>();
     let unknown = fixture(&directory.0.join("unknown"));
-    let originals = expected
-        .iter()
-        .chain([&unknown])
+    let sealed = sealed_memfd(SEALED_BODY, true);
+    let unsealed = sealed_memfd(SEALED_BODY, false);
+    let inherited = || expected.iter().chain([&unknown, &sealed, &unsealed]);
+    let originals = inherited()
         .map(|file| fcntl_getfd(file).unwrap())
         .collect::<Vec<_>>();
-    for file in expected.iter().chain([&unknown]) {
+    for file in inherited() {
         let flags = fcntl_getfd(file).unwrap();
         fcntl_setfd(file, flags - FdFlags::CLOEXEC).unwrap();
     }
 
     for stage in STAGES {
-        run_replacement(stage, &expected, &unknown);
+        run_replacement(stage, &expected, &unknown, [&sealed, &unsealed]);
         println!("test post_exec_claim::{stage} ... ok");
     }
 
-    for (file, flags) in expected.iter().chain([&unknown]).zip(originals) {
+    for (file, flags) in inherited().zip(originals) {
         fcntl_setfd(file, flags).unwrap();
     }
     println!("\ntest result: ok. {} passed; 0 failed", STAGES.len());

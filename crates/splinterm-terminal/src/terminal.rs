@@ -541,6 +541,12 @@ impl Terminal {
         };
     }
 
+    /// Returns the cell pixel geometry used by image protocol state.
+    #[must_use]
+    pub const fn cell_pixel_size(&self) -> Option<(u32, u32)> {
+        self.cell_pixels
+    }
+
     /// Returns current image-plane accounting and high-water marks.
     #[must_use]
     pub const fn image_metrics(&self) -> ImageMetrics {

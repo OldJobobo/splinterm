@@ -46,6 +46,55 @@ fn canonical_round_trip_preserves_state_and_pending_replies() {
 }
 
 #[test]
+fn handoff_restore_reconstructs_encoded_limits_with_exact_shared_budgets() {
+    let image_budget = SharedImageBudget::new(4 * 1024 * 1024);
+    let kitty_budget = SharedKittyUploadBudget::new(2 * 1024 * 1024);
+    let config = TerminalConfig {
+        scrollback_lines: 77,
+        osc_limit: 8_192,
+        shared_image_budget: Some(image_budget.clone()),
+        shared_kitty_upload_budget: Some(kitty_budget.clone()),
+        ..TerminalConfig::default()
+    };
+    let mut original = Terminal::new(12, 4, config);
+    original.set_cell_pixel_size(8, 16);
+    original.advance(b"handoff-config\r\n");
+    let bytes = original.encode_checkpoint().unwrap();
+
+    let restored =
+        Terminal::restore_handoff_checkpoint(&bytes, image_budget.clone(), kitty_budget.clone())
+            .unwrap();
+    assert_eq!(restored.encode_checkpoint().unwrap(), bytes);
+    assert_eq!(restored.cell_pixel_size(), Some((8, 16)));
+    assert_eq!(restored.revision(), original.revision());
+    assert!(matches!(
+        Terminal::restore_handoff_checkpoint(
+            &bytes,
+            SharedImageBudget::new(image_budget.limit() + 1),
+            kitty_budget.clone(),
+        ),
+        Err(CheckpointError::IncompatibleConfig)
+    ));
+    assert!(matches!(
+        Terminal::restore_handoff_checkpoint(
+            &bytes,
+            image_budget.clone(),
+            SharedKittyUploadBudget::new(kitty_budget.limit() + 1),
+        ),
+        Err(CheckpointError::IncompatibleConfig)
+    ));
+
+    // A checkpoint without shared-budget evidence cannot be bound to the
+    // receiving generation's process-wide budgets.
+    let (unbudgeted, _) = terminal();
+    let unbudgeted = unbudgeted.encode_checkpoint().unwrap();
+    assert!(matches!(
+        Terminal::restore_handoff_checkpoint(&unbudgeted, image_budget, kitty_budget),
+        Err(CheckpointError::IncompatibleConfig)
+    ));
+}
+
+#[test]
 fn every_supported_byte_split_continues_identically() {
     let fixtures: &[&[u8]] = &[
         "plain-\u{00e9}-e\u{301}-\u{754c}".as_bytes(),

@@ -34,10 +34,21 @@ tracing-subscriber.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+proc-macro2 = "1.0"
 splinterm-automation-client = { path = "../splinterm-automation-client" }
 splinterm-inherited-fd = { path = "../splinterm-inherited-fd", features = ["test-support"] }
 splinterm-mcp = { path = "../splinterm-mcp", features = ["integration-test"] }
+syn = { version = "2.0", features = ["full", "visit"] }
 tokio = { workspace = true, features = ["test-util"] }
+toml.workspace = true
 
-[lints]
-workspace = true
+# A workspace `unsafe_code = "forbid"` cannot be overridden locally. The daemon
+# binary has exactly one audited post-exec invocation of the inherited-FD leaf
+# crate, so this package copies the workspace policy with `deny` instead.
+# tests/unsafe_boundary_audit.rs pins this exact table and that one exception.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
