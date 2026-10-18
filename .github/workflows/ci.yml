@@ -49,7 +49,7 @@ jobs:
       - name: Fetch the locked dependency graph
         run: cargo fetch --locked
       - run: cargo fmt --all --check
-      - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh tools/testbed/omarchy-vm.sh
+      - run: shellcheck install.sh tools/package/build-local-package.sh tools/package/upgrade-local-package.sh tools/testbed/omarchy-vm.sh tools/agents/provision-arch-worker.sh
       - run: cargo clippy --frozen --workspace --all-targets -- -D warnings
 
   workspace-tests:
@@ -226,12 +226,19 @@ jobs:
             tools/release/test_distribute_aur.py \
             tools/release/test_distribute_aur_workflow.py \
             2>&1 | tee package-release-tests.log
+      - name: Run agent runner contracts without remote services
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tools/agents -p 'test_*.py' -v \
+            2>&1 | tee remote-agent-tests.log
       - name: Upload focused package/release failure evidence
         if: ${{ failure() }}
         uses: actions/upload-artifact@v6
         with:
           name: package-release-failure-${{ github.run_id }}
-          path: package-release-tests.log
+          path: |
+            package-release-tests.log
+            remote-agent-tests.log
           if-no-files-found: error
           retention-days: 14
 
