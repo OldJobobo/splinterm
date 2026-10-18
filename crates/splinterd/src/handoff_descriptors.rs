@@ -654,6 +654,7 @@ mod tests {
             handoff_protocol: 1,
             terminal_checkpoint_schema: 2,
             descriptor_manifest_schema: 1,
+            install_prefix: PathBuf::from("/usr/bin"),
             executable_pairs: ExecutablePairSetEvidence {
                 forward: ManifestExecutablePair {
                     daemon: claim_image(2),

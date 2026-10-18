@@ -41,6 +41,7 @@ use splinterd::{
         build_handoff_manifests, capture_live_splints,
     },
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
+    install_prefix::InstallPrefix,
     policy,
 };
 use splinterm_core::{
@@ -1036,6 +1037,11 @@ struct DaemonState {
     image_transfer_expiry_changed: Notify,
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
+    /// The installed-prefix authority, recorded once at startup. Every path
+    /// to an installed executable (the PTY helper, the consent and trusted
+    /// clients, the rollback pair) derives from it, never from the running
+    /// image, which after a memfd exec has no installed path.
+    install_prefix: Arc<InstallPrefix>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
     rollback_handoff: handoff_requests::RollbackAuthority,
@@ -1225,6 +1231,7 @@ struct DaemonStateInputs {
     daemon_audit_peer: splinterm_protocol::AuditPeer,
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
+    install_prefix: Arc<InstallPrefix>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
     rollback_handoff: handoff_requests::RollbackAuthority,
@@ -1293,14 +1300,22 @@ async fn start_fresh(
     shared_kitty_upload_budget: SharedKittyUploadBudget,
 ) -> Result<StartedDaemon> {
     init_tracing();
-    let rollback_handoff = handoff_requests::RollbackAuthority::from_startup(rollback_handoff);
+    // The one moment the prefix is derived from the running image: a fresh
+    // daemon still runs from its installed path. Nothing later re-resolves it.
+    // An adopted daemon (M3.8/M3.10) runs from a sealed memfd and will take
+    // its prefix from the authenticated manifest's `install_prefix` instead.
+    let install_prefix = Arc::new(
+        InstallPrefix::of_running_daemon().context("cannot establish the installed prefix")?,
+    );
+    let rollback_handoff =
+        handoff_requests::RollbackAuthority::from_startup(rollback_handoff, &install_prefix);
 
     let signals = DaemonSignals::install()?;
 
     let metadata = MetadataStore::discover()?;
     let topology = restore_topology(&metadata).await?;
     let listeners = bind_listeners().await?;
-    let daemon_audit_peer = daemon_audit_identity().await?;
+    let daemon_audit_peer = daemon_audit_identity(&install_prefix).await?;
     let workload_units = connect_workload_units(require_workload_cgroups)?;
     let mut policy = policy::PolicyStore::default();
     let policy_generation = policy.reload(policy::configured_path().as_deref(), &topology);
@@ -1314,7 +1329,8 @@ async fn start_fresh(
         daemon_audit_peer,
         shared_image_budget,
         shared_kitty_upload_budget,
-        pty_backend: LinuxPtyBackend::installed()?,
+        pty_backend: LinuxPtyBackend::installed_in(install_prefix.directory())?,
+        install_prefix,
         workload_units,
         rollback_handoff,
         // A fresh start serves the first generation; adoption (M3.8) will
@@ -1400,9 +1416,15 @@ async fn bind_listeners() -> Result<DaemonListeners> {
     })
 }
 
-async fn daemon_audit_identity() -> Result<splinterm_protocol::AuditPeer> {
-    let daemon_identity = tokio::task::spawn_blocking(|| {
-        executable_identity::ExecutableIdentity::from_pid(std::process::id())
+/// The daemon's own audit identity, captured once at startup: the running
+/// image hashed through `/proc/self/exe`, bound to `<prefix>/splinterd`
+/// rather than to the executable link's text.
+async fn daemon_audit_identity(
+    install_prefix: &InstallPrefix,
+) -> Result<splinterm_protocol::AuditPeer> {
+    let installed = install_prefix.daemon();
+    let daemon_identity = tokio::task::spawn_blocking(move || {
+        executable_identity::ExecutableIdentity::of_current_process_at(&installed)
     })
     .await
     .context("daemon executable identity task failed")??;
@@ -1444,6 +1466,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         daemon_audit_peer,
         shared_image_budget,
         shared_kitty_upload_budget,
+        install_prefix,
         pty_backend,
         workload_units,
         rollback_handoff,
@@ -1492,6 +1515,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         image_transfer_expiry_changed: Notify::new(),
         shared_image_budget,
         shared_kitty_upload_budget,
+        install_prefix,
         pty_backend,
         workload_units,
         rollback_handoff,
@@ -1828,7 +1852,7 @@ async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> R
 }
 
 async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let (peer, peer_monitor) = verify_peer(&stream).await?;
+    let (peer, peer_monitor) = verify_peer(&stream, &state.install_prefix).await?;
     let transfer_peer = peer
         .transfer_peer()
         .context("persistent image content peer identity is unavailable")?;
@@ -2000,7 +2024,7 @@ async fn send_image_content_chunks(
 }
 
 async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let (peer, peer_monitor) = verify_peer(&stream).await?;
+    let (peer, peer_monitor) = verify_peer(&stream, &state.install_prefix).await?;
     let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
@@ -6102,14 +6126,21 @@ async fn handle_authorized_request(
             {
                 existing_access_response(state, grant_id, splint_id, incarnation).await?
             } else {
-                let granted =
-                    match consent::prompt(peer, splint_id, incarnation, scopes.clone()).await {
-                        Ok(granted) => granted,
-                        Err(error) => {
-                            warn!(%error, "trusted consent client failed closed");
-                            false
-                        }
-                    };
+                let granted = match consent::prompt(
+                    &state.install_prefix,
+                    peer,
+                    splint_id,
+                    incarnation,
+                    scopes.clone(),
+                )
+                .await
+                {
+                    Ok(granted) => granted,
+                    Err(error) => {
+                        warn!(%error, "trusted consent client failed closed");
+                        false
+                    }
+                };
                 if !granted {
                     state.grants.lock().await.deny(
                         peer,
@@ -6177,14 +6208,21 @@ async fn handle_authorized_request(
             {
                 existing_lair_access_response(state, grant_id, lair_id).await?
             } else {
-                let granted =
-                    match consent::prompt_lair(peer, lair_id, lair_name, scopes.clone()).await {
-                        Ok(granted) => granted,
-                        Err(error) => {
-                            warn!(%error, "trusted Lair consent client failed closed");
-                            false
-                        }
-                    };
+                let granted = match consent::prompt_lair(
+                    &state.install_prefix,
+                    peer,
+                    lair_id,
+                    lair_name,
+                    scopes.clone(),
+                )
+                .await
+                {
+                    Ok(granted) => granted,
+                    Err(error) => {
+                        warn!(%error, "trusted Lair consent client failed closed");
+                        false
+                    }
+                };
                 commit_lair_consent(state, peer, lair_id, scopes, granted).await?
             }
         }
@@ -7811,6 +7849,7 @@ async fn handle_authorized_request(
             let _ = current_handle(state, splint_id, incarnation).await?;
             if trusted_local {
                 let confirmed = consent::prompt(
+                    &state.install_prefix,
                     peer,
                     splint_id,
                     incarnation,
@@ -8630,6 +8669,7 @@ impl ForwardPreparation for ForwardHandoffAuthority {
             topology,
             listeners,
             daemon_generation: state.daemon_generation,
+            install_prefix: &state.install_prefix,
         };
         build_handoff_manifests(authority, self, captures, &inputs).map_err(|error| {
             warn!(%error, "handoff manifests could not be built");
@@ -10435,8 +10475,11 @@ fn wire_color_source(source: TerminalColorSource) -> ColorSource {
     }
 }
 
-async fn verify_peer(stream: &UnixStream) -> Result<(PeerIdentity, Option<consent::PeerMonitor>)> {
-    let mut identity = PeerIdentity::from_stream(stream)?;
+async fn verify_peer(
+    stream: &UnixStream,
+    install_prefix: &Arc<InstallPrefix>,
+) -> Result<(PeerIdentity, Option<consent::PeerMonitor>)> {
+    let mut identity = PeerIdentity::from_stream(stream, Arc::clone(install_prefix))?;
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
@@ -10445,13 +10488,30 @@ async fn verify_peer(stream: &UnixStream) -> Result<(PeerIdentity, Option<consen
     if let Some(start_time) = agent_status::process_start_time(identity.pid) {
         identity.install_start_time(start_time);
     }
-    let monitor = match consent::PeerMonitor::initialize(stream, identity.pid).await {
-        Ok((monitor, executable)) => {
-            identity.install_persistent_executable(executable);
+    // A pidfd that proves the peer exited or names another process rejects
+    // the connection: the identity read above may describe a process that
+    // reused the PID. Only a kernel without SO_PEERPIDFD proceeds unpinned.
+    let monitor = match consent::PeerMonitor::initialize(stream, identity.pid)
+        .await
+        .context("socket peer identity could not be pinned")?
+    {
+        consent::PeerPinning::Pinned {
+            monitor,
+            executable,
+        } => {
+            match executable {
+                Ok(executable) => identity.install_persistent_executable(executable),
+                Err(error) => warn!(
+                    %error,
+                    "persistent peer identity unavailable; policy authorization disabled"
+                ),
+            }
             Some(monitor)
         }
-        Err(error) => {
-            warn!(%error, "persistent peer identity unavailable; policy authorization disabled");
+        consent::PeerPinning::Unsupported => {
+            warn!(
+                "SO_PEERPIDFD is unsupported; persistent peer identity unavailable; policy authorization disabled"
+            );
             None
         }
     };
@@ -11633,6 +11693,7 @@ mod tests {
             shared_kitty_upload_budget: SharedKittyUploadBudget::new(
                 DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
             ),
+            install_prefix: Arc::new(consent::test_install_prefix()),
             pty_backend,
             workload_units: None,
             rollback_handoff: handoff_requests::RollbackAuthority::NotPackaged,

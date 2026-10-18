@@ -17,6 +17,7 @@ use splinterd::{
         ForwardHandoffAuthority, HandoffCoordinatorError, RollbackHandoffAuthority,
     },
     handoff_preflight::compiled_handoff_generation,
+    install_prefix::InstallPrefix,
     package_provenance::{BuildProvenanceKind, compiled_build_provenance},
 };
 use splinterm_core::{LairLifetime, Topology};
@@ -45,13 +46,27 @@ pub(crate) enum RollbackAuthority {
 }
 
 impl RollbackAuthority {
+    /// Classifies the startup rollback capture, which must agree with the
+    /// installed-prefix authority.
+    ///
+    /// The rollback pair is captured in `main`'s single-threaded preamble,
+    /// before the prefix is recorded; both resolve the running path then. A
+    /// pair captured from anywhere but `<prefix>/splinterd` and
+    /// `<prefix>/splinterm` is not retained, so every forward preparation,
+    /// package record, and manifest derived from the pair's recorded paths
+    /// names the same installation as the prefix.
     pub(crate) fn from_startup(
         prepared: Result<RollbackHandoffAuthority, HandoffCoordinatorError>,
+        install_prefix: &InstallPrefix,
     ) -> Self {
         match prepared {
-            Ok(authority) => Self::Retained {
+            Ok(authority) if install_prefix.names_pair(authority.pair()) => Self::Retained {
                 authority: Box::new(authority),
             },
+            Ok(_) => {
+                warn!("packaged rollback pair disagrees with the installed prefix");
+                Self::Unavailable
+            }
             Err(HandoffCoordinatorError::NotPackaged) => {
                 debug!("development daemon has no packaged rollback handoff authority");
                 Self::NotPackaged

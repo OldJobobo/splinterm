@@ -54,6 +54,7 @@ use crate::{
         SubscriptionDisposition, decode_manifest, encode_manifest, validate_manifest_pair,
     },
     handoff_preflight::SealedPreflightReports,
+    install_prefix::InstallPrefix,
     live::SYNCHRONIZED_FRAME_INTERVAL,
     package_provenance::ValidatedHandoffPackageProvenance,
 };
@@ -514,6 +515,9 @@ pub struct ManifestInputs<'a> {
     pub listeners: ListenerDescriptors,
     /// The generation this daemon serves.
     pub daemon_generation: u64,
+    /// The daemon's installed-prefix authority, which both manifests carry
+    /// and which must name both sealed pairs' recorded source paths.
+    pub install_prefix: &'a InstallPrefix,
 }
 
 /// A validated forward/rollback manifest pair, its canonical encodings, and
@@ -723,6 +727,7 @@ fn build_manifests(
         handoff_protocol: negotiated.handoff_protocol,
         terminal_checkpoint_schema: negotiated.terminal_checkpoint,
         descriptor_manifest_schema: negotiated.descriptor_manifest,
+        install_prefix: inputs.install_prefix.directory().to_path_buf(),
         executable_pairs: ExecutablePairSetEvidence::from_verified(
             authority.snapshots,
             &authority.reports,
@@ -1059,6 +1064,7 @@ mod tests {
     /// reports, provenance, and contract an attempt would authenticate.
     struct AuthorityFixture {
         directory: PathBuf,
+        install_prefix: InstallPrefix,
         snapshots: HandoffExecutableSnapshots,
         reports: SealedPreflightReports,
         provenance: ValidatedHandoffPackageProvenance,
@@ -1078,13 +1084,17 @@ mod tests {
                 NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&directory).unwrap();
+            let directory = fs::canonicalize(&directory).unwrap();
             let policy = ExecutableSnapshotPolicy {
                 expected_owner_uid: rustix::process::geteuid().as_raw(),
             };
-            let forward = executable_pair(&directory, "forward");
-            let rollback = executable_pair(&directory, "rollback");
+            // As in a package upgrade, the forward pair replaces the rollback
+            // pair at the same installed paths after the rollback capture.
+            let prefix = directory.join("bin");
+            let rollback = install_pair(&prefix, "rollback");
             let retained =
                 RetainedRollbackExecutables::capture_declared_for_test(&rollback, policy).unwrap();
+            let forward = install_pair(&prefix, "forward");
             let snapshots =
                 HandoffExecutableSnapshots::materialize(&forward, &retained, policy).unwrap();
             let reports = SealedPreflightReports {
@@ -1105,6 +1115,7 @@ mod tests {
             );
             Self {
                 directory,
+                install_prefix: InstallPrefix::from_directory(&prefix).unwrap(),
                 snapshots,
                 reports,
                 provenance,
@@ -1130,15 +1141,17 @@ mod tests {
         }
     }
 
-    fn executable_pair(root: &Path, generation: &str) -> ExecutableSourcePair {
-        let directory = root.join(generation);
-        fs::create_dir(&directory).unwrap();
-        let daemon = directory.join("splinterd");
-        let client = directory.join("splinterm");
-        fs::write(&daemon, format!("{generation}-daemon")).unwrap();
-        fs::write(&client, format!("{generation}-client")).unwrap();
-        for path in [&daemon, &client] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    /// Installs one generation's pair in `prefix` by rename, replacing any
+    /// earlier generation with new inodes.
+    fn install_pair(prefix: &Path, generation: &str) -> ExecutableSourcePair {
+        fs::create_dir_all(prefix).unwrap();
+        let daemon = prefix.join("splinterd");
+        let client = prefix.join("splinterm");
+        for (path, role) in [(&daemon, "daemon"), (&client, "client")] {
+            let staged = prefix.join(format!(".{role}.staged"));
+            fs::write(&staged, format!("{generation}-{role}")).unwrap();
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::rename(&staged, path).unwrap();
         }
         ExecutableSourcePair::new(daemon, client).unwrap()
     }
@@ -1559,6 +1572,7 @@ mod tests {
             topology: &fleet.topology,
             listeners,
             daemon_generation: 1,
+            install_prefix: &fixture.install_prefix,
         };
         let owner = PackagedOwnerOverride::current_user();
         let manifests = build_manifests(&fixture.authority(), &captures, &inputs).unwrap();
@@ -1579,6 +1593,14 @@ mod tests {
             validate_manifest_pair(&manifests.forward, &manifests.rollback).unwrap();
         }
         assert_eq!(manifests.splint_count(), 3);
+        assert_eq!(
+            manifests.forward.install_prefix,
+            fixture.install_prefix.directory()
+        );
+        assert_eq!(
+            manifests.rollback.install_prefix,
+            manifests.forward.install_prefix
+        );
         assert_eq!(manifests.descriptor_count(), GLOBAL_DESCRIPTOR_SLOTS + 6);
         assert_eq!(manifests.daemon_generations(), (1, 2));
         assert!(manifests.rollback_reverses_forward());
@@ -1627,6 +1649,7 @@ mod tests {
             topology: &fleet.topology,
             listeners,
             daemon_generation: 1,
+            install_prefix: &fixture.install_prefix,
         };
         // Without the test owner override, authority validation refuses the
         // test user's executables exactly as it refuses any non-root source.
@@ -1635,6 +1658,21 @@ mod tests {
             Err(ManifestPreparationError::Manifest(_))
         ));
         let _owner = PackagedOwnerOverride::current_user();
+        // A prefix that does not hold both pairs' recorded sources.
+        let elsewhere = InstallPrefix::from_directory(&fixture.directory).unwrap();
+        assert!(matches!(
+            build_manifests(
+                &fixture.authority(),
+                &captures,
+                &ManifestInputs {
+                    install_prefix: &elsewhere,
+                    ..inputs
+                },
+            ),
+            Err(ManifestPreparationError::Manifest(ManifestRejection(
+                ManifestError::InvalidInstallPrefix
+            )))
+        ));
         let empty = Topology::new();
         assert!(matches!(
             build_manifests(

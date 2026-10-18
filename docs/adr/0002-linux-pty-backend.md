@@ -99,7 +99,8 @@ terminal or protocol dependency types.
 - Linux PTY semantics remain directly testable and are not hidden behind a
   portability abstraction.
 - Packaging must install the helper beside the daemon;
-  `LinuxPtyBackend::installed` resolves that layout while tests may inject an
+  `LinuxPtyBackend::installed_in` resolves that layout from the daemon's
+  installed-prefix authority (Plan 0061 M3.5b) while tests may inject an
   explicit helper path.
 - Phase 6 must own child reaping and the Foot-style HUP → TERM → KILL shutdown
   policy; dropping a session is not defined as process cleanup.

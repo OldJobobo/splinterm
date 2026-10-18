@@ -210,6 +210,7 @@ impl Fixture {
             "handoff_protocol": compiled.capabilities.handoff_protocol.maximum(),
             "terminal_checkpoint_schema": compiled.capabilities.terminal_checkpoint.maximum(),
             "descriptor_manifest_schema": compiled.capabilities.descriptor_manifest.maximum(),
+            "install_prefix": "/usr/bin",
             "executable_pairs": executable_pairs,
             "counterpart_manifest_slot": HandoffDescriptorSlot::RollbackManifest,
             "splints": [],

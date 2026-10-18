@@ -28,7 +28,7 @@ use std::{
             process::ExitStatusExt,
         },
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
@@ -41,6 +41,9 @@ use rustix::{
     termios::{self, Winsize},
 };
 use thiserror::Error;
+
+/// File name of the exec-first helper, installed beside the daemon.
+pub const HELPER_EXECUTABLE: &str = "splinterm-pty-child";
 
 #[doc(hidden)]
 pub const CHILD_READY_MARKER: &[u8] = b"\0splinterm-pty-ready\0";
@@ -270,20 +273,28 @@ impl LinuxPtyBackend {
         }
     }
 
-    /// Locates an installed helper beside the running executable.
+    /// Uses the helper installed in `directory`: the caller's installed-prefix
+    /// authority, the directory holding the daemon and its helper.
+    ///
+    /// The caller supplies the directory rather than this crate resolving the
+    /// running executable. After an exec from a sealed memfd the running image
+    /// has no installed path, so only a prefix recorded while it still had one
+    /// can name the helper.
     ///
     /// # Errors
-    /// Returns an error when the current executable path has no parent directory.
-    pub fn installed() -> Result<Self> {
-        let executable = std::env::current_exe()
-            .map_err(|error| PtyError::io("locate current executable", error))?;
-        let parent = executable.parent().ok_or_else(|| {
-            PtyError::io(
+    /// Returns an error when `directory` is not an absolute path.
+    pub fn installed_in(directory: impl AsRef<Path>) -> Result<Self> {
+        let directory = directory.as_ref();
+        if !directory.is_absolute() {
+            return Err(PtyError::io(
                 "locate PTY helper",
-                io::Error::new(io::ErrorKind::NotFound, "executable has no parent"),
-            )
-        })?;
-        Ok(Self::new(parent.join("splinterm-pty-child")))
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "installed prefix is not an absolute path",
+                ),
+            ));
+        }
+        Ok(Self::new(directory.join(HELPER_EXECUTABLE)))
     }
 
     /// Allocates a PTY and starts the configured command through the exec-first helper.
@@ -1101,6 +1112,16 @@ mod tests {
 
         assert!(matches!(result, Err(PtyError::IdentityMismatch)));
         assert!(!status_consumed.get());
+    }
+
+    #[test]
+    fn installed_helper_comes_from_the_callers_absolute_prefix() {
+        assert_eq!(
+            LinuxPtyBackend::installed_in("/usr/bin").unwrap(),
+            LinuxPtyBackend::new("/usr/bin/splinterm-pty-child")
+        );
+        assert!(LinuxPtyBackend::installed_in("usr/bin").is_err());
+        assert!(LinuxPtyBackend::installed_in("").is_err());
     }
 
     #[test]
