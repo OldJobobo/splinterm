@@ -280,8 +280,22 @@ fn session_bus_stage() {
     });
     stuck_running.recv().unwrap();
     let started = Instant::now();
+    // A second caller that arrives mid-shutdown must wait for the same join
+    // rather than return while the worker is still running.
+    let concurrent_worker = Arc::clone(&bus);
+    let concurrent = thread::spawn(move || {
+        thread::sleep(STUCK_GRACE / 4);
+        let result = concurrent_worker.shutdown();
+        (result, started.elapsed())
+    });
     bus.shutdown_within(STUCK_GRACE).unwrap();
     let elapsed = started.elapsed();
+    let (concurrent_result, concurrent_elapsed) = concurrent.join().unwrap();
+    concurrent_result.unwrap();
+    assert!(
+        concurrent_elapsed >= STUCK_GRACE,
+        "a concurrent shutdown returned before the join: {concurrent_elapsed:?}"
+    );
     assert!(
         elapsed >= STUCK_GRACE,
         "shutdown returned before the grace period: {elapsed:?}"

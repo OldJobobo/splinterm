@@ -21,7 +21,7 @@
 use std::{
     fmt,
     future::Future,
-    io,
+    io, mem,
     pin::Pin,
     sync::{Mutex, PoisonError, mpsc},
     thread::{self, JoinHandle},
@@ -72,7 +72,13 @@ pub enum DbusWorkerError {
 /// Session-bus connection served by one thread that [`Self::shutdown`] joins.
 pub struct DbusWorker {
     jobs: Mutex<Option<job_channel::UnboundedSender<Command>>>,
-    thread: Mutex<Option<JoinHandle<()>>>,
+    thread: Mutex<WorkerThread>,
+}
+
+/// The worker thread, or how its join ended.
+enum WorkerThread {
+    Running(JoinHandle<()>),
+    Joined { panicked: bool },
 }
 
 impl fmt::Debug for DbusWorker {
@@ -118,7 +124,7 @@ impl DbusWorker {
         match started {
             Ok(Ok(())) => Ok(Self {
                 jobs: Mutex::new(Some(jobs)),
-                thread: Mutex::new(Some(thread)),
+                thread: Mutex::new(WorkerThread::Running(thread)),
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
@@ -175,7 +181,8 @@ impl DbusWorker {
     /// the connection is bounded by `grace` too, so the worker ends within
     /// about three `grace` periods (drain, abort, close) plus dropping its
     /// runtime. Every later [`Self::call`] fails with
-    /// [`DbusWorkerError::Closed`]. Calling this again is a no-op.
+    /// [`DbusWorkerError::Closed`]. A concurrent or later call waits for the
+    /// same join and reports the same result.
     ///
     /// # Errors
     /// Reports a worker thread that panicked.
@@ -190,14 +197,19 @@ impl DbusWorker {
             // join below still reaps it.
             let _ = jobs.send(Command::Shutdown(grace));
         }
-        let thread = self
-            .thread
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        thread.map_or(Ok(()), |thread| {
-            thread.join().map_err(|_| DbusWorkerError::Panicked)
-        })
+        // Holding the lock across the join makes a concurrent caller wait for
+        // it instead of returning while the worker is still running.
+        let mut thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner);
+        let panicked = match mem::replace(&mut *thread, WorkerThread::Joined { panicked: false }) {
+            WorkerThread::Running(handle) => handle.join().is_err(),
+            WorkerThread::Joined { panicked } => panicked,
+        };
+        *thread = WorkerThread::Joined { panicked };
+        if panicked {
+            Err(DbusWorkerError::Panicked)
+        } else {
+            Ok(())
+        }
     }
 }
 
