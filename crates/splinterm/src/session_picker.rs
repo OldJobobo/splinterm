@@ -94,7 +94,10 @@ impl SessionEntry {
 
     #[must_use]
     pub fn display_title(&self) -> String {
-        let label = if self.lair_label == self.dojo_label {
+        // Collapse only when the canonical names match; equal labels can come
+        // from distinct names (a generated "Lair 1" holding a Dojo named
+        // "Lair 1"), and both levels must stay visible then.
+        let label = if self.lair_name == self.dojo_name {
             self.lair_label.clone()
         } else {
             format!("{} / {}", self.lair_label, self.dojo_label)
@@ -480,6 +483,28 @@ mod tests {
         assert_eq!(generated.lair_name, "terminal-1787899189123456789-4132");
         assert_eq!(generated.lair_display_title(), "Lair 1");
         assert_eq!(generated.dojo_display_title(), "Dojo 1");
+    }
+
+    #[test]
+    fn equal_labels_from_distinct_names_keep_both_title_segments() {
+        // A generated Lair labelled "Lair 1" holding a Dojo the user named
+        // "Lair 1": the labels match but the names don't.
+        let mut generated = running_dojo("terminal-1787899189123456789-4132", "/a");
+        generated.dojos[0].name = "Lair 1".into();
+        // Matching canonical names still collapse to one segment.
+        let mut same = running_dojo("work", "/work");
+        same.dojos[0].name = "work".into();
+        let ids = [generated.id, same.id];
+        let entries = collect_sessions(&[generated, same], &[]);
+        let title = |lair_id| {
+            entries
+                .iter()
+                .find(|entry| entry.lair_id == lair_id)
+                .unwrap()
+                .display_title()
+        };
+        assert_eq!(title(ids[0]), "Lair 1 / Lair 1");
+        assert_eq!(title(ids[1]), "work");
     }
 
     #[test]
