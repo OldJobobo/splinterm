@@ -120,10 +120,12 @@ class InstallerSafetyTest(unittest.TestCase):
             self.assertIn(f"{python_name} = {rust_value.group(1)}", generator)
             handoff_versions += [rust_value.group(1)] * 2
         self.assertIn(
-            "for value in (PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, "
-            f"{', '.join(handoff_versions)}):",
+            "PACKAGE_PAIR_CAPABILITIES = (\n"
+            "    PRIVATE_PROTOCOL_VERSION, PRIVATE_PROTOCOL_VERSION, "
+            f"{', '.join(handoff_versions)}\n)",
             validator,
         )
+        self.assertIn("for value in PACKAGE_PAIR_CAPABILITIES:", validator)
 
     def daemon_owned_environment(self, directory: Path) -> dict[str, str]:
         proc = directory / "proc"
