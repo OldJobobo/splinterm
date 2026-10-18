@@ -369,3 +369,115 @@ fn splinterd_keeps_two_exact_unsafe_post_exec_invocations_and_policy() {
         ]
     );
 }
+
+/// Returns the `main` function of one binary source file.
+fn main_function(path: &Path) -> ItemFn {
+    let source = fs::read_to_string(path).unwrap();
+    let syntax = syn::parse_file(&source)
+        .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+    syntax
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "main" => Some(function),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{} has no main function", path.display()))
+}
+
+/// Requires `main` to open with exactly `expected`, in order, with no
+/// attribute (such as a runtime macro) and no statement before them.
+fn assert_main_opens_with(path: &Path, expected: &[&str]) {
+    let main = main_function(path);
+    assert!(
+        main.attrs.is_empty(),
+        "{}: main must carry no attribute that runs code first",
+        path.display()
+    );
+    assert!(
+        main.block.stmts.len() >= expected.len(),
+        "{}: main is shorter than its pinned opening",
+        path.display()
+    );
+    for (index, (actual, expected)) in main.block.stmts.iter().zip(expected).enumerate() {
+        let expected = syn::parse_str::<syn::Stmt>(expected).unwrap();
+        assert!(
+            *actual == expected,
+            "{}: statement {index} of main is not the pinned descriptor-ordering statement",
+            path.display()
+        );
+    }
+}
+
+/// `close_inherited_descriptors` in `src/handoff_preflight.rs` is sound only
+/// because `dispatch_internal_preflight`, a safe public function, runs before
+/// anything in either binary can own a descriptor. Pin the opening of both
+/// `main` functions so that no statement can slip in ahead of it. Candidate
+/// acquisition in `splinterd` and the askpass helper in `splinterm` come first;
+/// each either finds no activation, owning nothing, or never reaches the
+/// preflight dispatch.
+#[test]
+fn both_mains_dispatch_sealed_preflight_before_any_descriptor_owner() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_main_opens_with(
+        &root.join("src/main.rs"),
+        &[
+            "let candidate = candidate_acquire::acquire_before_tokio()?;",
+            "if candidate.is_none()
+                && splinterd::handoff_preflight::dispatch_internal_preflight(
+                    splinterd::handoff_preflight::PreflightRole::Daemon,
+                )?
+            {
+                return Ok(());
+            }",
+        ],
+    );
+    assert_main_opens_with(
+        &root.join("../splinterm/src/main.rs"),
+        &[
+            "if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+                std::process::exit(code);
+            }",
+            r#"match splinterd::handoff_preflight::dispatch_internal_preflight(
+                splinterd::handoff_preflight::PreflightRole::Client,
+            ) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("sealed preflight failed: {error}");
+                    std::process::exit(1);
+                }
+            }"#,
+        ],
+    );
+}
+
+#[test]
+fn the_main_ordering_pin_rejects_an_inserted_statement() {
+    let directory =
+        std::env::temp_dir().join(format!("splinterd-main-ordering-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("main.rs");
+    fs::write(
+        &path,
+        "fn main() {
+            let early = std::fs::File::open(\"/dev/null\");
+            if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+                std::process::exit(code);
+            }
+        }",
+    )
+    .unwrap();
+    let inserted = std::panic::catch_unwind(|| {
+        assert_main_opens_with(
+            &path,
+            &[
+                "if let Some(code) = splinterm::remote_askpass::dispatch_internal_askpass() {
+                std::process::exit(code);
+            }",
+            ],
+        );
+    });
+    fs::remove_dir_all(&directory).unwrap();
+    assert!(inserted.is_err(), "an inserted statement must fail the pin");
+}

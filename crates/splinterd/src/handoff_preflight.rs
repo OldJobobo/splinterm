@@ -14,19 +14,23 @@
 //! - every descriptor this module creates in the daemon is close-on-exec, and
 //!   the spawn places exactly the report socket, `/dev/null`, and the sealed
 //!   target on standard input, output, and error;
-//! - the launcher, a fresh exec of the running daemon's own image that has run
-//!   no other code, closes every inherited descriptor above standard error
-//!   through the audited `splinterm-inherited-fd` boundary before it installs
-//!   its seccomp filter, so a descriptor another daemon thread made inheritable
-//!   while the spawn copied the descriptor table never reaches the sealed image;
+//! - the launcher, a fresh exec of the running daemon's own image, reaches
+//!   `dispatch_internal_preflight` before anything in its `main` can own a
+//!   descriptor (`tests/unsafe_boundary_audit.rs` pins both binaries' `main`),
+//!   and closes every inherited descriptor above standard error through the
+//!   audited `splinterm-inherited-fd` boundary before it installs its seccomp
+//!   filter, so a descriptor another daemon thread made inheritable while the
+//!   spawn copied the descriptor table never reaches the sealed image;
 //! - the sealed image then starts with standard input and output only, the
 //!   target descriptor being close-on-exec, and its child mode refuses to
 //!   report if it observes any inherited descriptor above standard error.
 //!
-//! The daemon-side audit before each spawn is detection only. It fails the
-//! preflight closed when it observes an inheritable descriptor anywhere in the
-//! daemon, which would be a bug elsewhere, but it can miss one created after
-//! its scan, and the child's descriptor set does not depend on it.
+//! The daemon-side scan before each spawn is detection only: it logs each
+//! inheritable descriptor it observes and continues. A same-user peer can make
+//! the daemon hold one, for example by passing descriptors in a message its
+//! session-bus library receives without close-on-exec, so failing on it would
+//! let that peer deny handoff, and the child's descriptor set does not depend
+//! on it.
 
 use std::{
     ffi::CString,
@@ -59,7 +63,9 @@ use crate::{
         BuildIdentity, BuildVersion, ExecutablePairBinding, ExecutablePairPreflight,
         HandoffCapabilities, RunningHandoffGeneration, VersionRange,
     },
-    handoff_descriptors::{DescriptorHandoffError, audit_inheritable_descriptors},
+    handoff_descriptors::{
+        DescriptorHandoffError, audit_inheritable_descriptors, inheritable_descriptors,
+    },
     package_provenance::compiled_build_provenance,
 };
 
@@ -70,6 +76,10 @@ const WIRE_VERSION: u16 = 1;
 const CHALLENGE_BYTES: usize = 44;
 const REPORT_BYTES: usize = 98;
 const DEFAULT_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Inheritable daemon descriptors named in one detection log.
+const MAX_LOGGED_INHERITABLE_DESCRIPTORS: usize = 16;
+/// Bytes of one descriptor's link target kept in that log.
+const MAX_LOGGED_DESCRIPTOR_TARGET_BYTES: usize = 256;
 const HANDOFF_PROTOCOL_VERSION: u16 = 1;
 // A literal, because package tooling reads it from source; the assertion keeps
 // it equal to the schema the terminal crate writes.
@@ -177,10 +187,22 @@ pub enum PreflightError {
 /// Returns `Ok(true)` only after completing one internal mode. Normal user
 /// invocations return `Ok(false)`.
 ///
+/// # Contract
+///
+/// This must be the first descriptor-relevant call in the binary's `main`:
+/// nothing before it may open, duplicate, close, or own a descriptor, or
+/// start a thread. Launcher mode closes every inheritable descriptor above
+/// standard error through an audited unsafe claim whose soundness rests on
+/// that ordering. `splinterd` and `splinterm` call it only after activation
+/// checks that own nothing when they return, and
+/// `tests/unsafe_boundary_audit.rs` pins the opening of both `main`
+/// functions. No other caller is supported.
+///
 /// # Errors
 ///
 /// Returns an error for a malformed challenge, role mismatch, transport
 /// failure, or invalid compiled contract while handling an internal mode.
+#[doc(hidden)]
 pub fn dispatch_internal_preflight(expected_role: PreflightRole) -> Result<bool, PreflightError> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments.len() != 2 {
@@ -343,9 +365,10 @@ fn preflight_one_with_launcher(
     launcher: &Path,
     after_audit: impl FnOnce(),
 ) -> Result<ChildReport, PreflightError> {
-    // Detection only: the launcher, not this scan, keeps a descriptor that
-    // another thread makes inheritable from now on out of the sealed image.
-    audit_inheritable_descriptors()?;
+    // Detection only: the launcher, not this scan, keeps an inheritable
+    // descriptor out of the sealed image, so one observed here is logged and
+    // the preflight goes on.
+    log_inheritable_descriptors();
     after_audit();
     let (parent, child_endpoint) = socketpair(
         AddressFamily::Unix,
@@ -416,6 +439,38 @@ fn preflight_one_with_launcher(
         terminate_and_reap(&mut child);
     }
     result
+}
+
+/// Logs, without failing, the inheritable descriptors the daemon holds before
+/// a spawn. The launcher closes them; a same-user peer can cause one (a
+/// session-bus message can carry descriptors received without close-on-exec),
+/// so failing here would let that peer deny handoff.
+fn log_inheritable_descriptors() {
+    match inheritable_descriptors(MAX_LOGGED_INHERITABLE_DESCRIPTORS) {
+        Ok(found) => {
+            for (fd, target) in found {
+                let target = target.map_or_else(
+                    || "<unreadable>".to_owned(),
+                    |target| {
+                        let target = target.to_string_lossy();
+                        let mut end = target.len().min(MAX_LOGGED_DESCRIPTOR_TARGET_BYTES);
+                        while !target.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        target[..end].to_owned()
+                    },
+                );
+                tracing::warn!(
+                    fd,
+                    target = %target,
+                    "inheritable daemon descriptor observed before sealed preflight; its launcher closes it"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "cannot scan daemon descriptors before sealed preflight");
+        }
+    }
 }
 
 fn launch_sealed_target() -> ! {
@@ -492,16 +547,24 @@ fn launch_sealed_target() -> ! {
     reason = "audited invocation of the inherited-FD leaf boundary in the freshly executed preflight launcher"
 )]
 fn close_inherited_descriptors() -> Result<(), splinterm_inherited_fd::InheritedFdError> {
-    // SAFETY: only `dispatch_internal_preflight` reaches this, as the first
-    // descriptor operation of a process the daemon has just executed with an
-    // empty environment and this one argument. `main` ran only candidate and
-    // askpass activation checks, which find no activation and touch no
-    // descriptor, so the process is single-threaded and no Rust value owns or
-    // borrows any non-standard descriptor. Every non-standard descriptor with
-    // FD_CLOEXEC clear therefore crossed exec without a surviving Rust owner,
-    // and nothing opens, closes, or replaces a descriptor until the claim
-    // returns. An empty expected set claims nothing and closes every such
-    // descriptor. The leaf also rejects a second thread.
+    // SAFETY: only `launch_sealed_target` calls this, first, and only
+    // `dispatch_internal_preflight` reaches that. The proof does not depend on
+    // who started the process or with which argv and environment: whatever
+    // they say, each binary's `main` reaches the dispatch having created no
+    // descriptor owner and no thread (`tests/unsafe_boundary_audit.rs` pins
+    // the opening of both). In `splinterd`, candidate acquisition runs first:
+    // without its activation variable it only reads the environment, a valid
+    // activation skips the dispatch entirely, and an invalid one returns an
+    // error that ends `main`. In `splinterm`, the askpass check runs first:
+    // without both broker variables it only reads the environment, and with
+    // them it runs the helper and exits without returning. Before `main`, std
+    // startup only reopens descriptors 0 to 2 on `/dev/null`, and nothing else
+    // before `main` owns a descriptor. So the process is single-threaded, no
+    // Rust value owns or borrows a descriptor above standard error, and every
+    // such descriptor with FD_CLOEXEC clear crossed exec without a surviving
+    // Rust owner. Nothing opens, closes, or replaces a descriptor until the
+    // claim returns. An empty expected set claims nothing and closes every
+    // such descriptor. The leaf also rejects a second thread.
     unsafe { splinterm_inherited_fd::claim_post_exec_inherited(&[]) }.map(drop)
 }
 

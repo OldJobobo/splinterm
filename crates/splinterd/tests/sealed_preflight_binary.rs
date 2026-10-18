@@ -137,5 +137,14 @@ fn production_launcher_closes_a_descriptor_inherited_after_the_audit() {
             .contains(FdFlags::CLOEXEC),
         "the descriptor really was inheritable at the spawn"
     );
+    // Inheritable before the daemon-side scan too: the scan only logs it, so
+    // a descriptor a peer can make the daemon hold cannot fail preparation,
+    // and the sealed child still never sees it.
+    preflight_sealed_snapshot_for_integration_test(
+        fixture.snapshots.forward().daemon(),
+        PreflightRole::Daemon,
+        executable,
+    )
+    .expect("an inheritable daemon descriptor is logged, not fatal");
     fcntl_setfd(leaked.as_fd(), flags).unwrap();
 }

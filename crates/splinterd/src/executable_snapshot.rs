@@ -2,7 +2,7 @@
 
 use std::{
     fs::{File, Metadata},
-    io::{self, Read, Seek, SeekFrom},
+    io,
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
         unix::{
@@ -672,18 +672,18 @@ fn write_all(fd: &OwnedFd, mut bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Hashes a snapshot with positioned reads, so the shared file offset of a
+/// sealed memfd that other descriptors also name is neither used nor moved.
 fn hash_descriptor(fd: &OwnedFd, expected_size: u64) -> Result<[u8; 32], ExecutableSnapshotError> {
-    let descriptor = duplicate(fd).map_err(ExecutableSnapshotError::VerifySnapshot)?;
-    let mut file = File::from(descriptor);
-    file.seek(SeekFrom::Start(0))
-        .map_err(ExecutableSnapshotError::VerifySnapshot)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES].into_boxed_slice();
     let mut total = 0_u64;
     loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(ExecutableSnapshotError::VerifySnapshot)?;
+        let count = match rustix::io::pread(fd, &mut buffer[..], total) {
+            Ok(count) => count,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(ExecutableSnapshotError::VerifySnapshot(errno_error(error))),
+        };
         if count == 0 {
             break;
         }
@@ -736,7 +736,7 @@ mod tests {
     use std::{
         collections::BTreeSet,
         fs::{self, OpenOptions},
-        io::Write,
+        io::{Read, Seek, SeekFrom, Write},
         os::{fd::AsRawFd, unix::fs::PermissionsExt},
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},

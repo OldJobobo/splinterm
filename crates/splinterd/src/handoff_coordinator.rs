@@ -356,7 +356,9 @@ impl RollbackHandoffAuthority {
     /// # Errors
     ///
     /// [`HandoffCoordinatorError::NoInstalledUpgrade`] when the installed pair
-    /// is the running build. Otherwise fails closed on a missing, replaced,
+    /// is the running build, and
+    /// [`HandoffCoordinatorError::NoInstalledPackageRecord`] when no package
+    /// record is installed beside it. Otherwise fails closed on a missing, replaced,
     /// unsafe, or mutating forward source, a copy, digest, or seal failure, a
     /// failed or mismatched preflight, a package record that does not describe
     /// the sealed pair, or an incompatible contract.
@@ -365,8 +367,7 @@ impl RollbackHandoffAuthority {
     ) -> Result<ForwardHandoffAuthority, HandoffCoordinatorError> {
         let daemon = &self.pair().daemon().source().path;
         let source = installed_source_pair(daemon)?;
-        let record =
-            PackageProvenanceRecord::load(&package_provenance_path(daemon)?, PACKAGED_OWNER_UID)?;
+        let record = load_installed_record(&package_provenance_path(daemon)?, PACKAGED_OWNER_UID)?;
         self.prepare_forward(
             &source,
             &record,
@@ -474,6 +475,8 @@ pub enum HandoffCoordinatorError {
     UnexpectedPhase,
     #[error("the installed daemon is the running build; there is nothing to hand off to")]
     NoInstalledUpgrade,
+    #[error("the installed daemon has no package record, as after a dirty-tree install")]
+    NoInstalledPackageRecord,
     #[error(transparent)]
     Compatibility(#[from] CompatibilityError),
     #[error(transparent)]
@@ -482,6 +485,23 @@ pub enum HandoffCoordinatorError {
     Preflight(#[from] PreflightError),
     #[error(transparent)]
     Provenance(#[from] PackageProvenanceError),
+}
+
+/// Loads the package record now installed beside the forward pair. An absent
+/// record, which a dirty-tree install over a packaged daemon leaves, is named
+/// as such rather than as a generic load failure.
+fn load_installed_record(
+    path: &Path,
+    owner_uid: u32,
+) -> Result<PackageProvenanceRecord, HandoffCoordinatorError> {
+    match PackageProvenanceRecord::load(path, owner_uid) {
+        Err(PackageProvenanceError::Open { source, .. })
+            if source.kind() == io::ErrorKind::NotFound =>
+        {
+            Err(HandoffCoordinatorError::NoInstalledPackageRecord)
+        }
+        record => Ok(record?),
+    }
 }
 
 fn installed_source_pair(daemon: &Path) -> Result<ExecutableSourcePair, HandoffCoordinatorError> {
@@ -883,6 +903,25 @@ mod tests {
             }),
             Err(HandoffCoordinatorError::NoInstalledUpgrade)
         ));
+    }
+
+    #[test]
+    fn a_missing_installed_record_is_named_as_such() {
+        let fixture = Fixture::new();
+        assert!(matches!(
+            load_installed_record(
+                &fixture.directory.join("absent-provenance.json"),
+                rustix::process::geteuid().as_raw(),
+            ),
+            Err(HandoffCoordinatorError::NoInstalledPackageRecord)
+        ));
+        assert!(
+            load_installed_record(
+                &fixture.directory.join("package-provenance.json"),
+                rustix::process::geteuid().as_raw(),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
