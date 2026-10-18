@@ -162,8 +162,9 @@ Launcher-generated `terminal-<timestamp>-<pid>` names appear as compact **Lair 1
 **Dojo N** and **Terminal N**. Meaningful custom names are preserved, and aliases
 skip names already used by siblings. These are display labels, not renamed saved
 objects or CLI identifiers; numbering follows the current topology and can change
-when siblings are added or removed. Search, breadcrumbs, and the navigation
-pickers use the same labels. Each Explorer row puts status on a separate line so
+when siblings are added or removed. Search, breadcrumbs, the navigation
+pickers, and the standalone Recent Dojos picker (`splinterm dojos`) use the
+same labels. Each Explorer row puts status on a separate line so
 it does not crowd out the name; long text is ellipsized within the panel.
 
 Parent rows summarize runtime state independently of retention and window

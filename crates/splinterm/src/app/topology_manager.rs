@@ -4324,6 +4324,8 @@ mod tests {
             dojo_id,
             lair_name: "lair".to_owned(),
             dojo_name: "dojo".to_owned(),
+            lair_label: "lair".to_owned(),
+            dojo_label: "dojo".to_owned(),
             cwd: PathBuf::from("/tmp"),
             pane_count: 1,
             running_panes: 1,
