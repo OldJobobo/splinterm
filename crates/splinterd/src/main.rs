@@ -1047,8 +1047,6 @@ fn require_workload_cgroups() -> Result<bool> {
     parse_daemon_arguments(env::args_os().skip(1))
 }
 
-// Local PTY and Unix-socket work is asynchronous; bounding workers also bounds
-// glibc per-thread allocator arenas after sustained terminal output.
 fn main() -> Result<()> {
     // Candidate activation is the first operation: nothing may create, close,
     // or own a descriptor before the inherited set is claimed.
@@ -1090,20 +1088,160 @@ fn main() -> Result<()> {
     // authority.
     let rollback_handoff =
         splinterd::handoff_coordinator::RollbackHandoffAuthority::prepare_installed();
-    run_daemon(
+    run_daemon(StartupSource::Fresh {
         require_workload_cgroups,
         rollback_handoff,
         shared_image_budget,
         shared_kitty_upload_budget,
-    )
+    })
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "startup, owned connection lifetime, and ordered shutdown remain one daemon boundary"
-)]
-#[tokio::main(worker_threads = 2)]
-async fn run_daemon(
+/// Where a daemon process gets the state and listeners it serves.
+///
+/// Only fresh startup exists today. Candidate runtime adoption (M3.8/M3.9)
+/// adds `Adopted`, built from a verified handoff stage, and a cancelled or
+/// late-failed handoff (M3.6/M3.7) adds `Resumed`, which serves the old
+/// daemon's own state and listeners again on a rebuilt runtime.
+enum StartupSource {
+    /// Restore persisted metadata and bind new sockets.
+    Fresh {
+        require_workload_cgroups: bool,
+        rollback_handoff: Result<
+            splinterd::handoff_coordinator::RollbackHandoffAuthority,
+            splinterd::handoff_coordinator::HandoffCoordinatorError,
+        >,
+        shared_image_budget: SharedImageBudget,
+        shared_kitty_upload_budget: SharedKittyUploadBudget,
+    },
+}
+
+/// Why a serve round ended.
+///
+/// Only an ordered-shutdown signal ends a round today. The handoff gate
+/// (M3.6) adds `Handoff`, which returns the std listeners and state the old
+/// daemon passes to its candidate instead of shutting down.
+enum ServeOutcome {
+    /// SIGINT or SIGTERM arrived and every connection task has stopped.
+    Shutdown(ServingListeners),
+}
+
+/// The daemon's process-signal streams, installed before the potentially slow
+/// metadata load. Their receivers are process-global, so they keep working
+/// across a runtime rebuild once a runtime with a signal driver is live again;
+/// a resumed round reuses them rather than reinstalling.
+struct DaemonSignals {
+    interrupt: signal::unix::Signal,
+    terminate: signal::unix::Signal,
+    reload: signal::unix::Signal,
+}
+
+impl DaemonSignals {
+    fn install() -> Result<Self> {
+        Ok(Self {
+            interrupt: signal::unix::signal(signal::unix::SignalKind::interrupt())
+                .context("failed to listen for interrupt signal")?,
+            terminate: signal::unix::signal(signal::unix::SignalKind::terminate())
+                .context("failed to listen for termination signal")?,
+            reload: signal::unix::signal(signal::unix::SignalKind::hangup())
+                .context("failed to listen for policy reload signal")?,
+        })
+    }
+}
+
+/// The bound client and image-content sockets.
+///
+/// Between serve rounds the listeners are plain std descriptors, so they
+/// survive a runtime teardown and can travel over `SCM_RIGHTS`; `serve`
+/// registers them with its own runtime.
+struct DaemonListeners {
+    socket: PathBuf,
+    image_socket: PathBuf,
+    listener: std::os::unix::net::UnixListener,
+    image_listener: std::os::unix::net::UnixListener,
+}
+
+/// Listeners still registered with the serving runtime. The ordered shutdown
+/// holds them open until it has removed their paths.
+struct ServingListeners {
+    socket: PathBuf,
+    image_socket: PathBuf,
+    _listener: UnixListener,
+    _image_listener: UnixListener,
+}
+
+/// What a startup source hands its serve round.
+struct StartedDaemon {
+    state: Arc<DaemonState>,
+    listeners: DaemonListeners,
+    signals: DaemonSignals,
+    agent_status_timer: AbortOnDrop,
+}
+
+/// Everything `build_daemon_state` does not create itself.
+struct DaemonStateInputs {
+    topology: Topology,
+    metadata: MetadataStore,
+    policy: policy::PolicyStore,
+    daemon_audit_peer: splinterm_protocol::AuditPeer,
+    shared_image_budget: SharedImageBudget,
+    shared_kitty_upload_budget: SharedKittyUploadBudget,
+    pty_backend: LinuxPtyBackend,
+    workload_units: Option<WorkloadUnitManager>,
+    rollback_handoff: Option<splinterd::handoff_coordinator::RollbackHandoffAuthority>,
+}
+
+fn run_daemon(source: StartupSource) -> Result<()> {
+    // The runtime `#[tokio::main(worker_threads = 2)]` built, owned here so a
+    // later handoff round can drop it and return the process to one thread.
+    // Local PTY and Unix-socket work is asynchronous; bounding workers also
+    // bounds glibc per-thread allocator arenas after sustained terminal output.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("Failed building the Runtime")
+        .block_on(async move {
+            let StartedDaemon {
+                state,
+                listeners,
+                mut signals,
+                agent_status_timer: _agent_status_timer,
+            } = match source {
+                StartupSource::Fresh {
+                    require_workload_cgroups,
+                    rollback_handoff,
+                    shared_image_budget,
+                    shared_kitty_upload_budget,
+                } => {
+                    start_fresh(
+                        require_workload_cgroups,
+                        rollback_handoff,
+                        shared_image_budget,
+                        shared_kitty_upload_budget,
+                    )
+                    .await?
+                }
+            };
+            match serve(&state, listeners, &mut signals).await? {
+                ServeOutcome::Shutdown(listeners) => ordered_shutdown(&state, listeners).await,
+            }
+        })
+}
+
+/// Installs the daemon's global tracing subscriber.
+///
+/// Re-entrant: the first call in a process installs the subscriber, and a
+/// later startup round (a resumed serve, M3.6/M3.7) keeps it instead of
+/// panicking as `init` would.
+fn init_tracing() {
+    // `try_init` fails only when a global subscriber or `log` logger is
+    // already installed, which leaves that one in place.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+}
+
+async fn start_fresh(
     require_workload_cgroups: bool,
     rollback_handoff: Result<
         splinterd::handoff_coordinator::RollbackHandoffAuthority,
@@ -1111,10 +1249,8 @@ async fn run_daemon(
     >,
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
-) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+) -> Result<StartedDaemon> {
+    init_tracing();
     let rollback_handoff = match rollback_handoff {
         Ok(authority) => Some(authority),
         Err(splinterd::handoff_coordinator::HandoffCoordinatorError::NotPackaged) => {
@@ -1127,14 +1263,42 @@ async fn run_daemon(
         }
     };
 
-    let mut interrupt_signal = signal::unix::signal(signal::unix::SignalKind::interrupt())
-        .context("failed to listen for interrupt signal")?;
-    let mut terminate_signal = signal::unix::signal(signal::unix::SignalKind::terminate())
-        .context("failed to listen for termination signal")?;
-    let mut reload_signal = signal::unix::signal(signal::unix::SignalKind::hangup())
-        .context("failed to listen for policy reload signal")?;
+    let signals = DaemonSignals::install()?;
 
     let metadata = MetadataStore::discover()?;
+    let topology = restore_topology(&metadata).await?;
+    let listeners = bind_listeners().await?;
+    let daemon_audit_peer = daemon_audit_identity().await?;
+    let workload_units = connect_workload_units(require_workload_cgroups)?;
+    let mut policy = policy::PolicyStore::default();
+    let policy_generation = policy.reload(policy::configured_path().as_deref(), &topology);
+    if let Some(diagnostic) = &policy_generation.diagnostic {
+        warn!(generation = policy_generation.id, %diagnostic, "persistent policy rejected; installed deny-all generation");
+    }
+    let state = build_daemon_state(DaemonStateInputs {
+        topology,
+        metadata,
+        policy,
+        daemon_audit_peer,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+        pty_backend: LinuxPtyBackend::installed()?,
+        workload_units,
+        rollback_handoff,
+    });
+    let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
+    record_policy_reload(&state, &policy_generation).await;
+    Ok(StartedDaemon {
+        state,
+        listeners,
+        signals,
+        agent_status_timer,
+    })
+}
+
+/// Restores the persisted Topology, or an empty one when recovery fails, and
+/// reserves every recorded incarnation so a new process never reuses one.
+async fn restore_topology(metadata: &MetadataStore) -> Result<Topology> {
     let loaded = tokio::task::spawn_blocking({
         let metadata = metadata.clone();
         move || metadata.load()
@@ -1163,7 +1327,11 @@ async fn run_daemon(
             }
         }
     }
+    Ok(lair)
+}
 
+/// Binds and verifies the owner-only client and image-content sockets.
+async fn bind_listeners() -> Result<DaemonListeners> {
     let socket = socket_path()?;
     prepare_socket_parent(&socket).await?;
     remove_stale_socket(&socket).await?;
@@ -1177,13 +1345,29 @@ async fn run_daemon(
         .with_context(|| format!("failed to bind {}", image_socket.display()))?;
     fs::set_permissions(&image_socket, std::fs::Permissions::from_mode(0o600)).await?;
     verify_socket(&image_socket).await?;
+    // Binding through Tokio keeps its nonblocking, close-on-exec socket and
+    // listen backlog; releasing the registration leaves plain descriptors.
+    let listener = listener
+        .into_std()
+        .with_context(|| format!("failed to release {}", socket.display()))?;
+    let image_listener = image_listener
+        .into_std()
+        .with_context(|| format!("failed to release {}", image_socket.display()))?;
+    Ok(DaemonListeners {
+        socket,
+        image_socket,
+        listener,
+        image_listener,
+    })
+}
 
+async fn daemon_audit_identity() -> Result<splinterm_protocol::AuditPeer> {
     let daemon_identity = tokio::task::spawn_blocking(|| {
         executable_identity::ExecutableIdentity::from_pid(std::process::id())
     })
     .await
     .context("daemon executable identity task failed")??;
-    let daemon_audit_peer = splinterm_protocol::AuditPeer {
+    Ok(splinterm_protocol::AuditPeer {
         uid: rustix::process::geteuid().as_raw(),
         executable_path: daemon_identity
             .path
@@ -1194,32 +1378,44 @@ async fn run_daemon(
         executable_sha256: daemon_identity.sha256,
         device: Some(daemon_identity.device),
         inode: Some(daemon_identity.inode),
-    };
-    let workload_units = match WorkloadUnitManager::connect(
+    })
+}
+
+fn connect_workload_units(require_workload_cgroups: bool) -> Result<Option<WorkloadUnitManager>> {
+    match WorkloadUnitManager::connect(
         WorkloadMemoryPolicy::default(),
         require_workload_cgroups.then_some("splinterd.service"),
     ) {
-        Ok(manager) => Some(manager),
+        Ok(manager) => Ok(Some(manager)),
         Err(error) if require_workload_cgroups => {
-            return Err(error).context("required workload cgroup manager is unavailable");
+            Err(error).context("required workload cgroup manager is unavailable")
         }
         Err(error) => {
             warn!(%error, "workload cgroup manager unavailable; development launch is uncontained");
-            None
+            Ok(None)
         }
-    };
+    }
+}
+
+fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
+    let DaemonStateInputs {
+        topology,
+        metadata,
+        policy,
+        daemon_audit_peer,
+        shared_image_budget,
+        shared_kitty_upload_budget,
+        pty_backend,
+        workload_units,
+        rollback_handoff,
+    } = inputs;
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let (connection_revocations, _) = broadcast::channel(CONNECTION_LIMIT);
     let retiring = RetiringRuntimes::default();
     let (policy_reloads, _) = broadcast::channel(1);
-    let mut policy = policy::PolicyStore::default();
-    let policy_generation = policy.reload(policy::configured_path().as_deref(), &lair);
-    if let Some(diagnostic) = &policy_generation.diagnostic {
-        warn!(generation = policy_generation.id, %diagnostic, "persistent policy rejected; installed deny-all generation");
-    }
-    let state = Arc::new(DaemonState {
-        topology: RwLock::new(lair),
+    Arc::new(DaemonState {
+        topology: RwLock::new(topology),
         runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
         retiring,
         plain_dojos: StdMutex::default(),
@@ -1254,7 +1450,7 @@ async fn run_daemon(
         image_transfer_expiry_changed: Notify::new(),
         shared_image_budget,
         shared_kitty_upload_budget,
-        pty_backend: LinuxPtyBackend::installed()?,
+        pty_backend,
         workload_units,
         _rollback_handoff: rollback_handoff,
         owner_home: env::var_os("HOME")
@@ -1263,27 +1459,46 @@ async fn run_daemon(
         development_terminal_access: env::var_os("SPLINTERM_ENABLE_DEV_ATTACH").as_deref()
             == Some(std::ffi::OsStr::new("1")),
         agent_status: Arc::default(),
-    });
-    let _agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
-    record_policy_reload(&state, &policy_generation).await;
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the accept loop keeps every select arm, policy reload included, at one boundary"
+)]
+async fn serve(
+    state: &Arc<DaemonState>,
+    listeners: DaemonListeners,
+    signals: &mut DaemonSignals,
+) -> Result<ServeOutcome> {
+    let DaemonListeners {
+        socket,
+        image_socket,
+        listener,
+        image_listener,
+    } = listeners;
+    let listener = UnixListener::from_std(listener)
+        .with_context(|| format!("failed to register {}", socket.display()))?;
+    let image_listener = UnixListener::from_std(image_listener)
+        .with_context(|| format!("failed to register {}", image_socket.display()))?;
     let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
     info!(socket = %socket.display(), image_socket = %image_socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
     let image_transfer_expiry =
-        time::sleep_until(image_transfer_expiry_deadline(&state, false).await);
+        time::sleep_until(image_transfer_expiry_deadline(state, false).await);
     tokio::pin!(image_transfer_expiry);
 
     loop {
         tokio::select! {
             biased;
-            received = interrupt_signal.recv() => {
+            received = signals.interrupt.recv() => {
                 if received.is_none() {
                     bail!("interrupt signal stream closed");
                 }
                 break;
             }
-            received = terminate_signal.recv() => {
+            received = signals.terminate.recv() => {
                 if received.is_none() {
                     bail!("termination signal stream closed");
                 }
@@ -1292,14 +1507,14 @@ async fn run_daemon(
             () = &mut image_transfer_expiry => {
                 image_transfer_expiry
                     .as_mut()
-                    .reset(image_transfer_expiry_deadline(&state, true).await);
+                    .reset(image_transfer_expiry_deadline(state, true).await);
             }
             () = state.image_transfer_expiry_changed.notified() => {
                 image_transfer_expiry
                     .as_mut()
-                    .reset(image_transfer_expiry_deadline(&state, false).await);
+                    .reset(image_transfer_expiry_deadline(state, false).await);
             }
-            received = reload_signal.recv() => {
+            received = signals.reload.recv() => {
                 if received.is_none() {
                     bail!("policy reload signal stream closed");
                 }
@@ -1318,7 +1533,7 @@ async fn run_daemon(
                     .lock()
                     .await
                     .publish(candidate, &topology_snapshot);
-                record_policy_reload(&state, &generation).await;
+                record_policy_reload(state, &generation).await;
                 let automation_connections =
                     Arc::new(state.automation_connections.lock().await.clone());
                 state
@@ -1334,7 +1549,7 @@ async fn run_daemon(
                 let _ = state.policy_reloads.send(generation.id);
                 for lease in &leases {
                     append_daemon_splint_audit(
-                        &state,
+                        state,
                         splinterm_protocol::AuditOperation::AcquireControl,
                         lease.splint_id,
                         lease.incarnation,
@@ -1344,7 +1559,7 @@ async fn run_daemon(
                     )
                     .await;
                     publish_control_status_excluding(
-                        &state,
+                        state,
                         lease.splint_id,
                         lease.incarnation,
                         Some(Arc::clone(&automation_connections)),
@@ -1353,7 +1568,7 @@ async fn run_daemon(
                 }
                 for transfer in &transfers {
                     append_daemon_splint_audit(
-                        &state,
+                        state,
                         splinterm_protocol::AuditOperation::RequestControlTransfer,
                         transfer.splint_id,
                         transfer.incarnation,
@@ -1363,7 +1578,7 @@ async fn run_daemon(
                     )
                     .await;
                     publish_control_notice(
-                        &state,
+                        state,
                         ControlNotice::TransferResolved {
                             transfer: *transfer,
                             outcome: ControlTransferOutcome::Cancelled,
@@ -1386,7 +1601,7 @@ async fn run_daemon(
                     warn!("image content connection limit reached");
                     continue;
                 };
-                let state = Arc::clone(&state);
+                let state = Arc::clone(state);
                 connection_tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = serve_image_content_client(stream, state).await {
@@ -1402,7 +1617,7 @@ async fn run_daemon(
                     warn!("connection limit reached");
                     continue;
                 };
-                let state = Arc::clone(&state);
+                let state = Arc::clone(state);
                 connection_tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = Box::pin(serve_client(stream, state)).await {
@@ -1420,7 +1635,18 @@ async fn run_daemon(
 
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    Ok(ServeOutcome::Shutdown(ServingListeners {
+        socket,
+        image_socket,
+        _listener: listener,
+        _image_listener: image_listener,
+    }))
+}
 
+/// Drains live and retiring Splints, reconciles process exits, persists the
+/// final Topology, and removes both socket paths. A shutdown failure takes
+/// precedence over a socket-removal failure.
+async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> Result<()> {
     state.exit_observers.close();
     let runtimes = state.runtimes.lock().await.drain();
     let shutdown_result = async {
@@ -1447,13 +1673,15 @@ async fn run_daemon(
             .await
             .context("topology transaction barrier closed during shutdown")?;
         let final_topology = state.topology.read().await.clone();
-        persist_topology(&state, &final_topology)
+        persist_topology(state, &final_topology)
             .await
             .map_err(|_| anyhow::anyhow!("failed to persist final Topology metadata"))
     }
     .await;
-    let socket_removal = fs::remove_file(&socket).await;
-    let image_socket_removal = fs::remove_file(&image_socket).await;
+    let socket_removal = fs::remove_file(&listeners.socket).await;
+    let image_socket_removal = fs::remove_file(&listeners.image_socket).await;
+    // Close both listeners only once their paths are gone.
+    drop(listeners);
     shutdown_result?;
     socket_removal?;
     image_socket_removal?;
