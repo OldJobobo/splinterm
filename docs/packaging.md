@@ -238,6 +238,13 @@ never claimed or removed. A versioned state journal under
 `${XDG_STATE_HOME:-~/.local/state}/splinterm/integrations/` prevents guessing
 after an interrupted transaction.
 
+Without the `terminal` tag, Omarchy's universal `Super+C` sends `Ctrl+C`
+(interrupt) to Splinterm, so the `post_install` and `post_upgrade` messages of
+`splinterm.install` recommend the command and explain why. The AUR source and
+binary recipes carry byte-identical copies. The client also shows one desktop
+notification under Omarchy while the tag is missing; see
+[integrations.md](integrations.md#why-the-terminal-tag-matters).
+
 Package installation still changes none of these user files. The reference
 terminal-list snippet remains `/usr/share/doc/splinterm/xdg-terminals.list` for
 manual setups.
