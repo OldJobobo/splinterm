@@ -34,6 +34,7 @@ async fn routed_with(
                         limits: ServerLimits::default(),
                         development_terminal_access: false,
                         daemon_hostname: None,
+                        daemon_generation: 1,
                     })
                     .unwrap(),
                 )

@@ -286,6 +286,7 @@ fn preset_run_sends_one_atomic_tree_and_reconciles_stable_mappings() {
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
                     daemon_hostname: None,
+                    daemon_generation: 1,
                 })
                 .unwrap(),
             )

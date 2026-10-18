@@ -171,7 +171,7 @@ while True:
                     continue
                 private_write(channel, {
                     'type': 'hello',
-                    'version': 40,
+                    'version': 41,
                     'limits': {
                         'maximum_frame_bytes': 16777216,
                         'maximum_input_bytes': 65536,
@@ -197,7 +197,8 @@ while True:
                             'maximum_transfers_per_daemon': 1
                         }
                     },
-                    'development_terminal_access': False
+                    'development_terminal_access': False,
+                    'daemon_generation': 1
                 })
             else:
                 request_id = message['request_id']

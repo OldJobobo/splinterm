@@ -1603,6 +1603,20 @@ mod tests {
             ),
             EventAction::Shutdown
         );
+        // Handoff status may ride a terminal subscription: in order it only
+        // advances the sequence, out of order it is an ordinary gap.
+        let status = || SubscriptionEvent::HandoffStatus {
+            daemon_generation: 1,
+            phase: splinterm_protocol::HandoffStatusPhase::Fenced,
+        };
+        assert_eq!(
+            classify_subscription_event(9, 1, 9, 2, status()),
+            EventAction::Skip { sequence: 2 }
+        );
+        assert_eq!(
+            classify_subscription_event(9, 1, 9, 3, status()),
+            EventAction::Resynchronize
+        );
     }
 
     #[test]

@@ -1037,6 +1037,118 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(
     clippy::too_many_lines,
+    reason = "one isolated scenario proves every handoff request refusal and its audit"
+)]
+async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited() {
+    time::timeout(Duration::from_secs(30), async {
+        // Development terminal access is on, so audit inspection needs no
+        // policy; it still never authorizes a trusted-UI-only request.
+        let daemon = Daemon::start().await;
+        let mut stream = UnixStream::connect(&daemon.socket).await.unwrap();
+        write_frame(
+            &mut stream,
+            &ClientFrame::Hello {
+                minimum_version: PROTOCOL_VERSION,
+                maximum_version: PROTOCOL_VERSION,
+                role: ClientRole::Automation,
+            },
+        )
+        .await;
+        assert!(matches!(
+            read_frame(&mut stream).await,
+            ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                daemon_generation: 1,
+                ..
+            }
+        ));
+        drop(stream);
+
+        let mut automation = daemon.connect().await;
+        for request in [
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::DryRun,
+            },
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::Execute,
+            },
+            Request::ClaimHandoffControl {
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [0x5a; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ),
+            },
+            Request::AcknowledgeHandoffPrepare {
+                daemon_generation: 1,
+            },
+        ] {
+            let denied = automation.request_result(request).await.unwrap_err();
+            assert_eq!(denied.code, ErrorCode::Unauthorized);
+            assert_eq!(
+                denied.message,
+                "request requires the installed trusted graphical client"
+            );
+            assert!(denied.handoff_blocking_reasons.is_empty());
+        }
+        let Response::AuditPage { page } = automation
+            .request(Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 16,
+            })
+            .await
+        else {
+            panic!("audit page was not returned");
+        };
+        let refusals = page
+            .records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.operation,
+                    splinterm_protocol::AuditOperation::PrepareDaemonHandoff
+                        | splinterm_protocol::AuditOperation::ClaimHandoffControl
+                        | splinterm_protocol::AuditOperation::AcknowledgeHandoffPrepare
+                )
+            })
+            .map(|record| {
+                (
+                    record.operation,
+                    record.decision,
+                    record.reason.as_str(),
+                    record.outcome,
+                )
+            })
+            .collect::<Vec<_>>();
+        let denied = |operation| {
+            (
+                operation,
+                splinterm_protocol::AuditDecision::Denied,
+                "policy_rejected",
+                Some(splinterm_protocol::AuditOutcome::Failed),
+            )
+        };
+        assert_eq!(
+            refusals,
+            [
+                denied(splinterm_protocol::AuditOperation::PrepareDaemonHandoff),
+                denied(splinterm_protocol::AuditOperation::PrepareDaemonHandoff),
+                denied(splinterm_protocol::AuditOperation::ClaimHandoffControl),
+                denied(splinterm_protocol::AuditOperation::AcknowledgeHandoffPrepare),
+            ]
+        );
+        // Refusal leaves the connection usable.
+        assert!(matches!(
+            automation.request(Request::Ping).await,
+            Response::Pong
+        ));
+        daemon.shutdown();
+    })
+    .await
+    .expect("daemon handoff authorization scenario timed out");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
     reason = "one isolated scenario proves the complete mutation preflight authority boundary"
 )]
 async fn mutation_preflight_preserves_exact_scope_cas_and_descendant_denial() {

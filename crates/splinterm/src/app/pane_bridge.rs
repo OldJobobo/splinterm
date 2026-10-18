@@ -42,6 +42,11 @@ pub(in crate::app) struct Attachment {
 #[derive(Debug, PartialEq)]
 pub(in crate::app) enum EventAction {
     Ignore,
+    /// An in-order event that changes no terminal state, such as handoff
+    /// status, which may ride any subscription; it only advances the sequence.
+    Skip {
+        sequence: u64,
+    },
     Snapshot {
         sequence: u64,
         snapshot: TerminalSnapshot,
@@ -72,6 +77,7 @@ pub(in crate::app) fn classify_subscription_event(
         SubscriptionEvent::Snapshot { snapshot } => EventAction::Snapshot { sequence, snapshot },
         SubscriptionEvent::Update { update } => EventAction::Update { sequence, update },
         SubscriptionEvent::ResyncRequired { .. } => EventAction::Resynchronize,
+        SubscriptionEvent::HandoffStatus { .. } => EventAction::Skip { sequence },
         SubscriptionEvent::TopologyChanged { .. }
         | SubscriptionEvent::TopologyResyncRequired { .. }
         | SubscriptionEvent::ControlStatusChanged { .. }
@@ -1421,6 +1427,7 @@ pub(in crate::app) async fn run_pane_subscription(
                     attachment.subscription_id, last_sequence, subscription_id, sequence, event,
                 ) {
                     EventAction::Ignore => {}
+                    EventAction::Skip { sequence } => last_sequence = sequence,
                     EventAction::Snapshot { sequence, snapshot } => {
                         validate_attached_snapshot(&snapshot, splint_id, incarnation)?;
                         last_revision = snapshot.revision;

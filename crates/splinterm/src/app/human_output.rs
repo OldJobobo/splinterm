@@ -360,6 +360,18 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
                 println!("Dojo {dojo_id} is in use ({reason:?}); left running.");
             }
         },
+        Response::HandoffReport { report } => println!(
+            "Daemon generation {} ({}): {} handoff blocking reason(s).",
+            report.daemon_generation,
+            report.build.version,
+            report.blocking_reasons.len()
+        ),
+        Response::HandoffControlClaimed { controllers } => {
+            println!(
+                "Restored {} controller(s) after handoff.",
+                controllers.len()
+            );
+        }
     }
     io::stdout()
         .flush()

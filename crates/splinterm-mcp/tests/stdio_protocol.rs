@@ -284,6 +284,7 @@ fn accept_automation(listener: &UnixListener) -> UnixStream {
             limits: ServerLimits::default(),
             development_terminal_access: false,
             daemon_hostname: None,
+            daemon_generation: 1,
         },
     );
     stream
@@ -642,6 +643,7 @@ fn daemon_backed_slice4_tools_preserve_exact_scopes_and_closed_outputs() {
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
                     daemon_hostname: None,
+                    daemon_generation: 1,
                 },
             );
             let ClientFrame::Request {
@@ -1007,6 +1009,7 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: None,
+                daemon_generation: 1,
             },
         );
         let ClientFrame::Request {
@@ -1106,6 +1109,7 @@ fn terminal_tools_use_exact_scoped_requests_cursors_and_cleanup() {
                     limits: ServerLimits::default(),
                     development_terminal_access: false,
                     daemon_hostname: None,
+                    daemon_generation: 1,
                 },
             );
             let ClientFrame::Request {
@@ -1867,6 +1871,7 @@ fn successful_output_size_is_checked_after_schema_validation() {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: None,
+                daemon_generation: 1,
             },
         );
         let ClientFrame::Request {
@@ -1947,6 +1952,7 @@ fn daemon_deadline_returns_stable_timeout_and_disposes_connection() {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: None,
+                daemon_generation: 1,
             },
         );
         assert!(matches!(
