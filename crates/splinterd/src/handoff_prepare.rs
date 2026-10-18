@@ -901,7 +901,7 @@ fn draw_handoff_id() -> Result<HandoffId, ManifestPreparationError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         fs::{self, File},
         os::unix::fs::PermissionsExt,
@@ -927,7 +927,7 @@ mod tests {
         handoff_manifest::{MAX_HANDOFF_MANIFEST_BYTES, PackagedOwnerOverride},
     };
 
-    const CAT: &str = "printf ready; exec cat";
+    pub(crate) const CAT: &str = "printf ready; exec cat";
 
     fn backend() -> LinuxPtyBackend {
         let test_binary = std::env::current_exe().unwrap();
@@ -937,7 +937,7 @@ mod tests {
         LinuxPtyBackend::new(helper)
     }
 
-    fn config() -> LiveSplintConfig {
+    pub(crate) fn config() -> LiveSplintConfig {
         LiveSplintConfig {
             columns: 60,
             rows: 24,
@@ -949,7 +949,7 @@ mod tests {
         }
     }
 
-    fn snapshot_text(snapshot: &LiveSnapshot) -> String {
+    pub(crate) fn snapshot_text(snapshot: &LiveSnapshot) -> String {
         snapshot
             .visible_rows
             .iter()
@@ -974,6 +974,10 @@ mod tests {
 
     impl Fleet {
         async fn spawn(scripts: &[&str]) -> Self {
+            Self::spawn_with(scripts, &config()).await
+        }
+
+        async fn spawn_with(scripts: &[&str], config: &LiveSplintConfig) -> Self {
             let mut topology = Topology::new();
             let mut runtimes = Vec::new();
             for (index, script) in scripts.iter().enumerate() {
@@ -985,7 +989,7 @@ mod tests {
                 let command =
                     PtyCommand::new("/bin/sh", PathBuf::from("/tmp")).args(["-c", script]);
                 runtimes.push(
-                    LiveSplintRuntime::spawn(splint_id, backend(), command, config())
+                    LiveSplintRuntime::spawn(splint_id, backend(), command, config.clone())
                         .await
                         .unwrap(),
                 );
@@ -1699,5 +1703,105 @@ mod tests {
         captures.release().await;
         fleet.assert_all_echo("after-refused-manifest").await;
         fleet.shutdown().await;
+    }
+
+    /// The shared image and kitty-upload budget limits of [`hand_off_fleet`]
+    /// terminals; a candidate restores their checkpoints with equal limits.
+    pub(crate) const ADOPTION_BUDGET_BYTES: usize = 1 << 20;
+
+    /// Everything one in-process old generation hands its candidate: the
+    /// fenced Topology, the validated manifest pair and its storage, and
+    /// each captured Splint ended for handoff with its linked checkpoint.
+    /// The fixture keeps the sealed executable pairs and the install prefix
+    /// alive.
+    pub(crate) struct OldSideHandoff {
+        pub(crate) forward_client: OwnedFd,
+        pub(crate) rollback_daemon: OwnedFd,
+        pub(crate) rollback_client: OwnedFd,
+        pub(crate) topology: Topology,
+        pub(crate) forward: HandoffManifestV1,
+        pub(crate) rollback: HandoffManifestV1,
+        pub(crate) forward_storage: OwnedFd,
+        pub(crate) rollback_storage: OwnedFd,
+        /// Keyed by the slot each Splint's master and checkpoint share.
+        pub(crate) handed_off: Vec<(u16, crate::HandedOffSplint, LinkedCheckpointBody)>,
+        _fixture: AuthorityFixture,
+    }
+
+    /// Spawns one real PTY Splint per script with the daemon's shared budgets,
+    /// which a handoff checkpoint records ([`ADOPTION_BUDGET_BYTES`] each),
+    /// waits until each printed `ready`, captures them all, builds the
+    /// manifests as daemon generation 1 naming `listeners`, and ends every
+    /// actor for handoff.
+    pub(crate) async fn hand_off_fleet(
+        scripts: &[&str],
+        listeners: ListenerDescriptors,
+    ) -> OldSideHandoff {
+        let mut adoptable = config();
+        adoptable.terminal.shared_image_budget = Some(splinterm_terminal::SharedImageBudget::new(
+            ADOPTION_BUDGET_BYTES,
+        ));
+        adoptable.terminal.shared_kitty_upload_budget = Some(
+            splinterm_terminal::SharedKittyUploadBudget::new(ADOPTION_BUDGET_BYTES),
+        );
+        let mut fleet = Fleet::spawn_with(scripts, &adoptable).await;
+        for handle in fleet.handles() {
+            // The daemon records each spawned incarnation in the Topology.
+            assert!(
+                fleet
+                    .topology
+                    .set_splint_last_incarnation(handle.splint_id, handle.incarnation.value())
+            );
+            time::timeout(Duration::from_secs(5), async {
+                while !snapshot_text(&handle.snapshot().await.unwrap()).contains("ready") {
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("every Splint prints ready");
+        }
+        let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, prepare)
+            .await
+            .unwrap();
+        assert!(captures.excluded().is_empty());
+        let fixture = AuthorityFixture::new();
+        let manifests = {
+            let _owner = PackagedOwnerOverride::current_user();
+            build_manifests(
+                &fixture.authority(),
+                &captures,
+                &ManifestInputs {
+                    topology: &fleet.topology,
+                    listeners,
+                    daemon_generation: 1,
+                    install_prefix: &fixture.install_prefix,
+                },
+            )
+            .unwrap()
+        };
+        let handed_off = captures
+            .captured
+            .into_iter()
+            .map(|CapturedSplint { lease, checkpoint }| {
+                (checkpoint.slot(), lease.into_handed_off(), checkpoint)
+            })
+            .collect();
+        // Each old actor ends on its handoff without killing its child.
+        for runtime in fleet.runtimes {
+            assert!(matches!(runtime.wait().await, Err(LiveError::HandedOff)));
+        }
+        let duplicate = |descriptor: BorrowedFd<'_>| descriptor.try_clone_to_owned().unwrap();
+        OldSideHandoff {
+            forward_client: duplicate(fixture.snapshots.forward().client().descriptor()),
+            rollback_daemon: duplicate(fixture.snapshots.rollback().daemon().descriptor()),
+            rollback_client: duplicate(fixture.snapshots.rollback().client().descriptor()),
+            topology: fleet.topology,
+            forward: manifests.forward,
+            rollback: manifests.rollback,
+            forward_storage: manifests.forward_storage,
+            rollback_storage: manifests.rollback_storage,
+            handed_off,
+            _fixture: fixture,
+        }
     }
 }

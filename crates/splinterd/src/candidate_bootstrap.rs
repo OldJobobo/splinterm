@@ -33,7 +33,9 @@ use rustix::{
 };
 use sha2::{Digest, Sha256};
 use splinterm_filemap::REQUIRED_IMMUTABLE_SEALS;
-use splinterm_pty::{AdoptableLinuxPtySession, LinuxPtyIdentity, PtyError, PtySize};
+use splinterm_pty::{
+    AdoptableLinuxPtySession, InheritedChild, LinuxPtyIdentity, PtyError, PtySize,
+};
 use splinterm_terminal::{
     CheckpointError, MAX_TERMINAL_CHECKPOINT_BYTES, SharedImageBudget, SharedKittyUploadBudget,
     SnapshotRequest, Terminal,
@@ -97,18 +99,18 @@ pub struct CandidateBootstrap {
 
 /// Every owner and decoded record that staging verified.
 #[derive(Debug)]
-struct CandidateStagedAuthorities {
-    manifest: HandoffManifestV1,
-    counterpart_manifest: HandoffManifestV1,
-    splints: Vec<CandidateSplintStage>,
-    listener: OwnedFd,
-    image_listener: OwnedFd,
-    current_manifest_descriptor: OwnedFd,
-    counterpart_manifest_descriptor: OwnedFd,
-    forward_client: OwnedFd,
-    rollback_daemon: OwnedFd,
-    rollback_client: OwnedFd,
-    closed_unexpected: usize,
+pub(crate) struct CandidateStagedAuthorities {
+    pub(crate) manifest: HandoffManifestV1,
+    pub(crate) counterpart_manifest: HandoffManifestV1,
+    pub(crate) splints: Vec<CandidateSplintStage>,
+    pub(crate) listener: OwnedFd,
+    pub(crate) image_listener: OwnedFd,
+    pub(crate) current_manifest_descriptor: OwnedFd,
+    pub(crate) counterpart_manifest_descriptor: OwnedFd,
+    pub(crate) forward_client: OwnedFd,
+    pub(crate) rollback_daemon: OwnedFd,
+    pub(crate) rollback_client: OwnedFd,
+    pub(crate) closed_unexpected: usize,
 }
 
 /// Fully verified candidate authority while the process remains single-threaded.
@@ -127,12 +129,14 @@ pub struct CandidateRuntimeStage {
     authorities: CandidateStagedAuthorities,
 }
 
+/// One staged Splint: its manifest evidence, restored terminal, inherited
+/// PTY, and checkpoint body.
 #[derive(Debug)]
-struct CandidateSplintStage {
-    evidence: ManifestSplint,
-    terminal: Terminal,
-    pty: AdoptableLinuxPtySession,
-    checkpoint_descriptor: OwnedFd,
+pub(crate) struct CandidateSplintStage {
+    pub(crate) evidence: ManifestSplint,
+    pub(crate) terminal: Terminal,
+    pub(crate) pty: AdoptableLinuxPtySession,
+    pub(crate) checkpoint_descriptor: OwnedFd,
 }
 
 impl CandidatePreRuntimeStage {
@@ -170,6 +174,12 @@ impl CandidateRuntimeStage {
     #[must_use]
     pub const fn closed_unexpected(&self) -> usize {
         self.authorities.closed_unexpected
+    }
+
+    /// Moves the lifecycle and every staged owner out for runtime adoption
+    /// (`handoff_adoption`).
+    pub(crate) fn into_parts(self) -> (HandoffLifecycle, CandidateStagedAuthorities) {
+        (self.lifecycle, self.authorities)
     }
 
     /// Keeps the newly verified owners alive until the next adoption slice.
@@ -222,6 +232,74 @@ impl CandidateRuntimeStage {
             anyhow::bail!("candidate runtime staging invariant failed");
         }
         anyhow::bail!("candidate runtime adoption is not wired")
+    }
+}
+
+/// The owners an exec would hand a candidate, for staging in process.
+///
+/// A full [`CandidateBootstrap::stage`] needs this process to run from the
+/// manifest's sealed daemon snapshot, which a test cannot arrange, so tests
+/// stage Splints through the same per-Splint verification and skip only the
+/// whole-process role, executable, and listener-path passes.
+#[cfg(test)]
+pub(crate) struct RuntimeStageForTest {
+    pub(crate) manifest: HandoffManifestV1,
+    pub(crate) counterpart_manifest: HandoffManifestV1,
+    /// Each Splint's PTY master and checkpoint body, in manifest order.
+    pub(crate) splints: Vec<(OwnedFd, OwnedFd)>,
+    pub(crate) listener: OwnedFd,
+    pub(crate) image_listener: OwnedFd,
+    pub(crate) current_manifest_descriptor: OwnedFd,
+    pub(crate) counterpart_manifest_descriptor: OwnedFd,
+    pub(crate) forward_client: OwnedFd,
+    pub(crate) rollback_daemon: OwnedFd,
+    pub(crate) rollback_client: OwnedFd,
+}
+
+#[cfg(test)]
+impl CandidateRuntimeStage {
+    pub(crate) fn stage_for_test(
+        parts: RuntimeStageForTest,
+        shared_image_budget: &SharedImageBudget,
+        shared_kitty_upload_budget: &SharedKittyUploadBudget,
+    ) -> Result<Self, CandidateBootstrapError> {
+        let mut splints = Vec::with_capacity(parts.splints.len());
+        for (evidence, (master, checkpoint)) in
+            parts.manifest.splints.iter().cloned().zip(parts.splints)
+        {
+            let (terminal, identity) = stage_splint(
+                &evidence,
+                parts.manifest.terminal_checkpoint_schema,
+                checkpoint.as_fd(),
+                master.as_fd(),
+                shared_image_budget,
+                shared_kitty_upload_budget,
+            )?;
+            splints.push(CandidateSplintStage {
+                evidence,
+                terminal,
+                pty: AdoptableLinuxPtySession::from_parts(identity, master),
+                checkpoint_descriptor: checkpoint,
+            });
+        }
+        let mut lifecycle = HandoffLifecycle::candidate_claimed();
+        lifecycle.transition(HandoffPhase::AdoptionStaged)?;
+        Ok(Self {
+            lifecycle,
+            authorities: CandidateStagedAuthorities {
+                manifest: parts.manifest,
+                counterpart_manifest: parts.counterpart_manifest,
+                splints,
+                listener: parts.listener,
+                image_listener: parts.image_listener,
+                current_manifest_descriptor: parts.current_manifest_descriptor,
+                counterpart_manifest_descriptor: parts.counterpart_manifest_descriptor,
+                forward_client: parts.forward_client,
+                rollback_daemon: parts.rollback_daemon,
+                rollback_client: parts.rollback_client,
+                closed_unexpected: 0,
+            },
+        })
     }
 }
 
@@ -613,45 +691,13 @@ impl CandidateBootstrap {
         let mut terminals = Vec::with_capacity(self.manifest.splints.len());
         for splint in &self.manifest.splints {
             let checkpoint_slot = terminal_checkpoint_slot(splint)?;
-            let checkpoint_bytes = read_immutable_descriptor(
+            let (terminal, identity) = stage_splint(
+                splint,
+                self.manifest.terminal_checkpoint_schema,
                 self.required(checkpoint_slot)?,
-                MAX_TERMINAL_CHECKPOINT_BYTES,
-            )?;
-            if Terminal::validate_checkpoint_encoding(&checkpoint_bytes)?
-                != self.manifest.terminal_checkpoint_schema
-            {
-                return Err(CandidateBootstrapError::TerminalMismatch);
-            }
-            let terminal = Terminal::restore_handoff_checkpoint(
-                &checkpoint_bytes,
-                shared_image_budget.clone(),
-                shared_kitty_upload_budget.clone(),
-            )?;
-            if !terminal_matches_manifest_state(
-                &terminal,
-                splint.size,
-                splint.terminal_revision,
-                splint.history_generation,
-            ) {
-                return Err(CandidateBootstrapError::TerminalMismatch);
-            }
-            let identity = LinuxPtyIdentity::from_raw(
-                splint.pty.child_pid,
-                splint.pty.process_group,
-                splint.pty.session_id,
-            )?;
-            let foreground = splint
-                .foreground_process_group
-                .ok_or(CandidateBootstrapError::TerminalMismatch)?;
-            identity.verify_inherited(
                 self.required(HandoffDescriptorSlot::PtyMaster(splint.pty.master_slot))?,
-                PtySize {
-                    rows: splint.size.rows,
-                    columns: splint.size.columns,
-                    pixel_width: splint.size.pixel_width,
-                    pixel_height: splint.size.pixel_height,
-                },
-                foreground,
+                shared_image_budget,
+                shared_kitty_upload_budget,
             )?;
             terminals.push((terminal, identity, checkpoint_slot));
         }
@@ -718,6 +764,62 @@ impl CandidateBootstrap {
     }
 }
 
+/// Restores one checkpoint and checks it and its inherited PTY against the
+/// body-free manifest evidence, without reading the PTY.
+///
+/// A child that exited after capture and is still unreaped is accepted
+/// (Plan 0061 M3.7b review): the adopting generation reaps it and publishes
+/// its exit like any other, so a shell that exits in the exec window does not
+/// roll back the whole upgrade. Everything else about such a Splint is still
+/// verified: the checkpoint, the master, the kernel size, and the unreaped
+/// direct child's process group and session.
+fn stage_splint(
+    splint: &ManifestSplint,
+    checkpoint_schema: u16,
+    checkpoint: BorrowedFd<'_>,
+    master: BorrowedFd<'_>,
+    shared_image_budget: &SharedImageBudget,
+    shared_kitty_upload_budget: &SharedKittyUploadBudget,
+) -> Result<(Terminal, LinuxPtyIdentity), CandidateBootstrapError> {
+    let checkpoint_bytes = read_immutable_descriptor(checkpoint, MAX_TERMINAL_CHECKPOINT_BYTES)?;
+    if Terminal::validate_checkpoint_encoding(&checkpoint_bytes)? != checkpoint_schema {
+        return Err(CandidateBootstrapError::TerminalMismatch);
+    }
+    let terminal = Terminal::restore_handoff_checkpoint(
+        &checkpoint_bytes,
+        shared_image_budget.clone(),
+        shared_kitty_upload_budget.clone(),
+    )?;
+    if !terminal_matches_manifest_state(
+        &terminal,
+        splint.size,
+        splint.terminal_revision,
+        splint.history_generation,
+    ) {
+        return Err(CandidateBootstrapError::TerminalMismatch);
+    }
+    let identity = LinuxPtyIdentity::from_raw(
+        splint.pty.child_pid,
+        splint.pty.process_group,
+        splint.pty.session_id,
+    )?;
+    let foreground = splint
+        .foreground_process_group
+        .ok_or(CandidateBootstrapError::TerminalMismatch)?;
+    // Running or exited-and-unreaped are both carried; see above.
+    let _: InheritedChild = identity.verify_inherited_allowing_exit(
+        master,
+        PtySize {
+            rows: splint.size.rows,
+            columns: splint.size.columns,
+            pixel_width: splint.size.pixel_width,
+            pixel_height: splint.size.pixel_height,
+        },
+        foreground,
+    )?;
+    Ok((terminal, identity))
+}
+
 fn current_manifest_slot(kind: ManifestKind) -> HandoffDescriptorSlot {
     match kind {
         ManifestKind::Forward => HandoffDescriptorSlot::CheckpointManifest,
@@ -741,7 +843,7 @@ fn require_sealed_regular_file(
     }
 }
 
-fn require_unix_stream_listener(
+pub(crate) fn require_unix_stream_listener(
     descriptor: BorrowedFd<'_>,
     stat: &Stat,
     slot: HandoffDescriptorSlot,

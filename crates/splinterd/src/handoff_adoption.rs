@@ -1,0 +1,1775 @@
+//! Candidate-side runtime adoption for one daemon handoff (Plan 0061 M3.8).
+//!
+//! [`CandidateRuntimeStage::adopt`] runs every fallible adoption step after
+//! staging and before the first post-checkpoint PTY read (Plan 0037
+//! quiescence item 7):
+//!
+//! 1. the install prefix, taken only from the authenticated sealed manifest,
+//!    re-resolved, and re-bound to the forward pair's recorded sources;
+//! 2. the durable Topology at the manifest's revision, with every carried
+//!    Splint present in its Lair and Dojo at its carried incarnation;
+//! 3. both inherited listeners re-checked as listening Unix stream sockets;
+//! 4. every carried incarnation adopted before this generation allocates one;
+//! 5. a fresh persistent-policy generation against the adopted Topology;
+//! 6. every carried workload scope adopted on the blocking pool, and any
+//!    provably empty Dojo slice left by Splints that all exited reclaimed;
+//! 7. every live actor staged with its read gate closed.
+//!
+//! [`StagedAdoption::commit`] then starts the actors and cannot fail. It is
+//! the irreversible adoption commit of Plan 0037 quiescence item 8: the first
+//! PTY read happens in an actor it started.
+//!
+//! Until commit, every failure returns every owned part in an
+//! [`AdoptionFailure`]: the inherited descriptors, each restored terminal,
+//! and each adopted scope retained again. Nothing is killed and no scope is
+//! stopped, so the rollback executor (M3.11) can exec the rollback image with
+//! the same descriptors.
+//!
+//! # Exited children
+//!
+//! A child that exits between capture and adoption is carried, not refused
+//! (Plan 0061 M3.7b review): staging accepts it unreaped
+//! ([`splinterm_pty::LinuxPtyIdentity::verify_inherited_allowing_exit`]),
+//! [`crate::LiveSplintRuntime::adopt_staged`] accepts it without reaping, and
+//! its committed actor drains its last output, reaps it, and publishes its
+//! exit like any other. Its workload scope is adopted when systemd still
+//! holds it; otherwise it runs uncontained, which is harmless for a process
+//! that is gone.
+//!
+//! # Workload scopes
+//!
+//! With a workload unit manager, scopes are adopted before commit (Plan 0061
+//! D7), whether or not cgroups are required: a failed adoption of a process
+//! that is still running fails the whole adoption, because continuing with it
+//! uncounted would let its Dojo slice stop under it once its adopted siblings
+//! release (the M3.8a sibling-kill rule). Without a manager (development, or
+//! a manager that could not connect while cgroups are optional), Splints run
+//! uncontained. Required cgroups without a manager fail closed.
+//!
+//! A Dojo whose carried Splints all exited has no adopted scope, so this
+//! generation does not count its slice, and every later launch there would
+//! fail with `UnitExists`. Adoption stops such a slice only when
+//! `GetUnitProcesses` proves it holds no process
+//! ([`WorkloadUnitManager::reclaim_empty_dojo_slice`]); otherwise it leaves
+//! it running and reports it. A failed reclaim never fails the adoption.
+
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs,
+    os::{
+        fd::{AsFd, AsRawFd, OwnedFd},
+        unix::{fs::MetadataExt, net::UnixListener},
+    },
+    path::PathBuf,
+};
+
+use rustix::{
+    fs::fstat,
+    process::{Pid, WaitId, WaitIdOptions, waitid},
+};
+use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplintState, Topology};
+use splinterm_policy::policy::{self, PolicyGeneration, PolicyStore};
+use splinterm_pty::AdoptableLinuxPtySession;
+use splinterm_terminal::Terminal;
+use thiserror::Error;
+use tokio::runtime::Handle;
+use tracing::warn;
+
+use crate::{
+    LiveError, LiveSplintConfig, LiveSplintRuntime, ProcessIncarnation, ProcessPlacement,
+    StagedLiveSplint,
+    candidate_bootstrap::{
+        CandidateRuntimeStage, CandidateSplintStage, CandidateStagedAuthorities,
+        require_unix_stream_listener,
+    },
+    cgroup::{
+        ActiveWorkloadScope, DojoSliceReclaim, RetainedWorkloadScope, WorkloadUnitError,
+        WorkloadUnitManager,
+    },
+    handoff_coordinator::{HandoffLifecycle, HandoffPhase},
+    handoff_descriptors::HandoffDescriptorSlot,
+    handoff_manifest::{ExitDisposition, HandoffManifestV1, ManifestKind, ManifestSplint},
+    handoff_prepare::ListenerDescriptors,
+    install_prefix::{CLIENT_EXECUTABLE, DAEMON_EXECUTABLE, InstallPrefix, InstallPrefixError},
+};
+
+/// The workload scope authority adoption needs, so tests can stand in for
+/// systemd. [`WorkloadUnitManager`] is the daemon's implementation.
+pub trait WorkloadScopeAdopter: Clone + Send + Sync + 'static {
+    /// The counted scope a successful adoption yields.
+    type Scope: ProcessPlacement;
+
+    /// Takes ownership of a retained scope after checking systemd still
+    /// holds its process there. Blocking: adoption calls it on the blocking
+    /// pool.
+    ///
+    /// # Errors
+    /// See [`WorkloadUnitManager::adopt_scope`].
+    fn adopt_scope(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<Self::Scope, WorkloadUnitError>;
+
+    /// Stops a leftover Dojo slice only when it provably holds no process.
+    /// Blocking.
+    ///
+    /// # Errors
+    /// See [`WorkloadUnitManager::reclaim_empty_dojo_slice`].
+    fn reclaim_empty_dojo_slice(
+        &self,
+        dojo_id: DojoId,
+    ) -> Result<DojoSliceReclaim, WorkloadUnitError>;
+}
+
+impl WorkloadScopeAdopter for WorkloadUnitManager {
+    type Scope = ActiveWorkloadScope;
+
+    fn adopt_scope(
+        &self,
+        retained: &RetainedWorkloadScope,
+    ) -> Result<ActiveWorkloadScope, WorkloadUnitError> {
+        Self::adopt_scope(self, retained)
+    }
+
+    fn reclaim_empty_dojo_slice(
+        &self,
+        dojo_id: DojoId,
+    ) -> Result<DojoSliceReclaim, WorkloadUnitError> {
+        Self::reclaim_empty_dojo_slice(self, dojo_id)
+    }
+}
+
+/// Where an adopted Splint's process runs.
+#[derive(Debug)]
+pub enum AdoptedPlacement<S> {
+    /// Its carried workload scope, now counted by this generation.
+    Scope(S),
+    /// No workload scope: no manager, or a child that exited before systemd
+    /// could confirm its scope.
+    Uncontained,
+}
+
+impl<S: ProcessPlacement> ProcessPlacement for AdoptedPlacement<S> {
+    fn release(self) {
+        if let Self::Scope(scope) = self {
+            scope.release();
+        }
+    }
+
+    fn retain_for_handoff(self) {
+        if let Self::Scope(scope) = self {
+            scope.retain_for_handoff();
+        }
+    }
+}
+
+/// What the binary supplies besides the staged authority.
+#[derive(Debug)]
+pub struct AdoptionInputs<A> {
+    /// The durable Topology the binary loaded from its metadata store.
+    pub topology: Topology,
+    /// The one workload unit manager of this process, if it connected.
+    pub workload_units: Option<A>,
+    /// Whether the daemon runs with `--require-workload-cgroups`.
+    pub workload_cgroups_required: bool,
+    /// The persistent policy file, as [`policy::configured_path`] names it.
+    pub policy_path: Option<PathBuf>,
+    /// The runtime configuration every adopted actor starts from: grace
+    /// periods, budgets, and the incarnation environment. Adoption sets each
+    /// Splint's geometry from its manifest record and its scrollback from
+    /// its Topology launch metadata.
+    pub live_config: LiveSplintConfig,
+}
+
+/// Why runtime adoption refused the staged authority.
+#[derive(Debug, Error)]
+pub enum AdoptionError {
+    #[error("candidate adoption lifecycle is not staged")]
+    UnexpectedPhase,
+    #[error("the manifest's install prefix is invalid: {0}")]
+    InstallPrefix(#[source] InstallPrefixError),
+    #[error("the install prefix does not hold the forward pair the manifest recorded")]
+    InstallPrefixMismatch,
+    #[error(
+        "the durable Topology is at revision {durable}, but the manifest recorded revision {manifest}"
+    )]
+    TopologyRevision { manifest: u64, durable: u64 },
+    #[error("carried Splint {0} is missing from the durable Topology")]
+    MissingSplint(SplintId),
+    #[error("carried Splint {0} is in another Lair or Dojo in the durable Topology")]
+    SplintPlacement(SplintId),
+    #[error("carried Splint {0}'s incarnation does not match the durable Topology")]
+    IncarnationMismatch(SplintId),
+    #[error("carried Splint {0} is not recorded as running")]
+    NotRunning(SplintId),
+    #[error("incarnation {0} cannot be adopted: this generation already allocated one")]
+    IncarnationAllocationStarted(u64),
+    #[error("inherited {0:?} is not a listening Unix stream socket")]
+    InvalidListener(HandoffDescriptorSlot),
+    #[error("workload cgroups are required, but no workload unit manager is available")]
+    WorkloadCgroupsUnavailable,
+    #[error(
+        "carried Splint {splint_id}'s running process could not be adopted into its workload scope: {error}"
+    )]
+    WorkloadScope {
+        splint_id: SplintId,
+        #[source]
+        error: Box<WorkloadUnitError>,
+    },
+    #[error("carried Splint {splint_id}'s live runtime could not be staged: {error}")]
+    LiveRuntime {
+        splint_id: SplintId,
+        #[source]
+        error: Box<LiveError>,
+    },
+    #[error("an adoption task failed: {0}")]
+    TaskFailed(#[source] tokio::task::JoinError),
+    #[error("the staged adoption was abandoned before commit")]
+    Aborted,
+}
+
+/// A refused adoption with every owned part, for cooperative rollback.
+pub struct AdoptionFailure {
+    error: AdoptionError,
+    recovery: Box<AdoptionRecovery>,
+}
+
+impl std::fmt::Debug for AdoptionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdoptionFailure")
+            .field("error", &self.error)
+            .field("splints", &self.recovery.authorities.splints.len())
+            .field("retained_scopes", &self.recovery.retained_scopes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for AdoptionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "candidate runtime adoption failed: {}",
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for AdoptionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl AdoptionFailure {
+    #[must_use]
+    pub const fn error(&self) -> &AdoptionError {
+        &self.error
+    }
+
+    /// Returns every owned part for the rollback executor.
+    #[must_use]
+    pub fn into_recovery(self) -> AdoptionRecovery {
+        *self.recovery
+    }
+}
+
+/// Everything a refused adoption owned, unchanged where it matters: the same
+/// inherited descriptors at the same numbers, each restored terminal, each
+/// child unreaped, and every scope this attempt adopted retained again so
+/// that dropping this value stops nothing.
+///
+/// The lifecycle is rolling back. Dropping this value closes every
+/// descriptor, which hangs up the carried terminals.
+pub struct AdoptionRecovery {
+    lifecycle: HandoffLifecycle,
+    authorities: CandidateStagedAuthorities,
+    retained_scopes: Vec<RetainedWorkloadScope>,
+}
+
+impl std::fmt::Debug for AdoptionRecovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdoptionRecovery")
+            .field("phase", &self.lifecycle.phase())
+            .field("splints", &self.authorities.splints.len())
+            .field("retained_scopes", &self.retained_scopes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AdoptionRecovery {
+    /// Number of carried Splints whose descriptors this recovery holds.
+    #[must_use]
+    pub fn splint_count(&self) -> usize {
+        self.authorities.splints.len()
+    }
+
+    /// The scopes this attempt adopted and then retained again; their Dojo
+    /// slices stay referenced in the manager that adopted them.
+    #[must_use]
+    pub fn retained_scopes(&self) -> &[RetainedWorkloadScope] {
+        &self.retained_scopes
+    }
+}
+
+/// One adopted live Splint and the Topology place it occupies.
+#[derive(Debug)]
+pub struct AdoptedSplint {
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    pub splint_id: SplintId,
+    pub incarnation: ProcessIncarnation,
+    pub runtime: LiveSplintRuntime,
+}
+
+/// The committed adoption: everything the binary's daemon state needs.
+///
+/// Rollback is closed. The rollback snapshot pair and both manifest memfds
+/// closed at commit; the forward client snapshot stays pinned for trusted
+/// relaunch (M3.13 onward).
+#[derive(Debug)]
+pub struct CommittedAdoption {
+    pub handoff_id: [u8; 16],
+    /// Whether this generation is the rollback image adopting a refused
+    /// forward attempt's state.
+    pub rollback: bool,
+    pub source_daemon_generation: u64,
+    /// The generation this daemon serves in `Hello`, from the authenticated
+    /// manifest.
+    pub daemon_generation: u64,
+    pub install_prefix: InstallPrefix,
+    /// The durable Topology with every carried Splint running and every
+    /// other Splint exited.
+    pub topology: Topology,
+    pub policy: PolicyStore,
+    pub policy_generation: PolicyGeneration,
+    /// Committed actors, in manifest order.
+    pub splints: Vec<AdoptedSplint>,
+    pub listener: UnixListener,
+    pub image_listener: UnixListener,
+    /// The inherited listener numbers, which the daemon keeps for its life.
+    pub handoff_listeners: ListenerDescriptors,
+    pub forward_client: OwnedFd,
+    /// Carried Splints whose child had already exited when adoption staged
+    /// them; each committed actor reaps it and publishes its exit.
+    pub exited_before_adoption: Vec<SplintId>,
+    /// Leftover Dojo slices reclaimed because they held no process.
+    pub reclaimed_slices: Vec<DojoId>,
+    /// Leftover Dojo slices left running because they still held a process,
+    /// or because the reclaim request failed. Launches there fail until the
+    /// slice empties.
+    pub unreclaimed_slices: Vec<DojoId>,
+    pub closed_unexpected: usize,
+    lifecycle: HandoffLifecycle,
+}
+
+impl CommittedAdoption {
+    /// Always [`HandoffPhase::Committed`]; kept for diagnostics.
+    #[must_use]
+    pub fn committed(&self) -> bool {
+        self.lifecycle.phase() == HandoffPhase::Committed
+    }
+}
+
+/// A Splint waiting for its live runtime stage. Its placement retains on drop.
+struct PendingSplint<S: ProcessPlacement> {
+    evidence: ManifestSplint,
+    checkpoint_descriptor: OwnedFd,
+    terminal: Terminal,
+    pty: AdoptableLinuxPtySession,
+    incarnation: Option<ProcessIncarnation>,
+    scrollback_lines: Option<usize>,
+    placement: RetainOnDrop<AdoptedPlacement<S>>,
+}
+
+impl<S: ProcessPlacement> PendingSplint<S> {
+    fn new(stage: CandidateSplintStage) -> Self {
+        Self {
+            evidence: stage.evidence,
+            checkpoint_descriptor: stage.checkpoint_descriptor,
+            terminal: stage.terminal,
+            pty: stage.pty,
+            incarnation: None,
+            scrollback_lines: None,
+            placement: RetainOnDrop::new(AdoptedPlacement::Uncontained),
+        }
+    }
+
+    /// Returns the staged owners, retaining any adopted scope.
+    fn unwind(self) -> (CandidateSplintStage, bool) {
+        let scoped = self.placement.release_retained();
+        (
+            CandidateSplintStage {
+                evidence: self.evidence,
+                terminal: self.terminal,
+                pty: self.pty,
+                checkpoint_descriptor: self.checkpoint_descriptor,
+            },
+            scoped,
+        )
+    }
+}
+
+/// A staged live Splint. Dropping it uncommitted aborts the stage and
+/// retains its scope instead of letting the placement's `Drop` stop it.
+struct StagedSplint<S: ProcessPlacement>(Option<StagedParts<S>>);
+
+struct StagedParts<S: ProcessPlacement> {
+    evidence: ManifestSplint,
+    checkpoint_descriptor: OwnedFd,
+    incarnation: ProcessIncarnation,
+    staged: StagedLiveSplint<AdoptedPlacement<S>>,
+}
+
+impl<S: ProcessPlacement> StagedSplint<S> {
+    fn unwind(mut self) -> Option<(CandidateSplintStage, bool)> {
+        let parts = self.0.take()?;
+        let inputs = parts.staged.abort();
+        let scoped = matches!(inputs.placement, AdoptedPlacement::Scope(_));
+        inputs.placement.retain_for_handoff();
+        Some((
+            CandidateSplintStage {
+                evidence: parts.evidence,
+                terminal: inputs.terminal,
+                pty: inputs.session,
+                checkpoint_descriptor: parts.checkpoint_descriptor,
+            },
+            scoped,
+        ))
+    }
+}
+
+impl<S: ProcessPlacement> Drop for StagedSplint<S> {
+    fn drop(&mut self) {
+        if let Some(parts) = self.0.take() {
+            parts.staged.abort().placement.retain_for_handoff();
+        }
+    }
+}
+
+/// A placement that retains, rather than drops, when it goes out of scope
+/// before adoption hands it to an actor.
+struct RetainOnDrop<P: ProcessPlacement>(Option<P>);
+
+impl<P: ProcessPlacement> RetainOnDrop<P> {
+    const fn new(placement: P) -> Self {
+        Self(Some(placement))
+    }
+
+    fn get(&self) -> Option<&P> {
+        self.0.as_ref()
+    }
+
+    fn take(&mut self) -> Option<P> {
+        self.0.take()
+    }
+}
+
+impl<S: ProcessPlacement> RetainOnDrop<AdoptedPlacement<S>> {
+    /// Hands the placement to its actor. Only `new` builds this value and
+    /// only this consumes it, so the uncontained fallback is unreachable.
+    fn into_inner(mut self) -> AdoptedPlacement<S> {
+        self.take().unwrap_or(AdoptedPlacement::Uncontained)
+    }
+
+    /// Retains the placement now; returns whether it held a scope.
+    fn release_retained(mut self) -> bool {
+        let placement = self.take();
+        let scoped = matches!(placement, Some(AdoptedPlacement::Scope(_)));
+        if let Some(placement) = placement {
+            placement.retain_for_handoff();
+        }
+        scoped
+    }
+}
+
+impl<P: ProcessPlacement> Drop for RetainOnDrop<P> {
+    fn drop(&mut self) {
+        if let Some(placement) = self.0.take() {
+            placement.retain_for_handoff();
+        }
+    }
+}
+
+/// Every carried Splint between staging and commit. Each element protects
+/// its own placement, so no early return, panic, or cancellation stops a
+/// scope.
+struct AdoptionGuard<S: ProcessPlacement> {
+    staged: Vec<StagedSplint<S>>,
+    pending: Vec<PendingSplint<S>>,
+}
+
+impl<S: ProcessPlacement> AdoptionGuard<S> {
+    /// Returns every Splint's owners, in manifest order, and the identities
+    /// of the scopes retained again.
+    fn unwind(self) -> (Vec<CandidateSplintStage>, Vec<RetainedWorkloadScope>) {
+        let mut splints = Vec::with_capacity(self.staged.len() + self.pending.len());
+        let mut retained = Vec::new();
+        let unwound = self
+            .staged
+            .into_iter()
+            .filter_map(StagedSplint::unwind)
+            .chain(self.pending.into_iter().map(PendingSplint::unwind));
+        for (stage, scoped) in unwound {
+            if scoped {
+                retained.push(retained_scope(&stage.evidence));
+            }
+            splints.push(stage);
+        }
+        (splints, retained)
+    }
+}
+
+/// Every staged owner except the Splints, held across adoption.
+struct AdoptionShell {
+    lifecycle: HandoffLifecycle,
+    manifest: HandoffManifestV1,
+    counterpart_manifest: HandoffManifestV1,
+    listener: OwnedFd,
+    image_listener: OwnedFd,
+    current_manifest_descriptor: OwnedFd,
+    counterpart_manifest_descriptor: OwnedFd,
+    forward_client: OwnedFd,
+    rollback_daemon: OwnedFd,
+    rollback_client: OwnedFd,
+    closed_unexpected: usize,
+}
+
+impl AdoptionShell {
+    fn fail<S: ProcessPlacement>(
+        self,
+        error: AdoptionError,
+        guard: AdoptionGuard<S>,
+    ) -> AdoptionFailure {
+        let (splints, retained_scopes) = guard.unwind();
+        let mut lifecycle = self.lifecycle;
+        if lifecycle.phase() == HandoffPhase::AdoptionStaged {
+            // Always a valid edge from the only phase that adopts.
+            let _ = lifecycle.transition(HandoffPhase::RollingBack);
+        }
+        AdoptionFailure {
+            error,
+            recovery: Box::new(AdoptionRecovery {
+                lifecycle,
+                authorities: CandidateStagedAuthorities {
+                    manifest: self.manifest,
+                    counterpart_manifest: self.counterpart_manifest,
+                    splints,
+                    listener: self.listener,
+                    image_listener: self.image_listener,
+                    current_manifest_descriptor: self.current_manifest_descriptor,
+                    counterpart_manifest_descriptor: self.counterpart_manifest_descriptor,
+                    forward_client: self.forward_client,
+                    rollback_daemon: self.rollback_daemon,
+                    rollback_client: self.rollback_client,
+                    closed_unexpected: self.closed_unexpected,
+                },
+                retained_scopes,
+            }),
+        }
+    }
+}
+
+/// What the fallible steps produced besides the staged Splints.
+struct Prepared {
+    install_prefix: InstallPrefix,
+    topology: Topology,
+    policy: PolicyStore,
+    policy_generation: PolicyGeneration,
+    reclaimed_slices: Vec<DojoId>,
+    unreclaimed_slices: Vec<DojoId>,
+}
+
+/// Every adoption step completed; only [`Self::commit`] remains.
+///
+/// [`Self::abort`] returns every owned part instead. Dropping it uncommitted
+/// retains every adopted scope, so nothing is stopped, but closes the carried
+/// descriptors, which hangs up their terminals.
+pub struct StagedAdoption<S: ProcessPlacement> {
+    runtime: Handle,
+    shell: AdoptionShell,
+    splints: Vec<StagedSplint<S>>,
+    prepared: Prepared,
+    exited_before_adoption: Vec<SplintId>,
+}
+
+impl<S: ProcessPlacement> std::fmt::Debug for StagedAdoption<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StagedAdoption")
+            .field("splints", &self.splints.len())
+            .field(
+                "daemon_generation",
+                &self.shell.manifest.target_daemon_generation,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl CandidateRuntimeStage {
+    /// Runs every fallible adoption step without reading any PTY, accepting
+    /// a connection, or stopping anything; see the module documentation.
+    ///
+    /// Call it on the runtime that will serve: actors are staged with its
+    /// I/O driver, and [`StagedAdoption::commit`] starts them on it.
+    ///
+    /// # Errors
+    /// Returns the typed refusal with every owned part (see
+    /// [`AdoptionRecovery`]) when any check, scope adoption, or actor stage
+    /// fails.
+    pub async fn adopt<A: WorkloadScopeAdopter>(
+        self,
+        inputs: AdoptionInputs<A>,
+    ) -> Result<StagedAdoption<A::Scope>, AdoptionFailure> {
+        let (lifecycle, authorities) = self.into_parts();
+        let CandidateStagedAuthorities {
+            manifest,
+            counterpart_manifest,
+            splints,
+            listener,
+            image_listener,
+            current_manifest_descriptor,
+            counterpart_manifest_descriptor,
+            forward_client,
+            rollback_daemon,
+            rollback_client,
+            closed_unexpected,
+        } = authorities;
+        let shell = AdoptionShell {
+            lifecycle,
+            manifest,
+            counterpart_manifest,
+            listener,
+            image_listener,
+            current_manifest_descriptor,
+            counterpart_manifest_descriptor,
+            forward_client,
+            rollback_daemon,
+            rollback_client,
+            closed_unexpected,
+        };
+        let mut guard = AdoptionGuard {
+            staged: Vec::with_capacity(splints.len()),
+            pending: splints.into_iter().map(PendingSplint::new).collect(),
+        };
+        match prepare(&shell, &mut guard, inputs).await {
+            Ok(prepared) => {
+                let exited_before_adoption = guard
+                    .staged
+                    .iter()
+                    .filter_map(|staged| staged.0.as_ref())
+                    .filter(|parts| child_has_exited(parts.evidence.pty.child_pid))
+                    .map(|parts| parts.evidence.splint_id)
+                    .collect();
+                Ok(StagedAdoption {
+                    runtime: Handle::current(),
+                    shell,
+                    splints: std::mem::take(&mut guard.staged),
+                    prepared,
+                    exited_before_adoption,
+                })
+            }
+            Err(error) => Err(shell.fail(error, guard)),
+        }
+    }
+}
+
+async fn prepare<A: WorkloadScopeAdopter>(
+    shell: &AdoptionShell,
+    guard: &mut AdoptionGuard<A::Scope>,
+    inputs: AdoptionInputs<A>,
+) -> Result<Prepared, AdoptionError> {
+    let AdoptionInputs {
+        mut topology,
+        workload_units,
+        workload_cgroups_required,
+        policy_path,
+        live_config,
+    } = inputs;
+    if shell.lifecycle.phase() != HandoffPhase::AdoptionStaged {
+        return Err(AdoptionError::UnexpectedPhase);
+    }
+    let manifest = &shell.manifest;
+    let install_prefix = verify_install_prefix(manifest)?;
+    verify_topology(manifest, &topology)?;
+    for (slot, listener) in [
+        (HandoffDescriptorSlot::Listener, &shell.listener),
+        (HandoffDescriptorSlot::ImageListener, &shell.image_listener),
+    ] {
+        verify_listener(slot, listener)?;
+    }
+    if workload_cgroups_required && workload_units.is_none() {
+        return Err(AdoptionError::WorkloadCgroupsUnavailable);
+    }
+    let carried = manifest
+        .splints
+        .iter()
+        .map(|splint| splint.splint_id)
+        .collect::<HashSet<_>>();
+    mark_adopted_states(&mut topology, &carried);
+    reserve_recorded_incarnations(&topology);
+    for pending in &mut guard.pending {
+        let value = pending.evidence.incarnation;
+        pending.incarnation = Some(
+            adopt_carried_incarnation(value)
+                .ok_or(AdoptionError::IncarnationAllocationStarted(value))?,
+        );
+        pending.scrollback_lines = topology
+            .find_splint(pending.evidence.splint_id)
+            .map(|splint| splint.launch.scrollback_lines);
+    }
+    let (policy, policy_generation) = reload_policy(policy_path, &topology).await?;
+    let (reclaimed_slices, unreclaimed_slices) = match workload_units {
+        Some(adopter) => {
+            adopt_scopes(&adopter, guard).await?;
+            reclaim_leftover_slices(&adopter, guard).await?
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    stage_actors(guard, &live_config)?;
+    Ok(Prepared {
+        install_prefix,
+        topology,
+        policy,
+        policy_generation,
+        reclaimed_slices,
+        unreclaimed_slices,
+    })
+}
+
+/// Takes the prefix only from the authenticated manifest (never the running
+/// image, a memfd), re-resolves it, and re-binds the forward pair's recorded
+/// sources to `<prefix>/splinterd` and `<prefix>/splinterm` as this process
+/// sees them now (Plan 0061 M3.5b review). Both manifest kinds check the
+/// forward pair: the package upgrade installed it at the prefix, and a
+/// rollback restores the old process, not the old package.
+fn verify_install_prefix(manifest: &HandoffManifestV1) -> Result<InstallPrefix, AdoptionError> {
+    let prefix = InstallPrefix::from_directory(&manifest.install_prefix)
+        .map_err(AdoptionError::InstallPrefix)?;
+    let pair = &manifest.executable_pairs.forward;
+    for (name, image) in [
+        (DAEMON_EXECUTABLE, &pair.daemon),
+        (CLIENT_EXECUTABLE, &pair.client),
+    ] {
+        let metadata = fs::symlink_metadata(prefix.directory().join(name))
+            .map_err(|_| AdoptionError::InstallPrefixMismatch)?;
+        if !metadata.is_file()
+            || metadata.dev() != image.source_device
+            || metadata.ino() != image.source_inode
+            || metadata.uid() != image.source_owner_uid
+            || metadata.mode() != image.source_mode
+            || metadata.len() != image.source_size
+        {
+            return Err(AdoptionError::InstallPrefixMismatch);
+        }
+    }
+    Ok(prefix)
+}
+
+/// Requires the durable Topology at the revision the old generation persisted
+/// at its fence, and each carried Splint in it at its Lair, Dojo, and
+/// incarnation.
+fn verify_topology(manifest: &HandoffManifestV1, topology: &Topology) -> Result<(), AdoptionError> {
+    let durable = topology.revision().get();
+    // The fence persists exactly one revision, which the manifest records as
+    // both values; the metadata store keeps no other generation.
+    if manifest.topology_revision != durable || manifest.durable_state_generation != durable {
+        return Err(AdoptionError::TopologyRevision {
+            manifest: manifest.topology_revision,
+            durable,
+        });
+    }
+    for splint in &manifest.splints {
+        if splint.exit != ExitDisposition::Running {
+            return Err(AdoptionError::NotRunning(splint.splint_id));
+        }
+        let record = topology
+            .find_splint(splint.splint_id)
+            .ok_or(AdoptionError::MissingSplint(splint.splint_id))?;
+        let placed = topology
+            .find_lair(splint.lair_id)
+            .and_then(|lair| lair.dojos.iter().find(|dojo| dojo.id == splint.dojo_id))
+            .is_some_and(|dojo| dojo.root.find_splint(splint.splint_id).is_some());
+        if !placed {
+            return Err(AdoptionError::SplintPlacement(splint.splint_id));
+        }
+        if record.last_incarnation != Some(splint.incarnation) {
+            return Err(AdoptionError::IncarnationMismatch(splint.splint_id));
+        }
+    }
+    Ok(())
+}
+
+fn verify_listener(slot: HandoffDescriptorSlot, listener: &OwnedFd) -> Result<(), AdoptionError> {
+    let stat = fstat(listener).map_err(|_| AdoptionError::InvalidListener(slot))?;
+    require_unix_stream_listener(listener.as_fd(), &stat, slot)
+        .map_err(|_| AdoptionError::InvalidListener(slot))
+}
+
+/// Marks every carried Splint running. Any other Splint the Topology records
+/// as running or starting has no live process in this generation, so it is
+/// marked exited (Plan 0061 M3.7b review). The durable projection already
+/// stores every Splint as exited; this keeps the rule independent of that.
+fn mark_adopted_states(topology: &mut Topology, carried: &HashSet<SplintId>) {
+    let mut recorded = Vec::new();
+    for lair in topology.lairs() {
+        for dojo in &lair.dojos {
+            collect_splint_states(&dojo.root, &mut recorded);
+        }
+    }
+    for (splint_id, state) in recorded {
+        if carried.contains(&splint_id) {
+            topology.set_splint_state(splint_id, SplintState::Running);
+        } else if !matches!(state, SplintState::Exited(_)) {
+            topology.set_splint_state(splint_id, SplintState::Exited(0));
+        }
+    }
+}
+
+fn collect_splint_states(node: &LayoutNode, states: &mut Vec<(SplintId, SplintState)>) {
+    match node {
+        LayoutNode::Leaf(splint) => states.push((splint.id, splint.state)),
+        LayoutNode::Branch { first, second, .. } => {
+            collect_splint_states(first, states);
+            collect_splint_states(second, states);
+        }
+    }
+}
+
+/// Reserves every incarnation the Topology records, so this generation never
+/// reissues one, as a fresh start does.
+fn reserve_recorded_incarnations(topology: &Topology) {
+    let mut recorded = Vec::new();
+    for lair in topology.lairs() {
+        for dojo in &lair.dojos {
+            collect_splint_states(&dojo.root, &mut recorded);
+        }
+    }
+    for (splint_id, _) in recorded {
+        if let Some(incarnation) = topology
+            .find_splint(splint_id)
+            .and_then(|splint| splint.last_incarnation)
+        {
+            ProcessIncarnation::reserve_after(incarnation);
+        }
+    }
+}
+
+/// Adopts one carried incarnation, which must happen before this
+/// generation's first allocation (Plan 0061 M3.3 review).
+fn adopt_carried_incarnation(value: u64) -> Option<ProcessIncarnation> {
+    #[cfg(not(test))]
+    {
+        ProcessIncarnation::adopted(value)
+    }
+    // The unit-test binary allocates incarnations long before any adoption.
+    #[cfg(test)]
+    {
+        ProcessIncarnation::carried_for_test(value)
+    }
+}
+
+async fn reload_policy(
+    path: Option<PathBuf>,
+    topology: &Topology,
+) -> Result<(PolicyStore, PolicyGeneration), AdoptionError> {
+    let candidate = tokio::task::spawn_blocking(move || policy::prepare(path))
+        .await
+        .map_err(AdoptionError::TaskFailed)?;
+    let mut store = PolicyStore::default();
+    let generation = store.publish(candidate, topology);
+    if let Some(diagnostic) = &generation.diagnostic {
+        warn!(generation = generation.id, %diagnostic, "persistent policy rejected at handoff adoption; installed deny-all generation");
+    }
+    Ok((store, generation))
+}
+
+/// How one carried scope's adoption ended on the blocking pool.
+enum ScopeOutcome<S: ProcessPlacement> {
+    Adopted(RetainOnDrop<S>),
+    /// Systemd no longer confirms the scope, and the child has exited.
+    Exited,
+}
+
+/// Adopts every carried scope, in manifest order, on the blocking pool:
+/// [`WorkloadUnitManager::adopt_scope`] holds a lock across D-Bus calls.
+///
+/// A scope that fails for a child that has exited is tolerated, and that
+/// Splint runs uncontained. A failure for a child still running fails the
+/// adoption (the sibling-kill rule). Every adopted scope is wrapped so that
+/// a panic, an early return, or a dropped adoption future retains it rather
+/// than stopping it.
+async fn adopt_scopes<A: WorkloadScopeAdopter>(
+    adopter: &A,
+    guard: &mut AdoptionGuard<A::Scope>,
+) -> Result<(), AdoptionError> {
+    let identities = guard
+        .pending
+        .iter()
+        .map(|pending| retained_scope(&pending.evidence))
+        .collect::<Vec<_>>();
+    let adopter = adopter.clone();
+    let (outcomes, failure) = tokio::task::spawn_blocking(move || {
+        let mut outcomes = Vec::with_capacity(identities.len());
+        for retained in &identities {
+            match adopter.adopt_scope(retained) {
+                Ok(scope) => outcomes.push(ScopeOutcome::Adopted(RetainOnDrop::new(scope))),
+                // Checked after the failure: a child cannot come back, so an
+                // exit seen now explains the failure.
+                Err(_) if child_has_exited(retained.child_pid()) => {
+                    outcomes.push(ScopeOutcome::Exited);
+                }
+                Err(error) => return (outcomes, Some(error)),
+            }
+        }
+        (outcomes, None)
+    })
+    .await
+    .map_err(AdoptionError::TaskFailed)?;
+    let failed_index = outcomes.len();
+    for (pending, outcome) in guard.pending.iter_mut().zip(outcomes) {
+        if let ScopeOutcome::Adopted(mut scope) = outcome
+            && let Some(scope) = scope.take()
+        {
+            pending.placement = RetainOnDrop::new(AdoptedPlacement::Scope(scope));
+        }
+    }
+    match failure {
+        Some(error) => Err(AdoptionError::WorkloadScope {
+            splint_id: guard.pending[failed_index].evidence.splint_id,
+            error: Box::new(error),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Reclaims each carried Dojo's slice when none of its carried scopes was
+/// adopted, only when systemd proves it empty. A failed request is reported
+/// in the committed adoption, never as a refusal.
+async fn reclaim_leftover_slices<A: WorkloadScopeAdopter>(
+    adopter: &A,
+    guard: &AdoptionGuard<A::Scope>,
+) -> Result<(Vec<DojoId>, Vec<DojoId>), AdoptionError> {
+    let carried = guard
+        .pending
+        .iter()
+        .map(|pending| pending.evidence.dojo_id)
+        .collect::<BTreeSet<_>>();
+    let counted = guard
+        .pending
+        .iter()
+        .filter(|pending| matches!(pending.placement.get(), Some(AdoptedPlacement::Scope(_))))
+        .map(|pending| pending.evidence.dojo_id)
+        .collect::<BTreeSet<_>>();
+    let leftovers = carried.difference(&counted).copied().collect::<Vec<_>>();
+    if leftovers.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let adopter = adopter.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut reclaimed = Vec::new();
+        let mut unreclaimed = Vec::new();
+        for dojo_id in leftovers {
+            match adopter.reclaim_empty_dojo_slice(dojo_id) {
+                Ok(DojoSliceReclaim::Stopped) => reclaimed.push(dojo_id),
+                Ok(DojoSliceReclaim::Absent | DojoSliceReclaim::Referenced) => {}
+                Ok(DojoSliceReclaim::Occupied) => {
+                    warn!(%dojo_id, "leftover Dojo slice still holds processes; launches there fail until it empties");
+                    unreclaimed.push(dojo_id);
+                }
+                Err(error) => {
+                    warn!(%dojo_id, %error, "cannot reclaim leftover Dojo slice");
+                    unreclaimed.push(dojo_id);
+                }
+            }
+        }
+        (reclaimed, unreclaimed)
+    })
+    .await
+    .map_err(AdoptionError::TaskFailed)
+}
+
+/// Stages each actor with its read gate closed, in manifest order. A failed
+/// stage puts that Splint's untouched inputs back, and the caller unwinds
+/// every staged one.
+fn stage_actors<S: ProcessPlacement>(
+    guard: &mut AdoptionGuard<S>,
+    base: &LiveSplintConfig,
+) -> Result<(), AdoptionError> {
+    let mut pending = std::mem::take(&mut guard.pending).into_iter();
+    while let Some(splint) = pending.next() {
+        let PendingSplint {
+            evidence,
+            checkpoint_descriptor,
+            terminal,
+            pty,
+            incarnation,
+            scrollback_lines,
+            placement,
+        } = splint;
+        let Some(incarnation) = incarnation else {
+            guard.pending.push(PendingSplint {
+                evidence,
+                checkpoint_descriptor,
+                terminal,
+                pty,
+                incarnation,
+                scrollback_lines,
+                placement,
+            });
+            guard.pending.extend(pending);
+            return Err(AdoptionError::UnexpectedPhase);
+        };
+        let mut config = base.clone();
+        config.columns = evidence.size.columns;
+        config.rows = evidence.size.rows;
+        config.pixel_width = evidence.size.pixel_width;
+        config.pixel_height = evidence.size.pixel_height;
+        if let Some(lines) = scrollback_lines {
+            config.terminal.scrollback_lines = lines;
+        }
+        match LiveSplintRuntime::adopt_staged(
+            evidence.splint_id,
+            incarnation,
+            pty,
+            terminal,
+            config,
+            placement.into_inner(),
+        ) {
+            Ok(staged) => guard.staged.push(StagedSplint(Some(StagedParts {
+                evidence,
+                checkpoint_descriptor,
+                incarnation,
+                staged,
+            }))),
+            Err(failure) => {
+                let splint_id = evidence.splint_id;
+                let inputs = failure.inputs;
+                guard.pending.push(PendingSplint {
+                    evidence,
+                    checkpoint_descriptor,
+                    terminal: inputs.terminal,
+                    pty: inputs.session,
+                    incarnation: Some(incarnation),
+                    scrollback_lines,
+                    placement: RetainOnDrop::new(inputs.placement),
+                });
+                guard.pending.extend(pending);
+                return Err(AdoptionError::LiveRuntime {
+                    splint_id,
+                    error: Box::new(failure.error),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+impl<S: ProcessPlacement> StagedAdoption<S> {
+    /// The generation this daemon will serve, from the authenticated manifest.
+    #[must_use]
+    pub const fn daemon_generation(&self) -> u64 {
+        self.shell.manifest.target_daemon_generation
+    }
+
+    /// Abandons the staged adoption before commit, for a cooperative
+    /// rollback, and returns every owned part as a refused adoption does.
+    #[must_use]
+    pub fn abort(self) -> AdoptionRecovery {
+        let guard = AdoptionGuard {
+            staged: self.splints,
+            pending: Vec::new(),
+        };
+        self.shell
+            .fail(AdoptionError::Aborted, guard)
+            .into_recovery()
+    }
+
+    /// Commits the adoption: starts every staged actor, which opens its read
+    /// gate, and releases the rollback-only descriptors.
+    ///
+    /// Nothing here can fail or panic: each actor starts on the runtime that
+    /// staged it, entered explicitly, and the lifecycle edge from the staged
+    /// phase to committed is always valid. This is the last step before the
+    /// first post-checkpoint PTY read; after it, no cooperative rollback is
+    /// permitted.
+    #[must_use]
+    pub fn commit(self) -> CommittedAdoption {
+        let Self {
+            runtime,
+            shell,
+            splints,
+            prepared,
+            exited_before_adoption,
+        } = self;
+        let AdoptionShell {
+            mut lifecycle,
+            manifest,
+            counterpart_manifest,
+            listener,
+            image_listener,
+            current_manifest_descriptor,
+            counterpart_manifest_descriptor,
+            forward_client,
+            rollback_daemon,
+            rollback_client,
+            closed_unexpected,
+        } = shell;
+        // Valid by construction: only an adoption staged from
+        // `AdoptionStaged` reaches here.
+        let _ = lifecycle.transition(HandoffPhase::Committed);
+        let _entered = runtime.enter();
+        let splints = splints
+            .into_iter()
+            .filter_map(|mut staged| staged.0.take())
+            .map(|parts| AdoptedSplint {
+                lair_id: parts.evidence.lair_id,
+                dojo_id: parts.evidence.dojo_id,
+                splint_id: parts.evidence.splint_id,
+                incarnation: parts.incarnation,
+                runtime: parts.staged.commit(),
+            })
+            .collect();
+        drop((
+            counterpart_manifest,
+            current_manifest_descriptor,
+            counterpart_manifest_descriptor,
+            rollback_daemon,
+            rollback_client,
+        ));
+        let handoff_listeners = ListenerDescriptors {
+            listener: listener.as_raw_fd(),
+            image_listener: image_listener.as_raw_fd(),
+        };
+        CommittedAdoption {
+            handoff_id: manifest.handoff_id.bytes(),
+            rollback: manifest.kind == ManifestKind::Rollback,
+            source_daemon_generation: manifest.source_daemon_generation,
+            daemon_generation: manifest.target_daemon_generation,
+            install_prefix: prepared.install_prefix,
+            topology: prepared.topology,
+            policy: prepared.policy,
+            policy_generation: prepared.policy_generation,
+            splints,
+            listener: UnixListener::from(listener),
+            image_listener: UnixListener::from(image_listener),
+            handoff_listeners,
+            forward_client,
+            exited_before_adoption,
+            reclaimed_slices: prepared.reclaimed_slices,
+            unreclaimed_slices: prepared.unreclaimed_slices,
+            closed_unexpected,
+            lifecycle,
+        }
+    }
+}
+
+fn retained_scope(evidence: &ManifestSplint) -> RetainedWorkloadScope {
+    RetainedWorkloadScope::new(
+        evidence.dojo_id,
+        evidence.splint_id,
+        evidence.incarnation,
+        evidence.pty.child_pid,
+    )
+}
+
+/// Whether `pid` is this process's child and has exited, without consuming
+/// its status. Anything else, including a query failure, reads as running,
+/// so a doubtful scope failure fails closed.
+fn child_has_exited(pid: u32) -> bool {
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return false;
+    };
+    matches!(
+        waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        ),
+        Ok(Some(_))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::ErrorKind,
+        os::unix::net::UnixStream,
+        path::Path,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    use splinterm_core::TopologyDocument;
+    use splinterm_terminal::{SharedImageBudget, SharedKittyUploadBudget};
+    use tokio::time;
+
+    use super::*;
+    use crate::{
+        HandedOffSplint, LiveSplintHandle,
+        candidate_bootstrap::RuntimeStageForTest,
+        handoff_prepare::tests::{
+            ADOPTION_BUDGET_BYTES, CAT, OldSideHandoff, config, hand_off_fleet, snapshot_text,
+        },
+    };
+
+    /// Records what adoption did with each scope. A scope dropped without a
+    /// release or retain would have stopped its systemd unit.
+    #[derive(Clone, Default)]
+    struct FakeAdopter(Arc<FakeState>);
+
+    #[derive(Default)]
+    struct FakeState {
+        events: Mutex<Vec<&'static str>>,
+        refused: Mutex<HashSet<SplintId>>,
+        reclaims: Mutex<Vec<DojoId>>,
+    }
+
+    impl FakeAdopter {
+        fn record(&self, event: &'static str) {
+            self.0.events.lock().unwrap().push(event);
+        }
+
+        fn count(&self, event: &str) -> usize {
+            let events = self.0.events.lock().unwrap();
+            events.iter().filter(|name| **name == event).count()
+        }
+
+        fn refuse(&self, splint_id: SplintId) {
+            self.0.refused.lock().unwrap().insert(splint_id);
+        }
+    }
+
+    struct FakeScope {
+        adopter: FakeAdopter,
+        settled: bool,
+    }
+
+    impl ProcessPlacement for FakeScope {
+        fn release(mut self) {
+            self.settled = true;
+            self.adopter.record("release");
+        }
+
+        fn retain_for_handoff(mut self) {
+            self.settled = true;
+            self.adopter.record("retain");
+        }
+    }
+
+    impl Drop for FakeScope {
+        fn drop(&mut self) {
+            if !self.settled {
+                self.adopter.record("stop");
+            }
+        }
+    }
+
+    impl WorkloadScopeAdopter for FakeAdopter {
+        type Scope = FakeScope;
+
+        fn adopt_scope(
+            &self,
+            retained: &RetainedWorkloadScope,
+        ) -> Result<FakeScope, WorkloadUnitError> {
+            if self
+                .0
+                .refused
+                .lock()
+                .unwrap()
+                .contains(&retained.splint_id())
+            {
+                return Err(WorkloadUnitError::RetainedScopeMismatch);
+            }
+            self.record("adopt");
+            Ok(FakeScope {
+                adopter: self.clone(),
+                settled: false,
+            })
+        }
+
+        fn reclaim_empty_dojo_slice(
+            &self,
+            dojo_id: DojoId,
+        ) -> Result<DojoSliceReclaim, WorkloadUnitError> {
+            self.0.reclaims.lock().unwrap().push(dojo_id);
+            Ok(DojoSliceReclaim::Stopped)
+        }
+    }
+
+    /// One old generation handed off in process, and the candidate stage an
+    /// exec would have produced from the same descriptors.
+    struct Harness {
+        stage: Option<CandidateRuntimeStage>,
+        topology: Topology,
+        manifest: HandoffManifestV1,
+        directory: PathBuf,
+        _old: OldSideHandoff,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn listener(path: &Path) -> OwnedFd {
+        let listener = UnixListener::bind(path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        listener.into()
+    }
+
+    /// Removes and returns the entry for `slot`.
+    fn take_slot<T>(entries: &mut Vec<(u16, T)>, slot: u16) -> T {
+        let index = entries.iter().position(|(s, _)| *s == slot).unwrap();
+        entries.remove(index).1
+    }
+
+    impl Harness {
+        /// Hands off one Splint per script. `before_staging` sees each
+        /// handed-off Splint and may edit the manifest before staging.
+        async fn new(
+            scripts: &[&str],
+            before_staging: impl FnOnce(&[(u16, HandedOffSplint)], &mut HandoffManifestV1),
+        ) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let directory = std::env::temp_dir().join(format!(
+                "sd-adopt-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&directory).unwrap();
+            let listener_fd = listener(&directory.join("daemon.sock"));
+            let image_listener_fd = listener(&directory.join("image.sock"));
+            let mut old = hand_off_fleet(
+                scripts,
+                ListenerDescriptors {
+                    listener: listener_fd.as_raw_fd(),
+                    image_listener: image_listener_fd.as_raw_fd(),
+                },
+            )
+            .await;
+            let mut manifest = old.forward.clone();
+            let mut handed_off = Vec::new();
+            let mut checkpoints = Vec::new();
+            for (slot, splint, checkpoint) in std::mem::take(&mut old.handed_off) {
+                // The candidate inherits the checkpoint memfd itself.
+                let body = checkpoint.body().descriptor().try_clone_to_owned().unwrap();
+                checkpoints.push((slot, body));
+                handed_off.push((slot, splint));
+            }
+            before_staging(&handed_off, &mut manifest);
+            let mut masters = handed_off
+                .into_iter()
+                .map(|(slot, splint)| (slot, splint.session.into_parts().1))
+                .collect::<Vec<_>>();
+            let splints = manifest
+                .splints
+                .iter()
+                .map(|record| {
+                    let slot = record.pty.master_slot;
+                    (
+                        take_slot(&mut masters, slot),
+                        take_slot(&mut checkpoints, slot),
+                    )
+                })
+                .collect();
+            let duplicate = |descriptor: &OwnedFd| descriptor.try_clone().unwrap();
+            let stage = CandidateRuntimeStage::stage_for_test(
+                RuntimeStageForTest {
+                    manifest: manifest.clone(),
+                    counterpart_manifest: old.rollback.clone(),
+                    splints,
+                    listener: listener_fd,
+                    image_listener: image_listener_fd,
+                    current_manifest_descriptor: duplicate(&old.forward_storage),
+                    counterpart_manifest_descriptor: duplicate(&old.rollback_storage),
+                    forward_client: duplicate(&old.forward_client),
+                    rollback_daemon: duplicate(&old.rollback_daemon),
+                    rollback_client: duplicate(&old.rollback_client),
+                },
+                &SharedImageBudget::new(ADOPTION_BUDGET_BYTES),
+                &SharedKittyUploadBudget::new(ADOPTION_BUDGET_BYTES),
+            )
+            .unwrap();
+            // The candidate loads the fenced Topology's durable form.
+            let topology = TopologyDocument::from_topology(&old.topology)
+                .unwrap()
+                .into_topology()
+                .unwrap();
+            Self {
+                stage: Some(stage),
+                topology,
+                manifest,
+                directory,
+                _old: old,
+            }
+        }
+
+        fn inputs(&self, adopter: Option<FakeAdopter>) -> AdoptionInputs<FakeAdopter> {
+            AdoptionInputs {
+                topology: self.topology.clone(),
+                workload_units: adopter,
+                workload_cgroups_required: true,
+                policy_path: None,
+                live_config: config(),
+            }
+        }
+
+        async fn adopt(
+            &mut self,
+            inputs: AdoptionInputs<FakeAdopter>,
+        ) -> Result<StagedAdoption<FakeScope>, AdoptionFailure> {
+            Box::pin(self.stage.take().unwrap().adopt(inputs)).await
+        }
+
+        fn splint_id(&self, index: usize) -> SplintId {
+            self.manifest.splints[index].splint_id
+        }
+
+        /// Checks a refused adoption kept every part at its recorded
+        /// number and killed nothing, then ends the carried children.
+        fn assert_recovered(&self, recovery: AdoptionRecovery) -> Vec<RetainedWorkloadScope> {
+            assert_eq!(recovery.lifecycle.phase(), HandoffPhase::RollingBack);
+            assert_eq!(recovery.splint_count(), self.manifest.splints.len());
+            let retained = recovery.retained_scopes().to_vec();
+            for (stage, record) in recovery
+                .authorities
+                .splints
+                .into_iter()
+                .zip(&self.manifest.splints)
+            {
+                assert_eq!(stage.evidence, *record);
+                let recorded = self
+                    .manifest
+                    .descriptors
+                    .iter()
+                    .find(|entry| {
+                        entry.slot == HandoffDescriptorSlot::PtyMaster(record.pty.master_slot)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    u32::try_from(stage.pty.master_raw_fd()).unwrap(),
+                    recorded.inherited_fd
+                );
+                assert!(child_is_running(record.pty.child_pid), "nothing is killed");
+                stage.pty.kill_child_and_wait().unwrap();
+            }
+            retained
+        }
+    }
+
+    fn no_change(_: &[(u16, HandedOffSplint)], _: &mut HandoffManifestV1) {}
+
+    fn child_is_running(pid: u32) -> bool {
+        let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+        matches!(
+            waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            ),
+            Ok(None)
+        )
+    }
+
+    async fn assert_echoes(handle: &LiveSplintHandle, token: &str) {
+        time::timeout(Duration::from_secs(5), async {
+            handle
+                .input(format!("{token}\n").into_bytes())
+                .await
+                .unwrap();
+            while !snapshot_text(&handle.snapshot().await.unwrap()).contains(token) {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an adopted Splint reads its PTY and takes input");
+    }
+
+    async fn accept_one(listener: &UnixListener) {
+        time::timeout(Duration::from_secs(5), async {
+            loop {
+                match listener.accept() {
+                    Ok(_) => return,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(error) => panic!("inherited listener refused: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the inherited listener accepts");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_in_process_round_trip_adopts_live_splints_and_commits() {
+        let mut harness = Harness::new(&[CAT, CAT], no_change).await;
+        let adopter = FakeAdopter::default();
+        let carried_max = harness
+            .manifest
+            .splints
+            .iter()
+            .map(|splint| splint.incarnation)
+            .max()
+            .unwrap();
+        let staged = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap();
+        assert_eq!(staged.daemon_generation(), 2);
+        assert_eq!(adopter.count("adopt"), 2);
+        let committed = staged.commit();
+
+        assert!(committed.committed());
+        assert!(!committed.rollback);
+        assert_eq!(committed.source_daemon_generation, 1);
+        assert_eq!(committed.daemon_generation, 2);
+        assert_eq!(
+            committed.install_prefix.directory(),
+            harness.manifest.install_prefix
+        );
+        assert!(committed.exited_before_adoption.is_empty());
+        assert!(committed.reclaimed_slices.is_empty());
+        assert!(committed.unreclaimed_slices.is_empty());
+        assert!(committed.policy_generation.diagnostic.is_none());
+        // Every carried incarnation is reserved before this generation's
+        // first allocation.
+        assert!(ProcessIncarnation::allocate().value() > carried_max);
+        assert_eq!(committed.splints.len(), 2);
+        for (adopted, record) in committed.splints.iter().zip(&harness.manifest.splints) {
+            assert_eq!(adopted.splint_id, record.splint_id);
+            assert_eq!(
+                (adopted.lair_id, adopted.dojo_id),
+                (record.lair_id, record.dojo_id)
+            );
+            assert_eq!(adopted.incarnation.value(), record.incarnation);
+            assert_eq!(adopted.runtime.handle().child_pid(), record.pty.child_pid);
+            assert_eq!(
+                committed
+                    .topology
+                    .find_splint(record.splint_id)
+                    .unwrap()
+                    .state,
+                SplintState::Running
+            );
+            assert_echoes(&adopted.runtime.handle(), "after-adoption").await;
+        }
+        // Both inherited listeners still accept at their bound paths.
+        assert_eq!(
+            committed.handoff_listeners.listener,
+            committed.listener.as_raw_fd()
+        );
+        for (name, listener) in [
+            ("daemon.sock", &committed.listener),
+            ("image.sock", &committed.image_listener),
+        ] {
+            let _client = UnixStream::connect(harness.directory.join(name)).unwrap();
+            accept_one(listener).await;
+        }
+        assert_eq!(adopter.count("stop"), 0);
+        for adopted in committed.splints {
+            adopted.runtime.shutdown().await.unwrap();
+        }
+        // Each exit releases its adopted scope through the normal path.
+        assert_eq!(adopter.count("release"), 2);
+        assert_eq!(adopter.count("stop"), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_running_splint_whose_scope_fails_rolls_back_the_whole_adoption() {
+        let mut harness = Harness::new(&[CAT, CAT, CAT], no_change).await;
+        let adopter = FakeAdopter::default();
+        let refused = harness.splint_id(1);
+        adopter.refuse(refused);
+        let failure = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::WorkloadScope { splint_id, .. } if *splint_id == refused
+        ));
+        // The first scope was adopted and retained again, the third never
+        // adopted, and nothing stopped.
+        assert_eq!(adopter.count("adopt"), 1);
+        assert_eq!(adopter.count("retain"), 1);
+        assert_eq!(adopter.count("stop"), 0);
+        let retained = harness.assert_recovered(failure.into_recovery());
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].splint_id(), harness.splint_id(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failure_mid_list_retains_every_scope_and_kills_nothing() {
+        let mut harness = Harness::new(&[CAT, CAT, CAT], no_change).await;
+        let adopter = FakeAdopter::default();
+        let failing = harness.splint_id(1);
+        crate::live::inject_adoption_reader_fault(failing);
+        let failure = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::LiveRuntime { splint_id, .. } if *splint_id == failing
+        ));
+        // All three scopes were adopted; the staged first actor was aborted,
+        // and every scope was retained again rather than stopped.
+        assert_eq!(adopter.count("adopt"), 3);
+        assert_eq!(adopter.count("retain"), 3);
+        assert_eq!(adopter.count("stop") + adopter.count("release"), 0);
+        assert_eq!(harness.assert_recovered(failure.into_recovery()).len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_child_that_exits_after_capture_is_adopted_and_reaped() {
+        let exiting = Mutex::new(None);
+        let mut harness = Harness::new(&[CAT, "printf ready; read value; exit 3"], |splints, _| {
+            for (_, splint) in splints {
+                rustix::io::write(splint.session.master(), b"go\n").unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while exiting.lock().unwrap().is_none() {
+                assert!(Instant::now() < deadline, "the reading child exits");
+                *exiting.lock().unwrap() = splints
+                    .iter()
+                    .find(|(_, splint)| !child_is_running(splint.evidence.pty_identity.child_pid()))
+                    .map(|(_, splint)| splint.evidence.splint_id);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .await;
+        let exited = exiting.into_inner().unwrap().unwrap();
+        let exited_dojo = harness
+            .manifest
+            .splints
+            .iter()
+            .find(|splint| splint.splint_id == exited)
+            .unwrap()
+            .dojo_id;
+        // Systemd no longer confirms an exited child's scope.
+        let adopter = FakeAdopter::default();
+        adopter.refuse(exited);
+        let committed = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap()
+            .commit();
+        assert_eq!(committed.exited_before_adoption, [exited]);
+        assert_eq!(*adopter.0.reclaims.lock().unwrap(), [exited_dojo]);
+        assert_eq!(committed.reclaimed_slices, [exited_dojo]);
+        assert_eq!(adopter.count("adopt"), 1);
+        for adopted in committed.splints {
+            if adopted.splint_id == exited {
+                // The committed actor reaps the child and publishes its exit.
+                assert_eq!(adopted.runtime.wait().await.unwrap().code, Some(3));
+            } else {
+                assert_echoes(&adopted.runtime.handle(), "survivor").await;
+                adopted.runtime.shutdown().await.unwrap();
+            }
+        }
+        assert_eq!(adopter.count("stop"), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mismatched_authority_fails_closed_before_any_scope_is_adopted() {
+        // The prefix holds no forward pair.
+        let mut harness = Harness::new(&[CAT], |_, manifest| {
+            manifest.install_prefix = manifest.install_prefix.parent().unwrap().to_path_buf();
+        })
+        .await;
+        let adopter = FakeAdopter::default();
+        let failure = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::InstallPrefixMismatch
+        ));
+        harness.assert_recovered(failure.into_recovery());
+
+        // A durable Topology one revision ahead of the manifest.
+        let mut harness = Harness::new(&[CAT], no_change).await;
+        let mut inputs = harness.inputs(Some(adopter.clone()));
+        inputs
+            .topology
+            .create_lair("later", PathBuf::from("/tmp"))
+            .unwrap();
+        let failure = harness.adopt(inputs).await.unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::TopologyRevision { .. }
+        ));
+        harness.assert_recovered(failure.into_recovery());
+
+        // A durable Topology at the same revision without the carried Splint.
+        let mut harness = Harness::new(&[CAT], no_change).await;
+        let mut inputs = harness.inputs(Some(adopter.clone()));
+        inputs.topology = Topology::new();
+        inputs
+            .topology
+            .create_lair("other", PathBuf::from("/tmp"))
+            .unwrap();
+        assert_eq!(inputs.topology.revision(), harness.topology.revision());
+        let failure = harness.adopt(inputs).await.unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::MissingSplint(splint_id) if *splint_id == harness.splint_id(0)
+        ));
+        harness.assert_recovered(failure.into_recovery());
+
+        // Required workload cgroups without a manager.
+        let mut harness = Harness::new(&[CAT], no_change).await;
+        let failure = harness.adopt(harness.inputs(None)).await.unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            AdoptionError::WorkloadCgroupsUnavailable
+        ));
+        harness.assert_recovered(failure.into_recovery());
+        assert_eq!(adopter.count("adopt"), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_aborted_staged_adoption_returns_every_part() {
+        let mut harness = Harness::new(&[CAT, CAT], no_change).await;
+        let adopter = FakeAdopter::default();
+        let staged = harness
+            .adopt(harness.inputs(Some(adopter.clone())))
+            .await
+            .unwrap();
+        let recovery = staged.abort();
+        assert_eq!(adopter.count("retain"), 2);
+        assert_eq!(adopter.count("stop") + adopter.count("release"), 0);
+        assert_eq!(harness.assert_recovered(recovery).len(), 2);
+    }
+
+    #[test]
+    fn only_carried_splints_are_running_after_adoption() {
+        let mut topology = Topology::new();
+        let carried = topology
+            .create_lair("carried", PathBuf::from("/tmp"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        let stale = topology
+            .create_lair("stale", PathBuf::from("/tmp"))
+            .unwrap()
+            .dojos[0]
+            .default_focus;
+        assert!(topology.set_splint_state(stale, SplintState::Running));
+        mark_adopted_states(&mut topology, &HashSet::from([carried]));
+        assert_eq!(
+            topology.find_splint(carried).unwrap().state,
+            SplintState::Running
+        );
+        assert_eq!(
+            topology.find_splint(stale).unwrap().state,
+            SplintState::Exited(0)
+        );
+    }
+}
