@@ -29,7 +29,7 @@
 //! [`crate::handoff_rollback`] (M3.11a). One function in the binary,
 //! `handoff_requests::live_handoff_support`, decides whether a running
 //! daemon ever reaches the boundary. It refuses every build until window
-//! continuity lands (its `WINDOW_CONTINUITY_READY` flag, Plan 0061 M3.13 to
+//! continuity lands (its `WINDOW_CONTINUITY_READY` flag, Plan 0061 M3.12 to
 //! M3.16), and it refuses a Nix-store build for all of 0.2.0 (operator
 //! decision 2026-10-18). The dry-run report and `Execute` both use it, so
 //! `Execute` is refused before the handoff gate. The binary arms this call

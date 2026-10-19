@@ -45,9 +45,11 @@
 //! runtime, its blocking pool, and the workload unit manager (shut down
 //! before the runtime, so no workload scope can be stopped). A candidate
 //! that had released its signals blocks them on its main thread the moment
-//! it decides to roll back, before that teardown, and captures what its
-//! handlers took only after it, so no termination is lost between the
-//! failure and the exec. Then, in order:
+//! it decides to roll back, before that teardown. Then it waits until the
+//! process has exactly one thread, because a blocking task the runtime
+//! abandoned may still be able to take a signal. Only then does it capture
+//! what its handlers took, so no termination is lost between the failure
+//! and the exec. Then, in order:
 //!
 //! 1. check the lifecycle is rolling back;
 //! 2. take the rollback manifest: the counterpart staging already decoded
