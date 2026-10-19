@@ -201,8 +201,12 @@ nix build .#checks.x86_64-linux.headless --print-build-logs
 
 This check is also included in `nix flake check`. CI runs it together with the
 package and module checks; the required `check` job depends on the Nix job, so a
-Nix failure cannot produce a successful release-authority CI result. Graphical
-tests remain opt-in and are not launched by CI.
+Nix failure cannot produce a successful release-authority CI result. On pull
+requests, the Nix job runs only when Nix, packaging, Cargo manifest, toolchain,
+or CI workflow files change. It always runs in the merge queue and on
+authority-branch pushes. See
+[Merge queue and Nix cache](release-automation.md#merge-queue-and-nix-cache).
+Graphical tests remain opt-in and are not launched by CI.
 
 It boots two disposable,
 non-graphical NixOS VMs (1.5 GiB RAM and two vCPUs each) on an isolated test

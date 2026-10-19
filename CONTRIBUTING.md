@@ -45,7 +45,13 @@ pull request:
 git push --set-upstream origin HEAD
 ```
 
-Prefer squash merge. After the merge is verified:
+Pull requests into `main` merge through the GitHub merge queue with the squash
+method. The required `check` must pass on the pull request and again on the
+queued merge group. The NixOS job runs on a pull request only when Nix,
+packaging, Cargo manifest, toolchain, or CI workflow files change, and always
+in the queue and on `main`. See
+[Merge queue and Nix cache](docs/release-automation.md#merge-queue-and-nix-cache).
+After the merge is verified:
 
 ```bash
 cd "$root"

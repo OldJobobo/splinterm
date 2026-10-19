@@ -80,17 +80,22 @@ candidate or promotion prerequisite. See
 `CI / check` remains the required branch-protection context. It runs under
 `always()` and fails unless every mandatory dependency result is exactly
 `success`, so a failed, cancelled, or skipped boundary cannot turn the required
-context green.
+context green. The single exception is `nix` on a pull request whose `changes`
+job succeeded and selected exactly `nix=false`; there a skipped `nix` counts as
+covered. A skipped `nix` on a push or merge group still fails `check`.
 
 | Boundary | Exact responsibility |
 | --- | --- |
-| `preflight` | `release-doctor.py` before compilation |
+| `preflight` | `release-doctor.py`, release-tag ancestry for `main` pushes, pull requests, and merge groups, and pinned actionlint, before compilation |
+| `changes` | selects whether a pull request needs `nix`; always selects it for pushes and merge groups |
 | `static` | `cargo fmt`, ShellCheck, and frozen workspace clippy |
 | `workspace-tests` | workspace lib/bin/example/doc tests plus every Rust integration target except the separately isolated daemon and MCP targets |
 | `daemon-tests` | `splinterd` `end_to_end`, serialized, no retry-to-green |
 | `mcp-tests` | `schema_inventory` and `stdio_protocol`, serialized, no retry-to-green |
 | `package-automation` | all four `packaging/PKGBUILD::check()` Python suites plus package/release workflow and helper tests |
 | `renderer-contracts` | adopted Splinterm semantic vectors, public contract fixtures, and correctness-report contracts |
+| `nix` | `nix flake check`: NixOS packages, module, and headless VM lifecycle |
+| `arch-warning-check` | warning-free `cargo check` with the current Arch toolchain |
 
 Portable Foot fixture/tooling validation and the exact pinned-host differential
 both live in the separate manual/scheduled `foot-oracle-pinned.yml` workflow.
@@ -130,6 +135,49 @@ lives in the separate manual/scheduled `foot-oracle-pinned.yml` workflow so an
 offline self-hosted runner cannot delay required CI or candidate eligibility.
 Cargo/compiler changes do not require Foot-provenance refreshes. See
 [ADR 0013](adr/0013-splinterm-owned-renderer-acceptance.md).
+
+### Merge queue and Nix cache
+
+Pull requests into `main` merge through the GitHub merge queue. CI runs on
+`pull_request`, on the queue's `merge_group` event, and on pushes to `main` and
+`maint/0.1`. The queue tests each squash of a pull request on top of the
+current `main` plus earlier queued entries, so a merge no longer forces every
+open pull request to rebase and rerun. Newer pushes to a pull request cancel
+its superseded run. Push and merge-group runs are never cancelled or replaced.
+
+The `nix` job takes the longest. On a pull request it runs only when the
+`changes` job finds a path in the pull request's range that touches
+`nix/`, `flake.nix`, `flake.lock`, `packaging/`, `dist/`, `config/`,
+`tools/automation/`, `tools/package/`, `Cargo.lock`, any
+`Cargo.toml`, `rust-toolchain*`, `.github/workflows/ci.yml`, or one of the
+sources `nix/package.nix` patches (`crates/splinterm/src/app/local_service.rs`,
+`remote.rs`, `renderer/fonts.rs`, `wayland.rs`). It always runs
+in the merge queue and on pushes to `main` and `maint/0.1`, so a change that
+breaks the Nix build is still caught before it lands on `main`.
+
+Candidate construction and promotion still accept only a successful `push`
+run on the exact authority-branch commit. That run always includes `nix`.
+Pull-request and merge-group runs never satisfy the CI attestation, because the
+attestation requires `event` to be `push` and `head_branch` to be `main` or
+`maint/0.1`.
+
+The `nix` job can pull from and push to a Cachix binary cache. The step is
+inert until the operator configures it:
+
+1. Create a public Cachix cache.
+2. Set the repository variable `CACHIX_CACHE` to the cache name.
+3. Set the repository secret `CACHIX_AUTH_TOKEN` to a token with write
+   access to that cache.
+
+Only pushes to `main` and `maint/0.1` receive the token and upload to the
+cache. Pull requests and merge groups run code that has not landed (possibly
+from a fork), so they get no token and only read the public cache.
+
+Branch protection for `main` keeps `check` as the only required status check
+(source: GitHub Actions) and enables **Require merge queue** with the squash
+merge method. Because the queue tests each entry on top of the current base,
+the "Require branches to be up to date before merging" setting no longer
+gates merges.
 
 ## Human approval boundary
 
