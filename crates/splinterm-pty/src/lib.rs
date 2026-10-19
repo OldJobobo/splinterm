@@ -564,24 +564,31 @@ impl LinuxPtyIdentity {
         )
     }
 
-    /// Verifies one inherited master like
-    /// [`Self::verify_inherited_allowing_exit`], except that any foreground
-    /// process group of the recorded session is accepted, not only the
-    /// recorded one.
+    /// Verifies one inherited master for a daemon handoff's rollback
+    /// generation: like [`Self::verify_inherited_allowing_exit`], except that
+    /// two kinds of drift a carried program may cause in the exec window are
+    /// reconciled instead of refused.
     ///
-    /// A daemon handoff's rollback generation uses this: an interactive
-    /// shell that started or finished a foreground job in the exec window
-    /// changed its terminal's foreground group, which refuses the forward
-    /// adoption, and the same check would then refuse the rollback that
-    /// exists to keep the Splint alive. The foreground group still belongs
-    /// to the recorded session: the terminal's session is checked to be the
-    /// recorded one, and the kernel lets a terminal's foreground group be
-    /// set only to a process group of that session.
+    /// * **Foreground process group.** Any foreground group of the recorded
+    ///   session is accepted. A shell that started or finished a foreground
+    ///   job changed it; it still belongs to the recorded session, because
+    ///   the terminal's session is checked to be the recorded one and the
+    ///   kernel lets a terminal's foreground group be set only to a process
+    ///   group of that session.
+    /// * **Window size.** A changed kernel size (a program's `TIOCSWINSZ`,
+    ///   such as `stty rows`) is set back to the recorded size, once every
+    ///   identity check has passed, and read back. The recorded size is the
+    ///   restored terminal grid's, so the adopted actor and the kernel agree
+    ///   again; the foreground group receives `SIGWINCH` and redraws, and a
+    ///   reconnecting Window resizes as it always does.
+    ///
+    /// The forward adoption refused that drift, and refusing the rollback
+    /// that exists to keep the Splint alive the same way would hang it up.
     ///
     /// # Errors
     /// As [`Self::verify_inherited_allowing_exit`], without the foreground
-    /// process group equality.
-    pub fn verify_inherited_allowing_exit_in_session(
+    /// process group equality, and when the recorded size cannot be set back.
+    pub fn verify_inherited_for_rollback(
         self,
         master: BorrowedFd<'_>,
         expected_size: PtySize,
@@ -589,6 +596,9 @@ impl LinuxPtyIdentity {
         self.verify_inherited_with(master, expected_size, None)
     }
 
+    /// `expected_foreground_process_group: None` is the rollback mode of
+    /// [`Self::verify_inherited_for_rollback`]: any foreground group of the
+    /// session, and a changed size set back to `expected_size`.
     fn verify_inherited_with(
         self,
         master: BorrowedFd<'_>,
@@ -597,22 +607,32 @@ impl LinuxPtyIdentity {
     ) -> Result<InheritedChild> {
         verify_pty_master(master)?;
         self.validate_process()?;
-        let observed_size = termios::tcgetwinsize(master)
-            .map(PtySize::from_winsize)
-            .map_err(|error| PtyError::io("validate inherited PTY size", error))?;
+        let mut child = if self.child_exited()? {
+            InheritedChild::Exited
+        } else {
+            InheritedChild::Running
+        };
+        if child == InheritedChild::Running {
+            match self.validate_running_terminal(master, expected_foreground_process_group) {
+                Ok(()) => {}
+                // The terminal checks fail once the session leader exits;
+                // that race is an exit, not a substituted terminal.
+                Err(_) if self.child_exited()? => child = InheritedChild::Exited,
+                Err(error) => return Err(error),
+            }
+        }
+        let observed_size = read_size(master)?;
         if observed_size != expected_size {
-            return Err(PtyError::IdentityMismatch);
+            if expected_foreground_process_group.is_some() {
+                return Err(PtyError::IdentityMismatch);
+            }
+            termios::tcsetwinsize(master, expected_size.winsize())
+                .map_err(|error| PtyError::io("restore inherited PTY size", error))?;
+            if read_size(master)? != expected_size {
+                return Err(PtyError::IdentityMismatch);
+            }
         }
-        if self.child_exited()? {
-            return Ok(InheritedChild::Exited);
-        }
-        match self.validate_running_terminal(master, expected_foreground_process_group) {
-            Ok(()) => Ok(InheritedChild::Running),
-            // The terminal checks fail once the session leader exits; that
-            // race is an exit, not a substituted terminal.
-            Err(_) if self.child_exited()? => Ok(InheritedChild::Exited),
-            Err(error) => Err(error),
-        }
+        Ok(child)
     }
 
     /// Whether the direct child has exited, without consuming its status.
@@ -646,6 +666,13 @@ impl LinuxPtyIdentity {
         }
         Ok(())
     }
+}
+
+/// The kernel window size of an inherited PTY.
+fn read_size(master: BorrowedFd<'_>) -> Result<PtySize> {
+    termios::tcgetwinsize(master)
+        .map(PtySize::from_winsize)
+        .map_err(|error| PtyError::io("validate inherited PTY size", error))
 }
 
 /// Whether an inherited PTY child was still running when it was verified.

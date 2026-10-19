@@ -391,13 +391,15 @@ fn handoff_signal_set() -> SigSet {
 /// exec; dropping it restores the thread's previous mask, so a signal that
 /// arrived meanwhile is delivered then. See the module documentation.
 ///
-/// The mask is per thread. Every handoff exec runs under the single-threaded
-/// process guard, so the exec thread is the only thread and its mask is
-/// what crosses exec.
+/// The mask is per thread, so the value is neither `Send` nor `Sync`: it is
+/// restored on the thread that blocked. Every handoff exec runs under the
+/// single-threaded process guard, so the exec thread is the only thread and
+/// its mask is what crosses exec.
 #[must_use = "dropping it restores the signal mask at once"]
 #[derive(Debug)]
 pub struct BlockedHandoffSignals {
     previous: SigSet,
+    _thread: std::marker::PhantomData<*const ()>,
 }
 
 impl BlockedHandoffSignals {
@@ -412,7 +414,10 @@ impl BlockedHandoffSignals {
             Some(&handoff_signal_set()),
             Some(&mut previous),
         )?;
-        Ok(Self { previous })
+        Ok(Self {
+            previous,
+            _thread: std::marker::PhantomData,
+        })
     }
 }
 

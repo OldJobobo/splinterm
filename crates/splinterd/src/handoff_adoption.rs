@@ -2264,7 +2264,7 @@ mod tests {
         let recovery: crate::handoff_rollback::PreCommitRecovery = failure.into();
         assert!(!recovery.has_rollback_edge());
         let mask = signal_mask();
-        let refused = crate::handoff_rollback::execute_rollback(recovery, &rollback_exec());
+        let refused = crate::handoff_rollback::execute_rollback(recovery, &rollback_exec(), None);
         assert!(
             matches!(
                 refused,
@@ -2318,6 +2318,73 @@ mod tests {
         shut_down(committed).await;
     }
 
+    /// A carried program changed its terminal's kernel window size after
+    /// capture (as `stty rows` would): a forward candidate refuses it at
+    /// staging, and a rollback generation sets the recorded size back, so the
+    /// kernel and the restored grid agree, and adopts (Plan 0061 M3.11a
+    /// review).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_rollback_generation_restores_a_changed_window_size() {
+        fn grow(splints: &[(u16, HandedOffSplint)], kept: &mut Vec<OwnedFd>) {
+            for (_, splint) in splints {
+                let master = splint.session.master();
+                let mut size = rustix::termios::tcgetwinsize(master).unwrap();
+                size.ws_row += 5;
+                size.ws_col += 7;
+                rustix::termios::tcsetwinsize(master, size).unwrap();
+                kept.push(master.try_clone_to_owned().unwrap());
+            }
+        }
+
+        let mut kept = Vec::new();
+        let refused = Harness::try_new(&[CAT], |splints, _| grow(splints, &mut kept)).await;
+        let Err((error, manifest)) = refused else {
+            panic!("a forward candidate staged a changed window size");
+        };
+        assert!(
+            matches!(
+                error,
+                CandidateBootstrapError::Pty(splinterm_pty::PtyError::IdentityMismatch)
+            ),
+            "{error}"
+        );
+        drop(kept);
+        reap_hung_up(&manifest);
+
+        let mut kept = Vec::new();
+        let mut harness = Harness::new(&[CAT], |splints, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+            grow(splints, &mut kept);
+        })
+        .await;
+        let recorded = harness.manifest.splints[0].size;
+        let restored = rustix::termios::tcgetwinsize(&kept[0]).unwrap();
+        assert_eq!(
+            (
+                restored.ws_row,
+                restored.ws_col,
+                restored.ws_xpixel,
+                restored.ws_ypixel
+            ),
+            (
+                recorded.rows,
+                recorded.columns,
+                recorded.pixel_width,
+                recorded.pixel_height
+            ),
+            "rollback staging sets the recorded size back"
+        );
+        let committed = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap()
+            .commit();
+        assert!(committed.rollback);
+        assert_echoes(&committed.splints[0].runtime.handle(), "after-resize").await;
+        drop(kept);
+        shut_down(committed).await;
+    }
+
     /// The executor binds every recovered descriptor to the number the
     /// rollback manifest records and renumbers nothing: a recovery holding a
     /// descriptor elsewhere (the harness duplicates the manifest memfds)
@@ -2334,7 +2401,7 @@ mod tests {
         assert!(recovery.has_rollback_edge());
         assert_eq!(recovery.carried_splints(), Some(1));
         let mask = signal_mask();
-        let refused = crate::handoff_rollback::execute_rollback(recovery, &rollback_exec());
+        let refused = crate::handoff_rollback::execute_rollback(recovery, &rollback_exec(), None);
         assert!(
             matches!(
                 refused,

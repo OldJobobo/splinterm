@@ -29,7 +29,8 @@
 //! rollback edge and exits loudly with no further exec. Two cases leave a
 //! SIGTERM pending across exec (raised inside the exec boundary, after its
 //! own block), which must become an ordered shutdown once the adopting
-//! generation installed its handler, never a killed candidate. A rollback
+//! generation installed its handler, never a killed candidate; so must one
+//! sent while a failed candidate tears its runtime down. A rollback
 //! image whose digest does not match its manifest is never executed, and a
 //! stray inheritable descriptor in the failed candidate crosses the rollback
 //! exec to be closed by the rollback daemon's claim instead of costing every
@@ -151,13 +152,14 @@ const FAULT_POINTS: [CandidateFaultPoint; 6] = [
     CandidateFaultPoint::ScopeAdoption,
     CandidateFaultPoint::ActorStaging,
 ];
-const CASES: [&str; 7] = [
+const CASES: [&str; 8] = [
     "adopt",
     "rollback",
     "rollback-of-rollback",
     "pending-sigterm",
     "tampered-rollback-image",
     "stray-descriptor",
+    "terminate-during-teardown",
     "fault-matrix",
 ];
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
@@ -242,6 +244,8 @@ fn main() -> ExitCode {
             println!("handoff_exec_adoption: tampered-rollback-image passed");
             stray_descriptor_case();
             println!("handoff_exec_adoption: stray-descriptor passed");
+            terminate_during_teardown_case();
+            println!("handoff_exec_adoption: terminate-during-teardown passed");
             for point in FAULT_POINTS {
                 fault_case(point);
                 println!(
@@ -1868,7 +1872,9 @@ fn fault_case(point: CandidateFaultPoint) {
         CandidateFaultPoint::ActorStaging => {
             ("adoption", "injected candidate fault at actor staging")
         }
-        CandidateFaultPoint::StrayDescriptor => unreachable!("not a fault point"),
+        CandidateFaultPoint::StrayDescriptor | CandidateFaultPoint::TerminateDuringTeardown => {
+            unreachable!("not a fault point")
+        }
     };
     let logs = stage.logs();
     for expected in [format!("phase=\"{phase}\""), cause.to_owned()] {
@@ -1940,4 +1946,51 @@ fn stray_descriptor_case() {
         "{logs}"
     );
     shut_down(&mut stage, &record, &[launched]);
+}
+
+/// A SIGTERM arrives during rollback teardown: after the forward
+/// candidate decided to roll back and blocked the handoff signals on its
+/// main thread, but while its runtime's workers still run with them
+/// unblocked, so a worker's handler may take it. Captured after teardown or
+/// still kernel-pending, it crosses the rollback exec, and the rollback
+/// daemon performs an ordered shutdown once it adopted instead of serving
+/// until a SIGKILL (Plan 0061 M3.11a review).
+fn terminate_during_teardown_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            remove_forward_client: true,
+            fault: Some(format!(
+                "{}@forward",
+                CandidateFaultPoint::TerminateDuringTeardown.name()
+            )),
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    let status = stage.wait(STAGE_WAIT);
+    let logs = stage.logs();
+    assert!(
+        status.success(),
+        "a SIGTERM during rollback teardown must become an ordered shutdown: {status}\n{logs}"
+    );
+    for expected in [
+        "test seam: sent SIGTERM to this process during rollback teardown",
+        "daemon handoff: adopted generation published",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
+    log_line(
+        &logs,
+        "daemon handoff: executing the sealed rollback daemon",
+    );
+    let committed = log_line(&logs, "daemon handoff: adoption committed");
+    assert!(
+        committed.contains("daemon_generation=1") && committed.contains("rollback=true"),
+        "{committed:?}\n{logs}"
+    );
+    for splint in &record.carried {
+        wait_until_exited(splint.child_pid, "carried Splint after an ordered shutdown");
+    }
 }

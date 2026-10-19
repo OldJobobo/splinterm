@@ -161,6 +161,11 @@ pub enum CandidateFaultPoint {
     /// that no manifest names, as a leaked descriptor would
     /// ([`leak_inheritable_descriptor`]).
     StrayDescriptor,
+    /// Not a failure: once a pre-commit failure has been decided and the
+    /// handoff signals blocked on the main thread, sends this process a
+    /// SIGTERM ([`terminate_this_process`]) while the runtime's workers still
+    /// run with them unblocked, as `systemctl stop` during rollback teardown.
+    TerminateDuringTeardown,
 }
 
 impl CandidateFaultPoint {
@@ -175,6 +180,7 @@ impl CandidateFaultPoint {
             Self::ScopeAdoption => "scope-adoption",
             Self::ActorStaging => "actor-staging",
             Self::StrayDescriptor => "stray-descriptor",
+            Self::TerminateDuringTeardown => "terminate-during-teardown",
         }
     }
 }
@@ -212,6 +218,19 @@ pub fn leak_inheritable_descriptor() -> std::io::Result<std::os::fd::RawFd> {
     rustix::io::fcntl_setfd(&file, flags - rustix::io::FdFlags::CLOEXEC)?;
     // Leaked on purpose: nothing owns it once this returns.
     Ok(file.into_raw_fd())
+}
+
+/// Sends this process a process-directed SIGTERM, which the kernel delivers
+/// to any thread that does not block it. Only the
+/// [`CandidateFaultPoint::TerminateDuringTeardown`] seam calls it.
+///
+/// # Errors
+/// Reports a failed `kill`.
+pub fn terminate_this_process() -> std::io::Result<()> {
+    Ok(rustix::process::kill_process(
+        rustix::process::getpid(),
+        rustix::process::Signal::TERM,
+    )?)
 }
 
 #[cfg(test)]

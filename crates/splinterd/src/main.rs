@@ -38,8 +38,9 @@ use splinterd::{
     handoff_coordinator::ForwardHandoffAuthority,
     handoff_descriptors::{HandoffDescriptor, HandoffDescriptorSlot},
     handoff_exec::{
-        ExecBoundaryError, ExecInheritancePlan, HANDOFF_RESUME_SCOPE_TIMEOUT, ResumableSplint,
-        ResumeBudgets, cross_exec_boundary, resume_handed_off,
+        BlockedHandoffSignals, ExecBoundaryError, ExecInheritancePlan,
+        HANDOFF_RESUME_SCOPE_TIMEOUT, ResumableSplint, ResumeBudgets, cross_exec_boundary,
+        resume_handed_off,
     },
     handoff_prepare::{
         CaptureLimits, HandedOffCapture, HandoffCaptures, ListenerDescriptors, ManifestInputs,
@@ -1366,9 +1367,13 @@ fn run_daemon(source: StartupSource) -> Result<()> {
                 StartupSource::Adopted(startup) => {
                     let AdoptedStartup {
                         stage,
+                        signals,
                         require_workload_cgroups,
                         ..
                     } = *startup;
+                    // Only this thread exists: blocking here first leaves
+                    // nothing that could take a termination before exec.
+                    let blocked = block_for_rollback();
                     let error = format!("cannot build the serving runtime: {error}");
                     let refused = stage.refuse(
                         splinterd::handoff_adoption::AdoptionError::DaemonStartup(error.clone()),
@@ -1378,10 +1383,8 @@ fn run_daemon(source: StartupSource) -> Result<()> {
                         error,
                         recovery: refused.into(),
                         workload_units: None,
-                        // No signal driver has run since the handlers were
-                        // installed, so no taken termination is observable;
-                        // one taken in this instant is lost, never fatal.
-                        pending: PendingTermination::default(),
+                        signals: Some(signals),
+                        blocked,
                         require_workload_cgroups,
                     }));
                 }
@@ -1393,7 +1396,10 @@ fn run_daemon(source: StartupSource) -> Result<()> {
             RoundEnd::RollBack(mut failure) => {
                 // The no-kill order of `stop_runtime_and_cross`: no scope
                 // can stop once the manager is shut down, then the runtime
-                // stops and the process is back to one thread.
+                // stops and the process is back to one thread. The failure
+                // already holds the handoff signals blocked on this thread,
+                // so once the workers are gone no handler can take one
+                // (`roll_back` captures what handlers took before).
                 if let Some(manager) = failure.workload_units.take()
                     && let Err(error) = manager.shutdown()
                 {
@@ -1509,14 +1515,17 @@ fn run_candidate(startup: CandidateStartup) -> Result<()> {
     } = startup;
     init_tracing();
     info!("daemon handoff candidate: inherited descriptors claimed; staging");
-    // No runtime exists yet, so a failure here rolls back at once.
+    // No runtime exists yet, so a failure here rolls back at once. The
+    // signals are not released yet either: the blocked mask the exec carried
+    // still holds them, and no handler has taken one.
     let unstarted = |phase, error: String, recovery: PreCommitRecovery| {
         roll_back(CandidateFailure {
             phase,
             error,
             recovery,
             workload_units: None,
-            pending: PendingTermination::default(),
+            signals: None,
+            blocked: None,
             require_workload_cgroups,
         })
     };
@@ -1604,8 +1613,15 @@ struct CandidateFailure {
     /// The process's one workload unit manager, shut down before the
     /// runtime stops so no scope can be stopped.
     workload_units: Option<WorkloadUnitManager>,
-    /// Terminations this candidate's own handlers already took.
-    pending: PendingTermination,
+    /// The candidate's signal streams, once installed. Whatever their
+    /// handlers took is captured only after every runtime thread is gone
+    /// ([`captured_terminations`]).
+    signals: Option<DaemonSignals>,
+    /// SIGINT, SIGTERM, and SIGHUP blocked on the main thread from the
+    /// moment the failure was decided ([`block_for_rollback`]), held through
+    /// teardown, capture, and the rollback exec. `None` before the signals
+    /// were released: the exec's blocked mask is then still in place.
+    blocked: Option<BlockedHandoffSignals>,
     require_workload_cgroups: bool,
 }
 
@@ -1648,7 +1664,8 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
         error,
         recovery,
         workload_units,
-        pending,
+        signals,
+        blocked,
         require_workload_cgroups,
     } = failure;
     if let Some(manager) = workload_units
@@ -1656,6 +1673,13 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
     {
         error!(%error, "workload unit manager did not shut down cleanly before rollback");
     }
+    // No runtime thread exists any more and, once the signals were
+    // released, the main thread holds them blocked: nothing can take a
+    // termination from here on, and whatever a handler took before is
+    // captured now.
+    let pending = signals.map_or_else(PendingTermination::default, |mut signals| {
+        captured_terminations(&mut signals)
+    });
     let rollback_edge = recovery.has_rollback_edge();
     error!(
         phase,
@@ -1682,6 +1706,7 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
             guard_deadline: Instant::now() + HANDOFF_GUARD_WAIT,
             pending,
         },
+        blocked,
     );
     error!(
         phase,
@@ -1693,24 +1718,62 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
     )
 }
 
-/// Whether this candidate's own signal handlers already took a SIGTERM or
-/// SIGINT that nothing will now act on: a failure after
-/// [`DaemonSignals::install`] unblocked them. The executor makes each one
-/// pending again under the blocked mask, so the rollback daemon performs the
-/// ordered shutdown it asked for after adopting. Best effort: a signal the
-/// runtime's driver has not yet delivered to its stream, or one that lands
-/// while the runtime stops, is missed (it is then lost, never fatal).
-async fn pending_termination(signals: &mut DaemonSignals) -> PendingTermination {
-    // Lets the signal driver deliver what the kernel already handed it.
-    tokio::task::yield_now().await;
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    let taken = |signal: &mut signal::unix::Signal, context: &mut std::task::Context<'_>| {
-        matches!(signal.poll_recv(context), std::task::Poll::Ready(Some(())))
-    };
-    PendingTermination {
-        terminate: taken(&mut signals.terminate, &mut context),
-        interrupt: taken(&mut signals.interrupt, &mut context),
+/// Blocks SIGINT, SIGTERM, and SIGHUP on the calling (main) thread the
+/// moment a candidate that already released its signals decides to roll
+/// back, and keeps them blocked through teardown and the rollback exec. From
+/// then on a termination either reaches a runtime worker's handler, which
+/// records it for [`captured_terminations`], or stays kernel-pending for the
+/// main thread, the only thread left after teardown, and crosses exec.
+///
+/// A failed `pthread_sigmask` changes nothing; the executor then blocks
+/// right before exec, as before this candidate released its signals.
+fn block_for_rollback() -> Option<BlockedHandoffSignals> {
+    match BlockedHandoffSignals::block() {
+        Ok(blocked) => Some(blocked),
+        Err(error) => {
+            warn!(%error, "cannot block the handoff signals for rollback teardown");
+            None
+        }
     }
+}
+
+/// Every SIGTERM or SIGINT this candidate's own handlers took, captured
+/// after teardown, for the executor to make pending again under the blocked
+/// mask so the rollback daemon performs the ordered shutdown it asked for.
+///
+/// Called only once no runtime thread is left and the main thread holds the
+/// signals blocked ([`block_for_rollback`]), so no handler can run any more.
+/// Tokio's handler records a signal in its process-global registry and then
+/// writes its self-pipe; a signal driver drains the pipe, then broadcasts to
+/// the streams. A signal a handler took before teardown was therefore either
+/// already broadcast to these streams, or is still recorded with its byte in
+/// the pipe. A current-thread runtime, which starts no thread, registers a
+/// fresh duplicate of the pipe, so one park of its driver broadcasts what is
+/// still recorded; polling the streams then sees every taken signal. Nothing
+/// is lost between the failure and the exec.
+fn captured_terminations(signals: &mut DaemonSignals) -> PendingTermination {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            warn!(%error, "cannot build the runtime that captures taken termination signals");
+            return PendingTermination::default();
+        }
+    };
+    runtime.block_on(async {
+        // Parks the driver at least once, which flushes the self-pipe.
+        time::sleep(Duration::from_millis(10)).await;
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let taken = |signal: &mut signal::unix::Signal, context: &mut std::task::Context<'_>| {
+            matches!(signal.poll_recv(context), std::task::Poll::Ready(Some(())))
+        };
+        PendingTermination {
+            terminate: taken(&mut signals.terminate, &mut context),
+            interrupt: taken(&mut signals.interrupt, &mut context),
+        }
+    })
 }
 
 /// The inputs a candidate builds on the serving runtime before adopting.
@@ -1818,7 +1881,7 @@ async fn connect_adoption_workload_units(required: bool) -> Option<WorkloadUnitM
 async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<CandidateFailure>> {
     let AdoptedStartup {
         stage,
-        mut signals,
+        signals,
         require_workload_cgroups,
         shared_image_budget,
         shared_kitty_upload_budget,
@@ -1826,16 +1889,38 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         image_socket,
     } = startup;
     info!("daemon handoff candidate: serving runtime started; loading durable state");
+    #[cfg(feature = "integration-test")]
+    let terminate_during_teardown = stage.injected_fault(
+        splinterd::integration_test_seams::CandidateFaultPoint::TerminateDuringTeardown,
+    );
+    // Every pre-commit failure from here on: the handoff signals are blocked
+    // on this (main) thread first, where `block_on` polls this future, and
+    // stay blocked through teardown and the rollback exec; the signal
+    // streams travel with the failure so that `roll_back` captures what
+    // their handlers took once no runtime thread is left.
     let refused = |phase: &'static str,
                    failure: splinterd::handoff_adoption::AdoptionFailure,
                    workload_units: Option<WorkloadUnitManager>,
-                   pending: PendingTermination| {
+                   signals: DaemonSignals| {
+        let blocked = block_for_rollback();
+        // A process-directed SIGTERM while the runtime's workers still run
+        // with the signals unblocked, as `systemctl stop` during teardown.
+        #[cfg(feature = "integration-test")]
+        if terminate_during_teardown {
+            match splinterd::integration_test_seams::terminate_this_process() {
+                Ok(()) => warn!("test seam: sent SIGTERM to this process during rollback teardown"),
+                Err(error) => {
+                    warn!(%error, "test seam: cannot send SIGTERM during rollback teardown");
+                }
+            }
+        }
         Box::new(CandidateFailure {
             phase,
             error: failure.to_string(),
             recovery: failure.into(),
             workload_units,
-            pending,
+            signals: Some(signals),
+            blocked,
             require_workload_cgroups,
         })
     };
@@ -1845,10 +1930,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
             let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
                 format!("{error:#}"),
             ));
-            // The handlers were installed and the signals released before
-            // this runtime existed; a termination they took is replayed.
-            let pending = pending_termination(&mut signals).await;
-            return Err(refused("startup", failure, None, pending));
+            return Err(refused("startup", failure, None, signals));
         }
     };
     #[cfg(feature = "integration-test")]
@@ -1856,8 +1938,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
             "injected candidate fault at startup".to_owned(),
         ));
-        let pending = pending_termination(&mut signals).await;
-        return Err(refused("startup", failure, None, pending));
+        return Err(refused("startup", failure, None, signals));
     }
     #[cfg(feature = "integration-test")]
     if stage.injected_fault(splinterd::integration_test_seams::CandidateFaultPoint::StrayDescriptor)
@@ -1888,8 +1969,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
     let staged = match adopted {
         Ok(staged) => staged,
         Err(failure) => {
-            let pending = pending_termination(&mut signals).await;
-            return Err(refused("adoption", failure, workload_units, pending));
+            return Err(refused("adoption", failure, workload_units, signals));
         }
     };
     // The irreversible adoption commit: nothing fallible since `adopt`, and

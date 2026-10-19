@@ -853,18 +853,19 @@ fn stage_splint(
         pixel_height: splint.size.pixel_height,
     };
     // Running or exited-and-unreaped are both carried; see above. A forward
-    // candidate requires the captured foreground group. A rollback
-    // generation accepts any foreground group of the recorded session: a
-    // foreground job that started or ended in the exec window refused the
-    // forward adoption, and refusing the rollback the same way would hang
-    // up every carried Splint (Plan 0061 M3.11a review).
+    // candidate requires the captured foreground group and window size. A
+    // rollback generation accepts any foreground group of the recorded
+    // session and sets a changed window size back to the recorded one (the
+    // restored grid's): a foreground job or a `stty rows` in the exec window
+    // refused the forward adoption, and refusing the rollback the same way
+    // would hang up every carried Splint (Plan 0061 M3.11a review). This is
+    // the one PTY mutation staging makes, after every identity check of
+    // that Splint passed.
     let _: InheritedChild = match kind {
         ManifestKind::Forward => {
             identity.verify_inherited_allowing_exit(master, size, foreground)?
         }
-        ManifestKind::Rollback => {
-            identity.verify_inherited_allowing_exit_in_session(master, size)?
-        }
+        ManifestKind::Rollback => identity.verify_inherited_for_rollback(master, size)?,
     };
     Ok((terminal, identity))
 }

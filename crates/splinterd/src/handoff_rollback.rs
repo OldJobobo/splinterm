@@ -43,7 +43,11 @@
 //!
 //! The caller must have stopped every thread it owns first: the Tokio
 //! runtime, its blocking pool, and the workload unit manager (shut down
-//! before the runtime, so no workload scope can be stopped). Then, in order:
+//! before the runtime, so no workload scope can be stopped). A candidate
+//! that had released its signals blocks them on its main thread the moment
+//! it decides to roll back, before that teardown, and captures what its
+//! handlers took only after it, so no termination is lost between the
+//! failure and the exec. Then, in order:
 //!
 //! 1. check the lifecycle is rolling back;
 //! 2. take the rollback manifest: the counterpart staging already decoded
@@ -58,9 +62,10 @@
 //! 5. rebuild argv from parsed state, never from the running argv:
 //!    `[argv0, <activation>=<rollback manifest fd>]`, plus
 //!    `--require-workload-cgroups` when it was given;
-//! 6. block SIGINT, SIGTERM, and SIGHUP, and make a termination the failed
-//!    candidate's handler already consumed pending again, so it crosses exec
-//!    (`crate::handoff_exec` documents the signal discipline);
+//! 6. hold SIGINT, SIGTERM, and SIGHUP blocked (the block the caller took
+//!    when it decided to roll back, or a new one), and make a termination
+//!    the failed candidate's handler already took pending again, so it
+//!    crosses exec (`crate::handoff_exec` documents the signal discipline);
 //! 7. take a fresh single-threaded process guard
 //!    ([`HandoffProcessGuard::acquire_until`]);
 //! 8. clear close-on-exec on exactly the recorded descriptors, under the
@@ -213,8 +218,9 @@ impl PreCommitRecovery {
 }
 
 /// Termination requests the failed candidate's own handlers already took
-/// from the kernel, which the executor makes pending again under the
-/// blocked mask so the rollback daemon acts on them after it adopts.
+/// from the kernel, captured once no runtime thread is left and the signals
+/// are blocked, which the executor makes pending again under that block so
+/// the rollback daemon acts on them after it adopts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PendingTermination {
     /// A SIGTERM arrived.
@@ -285,9 +291,20 @@ pub enum RollbackError {
 /// Re-executes the sealed rollback daemon with the recovered descriptors;
 /// see the module documentation. Returns only when rollback is impossible,
 /// with why; the caller must then end the process loudly.
+///
+/// `blocked` is the block a caller took on this thread when it decided to
+/// roll back, after its handlers had been released, and that it held
+/// through teardown: the executor keeps it to the exec, so no termination
+/// can be taken in between. Without one (the signals were never released,
+/// so the blocked mask the forward exec carried still holds them), the
+/// executor blocks itself before the replay.
 #[must_use = "the executor returns only to say why rollback failed"]
-pub fn execute_rollback(recovery: PreCommitRecovery, exec: &RollbackExec) -> RollbackError {
-    match roll_back(recovery, exec) {
+pub fn execute_rollback(
+    recovery: PreCommitRecovery,
+    exec: &RollbackExec,
+    blocked: Option<BlockedHandoffSignals>,
+) -> RollbackError {
+    match roll_back(recovery, exec, blocked) {
         Err(error) => error,
         Ok(never) => match never {},
     }
@@ -305,6 +322,7 @@ enum RollbackParts {
 fn roll_back(
     recovery: PreCommitRecovery,
     exec: &RollbackExec,
+    blocked: Option<BlockedHandoffSignals>,
 ) -> Result<Infallible, RollbackError> {
     let parts = RollbackParts::rolling_back(recovery)?;
     let rollback_manifest = parts.rollback_manifest()?;
@@ -339,7 +357,10 @@ fn roll_back(
     )
     .ok_or(RollbackError::Arguments)?;
 
-    let signals = BlockedHandoffSignals::block().map_err(RollbackError::SignalMask)?;
+    let signals = match blocked {
+        Some(blocked) => blocked,
+        None => BlockedHandoffSignals::block().map_err(RollbackError::SignalMask)?,
+    };
     for (pending, signal) in [
         (exec.pending.terminate, Signal::SIGTERM),
         (exec.pending.interrupt, Signal::SIGINT),
