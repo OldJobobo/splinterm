@@ -29,6 +29,7 @@ use crate::{
         CompatibilityError, ExecutablePairPreflight, NegotiatedHandoff, RunningHandoffGeneration,
         negotiate_handoff,
     },
+    handoff_manifest::ManifestKind,
     handoff_preflight::{PreflightError, PreflightGeneration, preflight_sealed_pair},
     package_provenance::{
         PackageProvenanceError, PackageProvenanceRecord, ValidatedPackageProvenance,
@@ -83,9 +84,19 @@ pub(crate) enum HandoffPhase {
 /// Deliberately neither `Clone` nor `Copy`: the lifecycle is uniquely owned,
 /// so committing advances the only rollback-capable value and no stale copy
 /// can later roll back.
+///
+/// A candidate's lifecycle knows the kind of manifest that activated it
+/// (Plan 0061 M3.11). Only a forward candidate has a rollback edge: a
+/// rollback generation that fails before its commit has nothing older to
+/// return to, so its pre-commit failure edge leads to `Failed`, never to
+/// `RollingBack`, and the rollback executor refuses every lifecycle that is
+/// not rolling back. No edge reaches `RollingBack` from `Committed`.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct HandoffLifecycle {
     phase: HandoffPhase,
+    /// Whether a failure before commit may roll back: true only for a
+    /// candidate a forward manifest activated.
+    rollback_edge: bool,
 }
 
 impl HandoffLifecycle {
@@ -93,13 +104,16 @@ impl HandoffLifecycle {
     pub(crate) const fn old_running() -> Self {
         Self {
             phase: HandoffPhase::OldRunning,
+            rollback_edge: false,
         }
     }
 
+    /// A candidate that claimed the descriptors a manifest of `kind` names.
     #[must_use]
-    pub(crate) const fn candidate_claimed() -> Self {
+    pub(crate) const fn candidate_claimed(kind: ManifestKind) -> Self {
         Self {
             phase: HandoffPhase::CandidateClaimed,
+            rollback_edge: matches!(kind, ManifestKind::Forward),
         }
     }
 
@@ -108,41 +122,62 @@ impl HandoffLifecycle {
         self.phase
     }
 
+    /// Takes the pre-commit failure edge from a phase that stages or adopts:
+    /// `RollingBack` for a forward candidate, `Failed` for a rollback
+    /// generation, which has no rollback edge. Every other phase is left
+    /// unchanged, so after commit this cannot reach rollback. Returns the
+    /// phase the lifecycle ends in.
+    pub(crate) fn refuse_before_commit(&mut self) -> HandoffPhase {
+        let next = if self.rollback_edge {
+            HandoffPhase::RollingBack
+        } else {
+            HandoffPhase::Failed
+        };
+        if matches!(
+            self.phase,
+            HandoffPhase::CandidateClaimed | HandoffPhase::AdoptionStaged
+        ) {
+            // Valid by the table in `transition` from both phases, for the
+            // edge this lifecycle's kind selects.
+            let _ = self.transition(next);
+        }
+        self.phase
+    }
+
     /// Advances to `next` only along a defined handoff edge.
     pub(crate) fn transition(&mut self, next: HandoffPhase) -> Result<(), HandoffCoordinatorError> {
-        let valid = matches!(
-            (self.phase, next),
-            (HandoffPhase::OldRunning, HandoffPhase::Preparing)
-                | (
-                    HandoffPhase::Preparing,
-                    HandoffPhase::Quiescing | HandoffPhase::OldRunning
-                )
-                | (
-                    HandoffPhase::Quiescing,
-                    HandoffPhase::RuntimeStopped | HandoffPhase::OldRunning
-                )
-                | (
-                    HandoffPhase::RuntimeStopped,
-                    HandoffPhase::InheritancePrepared | HandoffPhase::OldRunning
-                )
-                | (HandoffPhase::InheritancePrepared, HandoffPhase::OldRunning)
-                | (
-                    HandoffPhase::CandidateClaimed,
-                    HandoffPhase::AdoptionStaged | HandoffPhase::RollingBack
-                )
-                | (
-                    HandoffPhase::AdoptionStaged,
-                    HandoffPhase::RollingBack | HandoffPhase::Committed
-                )
-                | (
-                    HandoffPhase::Committed,
-                    HandoffPhase::Published | HandoffPhase::Failed
-                )
-                | (
-                    HandoffPhase::Published | HandoffPhase::RollingBack,
-                    HandoffPhase::Failed
-                )
-        );
+        use HandoffPhase as P;
+
+        // Each phase by the phases it may be entered from.
+        let valid = match next {
+            P::Preparing => self.phase == P::OldRunning,
+            P::Quiescing => self.phase == P::Preparing,
+            P::RuntimeStopped => self.phase == P::Quiescing,
+            P::InheritancePrepared => self.phase == P::RuntimeStopped,
+            P::OldRunning => matches!(
+                self.phase,
+                P::Preparing | P::Quiescing | P::RuntimeStopped | P::InheritancePrepared
+            ),
+            P::CandidateClaimed => false,
+            P::AdoptionStaged => self.phase == P::CandidateClaimed,
+            P::Committed => self.phase == P::AdoptionStaged,
+            P::Published => self.phase == P::Committed,
+            // The only edges into rollback, before commit, and only for a
+            // forward candidate.
+            P::RollingBack => {
+                self.rollback_edge && matches!(self.phase, P::CandidateClaimed | P::AdoptionStaged)
+            }
+            // A rollback generation's pre-commit failure, a failure after
+            // commit, and a failed rollback.
+            P::Failed => matches!(
+                self.phase,
+                P::CandidateClaimed
+                    | P::AdoptionStaged
+                    | P::Committed
+                    | P::Published
+                    | P::RollingBack
+            ),
+        };
         if !valid {
             return Err(HandoffCoordinatorError::InvalidPhaseTransition);
         }
@@ -965,7 +1000,7 @@ mod tests {
         assert_eq!(old.phase(), HandoffPhase::InheritancePrepared);
         old.transition(HandoffPhase::OldRunning).unwrap();
 
-        let mut candidate = HandoffLifecycle::candidate_claimed();
+        let mut candidate = HandoffLifecycle::candidate_claimed(ManifestKind::Forward);
         assert!(matches!(
             candidate.transition(HandoffPhase::Committed),
             Err(HandoffCoordinatorError::InvalidPhaseTransition)
@@ -983,12 +1018,51 @@ mod tests {
             Err(HandoffCoordinatorError::InvalidPhaseTransition)
         ));
 
-        let mut rolling_back = HandoffLifecycle::candidate_claimed();
+        let mut rolling_back = HandoffLifecycle::candidate_claimed(ManifestKind::Forward);
         rolling_back.transition(HandoffPhase::RollingBack).unwrap();
         assert!(matches!(
             rolling_back.transition(HandoffPhase::AdoptionStaged),
             Err(HandoffCoordinatorError::InvalidPhaseTransition)
         ));
+    }
+
+    /// Plan 0061 M3.11: a rollback generation has no rollback edge from
+    /// either pre-commit phase, and nothing rolls back once committed.
+    #[test]
+    fn only_a_forward_candidate_has_a_rollback_edge() {
+        for staged in [false, true] {
+            let mut forward = HandoffLifecycle::candidate_claimed(ManifestKind::Forward);
+            let mut rollback = HandoffLifecycle::candidate_claimed(ManifestKind::Rollback);
+            if staged {
+                forward.transition(HandoffPhase::AdoptionStaged).unwrap();
+                rollback.transition(HandoffPhase::AdoptionStaged).unwrap();
+            }
+            assert!(matches!(
+                rollback.transition(HandoffPhase::RollingBack),
+                Err(HandoffCoordinatorError::InvalidPhaseTransition)
+            ));
+            assert_eq!(rollback.refuse_before_commit(), HandoffPhase::Failed);
+            assert_eq!(forward.refuse_before_commit(), HandoffPhase::RollingBack);
+            // Taking the edge again changes nothing.
+            assert_eq!(rollback.refuse_before_commit(), HandoffPhase::Failed);
+            assert_eq!(forward.refuse_before_commit(), HandoffPhase::RollingBack);
+        }
+        for kind in [ManifestKind::Forward, ManifestKind::Rollback] {
+            let mut committed = HandoffLifecycle::candidate_claimed(kind);
+            committed.transition(HandoffPhase::AdoptionStaged).unwrap();
+            committed.transition(HandoffPhase::Committed).unwrap();
+            assert!(matches!(
+                committed.transition(HandoffPhase::RollingBack),
+                Err(HandoffCoordinatorError::InvalidPhaseTransition)
+            ));
+            // The pre-commit failure edge does not exist after commit.
+            assert_eq!(committed.refuse_before_commit(), HandoffPhase::Committed);
+            committed.transition(HandoffPhase::Published).unwrap();
+            assert!(matches!(
+                committed.transition(HandoffPhase::RollingBack),
+                Err(HandoffCoordinatorError::InvalidPhaseTransition)
+            ));
+        }
     }
 
     #[test]

@@ -38,13 +38,15 @@ use splinterd::{
     handoff_coordinator::ForwardHandoffAuthority,
     handoff_descriptors::{HandoffDescriptor, HandoffDescriptorSlot},
     handoff_exec::{
-        ExecBoundaryError, ExecInheritancePlan, HANDOFF_RESUME_SCOPE_TIMEOUT, ResumableSplint,
-        ResumeBudgets, cross_exec_boundary, resume_handed_off,
+        BlockedHandoffSignals, ExecBoundaryError, ExecInheritancePlan,
+        HANDOFF_RESUME_SCOPE_TIMEOUT, ResumableSplint, ResumeBudgets, cross_exec_boundary,
+        resume_handed_off,
     },
     handoff_prepare::{
         CaptureLimits, HandedOffCapture, HandoffCaptures, ListenerDescriptors, ManifestInputs,
         PreparedManifests, build_handoff_manifests, capture_live_splints,
     },
+    handoff_rollback::{PendingTermination, PreCommitRecovery, RollbackExec, execute_rollback},
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     install_prefix::InstallPrefix,
     policy,
@@ -1217,6 +1219,9 @@ enum RoundEnd {
         stopped: Box<StoppedForHandoff>,
         signals: DaemonSignals,
     },
+    /// An adopted round failed before its commit; the runtime stops and the
+    /// candidate rolls back ([`roll_back`]).
+    RollBack(Box<CandidateFailure>),
 }
 
 /// The daemon's process-signal streams, installed before the potentially slow
@@ -1322,17 +1327,23 @@ struct DaemonStateInputs {
     handoff_listeners: Option<ListenerDescriptors>,
 }
 
+/// The daemon's runtime, for tests; panics when it cannot be built.
+#[cfg(test)]
+fn daemon_runtime() -> tokio::runtime::Runtime {
+    build_daemon_runtime().expect("Failed building the Runtime")
+}
+
 /// The runtime `#[tokio::main(worker_threads = 2)]` built, owned by
 /// `run_daemon` so a handoff round can stop it and return the process to one
 /// thread, and a resumed round can build an identical one. Local PTY and
 /// Unix-socket work is asynchronous; bounding workers also bounds glibc
-/// per-thread allocator arenas after sustained terminal output.
-fn daemon_runtime() -> tokio::runtime::Runtime {
+/// per-thread allocator arenas after sustained terminal output. Fallible, so
+/// a candidate whose runtime cannot be built rolls back (Plan 0061 M3.11a).
+fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
-        .expect("Failed building the Runtime")
 }
 
 /// Serves rounds until an ordered shutdown.
@@ -1340,15 +1351,63 @@ fn daemon_runtime() -> tokio::runtime::Runtime {
 /// A round that leaves serve for the exec boundary stops its runtime and the
 /// systemd connection and crosses the boundary ([`stop_runtime_and_cross`]).
 /// A successful exec never returns. Every build but `integration-test` has
-/// no exec call site (Plan 0061 M3.11 gates it), so the boundary always
-/// comes back there, and the next round serves the same generation again on
-/// a new runtime ([`StartupSource::Resumed`]).
+/// no forward exec call site (Plan 0061 M3.11b gates it), so the boundary
+/// always comes back there, and the next round serves the same generation
+/// again on a new runtime ([`StartupSource::Resumed`]).
+///
+/// An adopted round that fails before its commit, or whose runtime cannot
+/// even be built, rolls back instead ([`roll_back`]): its runtime stops
+/// first, so the rollback executor runs single-threaded on this thread.
 fn run_daemon(source: StartupSource) -> Result<()> {
     let mut source = source;
     loop {
-        let runtime = daemon_runtime();
+        let runtime = match build_daemon_runtime() {
+            Ok(runtime) => runtime,
+            Err(error) => match source {
+                StartupSource::Adopted(startup) => {
+                    let AdoptedStartup {
+                        stage,
+                        signals,
+                        require_workload_cgroups,
+                        ..
+                    } = *startup;
+                    // Only this thread exists: blocking here first leaves
+                    // nothing that could take a termination before exec.
+                    let blocked = block_for_rollback();
+                    let error = format!("cannot build the serving runtime: {error}");
+                    let refused = stage.refuse(
+                        splinterd::handoff_adoption::AdoptionError::DaemonStartup(error.clone()),
+                    );
+                    return Err(roll_back(CandidateFailure {
+                        phase: "runtime build",
+                        error,
+                        recovery: refused.into(),
+                        workload_units: None,
+                        signals: Some(signals),
+                        blocked,
+                        require_workload_cgroups,
+                    }));
+                }
+                _ => panic!("Failed building the Runtime: {error:?}"),
+            },
+        };
         match runtime.block_on(Box::pin(serve_round(source)))? {
             RoundEnd::Shutdown => return Ok(()),
+            RoundEnd::RollBack(mut failure) => {
+                // The no-kill order of `stop_runtime_and_cross`: no scope
+                // can stop once the manager is shut down, then the runtime
+                // stops and the process is back to one thread. The failure
+                // already holds the handoff signals blocked on this thread,
+                // so once the workers are gone no handler can take one
+                // (`roll_back` captures what handlers took before).
+                if let Some(manager) = failure.workload_units.take()
+                    && let Err(error) = manager.shutdown()
+                {
+                    error!(%error, "workload unit manager did not shut down cleanly before rollback");
+                }
+                runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
+                return Err(roll_back(*failure));
+            }
             RoundEnd::Handoff { stopped, signals } => {
                 let resumed = stop_runtime_and_cross(runtime, *stopped);
                 source = StartupSource::Resumed {
@@ -1381,7 +1440,10 @@ async fn serve_round(source: StartupSource) -> Result<RoundEnd> {
             )
             .await?
         }
-        StartupSource::Adopted(startup) => Box::pin(start_adopted(*startup)).await?,
+        StartupSource::Adopted(startup) => match Box::pin(start_adopted(*startup)).await {
+            Ok(started) => started,
+            Err(failure) => return Ok(RoundEnd::RollBack(failure)),
+        },
         StartupSource::Resumed { resumed, signals } => {
             let round = Box::pin(start_resumed(*resumed)).await;
             StartedDaemon {
@@ -1424,6 +1486,9 @@ struct CandidateStartup {
 /// for the serve round that adopts it.
 struct AdoptedStartup {
     stage: splinterd::CandidateRuntimeStage,
+    /// Installed, and the handoff signals unblocked, before the serving
+    /// runtime exists ([`release_handoff_signals`]).
+    signals: DaemonSignals,
     require_workload_cgroups: bool,
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
@@ -1435,10 +1500,12 @@ struct AdoptedStartup {
 /// next daemon generation (Plan 0061 M3.10).
 ///
 /// Staging is read-only and still holds the single-threaded handoff guard;
-/// only `enter_tokio` releases it, and only then does `run_daemon` build the
-/// runtime. Tracing is installed first: it allocates and writes standard
-/// output but creates no thread and no descriptor, so the guard's
-/// single-threaded descriptor table is unchanged.
+/// only `enter_tokio` releases it. Then the signal handlers are installed
+/// and the signals the exec carried blocked are released, still without a
+/// runtime thread ([`release_handoff_signals`]), and only then does
+/// `run_daemon` build the runtime. Tracing is installed first: it allocates
+/// and writes standard output but creates no thread and no descriptor, so
+/// the guard's single-threaded descriptor table is unchanged.
 fn run_candidate(startup: CandidateStartup) -> Result<()> {
     let CandidateStartup {
         candidate,
@@ -1448,14 +1515,26 @@ fn run_candidate(startup: CandidateStartup) -> Result<()> {
     } = startup;
     init_tracing();
     info!("daemon handoff candidate: inherited descriptors claimed; staging");
+    // No runtime exists yet, so a failure here rolls back at once. The
+    // signals are not released yet either: the blocked mask the exec carried
+    // still holds them, and no handler has taken one.
+    let unstarted = |phase, error: String, recovery: PreCommitRecovery| {
+        roll_back(CandidateFailure {
+            phase,
+            error,
+            recovery,
+            workload_units: None,
+            signals: None,
+            blocked: None,
+            require_workload_cgroups,
+        })
+    };
     let socket = match socket_path() {
         Ok(socket) => socket,
         Err(error) => {
-            return Err(fail_before_commit(
-                "staging",
-                &format!("{error:#}"),
-                PreCommitRecovery::Unstaged(Box::new(candidate)),
-            ));
+            let error = format!("{error:#}");
+            let failure = candidate.refuse(error.clone());
+            return Err(unstarted("staging", error, failure.into()));
         }
     };
     let image_socket = image_content_socket_path(&socket);
@@ -1468,11 +1547,7 @@ fn run_candidate(startup: CandidateStartup) -> Result<()> {
         Ok(stage) => stage,
         Err(failure) => {
             let error = error_chain(&failure);
-            return Err(fail_before_commit(
-                "staging",
-                &error,
-                PreCommitRecovery::Unstaged(Box::new(failure.into_recovery())),
-            ));
+            return Err(unstarted("staging", error, failure.into()));
         }
     };
     info!(
@@ -1486,15 +1561,26 @@ fn run_candidate(startup: CandidateStartup) -> Result<()> {
             let refused = failure
                 .into_stage()
                 .refuse(splinterd::handoff_adoption::AdoptionError::UnexpectedPhase);
-            return Err(fail_before_commit(
-                "runtime entry",
-                &error,
-                PreCommitRecovery::Adoption(Box::new(refused.into_recovery())),
+            return Err(unstarted("runtime entry", error, refused.into()));
+        }
+    };
+    // Before the serving runtime: its threads must not inherit the mask.
+    let signals = match release_handoff_signals() {
+        Ok(signals) => signals,
+        Err(error) => {
+            let refused = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
+                format!("{error:#}"),
+            ));
+            return Err(unstarted(
+                "signal release",
+                error_chain(&refused),
+                refused.into(),
             ));
         }
     };
     run_daemon(StartupSource::Adopted(Box::new(AdoptedStartup {
         stage,
+        signals,
         require_workload_cgroups,
         shared_image_budget,
         shared_kitty_upload_budget,
@@ -1515,88 +1601,226 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     text
 }
 
-/// Everything a candidate still owns when it fails before its adoption
-/// commit, for the cooperative rollback executor.
-enum PreCommitRecovery {
-    /// Staging refused: the complete claimed descriptor table.
-    Unstaged(
-        #[allow(
-            dead_code,
-            reason = "held only to be handed to the M3.11 rollback executor; until then it is dropped"
-        )]
-        Box<splinterd::CandidateBootstrap>,
-    ),
-    /// Adoption refused: every staged part, each adopted scope retained.
-    Adoption(Box<splinterd::handoff_adoption::AdoptionRecovery>),
+/// A candidate that failed before its adoption commit, with everything the
+/// rollback executor needs. Only pre-commit failure paths build one: its
+/// [`PreCommitRecovery`] has no constructor from a committed adoption
+/// (`splinterd::handoff_rollback`, "No rollback after commit").
+struct CandidateFailure {
+    /// The step that failed, for diagnostics.
+    phase: &'static str,
+    error: String,
+    recovery: PreCommitRecovery,
+    /// The process's one workload unit manager, shut down before the
+    /// runtime stops so no scope can be stopped.
+    workload_units: Option<WorkloadUnitManager>,
+    /// The candidate's signal streams, once installed. Whatever their
+    /// handlers took is captured only after every runtime thread is gone
+    /// ([`captured_terminations`]).
+    signals: Option<DaemonSignals>,
+    /// SIGINT, SIGTERM, and SIGHUP blocked on the main thread from the
+    /// moment the failure was decided ([`block_for_rollback`]), held through
+    /// teardown, capture, and the rollback exec. `None` before the signals
+    /// were released: the exec's blocked mask is then still in place.
+    blocked: Option<BlockedHandoffSignals>,
+    require_workload_cgroups: bool,
 }
 
-/// Ends a candidate that failed before its adoption commit, and returns the
-/// error `main` exits with.
+/// ---- Pre-commit candidate failure: the cooperative rollback executor
+/// (Plan 0061 M3.11a) ----
 ///
-/// ---- Pre-commit candidate failure (Plan 0061 M3.11 hand-off point) ----
-/// M3.11 replaces this body with the cooperative rollback executor: it takes
-/// `recovery`, acquires a fresh single-threaded guard, and executes the
-/// sealed rollback daemon by descriptor with the unchanged PTYs and the
-/// rollback manifest (Plan 0037 "Failure and rollback", item 5). Until then
-/// the honest outcome is a loud, non-zero exit with full diagnostics.
-/// Dropping `recovery` and exiting closes every carried PTY master, which
-/// hangs up every carried Splint; scopes adoption took are retained, never
-/// stopped, so nothing beyond what exit implies is killed. This is why the
-/// old generation's exec stays compiled only into `integration-test` builds
-/// until M3.11.
+/// Rolls a candidate that failed before its adoption commit back to the
+/// generation that handed off: it executes the sealed rollback daemon by
+/// descriptor with the unchanged PTYs and the rollback manifest (Plan 0037
+/// "Failure and rollback", item 5; [`execute_rollback`]). A successful
+/// rollback never returns: this process becomes the rollback daemon, which
+/// adopts and serves the original generation. Called only once the process
+/// is single-threaded: before any runtime exists, or after `run_daemon` shut
+/// down the workload unit manager and then the runtime.
 ///
-/// Every pre-commit failure that returns, from staging through runtime entry
-/// and startup to adoption, reaches this one function. A panic before commit
-/// does not (for example `daemon_runtime().expect(..)` failing to build the
-/// runtime, or a panic inside `adopt`): it unwinds past here with no rollback
-/// path, even after M3.11, and belongs to the daemon-crash row of Plan 0037's
-/// lifetime matrix. What such an unwind drops still stops no workload scope:
-/// adoption wraps every placement so that dropping it retains the scope
-/// (`RetainOnDrop`, `StagedSplint`), and only the PTY masters close.
-fn fail_before_commit(
-    phase: &'static str,
-    error: &str,
-    recovery: PreCommitRecovery,
-) -> anyhow::Error {
-    let (carried, retained_scopes) = match &recovery {
-        PreCommitRecovery::Unstaged(_) => (None, 0),
-        PreCommitRecovery::Adoption(recovery) => (
-            Some(recovery.splint_count()),
-            recovery.retained_scopes().len(),
-        ),
-    };
+/// Returns the error `main` exits with when rollback is impossible: the
+/// failed candidate is itself a rollback generation (no rollback edge), or
+/// the rollback manifest, the descriptors, the guard, the inheritance audit,
+/// or exec refused. Exiting then closes every carried PTY master, which
+/// hangs up every carried Splint; workload scopes are retained, never
+/// stopped, and systemd reports a failed service.
+///
+/// Every pre-commit failure that returns, from staging through runtime
+/// entry, the runtime build, and startup to adoption, reaches this one
+/// function. A panic before commit does not, by decision: unwinding (the
+/// daemon is built with `panic = "unwind"`) drops the owned descriptors on
+/// the way out of the frame that holds them, long before a `catch_unwind`
+/// at `run_daemon` or a panic hook could hand them over, and keeping them
+/// outside the adopting future would move every staged actor out of the
+/// drop guards that retain its scope. Panics inside spawned adoption tasks
+/// (the scope adoption on the blocking pool) already arrive here as a
+/// refused adoption (`TaskFailed`). A panic on the adopting thread itself
+/// therefore belongs to the daemon-crash row of Plan 0037's lifetime matrix:
+/// what the unwind drops stops no workload scope (`RetainOnDrop`,
+/// `StagedSplint` retain every placement), the PTY masters close with the
+/// process, and every carried Splint is hung up.
+fn roll_back(failure: CandidateFailure) -> anyhow::Error {
+    let CandidateFailure {
+        phase,
+        error,
+        recovery,
+        workload_units,
+        signals,
+        blocked,
+        require_workload_cgroups,
+    } = failure;
+    if let Some(manager) = workload_units
+        && let Err(error) = manager.shutdown()
+    {
+        error!(%error, "workload unit manager did not shut down cleanly before rollback");
+    }
+    // No runtime thread exists any more and, once the signals were
+    // released, the main thread holds them blocked: nothing can take a
+    // termination from here on, and whatever a handler took before is
+    // captured now.
+    let pending = signals.map_or_else(PendingTermination::default, |mut signals| {
+        captured_terminations(&mut signals)
+    });
+    let rollback_edge = recovery.has_rollback_edge();
     error!(
         phase,
         %error,
-        ?carried,
-        retained_scopes,
-        "daemon handoff candidate failed before its adoption commit; no rollback executor exists yet (Plan 0061 M3.11), so it exits and every carried Splint's terminal is hung up"
+        carried = ?recovery.carried_splints(),
+        retained_scopes = recovery.retained_scopes(),
+        rollback_edge,
+        ?pending,
+        "daemon handoff candidate failed before its adoption commit"
     );
-    drop(recovery);
+    if rollback_edge {
+        warn!(
+            "daemon handoff: rolling back to the previous generation with the unchanged descriptors"
+        );
+    }
+    let rollback = execute_rollback(
+        recovery,
+        &RollbackExec {
+            program: env::args_os()
+                .next()
+                .unwrap_or_else(|| OsString::from("splinterd")),
+            workload_cgroups_required: require_workload_cgroups,
+            environment: splinterd::handoff_exec::exec_environment(),
+            guard_deadline: Instant::now() + HANDOFF_GUARD_WAIT,
+            pending,
+        },
+        blocked,
+    );
+    error!(
+        phase,
+        %rollback,
+        "daemon handoff: no rollback; the candidate exits, every carried Splint's terminal is hung up, and live-process continuity is no longer guaranteed"
+    );
     anyhow::anyhow!(
-        "upgrade-handoff candidate failed before its adoption commit ({phase}): {error}; live-process continuity is not guaranteed"
+        "upgrade-handoff candidate failed before its adoption commit ({phase}): {error}; rollback failed: {rollback}; live-process continuity is not guaranteed"
     )
+}
+
+/// Blocks SIGINT, SIGTERM, and SIGHUP on the calling (main) thread the
+/// moment a candidate that already released its signals decides to roll
+/// back, and keeps them blocked through teardown and the rollback exec. From
+/// then on a termination either reaches a runtime worker's handler, which
+/// records it for [`captured_terminations`], or stays kernel-pending for the
+/// main thread, the only thread left after teardown, and crosses exec.
+///
+/// A failed `pthread_sigmask` changes nothing; the executor then blocks
+/// right before exec, as before this candidate released its signals.
+fn block_for_rollback() -> Option<BlockedHandoffSignals> {
+    match BlockedHandoffSignals::block() {
+        Ok(blocked) => Some(blocked),
+        Err(error) => {
+            warn!(%error, "cannot block the handoff signals for rollback teardown");
+            None
+        }
+    }
+}
+
+/// Every SIGTERM or SIGINT this candidate's own handlers took, captured
+/// after teardown, for the executor to make pending again under the blocked
+/// mask so the rollback daemon performs the ordered shutdown it asked for.
+///
+/// Called only once no runtime thread is left and the main thread holds the
+/// signals blocked ([`block_for_rollback`]), so no handler can run any more.
+/// Tokio's handler records a signal in its process-global registry and then
+/// writes its self-pipe; a signal driver drains the pipe, then broadcasts to
+/// the streams. A signal a handler took before teardown was therefore either
+/// already broadcast to these streams, or is still recorded with its byte in
+/// the pipe. A current-thread runtime, which starts no thread, registers a
+/// fresh duplicate of the pipe, so one park of its driver broadcasts what is
+/// still recorded; polling the streams then sees every taken signal. Nothing
+/// is lost between the failure and the exec.
+fn captured_terminations(signals: &mut DaemonSignals) -> PendingTermination {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            warn!(%error, "cannot build the runtime that captures taken termination signals");
+            return PendingTermination::default();
+        }
+    };
+    runtime.block_on(async {
+        // Parks the driver at least once, which flushes the self-pipe.
+        time::sleep(Duration::from_millis(10)).await;
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let taken = |signal: &mut signal::unix::Signal, context: &mut std::task::Context<'_>| {
+            matches!(signal.poll_recv(context), std::task::Poll::Ready(Some(())))
+        };
+        PendingTermination {
+            terminate: taken(&mut signals.terminate, &mut context),
+            interrupt: taken(&mut signals.interrupt, &mut context),
+        }
+    })
 }
 
 /// The inputs a candidate builds on the serving runtime before adopting.
 struct AdoptionStartupInputs {
-    signals: DaemonSignals,
     metadata: MetadataStore,
     topology: Topology,
 }
 
-/// Installs the signal streams and loads the durable Topology through the
-/// fresh-start restore path, which reserves recorded incarnations but
-/// allocates none (every carried incarnation is adopted first).
+/// Loads the durable Topology through the fresh-start restore path, which
+/// reserves recorded incarnations but allocates none (every carried
+/// incarnation is adopted first). The signal streams already exist
+/// ([`release_handoff_signals`]).
 async fn adoption_startup_inputs() -> Result<AdoptionStartupInputs> {
-    let signals = DaemonSignals::install()?;
     let metadata = MetadataStore::discover()?;
     let topology = restore_topology(&metadata).await?;
-    Ok(AdoptionStartupInputs {
-        signals,
-        metadata,
-        topology,
-    })
+    Ok(AdoptionStartupInputs { metadata, topology })
+}
+
+/// Installs a candidate's signal handlers, then unblocks the signals the
+/// handoff exec carried blocked (`splinterd::handoff_exec`, "Signals across
+/// exec"), before any runtime thread exists.
+///
+/// A signal that arrived in the exec window was pending, not acted on by a
+/// default action; it reaches the handler now, and the serving round acts on
+/// it in order (a SIGTERM becomes an ordered shutdown once adoption
+/// commits). Threads inherit the creating thread's mask, and
+/// `std::process::Command` passes a spawning thread's mask on to its child,
+/// so the handlers are installed under a current-thread runtime, which starts
+/// no thread, and the serving runtime is built only after this returns: none
+/// of its workers or blocking threads, and so none of the Splints, consent
+/// prompts, or preflight children they spawn, ever carries the blocked mask.
+/// The streams outlive this runtime: their receivers are process-global, as
+/// a resumed round already relies on, and the serving runtime's signal
+/// driver delivers what the handlers recorded meanwhile.
+fn release_handoff_signals() -> Result<DaemonSignals> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the runtime that installs the signal handlers")?;
+    let signals = {
+        let _entered = runtime.enter();
+        DaemonSignals::install()?
+    };
+    splinterd::handoff_exec::unblock_handoff_signals()
+        .context("failed to unblock the signals the handoff exec carried")?;
+    drop(runtime);
+    Ok(signals)
 }
 
 /// Connects the process's one workload unit manager for adoption, off the
@@ -1633,23 +1857,31 @@ async fn connect_adoption_workload_units(required: bool) -> Option<WorkloadUnitM
 ///
 /// Every fallible step runs before `commit`: the inputs, one workload unit
 /// manager for the whole process, and [`splinterd::CandidateRuntimeStage::adopt`].
-/// A failure of any of them returns every owned part to
-/// [`fail_before_commit`]. Nothing fallible runs between `adopt` and
-/// `commit`. After commit nothing can fail the round: what remains degrades
-/// instead (an unpinnable client snapshot is logged and not pinned).
+/// A failure of any of them returns every owned part in a
+/// [`CandidateFailure`], which `run_daemon` hands to the rollback executor
+/// ([`roll_back`]) once this round's runtime has stopped. The error type is
+/// the proof that only pre-commit paths reach rollback: a
+/// [`CandidateFailure`] needs a [`PreCommitRecovery`], and `commit` consumes
+/// the staged adoption that could have produced one. Nothing fallible runs
+/// between `adopt` and `commit`. After commit nothing can fail the round:
+/// what remains degrades instead (an unpinnable client snapshot is logged
+/// and not pinned).
 ///
 /// The adopted daemon has no rollback authority: its sealed rollback pair
 /// closed at commit, and the pair it would retain for the next handoff is a
 /// startup capture of an installed image it no longer runs from. Handoff is
-/// therefore unavailable until the daemon restarts (Plan 0061 D8); rebuilding
-/// that authority after a handoff is M3.17's.
+/// therefore unavailable until the daemon restarts (Plan 0061 D8); this
+/// holds for a forward adoption and a rollback adoption alike, since both
+/// serve with `RollbackAuthority::Unavailable`. Rebuilding that authority
+/// after a handoff is M3.17's.
 #[allow(
     clippy::too_many_lines,
     reason = "one ordered adopt, commit, publish sequence with nothing fallible after commit"
 )]
-async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
+async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<CandidateFailure>> {
     let AdoptedStartup {
         stage,
+        signals,
         require_workload_cgroups,
         shared_image_budget,
         shared_kitty_upload_budget,
@@ -1657,25 +1889,65 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
         image_socket,
     } = startup;
     info!("daemon handoff candidate: serving runtime started; loading durable state");
-    let AdoptionStartupInputs {
-        signals,
-        metadata,
-        topology,
-    } = match adoption_startup_inputs().await {
+    #[cfg(feature = "integration-test")]
+    let terminate_during_teardown = stage.injected_fault(
+        splinterd::integration_test_seams::CandidateFaultPoint::TerminateDuringTeardown,
+    );
+    // Every pre-commit failure from here on: the handoff signals are blocked
+    // on this (main) thread first, where `block_on` polls this future, and
+    // stay blocked through teardown and the rollback exec; the signal
+    // streams travel with the failure so that `roll_back` captures what
+    // their handlers took once no runtime thread is left.
+    let refused = |phase: &'static str,
+                   failure: splinterd::handoff_adoption::AdoptionFailure,
+                   workload_units: Option<WorkloadUnitManager>,
+                   signals: DaemonSignals| {
+        let blocked = block_for_rollback();
+        // A process-directed SIGTERM while the runtime's workers still run
+        // with the signals unblocked, as `systemctl stop` during teardown.
+        #[cfg(feature = "integration-test")]
+        if terminate_during_teardown {
+            match splinterd::integration_test_seams::terminate_this_process() {
+                Ok(()) => warn!("test seam: sent SIGTERM to this process during rollback teardown"),
+                Err(error) => {
+                    warn!(%error, "test seam: cannot send SIGTERM during rollback teardown");
+                }
+            }
+        }
+        Box::new(CandidateFailure {
+            phase,
+            error: failure.to_string(),
+            recovery: failure.into(),
+            workload_units,
+            signals: Some(signals),
+            blocked,
+            require_workload_cgroups,
+        })
+    };
+    let AdoptionStartupInputs { metadata, topology } = match adoption_startup_inputs().await {
         Ok(inputs) => inputs,
         Err(error) => {
-            let error = format!("{error:#}");
             let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
-                error,
+                format!("{error:#}"),
             ));
-            let error = failure.to_string();
-            return Err(fail_before_commit(
-                "startup",
-                &error,
-                PreCommitRecovery::Adoption(Box::new(failure.into_recovery())),
-            ));
+            return Err(refused("startup", failure, None, signals));
         }
     };
+    #[cfg(feature = "integration-test")]
+    if stage.injected_fault(splinterd::integration_test_seams::CandidateFaultPoint::Startup) {
+        let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
+            "injected candidate fault at startup".to_owned(),
+        ));
+        return Err(refused("startup", failure, None, signals));
+    }
+    #[cfg(feature = "integration-test")]
+    if stage.injected_fault(splinterd::integration_test_seams::CandidateFaultPoint::StrayDescriptor)
+    {
+        match splinterd::integration_test_seams::leak_inheritable_descriptor() {
+            Ok(descriptor) => warn!(descriptor, "test seam: left an inheritable descriptor open"),
+            Err(error) => warn!(%error, "test seam: cannot leave an inheritable descriptor open"),
+        }
+    }
     let workload_units = connect_adoption_workload_units(require_workload_cgroups).await;
     info!(
         revision = topology.revision().get(),
@@ -1697,12 +1969,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon> {
     let staged = match adopted {
         Ok(staged) => staged,
         Err(failure) => {
-            let error = failure.to_string();
-            return Err(fail_before_commit(
-                "adoption",
-                &error,
-                PreCommitRecovery::Adoption(Box::new(failure.into_recovery())),
-            ));
+            return Err(refused("adoption", failure, workload_units, signals));
         }
     };
     // The irreversible adoption commit: nothing fallible since `adopt`, and
@@ -2162,8 +2429,9 @@ fn cross_boundary(
 
 /// Arms the exec call site with the attempt's sealed forward daemon, when
 /// the attempt has one (Plan 0061 M3.10). Compiled only into
-/// `integration-test` builds: production exec is gated on the M3.11
-/// rollback executor (see `handoff_exec::under_guard`).
+/// `integration-test` builds: enabling production exec is Plan 0061
+/// M3.11b's gate, now that the M3.11a rollback executor exists (see
+/// `handoff_exec::under_guard`).
 ///
 /// The argument vector is rebuilt from this daemon's state, never copied
 /// from its own argv, which in an adopted daemon still names its activation
@@ -2182,7 +2450,7 @@ fn arm_forward_exec<'a>(
         .next()
         .unwrap_or_else(|| OsString::from("splinterd"));
     let arguments = plan.forward_manifest_descriptor().and_then(|manifest| {
-        splinterd::handoff_exec::forward_daemon_arguments(
+        splinterd::handoff_exec::candidate_daemon_arguments(
             &program,
             manifest,
             state.workload_cgroups_required,

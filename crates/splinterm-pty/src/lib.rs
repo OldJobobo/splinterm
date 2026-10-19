@@ -557,24 +557,82 @@ impl LinuxPtyIdentity {
         expected_size: PtySize,
         expected_foreground_process_group: u32,
     ) -> Result<InheritedChild> {
+        self.verify_inherited_with(
+            master,
+            expected_size,
+            Some(expected_foreground_process_group),
+        )
+    }
+
+    /// Verifies one inherited master for a daemon handoff's rollback
+    /// generation: like [`Self::verify_inherited_allowing_exit`], except that
+    /// two kinds of drift a carried program may cause in the exec window are
+    /// reconciled instead of refused.
+    ///
+    /// * **Foreground process group.** Any foreground group of the recorded
+    ///   session is accepted. A shell that started or finished a foreground
+    ///   job changed it; it still belongs to the recorded session, because
+    ///   the terminal's session is checked to be the recorded one and the
+    ///   kernel lets a terminal's foreground group be set only to a process
+    ///   group of that session.
+    /// * **Window size.** A changed kernel size (a program's `TIOCSWINSZ`,
+    ///   such as `stty rows`) is set back to the recorded size, once every
+    ///   identity check has passed, and read back. The recorded size is the
+    ///   restored terminal grid's, so the adopted actor and the kernel agree
+    ///   again; the foreground group receives `SIGWINCH` and redraws, and a
+    ///   reconnecting Window resizes as it always does.
+    ///
+    /// The forward adoption refused that drift, and refusing the rollback
+    /// that exists to keep the Splint alive the same way would hang it up.
+    ///
+    /// # Errors
+    /// As [`Self::verify_inherited_allowing_exit`], without the foreground
+    /// process group equality, and when the recorded size cannot be set back.
+    pub fn verify_inherited_for_rollback(
+        self,
+        master: BorrowedFd<'_>,
+        expected_size: PtySize,
+    ) -> Result<InheritedChild> {
+        self.verify_inherited_with(master, expected_size, None)
+    }
+
+    /// `expected_foreground_process_group: None` is the rollback mode of
+    /// [`Self::verify_inherited_for_rollback`]: any foreground group of the
+    /// session, and a changed size set back to `expected_size`.
+    fn verify_inherited_with(
+        self,
+        master: BorrowedFd<'_>,
+        expected_size: PtySize,
+        expected_foreground_process_group: Option<u32>,
+    ) -> Result<InheritedChild> {
         verify_pty_master(master)?;
         self.validate_process()?;
-        let observed_size = termios::tcgetwinsize(master)
-            .map(PtySize::from_winsize)
-            .map_err(|error| PtyError::io("validate inherited PTY size", error))?;
+        let mut child = if self.child_exited()? {
+            InheritedChild::Exited
+        } else {
+            InheritedChild::Running
+        };
+        if child == InheritedChild::Running {
+            match self.validate_running_terminal(master, expected_foreground_process_group) {
+                Ok(()) => {}
+                // The terminal checks fail once the session leader exits;
+                // that race is an exit, not a substituted terminal.
+                Err(_) if self.child_exited()? => child = InheritedChild::Exited,
+                Err(error) => return Err(error),
+            }
+        }
+        let observed_size = read_size(master)?;
         if observed_size != expected_size {
-            return Err(PtyError::IdentityMismatch);
+            if expected_foreground_process_group.is_some() {
+                return Err(PtyError::IdentityMismatch);
+            }
+            termios::tcsetwinsize(master, expected_size.winsize())
+                .map_err(|error| PtyError::io("restore inherited PTY size", error))?;
+            if read_size(master)? != expected_size {
+                return Err(PtyError::IdentityMismatch);
+            }
         }
-        if self.child_exited()? {
-            return Ok(InheritedChild::Exited);
-        }
-        match self.validate_running_terminal(master, expected_foreground_process_group) {
-            Ok(()) => Ok(InheritedChild::Running),
-            // The terminal checks fail once the session leader exits; that
-            // race is an exit, not a substituted terminal.
-            Err(_) if self.child_exited()? => Ok(InheritedChild::Exited),
-            Err(error) => Err(error),
-        }
+        Ok(child)
     }
 
     /// Whether the direct child has exited, without consuming its status.
@@ -589,20 +647,32 @@ impl LinuxPtyIdentity {
         .is_some())
     }
 
+    /// The controlling-terminal session, then the foreground group: exactly
+    /// `expected_foreground_process_group` when given, otherwise any group
+    /// the terminal reports (the kernel keeps it within the session that
+    /// [`Self::validate_terminal`] just checked).
     fn validate_running_terminal(
         self,
         master: BorrowedFd<'_>,
-        expected_foreground_process_group: u32,
+        expected_foreground_process_group: Option<u32>,
     ) -> Result<()> {
         self.validate_terminal(&master)?;
         let observed_foreground = termios::tcgetpgrp(master)
             .map(pid_to_u32)
             .map_err(|error| PtyError::io("validate inherited PTY foreground group", error))?;
-        if observed_foreground != expected_foreground_process_group {
+        if expected_foreground_process_group.is_some_and(|expected| observed_foreground != expected)
+        {
             return Err(PtyError::IdentityMismatch);
         }
         Ok(())
     }
+}
+
+/// The kernel window size of an inherited PTY.
+fn read_size(master: BorrowedFd<'_>) -> Result<PtySize> {
+    termios::tcgetwinsize(master)
+        .map(PtySize::from_winsize)
+        .map_err(|error| PtyError::io("validate inherited PTY size", error))
 }
 
 /// Whether an inherited PTY child was still running when it was verified.

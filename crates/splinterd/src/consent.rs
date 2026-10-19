@@ -997,6 +997,10 @@ fn prompt_blocking(
     let child_read = child
         .try_clone()
         .context("duplicate private consent descriptor")?;
+    // The child inherits this thread's signal mask (`std::process::Command`
+    // passes it on). No daemon thread that can reach here holds a blocked
+    // mask: a handoff candidate releases the signals its exec carried before
+    // it builds its runtime (`handoff_exec`, "Signals across exec").
     let mut process = Command::new(executable)
         .arg("consent")
         .stdin(Stdio::from(OwnedFd::from(child_read)))

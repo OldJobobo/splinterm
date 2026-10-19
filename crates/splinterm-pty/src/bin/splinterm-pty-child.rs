@@ -96,6 +96,19 @@ fn run(
         return Err("invalid readiness acknowledgement".into());
     }
 
+    // The target starts with no signal blocked, whatever the spawning
+    // daemon thread had blocked: `std::process::Command` passes the
+    // parent's signal mask on to its child (since Rust 1.66), and a shell
+    // keeps an inherited mask for every job, so a blocked SIGINT, SIGTERM,
+    // or SIGHUP would survive into every command it runs. This process is
+    // single-threaded, so the thread mask is the process mask. Foot's
+    // `slave.c` resets the mask the same way.
+    nix::sys::signal::sigprocmask(
+        nix::sys::signal::SigmaskHow::SIG_SETMASK,
+        Some(&nix::sys::signal::SigSet::empty()),
+        None,
+    )
+    .map_err(|error| format!("resetting the signal mask failed: {error}"))?;
     let mut command = Command::new(&program);
     command.args(target_arguments);
     if login {

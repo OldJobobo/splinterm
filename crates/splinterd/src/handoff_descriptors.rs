@@ -149,6 +149,33 @@ impl<'fd> PreparedDescriptorInheritance<'fd> {
         )
     }
 
+    /// [`Self::prepare`] for an exec whose target closes every unexpected
+    /// inherited descriptor itself: the process-wide audit reports each
+    /// unexpected inheritable descriptor (up to [`MAX_HANDOFF_DESCRIPTORS`])
+    /// instead of refusing, and the strays stay inheritable.
+    ///
+    /// Only the candidate's rollback exec uses it. Its target is a candidate,
+    /// whose audited first operation (`splinterm-inherited-fd`) closes every
+    /// inherited descriptor its manifest does not name and reports how many,
+    /// and refusing there has nothing to fall back to: it would hang up every
+    /// carried Splint over a descriptor the next image closes anyway. The old
+    /// generation keeps the strict audit, where refusing only resumes it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare`], except for an unexpected inheritable descriptor.
+    pub(crate) fn prepare_reporting(
+        descriptors: impl IntoIterator<Item = HandoffDescriptor<'fd>>,
+    ) -> Result<(Self, Vec<RawFd>), DescriptorHandoffError> {
+        let mut strays = Vec::new();
+        let prepared =
+            Self::prepare_with_audit(descriptors.into_iter().collect::<Vec<_>>(), |allowlist| {
+                strays = inheritable_process_descriptors(allowlist, MAX_HANDOFF_DESCRIPTORS)?;
+                Ok(())
+            })?;
+        Ok((prepared, strays))
+    }
+
     fn prepare_with_audit(
         descriptors: Vec<HandoffDescriptor<'fd>>,
         audit: impl FnOnce(&[HandoffDescriptor<'_>]) -> Result<(), DescriptorHandoffError>,
@@ -304,6 +331,13 @@ impl CandidateDescriptorClaims {
     #[must_use]
     pub(crate) fn descriptor(&self, slot: HandoffDescriptorSlot) -> Option<BorrowedFd<'_>> {
         self.descriptors.get(&slot).map(OwnedFd::as_fd)
+    }
+
+    /// Every owner still in the table, bound to the slot it was claimed for.
+    pub(crate) fn handoff_descriptors(&self) -> impl Iterator<Item = HandoffDescriptor<'_>> {
+        self.descriptors
+            .iter()
+            .map(|(slot, descriptor)| HandoffDescriptor::new(*slot, descriptor.as_fd()))
     }
 
     /// Transfers unique ownership of one validated role.

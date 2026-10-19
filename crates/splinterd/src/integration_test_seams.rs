@@ -21,8 +21,14 @@
 //!   recorded executable source to be root-owned, which a test running as an
 //!   ordinary user cannot create. [`PACKAGED_OWNER_UID_ENV`] names the uid
 //!   that stands in for root.
+//! * **Candidate fault points.** The rollback fault matrix (Plan 0061
+//!   M3.11) needs a forward candidate to fail at each pre-commit step it
+//!   cannot be made to fail at from outside. [`CANDIDATE_FAULT_ENV`] names
+//!   the steps, each for one manifest kind, so the same environment, which
+//!   crosses both execs, fails the forward candidate but not the rollback
+//!   daemon (or, for the rollback-of-a-rollback case, the rollback daemon).
 //!
-//! Packaging must never ship either seam. Every package recipe (the PKGBUILDs
+//! Packaging must never ship any of these seams. Every package recipe (the PKGBUILDs
 //! and the Nix package) generates its provenance record with
 //! `tools/package/generate-package-provenance.py`, which refuses a daemon or
 //! client binary containing [`BUILD_SALT_MARKER`]: the marker is present
@@ -127,6 +133,104 @@ pub(crate) fn salt_compiled_identity(identity: BuildIdentity) -> BuildIdentity {
 /// The uid [`PACKAGED_OWNER_UID_ENV`] names, if it names one.
 pub(crate) fn packaged_owner_uid_override() -> Option<u32> {
     std::env::var(PACKAGED_OWNER_UID_ENV).ok()?.parse().ok()
+}
+
+/// Arms candidate fault points: a comma-separated list of
+/// `<point>@<forward|rollback>`, each naming a [`CandidateFaultPoint`] by
+/// [`CandidateFaultPoint::name`] and the manifest kind whose candidate fails
+/// there. Read only by `integration-test` builds.
+pub const CANDIDATE_FAULT_ENV: &str = "SPLINTERD_INTEGRATION_TEST_CANDIDATE_FAULT";
+
+/// One pre-commit step a test can make a candidate fail at, in the order a
+/// candidate reaches them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CandidateFaultPoint {
+    /// After staging verified every descriptor, before it transfers them.
+    Staging,
+    /// Leaving the single-threaded boundary, before any runtime exists.
+    RuntimeEntry,
+    /// On the serving runtime, after the signal streams and durable state.
+    Startup,
+    /// Right after both inherited listeners registered with the runtime.
+    ListenerRegistration,
+    /// Where workload scopes are adopted, whether or not a manager exists.
+    ScopeAdoption,
+    /// After the first carried actor staged, before the next one.
+    ActorStaging,
+    /// Not a failure: at startup, leaves one inheritable descriptor open
+    /// that no manifest names, as a leaked descriptor would
+    /// ([`leak_inheritable_descriptor`]).
+    StrayDescriptor,
+    /// Not a failure: once a pre-commit failure has been decided and the
+    /// handoff signals blocked on the main thread, sends this process a
+    /// SIGTERM ([`terminate_this_process`]) while the runtime's workers still
+    /// run with them unblocked, as `systemctl stop` during rollback teardown.
+    TerminateDuringTeardown,
+}
+
+impl CandidateFaultPoint {
+    /// The point's spelling in [`CANDIDATE_FAULT_ENV`].
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Staging => "staging",
+            Self::RuntimeEntry => "runtime-entry",
+            Self::Startup => "startup",
+            Self::ListenerRegistration => "listener-registration",
+            Self::ScopeAdoption => "scope-adoption",
+            Self::ActorStaging => "actor-staging",
+            Self::StrayDescriptor => "stray-descriptor",
+            Self::TerminateDuringTeardown => "terminate-during-teardown",
+        }
+    }
+}
+
+/// Whether [`CANDIDATE_FAULT_ENV`] arms `point` for a candidate activated by
+/// a manifest of `kind`.
+pub(crate) fn candidate_fault(
+    point: CandidateFaultPoint,
+    kind: crate::handoff_manifest::ManifestKind,
+) -> bool {
+    let kind = match kind {
+        crate::handoff_manifest::ManifestKind::Forward => "forward",
+        crate::handoff_manifest::ManifestKind::Rollback => "rollback",
+    };
+    std::env::var(CANDIDATE_FAULT_ENV).is_ok_and(|armed| {
+        armed
+            .split(',')
+            .filter_map(|entry| entry.trim().split_once('@'))
+            .any(|(armed_point, armed_kind)| armed_point == point.name() && armed_kind == kind)
+    })
+}
+
+/// Opens `/dev/null` and leaves it open and inheritable across exec,
+/// returning its number: a stand-in for a descriptor leaked without
+/// close-on-exec (the zbus `SCM_RIGHTS` case). Only the
+/// [`CandidateFaultPoint::StrayDescriptor`] seam calls it.
+///
+/// # Errors
+/// Reports a failed open or flag update.
+pub fn leak_inheritable_descriptor() -> std::io::Result<std::os::fd::RawFd> {
+    use std::os::fd::IntoRawFd;
+
+    let file = std::fs::File::open("/dev/null")?;
+    let flags = rustix::io::fcntl_getfd(&file)?;
+    rustix::io::fcntl_setfd(&file, flags - rustix::io::FdFlags::CLOEXEC)?;
+    // Leaked on purpose: nothing owns it once this returns.
+    Ok(file.into_raw_fd())
+}
+
+/// Sends this process a process-directed SIGTERM, which the kernel delivers
+/// to any thread that does not block it. Only the
+/// [`CandidateFaultPoint::TerminateDuringTeardown`] seam calls it.
+///
+/// # Errors
+/// Reports a failed `kill`.
+pub fn terminate_this_process() -> std::io::Result<()> {
+    Ok(rustix::process::kill_process(
+        rustix::process::getpid(),
+        rustix::process::Signal::TERM,
+    )?)
 }
 
 #[cfg(test)]

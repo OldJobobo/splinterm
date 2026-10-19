@@ -592,3 +592,39 @@ fn invalid_cwd_and_program_fail_without_affecting_the_daemon() {
     );
     assert!(matches!(invalid_program, Err(PtyError::TargetExec)));
 }
+
+/// A child starts with no signal blocked even when the spawning thread
+/// blocks SIGINT, SIGTERM, and SIGHUP: `std::process::Command` passes the
+/// spawning thread's mask on, and the helper empties it before it executes
+/// the target (Plan 0061 M3.11a review).
+#[test]
+fn child_starts_with_an_empty_signal_mask_whatever_the_spawner_blocks() {
+    use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+
+    let cwd = std::env::current_dir().unwrap();
+    let mut blocked = SigSet::empty();
+    for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+        blocked.add(signal);
+    }
+    let mut previous = SigSet::empty();
+    pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&blocked), Some(&mut previous)).unwrap();
+    let spawned = backend().spawn(
+        &PtyCommand::new("/bin/sh", &cwd).args([
+            "-c",
+            // The measuring process reads its own mask, which `exec` keeps.
+            "exec sed -n 's/^SigBlk:[[:space:]]*\\(.*\\)$/MASK=\\1 END/p' /proc/self/status",
+        ]),
+        PtySize::cells(80, 24),
+    );
+    pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&previous), None).unwrap();
+    let mut session = spawned.unwrap();
+    let output = read_until(&mut session, " END");
+    let mask = output
+        .split("MASK=")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|mask| u64::from_str_radix(mask, 16).ok())
+        .unwrap_or_else(|| panic!("no signal mask in {output:?}"));
+    assert_eq!(mask, 0, "the child inherited a blocked mask: {mask:016x}");
+    assert!(session.wait().unwrap().success());
+}

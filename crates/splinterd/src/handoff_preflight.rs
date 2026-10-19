@@ -389,6 +389,12 @@ fn preflight_one_with_launcher(
         .map_err(rustix_errno_io)
         .map_err(PreflightError::CreateTransport)?;
 
+    // The launcher inherits this thread's signal mask (`std::process::Command`
+    // passes it on). No thread that can reach here holds a blocked mask: a
+    // handoff candidate releases the signals its exec carried before it
+    // builds its runtime, and the old generation blocks them only inside the
+    // exec boundary, where nothing spawns (`handoff_exec`, "Signals across
+    // exec").
     let mut command = Command::new(launcher);
     command.env_clear();
     #[cfg(not(test))]
