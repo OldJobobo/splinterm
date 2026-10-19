@@ -330,6 +330,15 @@ matches the device and inode of the `splinterm` binary adjacent to the running
 `splinterd` executable. On the packaged system, that authority is
 `/usr/bin/splinterm` next to `/usr/bin/splinterd`.
 
+One exception, approved by the operator on 2026-10-18 for the upgrade handoff
+(Plan 0037, ADR 0011): a daemon adopted through a verified handoff may also
+grant it to a client process executing the exact sealed forward client
+snapshot that the daemon verified against its package record and pinned for
+its own lifetime, matched by that snapshot's device and inode. Matching is
+never by content hash, a fresh daemon pins no snapshot, and a client running
+any other image, including a stale pre-upgrade inode, never regains
+trusted-UI authority this way.
+
 Do not install a development client to `~/.local/bin/splinterm`,
 `~/.cargo/bin/splinterm`, or another earlier `PATH` entry and then claim the
 desktop launcher is installed. The packaged desktop wrapper resolves
