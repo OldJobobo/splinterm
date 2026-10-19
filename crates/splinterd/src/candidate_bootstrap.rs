@@ -41,6 +41,7 @@ use splinterm_terminal::{
     SnapshotRequest, Terminal,
 };
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{
     executable_snapshot::{MAX_EXECUTABLE_SNAPSHOT_BYTES, REQUIRED_EXECUTABLE_SEALS},
@@ -150,9 +151,10 @@ pub(crate) struct CandidateSplintStage {
 /// pidfd (`ClientProcess(index)`) and the daemon end of its continuation
 /// channel (`Continuation(index)`).
 ///
-/// A Window whose process had exited at staging is not `live`: it is
-/// dropped logically (no outcome, no controller placeholder) and never
-/// causes a rollback, but its owners stay held until commit, because the
+/// A Window whose process had exited at staging, or that a rollback
+/// generation refused ([`window_verdict`]), is not `live`: it is dropped
+/// logically (no outcome, no controller placeholder) and never causes a
+/// rollback, but its owners stay held until commit, because the
 /// rollback manifest still records them and rollback requires every
 /// recorded owner at its original number. Commit closes them.
 #[derive(Debug)]
@@ -325,17 +327,30 @@ impl CandidateRuntimeStage {
         for (record, (process, continuation)) in
             parts.manifest.windows.iter().cloned().zip(parts.windows)
         {
-            let live = verify_window_process(
+            let kind = parts.manifest.kind;
+            let process_live = window_verdict(
+                kind,
                 &record,
-                process.as_fd(),
                 HandoffDescriptorSlot::ClientProcess(record.index),
+                verify_window_process(
+                    &record,
+                    process.as_fd(),
+                    HandoffDescriptorSlot::ClientProcess(record.index),
+                ),
             )?;
             let stat = fstat(&continuation).map_err(errno_descriptor)?;
-            verify_continuation(
-                continuation.as_fd(),
-                &stat,
+            let channel_live = window_verdict(
+                kind,
+                &record,
                 HandoffDescriptorSlot::Continuation(record.index),
+                verify_continuation(
+                    continuation.as_fd(),
+                    &stat,
+                    HandoffDescriptorSlot::Continuation(record.index),
+                )
+                .map(|()| true),
             )?;
+            let live = process_live && channel_live;
             windows.push(CandidateWindowStage {
                 record,
                 process,
@@ -632,7 +647,9 @@ impl CandidateBootstrap {
     /// Returns, for each carried Window by index, whether its process is
     /// still the recorded live one (`true`) or has exited (`false`). An
     /// exited Window passes; a wrong descriptor type, or a live process
-    /// that is not the recorded one, fails staging.
+    /// that is not the recorded one, fails a forward candidate's staging
+    /// and is dropped (`false`) by a rollback generation
+    /// ([`window_verdict`]).
     fn verify_descriptor_roles(&self) -> Result<BTreeMap<u8, bool>, CandidateBootstrapError> {
         #[derive(Eq, Ord, PartialEq, PartialOrd)]
         enum ObjectKey {
@@ -691,19 +708,36 @@ impl CandidateBootstrap {
                 // to its own record, so no two slots can name one live
                 // process. Pidfds share one anonymous inode on older
                 // kernels, so the inode cannot serve.
+                // A rollback generation drops a Window it refuses instead of
+                // failing ([`window_verdict`]).
                 HandoffDescriptorSlot::ClientProcess(index) => {
                     let record = self
                         .window_record(index)
                         .ok_or(CandidateBootstrapError::UnsupportedRole(slot))?;
-                    let live = verify_window_process(record, descriptor, slot)?;
+                    let live = window_verdict(
+                        self.manifest.kind,
+                        record,
+                        slot,
+                        verify_window_process(record, descriptor, slot),
+                    )?;
                     windows.insert(index, live);
                     ObjectKey::Window(index)
                 }
+                // Every `ClientProcess` slot sorts before every
+                // `Continuation` slot, so the process verdict is already in.
                 HandoffDescriptorSlot::Continuation(index) => {
-                    if self.window_record(index).is_none() {
-                        return Err(CandidateBootstrapError::UnsupportedRole(slot));
+                    let record = self
+                        .window_record(index)
+                        .ok_or(CandidateBootstrapError::UnsupportedRole(slot))?;
+                    let usable = window_verdict(
+                        self.manifest.kind,
+                        record,
+                        slot,
+                        verify_continuation(descriptor, &stat, slot).map(|()| true),
+                    )?;
+                    if !usable {
+                        windows.insert(index, false);
                     }
-                    verify_continuation(descriptor, &stat, slot)?;
                     ObjectKey::Inode(stat.st_dev, stat.st_ino)
                 }
                 // Schema-v2 checkpoints embed image state.
@@ -1013,6 +1047,40 @@ pub(crate) fn require_unix_stream_listener(
         return Err(CandidateBootstrapError::DescriptorRole(slot));
     }
     Ok(())
+}
+
+/// What staging does with one Window check's result for a manifest of
+/// `kind`.
+///
+/// A forward candidate refuses a Window descriptor of the wrong type, a live
+/// process that is not the recorded one, or one it cannot inspect: staging
+/// fails and the candidate rolls back, the contract for every invalid
+/// descriptor. These checks are deterministic, so the rollback generation
+/// would refuse the same descriptors, and it has no rollback edge: failing
+/// would end it and hang up every carried Splint over one Window. So a
+/// rollback generation logs the refusal and drops the Window instead
+/// (`Ok(false)`): its owners stay held, commit closes them, and it gets no
+/// outcome and no controller placeholder.
+fn window_verdict(
+    kind: ManifestKind,
+    record: &ManifestWindow,
+    slot: HandoffDescriptorSlot,
+    checked: Result<bool, CandidateBootstrapError>,
+) -> Result<bool, CandidateBootstrapError> {
+    match (checked, kind) {
+        (Ok(live), _) => Ok(live),
+        (Err(error), ManifestKind::Forward) => Err(error),
+        (Err(error), ManifestKind::Rollback) => {
+            warn!(
+                ?slot,
+                index = record.index,
+                pid = record.pid,
+                %error,
+                "daemon handoff rollback: dropping a carried Window it cannot accept"
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// Checks one Window's inherited pidfd against its record
@@ -1833,6 +1901,44 @@ mod tests {
                 "{result:?}"
             );
         }
+    }
+
+    /// A rollback generation has no rollback edge, so it drops a Window it
+    /// would refuse instead of failing: every refusal a forward candidate
+    /// makes reads as a dropped Window there.
+    #[test]
+    fn a_rollback_generation_drops_every_window_a_forward_candidate_refuses() {
+        let window = test_window();
+        let pidfd = || window.pidfd.try_clone().unwrap();
+        let channel = || window.continuation.try_clone().unwrap();
+        let mut other_start = window.record.clone();
+        other_start.start_time += 1;
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (uncredentialed, _client) = seqpacket(false);
+        let cases: [(ManifestWindow, OwnedFd, OwnedFd); 4] = [
+            (other_start, pidfd(), channel()),
+            (window.record.clone(), body(), channel()),
+            (window.record.clone(), pidfd(), OwnedFd::from(stream)),
+            (window.record.clone(), pidfd(), uncredentialed),
+        ];
+        for (record, process, continuation) in cases {
+            let (idle, mut bootstrap) = windowed_bootstrap(record, process, continuation);
+            let forward = bootstrap.verify_descriptor_roles();
+            assert!(forward.is_err(), "{forward:?}");
+            bootstrap.manifest.kind = ManifestKind::Rollback;
+            assert_eq!(
+                bootstrap.verify_descriptor_roles().unwrap(),
+                BTreeMap::from([(0, false)])
+            );
+            drop(idle);
+        }
+        // An accepted Window stays live on the rollback side too.
+        let (_idle, mut bootstrap) = windowed_bootstrap(window.record.clone(), pidfd(), channel());
+        bootstrap.manifest.kind = ManifestKind::Rollback;
+        assert_eq!(
+            bootstrap.verify_descriptor_roles().unwrap(),
+            BTreeMap::from([(0, true)])
+        );
     }
 
     /// A Window that fails its check fails staging like any other invalid

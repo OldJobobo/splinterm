@@ -2120,10 +2120,12 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         ..
     } = committed;
     // The forward client snapshot closes here: nothing relaunches from it
-    // before M3.14, and no peer executing it is trusted UI. The adopted
-    // daemon trusts exactly `<prefix>/splinterm`, as a fresh daemon does
-    // (AGENTS.md §4.4); matching the pinned snapshot needs an approved §4.4
-    // amendment first.
+    // before M3.14, so for now the adopted daemon trusts exactly
+    // `<prefix>/splinterm`, as a fresh daemon does. AGENTS.md §4.4 already
+    // carries the 2026-10-18 exception for a handoff-adopted daemon:
+    // M3.14/M3.16 will keep this snapshot, pin it for the daemon's
+    // lifetime, and also trust a client executing exactly it, by device and
+    // inode, never by content hash.
     let install_prefix = Arc::new(install_prefix);
     let daemon_audit_peer = adopted_daemon_audit_peer(&install_prefix, daemon_image);
     let state = build_daemon_state(DaemonStateInputs {

@@ -116,6 +116,18 @@
 //!   scope systemd refuses to hand over (`WorkloadScope`), for as long as
 //!   that session state persists.
 //!
+//! A carried Window's descriptors are the one exception the rollback side
+//! degrades instead of refusing. A forward candidate refuses a Window whose
+//! pidfd is not a pidfd, pins a live process other than the recorded one,
+//! or cannot be inspected, or whose continuation end is not a credentialed
+//! Unix `SOCK_SEQPACKET` socket (`DescriptorRole`, `WindowIdentity`,
+//! `Descriptor`), and rolls back as for any invalid descriptor. The
+//! rollback daemon would refuse the same descriptors the same way, and
+//! ending it would hang up every carried Splint over one Window, so a
+//! rollback generation logs the refusal and drops that Window instead: its
+//! owners stay held until commit closes them, and it gets no outcome and
+//! no controller placeholder (`candidate_bootstrap::window_verdict`).
+//!
 //! A transient condition (a single failed systemd call, a failed task, a
 //! runtime that could not be built) can succeed on the second attempt. A
 //! deterministic one cannot. The Plan 0061 M3.17 proofs and VM acceptance

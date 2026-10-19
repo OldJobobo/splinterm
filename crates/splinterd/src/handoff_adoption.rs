@@ -1660,6 +1660,7 @@ mod tests {
 
     use super::*;
     use crate::handoff_manifest::ControllerDisposition;
+    use crate::handoff_window_carry::assert_end_of_file;
     use crate::{
         HandedOffSplint, LiveSplintHandle,
         candidate_bootstrap::{CandidateBootstrapError, RuntimeStageForTest},
@@ -2124,11 +2125,8 @@ mod tests {
             })
         );
         assert_eq!(live.read(), None, "exactly one outcome");
-        assert_eq!(
-            exited.read(),
-            Some(Vec::new()),
-            "closed at commit, unannounced"
-        );
+        // Closed at commit, unannounced.
+        assert_end_of_file(&exited.client);
         assert!(committed.windows.is_held());
         assert_eq!(committed.windows.window_count(), 1);
         assert_eq!(
@@ -2141,7 +2139,7 @@ mod tests {
             }]
         );
         committed.windows.release();
-        assert_eq!(live.read(), Some(Vec::new()));
+        assert_end_of_file(&live.client);
         shut_down(committed).await;
     }
 
@@ -2172,6 +2170,67 @@ mod tests {
         assert_eq!(committed.window_announcement.announced, 1);
         assert!(committed.windows.placeholders().is_empty());
         committed.windows.release();
+        shut_down(committed).await;
+    }
+
+    /// A Window a forward candidate refuses (here a live process that is
+    /// not the recorded one) fails its staging, so it rolls back. The
+    /// rollback generation refuses the same Window the same way, but drops
+    /// it instead: it adopts every Splint, and the Window gets no outcome
+    /// and its channel closes at commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rollback_generation_drops_a_window_it_refuses_and_carries_every_splint() {
+        let mismatched = |index| {
+            let (window, mut fixture) = test_window(index, &[6]);
+            fixture.record.start_time += 1;
+            (window, fixture)
+        };
+        let (_forward_window, fixture) = mismatched(0);
+        let refused = Harness::try_new(&[CAT], vec![fixture], no_change).await;
+        let Err((error, manifest)) = refused else {
+            panic!("a forward candidate must refuse a mismatched Window");
+        };
+        assert!(
+            matches!(
+                error,
+                CandidateBootstrapError::WindowIdentity(HandoffDescriptorSlot::ClientProcess(0))
+            ),
+            "{error}"
+        );
+        // The refusal dropped the staged PTYs; reap the hung-up children.
+        reap_hung_up(&manifest);
+
+        let (window, fixture) = mismatched(0);
+        let mut harness = Harness::try_new(&[CAT, CAT], vec![fixture], |_, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+            manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                window: 0,
+                connection: 6,
+            };
+        })
+        .await
+        .map_err(|(error, _)| error)
+        .unwrap();
+        let staged = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap();
+        assert_eq!(window.read(), None, "owners are held until commit");
+        let committed = staged.commit();
+        assert!(committed.rollback);
+        assert_eq!(committed.splints.len(), 2);
+        assert_eq!(
+            committed.window_announcement,
+            WindowAnnouncement {
+                exited: 1,
+                ..WindowAnnouncement::default()
+            }
+        );
+        assert!(!committed.windows.is_held());
+        assert_end_of_file(&window.client);
+        for adopted in &committed.splints {
+            assert_echoes(&adopted.runtime.handle(), "after-dropped-window").await;
+        }
         shut_down(committed).await;
     }
 

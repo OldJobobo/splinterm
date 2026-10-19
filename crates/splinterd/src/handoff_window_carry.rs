@@ -75,8 +75,12 @@ pub(crate) fn fdinfo_pid(fdinfo: &str) -> Option<i64> {
 /// The start time, in clock ticks after boot, field 22 of
 /// `/proc/<pid>/stat`. The command name may hold any bytes, including `)`
 /// and invalid UTF-8, so the fields are read after its final `)`.
+///
+/// The daemon's one start-time parser: the old generation pins a Window
+/// (and verifies every peer) with it, and a candidate checks an inherited
+/// Window pidfd's process with it, so both sides read the same field.
 #[must_use]
-pub(crate) fn stat_start_time(stat: &[u8]) -> Option<u64> {
+pub fn stat_start_time(stat: &[u8]) -> Option<u64> {
     let close = stat.iter().rposition(|&byte| byte == b')')?;
     let rest = std::str::from_utf8(&stat[close + 1..]).ok()?;
     // Field 3 (state) is the first after the name; starttime is the 20th
@@ -84,7 +88,10 @@ pub(crate) fn stat_start_time(stat: &[u8]) -> Option<u64> {
     rest.split_ascii_whitespace().nth(19)?.parse().ok()
 }
 
-pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
+/// The start time of `pid` ([`stat_start_time`] of its `/proc/<pid>/stat`),
+/// or `None` when it cannot be read.
+#[must_use]
+pub fn process_start_time(pid: u32) -> Option<u64> {
     stat_start_time(&fs::read(format!("/proc/{pid}/stat")).ok()?)
 }
 
@@ -374,8 +381,8 @@ impl fmt::Debug for HandoffWindowHold {
 pub struct WindowAnnouncement {
     /// Windows sent their outcome and held.
     pub announced: usize,
-    /// Windows whose process had exited by staging or by commit, sent
-    /// nothing.
+    /// Windows whose process had exited by staging or by commit, or that a
+    /// rollback generation refused at staging, sent nothing.
     pub exited: usize,
     /// Windows whose outcome could not be sent, dropped.
     pub unsent: usize,
@@ -497,6 +504,37 @@ pub(crate) fn announce_and_hold(
         expiring.release();
     }));
     (shared, announcement)
+}
+
+/// Asserts that the continuation channel's client end reads end of file,
+/// with no packet before it.
+///
+/// It waits up to 5 s for the channel to become readable first. A sibling
+/// test's `Command::spawn` duplicates this process's descriptor table until
+/// its child executes, so the daemon end can stay open for a moment after
+/// it was dropped; an immediate read would then see an empty channel, not
+/// end of file.
+#[cfg(test)]
+pub(crate) fn assert_end_of_file(client: &OwnedFd) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut descriptors = [PollFd::new(client, PollFlags::IN | PollFlags::HUP)];
+        let left = deadline.saturating_duration_since(Instant::now());
+        let timeout = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(5),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        match poll(&mut descriptors, Some(&timeout)) {
+            Ok(0) => panic!("the continuation channel never reached end of file"),
+            Ok(_) => break,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => panic!("cannot poll the continuation channel: {error}"),
+        }
+    }
+    let mut buffer = [0_u8; 64];
+    let (read, _) =
+        rustix::net::recv(client, &mut buffer, rustix::net::RecvFlags::DONTWAIT).unwrap();
+    assert_eq!(read, 0, "a packet arrived where end of file was expected");
 }
 
 #[cfg(test)]
@@ -796,7 +834,7 @@ mod tests {
         // Exactly one packet.
         assert_eq!(read_packet(&live_client), None);
         // The exited Window got nothing and its end closed at once.
-        assert_eq!(read_packet(&exited_client), Some(Vec::new()));
+        assert_end_of_file(&exited_client);
         assert!(hold.is_held());
         assert_eq!(hold.window_count(), 1);
         assert_eq!(
@@ -817,7 +855,7 @@ mod tests {
         .await
         .expect("the hold expires");
         assert!(hold.placeholders().is_empty());
-        assert_eq!(read_packet(&live_client), Some(Vec::new()));
+        assert_end_of_file(&live_client);
     }
 
     #[tokio::test]
@@ -838,7 +876,7 @@ mod tests {
         assert!(hold.is_held());
         hold.release();
         assert!(!hold.is_held());
-        assert_eq!(read_packet(&client), Some(Vec::new()));
+        assert_end_of_file(&client);
     }
 
     #[test]
@@ -863,6 +901,6 @@ mod tests {
         );
         assert!(!hold.is_held());
         // No outcome went out: the channel just closed.
-        assert_eq!(read_packet(&client), Some(Vec::new()));
+        assert_end_of_file(&client);
     }
 }
