@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+nix = { workspace = true, features = ["signal"] }
 rustix.workspace = true
 thiserror.workspace = true
 

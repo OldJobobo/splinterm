@@ -557,6 +557,44 @@ impl LinuxPtyIdentity {
         expected_size: PtySize,
         expected_foreground_process_group: u32,
     ) -> Result<InheritedChild> {
+        self.verify_inherited_with(
+            master,
+            expected_size,
+            Some(expected_foreground_process_group),
+        )
+    }
+
+    /// Verifies one inherited master like
+    /// [`Self::verify_inherited_allowing_exit`], except that any foreground
+    /// process group of the recorded session is accepted, not only the
+    /// recorded one.
+    ///
+    /// A daemon handoff's rollback generation uses this: an interactive
+    /// shell that started or finished a foreground job in the exec window
+    /// changed its terminal's foreground group, which refuses the forward
+    /// adoption, and the same check would then refuse the rollback that
+    /// exists to keep the Splint alive. The foreground group still belongs
+    /// to the recorded session: the terminal's session is checked to be the
+    /// recorded one, and the kernel lets a terminal's foreground group be
+    /// set only to a process group of that session.
+    ///
+    /// # Errors
+    /// As [`Self::verify_inherited_allowing_exit`], without the foreground
+    /// process group equality.
+    pub fn verify_inherited_allowing_exit_in_session(
+        self,
+        master: BorrowedFd<'_>,
+        expected_size: PtySize,
+    ) -> Result<InheritedChild> {
+        self.verify_inherited_with(master, expected_size, None)
+    }
+
+    fn verify_inherited_with(
+        self,
+        master: BorrowedFd<'_>,
+        expected_size: PtySize,
+        expected_foreground_process_group: Option<u32>,
+    ) -> Result<InheritedChild> {
         verify_pty_master(master)?;
         self.validate_process()?;
         let observed_size = termios::tcgetwinsize(master)
@@ -589,16 +627,21 @@ impl LinuxPtyIdentity {
         .is_some())
     }
 
+    /// The controlling-terminal session, then the foreground group: exactly
+    /// `expected_foreground_process_group` when given, otherwise any group
+    /// the terminal reports (the kernel keeps it within the session that
+    /// [`Self::validate_terminal`] just checked).
     fn validate_running_terminal(
         self,
         master: BorrowedFd<'_>,
-        expected_foreground_process_group: u32,
+        expected_foreground_process_group: Option<u32>,
     ) -> Result<()> {
         self.validate_terminal(&master)?;
         let observed_foreground = termios::tcgetpgrp(master)
             .map(pid_to_u32)
             .map_err(|error| PtyError::io("validate inherited PTY foreground group", error))?;
-        if observed_foreground != expected_foreground_process_group {
+        if expected_foreground_process_group.is_some_and(|expected| observed_foreground != expected)
+        {
             return Err(PtyError::IdentityMismatch);
         }
         Ok(())

@@ -1618,7 +1618,7 @@ mod tests {
     use super::*;
     use crate::{
         HandedOffSplint, LiveSplintHandle,
-        candidate_bootstrap::RuntimeStageForTest,
+        candidate_bootstrap::{CandidateBootstrapError, RuntimeStageForTest},
         handoff_prepare::tests::{
             ADOPTION_BUDGET_BYTES, CAT, OldSideHandoff, config, hand_off_fleet, snapshot_text,
         },
@@ -1757,6 +1757,18 @@ mod tests {
             scripts: &[&str],
             before_staging: impl FnOnce(&[(u16, HandedOffSplint)], &mut HandoffManifestV1),
         ) -> Self {
+            match Self::try_new(scripts, before_staging).await {
+                Ok(harness) => harness,
+                Err((error, _)) => panic!("staging refused the harness candidate: {error}"),
+            }
+        }
+
+        /// [`Self::new`], returning a staging refusal with the manifest
+        /// (whose children the refusal hung up) instead of panicking.
+        async fn try_new(
+            scripts: &[&str],
+            before_staging: impl FnOnce(&[(u16, HandedOffSplint)], &mut HandoffManifestV1),
+        ) -> Result<Self, (CandidateBootstrapError, HandoffManifestV1)> {
             static NEXT: AtomicU64 = AtomicU64::new(1);
             let directory = std::env::temp_dir().join(format!(
                 "sd-adopt-{}-{}",
@@ -1815,20 +1827,26 @@ mod tests {
                 },
                 &SharedImageBudget::new(ADOPTION_BUDGET_BYTES),
                 &SharedKittyUploadBudget::new(ADOPTION_BUDGET_BYTES),
-            )
-            .unwrap();
+            );
+            let stage = match stage {
+                Ok(stage) => stage,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&directory);
+                    return Err((error, manifest));
+                }
+            };
             // The candidate loads the fenced Topology's durable form.
             let topology = TopologyDocument::from_topology(&old.topology)
                 .unwrap()
                 .into_topology()
                 .unwrap();
-            Self {
+            Ok(Self {
                 stage: Some(stage),
                 topology,
                 manifest,
                 directory,
                 _old: old,
-            }
+            })
         }
 
         fn inputs(&self, adopter: Option<FakeAdopter>) -> AdoptionInputs<FakeAdopter> {
@@ -2256,6 +2274,48 @@ mod tests {
         );
         assert_eq!(signal_mask(), mask);
         reap_hung_up(&harness.manifest);
+    }
+
+    /// The recorded foreground group no longer matches the terminal's, as
+    /// after a carried shell started or ended a foreground job in the exec
+    /// window: a forward candidate refuses it at staging, and a rollback
+    /// generation stages and adopts it (Plan 0061 M3.11a review). The
+    /// terminal's session is still checked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_rollback_generation_tolerates_a_changed_foreground_group() {
+        let moved = |manifest: &mut HandoffManifestV1| {
+            for splint in &mut manifest.splints {
+                splint.foreground_process_group = splint
+                    .foreground_process_group
+                    .map(|group| group.wrapping_add(100_000));
+            }
+        };
+        let refused = Harness::try_new(&[CAT], |_, manifest| moved(manifest)).await;
+        let Err((error, manifest)) = refused else {
+            panic!("a forward candidate staged a changed foreground group");
+        };
+        assert!(
+            matches!(
+                error,
+                CandidateBootstrapError::Pty(splinterm_pty::PtyError::IdentityMismatch)
+            ),
+            "{error}"
+        );
+        reap_hung_up(&manifest);
+
+        let mut harness = Harness::new(&[CAT], |_, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+            moved(manifest);
+        })
+        .await;
+        let committed = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap()
+            .commit();
+        assert!(committed.rollback);
+        assert_echoes(&committed.splints[0].runtime.handle(), "after-rollback").await;
+        shut_down(committed).await;
     }
 
     /// The executor binds every recovered descriptor to the number the

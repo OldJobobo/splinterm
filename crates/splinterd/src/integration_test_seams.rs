@@ -157,6 +157,10 @@ pub enum CandidateFaultPoint {
     ScopeAdoption,
     /// After the first carried actor staged, before the next one.
     ActorStaging,
+    /// Not a failure: at startup, leaves one inheritable descriptor open
+    /// that no manifest names, as a leaked descriptor would
+    /// ([`leak_inheritable_descriptor`]).
+    StrayDescriptor,
 }
 
 impl CandidateFaultPoint {
@@ -170,6 +174,7 @@ impl CandidateFaultPoint {
             Self::ListenerRegistration => "listener-registration",
             Self::ScopeAdoption => "scope-adoption",
             Self::ActorStaging => "actor-staging",
+            Self::StrayDescriptor => "stray-descriptor",
         }
     }
 }
@@ -190,6 +195,23 @@ pub(crate) fn candidate_fault(
             .filter_map(|entry| entry.trim().split_once('@'))
             .any(|(armed_point, armed_kind)| armed_point == point.name() && armed_kind == kind)
     })
+}
+
+/// Opens `/dev/null` and leaves it open and inheritable across exec,
+/// returning its number: a stand-in for a descriptor leaked without
+/// close-on-exec (the zbus `SCM_RIGHTS` case). Only the
+/// [`CandidateFaultPoint::StrayDescriptor`] seam calls it.
+///
+/// # Errors
+/// Reports a failed open or flag update.
+pub fn leak_inheritable_descriptor() -> std::io::Result<std::os::fd::RawFd> {
+    use std::os::fd::IntoRawFd;
+
+    let file = std::fs::File::open("/dev/null")?;
+    let flags = rustix::io::fcntl_getfd(&file)?;
+    rustix::io::fcntl_setfd(&file, flags - rustix::io::FdFlags::CLOEXEC)?;
+    // Leaked on purpose: nothing owns it once this returns.
+    Ok(file.into_raw_fd())
 }
 
 #[cfg(test)]

@@ -280,6 +280,7 @@ impl CandidateRuntimeStage {
             parts.manifest.splints.iter().cloned().zip(parts.splints)
         {
             let (terminal, identity) = stage_splint(
+                parts.manifest.kind,
                 &evidence,
                 parts.manifest.terminal_checkpoint_schema,
                 checkpoint.as_fd(),
@@ -729,6 +730,7 @@ impl CandidateBootstrap {
         for splint in &self.manifest.splints {
             let checkpoint_slot = terminal_checkpoint_slot(splint)?;
             let (terminal, identity) = stage_splint(
+                self.manifest.kind,
                 splint,
                 self.manifest.terminal_checkpoint_schema,
                 self.required(checkpoint_slot)?,
@@ -811,6 +813,7 @@ impl CandidateBootstrap {
 /// verified: the checkpoint, the master, the kernel size, and the unreaped
 /// direct child's process group and session.
 fn stage_splint(
+    kind: ManifestKind,
     splint: &ManifestSplint,
     checkpoint_schema: u16,
     checkpoint: BorrowedFd<'_>,
@@ -843,17 +846,26 @@ fn stage_splint(
     let foreground = splint
         .foreground_process_group
         .ok_or(CandidateBootstrapError::TerminalMismatch)?;
-    // Running or exited-and-unreaped are both carried; see above.
-    let _: InheritedChild = identity.verify_inherited_allowing_exit(
-        master,
-        PtySize {
-            rows: splint.size.rows,
-            columns: splint.size.columns,
-            pixel_width: splint.size.pixel_width,
-            pixel_height: splint.size.pixel_height,
-        },
-        foreground,
-    )?;
+    let size = PtySize {
+        rows: splint.size.rows,
+        columns: splint.size.columns,
+        pixel_width: splint.size.pixel_width,
+        pixel_height: splint.size.pixel_height,
+    };
+    // Running or exited-and-unreaped are both carried; see above. A forward
+    // candidate requires the captured foreground group. A rollback
+    // generation accepts any foreground group of the recorded session: a
+    // foreground job that started or ended in the exec window refused the
+    // forward adoption, and refusing the rollback the same way would hang
+    // up every carried Splint (Plan 0061 M3.11a review).
+    let _: InheritedChild = match kind {
+        ManifestKind::Forward => {
+            identity.verify_inherited_allowing_exit(master, size, foreground)?
+        }
+        ManifestKind::Rollback => {
+            identity.verify_inherited_allowing_exit_in_session(master, size)?
+        }
+    };
     Ok((terminal, identity))
 }
 
@@ -1031,7 +1043,7 @@ pub(crate) fn read_immutable_descriptor(
     Ok(bytes)
 }
 
-fn verify_executable(
+pub(crate) fn verify_executable(
     descriptor: BorrowedFd<'_>,
     expected: &ManifestExecutableImage,
 ) -> Result<(), CandidateBootstrapError> {

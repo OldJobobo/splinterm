@@ -44,9 +44,23 @@
 //! delivered to the handler and acted on in order (a SIGTERM becomes an
 //! ordered shutdown after adoption). When exec does not happen, the old
 //! generation restores its mask and a pending signal reaches its still
-//! installed handler before the resumed round serves. Splint children never
-//! inherit the blocked mask: the PTY helper and the consent launcher spawn
-//! through `std::process::Command`, which empties the child's signal mask.
+//! installed handler before the resumed round serves.
+//!
+//! No child may inherit the blocked mask. `std::process::Command` passes the
+//! spawning thread's signal mask on to the child (it has since Rust 1.66;
+//! only SIGPIPE's disposition is reset), and threads inherit their creator's
+//! mask, so the mask is confined to threads that never spawn:
+//!
+//! * The old generation blocks only on its one remaining thread, under the
+//!   process guard, where nothing spawns, and restores the mask before a
+//!   resumed round builds its runtime.
+//! * A candidate installs its handlers and unblocks before it builds its
+//!   serving runtime (`release_handoff_signals` in the binary), so no
+//!   worker or blocking-pool thread, and nothing they spawn (Splints, the
+//!   consent launcher, the sealed-preflight launcher), ever carries it.
+//! * `splinterm-pty-child` also empties the mask before it executes a
+//!   Splint's command, so a Splint starts with nothing blocked whatever the
+//!   spawning thread had.
 //!
 //! # Exec failure past the point of no return
 //!

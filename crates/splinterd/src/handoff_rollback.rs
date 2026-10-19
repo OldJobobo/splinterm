@@ -52,18 +52,23 @@
 //! 3. bind every owned descriptor to the slot and number the rollback
 //!    manifest records; nothing is renumbered, so a descriptor at another
 //!    number than recorded refuses rollback;
-//! 4. rebuild argv from parsed state, never from the running argv:
+//! 4. verify the rollback daemon descriptor is exactly the sealed snapshot
+//!    the rollback manifest records and no other role's object, whatever
+//!    staging verified before it failed;
+//! 5. rebuild argv from parsed state, never from the running argv:
 //!    `[argv0, <activation>=<rollback manifest fd>]`, plus
 //!    `--require-workload-cgroups` when it was given;
-//! 5. block SIGINT, SIGTERM, and SIGHUP, and make a termination the failed
+//! 6. block SIGINT, SIGTERM, and SIGHUP, and make a termination the failed
 //!    candidate's handler already consumed pending again, so it crosses exec
 //!    (`crate::handoff_exec` documents the signal discipline);
-//! 6. take a fresh single-threaded process guard
+//! 7. take a fresh single-threaded process guard
 //!    ([`HandoffProcessGuard::acquire_until`]);
-//! 7. clear close-on-exec on exactly the recorded descriptors, under the
-//!    guard ([`PreparedDescriptorInheritance::prepare`], whose process-wide
-//!    audit refuses any other inheritable descriptor);
-//! 8. `execveat(rollback_daemon, "", argv, envp, AT_EMPTY_PATH)` with the
+//! 8. clear close-on-exec on exactly the recorded descriptors, under the
+//!    guard. The process-wide audit only reports any other inheritable
+//!    descriptor (`PreparedDescriptorInheritance::prepare_reporting`):
+//!    the rollback daemon's audited claim closes it, and refusing would end
+//!    every Splint over it;
+//! 9. `execveat(rollback_daemon, "", argv, envp, AT_EMPTY_PATH)` with the
 //!    environment unchanged.
 //!
 //! # When rollback fails
@@ -99,6 +104,7 @@ use std::{
 };
 
 use nix::sys::signal::Signal;
+use rustix::fs::fstat;
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -106,6 +112,7 @@ use crate::{
     candidate_bootstrap::{
         CandidateBootstrap, CandidateStageFailure, CandidateStagedAuthorities,
         current_manifest_slot, read_immutable_descriptor, terminal_checkpoint_slot,
+        verify_executable,
     },
     handoff_adoption::{AdoptionFailure, AdoptionRecovery},
     handoff_coordinator::{
@@ -259,6 +266,10 @@ pub enum RollbackError {
     MissingRecord(HandoffDescriptorSlot),
     #[error("the recovered descriptors are not the rollback manifest's: {0}")]
     Descriptors(#[source] ExecBoundaryError),
+    #[error(
+        "the inherited rollback daemon image is not the one the rollback manifest records: {0}"
+    )]
+    RollbackImage(String),
     #[error("cannot build the rollback daemon's arguments")]
     Arguments,
     #[error("cannot block the handoff signals: {0}")]
@@ -320,6 +331,7 @@ fn roll_back(
     };
     let manifest = recorded_fd(HandoffDescriptorSlot::RollbackManifest)?;
     let daemon = recorded_fd(HandoffDescriptorSlot::RollbackDaemon)?;
+    verify_rollback_image(daemon, &descriptors, &rollback_manifest)?;
     let arguments = candidate_daemon_arguments(
         &exec.program,
         manifest.raw_fd(),
@@ -339,8 +351,18 @@ fn roll_back(
     }
     let guard =
         HandoffProcessGuard::acquire_until(exec.guard_deadline).map_err(RollbackError::Guard)?;
-    let inheritance = PreparedDescriptorInheritance::prepare(descriptors.iter().copied())
-        .map_err(RollbackError::Inheritance)?;
+    let (inheritance, strays) =
+        PreparedDescriptorInheritance::prepare_reporting(descriptors.iter().copied())
+            .map_err(RollbackError::Inheritance)?;
+    if !strays.is_empty() {
+        // The rollback daemon's own claim closes each of these and reports
+        // them as `closed_unexpected`; refusing here would end every Splint.
+        warn!(
+            strays = strays.len(),
+            descriptors = ?strays,
+            "daemon handoff: unexpected inheritable descriptors cross the rollback exec; the rollback daemon closes them"
+        );
+    }
     info!(
         handoff_id = ?rollback_manifest.handoff_id,
         target_daemon_generation = rollback_manifest.target_daemon_generation,
@@ -429,6 +451,43 @@ impl RollbackParts {
             Self::Adoption(authorities) => staged_owners(authorities),
         }
     }
+}
+
+/// Requires the descriptor the executor is about to run to be exactly the
+/// sealed rollback daemon snapshot the rollback manifest records, whatever
+/// staging got to verify before it failed: a sealed regular file with the
+/// recorded seal set, device, inode, size, and SHA-256, close-on-exec, that
+/// refuses a writable shared mapping (`verify_executable`, the check staging
+/// itself uses), and no other recorded role's object.
+///
+/// A staging failure can come before staging's executable pass (descriptor
+/// roles, manifests, listener paths, compiled generation) or from that pass
+/// itself, so in that case nothing else has authenticated this image.
+fn verify_rollback_image(
+    daemon: HandoffDescriptor<'_>,
+    descriptors: &[HandoffDescriptor<'_>],
+    rollback_manifest: &HandoffManifestV1,
+) -> Result<(), RollbackError> {
+    let refused = |error: &dyn std::fmt::Display| RollbackError::RollbackImage(error.to_string());
+    verify_executable(
+        daemon.descriptor(),
+        &rollback_manifest.executable_pairs.rollback.daemon,
+    )
+    .map_err(|error| refused(&error))?;
+    let image = fstat(daemon.descriptor()).map_err(|error| refused(&error))?;
+    for other in descriptors {
+        if other.slot() == daemon.slot() {
+            continue;
+        }
+        let object = fstat(other.descriptor()).map_err(|error| refused(&error))?;
+        if (object.st_dev, object.st_ino) == (image.st_dev, image.st_ino) {
+            return Err(refused(&format_args!(
+                "it is also inherited as {:?}",
+                other.slot()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn require_rolling_back(lifecycle: &HandoffLifecycle) -> Result<(), RollbackError> {

@@ -1378,6 +1378,9 @@ fn run_daemon(source: StartupSource) -> Result<()> {
                         error,
                         recovery: refused.into(),
                         workload_units: None,
+                        // No signal driver has run since the handlers were
+                        // installed, so no taken termination is observable;
+                        // one taken in this instant is lost, never fatal.
                         pending: PendingTermination::default(),
                         require_workload_cgroups,
                     }));
@@ -1477,6 +1480,9 @@ struct CandidateStartup {
 /// for the serve round that adopts it.
 struct AdoptedStartup {
     stage: splinterd::CandidateRuntimeStage,
+    /// Installed, and the handoff signals unblocked, before the serving
+    /// runtime exists ([`release_handoff_signals`]).
+    signals: DaemonSignals,
     require_workload_cgroups: bool,
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
@@ -1488,10 +1494,12 @@ struct AdoptedStartup {
 /// next daemon generation (Plan 0061 M3.10).
 ///
 /// Staging is read-only and still holds the single-threaded handoff guard;
-/// only `enter_tokio` releases it, and only then does `run_daemon` build the
-/// runtime. Tracing is installed first: it allocates and writes standard
-/// output but creates no thread and no descriptor, so the guard's
-/// single-threaded descriptor table is unchanged.
+/// only `enter_tokio` releases it. Then the signal handlers are installed
+/// and the signals the exec carried blocked are released, still without a
+/// runtime thread ([`release_handoff_signals`]), and only then does
+/// `run_daemon` build the runtime. Tracing is installed first: it allocates
+/// and writes standard output but creates no thread and no descriptor, so
+/// the guard's single-threaded descriptor table is unchanged.
 fn run_candidate(startup: CandidateStartup) -> Result<()> {
     let CandidateStartup {
         candidate,
@@ -1547,8 +1555,23 @@ fn run_candidate(startup: CandidateStartup) -> Result<()> {
             return Err(unstarted("runtime entry", error, refused.into()));
         }
     };
+    // Before the serving runtime: its threads must not inherit the mask.
+    let signals = match release_handoff_signals() {
+        Ok(signals) => signals,
+        Err(error) => {
+            let refused = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
+                format!("{error:#}"),
+            ));
+            return Err(unstarted(
+                "signal release",
+                error_chain(&refused),
+                refused.into(),
+            ));
+        }
+    };
     run_daemon(StartupSource::Adopted(Box::new(AdoptedStartup {
         stage,
+        signals,
         require_workload_cgroups,
         shared_image_budget,
         shared_kitty_upload_budget,
@@ -1692,34 +1715,49 @@ async fn pending_termination(signals: &mut DaemonSignals) -> PendingTermination 
 
 /// The inputs a candidate builds on the serving runtime before adopting.
 struct AdoptionStartupInputs {
-    signals: DaemonSignals,
     metadata: MetadataStore,
     topology: Topology,
 }
 
-/// Installs the signal streams and loads the durable Topology through the
-/// fresh-start restore path, which reserves recorded incarnations but
-/// allocates none (every carried incarnation is adopted first).
-///
-/// The handoff exec carried SIGINT, SIGTERM, and SIGHUP blocked on this
-/// thread (`splinterd::handoff_exec`, "Signals across exec"); they unblock
-/// only once their handlers exist, so one that arrived in the window is
-/// acted on now (a SIGTERM becomes an ordered shutdown once adoption
-/// commits) instead of killing the candidate. This runs on the thread that
-/// inherited the mask: `block_on` polls the round's future on the main
-/// thread. The runtime's worker threads, created before this, keep the
-/// signals blocked, so the kernel delivers them to this thread.
+/// Loads the durable Topology through the fresh-start restore path, which
+/// reserves recorded incarnations but allocates none (every carried
+/// incarnation is adopted first). The signal streams already exist
+/// ([`release_handoff_signals`]).
 async fn adoption_startup_inputs() -> Result<AdoptionStartupInputs> {
-    let signals = DaemonSignals::install()?;
-    splinterd::handoff_exec::unblock_handoff_signals()
-        .context("failed to unblock the signals the handoff exec carried")?;
     let metadata = MetadataStore::discover()?;
     let topology = restore_topology(&metadata).await?;
-    Ok(AdoptionStartupInputs {
-        signals,
-        metadata,
-        topology,
-    })
+    Ok(AdoptionStartupInputs { metadata, topology })
+}
+
+/// Installs a candidate's signal handlers, then unblocks the signals the
+/// handoff exec carried blocked (`splinterd::handoff_exec`, "Signals across
+/// exec"), before any runtime thread exists.
+///
+/// A signal that arrived in the exec window was pending, not acted on by a
+/// default action; it reaches the handler now, and the serving round acts on
+/// it in order (a SIGTERM becomes an ordered shutdown once adoption
+/// commits). Threads inherit the creating thread's mask, and
+/// `std::process::Command` passes a spawning thread's mask on to its child,
+/// so the handlers are installed under a current-thread runtime, which starts
+/// no thread, and the serving runtime is built only after this returns: none
+/// of its workers or blocking threads, and so none of the Splints, consent
+/// prompts, or preflight children they spawn, ever carries the blocked mask.
+/// The streams outlive this runtime: their receivers are process-global, as
+/// a resumed round already relies on, and the serving runtime's signal
+/// driver delivers what the handlers recorded meanwhile.
+fn release_handoff_signals() -> Result<DaemonSignals> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build the runtime that installs the signal handlers")?;
+    let signals = {
+        let _entered = runtime.enter();
+        DaemonSignals::install()?
+    };
+    splinterd::handoff_exec::unblock_handoff_signals()
+        .context("failed to unblock the signals the handoff exec carried")?;
+    drop(runtime);
+    Ok(signals)
 }
 
 /// Connects the process's one workload unit manager for adoption, off the
@@ -1780,6 +1818,7 @@ async fn connect_adoption_workload_units(required: bool) -> Option<WorkloadUnitM
 async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<CandidateFailure>> {
     let AdoptedStartup {
         stage,
+        mut signals,
         require_workload_cgroups,
         shared_image_budget,
         shared_kitty_upload_budget,
@@ -1800,23 +1839,16 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
             require_workload_cgroups,
         })
     };
-    let AdoptionStartupInputs {
-        mut signals,
-        metadata,
-        topology,
-    } = match adoption_startup_inputs().await {
+    let AdoptionStartupInputs { metadata, topology } = match adoption_startup_inputs().await {
         Ok(inputs) => inputs,
         Err(error) => {
             let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
                 format!("{error:#}"),
             ));
-            // The signal streams may not exist; nothing was unblocked then.
-            return Err(refused(
-                "startup",
-                failure,
-                None,
-                PendingTermination::default(),
-            ));
+            // The handlers were installed and the signals released before
+            // this runtime existed; a termination they took is replayed.
+            let pending = pending_termination(&mut signals).await;
+            return Err(refused("startup", failure, None, pending));
         }
     };
     #[cfg(feature = "integration-test")]
@@ -1826,6 +1858,14 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         ));
         let pending = pending_termination(&mut signals).await;
         return Err(refused("startup", failure, None, pending));
+    }
+    #[cfg(feature = "integration-test")]
+    if stage.injected_fault(splinterd::integration_test_seams::CandidateFaultPoint::StrayDescriptor)
+    {
+        match splinterd::integration_test_seams::leak_inheritable_descriptor() {
+            Ok(descriptor) => warn!(descriptor, "test seam: left an inheritable descriptor open"),
+            Err(error) => warn!(%error, "test seam: cannot leave an inheritable descriptor open"),
+        }
     }
     let workload_units = connect_adoption_workload_units(require_workload_cgroups).await;
     info!(
