@@ -839,8 +839,8 @@ loads.
 
 ### Omarchy shell settings
 
-Splinterm also follows two settings from the Omarchy 4 shell's `shell.toml`:
-panel alpha and text size.
+Splinterm also follows three settings from the Omarchy 4 shell's `shell.toml`:
+panel alpha, text size and the top bar's height, which sizes the tab strip.
 The shell reads two layers: the active theme's `shell.toml`, rendered from
 Omarchy's template or shipped by the theme, and the user's
 `~/.config/omarchy/shell.toml`. Omarchy hard-codes that user path under `$HOME`.
@@ -921,7 +921,8 @@ through the same reconciliation as a font family change. Runtime zoom stays a
 half-point offset from the followed size, and `omarchy-display-text-size reset`
 returns to the theme's size. Window chrome (tabs, Explorer, menus and the command
 palette) follows the terminal font size, runtime zoom included, until its text
-reaches a 24 px line height (logical pixels), then stays at that size.
+reaches a 24 px line height (logical pixels), then stays at that size. Tab
+text stops earlier when the tab strip is shorter; see "Tab strip height" below.
 Splinterm reads `base-size` as the shell does, with JavaScript's `parseInt` and
 a 1 px floor, so `12.0` and `"12px"` both mean 12 px and any positive size is
 accepted, not only the command's 9–20. The
@@ -934,6 +935,8 @@ choosing the theme directory with the same order and brief-gap grace as the
 native theme.
 While `config.ini` sets a font size, Splinterm does not report `base-size`
 problems, and with a JSON palette it does not report panel alpha problems.
+Bar size problems are reported in every case, because every palette follows
+the bar.
 
 To opt out, set a size in `config.ini`, for example:
 
@@ -941,3 +944,55 @@ To opt out, set a size in `config.ini`, for example:
 [main]
 font-pixelsize=14
 ```
+
+#### Tab strip height
+
+The tab strip is as tall as the shell's top bar, computed the way the shell
+computes it:
+
+```text
+height = round(size-horizontal × base-size / 12)   with scale-with-font on
+height = size-horizontal                           with scale-with-font off
+```
+
+`size-horizontal` is `[bar] size-horizontal`, 26 in Omarchy's template and by
+default. `base-size` is the `[font] base-size` described under "Text size",
+12 by default. `scale-with-font` is `[bar] scale-with-font`, on by default. A
+stock desktop therefore has a 26 px strip, and `omarchy-display-text-size 16`
+makes it 35 px. The height is in logical pixels, so at output scale 1.25 the
+default strip is 33 buffer pixels tall. Splinterm then clamps it to 20–48 px.
+
+Each key follows the usual layering, and edits apply live, including the
+`base-size` that `omarchy-display-text-size` writes. Open terminal windows move
+their terminal grid with the strip, as hiding or showing the strip does. The
+bar follows `base-size` even while `config.ini` sets a font size and Splinterm
+stops following the text size.
+
+Splinterm reads these keys as the shell does:
+
+* `size-horizontal` uses JavaScript's `parseInt`, so `26.7` gives 26 and
+  `"26px"` gives 26. A value with no leading digits, or one that is not
+  positive, uses 26.
+* `base-size` uses `parseInt` with a 1 px floor. A value with no leading digits
+  scales the bar as 12 does.
+* `scale-with-font` accepts `true`, `1`, `yes` and `on`, or `false`, `0`, `no`
+  and `off`, in any case. Anything else keeps it on.
+
+Rejected values are reported once. A clamp to 20–48 px is reported once when
+the configured `size-horizontal` is itself outside that range. A height that
+only `base-size` scaling pushes out of the range is clamped without a report,
+so a text size change never reports a bar problem. Omarchy's template always
+sets `size-horizontal = 26`. `[bar] size-vertical` sizes side bars and is
+ignored. The bar height is not a palette setting, so an explicit `main.theme`
+JSON palette follows it too, from the same Omarchy `shell.toml` layers it
+reads the text size from.
+
+Everything in the strip scales with it. The close and new-tab controls are
+square at the strip height, the active-tab underline is 2 px for strips up to
+29 px tall (3 px from 30 px, 4 px from 42 px), and the label inset is 10 px
+at 34 px and proportional from there. Tab labels, agent status badges, the
+close and new-tab glyphs and the remote tag follow the terminal font as other
+chrome does, but their line height also stays within the strip less the
+underline thickness above and below. At the default 26 px that is a 22 px
+line, so text stays vertically centred and clear of the underline at every
+zoom. Labels that do not fit end in `…` as before.

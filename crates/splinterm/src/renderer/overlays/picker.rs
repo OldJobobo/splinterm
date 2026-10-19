@@ -2443,6 +2443,7 @@ mod tests {
                 popup_alpha: foot_alpha(popup_alpha),
                 text_size_px: None,
                 text_size_held: false,
+                ..OmarchyShellSettings::default()
             },
             ..ResolvedTheme::default()
         }
@@ -2574,6 +2575,7 @@ mod tests {
                 popup_alpha: 0,
                 text_size_px: None,
                 text_size_held: false,
+                ..OmarchyShellSettings::default()
             },
             ..ResolvedTheme::default()
         };

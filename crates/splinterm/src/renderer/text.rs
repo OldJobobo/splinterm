@@ -259,7 +259,14 @@ impl ChromeText {
         style: ChromeTextStyle,
         context: &RenderContext,
     ) -> Result<Self> {
-        Self::load_parts(text, &[], scale_120, style, context)
+        Self::load_parts(
+            text,
+            &[],
+            scale_120,
+            style,
+            context,
+            chrome_maximum_cell_height(scale_120),
+        )
     }
 
     pub(crate) fn load_source_styled_with_context(
@@ -268,7 +275,35 @@ impl ChromeText {
         style: ChromeTextStyle,
         context: &RenderContext,
     ) -> Result<Self> {
-        Self::load_parts(&source.text, &source.icons, scale_120, style, context)
+        Self::load_parts(
+            &source.text,
+            &source.icons,
+            scale_120,
+            style,
+            context,
+            chrome_maximum_cell_height(scale_120),
+        )
+    }
+
+    /// Loads like [`Self::load_source_styled_with_context`], with a cell at
+    /// most `maximum_cell_height` buffer pixels tall and never taller than the
+    /// chrome line cap. A chrome row shorter than that cap, such as a tab
+    /// strip that follows a short Omarchy bar, keeps its text inside the row.
+    pub(crate) fn load_source_styled_within(
+        source: &ChromeSource,
+        scale_120: u32,
+        style: ChromeTextStyle,
+        context: &RenderContext,
+        maximum_cell_height: u32,
+    ) -> Result<Self> {
+        Self::load_parts(
+            &source.text,
+            &source.icons,
+            scale_120,
+            style,
+            context,
+            maximum_cell_height.min(chrome_maximum_cell_height(scale_120)),
+        )
     }
 
     fn load_parts(
@@ -277,6 +312,7 @@ impl ChromeText {
         scale_120: u32,
         style: ChromeTextStyle,
         context: &RenderContext,
+        maximum_cell_height: u32,
     ) -> Result<Self> {
         let attributes = chrome_attributes(style);
         let mut cell_row: Vec<TerminalCell> = Vec::new();
@@ -359,7 +395,7 @@ impl ChromeText {
             &snapshot,
             scale_120,
             context,
-            chrome_maximum_cell_height(scale_120),
+            maximum_cell_height,
         )?;
         place_icons(&mut frame, icons, cell_count)?;
         Ok(Self {
