@@ -600,6 +600,9 @@ pub(in crate::app) fn terminal_prompt_text(prompt: &HandoffDecisionPrompt) -> St
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::app) enum TerminalAnswer {
     Line(String),
+    /// More than [`MAX_TERMINAL_ANSWER_BYTES`] before a newline. It is never
+    /// read as an answer, so a long line can't be cut down to `p`.
+    Overlong,
     EndOfInput,
     TimedOut,
     Unreadable,
@@ -623,6 +626,10 @@ pub(in crate::app) fn decision_from_answer(
                 Some("Unrecognized answer; cancelling."),
             ),
         },
+        TerminalAnswer::Overlong => (
+            HandoffDecision::Cancel,
+            Some("Answer too long; cancelling."),
+        ),
         TerminalAnswer::EndOfInput => (
             HandoffDecision::Cancel,
             Some("No answer (end of input); cancelling."),
@@ -731,10 +738,14 @@ pub(in crate::app) fn read_terminal_answer(
                 line.extend_from_slice(&chunk[..read]);
                 if let Some(end) = line.iter().position(|&byte| byte == b'\n') {
                     line.truncate(end);
+                    if line.len() > MAX_TERMINAL_ANSWER_BYTES {
+                        return TerminalAnswer::Overlong;
+                    }
                     return TerminalAnswer::Line(String::from_utf8_lossy(&line).into_owned());
                 }
+                // Never decide on a prefix: the rest of the line is unread.
                 if line.len() > MAX_TERMINAL_ANSWER_BYTES {
-                    return TerminalAnswer::Line(String::from_utf8_lossy(&line).into_owned());
+                    return TerminalAnswer::Overlong;
                 }
             }
             Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => {}
@@ -1123,6 +1134,7 @@ mod tests {
             line("y"),
             line("yes"),
             line("pp"),
+            TerminalAnswer::Overlong,
             TerminalAnswer::EndOfInput,
             TerminalAnswer::TimedOut,
             TerminalAnswer::Unreadable,
@@ -1174,12 +1186,29 @@ mod tests {
 
         let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
         std::io::Write::write_all(&mut (&writer), &[b'x'; MAX_TERMINAL_ANSWER_BYTES + 10]).unwrap();
-        let TerminalAnswer::Line(long) = read_terminal_answer(reader.as_fd(), soon(), &stop) else {
-            panic!("a long answer is still a line");
-        };
         assert_eq!(
-            decision_from_answer(&TerminalAnswer::Line(long)).0,
-            HandoffDecision::Cancel
+            read_terminal_answer(reader.as_fd(), soon(), &stop),
+            TerminalAnswer::Overlong
+        );
+
+        // A proceed-looking prefix of an overlong line is never an answer,
+        // whether or not its newline has arrived yet.
+        let mut tricky = b"p".to_vec();
+        tricky.extend(std::iter::repeat_n(b' ', MAX_TERMINAL_ANSWER_BYTES + 63));
+        tricky.extend_from_slice(b"cancel\n");
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        std::io::Write::write_all(&mut (&writer), &tricky).unwrap();
+        let answer = read_terminal_answer(reader.as_fd(), soon(), &stop);
+        assert_eq!(answer, TerminalAnswer::Overlong);
+        assert_eq!(decision_from_answer(&answer).0, HandoffDecision::Cancel);
+        let mut terminated = b"p".to_vec();
+        terminated.extend(std::iter::repeat_n(b' ', MAX_TERMINAL_ANSWER_BYTES));
+        terminated.push(b'\n');
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        std::io::Write::write_all(&mut (&writer), &terminated).unwrap();
+        assert_eq!(
+            read_terminal_answer(reader.as_fd(), soon(), &stop),
+            TerminalAnswer::Overlong
         );
 
         // A stopped prompt returns at once, however long its deadline.
