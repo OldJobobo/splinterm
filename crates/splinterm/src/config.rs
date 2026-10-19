@@ -709,9 +709,12 @@ pub fn resolve_omarchy_shell(
             )),
         }
     }
-    if let Some((origin, raw)) = lookup("bar.size-horizontal") {
-        load.settings.bar_size_px = resolve_bar_size(origin, raw, &mut load.diagnostics);
-    }
+    load.settings.bar_size_px = resolve_bar_size(
+        lookup("bar.size-horizontal"),
+        lookup("bar.scale-with-font"),
+        lookup("font.base-size"),
+        &mut load.diagnostics,
+    );
     load.settings.text_size_px = match lookup("font.base-size") {
         None => None,
         Some((origin, raw)) => {
@@ -755,49 +758,107 @@ pub fn resolve_omarchy_shell(
     load
 }
 
-/// `[bar] size-horizontal` as a tab strip height: a number is rounded to a
-/// whole logical px and clamped to [`OMARCHY_BAR_SIZE_LIMITS_PX`]; anything
-/// else falls back to Omarchy's 26 px default. Both are reported once.
+/// The shell's `boolToken` for `[bar] scale-with-font`: `true`, `1`, `yes`
+/// or `on`, and `false`, `0`, `no` or `off`, trimmed and in any case.
+fn shell_bool_token(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// A `parseInt` result as a bounded f64. Values past 10 000 px only ever
+/// clamp to the tab strip's 48 px maximum, so bounding them changes nothing.
+fn bounded_px(value: i64) -> f64 {
+    f64::from(u32::try_from(value.clamp(1, 10_000)).unwrap_or(10_000))
+}
+
+/// The tab strip height: the Omarchy bar's height as the shell's
+/// `barToken("size-horizontal", 26)` computes it, clamped to
+/// [`OMARCHY_BAR_SIZE_LIMITS_PX`].
+///
+/// - `size-horizontal` is read with `parseInt`; a value without digits, or
+///   one that is not positive, uses the 26 px default.
+/// - With `scale-with-font` on, which is the default, the size is multiplied
+///   by `max(1/12, base-size / 12)`. `base-size` is read with `parseInt` and
+///   floored at 1 px, as the shell does, and is 12 px when unset or without
+///   digits.
+/// - The result is rounded as `Math.round` does, then clamped.
+///
+/// A rejected value is reported once, and so is a clamped result while a
+/// layer sets `size-horizontal`. A bar that only `base-size` pushes out of
+/// range clamps silently, so a text size change is never reported as a bar
+/// problem.
 fn resolve_bar_size(
-    origin: &Path,
-    raw: &str,
+    size: Option<(&Path, &str)>,
+    scale_with_font: Option<(&Path, &str)>,
+    base_size: Option<(&Path, &str)>,
     diagnostics: &mut Vec<(OmarchyShellConcern, String)>,
 ) -> u16 {
+    let default_size = f64::from(OMARCHY_DEFAULT_BAR_SIZE_PX);
+    let size_px = match size {
+        None => default_size,
+        Some((origin, raw)) => match js_parse_int(raw) {
+            Some(px) if px > 0 => bounded_px(px),
+            _ => {
+                diagnostics.push((
+                    OmarchyShellConcern::BarSize,
+                    format!(
+                        "{}: [bar] size-horizontal {raw:?} is not a positive whole number of px; using {OMARCHY_DEFAULT_BAR_SIZE_PX} px",
+                        origin.display()
+                    ),
+                ));
+                default_size
+            }
+        },
+    };
+    let follows_font = match scale_with_font {
+        None => true,
+        Some((origin, raw)) => shell_bool_token(raw).unwrap_or_else(|| {
+            diagnostics.push((
+                OmarchyShellConcern::BarSize,
+                format!(
+                    "{}: [bar] scale-with-font {raw:?} is not true or false; using true",
+                    origin.display()
+                ),
+            ));
+            true
+        }),
+    };
+    let font_scale = if follows_font {
+        let base = base_size
+            .and_then(|(_, raw)| js_parse_int(raw))
+            .map_or(f64::from(OMARCHY_DEFAULT_TEXT_SIZE_PX), bounded_px);
+        (base / 12.0).max(1.0 / 12.0)
+    } else {
+        1.0
+    };
+    // Math.round: the nearest whole px, halves rounding up.
+    let scaled = (size_px * font_scale + 0.5).floor().max(1.0);
     let (minimum, maximum) = (
         *OMARCHY_BAR_SIZE_LIMITS_PX.start(),
         *OMARCHY_BAR_SIZE_LIMITS_PX.end(),
     );
-    match raw.trim().parse::<f64>() {
-        Ok(size) if size.is_finite() => {
-            let clamped = size.round().clamp(f64::from(minimum), f64::from(maximum));
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "the value is clamped into the u16 bar size limits"
-            )]
-            let px = clamped as u16;
-            if !(f64::from(minimum)..=f64::from(maximum)).contains(&size) {
-                diagnostics.push((
-                    OmarchyShellConcern::BarSize,
-                    format!(
-                        "{}: [bar] size-horizontal {raw:?} is outside {minimum} to {maximum} px; using {px} px for the tab strip",
-                        origin.display()
-                    ),
-                ));
-            }
-            px
-        }
-        _ => {
-            diagnostics.push((
-                OmarchyShellConcern::BarSize,
-                format!(
-                    "{}: [bar] size-horizontal {raw:?} is not a number; using {OMARCHY_DEFAULT_BAR_SIZE_PX} px for the tab strip",
-                    origin.display()
-                ),
-            ));
-            OMARCHY_DEFAULT_BAR_SIZE_PX
-        }
+    let clamped = scaled.clamp(f64::from(minimum), f64::from(maximum));
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the value is a whole number clamped into the u16 bar size limits"
+    )]
+    let px = clamped as u16;
+    if !(f64::from(minimum)..=f64::from(maximum)).contains(&scaled)
+        && let Some((origin, _)) = size
+    {
+        diagnostics.push((
+            OmarchyShellConcern::BarSize,
+            format!(
+                "{}: the Omarchy bar is {scaled} px tall, outside the {minimum} to {maximum} px the tab strip takes; using {px} px",
+                origin.display()
+            ),
+        ));
     }
+    px
 }
 
 fn read_omarchy_shell_layer(
@@ -3294,7 +3355,8 @@ mod tests {
             Some(shell_layer("user/shell.toml", "[font]\nbase-size = 14\n")),
             OmarchyTextSizeFallback::OmarchyDefault,
         );
-        assert_eq!(theme_only.settings.bar_size_px, 30);
+        // The theme's 30 px, scaled by the user's base-size: round(30 × 14/12).
+        assert_eq!(theme_only.settings.bar_size_px, 35);
         // `size-vertical` sizes side bars, not the top bar.
         let vertical = resolve_omarchy_shell(
             shell_layer("theme/shell.toml", "[bar]\nsize-vertical = 40\n"),
@@ -3303,15 +3365,18 @@ mod tests {
         );
         assert_eq!(vertical.settings.bar_size_px, 26);
 
-        // Numbers round to whole px and clamp to 20..=48, reported when outside.
+        // The shell reads the size with parseInt; the result clamps to
+        // 20..=48, reported when outside.
         for (raw, px, diagnostics) in [
             ("20", 20, 0),
             ("48", 48, 0),
-            ("27.6", 28, 0),
+            ("26.7", 26, 0),
             ("\"24\"", 24, 0),
+            ("\"+28\"", 28, 0),
+            ("\"26px\"", 26, 0),
+            ("26 28", 26, 0),
+            ("\"1e2\"", 20, 1),
             ("19", 20, 1),
-            ("0", 20, 1),
-            ("-30", 20, 1),
             ("49", 48, 1),
             ("200", 48, 1),
         ] {
@@ -3322,9 +3387,10 @@ mod tests {
                 assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::BarSize);
             }
         }
-        // Values that are not numbers fall back to the stock 26 px bar, even
-        // over a theme value, as alpha falls back to Omarchy's default.
-        for raw in ["tall", "\"26px\"", "\"inf\"", "26 28"] {
+        // A value without digits, or one that is not positive, uses the shell's
+        // 26 px default even over a theme value, as alpha falls back to
+        // Omarchy's default.
+        for raw in ["tall", "\"inf\"", "0", "-30"] {
             let load = user_bar(raw);
             assert_eq!(load.settings.bar_size_px, 26, "{raw}");
             assert_eq!(load.diagnostics.len(), 1, "{raw}");
@@ -3337,12 +3403,111 @@ mod tests {
                 load.diagnostics
             );
         }
-        // Lines the shell drops leave the theme's value in place, silently.
+        // Lines the shell's parser drops leave the theme's value in place,
+        // silently, as for every other key.
         for raw in ["+28", ".5", "1e2"] {
             let load = user_bar(raw);
             assert_eq!(load.settings.bar_size_px, 30, "{raw}");
             assert!(load.diagnostics.is_empty(), "{raw}");
         }
+    }
+
+    #[test]
+    fn omarchy_bar_size_scales_with_the_font_base_size_like_the_shell() {
+        let bar = |theme: &str, user: &str| {
+            resolve_omarchy_shell(
+                shell_layer("theme/shell.toml", theme),
+                Some(shell_layer("user/shell.toml", user)),
+                OmarchyTextSizeFallback::OmarchyDefault,
+            )
+        };
+        // round(26 × base-size / 12): the stock bar at base-size 12, 9, 16, 20.
+        for (base, px) in [(12, 26), (9, 20), (16, 35), (20, 43), (15, 33)] {
+            let load = bar(
+                "[bar]\nscale-with-font = true\nsize-horizontal = 26\n",
+                &format!("[font]\nbase-size = {base}\n"),
+            );
+            assert_eq!(load.settings.bar_size_px, px, "base-size {base}");
+            assert!(load.diagnostics.is_empty(), "{:?}", load.diagnostics);
+        }
+        // Scaling is on when no layer sets scale-with-font, and with no
+        // size-horizontal the 26 px default scales.
+        assert_eq!(bar("", "[font]\nbase-size = 16\n").settings.bar_size_px, 35);
+        assert_eq!(
+            bar("[bar]\nsize-horizontal = 30\n", "[font]\nbase-size = 16\n")
+                .settings
+                .bar_size_px,
+            40
+        );
+        // The clamp applies after scaling, reported against the bar layer.
+        let large = bar("[bar]\nsize-horizontal = 26\n", "[font]\nbase-size = 24\n");
+        assert_eq!(large.settings.bar_size_px, 48);
+        assert_eq!(large.diagnostics.len(), 1, "{:?}", large.diagnostics);
+        assert_eq!(large.diagnostics[0].0, OmarchyShellConcern::BarSize);
+        assert!(
+            large.diagnostics[0].1.contains("52 px"),
+            "{:?}",
+            large.diagnostics
+        );
+        // A bar that only base-size pushes out of range clamps silently; here
+        // only the 6 px text size's own point-size diagnostic is reported.
+        let small = bar("", "[font]\nbase-size = 6\n");
+        assert_eq!(small.settings.bar_size_px, 20);
+        assert_eq!(small.diagnostics.len(), 1, "{:?}", small.diagnostics);
+        assert_eq!(small.diagnostics[0].0, OmarchyShellConcern::TextSize);
+        let theme_small = bar("[bar]\nsize-horizontal = 26\n", "[font]\nbase-size = 6\n");
+        assert!(
+            theme_small.diagnostics[0]
+                .1
+                .starts_with("theme/shell.toml: the Omarchy bar is 13 px"),
+            "{:?}",
+            theme_small.diagnostics
+        );
+        // base-size follows parseInt with the shell's 1 px floor; one without
+        // digits leaves the 12 px scale, and only its text-size diagnostic.
+        assert_eq!(
+            bar("", "[font]\nbase-size = \"16px\"\n")
+                .settings
+                .bar_size_px,
+            35
+        );
+        let unscaled = bar("", "[font]\nbase-size = big\n");
+        assert_eq!(unscaled.settings.bar_size_px, 26);
+        assert_eq!(unscaled.diagnostics.len(), 1);
+        assert_eq!(unscaled.diagnostics[0].0, OmarchyShellConcern::TextSize);
+
+        // boolToken: trimmed, any case; anything else keeps the default, true.
+        for raw in ["false", "FALSE", "0", "no", "Off", "\" off \""] {
+            let load = bar(
+                &format!("[bar]\nscale-with-font = {raw}\nsize-horizontal = 26\n"),
+                "[font]\nbase-size = 16\n",
+            );
+            assert_eq!(load.settings.bar_size_px, 26, "{raw}");
+            assert!(load.diagnostics.is_empty(), "{raw}");
+        }
+        for raw in ["true", "TRUE", "1", "yes", "On", "\" YES \""] {
+            let load = bar(
+                &format!("[bar]\nscale-with-font = {raw}\n"),
+                "[font]\nbase-size = 16\n",
+            );
+            assert_eq!(load.settings.bar_size_px, 35, "{raw}");
+            assert!(load.diagnostics.is_empty(), "{raw}");
+        }
+        for raw in ["maybe", "2", "\"\u{a0}\""] {
+            let load = bar(
+                &format!("[bar]\nscale-with-font = {raw}\n"),
+                "[font]\nbase-size = 16\n",
+            );
+            assert_eq!(load.settings.bar_size_px, 35, "{raw}");
+            assert_eq!(load.diagnostics.len(), 1, "{raw}");
+            assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::BarSize);
+        }
+        // The user's scale-with-font replaces the theme's, key by key.
+        let user_off = bar(
+            "[bar]\nscale-with-font = true\n",
+            "[bar]\nscale-with-font = off\n[font]\nbase-size = 20\n",
+        );
+        assert_eq!(user_off.settings.bar_size_px, 26);
     }
 
     #[test]

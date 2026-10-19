@@ -1124,6 +1124,51 @@ mod tests {
         step("[bar]\nsize-horizontal = 90\n", 48, 1);
         step("[bar]\nsize-horizontal = tall\n", 26, 1);
         step("", 26, 0);
+        // omarchy-display-text-size writes base-size to the user file; the bar,
+        // and the strip with it, grows by base-size / 12.
+        step("[font]\nbase-size = 16\n", 35, 0);
+        step("[font]\nbase-size = 20\n", 43, 0);
+        step(
+            "[font]\nbase-size = 20\n[bar]\nscale-with-font = off\n",
+            26,
+            0,
+        );
+        step("[font]\nbase-size = 12\n", 26, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_bar_follows_base_size_while_config_ini_sets_the_font_size() {
+        // An explicit config.ini font size stops Splinterm following the text
+        // size, but the Omarchy bar still grows with base-size, so the strip
+        // does too.
+        let root =
+            std::env::temp_dir().join(format!("splinterm-bar-explicit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(theme.join("shell.toml"), "[font]\nbase-size = 16\n").unwrap();
+        let mut diagnostics = Vec::new();
+        let resolved = with_omarchy_shell(
+            ResolvedTheme::default(),
+            ShellLayers {
+                theme_dir: &theme,
+                user: None,
+                panels: true,
+            },
+            false,
+            OmarchyTextSizeFallback::OmarchyDefault,
+            &mut diagnostics,
+        );
+        let applied = ThemeOverrides {
+            alpha: None,
+            blur: None,
+            follow_text_size: false,
+        }
+        .apply(resolved);
+        assert_eq!(applied.shell.text_size_px, None);
+        assert_eq!(applied.shell.bar_size_px, 35);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1215,11 +1260,35 @@ mod tests {
                 .text_size_px,
             Some(16)
         );
+        // The Omarchy bar still grows with base-size, so a base-size edit
+        // publishes only the new bar height, never the text size.
+        assert_eq!(startup.shell.bar_size_px, 35);
         std::fs::write(&user, "[font]\nbase-size = 18\n").unwrap();
         let mut selection = OmarchyThemeSelection::default();
         let active = active_theme_source(&source, &mut selection);
-        assert!(
+        let next =
             resolve_live_theme_update(active, &mut selection, explicit, startup, &mut Vec::new())
+                .unwrap()
+                .expect("the bar follows base-size");
+        assert_eq!(next.shell.text_size_px, None);
+        assert_eq!(next.shell.bar_size_px, 39);
+        // With the bar's scale-with-font off, a base-size edit publishes
+        // nothing while config.ini owns the size.
+        std::fs::write(
+            &user,
+            "[bar]\nscale-with-font = off\n[font]\nbase-size = 18\n",
+        )
+        .unwrap();
+        let unscaled = prepare_startup_theme(&source, explicit).theme;
+        assert_eq!(unscaled.shell.bar_size_px, 26);
+        std::fs::write(
+            &user,
+            "[bar]\nscale-with-font = off\n[font]\nbase-size = 20\n",
+        )
+        .unwrap();
+        let active = active_theme_source(&source, &mut selection);
+        assert!(
+            resolve_live_theme_update(active, &mut selection, explicit, unscaled, &mut Vec::new())
                 .unwrap()
                 .is_none(),
             "a base-size edit publishes nothing while config.ini owns the size"

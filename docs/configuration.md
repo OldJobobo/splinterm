@@ -945,19 +945,42 @@ font-pixelsize=14
 
 #### Tab strip height
 
-The tab strip is as tall as the shell's top bar: `[bar] size-horizontal`,
-26 logical pixels in Omarchy's template and by default. The height is in
-logical pixels, so at output scale 1.25 the default strip is 33 buffer pixels
-tall. The user `~/.config/omarchy/shell.toml` value replaces the theme's, and
-an edit applies live: open terminal windows move their terminal grid with the
-strip, as hiding or showing the strip does.
+The tab strip is as tall as the shell's top bar, computed the way the shell
+computes it:
 
-Splinterm rounds the value to a whole pixel and clamps it to 20–48 px. A
-value outside that range is clamped, and a value that is not a number uses
-26 px; both are reported once. `[bar] size-vertical` sizes side bars and is
-ignored. Splinterm follows the configured size itself and does not grow it
-with `[font] base-size`, even when the bar's `scale-with-font` is on. An
-explicit `main.theme` JSON keeps the 26 px strip and ignores this value.
+```text
+height = round(size-horizontal × base-size / 12)   with scale-with-font on
+height = size-horizontal                           with scale-with-font off
+```
+
+`size-horizontal` is `[bar] size-horizontal`, 26 in Omarchy's template and by
+default. `base-size` is the `[font] base-size` described under "Text size",
+12 by default. `scale-with-font` is `[bar] scale-with-font`, on by default. A
+stock desktop therefore has a 26 px strip, and `omarchy-display-text-size 16`
+makes it 35 px. The height is in logical pixels, so at output scale 1.25 the
+default strip is 33 buffer pixels tall. Splinterm then clamps it to 20–48 px.
+
+Each key follows the usual layering, and edits apply live, including the
+`base-size` that `omarchy-display-text-size` writes. Open terminal windows move
+their terminal grid with the strip, as hiding or showing the strip does. The
+bar follows `base-size` even while `config.ini` sets a font size and Splinterm
+stops following the text size.
+
+Splinterm reads these keys as the shell does:
+
+* `size-horizontal` uses JavaScript's `parseInt`, so `26.7` gives 26 and
+  `"26px"` gives 26. A value with no leading digits, or one that is not
+  positive, uses 26.
+* `base-size` uses `parseInt` with a 1 px floor. A value with no leading digits
+  scales the bar as 12 does.
+* `scale-with-font` accepts `true`, `1`, `yes` and `on`, or `false`, `0`, `no`
+  and `off`, in any case. Anything else keeps it on.
+
+Rejected values are reported once. A height clamped to 20–48 px is reported
+once while a layer sets `size-horizontal`. A height that only `base-size`
+pushes out of that range is clamped without a report.
+`[bar] size-vertical` sizes side bars and is ignored. An explicit `main.theme`
+JSON keeps the 26 px strip and ignores these values.
 
 Everything in the strip scales with it. The close and new-tab controls are
 square at the strip height, the active-tab underline is 2 px for strips up to

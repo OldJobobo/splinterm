@@ -11882,6 +11882,12 @@ mod tests {
         let mut text = current;
         text.shell.text_size_px = Some(16);
         assert!(!classify_theme_update(current, text).relayout_tab_strip);
+        // A base-size edit reaches the strip through the bar size the shell
+        // settings resolve with it (round(26 × 16/12) = 35 px).
+        let mut scaled = text;
+        scaled.shell.bar_size_px = 35;
+        let impact = classify_theme_update(current, scaled);
+        assert!(impact.relayout_tab_strip && impact.rebuild_pixels);
     }
 
     #[test]
