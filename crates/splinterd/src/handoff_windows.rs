@@ -21,6 +21,10 @@
 //! acknowledge only the prepare frame sent to it, for the generation it
 //! named, exactly once, while the attempt waits, and only while its process
 //! is the one it pinned; see [`HandoffWindows::pending_acknowledgement`].
+//! Every attempt in one daemon names the same generation, so an anchor that
+//! left a frame unanswered owes that late answer, and its next
+//! acknowledgement is refused as such
+//! ([`HandoffWindows::take_stale_acknowledgement`]).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -89,17 +93,24 @@ impl WindowProcess {
     /// Checks the pin: the pidfd shows the process alive and its start time
     /// still matches. The start time is read between two pidfd checks, so a
     /// pidfd still alive after the read proves the read described the pinned
-    /// process, not a later one reusing its PID.
+    /// process, not a later one reusing its PID. A pidfd that cannot be
+    /// polled proves nothing either way and reads as unpinned: a handoff then
+    /// names the Window instead of dropping it, and an acknowledgement, which
+    /// needs [`ProcessPin::Live`], still fails closed.
     pub(crate) fn pin(&self) -> ProcessPin {
         let (Some(pidfd), Some(start_time)) = (&self.pidfd, self.start_time) else {
             return ProcessPin::Unpinned;
         };
-        if pidfd_exited(pidfd) {
-            return ProcessPin::Exited;
+        match pidfd_exited(pidfd) {
+            Some(false) => {}
+            Some(true) => return ProcessPin::Exited,
+            None => return ProcessPin::Unpinned,
         }
         let current = crate::agent_status::process_start_time(self.pid);
-        if pidfd_exited(pidfd) {
-            return ProcessPin::Exited;
+        match pidfd_exited(pidfd) {
+            Some(false) => {}
+            Some(true) => return ProcessPin::Exited,
+            None => return ProcessPin::Unpinned,
         }
         if current == Some(start_time) {
             ProcessPin::Live
@@ -109,15 +120,17 @@ impl WindowProcess {
     }
 }
 
-/// Whether a pidfd reports its process exited. A pidfd becomes readable when
-/// its process exits; a failed poll is treated as an exit, so it fails closed.
-pub(crate) fn pidfd_exited(pidfd: &OwnedFd) -> bool {
+/// Whether a pidfd reports its process exited: a pidfd becomes readable when
+/// its process exits. `None` when it cannot be polled.
+pub(crate) fn pidfd_exited(pidfd: &OwnedFd) -> Option<bool> {
     let mut descriptors = [PollFd::new(pidfd, PollFlags::IN)];
     let immediately = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    !matches!(poll(&mut descriptors, Some(&immediately)), Ok(0))
+    poll(&mut descriptors, Some(&immediately))
+        .ok()
+        .map(|ready| ready != 0)
 }
 
 /// One trusted-UI connection: its process, and the Splints it holds
@@ -143,6 +156,13 @@ struct WindowAnchor {
     /// Present only while an attempt waits for this anchor's
     /// acknowledgement.
     pending: Option<PendingPrepare>,
+    /// Set when an attempt stopped waiting while this anchor's prepare frame
+    /// was still unacknowledged. Every attempt in one daemon names the same
+    /// generation, so the Window's late answer to that frame would look like
+    /// an answer to the next one. The next acknowledgement is therefore
+    /// taken as that late answer and refused, which clears the debt; see
+    /// [`HandoffWindows::take_stale_acknowledgement`].
+    stale_acknowledgement: bool,
 }
 
 /// A prepare frame sent to an anchor and not yet acknowledged.
@@ -159,8 +179,47 @@ pub(crate) enum WindowEvent {
     Acknowledged(u8),
     /// The Window's process exited.
     Exited(u8),
-    /// The anchor's writer could not send the prepare frame.
+    /// The anchor's writer wrote the whole prepare frame.
+    Sent(u8),
+    /// The anchor's writer could not send the whole prepare frame.
     NotSent(u8),
+}
+
+/// The anchor writer's report on one prepare frame, into the attempt's
+/// events. Dropped unreported, because the frame was never written or the
+/// writer went away, it reports the frame as not sent.
+pub(crate) struct PrepareSendReport {
+    index: u8,
+    events: Option<mpsc::UnboundedSender<WindowEvent>>,
+}
+
+impl PrepareSendReport {
+    pub(crate) const fn new(index: u8, events: mpsc::UnboundedSender<WindowEvent>) -> Self {
+        Self {
+            index,
+            events: Some(events),
+        }
+    }
+
+    pub(crate) fn report(mut self, sent: bool) {
+        self.send(sent);
+    }
+
+    fn send(&mut self, sent: bool) {
+        if let Some(events) = self.events.take() {
+            let _ = events.send(if sent {
+                WindowEvent::Sent(self.index)
+            } else {
+                WindowEvent::NotSent(self.index)
+            });
+        }
+    }
+}
+
+impl Drop for PrepareSendReport {
+    fn drop(&mut self) {
+        self.send(false);
+    }
 }
 
 /// Why an anchor declaration is refused.
@@ -173,6 +232,8 @@ pub(crate) enum AnchorRefusal {
     AlreadyDeclared,
     /// [`MAX_HANDOFF_WINDOWS`] anchors are declared.
     Full,
+    /// The connection's writer has gone, so its `Hello` cannot be queued.
+    WriterClosed,
 }
 
 /// One declared Window as an attempt took it.
@@ -216,17 +277,22 @@ impl HandoffWindows {
     }
 
     /// Declares `connection_id`, already registered as trusted UI, as its
-    /// Window's anchor.
+    /// Window's anchor, after queueing the connection's server `hello` on its
+    /// control channel. Both happen under the registry lock, so no attempt
+    /// takes the anchor, and no prepare frame is queued for it, before its
+    /// `Hello`. Nothing else is queued on a control channel before its
+    /// `Hello`, so the queue has room.
     ///
     /// # Errors
     /// Refuses while an attempt holds its Windows, a second anchor from one
-    /// process (the same PID and start time), and an anchor past
-    /// [`MAX_HANDOFF_WINDOWS`].
+    /// process (the same PID and start time), an anchor past
+    /// [`MAX_HANDOFF_WINDOWS`], and a connection whose writer has gone.
     pub(crate) fn declare_anchor(
         &mut self,
         connection_id: u64,
         process: WindowProcess,
         control: mpsc::Sender<ControlFrame>,
+        hello: ControlFrame,
     ) -> Result<(), AnchorRefusal> {
         if self.attempt {
             return Err(AnchorRefusal::HandoffInProgress);
@@ -239,12 +305,16 @@ impl HandoffWindows {
         if self.anchors.len() >= MAX_HANDOFF_WINDOWS {
             return Err(AnchorRefusal::Full);
         }
+        control
+            .try_send(hello)
+            .map_err(|_| AnchorRefusal::WriterClosed)?;
         self.anchors.insert(
             connection_id,
             WindowAnchor {
                 process,
                 control,
                 pending: None,
+                stale_acknowledgement: false,
             },
         );
         Ok(())
@@ -372,11 +442,37 @@ impl HandoffWindows {
         true
     }
 
-    /// Ends every pending acknowledgement: the attempt stopped waiting.
+    /// Ends every pending acknowledgement: the attempt stopped waiting. An
+    /// anchor whose frame was not acknowledged now owes one stale
+    /// acknowledgement.
     pub(crate) fn close_acknowledgements(&mut self) {
         for anchor in self.anchors.values_mut() {
-            anchor.pending = None;
+            if anchor.pending.take().is_some() {
+                anchor.stale_acknowledgement = true;
+            }
         }
+    }
+
+    /// Ends one anchor's pending acknowledgement because its frame could not
+    /// be sent completely. The Window may still have received the start of
+    /// it, so the anchor owes one stale acknowledgement.
+    pub(crate) fn abandon_acknowledgement(&mut self, connection_id: u64) {
+        if let Some(anchor) = self.anchors.get_mut(&connection_id)
+            && anchor.pending.take().is_some()
+        {
+            anchor.stale_acknowledgement = true;
+        }
+    }
+
+    /// Whether this acknowledgement answers an earlier abandoned prepare
+    /// frame; taking it clears the debt. A Window that never sends that late
+    /// answer loses its next real acknowledgement instead, and is named as
+    /// unacknowledged once. That fails closed: no frame is ever credited with
+    /// an answer the Window gave to another.
+    pub(crate) fn take_stale_acknowledgement(&mut self, connection_id: u64) -> bool {
+        self.anchors
+            .get_mut(&connection_id)
+            .is_some_and(|anchor| std::mem::take(&mut anchor.stale_acknowledgement))
     }
 
     /// Every Splint the process's trusted-UI connections are attached to.
