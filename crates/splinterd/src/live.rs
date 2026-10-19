@@ -2564,7 +2564,11 @@ struct PtyResume {
 /// What a quiesced actor does when its [`PreparedPtyHandoff`] lease ends.
 #[derive(Debug)]
 enum PtyHandoffDisposition {
-    /// Restore the returned master and one reader, then continue serving.
+    /// Try to restore the returned master and one reader, then continue
+    /// serving. If the master cannot be adopted again, the actor kills and
+    /// reaps its child and ends; if the replacement reader cannot be
+    /// registered, it ends with that error and its error path kills and
+    /// reaps the child.
     Resume(PtyResume),
     /// End without signaling or reaping the child and without publishing an
     /// exit; the caller now owns the canonical master.
@@ -2583,12 +2587,10 @@ enum PtyHandoffDisposition {
 pub struct HandedOffSplint {
     pub session: AdoptableLinuxPtySession,
     /// `None` when the body already moved to manifest linkage through
-    /// [`PreparedPtyHandoff::take_checkpoint_body`].
+    /// [`PreparedPtyHandoff::take_checkpoint_body`]. The body carries its
+    /// share of its handoff budget wherever it goes.
     pub checkpoint: Option<SealedCheckpointBody>,
     pub evidence: ActorHandoffEvidence,
-    /// The checkpoint's share of its handoff budget, kept with the carried
-    /// checkpoint; dropping it returns the share.
-    pub checkpoint_reservation: Option<CheckpointReservation>,
 }
 
 /// A shared bound on the sealed checkpoint bytes one handoff's captures hold
@@ -2597,8 +2599,10 @@ pub struct HandedOffSplint {
 /// Each actor reserves its encoded checkpoint's size after encoding and
 /// before sealing it, and refuses with [`LiveError::CheckpointBudgetExceeded`]
 /// when the reservation would pass the cap, so no sealed checkpoint memory
-/// beyond the cap ever exists. A reservation lives as long as the lease that
-/// holds the checkpoint, or the [`HandedOffSplint`] that carries it.
+/// beyond the cap ever exists. The sealed body itself carries its
+/// reservation ([`SealedCheckpointBody::reservation`]) and returns it only
+/// after its memfd closes, whichever lease, capture, or handed-off Splint
+/// holds the body when it drops.
 #[derive(Clone, Debug)]
 pub struct HandoffCheckpointBudget(Arc<CheckpointBudgetState>);
 
@@ -2607,6 +2611,21 @@ struct CheckpointBudgetState {
     cap: u64,
     reserved: AtomicU64,
     high_water: AtomicU64,
+    /// Runs as each reservation returns, before its bytes leave `reserved`,
+    /// so a test can observe what still exists at that moment.
+    #[cfg(test)]
+    on_release: ReleaseObserver,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ReleaseObserver(std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for ReleaseObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReleaseObserver")
+    }
 }
 
 impl HandoffCheckpointBudget {
@@ -2616,7 +2635,16 @@ impl HandoffCheckpointBudget {
             cap,
             reserved: AtomicU64::new(0),
             high_water: AtomicU64::new(0),
+            #[cfg(test)]
+            on_release: ReleaseObserver::default(),
         }))
+    }
+
+    /// Runs `observe` as each reservation of this budget returns, before its
+    /// bytes leave [`Self::reserved`].
+    #[cfg(test)]
+    fn observe_release(&self, observe: impl FnMut() + Send + 'static) {
+        *self.0.on_release.0.lock().unwrap() = Some(Box::new(observe));
     }
 
     #[must_use]
@@ -2679,6 +2707,10 @@ impl CheckpointReservation {
 
 impl Drop for CheckpointReservation {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(observe) = self.budget.0.on_release.0.lock().unwrap().as_mut() {
+            observe();
+        }
         self.budget
             .0
             .reserved
@@ -2715,15 +2747,23 @@ pub struct ActorHandoffEvidence {
 /// terminal checkpoint.
 ///
 /// The actor stops reading commands and PTY I/O until this lease is resumed or
-/// dropped. Dropping it returns the unchanged descriptor automatically, keeping
-/// cancellation before daemon exec recoverable.
+/// dropped. Dropping it returns the unchanged descriptor to the actor, which
+/// then tries to restore PTY reading, so cancellation before daemon exec
+/// normally leaves the Splint serving. Restoration can fail: if the master
+/// cannot be adopted again or the replacement reader cannot be registered,
+/// the actor kills and reaps its child instead (see
+/// [`PtyHandoffDisposition::Resume`]), and if the actor already ended there
+/// is nothing to restore.
+///
+/// The sealed checkpoint carries its own budget share
+/// ([`SealedCheckpointBody::reservation`]), so taking the body out of the
+/// lease takes the share with it.
 #[derive(Debug)]
 pub struct PreparedPtyHandoff {
     identity: LinuxPtyIdentity,
     master_raw_fd: i32,
     evidence: ActorHandoffEvidence,
     checkpoint: Option<SealedCheckpointBody>,
-    checkpoint_reservation: Option<CheckpointReservation>,
     #[cfg(test)]
     retired_reader_raw_fd: i32,
     session: Option<AdoptableLinuxPtySession>,
@@ -2758,6 +2798,10 @@ impl PreparedPtyHandoff {
 
     /// Moves the sealed body to coordinator-owned manifest linkage while this
     /// lease continues to fence the actor and retain PTY authority.
+    ///
+    /// The body takes its budget share with it, so resuming or consuming this
+    /// lease afterwards returns nothing to the budget: the share returns only
+    /// when the body is dropped, after its memfd closes.
     #[must_use]
     pub fn take_checkpoint_body(&mut self) -> Option<SealedCheckpointBody> {
         self.checkpoint.take()
@@ -2773,8 +2817,10 @@ impl PreparedPtyHandoff {
     /// one replacement async reader is active.
     ///
     /// # Errors
-    /// Returns [`LiveError::Closed`] when the actor ends or cannot restore its
-    /// validated PTY session and replacement reader.
+    /// Returns [`LiveError::Closed`] when the actor has ended, or cannot
+    /// restore its validated PTY session and replacement reader; the actor
+    /// then kills and reaps its child rather than serving it again (see
+    /// [`PtyHandoffDisposition::Resume`]).
     pub async fn resume(mut self) -> Result<(), LiveError> {
         let session = self.session.take().ok_or(LiveError::Closed)?;
         let resume = self.resume.take().ok_or(LiveError::Closed)?;
@@ -2818,11 +2864,13 @@ impl PreparedPtyHandoff {
             session,
             checkpoint: self.checkpoint.take(),
             evidence: self.evidence,
-            checkpoint_reservation: self.checkpoint_reservation.take(),
         }
     }
 }
 
+/// Returns the master to the actor without waiting, exactly as
+/// [`PreparedPtyHandoff::resume`] does but with no acknowledgement; the
+/// actor's restoration can still fail as described there.
 impl Drop for PreparedPtyHandoff {
     fn drop(&mut self) {
         let (Some(session), Some(resume)) = (self.session.take(), self.resume.take()) else {
@@ -3689,8 +3737,10 @@ impl LiveSplintHandle {
     /// Fences later commands, drains accepted PTY writes, closes the cloned
     /// async reader, and returns exclusive ownership of the canonical master.
     ///
-    /// Dropping the returned lease resumes the actor automatically. Call
-    /// [`PreparedPtyHandoff::resume`] when recovery must be acknowledged.
+    /// Dropping the returned lease returns the master to the actor, which
+    /// tries to restore PTY reading. Call [`PreparedPtyHandoff::resume`] when
+    /// recovery must be acknowledged; a failed restoration ends the actor and
+    /// kills its child (see [`PreparedPtyHandoff`]).
     ///
     /// # Errors
     /// Returns a PTY identity/exit error when the live session cannot be safely
@@ -3701,8 +3751,9 @@ impl LiveSplintHandle {
     }
 
     /// [`Self::prepare_pty_handoff`] with the sealed checkpoint charged to
-    /// `budget` for as long as the returned lease, or the [`HandedOffSplint`]
-    /// it becomes, holds it.
+    /// `budget` for as long as the sealed body exists, whether the returned
+    /// lease, a coordinator that took it, or the [`HandedOffSplint`] the
+    /// lease becomes holds it.
     ///
     /// # Errors
     /// As [`Self::prepare_pty_handoff`], plus
@@ -4804,8 +4855,11 @@ async fn run_actor_body(
                     reservation
                 }
             };
+            // From here the body owns its reservation, so every later
+            // refusal, and every later owner, closes the memfd before the
+            // reservation returns.
             let checkpoint = match SealedCheckpointBody::seal(&bytes) {
-                Ok(checkpoint) => checkpoint,
+                Ok(checkpoint) => checkpoint.with_reservation(checkpoint_reservation),
                 Err(error) => {
                     let _ = reply.send(Err(error.into()));
                     continue;
@@ -4903,7 +4957,6 @@ async fn run_actor_body(
                 master_raw_fd,
                 evidence,
                 checkpoint: Some(checkpoint),
-                checkpoint_reservation,
                 #[cfg(test)]
                 retired_reader_raw_fd,
                 session: Some(adoptable),
@@ -6403,6 +6456,68 @@ mod tests {
         latch.release_claim();
         assert!(latch.has_received_input(), "releasing nothing keeps use");
         assert!(latch.record_input(true));
+    }
+
+    /// Whether any descriptor this process holds is the memfd `identity`
+    /// names. It compares device and inode, so a reused descriptor number
+    /// does not count.
+    fn checkpoint_memfd_is_open(identity: CheckpointBodyIdentity) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                std::fs::metadata(entry.path()).is_ok_and(|metadata| {
+                    metadata.dev() == identity.device && metadata.ino() == identity.inode
+                })
+            })
+    }
+
+    #[test]
+    fn a_sealed_checkpoint_returns_its_budget_share_only_after_its_memfd_closes() {
+        let mut terminal = Terminal::new(8, 2, TerminalConfig::default());
+        terminal.advance(b"checkpoint body");
+        let bytes = terminal.encode_checkpoint().unwrap();
+        let size = u64::try_from(bytes.len()).unwrap();
+        let budget = HandoffCheckpointBudget::new(size);
+        let reservation = budget.try_reserve(size).expect("the body fits its budget");
+        let body = SealedCheckpointBody::seal(&bytes)
+            .unwrap()
+            .with_reservation(Some(reservation));
+        assert_eq!(
+            body.reservation().map(CheckpointReservation::bytes),
+            Some(size)
+        );
+        let identity = body.identity();
+        assert!(checkpoint_memfd_is_open(identity));
+        let closed_at_release = Arc::new(std::sync::Mutex::new(Vec::new()));
+        budget.observe_release({
+            let closed_at_release = Arc::clone(&closed_at_release);
+            move || {
+                closed_at_release
+                    .lock()
+                    .unwrap()
+                    .push(!checkpoint_memfd_is_open(identity));
+            }
+        });
+        // The body moves to manifest linkage, as a coordinator takes it out of
+        // its lease; the share moves with it.
+        let linked = crate::handoff_checkpoint::LinkedCheckpointBody::new(0, body).unwrap();
+        assert_eq!(budget.reserved(), size);
+        assert!(
+            budget.try_reserve(1).is_none(),
+            "the live body still holds the whole cap"
+        );
+        assert!(closed_at_release.lock().unwrap().is_empty());
+        drop(linked);
+        assert_eq!(
+            *closed_at_release.lock().unwrap(),
+            [true],
+            "the share returned once, after the memfd closed"
+        );
+        assert_eq!(budget.reserved(), 0);
+        assert!(!checkpoint_memfd_is_open(identity));
     }
 
     #[test]

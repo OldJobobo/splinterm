@@ -123,10 +123,12 @@ const SEARCH_DEADLINE: Duration = Duration::from_millis(10);
 /// may retry) instead of stretching the pause.
 ///
 /// This bounds how long an attempt stays `Preparing`, when launches are
-/// refused, while the fence waits for the topology permit. Topology
-/// transactions are short: one mutation, its persist, and its publication.
-/// One still running after this long is stuck or spawning a large preset,
-/// and the handoff yields to it.
+/// refused, while the fence waits for the fenced requests in flight and then
+/// for the topology permit; new fenced requests wait meanwhile. Topology
+/// transactions and fenced handlers are short: one mutation, its persist,
+/// and its publication, or one terminal round trip. One still running after
+/// this long is stuck, spawning a large preset, or killing a process that
+/// resists its hangup, and the handoff yields to it.
 const HANDOFF_FENCE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 /// This bounds the fenced pause, when input, resize, and mutations are
 /// refused, before the Topology is persisted. A retiring shell exits within
@@ -1019,6 +1021,10 @@ struct DaemonState {
     /// can hold it as an owned permit for the fence's whole lifetime.
     topology_transactions: Arc<Semaphore>,
     handoff_gate: HandoffGate,
+    /// Held shared by every request [`handoff_fenced`] names for as long as
+    /// its handler runs, and exclusively by [`HandoffAttempt::fence`] while
+    /// the gate moves to `Fenced`; see [`HandoffAdmission`].
+    handoff_in_flight: RwLock<()>,
     terminal_transaction_memory: Arc<Semaphore>,
     terminal_publication_memory: Arc<Semaphore>,
     terminal_splint_publication_memory: Mutex<HashMap<SplintId, std::sync::Weak<Semaphore>>>,
@@ -3138,6 +3144,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         topology_hub: Mutex::new(TopologyHub::default()),
         topology_transactions: Arc::new(Semaphore::new(1)),
         handoff_gate: HandoffGate::default(),
+        handoff_in_flight: RwLock::new(()),
         terminal_transaction_memory: Arc::new(Semaphore::new(
             TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES,
         )),
@@ -7688,19 +7695,31 @@ async fn handle_request(
     // policy would refuse learns nothing about a handoff, and before any
     // handler side effect. The refusal is audited as an authorized request
     // that failed, never as a denial.
-    let mut result = if handoff_fenced(&request) && state.handoff_gate.is_fenced() {
-        Err(handoff_in_progress())
-    } else {
-        handle_authorized_request(
-            request.clone(),
-            state,
-            peer,
-            connection_id,
-            trusted_ui_client,
-            remote_interactive_client,
-            &authorization,
-        )
-        .await
+    //
+    // Invariant: a fenced request's admission is taken before it reads the
+    // gate and held until its handler returns (or its future is dropped),
+    // and the fence moves the gate to `Fenced` only while it holds the
+    // in-flight guard exclusively. So no fenced handler is running while the
+    // gate reads `Fenced`, and capture never sees one change state. The
+    // admission is released before the response is checked, audited, and
+    // written, and before any subscription it returns starts streaming.
+    let mut result = match HandoffAdmission::for_request(&request, state).await {
+        Err(refused) => Err(refused),
+        Ok(mut admission) => {
+            let handled = handle_authorized_request(
+                request.clone(),
+                state,
+                peer,
+                connection_id,
+                trusted_ui_client,
+                remote_interactive_client,
+                &authorization,
+                &mut admission,
+            )
+            .await;
+            drop(admission);
+            handled
+        }
     };
     if let (Ok(handled), Some(maximum)) = (&result, authorization.maximum_returned_bytes()) {
         let encoded_bytes = serde_json::to_vec(&handled.response)
@@ -7725,9 +7744,16 @@ async fn handle_request(
     result
 }
 
+/// Runs one authorized request. `admission` is the request's hold on the
+/// handoff fence ([`HandoffAdmission`]); a handler releases it only around a
+/// wait the fence must not wait out.
 #[allow(
     clippy::too_many_lines,
     reason = "authorization remains adjacent to every sensitive operation"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the connection's identity, authorization, and fence admission are all per request"
 )]
 async fn handle_authorized_request(
     request: Request,
@@ -7737,6 +7763,7 @@ async fn handle_authorized_request(
     trusted_ui_client: bool,
     remote_interactive_client: bool,
     authorization: &RequestAuthorizationContext,
+    admission: &mut HandoffAdmission<'_>,
 ) -> Result<Handled, ProtocolError> {
     let request = resolve_automation_mutation(request, state).await?;
     let response = match request {
@@ -7889,15 +7916,19 @@ async fn handle_authorized_request(
             {
                 existing_access_response(state, grant_id, splint_id, incarnation).await?
             } else {
-                let granted = match consent::prompt(
-                    &state.install_prefix,
-                    peer,
-                    splint_id,
-                    incarnation,
-                    scopes.clone(),
-                )
-                .await
-                {
+                // A person answers the prompt, so the fence never waits it
+                // out: the admission is released for the prompt and retaken
+                // before anything is recorded.
+                let prompted = admission
+                    .outside(consent::prompt(
+                        &state.install_prefix,
+                        peer,
+                        splint_id,
+                        incarnation,
+                        scopes.clone(),
+                    ))
+                    .await;
+                let granted = match prompted {
                     Ok(granted) => granted,
                     Err(error) => {
                         warn!(%error, "trusted consent client failed closed");
@@ -7971,15 +8002,18 @@ async fn handle_authorized_request(
             {
                 existing_lair_access_response(state, grant_id, lair_id).await?
             } else {
-                let granted = match consent::prompt_lair(
-                    &state.install_prefix,
-                    peer,
-                    lair_id,
-                    lair_name,
-                    scopes.clone(),
-                )
-                .await
-                {
+                // As for a Splint prompt: released for the prompt, retaken
+                // before the answer is committed.
+                let prompted = admission
+                    .outside(consent::prompt_lair(
+                        &state.install_prefix,
+                        peer,
+                        lair_id,
+                        lair_name,
+                        scopes.clone(),
+                    ))
+                    .await;
+                let granted = match prompted {
                     Ok(granted) => granted,
                     Err(error) => {
                         warn!(%error, "trusted Lair consent client failed closed");
@@ -8583,6 +8617,11 @@ async fn handle_authorized_request(
             };
             publish_topology(state, topology_revision, TopologyChangeKind::SplintClosed).await;
             drop(transaction);
+            // Committed: the closed Splints left the registry, so capture
+            // cannot see them, and the fence's own retiring drain bounds
+            // their exit. Waiting for it changes no state, so the fence need
+            // not wait for this handler any longer.
+            admission.release();
             finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
         }
@@ -8895,6 +8934,11 @@ async fn handle_authorized_request(
             };
             publish_topology(state, topology_revision, TopologyChangeKind::DojoClosed).await;
             drop(transaction);
+            // Committed: the closed Splints left the registry, so capture
+            // cannot see them, and the fence's own retiring drain bounds
+            // their exit. Waiting for it changes no state, so the fence need
+            // not wait for this handler any longer.
+            admission.release();
             finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
         }
@@ -9091,6 +9135,11 @@ async fn handle_authorized_request(
             }
             publish_topology(state, topology_revision, TopologyChangeKind::LairTerminated).await;
             drop(transaction);
+            // Committed: the closed Splints left the registry, so capture
+            // cannot see them, and the fence's own retiring drain bounds
+            // their exit. Waiting for it changes no state, so the fence need
+            // not wait for this handler any longer.
+            admission.release();
             finish_runtime_shutdowns(shutdowns).await?;
             Response::TopologyCommitted { topology_revision }
         }
@@ -9611,21 +9660,24 @@ async fn handle_authorized_request(
             }
             let _ = current_handle(state, splint_id, incarnation).await?;
             if trusted_local {
-                let confirmed = consent::prompt(
-                    &state.install_prefix,
-                    peer,
-                    splint_id,
-                    incarnation,
-                    vec![AccessScope::ControlTakeover],
-                )
-                .await
-                .map_err(|error| {
-                    warn!(%error, "trusted forced-control confirmation failed closed");
-                    ProtocolError::new(
-                        ErrorCode::ConsentUnavailable,
-                        "trusted confirmation unavailable",
-                    )
-                })?;
+                // Released for the confirmation, which a person answers, and
+                // retaken before the lease is forced.
+                let confirmed = admission
+                    .outside(consent::prompt(
+                        &state.install_prefix,
+                        peer,
+                        splint_id,
+                        incarnation,
+                        vec![AccessScope::ControlTakeover],
+                    ))
+                    .await
+                    .map_err(|error| {
+                        warn!(%error, "trusted forced-control confirmation failed closed");
+                        ProtocolError::new(
+                            ErrorCode::ConsentUnavailable,
+                            "trusted confirmation unavailable",
+                        )
+                    })?;
                 if !confirmed {
                     return Err(ProtocolError::new(
                         ErrorCode::ConsentDenied,
@@ -9940,11 +9992,13 @@ enum HandoffGatePhase {
     #[default]
     Idle,
     /// A handoff started. The daemon still serves normally, but refuses new
-    /// launch reservations while the fence waits for the topology permit.
+    /// launch reservations while the fence drains the fenced requests in
+    /// flight and waits for the topology permit.
     Preparing,
     /// The fence holds the topology transaction permit, so no topology
-    /// transaction or unused-close claim runs, and every request
-    /// [`handoff_fenced`] names is refused with `HandoffInProgress`.
+    /// transaction or unused-close claim runs, no fenced request's handler
+    /// is in flight, and every request [`handoff_fenced`] names is refused
+    /// with `HandoffInProgress`.
     Fenced,
 }
 
@@ -9984,14 +10038,89 @@ fn handoff_in_progress() -> ProtocolError {
     )
 }
 
-/// Re-checks the fence after a consent prompt returns. A prompt can outlast
-/// the check at the request choke point, so a request admitted before the
-/// fence must not commit a grant or forced lease once it is up.
+/// Re-checks the fence after a consent prompt returns. A prompt runs outside
+/// the request's admission ([`HandoffAdmission::outside`]), so the fence can
+/// go up while it is open; a request admitted before the fence must not
+/// commit a grant or forced lease once it is up.
 fn refuse_while_fenced(state: &DaemonState) -> Result<(), ProtocolError> {
     if state.handoff_gate.is_fenced() {
         Err(handoff_in_progress())
     } else {
         Ok(())
+    }
+}
+
+/// One request's admission past the handoff fence.
+///
+/// A request [`handoff_fenced`] names holds
+/// [`DaemonState::handoff_in_flight`] shared from before it reads the gate
+/// until its handler returns or its future is dropped; an unfenced request
+/// holds nothing. [`HandoffAttempt::fence`] takes the guard exclusively and
+/// moves the gate to `Fenced` only while holding it. So a fenced request
+/// either read a gate that was not yet `Fenced`, and the fence waits for its
+/// handler to finish, or it reads `Fenced` and is refused: no fenced handler
+/// runs, and so none changes state, while the gate reads `Fenced`.
+///
+/// Lock order is the admission, then the topology transaction permit, for
+/// fenced handlers and the fence alike. No other path takes the guard, and
+/// no handler retakes it while holding it (Tokio's lock queues a reader
+/// behind a waiting writer).
+///
+/// A handler releases the guard only around a wait the fence must not wait
+/// out: [`Self::outside`] for a consent prompt, which retakes it before the
+/// answer is committed, and [`Self::release`] once a close has committed and
+/// only waits for its processes to exit.
+struct HandoffAdmission<'a> {
+    /// The guard's lock, for a fenced request.
+    in_flight: Option<&'a RwLock<()>>,
+    guard: Option<tokio::sync::RwLockReadGuard<'a, ()>>,
+}
+
+impl<'a> HandoffAdmission<'a> {
+    /// Admits `request`, or refuses it while the fence is held.
+    ///
+    /// The guard is taken before the gate is read, so the fence cannot reach
+    /// `Fenced` between the check and the handler.
+    async fn for_request(request: &Request, state: &'a DaemonState) -> Result<Self, ProtocolError> {
+        if !handoff_fenced(request) {
+            return Ok(Self::unfenced());
+        }
+        let guard = state.handoff_in_flight.read().await;
+        refuse_while_fenced(state)?;
+        Ok(Self {
+            in_flight: Some(&state.handoff_in_flight),
+            guard: Some(guard),
+        })
+    }
+
+    /// An admission that holds nothing: an unfenced request, or a handler a
+    /// unit test runs past the choke point.
+    const fn unfenced() -> Self {
+        Self {
+            in_flight: None,
+            guard: None,
+        }
+    }
+
+    /// Awaits `wait` without the guard, then retakes it.
+    ///
+    /// The fence may go up meanwhile, so a caller re-checks it with
+    /// [`refuse_while_fenced`] before committing anything. Retaking waits
+    /// only while a fence is draining, at most
+    /// [`HANDOFF_FENCE_ACQUIRE_TIMEOUT`].
+    async fn outside<F: Future>(&mut self, wait: F) -> F::Output {
+        self.guard = None;
+        let output = wait.await;
+        if let Some(in_flight) = self.in_flight {
+            self.guard = Some(in_flight.read().await);
+        }
+        output
+    }
+
+    /// Releases the guard for the rest of a handler that changes no more
+    /// state.
+    fn release(&mut self) {
+        self.guard = None;
     }
 }
 
@@ -10019,6 +10148,10 @@ fn refuse_while_fenced(state: &DaemonState) -> Result<(), ProtocolError> {
 ///
 /// Admitted requests that take the topology permit (topology inspection,
 /// the mutation preflight, grant revocation) wait for the fence to lift.
+///
+/// A fenced request admitted before the fence holds a [`HandoffAdmission`]
+/// for as long as its handler runs, and the fence waits for it, so a request
+/// that passed the check cannot change state under the fence either.
 ///
 /// Every variant is named and there is no wildcard arm, so a new request
 /// does not compile until it is classified here.
@@ -10134,22 +10267,37 @@ impl HandoffAttempt {
             .expect("an attempt keeps its hold until it is cancelled or dropped")
     }
 
-    /// Takes and holds the topology transaction permit, then broadcasts
-    /// `Fenced`. Taking it waits out the running topology transaction or
-    /// unused-close claim; holding it starts no new one until the attempt
-    /// ends.
+    /// Drains every fenced request in flight, takes and holds the topology
+    /// transaction permit, then broadcasts `Fenced`.
+    ///
+    /// It first takes [`DaemonState::handoff_in_flight`] exclusively, which
+    /// waits until every fenced handler admitted before has finished and
+    /// holds back new fenced requests. Then it takes the permit, which waits
+    /// out the running topology transaction or unused-close claim of an
+    /// unfenced request or background task. This is the order every fenced
+    /// handler takes them, admission then permit, so the two waits cannot
+    /// deadlock (see [`HandoffAdmission`]). The gate moves to `Fenced` under
+    /// the exclusive guard, which is then released: the requests held back
+    /// read `Fenced` and are refused. Holding the permit starts no new
+    /// transaction until the attempt ends.
+    ///
+    /// Both waits share [`HANDOFF_FENCE_ACQUIRE_TIMEOUT`]. Missing it
+    /// cancels as `TimedOut` with neither held and the gate not fenced.
     async fn fence(&mut self) -> Result<(), HandoffCancelReason> {
         let hold = self.hold();
         let state = Arc::clone(&hold.state);
-        let permit = time::timeout(
-            HANDOFF_FENCE_ACQUIRE_TIMEOUT,
-            Arc::clone(&state.topology_transactions).acquire_owned(),
-        )
+        let (drained, permit) = time::timeout(HANDOFF_FENCE_ACQUIRE_TIMEOUT, async {
+            let drained = state.handoff_in_flight.write().await;
+            let permit = Arc::clone(&state.topology_transactions)
+                .acquire_owned()
+                .await;
+            (drained, permit)
+        })
         .await
-        .map_err(|_| HandoffCancelReason::TimedOut)?
-        .map_err(|_| HandoffCancelReason::Failed)?;
-        hold.fence = Some(permit);
+        .map_err(|_| HandoffCancelReason::TimedOut)?;
+        hold.fence = Some(permit.map_err(|_| HandoffCancelReason::Failed)?);
         state.handoff_gate.set(HandoffGatePhase::Fenced);
+        drop(drained);
         publish_handoff_status(&state, HandoffStatusPhase::Fenced).await;
         Ok(())
     }
@@ -10784,9 +10932,10 @@ impl ExecBoundaryInputs for TestExecInputs {
 /// Splint's capture lease, and the validated manifests that name them.
 ///
 /// The exec boundary consumes it ([`Self::into_exec`]). Dropping it closes
-/// the manifest memfds, resumes every captured actor without waiting, and
-/// closes this attempt's executable snapshots; the retained rollback
-/// authority keeps its own.
+/// the manifest memfds, returns every captured actor's master without
+/// waiting (each actor then tries to resume reading; see
+/// [`HandoffCaptures`]), and closes this attempt's executable snapshots; the
+/// retained rollback authority keeps its own.
 struct PreparedHandoff<F: ForwardPreparation> {
     forward: F,
     captures: HandoffCaptures,
@@ -10812,8 +10961,10 @@ impl<F: ForwardPreparation> PreparedHandoff<F> {
         }
     }
 
-    /// Cancels before exec: closes the manifests, waits until every captured
-    /// actor reads its PTY again, then releases the forward preparation.
+    /// Cancels before exec: closes the manifests, returns every captured
+    /// actor's master and waits for each to acknowledge (an actor that cannot
+    /// restore reading kills and reaps its child; see
+    /// [`HandoffCaptures::release`]), then releases the forward preparation.
     async fn release(self) {
         let Self {
             forward,
@@ -10829,9 +10980,11 @@ impl<F: ForwardPreparation> PreparedHandoff<F> {
 /// Captures every live Splint and builds the manifests while the attempt
 /// holds the fence (Plan 0061 M3.7).
 ///
-/// It only takes leases and waits: no actor ends and no Splint is signalled.
+/// It only takes leases and waits: it ends no actor and signals no Splint.
 /// Every failure has released what it acquired before it returns: each lease
-/// resumes its actor and manifest storage closes.
+/// returns its master to its actor and manifest storage closes. An actor
+/// that then cannot restore PTY reading takes its own error path and kills
+/// and reaps its child ([`splinterd::PreparedPtyHandoff`]).
 async fn prepare_fenced_handoff<F: ForwardPreparation>(
     state: &Arc<DaemonState>,
     forward: F,
@@ -13815,6 +13968,7 @@ mod tests {
             topology_hub: Mutex::new(TopologyHub::default()),
             topology_transactions: Arc::new(Semaphore::new(1)),
             handoff_gate: HandoffGate::default(),
+            handoff_in_flight: RwLock::new(()),
             terminal_transaction_memory: Arc::new(Semaphore::new(
                 TERMINAL_TRANSACTION_DAEMON_MEMORY_BYTES,
             )),
@@ -14087,6 +14241,7 @@ mod tests {
             true,
             false,
             &RequestAuthorizationContext::default(),
+            &mut HandoffAdmission::unfenced(),
         )
         .await
         .map(|handled| handled.response)
@@ -14811,6 +14966,7 @@ mod tests {
             true,
             false,
             &RequestAuthorizationContext::default(),
+            &mut HandoffAdmission::unfenced(),
         )
         .await
         .unwrap()
@@ -16164,6 +16320,264 @@ mod tests {
         );
     }
 
+    /// A fenced request whose handler is held mid-flight: `DecideControlTransfer`
+    /// passes the choke point and then waits for the controller lock the test
+    /// holds.
+    fn held_fenced_request() -> Request {
+        Request::DecideControlTransfer {
+            transfer_id: 1,
+            decision: ControlTransferDecision::Deny,
+        }
+    }
+
+    fn spawn_request(
+        state: &Arc<DaemonState>,
+        request: Request,
+    ) -> tokio::task::JoinHandle<Result<Response, ProtocolError>> {
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            handle_request(
+                request,
+                &state,
+                &PeerIdentity::for_test(),
+                1,
+                0,
+                false,
+                false,
+            )
+            .await
+            .map(|handled| handled.response)
+        })
+    }
+
+    /// Waits until a fenced request holds its admission.
+    async fn wait_for_admitted_request(state: &DaemonState) {
+        time::timeout(Duration::from_secs(5), async {
+            while state.handoff_in_flight.try_write().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the fenced request is admitted");
+    }
+
+    #[tokio::test]
+    async fn the_fence_waits_for_fenced_handlers_in_flight_and_refuses_later_ones() {
+        let state = test_state(false);
+        let ping = || async {
+            time::timeout(
+                Duration::from_secs(1),
+                handle_request(
+                    Request::Ping,
+                    &state,
+                    &PeerIdentity::for_test(),
+                    1,
+                    0,
+                    false,
+                    false,
+                ),
+            )
+            .await
+            .expect("an unfenced request never waits for the fence")
+            .unwrap()
+            .response
+        };
+        let controller = state.controller.lock().await;
+        let in_flight = spawn_request(&state, held_fenced_request());
+        wait_for_admitted_request(&state).await;
+
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        let fence = tokio::spawn(async move {
+            let fenced = attempt.fence().await;
+            (attempt, fenced)
+        });
+        // The fence queues for the guard behind the handler, which holds new
+        // admissions back.
+        time::timeout(Duration::from_secs(5), async {
+            while state.handoff_in_flight.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the fence waits for the in-flight handler");
+        let late = spawn_request(&state, held_fenced_request());
+        time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            state.handoff_gate.phase(),
+            HandoffGatePhase::Preparing,
+            "no fence while a fenced handler runs"
+        );
+        assert!(!fence.is_finished());
+        assert!(
+            !late.is_finished(),
+            "a new fenced request waits out the drain"
+        );
+        assert!(
+            state.topology_transactions.try_acquire().is_ok(),
+            "the fence takes the permit only after the drain"
+        );
+        assert!(matches!(ping().await, Response::Pong));
+
+        // The handler finishes on its own terms, then the fence goes up.
+        drop(controller);
+        let finished = time::timeout(Duration::from_secs(5), in_flight)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            finished.unwrap_err().code,
+            ErrorCode::HandoffInProgress,
+            "an admitted handler runs to its own end"
+        );
+        let (attempt, fenced) = time::timeout(Duration::from_secs(5), fence)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fenced, Ok(()));
+        assert!(state.handoff_gate.is_fenced());
+        // The request held back by the drain, and any later one, is refused.
+        let late = time::timeout(Duration::from_secs(5), late)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(late.unwrap_err().code, ErrorCode::HandoffInProgress);
+        assert_eq!(
+            spawn_request(&state, held_fenced_request())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            ErrorCode::HandoffInProgress
+        );
+        assert!(matches!(ping().await, Response::Pong));
+        assert!(
+            state.handoff_in_flight.try_write().is_ok(),
+            "a refused request holds no admission"
+        );
+
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        assert_ne!(
+            spawn_request(&state, held_fenced_request())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            ErrorCode::HandoffInProgress
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fenced_handler_that_never_finishes_times_the_fence_out() {
+        let state = test_state(false);
+        let controller = state.controller.lock().await;
+        let in_flight = spawn_request(&state, held_fenced_request());
+        wait_for_admitted_request(&state).await;
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(attempt.fence().await, Err(HandoffCancelReason::TimedOut));
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Preparing);
+        assert!(
+            state.topology_transactions.try_acquire().is_ok(),
+            "a timed-out fence holds no permit"
+        );
+        attempt.cancel(HandoffCancelReason::TimedOut).await;
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        // The handler was never cut short and still runs once it can.
+        assert!(!in_flight.is_finished());
+        drop(controller);
+        assert_ne!(
+            in_flight.await.unwrap().unwrap_err().code,
+            ErrorCode::HandoffInProgress
+        );
+        assert!(state.handoff_in_flight.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_fenced_request_releases_its_admission() {
+        let state = test_state(false);
+        let controller = state.controller.lock().await;
+        let in_flight = spawn_request(&state, held_fenced_request());
+        wait_for_admitted_request(&state).await;
+        // The connection goes away mid-handler.
+        in_flight.abort();
+        assert!(in_flight.await.unwrap_err().is_cancelled());
+        assert!(state.handoff_in_flight.try_write().is_ok());
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(attempt.fence().await, Ok(()));
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        drop(controller);
+    }
+
+    /// A consent prompt runs through `outside`: the fence goes up while the
+    /// prompt is open, and the retaken admission then reads `Fenced`.
+    #[tokio::test]
+    async fn a_wait_outside_the_admission_lets_the_fence_go_up() {
+        let state = test_state(false);
+        let (admitted, admitted_signal) = tokio::sync::oneshot::channel();
+        let (answer, answer_signal) = tokio::sync::oneshot::channel::<bool>();
+        let prompt = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                let request = held_fenced_request();
+                let mut admission = HandoffAdmission::for_request(&request, &state)
+                    .await
+                    .unwrap();
+                admitted.send(()).unwrap();
+                let answered = admission.outside(answer_signal).await.unwrap();
+                // Retaken: a later fence would have to wait for this handler.
+                let retaken = state.handoff_in_flight.try_write().is_err();
+                let fenced = refuse_while_fenced(&state).map_err(|error| error.code);
+                drop(admission);
+                (answered, retaken, fenced)
+            }
+        });
+        admitted_signal.await.unwrap();
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), attempt.fence())
+                .await
+                .expect("the fence never waits out an open prompt"),
+            Ok(())
+        );
+        assert!(state.handoff_gate.is_fenced());
+        assert!(!prompt.is_finished(), "the prompt is still open");
+        answer.send(true).unwrap();
+        let (answered, retaken, fenced) = time::timeout(Duration::from_secs(5), prompt)
+            .await
+            .expect("the admission is retaken once the fence released its guard")
+            .unwrap();
+        assert!(answered);
+        assert!(retaken, "the admission is held again after the prompt");
+        assert_eq!(fenced, Err(ErrorCode::HandoffInProgress));
+        assert!(state.handoff_in_flight.try_write().is_ok());
+        attempt.cancel(HandoffCancelReason::Requested).await;
+    }
+
+    /// A committed close releases its admission before its exit wait.
+    #[tokio::test]
+    async fn a_released_admission_no_longer_holds_the_fence_back() {
+        let state = test_state(false);
+        let request = held_fenced_request();
+        let mut admission = HandoffAdmission::for_request(&request, &state)
+            .await
+            .unwrap();
+        assert!(
+            state.handoff_in_flight.try_write().is_err(),
+            "a fenced admission holds the guard"
+        );
+        admission.release();
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), attempt.fence())
+                .await
+                .expect("a released admission does not hold the fence back"),
+            Ok(())
+        );
+        assert!(state.handoff_gate.is_fenced());
+        // Still alive: only `release` freed the guard.
+        drop(admission);
+        attempt.cancel(HandoffCancelReason::Requested).await;
+    }
+
     #[tokio::test]
     async fn launch_reservations_are_refused_until_the_gate_is_idle() {
         let state = test_state(false);
@@ -16203,6 +16617,7 @@ mod tests {
         // the permit the fence holds (Plan 0061 D13).
         let peer = PeerIdentity::for_test();
         let authorization = RequestAuthorizationContext::default();
+        let mut admission = HandoffAdmission::unfenced();
         let close = handle_authorized_request(
             Request::CloseUnusedDojo { dojo_id },
             &state,
@@ -16211,6 +16626,7 @@ mod tests {
             false,
             false,
             &authorization,
+            &mut admission,
         );
         tokio::pin!(close);
         assert!(
@@ -19427,6 +19843,7 @@ mod tests {
                 interactive_bypass: true,
                 ..RequestAuthorizationContext::default()
             },
+            &mut HandoffAdmission::unfenced(),
         )
         .await
         .unwrap()
