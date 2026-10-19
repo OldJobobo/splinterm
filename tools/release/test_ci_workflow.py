@@ -141,11 +141,18 @@ class CiWorkflowTests(unittest.TestCase):
             "crates/splinterd/Cargo.toml",
             "rust-toolchain.toml",
             ".github/workflows/ci.yml",
+            # nix/package.nix patches these sources with substituteInPlace.
+            "crates/splinterm/src/app/local_service.rs",
+            "crates/splinterm/src/remote.rs",
+            "crates/splinterm/src/renderer/fonts.rs",
+            "crates/splinterm/src/wayland.rs",
         ):
             with self.subTest(path=path):
                 self.assertIsNotNone(selected.search(path))
         for path in (
             "crates/splinterd/src/main.rs",
+            "crates/splinterm/src/wayland/tabs.rs",
+            "crates/splinterm/src/remote.rs.orig",
             "docs/nixos.md",
             "tools/release/test_ci_workflow.py",
             ".github/workflows/site.yml",
