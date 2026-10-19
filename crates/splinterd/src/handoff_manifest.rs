@@ -791,9 +791,12 @@ fn validate_windows(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
             .iter()
             .any(|record| record.index == window && record.old_connections.contains(&connection))
     };
+    // A connection holds at most one controller lease, so no two Splints
+    // may name the same held connection.
+    let mut leases = HashSet::new();
     if manifest.splints.iter().any(|splint| {
         matches!(splint.controller, ControllerDisposition::HeldBy { window, connection }
-            if !held(window, connection))
+            if !held(window, connection) || !leases.insert(connection))
     }) {
         return Err(ManifestError::InvalidWindows);
     }
@@ -2596,13 +2599,24 @@ mod tests {
             push_window_slots(&mut maximum, index);
             maximum.windows.push(window);
         }
-        for (position, splint) in maximum.splints.iter_mut().enumerate() {
-            let window = &maximum.windows[position % MAX_MANIFEST_WINDOWS];
-            splint.controller = ControllerDisposition::HeldBy {
-                window: window.index,
-                connection: window.old_connections[0],
-            };
+        // Each connection holds at most one controller, so at most
+        // `MAX_MANIFEST_WINDOW_CONNECTIONS` Splints are held; the rest are
+        // released.
+        let held = maximum.windows.iter().flat_map(|window| {
+            window
+                .old_connections
+                .iter()
+                .map(|&connection| (window.index, connection))
+        });
+        for (splint, (window, connection)) in maximum.splints.iter_mut().zip(held) {
+            splint.controller = ControllerDisposition::HeldBy { window, connection };
         }
+        let mut shared = maximum.clone();
+        shared.splints[1].controller = shared.splints[0].controller;
+        assert!(matches!(
+            encode_manifest(&shared),
+            Err(ManifestError::InvalidWindows)
+        ));
         let bytes = encode_manifest(&maximum).unwrap();
         println!(
             "maximum manifest with {MAX_MANIFEST_SPLINTS} Splints and {MAX_MANIFEST_WINDOWS} \
