@@ -43,11 +43,19 @@ pub const HANDOFF_OUTCOME_VERSION: u8 = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandoffOutcomeKind {
     /// The forward daemon committed its adoption: the Window relaunches into
-    /// the sealed forward client snapshot.
+    /// the sealed forward client snapshot, which the adopted daemon pins and
+    /// trusts by device and inode (AGENTS.md §4.4, the 2026-10-18 exception).
     Adopted,
     /// The forward candidate failed before its commit and the rollback
-    /// daemon committed instead: the Window closes its handoff artifacts and
-    /// reconnects to the old generation.
+    /// daemon committed instead. The rollback daemon pins no client snapshot
+    /// and trusts only the installed `<prefix>/splinterm` by device and inode
+    /// (AGENTS.md §4.4), so the Window discards the forward snapshot and must
+    /// not keep running its pre-upgrade image, which never regains trusted-UI
+    /// authority: it relaunches the installed `<prefix>/splinterm` and
+    /// reconnects to the old generation. The forward pair's preflight
+    /// already required both generations to share the negotiated private
+    /// protocol, so the newer installed client can talk to the rollback
+    /// daemon.
     RolledBack,
 }
 
