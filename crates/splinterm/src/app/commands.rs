@@ -362,6 +362,28 @@ pub(in crate::app) enum Command {
     /// Private daemon-launched trusted consent surface.
     #[command(hide = true)]
     Consent,
+    /// Inspect or start a live daemon upgrade that keeps terminals running.
+    ///
+    /// Without --now, show whether the running daemon could hand its terminals
+    /// to the installed build, and change nothing. Live upgrade is not enabled
+    /// in this release; until it is, restarting the daemon is the upgrade path.
+    ///
+    /// Only the installed splinterm beside the running splinterd may ask.
+    /// Exit status: 0 report shown or handed off, 1 error, 2 usage, 3 cancelled,
+    /// 4 unavailable, 5 another upgrade in progress, 6 rolled back.
+    #[command(verbatim_doc_comment)]
+    Upgrade {
+        /// Start the upgrade now. When open Windows cannot take part, ask
+        /// before closing them; their terminals keep running. Asks in the
+        /// terminal, or in a dialog when there is none or when run inside a
+        /// Splinterm terminal, whose input the upgrade pauses. No answer
+        /// cancels.
+        #[arg(long)]
+        now: bool,
+    },
+    /// Private trusted dialog child of `upgrade --now`.
+    #[command(hide = true, name = "upgrade-dialog")]
+    UpgradeDialog,
 }
 
 /// Closed vocabulary of explicitly reported agent display states.
@@ -629,5 +651,52 @@ mod tests {
             Cli::try_parse_from(["splinterm", "diagnostics", "--last-exit", "--last-crash"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn upgrade_defaults_to_the_report_and_executes_only_with_now() {
+        let parsed = Cli::try_parse_from(["splinterm", "upgrade"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Upgrade { now: false })
+        ));
+        let parsed = Cli::try_parse_from(["splinterm", "upgrade", "--now"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Upgrade { now: true })
+        ));
+        for rejected in [
+            ["splinterm", "upgrade", "--yes"],
+            ["splinterm", "upgrade", "--execute"],
+            ["splinterm", "upgrade", "now"],
+        ] {
+            assert!(Cli::try_parse_from(rejected).is_err(), "{rejected:?}");
+        }
+        let parsed = Cli::try_parse_from(["splinterm", "upgrade-dialog"]).unwrap();
+        assert!(matches!(parsed.command, Some(Command::UpgradeDialog)));
+    }
+
+    #[test]
+    fn upgrade_help_documents_now_trust_and_exit_codes_and_hides_the_dialog() {
+        use clap::CommandFactory as _;
+
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("upgrade"), "{help}");
+        assert!(!help.contains("upgrade-dialog"), "{help}");
+        let upgrade = command.find_subcommand_mut("upgrade").unwrap();
+        let help = upgrade.render_long_help().to_string();
+        for expected in [
+            "--now",
+            "Live upgrade is not enabled",
+            "restarting the daemon",
+            "installed splinterm beside the running splinterd",
+            "3 cancelled",
+            "4 unavailable",
+            "5 another upgrade in progress",
+            "6 rolled back",
+        ] {
+            assert!(help.contains(expected), "missing {expected:?} in {help}");
+        }
     }
 }

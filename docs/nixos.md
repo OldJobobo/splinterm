@@ -152,6 +152,9 @@ it; close and reopen old GUI windows. Otherwise old daemon/new client identity
 checks may reject connections even when the protocol version is unchanged.
 A rollback must restore both the package/service generation and any associated
 policy identities. Persistent shell processes are not restored by rollback.
+Live daemon upgrade (`splinterm upgrade --now`) is not supported for Nix
+installations in Splinterm 0.2.0; `splinterm upgrade` reports this, and the
+restart procedure above remains the upgrade path.
 
 ## Build and non-graphical checks
 

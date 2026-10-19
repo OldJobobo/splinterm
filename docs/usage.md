@@ -509,6 +509,12 @@ reported backup, and restarts cleanly. It does not remove policy or user
 configuration. Read [Headless operation](headless.md) before service, backup,
 policy, or recovery work.
 
+`splinterm upgrade` shows whether the daemon could hand its running terminals to
+a newly installed build without stopping them, and `splinterm upgrade --now`
+starts that live upgrade. Live upgrade is not enabled in this release, so today
+it reports live upgrade as unavailable and restarting the daemon remains the
+upgrade path. See [Daemon upgrade](cli.md#daemon-upgrade).
+
 ## Remote human use
 
 Remote profiles are strict local TOML records. Inspect and probe one without

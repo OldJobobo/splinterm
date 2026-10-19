@@ -300,6 +300,11 @@ systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
 
+`splinterm upgrade` reports whether the running daemon could instead hand its
+terminals to the newly installed build without a restart. Live upgrade is not
+enabled in this release, so the restart above remains the upgrade path; see
+[Daemon upgrade](cli.md#daemon-upgrade).
+
 Install the adapter only when an MCP host will be configured:
 
 ```bash
