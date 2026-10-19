@@ -4,9 +4,18 @@ on:
   push:
     branches: [main, "maint/0.1"]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
+
+# Supersede only pull-request runs. Every other run gets a unique group: a
+# shared group would let a newer main push replace an older pending one, and
+# each authority-branch push and merge group must complete for its own SHA.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,14 +33,48 @@ jobs:
         run: python tools/release/release-doctor.py
       - name: Require every release tag in main's history
         # Maintenance releases reach main by merge; a missing tag means
-        # maint/0.1 has not been merged forward.
-        if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+        # maint/0.1 has not been merged forward. A merge group for main has an
+        # empty base_ref and a gh-readonly-queue ref, so match its base instead.
+        if: github.ref == 'refs/heads/main' || github.base_ref == 'main' || github.event.merge_group.base_ref == 'refs/heads/main'
         run: python tools/release/check-release-ancestry.py
       - name: Validate executable workflow syntax with pinned actionlint
         # actionlint v1.7.7 multi-platform image index.
         uses: docker://rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
         with:
           args: -color
+
+  changes:
+    name: Select path-gated pull-request boundaries
+    runs-on: ubuntu-latest
+    outputs:
+      nix: ${{ steps.select.outputs.nix }}
+    steps:
+      - uses: actions/checkout@v5
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the NixOS boundary from the pull-request range
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Pushes and merge groups always run every boundary.
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo 'nix=true' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --no-renames lists both sides of a move; a failed diff fails closed.
+          git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA" >changed-paths.txt
+          cat changed-paths.txt
+          if grep -Eq '^(nix/|packaging/|dist/)|^(flake\.nix|flake\.lock|Cargo\.lock|rust-toolchain.*|\.github/workflows/ci\.yml)$|(^|/)Cargo\.toml$' changed-paths.txt; then
+            echo 'nix=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'nix=false' >>"$GITHUB_OUTPUT"
+          fi
 
   static:
     name: Rust format, clippy, and shell static checks
@@ -272,7 +315,10 @@ jobs:
 
   nix:
     name: NixOS packages and headless lifecycle
-    needs: preflight
+    needs: [preflight, changes]
+    # Pull requests skip this only when changes reports exactly 'false';
+    # pushes and merge groups always run it.
+    if: github.event_name != 'pull_request' || needs.changes.outputs.nix != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -284,6 +330,15 @@ jobs:
           enable_kvm: true
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
+      - name: Use the Cachix binary cache when configured
+        # Inert until the operator sets the CACHIX_CACHE variable. Only
+        # trusted pushes and merge groups upload; pull requests only pull.
+        if: vars.CACHIX_CACHE != ''
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: ${{ github.event_name == 'pull_request' }}
       - name: Require hardware virtualization for headless VM tests
         run: test -r /dev/kvm && test -w /dev/kvm
       - name: Check packages, module, and headless VMs
@@ -316,6 +371,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - preflight
+      - changes
       - static
       - workspace-tests
       - daemon-tests
@@ -326,11 +382,13 @@ jobs:
       - arch-warning-check
     runs-on: ubuntu-latest
     steps:
+      # Only a pull request whose changes job reported exactly nix=false may
+      # skip nix; any other skipped, cancelled, or failed boundary fails.
       - name: Fail closed unless every mandatory boundary succeeded
-        if: ${{ needs.preflight.result != 'success' || needs.static.result != 'success' || needs.workspace-tests.result != 'success' || needs.daemon-tests.result != 'success' || needs.mcp-tests.result != 'success' || needs.package-automation.result != 'success' || needs.renderer-contracts.result != 'success' || needs.nix.result != 'success' || needs.arch-warning-check.result != 'success' }}
+        if: ${{ needs.preflight.result != 'success' || needs.changes.result != 'success' || needs.static.result != 'success' || needs.workspace-tests.result != 'success' || needs.daemon-tests.result != 'success' || needs.mcp-tests.result != 'success' || needs.package-automation.result != 'success' || needs.renderer-contracts.result != 'success' || (needs.nix.result != 'success' && !(github.event_name == 'pull_request' && needs.changes.outputs.nix == 'false' && needs.nix.result == 'skipped')) || needs.arch-warning-check.result != 'success' }}
         run: |
           echo 'One or more mandatory CI boundaries failed, were cancelled, or were skipped.' >&2
           exit 1
       - name: Confirm complete CI coverage
-        if: ${{ needs.preflight.result == 'success' && needs.static.result == 'success' && needs.workspace-tests.result == 'success' && needs.daemon-tests.result == 'success' && needs.mcp-tests.result == 'success' && needs.package-automation.result == 'success' && needs.renderer-contracts.result == 'success' && needs.nix.result == 'success' && needs.arch-warning-check.result == 'success' }}
+        if: ${{ needs.preflight.result == 'success' && needs.changes.result == 'success' && needs.static.result == 'success' && needs.workspace-tests.result == 'success' && needs.daemon-tests.result == 'success' && needs.mcp-tests.result == 'success' && needs.package-automation.result == 'success' && needs.renderer-contracts.result == 'success' && (needs.nix.result == 'success' || (github.event_name == 'pull_request' && needs.changes.outputs.nix == 'false' && needs.nix.result == 'skipped')) && needs.arch-warning-check.result == 'success' }}
         run: echo 'Every mandatory CI boundary succeeded.'

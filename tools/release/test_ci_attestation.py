@@ -54,10 +54,13 @@ class CiAttestationTests(unittest.TestCase):
         run = fixture("ci-runs-success.json")["workflow_runs"][0]
         for key, value in (
             ("head_branch", "maint/0.1"),
+            ("head_branch", "gh-readonly-queue/main/pr-1-" + "a" * 40),
+            ("event", "pull_request"),
+            ("event", "merge_group"),
             ("head_sha", "b" * 40),
             ("id", 999),
         ):
-            with self.subTest(key=key):
+            with self.subTest(key=key, value=value):
                 changed = copy.deepcopy(run)
                 changed[key] = value
                 with self.assertRaises(ValueError):

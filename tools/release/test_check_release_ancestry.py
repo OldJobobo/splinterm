@@ -67,8 +67,12 @@ class ReleaseAncestryTests(unittest.TestCase):
         preflight = workflow.split("\n  preflight:\n", 1)[1].split("\n  static:\n", 1)[0]
         self.assertIn("fetch-depth: 0", preflight)
         self.assertIn("python tools/release/check-release-ancestry.py", preflight)
+        # Pushes to main, pull requests into main, and main's merge queue
+        # (whose base_ref is empty) all require release-tag ancestry.
         self.assertIn(
-            "if: github.ref == 'refs/heads/main' || github.base_ref == 'main'", preflight
+            "if: github.ref == 'refs/heads/main' || github.base_ref == 'main'"
+            " || github.event.merge_group.base_ref == 'refs/heads/main'",
+            preflight,
         )
         self.assertNotIn("continue-on-error", preflight)
         self.assertIn("tools/release/test_check_release_ancestry.py", workflow)

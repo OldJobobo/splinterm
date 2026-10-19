@@ -9,6 +9,7 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PINNED_FOOT_WORKFLOW = ROOT / ".github/workflows/foot-oracle-pinned.yml"
 MANDATORY = (
     "preflight",
+    "changes",
     "static",
     "workspace-tests",
     "daemon-tests",
@@ -18,6 +19,24 @@ MANDATORY = (
     "nix",
     "arch-warning-check",
 )
+# The only skip check accepts: a pull request whose changes job selected
+# exactly nix=false. Pushes and merge groups always require nix success.
+NIX_SKIP_ALLOWED = (
+    "(github.event_name == 'pull_request' && needs.changes.outputs.nix == 'false'"
+    " && needs.nix.result == 'skipped')"
+)
+
+
+def failed_condition(job: str) -> str:
+    if job == "nix":
+        return f"(needs.nix.result != 'success' && !{NIX_SKIP_ALLOWED})"
+    return f"needs.{job}.result != 'success'"
+
+
+def succeeded_condition(job: str) -> str:
+    if job == "nix":
+        return f"(needs.nix.result == 'success' || {NIX_SKIP_ALLOWED})"
+    return f"needs.{job}.result == 'success'"
 
 
 class CiWorkflowTests(unittest.TestCase):
@@ -27,26 +46,114 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("if: ${{ always() }}", check)
         for job in MANDATORY:
             self.assertIn(f"- {job}", check)
-        failed = " || ".join(
-            f"needs.{job}.result != 'success'" for job in MANDATORY
-        )
-        succeeded = " && ".join(
-            f"needs.{job}.result == 'success'" for job in MANDATORY
-        )
+        failed = " || ".join(failed_condition(job) for job in MANDATORY)
+        succeeded = " && ".join(succeeded_condition(job) for job in MANDATORY)
         self.assertIn(f"if: ${{{{ {failed} }}}}", check)
         self.assertIn(f"if: ${{{{ {succeeded} }}}}", check)
+        self.assertEqual(check.count("needs.nix.result == 'skipped'"), 2)
 
     def test_aggregator_model_rejects_failed_cancelled_and_skipped_dependencies(self) -> None:
-        def succeeds(results: dict[str, str]) -> bool:
-            return all(results[job] == "success" for job in MANDATORY)
+        def succeeds(results: dict[str, str], event: str, nix_output: str) -> bool:
+            nix_skip_allowed = (
+                event == "pull_request"
+                and nix_output == "false"
+                and results["nix"] == "skipped"
+            )
+            return all(
+                results[job] == "success" or (job == "nix" and nix_skip_allowed)
+                for job in MANDATORY
+            )
 
         successful = {job: "success" for job in MANDATORY}
-        self.assertTrue(succeeds(successful))
-        for result in ("failure", "cancelled", "skipped"):
-            with self.subTest(result=result):
-                changed = dict(successful)
-                changed["daemon-tests"] = result
-                self.assertFalse(succeeds(changed))
+        for event in ("push", "pull_request", "merge_group"):
+            self.assertTrue(succeeds(successful, event, "true"))
+        for job in ("daemon-tests", "changes", "nix"):
+            for result in ("failure", "cancelled", "skipped"):
+                for event in ("push", "merge_group"):
+                    with self.subTest(job=job, result=result, event=event):
+                        changed = dict(successful, **{job: result})
+                        self.assertFalse(succeeds(changed, event, "false"))
+        skipped_nix = dict(successful, nix="skipped")
+        self.assertTrue(succeeds(skipped_nix, "pull_request", "false"))
+        for nix_output in ("true", ""):
+            self.assertFalse(succeeds(skipped_nix, "pull_request", nix_output))
+        for result in ("failure", "cancelled"):
+            self.assertFalse(
+                succeeds(dict(successful, nix=result), "pull_request", "false")
+            )
+
+    def test_merge_queue_and_superseded_pull_requests(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        triggers = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertIn("  merge_group:\n    types: [checks_requested]\n", triggers)
+        self.assertIn("  pull_request:\n", triggers)
+        self.assertIn('    branches: [main, "maint/0.1"]\n', triggers)
+        concurrency = workflow.split("\nconcurrency:\n", 1)[1].split("\n\n", 1)[0]
+        # Only pull requests share a per-ref group; pushes and merge groups get
+        # a unique per-run group so no run is cancelled or replaced while pending.
+        self.assertIn(
+            "group: ci-${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+            concurrency,
+        )
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            concurrency,
+        )
+        # No job may opt out of merge groups or pushes by event name except the
+        # path-gated nix job and the pull-request-only checkout in changes.
+        self.assertEqual(workflow.count("github.event_name != 'pull_request'"), 1)
+        self.assertNotIn("github.event_name == 'merge_group'", workflow)
+        self.assertNotIn("github.event_name == 'push'", workflow)
+
+    def test_changes_job_selects_nix_from_the_pull_request_range(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        block = workflow[workflow.index("  changes:\n") : workflow.index("  static:\n")]
+        self.assertIn("nix: ${{ steps.select.outputs.nix }}", block)
+        self.assertIn("fetch-depth: 0", block)
+        self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", block)
+        self.assertIn("HEAD_SHA: ${{ github.event.pull_request.head.sha }}", block)
+        self.assertIn("set -euo pipefail", block)
+        self.assertIn(
+            'git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA"', block
+        )
+        self.assertNotIn("uses: dorny", block)
+        self.assertNotIn("continue-on-error", block)
+        self.assertEqual(
+            [line.strip() for line in block.splitlines() if "uses:" in line],
+            ["- uses: actions/checkout@v5"],
+        )
+        # Non-pull-request events select nix before any diff is attempted.
+        self.assertLess(
+            block.index('if [ "$EVENT_NAME" != pull_request ]; then'),
+            block.index("git diff"),
+        )
+        pattern = re.search(r"grep -Eq '([^']+)' changed-paths.txt", block).group(1)
+        selected = re.compile(pattern)
+        for path in (
+            "nix/package.nix",
+            "flake.nix",
+            "flake.lock",
+            "packaging/PKGBUILD",
+            "dist/systemd/splinterd.service",
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/splinterd/Cargo.toml",
+            "rust-toolchain.toml",
+            ".github/workflows/ci.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNotNone(selected.search(path))
+        for path in (
+            "crates/splinterd/src/main.rs",
+            "docs/nixos.md",
+            "tools/release/test_ci_workflow.py",
+            ".github/workflows/site.yml",
+            "xnix/file",
+            "Cargo.toml.orig",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(selected.search(path))
 
     def test_each_frozen_rust_job_fetches_the_locked_graph_first(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
