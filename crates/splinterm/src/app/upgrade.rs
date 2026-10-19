@@ -157,10 +157,18 @@ async fn run_upgrade(now: bool) -> Result<UpgradeExit> {
         return Ok(exit);
     };
     let windows = prompted.lock().expect("prompt record lock").clone();
-    for line in closed_window_lines(proceeded_without, &windows) {
+    for line in dropped_window_lines(proceeded_without, &windows) {
         println!("{line}");
     }
-    Ok(confirm_handoff(&report).await)
+    let exit = confirm_handoff(&report).await;
+    if let Some(line) = dropped_terminals_line(exit, !proceeded_without.is_empty()) {
+        if matches!(exit, UpgradeExit::Success | UpgradeExit::RolledBack) {
+            println!("{line}");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+    Ok(exit)
 }
 
 /// Whether to ask in the terminal rather than in the dialog. A Splint's
@@ -374,7 +382,7 @@ pub(in crate::app) fn outcome_lines(
     }
 }
 
-fn closed_window_lines(
+fn dropped_window_lines(
     proceeded_without: &[u8],
     windows: &[HandoffUnresponsiveWindow],
 ) -> Vec<String> {
@@ -388,8 +396,29 @@ fn closed_window_lines(
         .collect::<Vec<_>>()
         .join(", ");
     vec![format!(
-        "The Windows with PIDs {pids} close. Their terminals keep running; reopen them from the Recent Dojos picker (`splinterm dojos`)."
+        "The Windows with PIDs {pids} were dropped from the upgrade and close."
     )]
+}
+
+/// What can be said about the dropped Windows' terminals once the daemon
+/// that serves after the close is known. A clean close alone proves
+/// nothing: a daemon that crashed or was stopped closes connections too.
+pub(in crate::app) fn dropped_terminals_line(
+    exit: UpgradeExit,
+    dropped: bool,
+) -> Option<&'static str> {
+    if !dropped {
+        return None;
+    }
+    match exit {
+        UpgradeExit::Success | UpgradeExit::RolledBack => Some(
+            "Their terminals keep running; reopen them from the Recent Dojos picker (`splinterm dojos`).",
+        ),
+        UpgradeExit::Error | UpgradeExit::Unconfirmed => {
+            Some("What happened to their terminals is unknown.")
+        }
+        UpgradeExit::Cancelled | UpgradeExit::Unavailable | UpgradeExit::InProgress => None,
+    }
 }
 
 /// Reconnects to whichever daemon serves next and says which build that is.
@@ -435,7 +464,7 @@ pub(in crate::app) fn confirmation_line(
         return (
             UpgradeExit::Unconfirmed,
             format!(
-                "No daemon answered within {} seconds, so the upgrade is not confirmed; run `splinterm upgrade` to check which build serves, or inspect `journalctl --user -u splinterd.service`.",
+                "No daemon answered within {} seconds, so the upgrade is not confirmed and what happened to the terminals is unknown; run `splinterm upgrade` to check which build serves, or inspect `journalctl --user -u splinterd.service`.",
                 CONFIRMATION_WINDOW.as_secs()
             ),
         );
@@ -1097,14 +1126,34 @@ mod tests {
     }
 
     #[test]
-    fn closed_windows_are_named_by_pid() {
+    fn dropped_windows_are_named_and_their_terminals_claimed_only_once_confirmed() {
         let windows = [
             window(2, 4242, HandoffWindowIssue::NoAcknowledgement, &[]),
             window(5, 4300, HandoffWindowIssue::Unpinned, &[]),
         ];
-        let lines = closed_window_lines(&[2, 5], &windows);
+        let lines = dropped_window_lines(&[2, 5], &windows);
         assert!(lines[0].contains("PIDs 4242, 4300"), "{lines:?}");
-        assert!(lines[0].contains("splinterm dojos"), "{lines:?}");
-        assert!(closed_window_lines(&[], &windows).is_empty());
+        assert!(lines[0].contains("dropped from the upgrade"), "{lines:?}");
+        // Nothing about their terminals before the daemon is confirmed.
+        assert!(!lines[0].contains("keep running"), "{lines:?}");
+        assert!(dropped_window_lines(&[], &windows).is_empty());
+        for exit in [UpgradeExit::Success, UpgradeExit::RolledBack] {
+            let line = dropped_terminals_line(exit, true).unwrap();
+            assert!(line.contains("keep running"), "{line}");
+            assert!(line.contains("splinterm dojos"), "{line}");
+        }
+        for exit in [UpgradeExit::Error, UpgradeExit::Unconfirmed] {
+            assert_eq!(
+                dropped_terminals_line(exit, true),
+                Some("What happened to their terminals is unknown.")
+            );
+        }
+        assert_eq!(dropped_terminals_line(UpgradeExit::Success, false), None);
+        let before = report(1, 1, HandoffBuildProvenance::ReleaseCandidate, Vec::new());
+        assert!(
+            confirmation_line(&before, None)
+                .1
+                .contains("terminals is unknown")
+        );
     }
 }
