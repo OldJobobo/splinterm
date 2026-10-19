@@ -601,6 +601,22 @@ fn assert_single_threaded() {
     );
 }
 
+/// This process's thread count once threads that are already exiting have
+/// left `/proc/self/task`, waiting up to [`GUARD_WAIT`] as the boundary's
+/// guard does. A stopped runtime's worker threads can still be listed for a
+/// moment after they finish, and an injected `Guard` fault returns before
+/// the guard's own wait.
+fn settled_thread_count() -> usize {
+    let deadline = Instant::now() + GUARD_WAIT;
+    loop {
+        let count = fs::read_dir("/proc/self/task").unwrap().count();
+        if count == 1 || Instant::now() >= deadline {
+            return count;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The full sequence under the real guard: seal, inherit exactly the recorded
 /// descriptors, restore, resume. Two Splints share a Dojo whose second scope
 /// cannot be adopted, so both run uncontained and the first's adopted scope
@@ -779,11 +795,7 @@ fn faults_stage() {
         for (storage, sealed) in manifests.iter().zip(sealed) {
             assert_eq!(sealed_size(storage.as_fd()).1, sealed, "{fault:?}");
         }
-        assert_eq!(
-            fs::read_dir("/proc/self/task").unwrap().count(),
-            1,
-            "{fault:?}"
-        );
+        assert_eq!(settled_thread_count(), 1, "{fault:?}");
         drop((owners, plan));
         let runtime = daemon_runtime();
         let (fleet, incarnations, _) = resume(&runtime, stopped, &FakeAdopter::default(), &budgets);
