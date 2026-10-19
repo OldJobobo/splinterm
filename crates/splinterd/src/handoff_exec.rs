@@ -455,14 +455,13 @@ pub fn unblock_handoff_signals() -> io::Result<()> {
 /// Makes `signal` pending again while [`BlockedHandoffSignals`] holds it
 /// blocked, so it crosses the next exec instead of being lost. Used for a
 /// termination a failed candidate's handler already consumed (see
-/// [`crate::handoff_rollback`]).
+/// [`crate::handoff_rollback`]), and for one the old generation's handler
+/// took while its runtime stopped for the exec boundary (the binary's
+/// `stop_runtime_and_cross`).
 ///
 /// # Errors
 /// Reports a failed `raise`.
-pub(crate) fn replay_blocked_signal(
-    _blocked: &BlockedHandoffSignals,
-    signal: Signal,
-) -> io::Result<()> {
+pub fn replay_blocked_signal(_blocked: &BlockedHandoffSignals, signal: Signal) -> io::Result<()> {
     Ok(nix::sys::signal::raise(signal)?)
 }
 

@@ -1412,8 +1412,11 @@ fn run_daemon(source: StartupSource) -> Result<()> {
                 runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
                 return Err(roll_back(*failure));
             }
-            RoundEnd::Handoff { stopped, signals } => {
-                let resumed = stop_runtime_and_cross(runtime, *stopped);
+            RoundEnd::Handoff {
+                stopped,
+                mut signals,
+            } => {
+                let resumed = stop_runtime_and_cross(runtime, *stopped, Some(&mut signals));
                 source = StartupSource::Resumed {
                     resumed: Box::new(resumed),
                     signals,
@@ -2312,12 +2315,23 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
 ///    the boundary writes and seals them, so no status is lost between the
 ///    manifest build and exec.
 ///
+/// Once the runtime has stopped, SIGINT, SIGTERM, and SIGHUP stay blocked on
+/// this thread until the boundary returns. A termination that this round's
+/// handlers took after serve left (for example `systemctl stop` while the
+/// runtime stopped) is made pending again, so it crosses a successful exec
+/// to the candidate instead of being lost ([`carry_taken_terminations`]).
+/// When the boundary returns, the block is released before the resumed round
+/// builds its runtime. The pending signal then reaches this generation's
+/// handler, and the resumed round acts on it as before. Unit tests pass no
+/// `signals`, and only the block is taken.
+///
 /// A fresh manager is connected after the boundary released the guard; the
 /// shut-down one is never used again, so no retained identity is adopted
 /// into two managers.
 fn stop_runtime_and_cross(
     runtime: tokio::runtime::Runtime,
     stopped: StoppedForHandoff,
+    signals: Option<&mut DaemonSignals>,
 ) -> ResumedDaemon {
     let StoppedForHandoff {
         state,
@@ -2335,6 +2349,7 @@ fn stop_runtime_and_cross(
         error!(%error, "workload unit manager did not shut down cleanly");
     }
     runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
+    let carried = carry_taken_terminations(signals);
     let reason = match boundary.refresh_excluded_exits(&state.rollback_handoff, &excluded) {
         Ok(()) => cross_boundary(
             &state,
@@ -2345,6 +2360,10 @@ fn stop_runtime_and_cross(
         ),
         Err(error) => error,
     };
+    // No exec: a termination made pending again is delivered to this
+    // generation's handler now, before any runtime thread exists to inherit
+    // the mask.
+    drop(carried);
     warn!(%reason, "daemon handoff did not exec; resuming the running generation");
     let recorded_dojos = boundary.recorded_dojos();
     // The attempt is over: its fence and its sealed manifests and forward
@@ -2367,6 +2386,43 @@ fn stop_runtime_and_cross(
         policy_path: policy::configured_path(),
         boundary_failure: reason,
     }
+}
+
+/// Blocks SIGINT, SIGTERM, and SIGHUP on the old generation's main thread
+/// once its runtime has stopped, then makes each SIGTERM or SIGINT its
+/// handlers took pending again ([`captured_terminations`]), so it crosses
+/// the exec boundary. This mirrors the candidate's rollback teardown
+/// ([`block_for_rollback`]).
+///
+/// From the block on, a termination is either already recorded by a handler,
+/// which the capture sees, or is kernel-pending on this thread, the only one
+/// left. A blocking thread that the runtime abandoned keeps the guard
+/// refused, so the boundary cannot exec past a signal that thread takes. A
+/// SIGHUP is not replayed: an adopting candidate reloads the policy anyway.
+/// A failed block changes nothing: the boundary still blocks for itself, as
+/// before.
+fn carry_taken_terminations(signals: Option<&mut DaemonSignals>) -> Option<BlockedHandoffSignals> {
+    let blocked = match BlockedHandoffSignals::block() {
+        Ok(blocked) => blocked,
+        Err(error) => {
+            warn!(%error, "cannot block the handoff signals after the runtime stopped");
+            return None;
+        }
+    };
+    if let Some(signals) = signals {
+        let taken = captured_terminations(signals);
+        for (taken, signal) in [
+            (taken.terminate, nix::sys::signal::Signal::SIGTERM),
+            (taken.interrupt, nix::sys::signal::Signal::SIGINT),
+        ] {
+            if taken
+                && let Err(error) = splinterd::handoff_exec::replay_blocked_signal(&blocked, signal)
+            {
+                warn!(%error, ?signal, "cannot carry a termination request across the exec boundary");
+            }
+        }
+    }
+    Some(blocked)
 }
 
 /// Connects the resumed round's fresh workload unit manager, bounded by the
@@ -16716,7 +16772,7 @@ mod tests {
                 .collect::<Vec<_>>();
             (stopped, live, exited, plain)
         });
-        let mut resumed = stop_runtime_and_cross(runtime, stopped);
+        let mut resumed = stop_runtime_and_cross(runtime, stopped, None);
         assert!(!resumed.workload_cgroups_required);
         // A required daemon had a manager before the handoff; unit tests
         // never have one, so the old round runs unrequired and only the
