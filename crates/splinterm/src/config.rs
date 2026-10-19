@@ -432,6 +432,15 @@ const OMARCHY_MIN_TEXT_SIZE_PX: u16 = 1;
 /// The point sizes Splinterm's renderer accepts for a base font size.
 const RENDERER_POINT_SIZES: std::ops::RangeInclusive<u16> = 6..=96;
 
+/// The Omarchy 4 bar's `[bar] size-horizontal` default, in logical px: the
+/// height of the stock top bar, which Splinterm's tab strip matches.
+pub const OMARCHY_DEFAULT_BAR_SIZE_PX: u16 = 26;
+
+/// The tab strip heights Splinterm accepts from `[bar] size-horizontal`, in
+/// logical px. Below 20 px no readable chrome text fits beside the active-tab
+/// indicator; above 48 px the strip is taller than any stock Omarchy bar.
+pub const OMARCHY_BAR_SIZE_LIMITS_PX: std::ops::RangeInclusive<u16> = 20..=48;
+
 /// The Omarchy shell settings Splinterm follows from the layered `shell.toml`
 /// (the active theme's file, then the user's `~/.config/omarchy/shell.toml`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -442,6 +451,9 @@ pub struct OmarchyShellSettings {
     pub popup_alpha: u16,
     /// Effective `[font] base-size` in px, or `None` when no layer sets it.
     pub text_size_px: Option<u16>,
+    /// `[bar] size-horizontal`, the Omarchy top bar's height, in logical px
+    /// and within [`OMARCHY_BAR_SIZE_LIMITS_PX`]. The tab strip uses it.
+    pub bar_size_px: u16,
     /// A running window's `base-size` became unparseable. `text_size_px`
     /// then repeats the last followed request, and the window keeps the size
     /// it has actually applied instead of retrying that request.
@@ -449,12 +461,14 @@ pub struct OmarchyShellSettings {
 }
 
 impl Default for OmarchyShellSettings {
-    /// Omarchy's template defaults: opaque menus and popups, no text size.
+    /// Omarchy's template defaults: opaque menus and popups, no text size and
+    /// the stock 26 px bar.
     fn default() -> Self {
         Self {
             menu_alpha: u16::MAX,
             popup_alpha: u16::MAX,
             text_size_px: None,
+            bar_size_px: OMARCHY_DEFAULT_BAR_SIZE_PX,
             text_size_held: false,
         }
     }
@@ -470,6 +484,8 @@ pub enum OmarchyShellConcern {
     PanelAlpha,
     /// `[font] base-size`.
     TextSize,
+    /// `[bar] size-horizontal`.
+    BarSize,
 }
 
 /// Effective shell settings plus diagnostics for rejected or adjusted values.
@@ -693,6 +709,9 @@ pub fn resolve_omarchy_shell(
             )),
         }
     }
+    if let Some((origin, raw)) = lookup("bar.size-horizontal") {
+        load.settings.bar_size_px = resolve_bar_size(origin, raw, &mut load.diagnostics);
+    }
     load.settings.text_size_px = match lookup("font.base-size") {
         None => None,
         Some((origin, raw)) => {
@@ -734,6 +753,51 @@ pub fn resolve_omarchy_shell(
         }
     };
     load
+}
+
+/// `[bar] size-horizontal` as a tab strip height: a number is rounded to a
+/// whole logical px and clamped to [`OMARCHY_BAR_SIZE_LIMITS_PX`]; anything
+/// else falls back to Omarchy's 26 px default. Both are reported once.
+fn resolve_bar_size(
+    origin: &Path,
+    raw: &str,
+    diagnostics: &mut Vec<(OmarchyShellConcern, String)>,
+) -> u16 {
+    let (minimum, maximum) = (
+        *OMARCHY_BAR_SIZE_LIMITS_PX.start(),
+        *OMARCHY_BAR_SIZE_LIMITS_PX.end(),
+    );
+    match raw.trim().parse::<f64>() {
+        Ok(size) if size.is_finite() => {
+            let clamped = size.round().clamp(f64::from(minimum), f64::from(maximum));
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the value is clamped into the u16 bar size limits"
+            )]
+            let px = clamped as u16;
+            if !(f64::from(minimum)..=f64::from(maximum)).contains(&size) {
+                diagnostics.push((
+                    OmarchyShellConcern::BarSize,
+                    format!(
+                        "{}: [bar] size-horizontal {raw:?} is outside {minimum} to {maximum} px; using {px} px for the tab strip",
+                        origin.display()
+                    ),
+                ));
+            }
+            px
+        }
+        _ => {
+            diagnostics.push((
+                OmarchyShellConcern::BarSize,
+                format!(
+                    "{}: [bar] size-horizontal {raw:?} is not a number; using {OMARCHY_DEFAULT_BAR_SIZE_PX} px for the tab strip",
+                    origin.display()
+                ),
+            ));
+            OMARCHY_DEFAULT_BAR_SIZE_PX
+        }
+    }
 }
 
 fn read_omarchy_shell_layer(
@@ -3048,6 +3112,7 @@ mod tests {
                 menu_alpha: u16::MAX,
                 popup_alpha: u16::MAX,
                 text_size_px: Some(12),
+                bar_size_px: 26,
                 text_size_held: false,
             }
         );
@@ -3195,6 +3260,88 @@ mod tests {
             );
             assert_eq!(load.diagnostics.len(), 1);
             assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::TextSize);
+        }
+    }
+
+    #[test]
+    fn omarchy_bar_size_layers_clamps_and_falls_back_to_the_stock_bar() {
+        // Omarchy's default and the rendered template both give a 26 px bar.
+        assert_eq!(OmarchyShellSettings::default().bar_size_px, 26);
+        let template =
+            include_str!("../tests/fixtures/omarchy4/shell/rendered-template.shell.toml");
+        let stock = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", template),
+            None,
+            OmarchyTextSizeFallback::OmarchyDefault,
+        );
+        assert_eq!(stock.settings.bar_size_px, 26);
+        assert!(stock.diagnostics.is_empty(), "{:?}", stock.diagnostics);
+
+        let user_bar = |raw: &str| {
+            resolve_omarchy_shell(
+                shell_layer("theme/shell.toml", "[bar]\nsize-horizontal = 30\n"),
+                Some(shell_layer(
+                    "user/shell.toml",
+                    &format!("[bar]\nsize-horizontal = {raw}\n"),
+                )),
+                OmarchyTextSizeFallback::OmarchyDefault,
+            )
+        };
+        // The user key replaces the theme's; the theme's applies otherwise.
+        assert_eq!(user_bar("32").settings.bar_size_px, 32);
+        let theme_only = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", "[bar]\nsize-horizontal = 30\n"),
+            Some(shell_layer("user/shell.toml", "[font]\nbase-size = 14\n")),
+            OmarchyTextSizeFallback::OmarchyDefault,
+        );
+        assert_eq!(theme_only.settings.bar_size_px, 30);
+        // `size-vertical` sizes side bars, not the top bar.
+        let vertical = resolve_omarchy_shell(
+            shell_layer("theme/shell.toml", "[bar]\nsize-vertical = 40\n"),
+            None,
+            OmarchyTextSizeFallback::OmarchyDefault,
+        );
+        assert_eq!(vertical.settings.bar_size_px, 26);
+
+        // Numbers round to whole px and clamp to 20..=48, reported when outside.
+        for (raw, px, diagnostics) in [
+            ("20", 20, 0),
+            ("48", 48, 0),
+            ("27.6", 28, 0),
+            ("\"24\"", 24, 0),
+            ("19", 20, 1),
+            ("0", 20, 1),
+            ("-30", 20, 1),
+            ("49", 48, 1),
+            ("200", 48, 1),
+        ] {
+            let load = user_bar(raw);
+            assert_eq!(load.settings.bar_size_px, px, "{raw}");
+            assert_eq!(load.diagnostics.len(), diagnostics, "{raw}");
+            if diagnostics > 0 {
+                assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::BarSize);
+            }
+        }
+        // Values that are not numbers fall back to the stock 26 px bar, even
+        // over a theme value, as alpha falls back to Omarchy's default.
+        for raw in ["tall", "\"26px\"", "\"inf\"", "26 28"] {
+            let load = user_bar(raw);
+            assert_eq!(load.settings.bar_size_px, 26, "{raw}");
+            assert_eq!(load.diagnostics.len(), 1, "{raw}");
+            assert_eq!(load.diagnostics[0].0, OmarchyShellConcern::BarSize);
+            assert!(
+                load.diagnostics[0]
+                    .1
+                    .starts_with("user/shell.toml: [bar] size-horizontal"),
+                "{:?}",
+                load.diagnostics
+            );
+        }
+        // Lines the shell drops leave the theme's value in place, silently.
+        for raw in ["+28", ".5", "1e2"] {
+            let load = user_bar(raw);
+            assert_eq!(load.settings.bar_size_px, 30, "{raw}");
+            assert!(load.diagnostics.is_empty(), "{raw}");
         }
     }
 

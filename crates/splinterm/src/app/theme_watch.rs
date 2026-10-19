@@ -227,9 +227,10 @@ fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerp
 }
 
 /// Layers the Omarchy shell settings onto a resolved palette. A JSON palette
-/// takes only the text size and keeps Omarchy's opaque panel defaults.
-/// Diagnostics for a setting Splinterm ignores are dropped: alpha for a JSON
-/// palette, and the text size while `config.ini` sets a font size.
+/// takes only the text size and keeps Omarchy's opaque panel defaults and its
+/// 26 px bar height. Diagnostics for a setting Splinterm ignores are dropped:
+/// alpha and bar size for a JSON palette, and the text size while
+/// `config.ini` sets a font size.
 fn with_omarchy_shell(
     mut theme: ResolvedTheme,
     layers: ShellLayers<'_>,
@@ -247,7 +248,7 @@ fn with_omarchy_shell(
             .into_iter()
             .filter(|(concern, _)| match concern {
                 OmarchyShellConcern::Read => true,
-                OmarchyShellConcern::PanelAlpha => layers.panels,
+                OmarchyShellConcern::PanelAlpha | OmarchyShellConcern::BarSize => layers.panels,
                 OmarchyShellConcern::TextSize => follow_text_size,
             })
             .map(|(_, diagnostic)| diagnostic),
@@ -1078,6 +1079,82 @@ mod tests {
             (u16::MAX, u16::MAX, None),
             0,
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_bar_size_is_followed_live_from_the_user_shell_toml() {
+        let root = std::env::temp_dir().join(format!("splinterm-bar-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("home/.config/omarchy/shell.toml");
+        write_theme(&theme, 0x10_10_10);
+        std::fs::write(theme.join("shell.toml"), "[bar]\nsize-horizontal = 26\n").unwrap();
+        let source = ThemeSource::Omarchy(
+            OmarchyThemeRoots::fixed(theme.clone()).with_user_shell(user.clone()),
+        );
+        let mut selection = OmarchyThemeSelection::default();
+        let mut current = ResolvedTheme::default();
+        let mut observed = fingerprint(&source);
+        let mut step = |contents: &str, expected: u16, diagnostics: usize| {
+            std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+            let staged = user.with_extension("tmp");
+            std::fs::write(&staged, contents).unwrap();
+            std::fs::rename(&staged, &user).unwrap();
+            let next_fingerprint = fingerprint(&source);
+            assert_ne!(next_fingerprint, observed);
+            observed = next_fingerprint;
+            let mut reported = Vec::new();
+            let active = active_theme_source(&source, &mut selection);
+            if let Some(next) = resolve_live_theme_update(
+                active,
+                &mut selection,
+                NO_OVERRIDES,
+                current,
+                &mut reported,
+            )
+            .unwrap()
+            {
+                current = next;
+            }
+            assert_eq!(current.shell.bar_size_px, expected, "{contents:?}");
+            assert_eq!(reported.len(), diagnostics, "{reported:?}");
+        };
+        step("[bar]\nsize-horizontal = 32\n", 32, 0);
+        step("[bar]\nsize-horizontal = 90\n", 48, 1);
+        step("[bar]\nsize-horizontal = tall\n", 26, 1);
+        step("", 26, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_json_palette_keeps_the_stock_bar_size() {
+        let root = std::env::temp_dir().join(format!("splinterm-bar-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(
+            theme.join("shell.toml"),
+            "[bar]\nsize-horizontal = tall\n[font]\nbase-size = 16\n",
+        )
+        .unwrap();
+        let mut diagnostics = Vec::new();
+        let shell = with_omarchy_shell(
+            ResolvedTheme::default(),
+            ShellLayers {
+                theme_dir: &theme,
+                user: None,
+                panels: false,
+            },
+            true,
+            OmarchyTextSizeFallback::OmarchyDefault,
+            &mut diagnostics,
+        )
+        .shell;
+        assert_eq!(shell.text_size_px, Some(16));
+        assert_eq!(shell.bar_size_px, 26);
+        // The ignored bar size is not reported for a JSON palette.
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

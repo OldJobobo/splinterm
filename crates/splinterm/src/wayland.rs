@@ -222,9 +222,11 @@ use selection::{
     copy_mode_enter, copy_mode_is_valid, move_copy_cursor, selection_display_bounds,
     selection_endpoint, selection_is_retained, selection_text, transient_overlay_rows, url_at,
 };
+#[cfg(test)]
+use tabs::DEFAULT_TAB_STRIP_LOGICAL_HEIGHT;
 use tabs::{
-    DojoTabView, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, TabsState, tab_context_target,
-    tab_strip_hit_test,
+    DojoTabView, TabHitTarget, TabsState, tab_context_target, tab_strip_hit_test,
+    tab_strip_logical_height,
 };
 #[cfg(test)]
 use terminal_state::snapshot_is_newer;
@@ -684,7 +686,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         || options.remote_display_identity.is_some()
     {
         initial_height = initial_height
-            .checked_add(TAB_STRIP_LOGICAL_HEIGHT)
+            .checked_add(tab_strip_logical_height(options.theme))
             .context("initial tab strip height overflow")?;
     }
     let connection = Connection::connect_to_env().context("connect to Wayland compositor")?;
@@ -2919,6 +2921,9 @@ enum BackgroundEffectCommitMode {
 struct ThemeUpdateImpact {
     rebuild_pixels: bool,
     reconcile_effect: bool,
+    /// The tab strip height changed, so the content area and the panes'
+    /// grids move with it.
+    relayout_tab_strip: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -3046,6 +3051,7 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     ThemeUpdateImpact {
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
+        relayout_tab_strip: tab_strip_logical_height(current) != tab_strip_logical_height(next),
     }
 }
 
@@ -3206,9 +3212,17 @@ fn pending_remote_snapshot(splint_id: SplintId, columns: usize, rows: usize) -> 
     }
 }
 
-fn tab_strip_height(managed_tabs: bool, visible: bool, remote: bool, surface_height: u32) -> u32 {
+/// The logical height the strip takes from a window: the theme's strip height
+/// while tabs show or a remote tag needs the header, else none.
+fn tab_strip_height(
+    managed_tabs: bool,
+    visible: bool,
+    remote: bool,
+    strip_height: u32,
+    surface_height: u32,
+) -> u32 {
     if (managed_tabs && visible) || remote {
-        TAB_STRIP_LOGICAL_HEIGHT.min(surface_height)
+        strip_height.min(surface_height)
     } else {
         0
     }
@@ -3279,6 +3293,7 @@ impl App {
             self.tab_state.managed_tabs,
             self.tab_state.tab_strip_visible,
             self.tab_state.remote_display_identity.is_some(),
+            self.tab_strip_logical_height(),
             self.surface.logical_height,
         );
         Rect {
@@ -6819,6 +6834,20 @@ impl App {
         Ok(true)
     }
 
+    /// Follows a live `[bar] size-horizontal` change: the strip, and with it
+    /// the content area below, takes the new height the way showing or hiding
+    /// the strip does. Overlays positioned from the content area follow it on
+    /// the next draw.
+    fn relayout_tab_strip(&mut self) -> Result<()> {
+        self.invalidate_tab_strip_text();
+        self.presentation.full_redraw = true;
+        self.update_ime_cursor_rectangle();
+        if self.surface.configured {
+            self.emit_resize()?;
+        }
+        Ok(())
+    }
+
     fn apply_font_zoom(
         &mut self,
         action: FontZoomAction,
@@ -9176,6 +9205,9 @@ impl App {
             .render_context
             .set_background_alpha(theme.background_alpha);
         self.presentation.theme = theme;
+        if impact.relayout_tab_strip {
+            self.invalidate_tab_strip_text();
+        }
         if !impact.rebuild_pixels {
             return impact;
         }
@@ -9359,6 +9391,9 @@ impl App {
                 full_frame_reload |= impact.rebuild_pixels;
                 rebuild_all_inactive |= impact.rebuild_pixels;
                 effect_desired_changed |= impact.reconcile_effect;
+                if impact.relayout_tab_strip {
+                    self.relayout_tab_strip()?;
+                }
             }
         }
         for update in pending {
@@ -9730,6 +9765,9 @@ impl App {
                         full_frame_reload |= impact.rebuild_pixels;
                         rebuild_all_inactive |= impact.rebuild_pixels;
                         effect_desired_changed |= impact.reconcile_effect;
+                        if impact.relayout_tab_strip {
+                            self.relayout_tab_strip()?;
+                        }
                     }
                 }
                 WindowUpdate::Font(update) => {
@@ -11797,26 +11835,53 @@ mod tests {
 
     #[test]
     fn hidden_tab_strip_reclaims_managed_window_height() {
+        // The default strip is the stock Omarchy bar's 26 px.
         assert_eq!(
-            tab_strip_height(true, true, false, TAB_STRIP_LOGICAL_HEIGHT + 20),
-            TAB_STRIP_LOGICAL_HEIGHT
+            tab_strip_logical_height(ResolvedTheme::default()),
+            DEFAULT_TAB_STRIP_LOGICAL_HEIGHT
         );
-        assert_eq!(
-            tab_strip_height(true, true, false, TAB_STRIP_LOGICAL_HEIGHT - 1),
-            TAB_STRIP_LOGICAL_HEIGHT - 1
-        );
-        for managed in [false, true] {
-            for visible in [false, true] {
-                assert_eq!(
-                    tab_strip_height(managed, visible, true, 200),
-                    TAB_STRIP_LOGICAL_HEIGHT
-                );
-                assert_eq!(tab_strip_height(managed, visible, true, 10), 10);
-                assert_eq!(tab_strip_height(managed, visible, true, 0), 0);
+        assert_eq!(DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 26);
+        for strip in [DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 20, 34, 48] {
+            assert_eq!(
+                tab_strip_height(true, true, false, strip, strip + 20),
+                strip
+            );
+            assert_eq!(
+                tab_strip_height(true, true, false, strip, strip - 1),
+                strip - 1
+            );
+            for managed in [false, true] {
+                for visible in [false, true] {
+                    assert_eq!(tab_strip_height(managed, visible, true, strip, 200), strip);
+                    assert_eq!(tab_strip_height(managed, visible, true, strip, 10), 10);
+                    assert_eq!(tab_strip_height(managed, visible, true, strip, 0), 0);
+                }
             }
+            assert_eq!(tab_strip_height(true, false, false, strip, 200), 0);
+            assert_eq!(tab_strip_height(false, true, false, strip, 200), 0);
         }
-        assert_eq!(tab_strip_height(true, false, false, 200), 0);
-        assert_eq!(tab_strip_height(false, true, false, 200), 0);
+    }
+
+    #[test]
+    fn a_live_bar_size_change_relayouts_the_tab_strip() {
+        let current = ResolvedTheme::default();
+        let mut taller = current;
+        taller.shell.bar_size_px = 30;
+        assert_eq!(
+            classify_theme_update(current, taller),
+            ThemeUpdateImpact {
+                rebuild_pixels: true,
+                reconcile_effect: false,
+                relayout_tab_strip: true,
+            }
+        );
+        // Other shell settings leave the strip where it is.
+        let mut panels = current;
+        panels.shell.menu_alpha = u16::MAX / 2;
+        assert!(!classify_theme_update(current, panels).relayout_tab_strip);
+        let mut text = current;
+        text.shell.text_size_px = Some(16);
+        assert!(!classify_theme_update(current, text).relayout_tab_strip);
     }
 
     #[test]
@@ -12041,7 +12106,7 @@ mod tests {
         let layout = session_picker_overlay_layout(960, 600, 120, 3, 1, 0).unwrap();
         let origin = Rect {
             x: 7,
-            y: TAB_STRIP_LOGICAL_HEIGHT,
+            y: DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
             width: 960,
             height: 600,
         };
@@ -12068,6 +12133,7 @@ mod tests {
             ThemeUpdateImpact {
                 rebuild_pixels: false,
                 reconcile_effect: true,
+                relayout_tab_strip: false,
             }
         );
         let mut schedule = BackgroundEffectReconcileSchedule::default();
@@ -12081,6 +12147,7 @@ mod tests {
             ThemeUpdateImpact {
                 rebuild_pixels: true,
                 reconcile_effect: true,
+                relayout_tab_strip: false,
             }
         );
 
@@ -12091,6 +12158,7 @@ mod tests {
             ThemeUpdateImpact {
                 rebuild_pixels: true,
                 reconcile_effect: false,
+                relayout_tab_strip: false,
             }
         );
         assert_eq!(
@@ -12111,6 +12179,7 @@ mod tests {
                 ThemeUpdateImpact {
                     rebuild_pixels: true,
                     reconcile_effect: false,
+                    relayout_tab_strip: false,
                 }
             );
         }
@@ -16159,7 +16228,13 @@ mod tests {
         use crate::geometry::{CellGeometry, TerminalPadding};
         for scale in [120, 150, 180, 240] {
             let logical_size = (801, 601);
-            let header = tab_strip_height(false, false, true, logical_size.1);
+            let header = tab_strip_height(
+                false,
+                false,
+                true,
+                DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
+                logical_size.1,
+            );
             let geometry = WindowGeometry::fit_window(
                 logical_size.0,
                 logical_size.1 - header,

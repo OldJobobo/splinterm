@@ -33,10 +33,46 @@ pub(super) fn replace_retired_panes<T>(
     active_replaced
 }
 
-pub(super) const TAB_STRIP_LOGICAL_HEIGHT: u32 = 34;
+/// The tab strip height before any `shell.toml` is read, in logical px: the
+/// stock Omarchy 4 top bar's.
+#[cfg(test)]
+pub(super) const DEFAULT_TAB_STRIP_LOGICAL_HEIGHT: u32 = 26;
 const TAB_PREFERRED_LOGICAL_WIDTH: u32 = 180;
 const TAB_MIN_LOGICAL_WIDTH: u32 = 96;
-const TAB_ACTION_LOGICAL_WIDTH: u32 = 34;
+
+/// The tab strip's height in logical px at every output scale: the Omarchy
+/// top bar's `[bar] size-horizontal`, 26 px unless `shell.toml` changes it.
+pub(super) fn tab_strip_logical_height(theme: ResolvedTheme) -> u32 {
+    u32::from(theme.shell.bar_size_px)
+}
+
+/// The active-tab indicator's thickness for a strip `strip_height` logical px
+/// tall: 2 px for the 20-29 px strips Omarchy bars use, 3 px at the former
+/// 34 px strip and 4 px at the 48 px maximum.
+pub(super) const fn tab_indicator_logical_height(strip_height: u32) -> u32 {
+    let thickness = strip_height.saturating_add(6) / 12;
+    if thickness == 0 { 1 } else { thickness }
+}
+
+/// The horizontal label inset for a strip `strip_height` logical px tall,
+/// 10 px at the former 34 px strip and scaled with the strip from there.
+const fn tab_label_logical_inset(strip_height: u32) -> u32 {
+    strip_height.saturating_mul(10).saturating_add(17) / 34
+}
+
+/// The tallest text cell a strip `strip_height` logical px tall draws at
+/// `scale_120`, in buffer px: the strip less the active-tab indicator's
+/// thickness above and below, so vertically centred text never reaches the
+/// indicator, and never above the chrome line cap. Tab labels, agent status
+/// badges, the close and new-tab glyphs and the remote tag all use it.
+pub(super) fn tab_text_maximum_cell_height(strip_height: u32, scale_120: u32) -> Result<u32> {
+    let strip = logical_extent_to_buffer(strip_height, scale_120)?;
+    let indicator =
+        logical_extent_to_buffer(tab_indicator_logical_height(strip_height), scale_120)?.max(1);
+    Ok(strip
+        .saturating_sub(indicator.saturating_mul(2))
+        .min(crate::renderer::chrome_maximum_cell_height(scale_120)))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TabHitTarget {
@@ -61,15 +97,20 @@ pub(super) struct TabStripLayout {
     pub(super) host_rect: Option<Rect>,
 }
 
+/// Lays out a strip `height` logical px tall: each tab's close control and the
+/// trailing new-tab control are square at the strip height, as the 34 px
+/// strip's were, and every hit target spans the strip's full height.
 pub(super) fn tab_strip_layout(
     width: u32,
+    height: u32,
     dojo_ids: &[DojoId],
     active: usize,
 ) -> Option<TabStripLayout> {
     if width == 0 || dojo_ids.is_empty() || active >= dojo_ids.len() {
         return None;
     }
-    let new_width = TAB_ACTION_LOGICAL_WIDTH.min((width / 4).max(u32::from(width > 0)));
+    let action_width = height;
+    let new_width = action_width.min((width / 4).max(u32::from(width > 0)));
     let tab_space = width.saturating_sub(new_width);
     let capacity = usize::try_from((tab_space / TAB_MIN_LOGICAL_WIDTH).max(1)).unwrap_or(1);
     let visible_count = dojo_ids.len().min(capacity);
@@ -85,28 +126,28 @@ pub(super) fn tab_strip_layout(
     for dojo_id in dojo_ids.iter().skip(start).take(visible_count).copied() {
         let remaining = tab_space.saturating_sub(x);
         let width = tab_width.min(remaining);
-        let close_width = TAB_ACTION_LOGICAL_WIDTH.min((width / 3).max(u32::from(width > 1)));
+        let close_width = action_width.min((width / 3).max(u32::from(width > 1)));
         let label_space = width.saturating_sub(close_width);
-        let label_inset = 10_u32.min(label_space / 4);
+        let label_inset = tab_label_logical_inset(height).min(label_space / 4);
         tabs.push(VisibleTabLayout {
             dojo_id,
             rect: Rect {
                 x,
                 y: 0,
                 width,
-                height: TAB_STRIP_LOGICAL_HEIGHT,
+                height,
             },
             label_rect: Rect {
                 x: x.saturating_add(label_inset),
                 y: 0,
                 width: label_space.saturating_sub(label_inset.saturating_mul(2)),
-                height: TAB_STRIP_LOGICAL_HEIGHT,
+                height,
             },
             close_rect: Rect {
                 x: x.saturating_add(width.saturating_sub(close_width)),
                 y: 0,
                 width: close_width,
-                height: TAB_STRIP_LOGICAL_HEIGHT,
+                height,
             },
         });
         x = x.saturating_add(width);
@@ -116,7 +157,7 @@ pub(super) fn tab_strip_layout(
             x: 0,
             y: 0,
             width,
-            height: TAB_STRIP_LOGICAL_HEIGHT,
+            height,
         },
         tabs,
         host_rect: None,
@@ -124,7 +165,7 @@ pub(super) fn tab_strip_layout(
             x,
             y: 0,
             width: new_width.min(width.saturating_sub(x)),
-            height: TAB_STRIP_LOGICAL_HEIGHT,
+            height,
         },
     })
 }
@@ -133,6 +174,7 @@ pub(super) fn tab_strip_layout(
 /// Reducing the tab layout's input width keeps every existing action out of the tag.
 fn remote_header_layout(
     width: u32,
+    height: u32,
     dojo_ids: &[DojoId],
     active: usize,
     host_width: u32,
@@ -148,23 +190,24 @@ fn remote_header_layout(
         width: 0,
         height: 0,
     };
-    let mut layout = tab_strip_layout(tab_width, dojo_ids, active).unwrap_or(TabStripLayout {
-        rect: empty,
-        tabs: Vec::new(),
-        new_rect: empty,
-        host_rect: None,
-    });
+    let mut layout =
+        tab_strip_layout(tab_width, height, dojo_ids, active).unwrap_or(TabStripLayout {
+            rect: empty,
+            tabs: Vec::new(),
+            new_rect: empty,
+            host_rect: None,
+        });
     layout.rect = Rect {
         x: 0,
         y: 0,
         width,
-        height: TAB_STRIP_LOGICAL_HEIGHT,
+        height,
     };
     layout.host_rect = Some(Rect {
         x: tab_width,
         y: 0,
         width: host_width,
-        height: TAB_STRIP_LOGICAL_HEIGHT,
+        height,
     });
     Some(layout)
 }
@@ -610,6 +653,37 @@ fn label_among_tabs<'a>(
 }
 
 impl App {
+    /// The strip height this window draws, from its theme's shell settings.
+    pub(super) fn tab_strip_logical_height(&self) -> u32 {
+        tab_strip_logical_height(self.presentation.theme)
+    }
+
+    /// Strip text sized for the current strip height and scale.
+    fn load_tab_strip_text(
+        &self,
+        source: &ChromeSource,
+        style: ChromeTextStyle,
+    ) -> Result<ChromeText> {
+        ChromeText::load_source_styled_within(
+            source,
+            self.surface.scale_120,
+            style,
+            &self.presentation.render_context,
+            tab_text_maximum_cell_height(self.tab_strip_logical_height(), self.surface.scale_120)?,
+        )
+    }
+
+    /// Drops every cached strip text and layout, for a strip height change.
+    /// Each cache otherwise keys on the scale alone.
+    pub(super) fn invalidate_tab_strip_text(&mut self) {
+        self.tab_state.tab_strip_layout = None;
+        self.tab_state.tab_label_cache.clear();
+        self.tab_state.tab_close_text = None;
+        self.tab_state.tab_new_text = None;
+        self.tab_state.remote_host_text = None;
+        self.tab_state.remote_host_clipped = None;
+    }
+
     pub(super) fn prepare_remote_host_text(&mut self) -> Result<()> {
         let Some(identity) = &self.tab_state.remote_display_identity else {
             return Ok(());
@@ -620,13 +694,10 @@ impl App {
             .as_ref()
             .is_none_or(|(scale, _)| *scale != self.surface.scale_120)
         {
+            let source = ChromeSource::from(identity.label());
             self.tab_state.remote_host_text = Some((
                 self.surface.scale_120,
-                ChromeText::load_with_context(
-                    &identity.label(),
-                    self.surface.scale_120,
-                    &self.presentation.render_context,
-                )?,
+                self.load_tab_strip_text(&source, ChromeTextStyle::Regular)?,
             ));
             self.tab_state.remote_host_clipped = None;
         }
@@ -651,6 +722,7 @@ impl App {
                 .position(|dojo_id| *dojo_id == self.tab_state.active_dojo_id())?
         };
         let width = self.surface.logical_width;
+        let height = self.tab_strip_logical_height();
         if let Some((_, text)) = &self.tab_state.remote_host_text {
             let cell = text.pixel_width() / text.cells().max(1);
             let logical = |pixels| {
@@ -663,12 +735,13 @@ impl App {
                 .max(minimum);
             return remote_header_layout(
                 width,
+                height,
                 &ids,
                 active,
                 desired.min((width / 3).max(minimum)),
             );
         }
-        tab_strip_layout(width, &ids, active)
+        tab_strip_layout(width, height, &ids, active)
     }
 
     fn prepare_clipped_remote_host_text(&mut self, layout: &TabStripLayout) -> Result<()> {
@@ -691,13 +764,10 @@ impl App {
                         || cached.scale_120 != self.surface.scale_120
                 })
             {
-                let clipped = clipped_remote_label(source.text(), maximum_cells as usize);
+                let clipped =
+                    ChromeSource::from(clipped_remote_label(source.text(), maximum_cells as usize));
                 self.tab_state.remote_host_clipped = Some(CachedFrameTitle {
-                    text: ChromeText::load_with_context(
-                        &clipped,
-                        self.surface.scale_120,
-                        &self.presentation.render_context,
-                    )?,
+                    text: self.load_tab_strip_text(&clipped, ChromeTextStyle::Regular)?,
                     source,
                     maximum_cells,
                     scale_120: self.surface.scale_120,
@@ -720,7 +790,7 @@ impl App {
             .retain(|dojo_id, _| visible.contains(dojo_id));
         self.prepare_tab_action_text()?;
         // Labels are bounded by the chrome cell they are drawn with, which
-        // follows the terminal font up to the chrome line cap.
+        // follows the terminal font up to the strip's text cap.
         let cell_width = self
             .tab_state
             .tab_close_text
@@ -754,15 +824,11 @@ impl App {
                 } else {
                     ChromeTextStyle::Regular
                 };
+                let text = self.load_tab_strip_text(&source, style)?;
                 self.tab_state.tab_label_cache.insert(
                     tab.dojo_id,
                     CachedFrameTitle {
-                        text: ChromeText::load_source_styled_with_context(
-                            &source,
-                            self.surface.scale_120,
-                            style,
-                            &self.presentation.render_context,
-                        )?,
+                        text,
                         source,
                         maximum_cells,
                         scale_120: self.surface.scale_120,
@@ -783,19 +849,11 @@ impl App {
         {
             self.tab_state.tab_close_text = Some((
                 self.surface.scale_120,
-                ChromeText::load_with_context(
-                    "×",
-                    self.surface.scale_120,
-                    &self.presentation.render_context,
-                )?,
+                self.load_tab_strip_text(&ChromeSource::from("×"), ChromeTextStyle::Regular)?,
             ));
             self.tab_state.tab_new_text = Some((
                 self.surface.scale_120,
-                ChromeText::load_with_context(
-                    "+",
-                    self.surface.scale_120,
-                    &self.presentation.render_context,
-                )?,
+                self.load_tab_strip_text(&ChromeSource::from("+"), ChromeTextStyle::Regular)?,
             ));
         }
         Ok(())
@@ -845,7 +903,11 @@ impl App {
                     (position(rect.x), position(rect.y), rect.width, rect.height),
                     premultiplied_theme_rgba(theme.active_tab_background, theme.background_alpha),
                 );
-                let underline = logical_extent_to_buffer(3, scale_120)?.max(1);
+                let underline = logical_extent_to_buffer(
+                    tab_indicator_logical_height(layout.rect.height),
+                    scale_120,
+                )?
+                .max(1);
                 fill_rect(
                     canvas,
                     width,
@@ -987,9 +1049,10 @@ mod tests {
     use splinterm_core::{LairId, TopologyRevision};
 
     use super::{
-        App, DojoId, ResolvedTheme, TAB_STRIP_LOGICAL_HEIGHT, TabHitTarget, WindowDojoIdentity,
-        ambiguous_tab_label, is_generated_lair_name, label_among_tabs, opaque_rgba,
-        tab_context_target, tab_dojo_label, tab_foreground, tab_strip_hit_test, tab_strip_layout,
+        App, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, DojoId, ResolvedTheme, TabHitTarget,
+        WindowDojoIdentity, ambiguous_tab_label, is_generated_lair_name, label_among_tabs,
+        opaque_rgba, tab_context_target, tab_dojo_label, tab_foreground, tab_strip_hit_test,
+        tab_strip_layout,
     };
 
     #[test]
@@ -998,7 +1061,13 @@ mod tests {
         for width in [0, 1, 3, 35, 80, 120, 420, 1200] {
             for visible in [true, false] {
                 let ids = if visible { &ids[..] } else { &[] };
-                let Some(layout) = super::remote_header_layout(width, ids, 10, 100) else {
+                let Some(layout) = super::remote_header_layout(
+                    width,
+                    DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
+                    ids,
+                    10,
+                    100,
+                ) else {
                     assert_eq!(width, 0);
                     continue;
                 };
@@ -1019,11 +1088,16 @@ mod tests {
                     assert!(layout.tabs.is_empty());
                     assert_eq!(layout.new_rect.width, 0);
                 }
-                assert_eq!(layout.rect.height, TAB_STRIP_LOGICAL_HEIGHT);
+                assert_eq!(layout.rect.height, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT);
             }
         }
-        assert!(tab_strip_layout(420, &[], 0).is_none());
-        assert!(tab_strip_layout(420, &ids, 0).unwrap().host_rect.is_none());
+        assert!(tab_strip_layout(420, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &[], 0).is_none());
+        assert!(
+            tab_strip_layout(420, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &ids, 0)
+                .unwrap()
+                .host_rect
+                .is_none()
+        );
     }
 
     #[test]
@@ -1051,7 +1125,14 @@ mod tests {
             let logical_height = 64;
             let width = super::logical_extent_to_buffer(logical_width, scale).unwrap();
             let height = super::logical_extent_to_buffer(logical_height, scale).unwrap();
-            let layout = super::remote_header_layout(logical_width, &[], 0, 180).unwrap();
+            let layout = super::remote_header_layout(
+                logical_width,
+                DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
+                &[],
+                0,
+                180,
+            )
+            .unwrap();
             let host = App::buffer_rect(layout.host_rect.unwrap(), scale).unwrap();
             let label = ChromeText::load("Remote: node", scale).unwrap();
             for foreground in [0xff_00_00, 0x00_ff_00] {
@@ -1107,7 +1188,7 @@ mod tests {
                     }
                     let below = Rect {
                         x: 0,
-                        y: super::logical_extent_to_buffer(TAB_STRIP_LOGICAL_HEIGHT, scale)
+                        y: super::logical_extent_to_buffer(DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, scale)
                             .unwrap(),
                         width,
                         height,
@@ -1140,12 +1221,14 @@ mod tests {
         assert_eq!(opaque_rgba(theme.ui_accent), [0x77, 0x88, 0x99, 0xff]);
 
         let active_dojo = DojoId::new();
-        let layout = tab_strip_layout(420, &[active_dojo], 0).unwrap();
-        let mut canvas = vec![0; 420 * usize::try_from(TAB_STRIP_LOGICAL_HEIGHT).unwrap() * 4];
+        let layout =
+            tab_strip_layout(420, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &[active_dojo], 0).unwrap();
+        let mut canvas =
+            vec![0; 420 * usize::try_from(DEFAULT_TAB_STRIP_LOGICAL_HEIGHT).unwrap() * 4];
         App::paint_tab_strip(
             &mut canvas,
             420,
-            TAB_STRIP_LOGICAL_HEIGHT,
+            DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
             &layout,
             120,
             theme,
@@ -1202,7 +1285,7 @@ mod tests {
     #[test]
     fn tab_strip_layout_keeps_active_visible_with_bounded_non_overlapping_targets() {
         let ids = (0..12).map(|_| DojoId::new()).collect::<Vec<_>>();
-        let layout = tab_strip_layout(420, &ids, 10).unwrap();
+        let layout = tab_strip_layout(420, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &ids, 10).unwrap();
         assert!(layout.tabs.iter().any(|tab| tab.dojo_id == ids[10]));
         assert!(layout.tabs.len() < ids.len());
         assert!(layout.tabs.iter().all(|tab| {
@@ -1233,17 +1316,24 @@ mod tests {
     fn inactive_tabs_have_exact_semantic_dividers() {
         let inactive_dojo = DojoId::new();
         let active_dojo = DojoId::new();
-        let layout = tab_strip_layout(420, &[inactive_dojo, active_dojo], 1).unwrap();
+        let layout = tab_strip_layout(
+            420,
+            DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
+            &[inactive_dojo, active_dojo],
+            1,
+        )
+        .unwrap();
         let theme = ResolvedTheme {
             background: 0x10_20_30,
             pane_border: 0x44_55_66,
             ..ResolvedTheme::default()
         };
-        let mut canvas = vec![0; 420 * usize::try_from(TAB_STRIP_LOGICAL_HEIGHT).unwrap() * 4];
+        let mut canvas =
+            vec![0; 420 * usize::try_from(DEFAULT_TAB_STRIP_LOGICAL_HEIGHT).unwrap() * 4];
         App::paint_tab_strip(
             &mut canvas,
             420,
-            TAB_STRIP_LOGICAL_HEIGHT,
+            DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
             &layout,
             120,
             theme,
@@ -1360,14 +1450,15 @@ mod tests {
     #[test]
     fn tab_strip_compact_layout_retains_active_close_and_new_targets() {
         let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
-        let layout = tab_strip_layout(80, &ids, 1).unwrap();
+        let layout = tab_strip_layout(80, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &ids, 1).unwrap();
         assert_eq!(layout.tabs.len(), 1);
         assert_eq!(layout.tabs[0].dojo_id, ids[1]);
         assert!(layout.tabs[0].label_rect.width > 0);
         assert!(layout.tabs[0].close_rect.width > 0);
         assert!(layout.new_rect.width > 0);
         for width in [3, 35] {
-            let compact = tab_strip_layout(width, &ids, 1).unwrap();
+            let compact =
+                tab_strip_layout(width, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &ids, 1).unwrap();
             assert!(compact.tabs[0].label_rect.width > 0);
             assert!(compact.tabs[0].close_rect.width > 0);
             assert!(compact.new_rect.width > 0);
@@ -1396,7 +1487,13 @@ mod tests {
             for scale in [120, 150, 180, 240] {
                 for logical_width in [420, 140, 60] {
                     let dojo = DojoId::new();
-                    let layout = tab_strip_layout(logical_width, &[dojo], 0).unwrap();
+                    let layout = tab_strip_layout(
+                        logical_width,
+                        DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
+                        &[dojo],
+                        0,
+                    )
+                    .unwrap();
                     let tab = &layout.tabs[0];
                     let maximum_cells = usize::try_from(super::tab_label_maximum_cells(
                         App::buffer_rect(tab.label_rect, scale).unwrap().width,
@@ -1405,7 +1502,8 @@ mod tests {
                     .unwrap();
                     let width = super::logical_extent_to_buffer(logical_width, scale).unwrap();
                     let height =
-                        super::logical_extent_to_buffer(TAB_STRIP_LOGICAL_HEIGHT, scale).unwrap();
+                        super::logical_extent_to_buffer(DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, scale)
+                            .unwrap();
                     let paint = |source: &ChromeSource| {
                         let text =
                             ChromeText::load_source_styled(source, scale, ChromeTextStyle::Bold)
@@ -1487,40 +1585,157 @@ mod tests {
     }
 
     /// VM case E6: at maximum zoom tab labels were clipped mid-glyph with
-    /// no ellipsis. They now fit the strip and end in `…` when too long.
+    /// no ellipsis. They now fit the strip and end in `…` when too long, and
+    /// centred text stays clear of the active-tab indicator at every strip
+    /// height `[bar] size-horizontal` allows.
     #[test]
     fn maximum_zoom_tab_labels_fit_the_strip_and_end_in_an_ellipsis() {
-        use super::{ChromeText, ChromeTextStyle, tab_label_maximum_cells};
+        use super::{
+            ChromeSource, ChromeText, ChromeTextStyle, tab_indicator_logical_height,
+            tab_label_maximum_cells, tab_text_maximum_cell_height,
+        };
         use crate::frontend::badged_tab_label;
         use crate::renderer::RenderContext;
 
-        const { assert!(TAB_STRIP_LOGICAL_HEIGHT >= crate::renderer::CHROME_MAXIMUM_LINE_HEIGHT) };
         let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
-        for scale in [120, 150, 180, 240] {
-            let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
-            let close = ChromeText::load_with_context("×", scale, &context).unwrap();
-            let cell = close.pixel_width() / close.cells().max(1);
-            let layout = tab_strip_layout(640, &ids, 0).unwrap();
-            let strip = App::buffer_rect(layout.rect, scale).unwrap();
-            for tab in &layout.tabs {
-                let label = App::buffer_rect(tab.label_rect, scale).unwrap();
-                let maximum = tab_label_maximum_cells(label.width, cell);
-                let source = badged_tab_label(
-                    None,
-                    "a long Dojo label name",
-                    usize::try_from(maximum).unwrap(),
-                );
-                assert!(source.text().ends_with('…'), "scale {scale}");
-                let text = ChromeText::load_source_styled_with_context(
-                    &source,
+        for strip_height in [DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 20, 34, 48] {
+            for scale in [120, 150, 180, 240] {
+                let context = RenderContext::new(u16::MAX).at_maximum_zoom(scale);
+                let cap = tab_text_maximum_cell_height(strip_height, scale).unwrap();
+                let load = |source: &ChromeSource, style| {
+                    ChromeText::load_source_styled_within(source, scale, style, &context, cap)
+                        .unwrap()
+                };
+                let close = load(&ChromeSource::from("×"), ChromeTextStyle::Regular);
+                let cell = close.pixel_width() / close.cells().max(1);
+                let layout = tab_strip_layout(640, strip_height, &ids, 0).unwrap();
+                let strip = App::buffer_rect(layout.rect, scale).unwrap();
+                let indicator = super::logical_extent_to_buffer(
+                    tab_indicator_logical_height(strip_height),
                     scale,
-                    ChromeTextStyle::Bold,
-                    &context,
                 )
                 .unwrap();
-                assert!(text.pixel_width() <= label.width, "scale {scale}");
-                assert!(text.pixel_height() <= strip.height, "scale {scale}");
+                let case = format!("strip {strip_height}, scale {scale}");
+                assert!(close.pixel_height() <= cap, "{case}");
+                for tab in &layout.tabs {
+                    let label = App::buffer_rect(tab.label_rect, scale).unwrap();
+                    let maximum = tab_label_maximum_cells(label.width, cell);
+                    let source = badged_tab_label(
+                        None,
+                        "a long Dojo label name that keeps going past the tab",
+                        usize::try_from(maximum).unwrap(),
+                    );
+                    assert!(source.text().ends_with('…'), "{case}");
+                    let text = load(&source, ChromeTextStyle::Bold);
+                    assert!(text.pixel_width() <= label.width, "{case}");
+                    assert!(text.pixel_height() <= cap, "{case}");
+                    // paint_tab_strip centres the cell: the indicator never
+                    // reaches it from below, nor a matching gap from above.
+                    let top = (label.height - text.pixel_height()) / 2;
+                    let bottom = strip.height - top - text.pixel_height();
+                    assert!(top >= indicator && bottom >= indicator, "{case}");
+                }
             }
         }
+    }
+
+    #[test]
+    fn strip_derived_dimensions_follow_the_strip_height() {
+        use super::{
+            tab_indicator_logical_height, tab_label_logical_inset, tab_strip_logical_height,
+            tab_text_maximum_cell_height,
+        };
+        use crate::renderer::chrome_maximum_cell_height;
+
+        assert_eq!(DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 26);
+        assert_eq!(
+            DEFAULT_TAB_STRIP_LOGICAL_HEIGHT,
+            u32::from(crate::config::OMARCHY_DEFAULT_BAR_SIZE_PX)
+        );
+        assert_eq!(
+            tab_strip_logical_height(ResolvedTheme::default()),
+            DEFAULT_TAB_STRIP_LOGICAL_HEIGHT
+        );
+        let mut theme = ResolvedTheme::default();
+        theme.shell.bar_size_px = 40;
+        assert_eq!(tab_strip_logical_height(theme), 40);
+        // The former 34 px strip keeps its 3 px indicator and 10 px inset.
+        for (strip, indicator, inset) in [(20, 2, 6), (26, 2, 8), (34, 3, 10), (48, 4, 14)] {
+            assert_eq!(tab_indicator_logical_height(strip), indicator, "{strip}");
+            assert_eq!(tab_label_logical_inset(strip), inset, "{strip}");
+        }
+        // Text cap in buffer px: the strip less the indicator above and below,
+        // never above the 24 px chrome line cap.
+        assert_eq!(tab_text_maximum_cell_height(26, 120).unwrap(), 22);
+        assert_eq!(tab_text_maximum_cell_height(26, 150).unwrap(), 33 - 2 * 3);
+        assert_eq!(tab_text_maximum_cell_height(20, 120).unwrap(), 16);
+        for scale in [120, 150, 180, 240] {
+            assert_eq!(
+                tab_text_maximum_cell_height(34, scale).unwrap(),
+                chrome_maximum_cell_height(scale)
+            );
+            assert_eq!(
+                tab_text_maximum_cell_height(48, scale).unwrap(),
+                chrome_maximum_cell_height(scale)
+            );
+        }
+    }
+
+    #[test]
+    fn strip_layout_at_scale_1_and_1_25_keeps_square_actions_and_targets_inside_the_strip() {
+        let ids = [DojoId::new(), DojoId::new(), DojoId::new()];
+        for strip_height in [DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, 20, 48] {
+            let layout = tab_strip_layout(640, strip_height, &ids, 1).unwrap();
+            assert_eq!(layout.rect.height, strip_height);
+            assert_eq!(layout.new_rect.width, strip_height);
+            assert_eq!(layout.new_rect.height, strip_height);
+            for tab in &layout.tabs {
+                for rect in [tab.rect, tab.label_rect, tab.close_rect] {
+                    assert_eq!((rect.y, rect.height), (0, strip_height));
+                }
+                assert_eq!(tab.close_rect.width, strip_height);
+                let x = f64::from(tab.rect.x + 1);
+                let last_row = f64::from(strip_height) - 0.5;
+                assert_eq!(
+                    tab_strip_hit_test(&layout, (x, last_row)),
+                    Some(TabHitTarget::Activate(tab.dojo_id))
+                );
+                assert_eq!(
+                    tab_strip_hit_test(&layout, (x, f64::from(strip_height))),
+                    None
+                );
+                let close = tab.close_rect;
+                assert_eq!(
+                    tab_strip_hit_test(&layout, (f64::from(close.x), last_row)),
+                    Some(TabHitTarget::Close(tab.dojo_id))
+                );
+            }
+            let new_x = f64::from(layout.new_rect.x);
+            assert_eq!(
+                tab_strip_hit_test(&layout, (new_x, 0.0)),
+                Some(TabHitTarget::New)
+            );
+            assert_eq!(
+                tab_strip_hit_test(&layout, (new_x, f64::from(strip_height))),
+                None
+            );
+            // The strip spans its whole logical height at scale 1 and 1.25.
+            for (scale, buffer_height) in
+                [(120, strip_height), (150, (strip_height * 5).div_ceil(4))]
+            {
+                let strip = App::buffer_rect(layout.rect, scale).unwrap();
+                assert_eq!(
+                    strip.height, buffer_height,
+                    "strip {strip_height}, scale {scale}"
+                );
+                for tab in &layout.tabs {
+                    let close = App::buffer_rect(tab.close_rect, scale).unwrap();
+                    assert!(close.y + close.height <= strip.y + strip.height);
+                }
+            }
+        }
+        // At the default 26 px, scale 1.25 draws a 33 px buffer strip.
+        let layout = tab_strip_layout(640, DEFAULT_TAB_STRIP_LOGICAL_HEIGHT, &ids, 1).unwrap();
+        assert_eq!(App::buffer_rect(layout.rect, 150).unwrap().height, 33);
     }
 }
