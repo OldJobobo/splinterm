@@ -226,10 +226,12 @@ fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerp
     }
 }
 
-/// Layers the Omarchy shell settings onto a resolved palette. A JSON palette
-/// takes only the text size and keeps Omarchy's opaque panel defaults.
-/// Diagnostics for a setting Splinterm ignores are dropped: alpha for a JSON
-/// palette, and the text size while `config.ini` sets a font size.
+/// Layers the Omarchy shell settings onto a resolved palette. The bar height,
+/// which sizes the tab strip, is not a palette setting, so every palette
+/// follows it. A JSON palette also takes the text size but keeps Omarchy's
+/// opaque panel defaults. Diagnostics for a setting Splinterm ignores are
+/// dropped: alpha for a JSON palette, and the text size while `config.ini`
+/// sets a font size.
 fn with_omarchy_shell(
     mut theme: ResolvedTheme,
     layers: ShellLayers<'_>,
@@ -237,16 +239,12 @@ fn with_omarchy_shell(
     fallback: OmarchyTextSizeFallback,
     diagnostics: &mut Vec<String>,
 ) -> ResolvedTheme {
-    if !layers.panels && !follow_text_size {
-        theme.shell = OmarchyShellSettings::default();
-        return theme;
-    }
     let load = load_omarchy_shell(layers.theme_dir, layers.user, fallback);
     diagnostics.extend(
         load.diagnostics
             .into_iter()
             .filter(|(concern, _)| match concern {
-                OmarchyShellConcern::Read => true,
+                OmarchyShellConcern::Read | OmarchyShellConcern::BarSize => true,
                 OmarchyShellConcern::PanelAlpha => layers.panels,
                 OmarchyShellConcern::TextSize => follow_text_size,
             })
@@ -258,6 +256,7 @@ fn with_omarchy_shell(
         OmarchyShellSettings {
             text_size_px: load.settings.text_size_px,
             text_size_held: load.settings.text_size_held,
+            bar_size_px: load.settings.bar_size_px,
             ..OmarchyShellSettings::default()
         }
     };
@@ -947,7 +946,9 @@ mod tests {
             background_alpha: Some(1234),
             background_blur: Some(true),
             // An explicit size and a JSON palette ignore every shell.toml
-            // setting, so this host's own Omarchy files cannot add output.
+            // setting except the bar size, which a stock or absent Omarchy
+            // install on this host always sets validly, so its files add no
+            // output.
             font_size_authority: splinterm::config::FontAuthority::Explicit,
             ..AppConfig::default()
         };
@@ -1082,6 +1083,138 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_size_is_followed_live_from_the_user_shell_toml() {
+        let root = std::env::temp_dir().join(format!("splinterm-bar-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        let user = root.join("home/.config/omarchy/shell.toml");
+        write_theme(&theme, 0x10_10_10);
+        std::fs::write(theme.join("shell.toml"), "[bar]\nsize-horizontal = 26\n").unwrap();
+        let source = ThemeSource::Omarchy(
+            OmarchyThemeRoots::fixed(theme.clone()).with_user_shell(user.clone()),
+        );
+        let mut selection = OmarchyThemeSelection::default();
+        let mut current = ResolvedTheme::default();
+        let mut observed = fingerprint(&source);
+        let mut step = |contents: &str, expected: u16, diagnostics: usize| {
+            std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+            let staged = user.with_extension("tmp");
+            std::fs::write(&staged, contents).unwrap();
+            std::fs::rename(&staged, &user).unwrap();
+            let next_fingerprint = fingerprint(&source);
+            assert_ne!(next_fingerprint, observed);
+            observed = next_fingerprint;
+            let mut reported = Vec::new();
+            let active = active_theme_source(&source, &mut selection);
+            if let Some(next) = resolve_live_theme_update(
+                active,
+                &mut selection,
+                NO_OVERRIDES,
+                current,
+                &mut reported,
+            )
+            .unwrap()
+            {
+                current = next;
+            }
+            assert_eq!(current.shell.bar_size_px, expected, "{contents:?}");
+            assert_eq!(reported.len(), diagnostics, "{reported:?}");
+        };
+        step("[bar]\nsize-horizontal = 32\n", 32, 0);
+        step("[bar]\nsize-horizontal = 90\n", 48, 1);
+        step("[bar]\nsize-horizontal = tall\n", 26, 1);
+        step("", 26, 0);
+        // omarchy-display-text-size writes base-size to the user file; the bar,
+        // and the strip with it, grows by base-size / 12.
+        step("[font]\nbase-size = 16\n", 35, 0);
+        step("[font]\nbase-size = 20\n", 43, 0);
+        step(
+            "[font]\nbase-size = 20\n[bar]\nscale-with-font = off\n",
+            26,
+            0,
+        );
+        step("[font]\nbase-size = 12\n", 26, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_bar_follows_base_size_while_config_ini_sets_the_font_size() {
+        // An explicit config.ini font size stops Splinterm following the text
+        // size, but the Omarchy bar still grows with base-size, so the strip
+        // does too.
+        let root =
+            std::env::temp_dir().join(format!("splinterm-bar-explicit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(theme.join("shell.toml"), "[font]\nbase-size = 16\n").unwrap();
+        let mut diagnostics = Vec::new();
+        let resolved = with_omarchy_shell(
+            ResolvedTheme::default(),
+            ShellLayers {
+                theme_dir: &theme,
+                user: None,
+                panels: true,
+            },
+            false,
+            OmarchyTextSizeFallback::OmarchyDefault,
+            &mut diagnostics,
+        );
+        let applied = ThemeOverrides {
+            alpha: None,
+            blur: None,
+            follow_text_size: false,
+        }
+        .apply(resolved);
+        assert_eq!(applied.shell.text_size_px, None);
+        assert_eq!(applied.shell.bar_size_px, 35);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_json_palette_follows_the_omarchy_bar_size() {
+        // The bar height is not a palette setting: a JSON palette follows the
+        // Omarchy bar like the native one, whether or not config.ini sets a
+        // font size, while it keeps opaque panels.
+        let root = std::env::temp_dir().join(format!("splinterm-bar-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let theme = root.join("theme");
+        std::fs::create_dir_all(&theme).unwrap();
+        let resolve = |contents: &str, follow_text_size: bool| {
+            std::fs::write(theme.join("shell.toml"), contents).unwrap();
+            let mut diagnostics = Vec::new();
+            let shell = with_omarchy_shell(
+                ResolvedTheme::default(),
+                ShellLayers {
+                    theme_dir: &theme,
+                    user: None,
+                    panels: false,
+                },
+                follow_text_size,
+                OmarchyTextSizeFallback::OmarchyDefault,
+                &mut diagnostics,
+            )
+            .shell;
+            (shell, diagnostics)
+        };
+        let scaled =
+            "[bar]\nsize-horizontal = 30\n[font]\nbase-size = 16\n[menu]\nbackground-alpha = 0.5\n";
+        for follow_text_size in [true, false] {
+            let (shell, diagnostics) = resolve(scaled, follow_text_size);
+            // round(30 × 16/12) = 40 px.
+            assert_eq!(shell.bar_size_px, 40, "{follow_text_size}");
+            assert_eq!(shell.menu_alpha, u16::MAX, "{follow_text_size}");
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            // A rejected bar size is reported for a JSON palette too.
+            let (shell, diagnostics) = resolve("[bar]\nsize-horizontal = tall\n", follow_text_size);
+            assert_eq!(shell.bar_size_px, 26);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn repeated_shell_diagnostics_are_reported_once_until_they_change() {
         let mut diagnostics = ThemeReloadDiagnostics::default();
         let invalid = vec!["user/shell.toml: bad".to_owned()];
@@ -1138,11 +1271,35 @@ mod tests {
                 .text_size_px,
             Some(16)
         );
+        // The Omarchy bar still grows with base-size, so a base-size edit
+        // publishes only the new bar height, never the text size.
+        assert_eq!(startup.shell.bar_size_px, 35);
         std::fs::write(&user, "[font]\nbase-size = 18\n").unwrap();
         let mut selection = OmarchyThemeSelection::default();
         let active = active_theme_source(&source, &mut selection);
-        assert!(
+        let next =
             resolve_live_theme_update(active, &mut selection, explicit, startup, &mut Vec::new())
+                .unwrap()
+                .expect("the bar follows base-size");
+        assert_eq!(next.shell.text_size_px, None);
+        assert_eq!(next.shell.bar_size_px, 39);
+        // With the bar's scale-with-font off, a base-size edit publishes
+        // nothing while config.ini owns the size.
+        std::fs::write(
+            &user,
+            "[bar]\nscale-with-font = off\n[font]\nbase-size = 18\n",
+        )
+        .unwrap();
+        let unscaled = prepare_startup_theme(&source, explicit).theme;
+        assert_eq!(unscaled.shell.bar_size_px, 26);
+        std::fs::write(
+            &user,
+            "[bar]\nscale-with-font = off\n[font]\nbase-size = 20\n",
+        )
+        .unwrap();
+        let active = active_theme_source(&source, &mut selection);
+        assert!(
+            resolve_live_theme_update(active, &mut selection, explicit, unscaled, &mut Vec::new())
                 .unwrap()
                 .is_none(),
             "a base-size edit publishes nothing while config.ini owns the size"
@@ -1252,7 +1409,7 @@ mod tests {
         std::fs::write(&json, valid_theme_json(1.0, false)).unwrap();
         std::fs::write(
             &user,
-            "[menu]\nbackground-alpha = opaque\n[font]\nbase-size = big\n",
+            "[menu]\nbackground-alpha = opaque\n[font]\nbase-size = big\n[bar]\nsize-horizontal = tall\n",
         )
         .unwrap();
         let roots = OmarchyThemeRoots::fixed(theme).with_user_shell(user);
@@ -1265,15 +1422,16 @@ mod tests {
             path: json,
             shell: Some(roots),
         };
+        // Every palette follows, and so reports, the bar size.
         for (source, overrides, expected) in [
-            // Both settings are followed and both are reported.
-            (&omarchy, NO_OVERRIDES, 2),
+            // All three settings are followed and all are reported.
+            (&omarchy, NO_OVERRIDES, 3),
             // An explicit font size ignores the text size.
-            (&omarchy, explicit, 1),
+            (&omarchy, explicit, 2),
             // A JSON palette ignores panel alpha.
-            (&json_source, NO_OVERRIDES, 1),
-            // A JSON palette with an explicit size ignores both.
-            (&json_source, explicit, 0),
+            (&json_source, NO_OVERRIDES, 2),
+            // A JSON palette with an explicit size ignores both, but not the bar.
+            (&json_source, explicit, 1),
         ] {
             let loaded = prepare_startup_theme(source, overrides);
             assert_eq!(loaded.shell_diagnostics.len(), expected, "{overrides:?}");
