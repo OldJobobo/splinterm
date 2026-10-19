@@ -190,7 +190,11 @@ pub enum ClientFrame {
         /// for at most [`MAX_HANDOFF_WINDOWS`] Windows, and never while a
         /// handoff already holds its Windows; any other declaration fails
         /// the handshake. Only the anchor may acknowledge its prepare frame
-        /// ([`Request::AcknowledgeHandoffPrepare`]).
+        /// ([`Request::AcknowledgeHandoffPrepare`]), so an anchor connection
+        /// cannot itself start a handoff: `PrepareDaemonHandoff { Execute }`
+        /// on it fails with [`ErrorCode::InvalidArgument`] before anything
+        /// begins, while a dry run is answered. The initiator uses a separate
+        /// connection.
         #[serde(default, skip_serializing_if = "bool_is_false")]
         handoff_window: bool,
     },

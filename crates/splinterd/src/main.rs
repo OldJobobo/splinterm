@@ -10073,6 +10073,7 @@ async fn handle_authorized_request(
             }
         }
         Request::PrepareDaemonHandoff { mode } => {
+            refuse_handoff_from_anchor(state, connection_id, mode)?;
             require_trusted_local_ui(trusted_ui_client, peer)?;
             let report = daemon_handoff_report(state).await?;
             match mode {
@@ -10189,6 +10190,32 @@ fn is_window_anchor(state: &DaemonState, connection_id: u64) -> bool {
         .lock()
         .unwrap()
         .is_anchor(connection_id)
+}
+
+/// Refuses an `Execute` on a Window's anchor connection, before the gate,
+/// so nothing is begun. The anchor must stay free to acknowledge its own
+/// prepare frame, which the initiator's in-flight `Execute` would refuse,
+/// so the initiator (`splinterm upgrade`, or the desktop dialog) always uses
+/// a separate connection. A dry run on an anchor is answered as usual.
+///
+/// The reverse cannot arise: an anchor is declared only in `Hello`, which a
+/// connection sends before any request.
+///
+/// # Errors
+/// `InvalidArgument` for `Execute` on an anchor connection.
+fn refuse_handoff_from_anchor(
+    state: &DaemonState,
+    connection_id: u64,
+    mode: splinterm_protocol::DaemonHandoffMode,
+) -> Result<(), ProtocolError> {
+    if mode == splinterm_protocol::DaemonHandoffMode::Execute
+        && is_window_anchor(state, connection_id)
+    {
+        return Err(invalid(
+            "a Window's anchor connection cannot start a daemon handoff; start it from a separate connection",
+        ));
+    }
+    Ok(())
 }
 
 /// A declared Window acknowledges its handoff prepare frame by its
@@ -11173,6 +11200,9 @@ struct AttemptExec {
 
 /// Runs `Execute` through the handoff gate and returns the error it ends
 /// with.
+///
+/// An `Execute` on a Window's anchor connection never reaches it: the
+/// handler refuses it first ([`refuse_handoff_from_anchor`]).
 ///
 /// A second `Execute` while a handoff runs is refused as in progress. Any
 /// other `Execute` is refused before the gate when
@@ -22666,5 +22696,63 @@ mod tests {
         drop(awaiting);
         assert!(!answers.take_late_answer(9));
         drop(initiator);
+    }
+
+    #[tokio::test]
+    async fn an_anchor_connection_cannot_start_a_handoff_but_may_ask_for_a_dry_run() {
+        let state = window_test_state();
+        let process = TestWindowProcess::spawn();
+        let _window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        // Execute on the anchor is refused before the gate: nothing begins.
+        let refused = handle_authorized_request(
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::Execute,
+            },
+            &state,
+            &PeerIdentity::for_test(),
+            11,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+            &mut HandoffAdmission::unfenced(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidArgument);
+        assert!(
+            refused.message.contains("separate connection"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(handoff_status_phases(&mut subscription).is_empty());
+        assert!(state.handoff_initiators.lock().unwrap().is_empty());
+        // A dry run on the anchor, and Execute on any other connection, pass
+        // this check and meet the ordinary handler.
+        for (connection_id, mode) in [
+            (11, splinterm_protocol::DaemonHandoffMode::DryRun),
+            (12, splinterm_protocol::DaemonHandoffMode::Execute),
+        ] {
+            refuse_handoff_from_anchor(&state, connection_id, mode).unwrap();
+        }
+        let dry_run = handle_authorized_request(
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::DryRun,
+            },
+            &state,
+            &PeerIdentity::for_test(),
+            11,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+            &mut HandoffAdmission::unfenced(),
+        )
+        .await
+        .unwrap_err();
+        // The unit-test peer is not the installed client, so the ordinary
+        // trusted-UI check answers, not the anchor refusal.
+        assert_eq!(dry_run.code, ErrorCode::Unauthorized);
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
     }
 }
