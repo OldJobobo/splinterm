@@ -67,6 +67,13 @@ jobs:
             echo 'nix=true' >>"$GITHUB_OUTPUT"
             exit 0
           fi
+          # A pull request whose payload omits either revision (GitHub may
+          # send an empty one for forks) cannot be gated, so it runs nix.
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            echo 'Pull-request revisions are missing; running every boundary.'
+            echo 'nix=true' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           # --no-renames lists both sides of a move; a failed diff fails closed.
           git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA" >changed-paths.txt
           cat changed-paths.txt

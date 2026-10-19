@@ -128,6 +128,13 @@ class CiWorkflowTests(unittest.TestCase):
             block.index('if [ "$EVENT_NAME" != pull_request ]; then'),
             block.index("git diff"),
         )
+        # A pull request with a missing revision (an empty fork payload)
+        # selects nix rather than diffing an empty range into nix=false.
+        missing = block.index('if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then')
+        self.assertLess(missing, block.index("git diff"))
+        self.assertLess(
+            missing, block.index("echo 'nix=true'", missing), block.index("git diff")
+        )
         pattern = re.search(r"grep -Eq '([^']+)' changed-paths.txt", block).group(1)
         selected = re.compile(pattern)
         for path in (
