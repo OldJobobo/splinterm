@@ -59,6 +59,17 @@ remain bound to reviewed commits on `main` for the active 0.2 line or
 `maint/0.1` for the 0.1 maintenance line. Candidate construction and promotion
 must be dispatched from the same authority branch.
 
+## Remote agent delegation
+
+Claude Code and Pi share the headless CLI in `tools/agents/remote`. Read
+[`docs/agent-delegation.md`](docs/agent-delegation.md) for private host setup,
+bounded tasks, durable job receipts, and recovery. Scouts/reviewers inspect source;
+validator jobs run declared Cargo checks in an isolated build environment under
+an explicitly configured restricted worker UID. Writing agents remain disabled.
+VM testing stays coordinator-owned through the existing testbed tooling and its
+explicit graphical approval boundary. Remote work retains the same branch,
+approval, validation, and review requirements.
+
 ## Standard validation
 
 Use the narrowest tier that proves the current boundary; do not run every tier

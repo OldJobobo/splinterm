@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
@@ -114,6 +114,29 @@ class CiWorkflowTests(unittest.TestCase):
                 if "cargo test " in line
             )
         )
+
+    def test_agent_runner_contracts_are_mandatory_and_retain_failure_evidence(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        block = workflow[
+            workflow.index("  package-automation:") : workflow.index("  renderer-contracts:")
+        ]
+        step = block.split(
+            "      - name: Run agent runner contracts without remote services\n", 1
+        )[1].split("      - name: Upload focused", 1)[0]
+        command = "python -m unittest discover -s tools/agents -p 'test_*.py' -v"
+        self.assertEqual(workflow.count(command), 1)
+        self.assertIn(command, step)
+        self.assertIn("set -o pipefail", step)
+        self.assertIn("2>&1 | tee remote-agent-tests.log", step)
+        self.assertNotIn("--host", step)
+        self.assertNotIn("submit", step)
+        self.assertNotIn("continue-on-error", block)
+        self.assertIn(
+            "path: |\n            package-release-tests.log\n            remote-agent-tests.log",
+            block,
+        )
+        static = workflow[workflow.index("  static:") : workflow.index("  workspace-tests:")]
+        self.assertIn("tools/agents/provision-arch-worker.sh", static)
 
     def test_timing_sensitive_jobs_upload_logs_without_retry(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
