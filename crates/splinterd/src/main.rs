@@ -16507,6 +16507,77 @@ mod tests {
         drop(controller);
     }
 
+    /// A consent prompt runs through `outside`: the fence goes up while the
+    /// prompt is open, and the retaken admission then reads `Fenced`.
+    #[tokio::test]
+    async fn a_wait_outside_the_admission_lets_the_fence_go_up() {
+        let state = test_state(false);
+        let (admitted, admitted_signal) = tokio::sync::oneshot::channel();
+        let (answer, answer_signal) = tokio::sync::oneshot::channel::<bool>();
+        let prompt = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                let request = held_fenced_request();
+                let mut admission = HandoffAdmission::for_request(&request, &state)
+                    .await
+                    .unwrap();
+                admitted.send(()).unwrap();
+                let answered = admission.outside(answer_signal).await.unwrap();
+                // Retaken: a later fence would have to wait for this handler.
+                let retaken = state.handoff_in_flight.try_write().is_err();
+                let fenced = refuse_while_fenced(&state).map_err(|error| error.code);
+                drop(admission);
+                (answered, retaken, fenced)
+            }
+        });
+        admitted_signal.await.unwrap();
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), attempt.fence())
+                .await
+                .expect("the fence never waits out an open prompt"),
+            Ok(())
+        );
+        assert!(state.handoff_gate.is_fenced());
+        assert!(!prompt.is_finished(), "the prompt is still open");
+        answer.send(true).unwrap();
+        let (answered, retaken, fenced) = time::timeout(Duration::from_secs(5), prompt)
+            .await
+            .expect("the admission is retaken once the fence released its guard")
+            .unwrap();
+        assert!(answered);
+        assert!(retaken, "the admission is held again after the prompt");
+        assert_eq!(fenced, Err(ErrorCode::HandoffInProgress));
+        assert!(state.handoff_in_flight.try_write().is_ok());
+        attempt.cancel(HandoffCancelReason::Requested).await;
+    }
+
+    /// A committed close releases its admission before its exit wait.
+    #[tokio::test]
+    async fn a_released_admission_no_longer_holds_the_fence_back() {
+        let state = test_state(false);
+        let request = held_fenced_request();
+        let mut admission = HandoffAdmission::for_request(&request, &state)
+            .await
+            .unwrap();
+        assert!(
+            state.handoff_in_flight.try_write().is_err(),
+            "a fenced admission holds the guard"
+        );
+        admission.release();
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(1), attempt.fence())
+                .await
+                .expect("a released admission does not hold the fence back"),
+            Ok(())
+        );
+        assert!(state.handoff_gate.is_fenced());
+        // Still alive: only `release` freed the guard.
+        drop(admission);
+        attempt.cancel(HandoffCancelReason::Requested).await;
+    }
+
     #[tokio::test]
     async fn launch_reservations_are_refused_until_the_gate_is_idle() {
         let state = test_state(false);
