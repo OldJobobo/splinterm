@@ -139,6 +139,10 @@ const HANDOFF_FENCE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDOFF_RETIRING_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 static NEXT_SUBSCRIPTION: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+/// Identifies every handoff prepare frame this process sends: never zero and
+/// never reused, so an acknowledgement names exactly one frame (Plan 0061
+/// M3.13b1).
+static NEXT_HANDOFF_PREPARE: AtomicU64 = AtomicU64::new(1);
 
 struct AbortOnDrop {
     task: Option<JoinHandle<()>>,
@@ -10200,17 +10204,25 @@ async fn window_acknowledgement(
     connection_id: u64,
     trusted_ui_client: bool,
 ) -> Option<Result<Handled, ProtocolError>> {
-    let &Request::AcknowledgeHandoffPrepare { daemon_generation } = request else {
+    let &Request::AcknowledgeHandoffPrepare {
+        daemon_generation,
+        prepare_id,
+    } = request
+    else {
         return None;
     };
     if !trusted_ui_client || !is_window_anchor(state, connection_id) {
         return None;
     }
     let result =
-        acknowledge_handoff_prepare(state, connection_id, daemon_generation).map(|()| Handled {
-            response: Response::Acknowledged,
-            subscription: None,
-        });
+        splinterm_protocol::validate_handoff_acknowledgement(daemon_generation, prepare_id)
+            .and_then(|()| {
+                acknowledge_handoff_prepare(state, connection_id, daemon_generation, prepare_id)
+            })
+            .map(|()| Handled {
+                response: Response::Acknowledged,
+                subscription: None,
+            });
     append_request_result_audit(
         state,
         peer,
@@ -10226,36 +10238,31 @@ async fn window_acknowledgement(
 /// Accepts a Window's acknowledgement of its handoff prepare frame by its
 /// participant binding (Plan 0061 M3.13b1).
 ///
-/// Only the anchor connection the frame went to may acknowledge it, naming
-/// the generation it came from, exactly once, and only while the attempt
-/// waits ([`handoff_windows::HandoffWindows::complete_acknowledgement`]).
-/// An anchor that left an earlier attempt's frame unanswered has its next
-/// acknowledgement refused as that late answer, since every attempt names
-/// the same generation
-/// ([`handoff_windows::HandoffWindows::take_stale_acknowledgement`]).
-/// The Window must still be the process its anchor pinned (the pidfd alive
-/// and the start time unchanged), and the image it executed at `Hello` must
-/// be a client a Window may run ([`window_client_identities`]). Everything
-/// else fails closed with `NotFound`, as an acknowledgement nothing waits
-/// for does. The trusted-UI executable check stays in force for every other
-/// request, this one from any other connection included.
+/// The binding is checked first: the Window must still be the process its
+/// anchor pinned (the pidfd alive and the start time unchanged), and the
+/// image it executed at `Hello` must be a client a Window may run
+/// ([`window_client_identities`]). Then, in one step under the registry lock,
+/// only the pending prepare that matches this anchor, the generation, and
+/// the prepare id exactly is consumed
+/// ([`handoff_windows::HandoffWindows::complete_acknowledgement`]). Prepare
+/// ids are never reused, so a late answer to an earlier attempt's frame, or
+/// a handler delayed past a later attempt's start, matches nothing.
+/// Everything else fails closed with `NotFound` and changes nothing, as an
+/// acknowledgement nothing waits for does. The trusted-UI executable check
+/// stays in force for every other request, this one from any other
+/// connection included.
 fn acknowledge_handoff_prepare(
     state: &DaemonState,
     connection_id: u64,
     daemon_generation: u64,
+    prepare_id: u64,
 ) -> Result<(), ProtocolError> {
-    let pending = {
-        let mut windows = state.handoff_windows.lock().unwrap();
-        // The late answer to a frame an earlier attempt stopped waiting for
-        // names the same generation; it is refused, never credited to the
-        // frame pending now.
-        if windows.take_stale_acknowledgement(connection_id) {
-            None
-        } else {
-            windows.pending_acknowledgement(connection_id, daemon_generation)
-        }
-    };
-    let Some(process) = pending else {
+    let process = state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .anchor_process(connection_id);
+    let Some(process) = process else {
         return Err(handoff_requests::no_pending_handoff_prepare());
     };
     if process.pin() != handoff_windows::ProcessPin::Live
@@ -10272,7 +10279,7 @@ fn acknowledge_handoff_prepare(
         .handoff_windows
         .lock()
         .unwrap()
-        .complete_acknowledgement(connection_id, daemon_generation)
+        .complete_acknowledgement(connection_id, daemon_generation, prepare_id)
     {
         Ok(())
     } else {
@@ -11343,10 +11350,6 @@ enum AttemptWindowState {
     Unpinned,
     /// A trusted-UI process with attachments and no anchor.
     Undeclared,
-    /// An anchor that owes
-    /// [`handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS`] late answers; it was
-    /// sent nothing and is named as unacknowledged.
-    Owing,
     /// The process exited; it is dropped without asking.
     Exited,
 }
@@ -11394,9 +11397,7 @@ impl AttemptWindow {
                 acknowledged, sent, ..
             } => matches!(sent, Some(false)) || (acknowledged && matches!(sent, Some(true))),
             AttemptWindowState::Exited => true,
-            AttemptWindowState::Unpinned
-            | AttemptWindowState::Undeclared
-            | AttemptWindowState::Owing => false,
+            AttemptWindowState::Unpinned | AttemptWindowState::Undeclared => false,
         }
     }
 
@@ -11410,7 +11411,7 @@ impl AttemptWindow {
                 ..
             }
             | AttemptWindowState::Exited => None,
-            AttemptWindowState::Prepared { .. } | AttemptWindowState::Owing => {
+            AttemptWindowState::Prepared { .. } => {
                 Some(splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)
             }
             AttemptWindowState::Unpinned => Some(splinterm_protocol::HandoffWindowIssue::Unpinned),
@@ -11434,10 +11435,8 @@ impl AttemptWindow {
 /// 2. Each anchor whose process is still pinned and runs a client image a
 ///    Window may run ([`window_client_identities`]) is sent its prepare frame
 ///    ([`send_window_prepare`]). One not pinned, or running another image,
-///    is sent nothing and is named as unpinned; one that owes
-///    [`handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS`] late answers to earlier
-///    frames is sent nothing and is named as unacknowledged; one whose
-///    process exited is dropped.
+///    is sent nothing and is named as unpinned; one whose process exited is
+///    dropped.
 /// 3. It waits up to [`HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT`] for every
 ///    acknowledgement that counts: the anchor answered and its writer
 ///    reported the whole frame written. A Window whose process exits
@@ -11537,7 +11536,6 @@ async fn prepare_and_await_windows<F: ForwardPreparation>(
             handoff_windows::ProcessPin::Live if !eligible.contains(&anchor.process.executable) => {
                 AttemptWindowState::Unpinned
             }
-            handoff_windows::ProcessPin::Live if anchor.owes_too_many => AttemptWindowState::Owing,
             handoff_windows::ProcessPin::Live => {
                 let process = anchor.process.clone();
                 let anchor_connection_id = anchor.connection_id;
@@ -11720,8 +11718,10 @@ async fn send_window_prepare<F: ForwardPreparation>(
     let (snapshot, client_snapshot) = forward
         .open_client_snapshot()
         .map_err(|error| failed("the client snapshot descriptor", &error))?;
+    let prepare_id = NEXT_HANDOFF_PREPARE.fetch_add(1, Ordering::Relaxed);
     let prepare = splinterm_protocol::HandoffPrepare {
         daemon_generation: state.daemon_generation,
+        prepare_id,
         descriptors: splinterm_protocol::HANDOFF_PREPARE_DESCRIPTORS,
         client_snapshot,
     };
@@ -11731,6 +11731,7 @@ async fn send_window_prepare<F: ForwardPreparation>(
     state.handoff_windows.lock().unwrap().await_acknowledgement(
         anchor.connection_id,
         state.daemon_generation,
+        prepare_id,
         index,
         events.clone(),
     );
@@ -16927,6 +16928,7 @@ mod tests {
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
+                prepare_id: 1,
             },
         ];
         // Development terminal access and remote human roles never stand in
@@ -17303,6 +17305,7 @@ mod tests {
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
+                prepare_id: 1,
             },
         ];
         let fenced = [
@@ -21557,13 +21560,33 @@ mod tests {
         }
     }
 
+    /// Acknowledges `prepare` on `connection_id`, echoing its generation and
+    /// id, as a Window does.
     async fn acknowledge(
         state: &Arc<DaemonState>,
         connection_id: u64,
+        prepare: &splinterm_protocol::HandoffPrepare,
+    ) -> Result<Response, ErrorCode> {
+        acknowledge_with(
+            state,
+            connection_id,
+            prepare.daemon_generation,
+            prepare.prepare_id,
+        )
+        .await
+    }
+
+    async fn acknowledge_with(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
         daemon_generation: u64,
+        prepare_id: u64,
     ) -> Result<Response, ErrorCode> {
         handle_request(
-            Request::AcknowledgeHandoffPrepare { daemon_generation },
+            Request::AcknowledgeHandoffPrepare {
+                daemon_generation,
+                prepare_id,
+            },
             state,
             &PeerIdentity::for_test(),
             connection_id,
@@ -21924,7 +21947,7 @@ mod tests {
                 .contains(rustix::io::FdFlags::CLOEXEC)
         );
         assert_eq!(
-            acknowledge(&state, window.connection_id, state.daemon_generation).await,
+            acknowledge(&state, window.connection_id, &prepare).await,
             Ok(Response::Acknowledged)
         );
         let exec = take_exec_ready(&state, execute).await;
@@ -21951,30 +21974,37 @@ mod tests {
         );
     }
 
-    /// Checks the participant binding while the attempt waits: anchor 11
-    /// may acknowledge once for `generation`; anchor 12 not for another
-    /// generation; anchor 13 was sent nothing; connection 99 is no anchor.
-    async fn assert_acknowledgement_binding(state: &Arc<DaemonState>, generation: u64) {
+    /// Checks the participant binding while the attempt waits. Anchor 11 was
+    /// sent `first` and anchor 12 `second`; anchor 13 was sent nothing;
+    /// connection 99 is no anchor. A wrong generation, another frame's id, or
+    /// a zero id changes nothing: anchor 11's exact answer then counts, once.
+    async fn assert_acknowledgement_binding(
+        state: &Arc<DaemonState>,
+        first: &splinterm_protocol::HandoffPrepare,
+        second: &splinterm_protocol::HandoffPrepare,
+    ) {
+        assert_ne!(first.prepare_id, second.prepare_id);
+        let generation = first.daemon_generation;
+        for (connection_id, daemon_generation, prepare_id, expected) in [
+            (11, generation + 1, first.prepare_id, ErrorCode::NotFound),
+            (11, generation, second.prepare_id, ErrorCode::NotFound),
+            (12, generation, first.prepare_id, ErrorCode::NotFound),
+            (11, generation, 0, ErrorCode::InvalidArgument),
+            (13, generation, first.prepare_id, ErrorCode::NotFound),
+            (99, generation, first.prepare_id, ErrorCode::Unauthorized),
+        ] {
+            assert_eq!(
+                acknowledge_with(state, connection_id, daemon_generation, prepare_id).await,
+                Err(expected),
+                "connection {connection_id}, generation {daemon_generation}, id {prepare_id}"
+            );
+        }
         assert_eq!(
-            acknowledge(state, 12, generation + 1).await,
-            Err(ErrorCode::NotFound)
-        );
-        assert_eq!(
-            acknowledge(state, 99, generation).await,
-            Err(ErrorCode::Unauthorized),
-            "a connection that is no anchor takes the trusted-UI check"
-        );
-        assert_eq!(
-            acknowledge(state, 13, generation).await,
-            Err(ErrorCode::NotFound),
-            "an anchor that was sent nothing"
-        );
-        assert_eq!(
-            acknowledge(state, 11, generation).await,
+            acknowledge(state, 11, first).await,
             Ok(Response::Acknowledged)
         );
         assert_eq!(
-            acknowledge(state, 11, generation).await,
+            acknowledge(state, 11, first).await,
             Err(ErrorCode::NotFound)
         );
     }
@@ -22010,11 +22040,11 @@ mod tests {
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let execute = spawn_window_execute(&state, Some(initiator));
 
-        let (_, first_descriptors) = first_window.read_prepare().await;
+        let (first_prepare, first_descriptors) = first_window.read_prepare().await;
         let (second_prepare, second_descriptors) = second_window.read_prepare().await;
         assert_eq!(second_prepare.daemon_generation, generation);
         // Only the anchor the frame went to, for its generation, once.
-        assert_acknowledgement_binding(&state, generation).await;
+        assert_acknowledgement_binding(&state, &first_prepare, &second_prepare).await;
 
         let (prompt_generation, deadline_ms, windows) = decision_prompt(&mut prompts).await;
         assert_eq!(prompt_generation, generation);
@@ -22044,7 +22074,7 @@ mod tests {
         );
         // The wait is over: a late acknowledgement fails.
         assert_eq!(
-            acknowledge(&state, 12, generation).await,
+            acknowledge(&state, 12, &second_prepare).await,
             Err(ErrorCode::NotFound)
         );
         assert!(state.handoff_gate.is_fenced(), "the fence holds meanwhile");
@@ -22073,7 +22103,7 @@ mod tests {
         answers.accept(late_answer()).unwrap();
         assert!(answers.accept(late_answer()).is_err());
         assert_eq!(
-            acknowledge(&state, 12, generation).await,
+            acknowledge(&state, 12, &second_prepare).await,
             Err(ErrorCode::NotFound)
         );
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
@@ -22090,10 +22120,10 @@ mod tests {
         let initiator = HandoffInitiator::new(9, control);
         let answers = Arc::clone(&initiator.answers);
         let execute = spawn_window_execute(&state, Some(initiator));
-        let (_, kept_descriptors) = kept_window.read_prepare().await;
+        let (kept_prepare, kept_descriptors) = kept_window.read_prepare().await;
         let (_, dropped_descriptors) = dropped_window.read_prepare().await;
         assert_eq!(
-            acknowledge(&state, 11, state.daemon_generation).await,
+            acknowledge(&state, 11, &kept_prepare).await,
             Ok(Response::Acknowledged)
         );
         let (_, _, windows) = decision_prompt(&mut prompts).await;
@@ -22203,9 +22233,9 @@ mod tests {
         let initiator = HandoffInitiator::new(9, control);
         let answers = Arc::clone(&initiator.answers);
         let execute = spawn_window_execute(&state, Some(initiator));
-        let (_, descriptors) = stale_window.read_prepare().await;
+        let (stale_prepare, descriptors) = stale_window.read_prepare().await;
         assert_eq!(
-            acknowledge(&state, 11, state.daemon_generation).await,
+            acknowledge(&state, 11, &stale_prepare).await,
             Ok(Response::Acknowledged)
         );
         // A Window running any other image is sent nothing.
@@ -22309,8 +22339,18 @@ mod tests {
         })
         .await
         .expect("the writer fails");
-        // Whether or not this answer is taken, it is never credited.
-        let _ = acknowledge(&state, 11, state.daemon_generation).await;
+        // Whether or not this answer is taken, it is never credited. The
+        // frame never arrived, so its id is the next one this process issued;
+        // under parallel tests the guess may be stale, which only weakens it.
+        let _ = acknowledge_with(
+            &state,
+            11,
+            state.daemon_generation,
+            NEXT_HANDOFF_PREPARE
+                .load(Ordering::Relaxed)
+                .saturating_sub(1),
+        )
+        .await;
         let (_, _, windows) = decision_prompt(&mut prompts).await;
         assert_eq!(
             windows
@@ -22326,56 +22366,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_late_acknowledgement_from_a_cancelled_attempt_never_completes_the_next() {
+    async fn an_acknowledgement_for_an_earlier_attempts_prepare_never_completes_the_next() {
         let state = window_test_state();
         let generation = state.daemon_generation;
         let process = TestWindowProcess::spawn();
         let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
         // Attempts N and N+1: the Window answers neither in time, and both are
         // cancelled.
-        for owed in 1..=2 {
+        let mut earlier = Vec::new();
+        for _ in 0..2 {
             let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
             let initiator = HandoffInitiator::new(9, control);
             let answers = Arc::clone(&initiator.answers);
             let execute = spawn_window_execute(&state, Some(initiator));
-            let (_, unanswered) = window.read_prepare().await;
+            let (prepare, unanswered) = window.read_prepare().await;
             decision_prompt(&mut prompts).await;
             answers
                 .accept(ClientFrame::Cancel { request_id: 9 })
                 .unwrap();
             assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
             assert!(continuation_closed(unanswered.continuation()));
-            assert_eq!(
-                state
-                    .handoff_windows
-                    .lock()
-                    .unwrap()
-                    .stale_acknowledgements(11),
-                owed
-            );
+            earlier.push(prepare);
         }
-        // Attempt N+2 names the same generation. The Window's late answers to
-        // both cancelled frames arrive first and are refused; only its answer
-        // to N+2's frame then counts.
+        // Attempt N+2 names the same generation but a new prepare id. The
+        // Window's late answers to both cancelled frames match nothing and
+        // change nothing; its answer to N+2's frame then counts.
         let (control, _prompts) = mpsc::channel(CONTROL_QUEUE);
         let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
-        let (prepare, current) = window.read_prepare().await;
-        assert_eq!(prepare.daemon_generation, generation);
-        for late in ["N", "N+1"] {
+        let (current, current_descriptors) = window.read_prepare().await;
+        assert_eq!(current.daemon_generation, generation);
+        assert!(
+            earlier
+                .iter()
+                .all(|prepare| prepare.prepare_id != current.prepare_id)
+        );
+        for late in &earlier {
             assert_eq!(
-                acknowledge(&state, 11, generation).await,
+                acknowledge(&state, 11, late).await,
                 Err(ErrorCode::NotFound),
-                "the late answer to attempt {late}'s frame"
+                "the late answer to prepare {}",
+                late.prepare_id
             );
         }
         assert_eq!(
-            acknowledge(&state, 11, generation).await,
+            acknowledge(&state, 11, &current).await,
             Ok(Response::Acknowledged)
         );
         let exec = take_exec_ready(&state, execute).await;
         assert_eq!(exec.windows.windows.len(), 1);
         exec.cancel(HandoffCancelReason::Failed).await;
-        assert!(continuation_closed(current.continuation()));
+        assert!(continuation_closed(current_descriptors.continuation()));
     }
 
     #[tokio::test]
@@ -22388,10 +22428,10 @@ mod tests {
         let initiator = HandoffInitiator::new(9, control);
         let answers = Arc::clone(&initiator.answers);
         let execute = spawn_window_execute(&state, Some(initiator));
-        exiting_window.read_prepare().await;
+        let (exiting_prepare, _) = exiting_window.read_prepare().await;
         silent_window.read_prepare().await;
         assert_eq!(
-            acknowledge(&state, 11, state.daemon_generation).await,
+            acknowledge(&state, 11, &exiting_prepare).await,
             Ok(Response::Acknowledged)
         );
         decision_prompt(&mut prompts).await;
@@ -22458,23 +22498,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_anchor_owing_too_many_late_answers_is_sent_nothing_and_named() {
+    async fn a_prepare_that_was_never_queued_does_not_affect_the_next_attempt() {
         let state = window_test_state();
         let process = TestWindowProcess::spawn();
-        let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
-        // Earlier attempts left that many frames unanswered.
+        let window_process = process.pinned(INSTALLED_CLIENT);
+        // The anchor's control queue holds one frame and its Hello fills it:
+        // nothing drains it during the first attempt.
+        let (control, control_rx) = mpsc::channel(1);
         {
-            let (events, _events) = mpsc::unbounded_channel();
             let mut windows = state.handoff_windows.lock().unwrap();
-            for _ in 0..handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS {
-                assert!(windows.await_acknowledgement(
-                    11,
-                    state.daemon_generation,
-                    0,
-                    events.clone()
-                ));
-                windows.close_acknowledgements();
-            }
+            windows.register_connection(11, window_process.pid, window_process.start_time);
+            windows
+                .declare_anchor(11, window_process, control, test_hello())
+                .unwrap();
         }
         let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
         let initiator = HandoffInitiator::new(9, control);
@@ -22492,27 +22528,39 @@ mod tests {
             .accept(ClientFrame::Cancel { request_id: 9 })
             .unwrap();
         assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
-        // No prepare frame reached it; only its Hello is queued.
-        let (hello, descriptors) = window.read_raw_frame().await;
-        assert!(matches!(hello, ServerFrame::Hello { .. }) && descriptors.is_none());
-        let mut byte = [0_u8; 1];
+        // Its writer starts now. The next attempt prepares and accepts the
+        // Window as if nothing had happened.
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server.set_nonblocking(true).unwrap();
+        let (reader, writer) = UnixStream::from_std(server).unwrap().into_split();
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
+        let mut window = TestWindow {
+            connection_id: 11,
+            client: Some(client),
+            greeted: false,
+            outbound,
+            _reader: reader,
+            writer: AbortOnDrop::new(tokio::spawn(write_frames(
+                writer,
+                outbound_rx,
+                control_rx,
+                Arc::clone(&state.terminal_transaction_memory),
+            ))),
+        };
+        let (control, _prompts) = mpsc::channel(CONTROL_QUEUE);
+        let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
+        let (prepare, descriptors) = window.read_prepare().await;
         assert_eq!(
-            rustix::net::recv(
-                window.client.as_ref().unwrap(),
-                &mut byte[..],
-                rustix::net::RecvFlags::DONTWAIT,
-            )
-            .unwrap_err(),
-            rustix::io::Errno::AGAIN
+            acknowledge(&state, window.connection_id, &prepare).await,
+            Ok(Response::Acknowledged)
         );
-        assert_eq!(
-            state
-                .handoff_windows
-                .lock()
-                .unwrap()
-                .stale_acknowledgements(11),
-            handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS
-        );
+        let exec = take_exec_ready(&state, execute).await;
+        assert_eq!(exec.windows.windows.len(), 1);
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(descriptors.continuation()));
     }
 
     #[tokio::test]

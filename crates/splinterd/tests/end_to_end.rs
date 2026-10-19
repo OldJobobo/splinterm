@@ -1082,6 +1082,7 @@ async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited()
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
+                prepare_id: 1,
             },
         ] {
             let denied = automation.request_result(request).await.unwrap_err();
