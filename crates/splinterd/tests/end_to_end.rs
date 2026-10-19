@@ -273,6 +273,7 @@ impl Connection {
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
                 role: ClientRole::Automation,
+                handoff_window: false,
             },
         )
         .await;
@@ -974,6 +975,7 @@ async fn human_roles_require_their_exact_installed_graphical_processes() {
                     minimum_version: PROTOCOL_VERSION,
                     maximum_version: PROTOCOL_VERSION,
                     role,
+                    handoff_window: false,
                 },
             )
             .await;
@@ -1051,6 +1053,7 @@ async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited()
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
                 role: ClientRole::Automation,
+                handoff_window: false,
             },
         )
         .await;

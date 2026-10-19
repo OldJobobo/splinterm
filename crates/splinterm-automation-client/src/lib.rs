@@ -3270,6 +3270,7 @@ impl Connection {
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
                 role,
+                handoff_window: false,
             },
         )
         .await?;
@@ -3655,6 +3656,11 @@ impl Connection {
                         // descriptors sent beside the frame.
                         Some(ServerFrame::HandoffPrepare { .. }) => {
                             bail!("splinterd sent a handoff prepare frame outside a handoff")
+                        }
+                        // This client never executes a handoff, so no
+                        // decision prompt can belong to one of its requests.
+                        Some(ServerFrame::HandoffDecisionRequired { .. }) => {
+                            bail!("splinterd sent a handoff decision prompt outside a handoff")
                         }
                         Some(frame) => return Ok(frame),
                         None => continue,
@@ -5388,6 +5394,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_ui_declares_no_window_anchor_and_rejects_an_unexpected_decision_prompt() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            // No client may declare an anchor before it can receive a
+            // handoff prepare (M3.14).
+            assert!(matches!(
+                read_client_frame(&mut server).await,
+                ClientFrame::Hello {
+                    role: ClientRole::TrustedUi,
+                    handoff_window: false,
+                    ..
+                }
+            ));
+            let hello = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: 4,
+            };
+            let prompt = ServerFrame::HandoffDecisionRequired {
+                request_id: 1,
+                daemon_generation: 4,
+                deadline_ms: 20_000,
+                windows: vec![splinterm_protocol::HandoffUnresponsiveWindow {
+                    index: 0,
+                    pid: 77,
+                    reason: splinterm_protocol::HandoffWindowIssue::NoAcknowledgement,
+                    dojos: Vec::new(),
+                }],
+            };
+            for frame in [hello, prompt] {
+                server
+                    .write_all(&encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            }
+            server
+        });
+        let mut connection = Connection::connect_stream(client, ClientRole::TrustedUi)
+            .await
+            .unwrap();
+        let error = connection.request(Request::Ping).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("handoff decision prompt outside a handoff"),
+            "{error:#}"
+        );
+        assert!(connection.request(Request::Ping).await.is_err());
+        drop(server_task.await.unwrap());
+    }
+
+    #[tokio::test]
     async fn negotiation_stores_limits_and_rejects_error() {
         let (client, mut server) = UnixStream::pair().unwrap();
         let expected_limits = ServerLimits {
@@ -5520,6 +5580,7 @@ mod tests {
                     minimum_version: PROTOCOL_VERSION,
                     maximum_version: PROTOCOL_VERSION,
                     role: ClientRole::RemoteInteractive,
+                    handoff_window: false,
                 }
             );
             server
