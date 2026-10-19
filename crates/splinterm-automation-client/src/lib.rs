@@ -5353,6 +5353,7 @@ mod tests {
             let (continuation, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
             let encoded = encode_handoff_prepare(&splinterm_protocol::HandoffPrepare {
                 daemon_generation: 4,
+                prepare_id: 1,
                 descriptors: splinterm_protocol::HANDOFF_PREPARE_DESCRIPTORS,
                 client_snapshot: splinterm_protocol::HandoffClientSnapshot {
                     device: 1,

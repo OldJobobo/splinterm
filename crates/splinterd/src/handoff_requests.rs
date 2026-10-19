@@ -447,9 +447,11 @@ pub(crate) fn refused_forward_handoff(
     }
 }
 
-/// This daemon never sends a handoff prepare frame, so no acknowledgement
-/// matches a pending one. The old-side preparation (M3.13) keeps this answer
-/// for a stale, cancelled, or mismatched acknowledgement.
+/// The answer to an acknowledgement nothing waits for: no prepare frame was
+/// sent to that anchor, the attempt stopped waiting or was cancelled, it was
+/// already acknowledged, the generation differs, or the Window failed its
+/// participant binding (Plan 0061 M3.13b1). One answer for all, so it tells
+/// a caller nothing more.
 pub(crate) fn no_pending_handoff_prepare() -> ProtocolError {
     ProtocolError::new(
         ErrorCode::NotFound,

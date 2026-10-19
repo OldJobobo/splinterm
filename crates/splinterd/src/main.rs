@@ -3,6 +3,7 @@ mod audit;
 mod candidate_acquire;
 mod consent;
 mod handoff_requests;
+mod handoff_windows;
 mod omarchy_environment;
 mod persistence;
 
@@ -138,6 +139,10 @@ const HANDOFF_FENCE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDOFF_RETIRING_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 static NEXT_SUBSCRIPTION: AtomicU64 = AtomicU64::new(1);
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+/// Identifies every handoff prepare frame this process sends: never zero and
+/// never reused, so an acknowledgement names exactly one frame (Plan 0061
+/// M3.13b1).
+static NEXT_HANDOFF_PREPARE: AtomicU64 = AtomicU64::new(1);
 
 struct AbortOnDrop {
     task: Option<JoinHandle<()>>,
@@ -898,6 +903,7 @@ struct PlainDojo {
 struct ConnectionSubscription {
     _task: AbortOnDrop,
     _attachment: Option<AttachmentGuard>,
+    _window_attachment: Option<handoff_windows::WindowAttachment>,
 }
 
 struct TopologySubscriber {
@@ -1003,6 +1009,49 @@ impl From<ServerFrame> for QueuedServerFrame {
     }
 }
 
+/// One item on a connection's control channel, which its writer serves
+/// before ordinary output.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "control frames move by value as they did before the descriptor variant"
+)]
+enum ControlFrame {
+    Frame(ServerFrame),
+    /// A Window's handoff prepare frame with its descriptors (Plan 0061
+    /// M3.13b1); see [`write_handoff_prepare`].
+    HandoffPrepare(HandoffPrepareSend),
+    /// A frame whose writer reports, through `written`, whether it was
+    /// written completely; dropped unwritten, it reports nothing.
+    Confirmed {
+        frame: ServerFrame,
+        written: tokio::sync::oneshot::Sender<bool>,
+    },
+}
+
+impl From<ServerFrame> for ControlFrame {
+    fn from(frame: ServerFrame) -> Self {
+        Self::Frame(frame)
+    }
+}
+
+/// A handoff prepare frame for an anchor connection's writer. The writer
+/// closes its descriptors once they are sent, or when it cannot send them,
+/// and reports which through `sent`; a frame dropped unwritten reports it
+/// was not sent.
+struct HandoffPrepareSend {
+    prepare: splinterm_protocol::HandoffPrepare,
+    descriptors: splinterm_protocol::handoff_prepare::HandoffPrepareDescriptors,
+    sent: handoff_windows::PrepareSendReport,
+}
+
+/// A unit test's replacement for the installed and rollback client
+/// identities; see [`window_client_sources`].
+#[cfg(test)]
+type WindowClientSources = Option<(
+    Option<handoff_windows::FileIdentity>,
+    Option<handoff_windows::FileIdentity>,
+)>;
+
 struct DaemonState {
     topology: RwLock<Topology>,
     runtimes: Mutex<RuntimeRegistry>,
@@ -1074,6 +1123,16 @@ struct DaemonState {
     /// A complete fenced attempt waiting for serve to leave for the exec
     /// boundary.
     handoff_exit: HandoffExit,
+    /// Trusted-UI connections and declared Window anchors (Plan 0061
+    /// M3.13b1).
+    handoff_windows: handoff_windows::SharedHandoffWindows,
+    /// The initiating connection's side of an in-flight `Execute`, by
+    /// connection, until its handler takes it; see [`HandoffInitiator`].
+    handoff_initiators: StdMutex<HashMap<u64, HandoffInitiator>>,
+    /// Replaces the installed and rollback client identities Window
+    /// participation is checked against; see [`window_client_sources`].
+    #[cfg(test)]
+    handoff_client_identities: StdMutex<WindowClientSources>,
     #[cfg(test)]
     handoff_faults: StdMutex<Vec<HandoffFault>>,
     #[cfg(test)]
@@ -2236,6 +2295,9 @@ struct StoppedForHandoff {
     /// The attempt's gate, still fenced, with its cancellation disarmed.
     hold: HandoffHold,
     boundary: Box<dyn ExecBoundaryInputs>,
+    /// The attempt's Windows, held until the boundary returns; see
+    /// [`ExecReady::windows`].
+    windows: handoff_windows::HandoffWindowParticipation,
     listeners: DaemonListeners,
     handed_off: Vec<HandedOffCapture>,
     /// Registered runtimes that were not captured: Splints whose process had
@@ -2258,11 +2320,13 @@ struct StoppedForHandoff {
 /// later lookup reaches an ended actor.
 async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> StoppedForHandoff {
     let ServeHandoff {
-        exec: ExecReady {
-            hold,
-            captures,
-            boundary,
-        },
+        exec:
+            ExecReady {
+                hold,
+                captures,
+                boundary,
+                windows,
+            },
         listeners,
     } = handoff;
     let (handed_off, excluded) = captures.hand_off();
@@ -2317,6 +2381,7 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
         state,
         hold,
         boundary,
+        windows,
         listeners,
         handed_off,
         uncaptured,
@@ -2366,6 +2431,7 @@ fn stop_runtime_and_cross(
         state,
         hold,
         mut boundary,
+        windows,
         listeners,
         handed_off,
         uncaptured,
@@ -2391,9 +2457,10 @@ fn stop_runtime_and_cross(
     };
     warn!(%reason, "daemon handoff did not exec; resuming the running generation");
     let recorded_dojos = boundary.recorded_dojos();
-    // The attempt is over: its fence and its sealed manifests and forward
-    // snapshots close. The resumed state has its own idle gate.
-    drop((hold, boundary));
+    // The attempt is over: its fence, its sealed manifests and forward
+    // snapshots, and its Windows' continuation channels close. The resumed
+    // state has its own idle gate.
+    drop((hold, boundary, windows));
     let workload_cgroups_required = state.workload_cgroups_required;
     // Required cgroups always try, so one failed connect does not leave
     // every later round without a manager.
@@ -3179,6 +3246,10 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         daemon_generation,
         handoff_listeners,
         handoff_exit: HandoffExit::default(),
+        handoff_windows: Arc::default(),
+        handoff_initiators: StdMutex::default(),
+        #[cfg(test)]
+        handoff_client_identities: StdMutex::default(),
         #[cfg(test)]
         handoff_faults: StdMutex::default(),
         #[cfg(test)]
@@ -3750,12 +3821,13 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
         reader,
         &state,
         &peer,
+        peer_monitor.as_ref(),
         connection_id,
         &outbound_tx,
         &control_tx,
         writer_closed_rx,
     ));
-    let result = if let Some(peer_monitor) = peer_monitor {
+    let result = if let Some(peer_monitor) = &peer_monitor {
         tokio::select! {
             result = authenticated => result,
             exited = peer_monitor.exited() => {
@@ -3900,6 +3972,11 @@ async fn append_preset_leaf_audit(state: &DaemonState, splint_id: SplintId, succ
 }
 
 async fn cleanup_connection(state: &DaemonState, connection_id: u64) {
+    state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .remove_connection(connection_id);
     state
         .topology_hub
         .lock()
@@ -4072,25 +4149,28 @@ fn submit_daemon_diagnostic(event: &splinterm_protocol::DaemonDiagnosticEvent) {
     clippy::too_many_lines,
     reason = "the connection state machine keeps handshake and request-id enforcement together"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the connection's peer, its pin, and both writer channels are all per connection"
+)]
 async fn serve_authenticated(
     mut reader: OwnedReadHalf,
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
+    peer_monitor: Option<&consent::PeerMonitor>,
     connection_id: u64,
     outbound: &mpsc::Sender<QueuedServerFrame>,
-    control: &mpsc::Sender<ServerFrame>,
+    control: &mpsc::Sender<ControlFrame>,
     mut writer_closed: watch::Receiver<bool>,
 ) -> Result<()> {
     let hello = time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut reader))
         .await
         .context("handshake timed out")??;
-    // No client declares a Window anchor before M3.14, and this daemon binds
-    // none until M3.13b, so the declaration is ignored.
     let ClientFrame::Hello {
         minimum_version,
         maximum_version,
         role,
-        handoff_window: _,
+        handoff_window,
     } = hello
     else {
         send_control(
@@ -4144,6 +4224,13 @@ async fn serve_authenticated(
         .await?;
         bail!("remote interactive role claimed outside the installed graphical relay");
     }
+    if trusted_ui_client {
+        state.handoff_windows.lock().unwrap().register_connection(
+            connection_id,
+            peer.pid,
+            peer.start_time(),
+        );
+    }
     if role == ClientRole::Automation {
         state
             .automation_connections
@@ -4151,22 +4238,41 @@ async fn serve_authenticated(
             .await
             .insert(connection_id);
     }
-    send_control(
-        control,
-        ServerFrame::Hello {
-            version: PROTOCOL_VERSION,
-            limits: server_limits(),
-            development_terminal_access: state.development_terminal_access,
-            daemon_hostname: daemon_hostname(),
-            daemon_generation: state.daemon_generation,
-        },
-    )
-    .await?;
+    let hello = ServerFrame::Hello {
+        version: PROTOCOL_VERSION,
+        limits: server_limits(),
+        development_terminal_access: state.development_terminal_access,
+        daemon_hostname: daemon_hostname(),
+        daemon_generation: state.daemon_generation,
+    };
+    if handoff_window {
+        // An anchor's Hello is queued as it is registered, under the
+        // registry lock, so no prepare frame can reach the Window first.
+        if let Err(refused) = declare_window_anchor(
+            state,
+            peer,
+            peer_monitor,
+            connection_id,
+            control,
+            role,
+            hello,
+        ) {
+            send_control(
+                control,
+                protocol_error(None, refused.code, &refused.message),
+            )
+            .await?;
+            bail!("Window anchor declaration refused: {}", refused.message);
+        }
+    } else {
+        send_control(control, hello).await?;
+    }
 
     let mut subscriptions = HashMap::<u64, ConnectionSubscription>::new();
     let mut policy_reloads = state.policy_reloads.subscribe();
     let mut connection_revocations = state.connection_revocations.subscribe();
     let mut last_request_id = 0_u64;
+    let mut finished_handoff: Option<Arc<InitiatorAnswers>> = None;
     loop {
         let frame = tokio::select! {
             biased;
@@ -4207,9 +4313,15 @@ async fn serve_authenticated(
                 .await?;
                 break;
             }
-            // A decision answers a prompt sent while an Execute is in flight,
-            // and this daemon never sends one, so an answer here is as
-            // unexpected as a second hello.
+            // A decision answers a prompt sent while an Execute is in flight.
+            // Once that request has ended, only the one late answer to a
+            // prompt it queued is dropped, since the prompt may have been
+            // written just before the attempt stopped waiting; any other is
+            // as unexpected as a second hello.
+            ClientFrame::HandoffDecision { request_id, .. }
+                if finished_handoff
+                    .as_ref()
+                    .is_some_and(|answers| answers.take_late_answer(request_id)) => {}
             ClientFrame::HandoffDecision { .. } => {
                 send_control(
                     control,
@@ -4332,7 +4444,10 @@ async fn serve_authenticated(
                 // Each is bound to its connection: a transient Lair is owned
                 // by it, and a handoff attempt is dropped, and so cancelled
                 // with `Requested`, as soon as its initiator disconnects. The
-                // client must send no other frame while either is in flight.
+                // client must send no other frame while either is in flight,
+                // except, for a handoff, its `Cancel` and its answer to a
+                // decision prompt (operator decision D10), which reach the
+                // attempt through its initiator link.
                 let in_flight_exclusive = match request {
                     Request::CreateTransientLair { .. } => Some("transient creation"),
                     Request::PrepareDaemonHandoff {
@@ -4340,6 +4455,13 @@ async fn serve_authenticated(
                     } => Some("a daemon handoff"),
                     _ => None,
                 };
+                let initiator = matches!(
+                    request,
+                    Request::PrepareDaemonHandoff {
+                        mode: splinterm_protocol::DaemonHandoffMode::Execute,
+                    }
+                )
+                .then(|| HandoffInitiatorLink::register(state, connection_id, request_id, control));
                 let handled = handle_request(
                     request,
                     state,
@@ -4351,30 +4473,40 @@ async fn serve_authenticated(
                 );
                 let handled = if let Some(operation) = in_flight_exclusive {
                     tokio::pin!(handled);
-                    tokio::select! {
-                        result = &mut handled => Some(result),
-                        frame = read_optional_frame(&mut reader) => {
-                            if frame?.is_some() {
+                    loop {
+                        tokio::select! {
+                            result = &mut handled => break Some(result),
+                            frame = read_optional_frame(&mut reader) => {
+                                let Some(frame) = frame? else { break None };
+                                let refusal = match &initiator {
+                                    Some(initiator) => match initiator.accept(frame) {
+                                        Ok(()) => continue,
+                                        Err(refusal) => refusal.to_owned(),
+                                    },
+                                    None => format!(
+                                        "another frame arrived while {operation} was in flight"
+                                    ),
+                                };
                                 send_control(
                                     control,
-                                    protocol_error(
-                                        None,
-                                        ErrorCode::InvalidFrame,
-                                        &format!("another frame arrived while {operation} was in flight"),
-                                    ),
+                                    protocol_error(None, ErrorCode::InvalidFrame, &refusal),
                                 )
                                 .await?;
+                                break None;
                             }
-                            None
-                        }
-                        changed = writer_closed.changed() => {
-                            let _ = changed;
-                            None
+                            changed = writer_closed.changed() => {
+                                let _ = changed;
+                                break None;
+                            }
                         }
                     }
                 } else {
                     Some(handled.await)
                 };
+                // Kept for one late answer to a prompt this request queued.
+                if let Some(initiator) = initiator {
+                    finished_handoff = Some(Arc::clone(&initiator.answers));
+                }
                 let Some(handled) = handled else {
                     break;
                 };
@@ -4410,6 +4542,17 @@ async fn serve_authenticated(
                                     continue;
                                 }
                             };
+                            // Counted per trusted-UI connection, so a handoff
+                            // finds the processes that hold attachments
+                            // without declaring a Window anchor, and names
+                            // each Window's Dojos in a decision prompt.
+                            let window_attachment = attachment.as_ref().and_then(|attachment| {
+                                handoff_windows::attach(
+                                    &state.handoff_windows,
+                                    connection_id,
+                                    attachment.splint_id,
+                                )
+                            });
                             send_response(outbound, state, request_id, Ok(response)).await?;
                             let (id, task) = match subscription {
                                 PendingSubscription::Terminal {
@@ -4476,6 +4619,7 @@ async fn serve_authenticated(
                                 ConnectionSubscription {
                                     _task: AbortOnDrop::new(task),
                                     _attachment: attachment,
+                                    _window_attachment: window_attachment,
                                 },
                             );
                         } else {
@@ -7648,6 +7792,11 @@ async fn handle_request(
     trusted_ui_client: bool,
     remote_interactive_client: bool,
 ) -> Result<Handled, ProtocolError> {
+    if let Some(result) =
+        window_acknowledgement(&request, state, peer, connection_id, trusted_ui_client).await
+    {
+        return result;
+    }
     let request = bind_current_terminal_incarnation(request, state, peer).await?;
     // Self-reports from inside the Splint need no grant and are not audited
     // per update; any other peer takes the ordinary authorized path below.
@@ -9924,15 +10073,24 @@ async fn handle_authorized_request(
             }
         }
         Request::PrepareDaemonHandoff { mode } => {
+            refuse_handoff_from_anchor(state, connection_id, mode)?;
             require_trusted_local_ui(trusted_ui_client, peer)?;
             let report = daemon_handoff_report(state).await?;
             match mode {
                 // A point-in-time report, answered during a handoff too.
                 splinterm_protocol::DaemonHandoffMode::DryRun => Response::HandoffReport { report },
                 splinterm_protocol::DaemonHandoffMode::Execute => {
+                    // The initiating connection registered its side of the
+                    // request before it ran; a unit test calling the handler
+                    // directly has none.
+                    let initiator = state
+                        .handoff_initiators
+                        .lock()
+                        .unwrap()
+                        .remove(&connection_id);
                     // Boxed: the attempt future is larger than every other
                     // request path, and would otherwise inflate each one.
-                    return Err(Box::pin(execute_daemon_handoff(state, &report)).await);
+                    return Err(Box::pin(execute_daemon_handoff(state, &report, initiator)).await);
                 }
             }
         }
@@ -9965,6 +10123,227 @@ fn require_trusted_local_ui(
             "request requires the installed trusted graphical client",
         ))
     }
+}
+
+/// Declares a connection its Window's anchor (Plan 0061 M3.13b1).
+///
+/// Only a connection that passed the trusted-UI check at `Hello` may: any
+/// other role is refused, not ignored, so no client believes it declared a
+/// Window that a handoff would neither prepare nor name. A process the
+/// daemon could not pin (no pidfd, or no start time) is still declared, and
+/// a handoff names it as unpinned rather than as undeclared.
+///
+/// # Errors
+/// `Unauthorized` for any other role, `HandoffInProgress` while an attempt
+/// holds its Windows, `InvalidArgument` for a second anchor from one process,
+/// and `ResourceLimit` past [`splinterm_protocol::MAX_HANDOFF_WINDOWS`].
+fn declare_window_anchor(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    peer_monitor: Option<&consent::PeerMonitor>,
+    connection_id: u64,
+    control: &mpsc::Sender<ControlFrame>,
+    role: ClientRole,
+    hello: ServerFrame,
+) -> Result<(), ProtocolError> {
+    if role != ClientRole::TrustedUi {
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "a Window anchor requires the installed trusted graphical client",
+        ));
+    }
+    let pidfd = peer_monitor.and_then(|monitor| match monitor.duplicate_pidfd() {
+        Ok(pidfd) => Some(Arc::new(pidfd)),
+        Err(error) => {
+            warn!(%error, "Window anchor declared unpinned");
+            None
+        }
+    });
+    let (device, inode) = peer.executable_file();
+    let process = handoff_windows::WindowProcess {
+        pid: peer.pid,
+        start_time: peer.start_time(),
+        pidfd,
+        executable: handoff_windows::FileIdentity { device, inode },
+    };
+    state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .declare_anchor(connection_id, process, control.clone(), hello.into())
+        .map_err(|refusal| match refusal {
+            handoff_windows::AnchorRefusal::HandoffInProgress => handoff_in_progress(),
+            handoff_windows::AnchorRefusal::AlreadyDeclared => ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "this Window already declared an anchor connection",
+            ),
+            handoff_windows::AnchorRefusal::Full => {
+                ProtocolError::new(ErrorCode::ResourceLimit, "Window anchor limit reached")
+            }
+            handoff_windows::AnchorRefusal::WriterClosed => internal(),
+        })
+}
+
+fn is_window_anchor(state: &DaemonState, connection_id: u64) -> bool {
+    state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .is_anchor(connection_id)
+}
+
+/// Refuses an `Execute` on a Window's anchor connection, before the gate,
+/// so nothing is begun. The anchor must stay free to acknowledge its own
+/// prepare frame, which the initiator's in-flight `Execute` would refuse,
+/// so the initiator (`splinterm upgrade`, or the desktop dialog) always uses
+/// a separate connection. A dry run on an anchor is answered as usual.
+///
+/// The reverse cannot arise: an anchor is declared only in `Hello`, which a
+/// connection sends before any request.
+///
+/// # Errors
+/// `InvalidArgument` for `Execute` on an anchor connection.
+fn refuse_handoff_from_anchor(
+    state: &DaemonState,
+    connection_id: u64,
+    mode: splinterm_protocol::DaemonHandoffMode,
+) -> Result<(), ProtocolError> {
+    if mode == splinterm_protocol::DaemonHandoffMode::Execute
+        && is_window_anchor(state, connection_id)
+    {
+        return Err(invalid(
+            "a Window's anchor connection cannot start a daemon handoff; start it from a separate connection",
+        ));
+    }
+    Ok(())
+}
+
+/// A declared Window acknowledges its handoff prepare frame by its
+/// participant binding instead of the trusted-UI executable check, which a
+/// Window still running the replaced client image fails
+/// ([`acknowledge_handoff_prepare`]). The result is audited like any other
+/// authorized request's. `None` for every other request and connection,
+/// which take the ordinary path and are refused there.
+async fn window_acknowledgement(
+    request: &Request,
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    connection_id: u64,
+    trusted_ui_client: bool,
+) -> Option<Result<Handled, ProtocolError>> {
+    let &Request::AcknowledgeHandoffPrepare {
+        daemon_generation,
+        prepare_id,
+    } = request
+    else {
+        return None;
+    };
+    if !trusted_ui_client || !is_window_anchor(state, connection_id) {
+        return None;
+    }
+    let result =
+        splinterm_protocol::validate_handoff_acknowledgement(daemon_generation, prepare_id)
+            .and_then(|()| {
+                acknowledge_handoff_prepare(state, connection_id, daemon_generation, prepare_id)
+            })
+            .map(|()| Handled {
+                response: Response::Acknowledged,
+                subscription: None,
+            });
+    append_request_result_audit(
+        state,
+        peer,
+        request,
+        &RequestAuthorizationContext::default(),
+        None,
+        &result,
+    )
+    .await;
+    Some(result)
+}
+
+/// Accepts a Window's acknowledgement of its handoff prepare frame by its
+/// participant binding (Plan 0061 M3.13b1).
+///
+/// The binding is checked first: the Window must still be the process its
+/// anchor pinned (the pidfd alive and the start time unchanged), and the
+/// image it executed at `Hello` must be a client a Window may run
+/// ([`window_client_identities`]). Then, in one step under the registry lock,
+/// only the pending prepare that matches this anchor, the generation, and
+/// the prepare id exactly is consumed
+/// ([`handoff_windows::HandoffWindows::complete_acknowledgement`]). Prepare
+/// ids are never reused, so a late answer to an earlier attempt's frame, or
+/// a handler delayed past a later attempt's start, matches nothing.
+/// Everything else fails closed with `NotFound` and changes nothing, as an
+/// acknowledgement nothing waits for does. The trusted-UI executable check
+/// stays in force for every other request, this one from any other
+/// connection included.
+fn acknowledge_handoff_prepare(
+    state: &DaemonState,
+    connection_id: u64,
+    daemon_generation: u64,
+    prepare_id: u64,
+) -> Result<(), ProtocolError> {
+    let process = state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .anchor_process(connection_id);
+    let Some(process) = process else {
+        return Err(handoff_requests::no_pending_handoff_prepare());
+    };
+    if process.pin() != handoff_windows::ProcessPin::Live
+        || !window_client_identities(state).contains(&process.executable)
+    {
+        warn!(
+            connection_id,
+            pid = process.pid,
+            "a Window acknowledgement failed its participant binding"
+        );
+        return Err(handoff_requests::no_pending_handoff_prepare());
+    }
+    if state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .complete_acknowledgement(connection_id, daemon_generation, prepare_id)
+    {
+        Ok(())
+    } else {
+        Err(handoff_requests::no_pending_handoff_prepare())
+    }
+}
+
+/// The client images a Window may run to take part in a handoff: the client
+/// installed at `<prefix>/splinterm` now, and the retained rollback pair's
+/// client, the image every Window started before a package upgrade still
+/// executes. Both are matched by device and inode, never by content.
+fn window_client_identities(state: &DaemonState) -> Vec<handoff_windows::FileIdentity> {
+    let (installed, rollback) = window_client_sources(state);
+    installed.into_iter().chain(rollback).collect()
+}
+
+/// The installed client now and the retained rollback client, either absent
+/// when it cannot be identified. Unit tests may replace both.
+fn window_client_sources(
+    state: &DaemonState,
+) -> (
+    Option<handoff_windows::FileIdentity>,
+    Option<handoff_windows::FileIdentity>,
+) {
+    #[cfg(test)]
+    if let Some(sources) = *state.handoff_client_identities.lock().unwrap() {
+        return sources;
+    }
+    let installed = handoff_windows::FileIdentity::of_path(&state.install_prefix.client());
+    let rollback = state.rollback_handoff.retained().map(|authority| {
+        let source = authority.pair().client().source();
+        handoff_windows::FileIdentity {
+            device: source.device,
+            inode: source.inode,
+        }
+    });
+    (installed, rollback)
 }
 
 /// A point-in-time dry-run report. It reads topology and the live registry
@@ -10368,18 +10747,24 @@ struct ExecReady {
     hold: HandoffHold,
     captures: HandoffCaptures,
     boundary: Box<dyn ExecBoundaryInputs>,
+    /// The Windows that acknowledged their prepare frames. They are not yet
+    /// carried: no manifest records them, and their continuation ends close
+    /// at exec or when the attempt resumes (Plan 0061 M3.13b2 adds both).
+    windows: handoff_windows::HandoffWindowParticipation,
 }
 
 impl ExecReady {
-    /// Cancels an attempt serve does not take to the boundary: resumes every
-    /// captured actor, then lifts the fence and broadcasts `Cancelled`.
+    /// Cancels an attempt serve does not take to the boundary: closes every
+    /// Window's continuation channel, resumes every captured actor, then
+    /// lifts the fence and broadcasts `Cancelled`.
     async fn cancel(self, reason: HandoffCancelReason) {
         let Self {
             hold,
             captures,
             boundary,
+            windows,
         } = self;
-        drop(boundary);
+        drop((boundary, windows));
         captures.release().await;
         release_handoff(hold, reason).await;
     }
@@ -10631,8 +11016,193 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
         .map_err(|_| HandoffCancelReason::Failed)
 }
 
+/// How long a handoff waits, under the fence, for every declared Window to
+/// acknowledge its prepare frame (Plan 0061 M3.13b1). Sending the frames
+/// counts against it.
+#[cfg(not(test))]
+const HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a handoff waits, still under the fence, for the initiator's
+/// answer to a decision prompt (operator decision D10) before it cancels as
+/// `TimedOut`, counted from when the prompt is written. With the
+/// acknowledgement wait and the prompt's delivery bound, input can stay
+/// paused everywhere for about 27 s before capture starts.
+#[cfg(not(test))]
+const HANDOFF_DECISION_DEADLINE: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const HANDOFF_DECISION_DEADLINE: Duration = Duration::from_secs(2);
+/// How long the decision prompt may take to reach the initiator: queued
+/// behind its connection's earlier frames and written. The decision deadline
+/// starts only once it is written.
+const HANDOFF_PROMPT_DELIVERY_TIMEOUT: Duration = WRITE_TIMEOUT;
+
+/// The initiating connection's side of its in-flight `Execute` (operator
+/// decision D10): the connection's control channel, which carries a decision
+/// prompt, and the answers its reader forwards.
+struct HandoffInitiator {
+    request_id: u64,
+    control: mpsc::Sender<ControlFrame>,
+    answers: Arc<InitiatorAnswers>,
+    decisions: mpsc::Receiver<Vec<u8>>,
+}
+
+impl HandoffInitiator {
+    fn new(request_id: u64, control: mpsc::Sender<ControlFrame>) -> Self {
+        let (decision, decisions) = mpsc::channel(1);
+        Self {
+            request_id,
+            control,
+            answers: Arc::new(InitiatorAnswers {
+                request_id,
+                cancelled: tokio_util::sync::CancellationToken::new(),
+                awaiting_decision: std::sync::atomic::AtomicBool::new(false),
+                unanswered_prompt: std::sync::atomic::AtomicBool::new(false),
+                decision,
+            }),
+            decisions,
+        }
+    }
+}
+
+/// What the initiating connection's reader forwards to its attempt.
+struct InitiatorAnswers {
+    request_id: u64,
+    /// Cancelled by the client's `Cancel` for the request.
+    cancelled: tokio_util::sync::CancellationToken,
+    /// Set only while a decision prompt waits for its one answer.
+    awaiting_decision: std::sync::atomic::AtomicBool,
+    /// Set once a prompt was queued and cleared by its one answer. A prompt
+    /// written just before the attempt stopped waiting (a timeout, a
+    /// `Cancel`, or the end of the request) can still be answered by a
+    /// conforming client; that one late answer is dropped, keeping the
+    /// connection ([`Self::take_late_answer`]).
+    unanswered_prompt: std::sync::atomic::AtomicBool,
+    decision: mpsc::Sender<Vec<u8>>,
+}
+
+impl InitiatorAnswers {
+    /// Takes one frame that arrived while the `Execute` is in flight: a
+    /// `Cancel` for it, the one answer to a pending decision prompt, or the
+    /// one late answer to a prompt the attempt no longer waits for, which is
+    /// dropped.
+    ///
+    /// # Errors
+    /// Any other frame, an answer when no prompt was queued, and a second
+    /// answer; the connection then ends with `InvalidFrame`, which cancels
+    /// the attempt as `Requested`.
+    fn accept(&self, frame: ClientFrame) -> Result<(), &'static str> {
+        match frame {
+            ClientFrame::Cancel { request_id } if request_id == self.request_id => {
+                self.cancelled.cancel();
+                Ok(())
+            }
+            ClientFrame::HandoffDecision {
+                request_id,
+                proceed_without,
+            } if request_id == self.request_id => {
+                if self.awaiting_decision.swap(false, Ordering::SeqCst) {
+                    self.unanswered_prompt.store(false, Ordering::SeqCst);
+                    return self
+                        .decision
+                        .try_send(proceed_without)
+                        .map_err(|_| "no handoff decision is pending");
+                }
+                if self.take_late_answer(request_id) {
+                    Ok(())
+                } else {
+                    Err("no handoff decision is pending")
+                }
+            }
+            _ => Err("another frame arrived while a daemon handoff was in flight"),
+        }
+    }
+
+    /// Whether a `HandoffDecision` for `request_id` is the one late answer
+    /// to a prompt queued for this request that no attempt waits for any
+    /// more. It is dropped, and the connection kept; a second fails.
+    fn take_late_answer(&self, request_id: u64) -> bool {
+        request_id == self.request_id
+            && !self.awaiting_decision.load(Ordering::SeqCst)
+            && self.unanswered_prompt.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// The initiating connection's registration of its `Execute`. The handler
+/// takes the [`HandoffInitiator`] by connection; the link removes it if the
+/// request ended before its handler ran, and forwards the reader's frames.
+struct HandoffInitiatorLink {
+    state: Arc<DaemonState>,
+    connection_id: u64,
+    answers: Arc<InitiatorAnswers>,
+}
+
+impl HandoffInitiatorLink {
+    fn register(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+        request_id: u64,
+        control: &mpsc::Sender<ControlFrame>,
+    ) -> Self {
+        let initiator = HandoffInitiator::new(request_id, control.clone());
+        let answers = Arc::clone(&initiator.answers);
+        state
+            .handoff_initiators
+            .lock()
+            .unwrap()
+            .insert(connection_id, initiator);
+        Self {
+            state: Arc::clone(state),
+            connection_id,
+            answers,
+        }
+    }
+
+    fn accept(&self, frame: ClientFrame) -> Result<(), &'static str> {
+        self.answers.accept(frame)
+    }
+}
+
+impl Drop for HandoffInitiatorLink {
+    fn drop(&mut self) {
+        if let Ok(mut initiators) = self.state.handoff_initiators.lock() {
+            initiators.remove(&self.connection_id);
+        }
+    }
+}
+
+/// How an attempt ended before exec.
+struct AttemptCancel {
+    reason: HandoffCancelReason,
+    /// The forward preparation's refusal, which names its own answer.
+    refusal: Option<handoff_requests::ForwardRefusal>,
+    /// An answer that replaces the cancelled report: a refused decision.
+    error: Option<ProtocolError>,
+}
+
+impl From<HandoffCancelReason> for AttemptCancel {
+    fn from(reason: HandoffCancelReason) -> Self {
+        Self {
+            reason,
+            refusal: None,
+            error: None,
+        }
+    }
+}
+
+/// A complete attempt's parts for the exec boundary; its hold is committed
+/// once the attempt future returns them.
+struct AttemptExec {
+    captures: HandoffCaptures,
+    boundary: Box<dyn ExecBoundaryInputs>,
+    windows: handoff_windows::HandoffWindowParticipation,
+}
+
 /// Runs `Execute` through the handoff gate and returns the error it ends
 /// with.
+///
+/// An `Execute` on a Window's anchor connection never reaches it: the
+/// handler refuses it first ([`refuse_handoff_from_anchor`]).
 ///
 /// A second `Execute` while a handoff runs is refused as in progress. Any
 /// other `Execute` is refused before the gate when
@@ -10641,22 +11211,34 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
 /// until window continuity lands, and Nix-store builds in 0.2.0 (Plan 0061
 /// M3.11b). Otherwise, while still `Preparing` and serving, the gate
 /// prepares the installed forward pair beside the borrowed rollback pair.
-/// It then fences, re-checks, drains, and persists, and then captures every
-/// live Splint and builds the validated manifests
+/// It then fences, re-checks, drains, and persists; prepares every declared
+/// Window, waits for their acknowledgements, and asks the initiator about
+/// any Window that cannot take part ([`prepare_handoff_windows`]); and then
+/// captures every live Splint and builds the validated manifests
 /// ([`prepare_fenced_handoff`]). A complete attempt with exec authority then
 /// commits its gate and leaves it for serve ([`HandoffExit`]), which stops
 /// the runtime and crosses the exec boundary (M3.9). This request never
 /// answers, because serve ends its connection on the way out. Every other
-/// ending releases what the attempt prepared, cancels, and answers
-/// `HandoffUnavailable` with a fresh report's reasons.
+/// ending releases what the attempt prepared, closes every prepared Window's
+/// continuation channel, cancels, and answers `HandoffUnavailable` with a
+/// fresh report's reasons, or `InvalidArgument` for a refused decision.
+///
+/// The initiator's `Cancel` for the request cancels the attempt wherever it
+/// is before the attempt commits, as `Requested`, and answers like any other
+/// cancel, keeping the connection; it replaces the earlier `InvalidFrame`
+/// close (Plan 0061 M3.6 review). A `Cancel` read once the attempt has left
+/// its exec inputs for serve has no effect. Work the attempt cannot
+/// interrupt, a running forward preparation or Topology save, finishes first
+/// and then cancels ([`HandoffAttempt::run_held`]).
 async fn execute_daemon_handoff(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
+    initiator: Option<HandoffInitiator>,
 ) -> ProtocolError {
     // Evaluated here, not read back from the report's reasons. The report's
     // provenance is the one compiled into this daemon.
     let support = handoff_requests::live_handoff_support(report.build.provenance);
-    execute_daemon_handoff_with(state, report, support, prepare_forward_handoff).await
+    execute_daemon_handoff_with(state, report, support, initiator, prepare_forward_handoff).await
 }
 
 /// [`execute_daemon_handoff`] with live handoff support and the forward
@@ -10667,6 +11249,7 @@ async fn execute_daemon_handoff_with<F, Prepared>(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
     support: Result<(), handoff_requests::LiveHandoffUnsupported>,
+    mut initiator: Option<HandoffInitiator>,
     prepare_forward: impl FnOnce(Arc<DaemonState>) -> F,
 ) -> ProtocolError
 where
@@ -10683,53 +11266,718 @@ where
         Ok(attempt) => attempt,
         Err(in_progress) => return in_progress,
     };
-    // Preparation borrows the retained rollback authority and runs before
-    // the fence (Plan 0061 D2), so PTY reads and requests continue meanwhile.
-    let (reason, refusal) = match attempt.run_held(prepare_forward(Arc::clone(state))).await {
-        Ok(Ok(forward)) => {
-            let reason = match fence_for_handoff(&mut attempt).await {
-                Ok(()) => match prepare_fenced_handoff(state, forward).await {
-                    Ok(prepared) => match prepared.into_exec() {
-                        Ok((captures, boundary)) => {
-                            // Still fenced: serve leaves for the exec
-                            // boundary and aborts this connection's task, so
-                            // the initiating client reconnects to whichever
-                            // generation serves next.
-                            state.handoff_exit.deposit(ExecReady {
-                                hold: attempt.commit(),
-                                captures,
-                                boundary,
-                            });
-                            return std::future::pending().await;
-                        }
-                        // No exec authority: release everything it holds.
-                        Err(prepared) => {
-                            prepared.release().await;
-                            HandoffCancelReason::Failed
-                        }
-                    },
-                    Err(reason) => reason,
-                },
-                Err(reason) => {
-                    drop(forward);
-                    reason
-                }
-            };
-            (reason, None)
-        }
-        Ok(Err(refusal)) => (refusal.cancel_reason(), Some(refusal)),
-        Err(reason) => (reason, None),
+    let cancelled = initiator
+        .as_ref()
+        .map(|initiator| initiator.answers.cancelled.clone());
+    let run = run_handoff_attempt(state, &mut attempt, initiator.as_mut(), prepare_forward);
+    let ended = match cancelled {
+        Some(cancelled) => tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Err(HandoffCancelReason::Requested.into()),
+            ended = run => ended,
+        },
+        None => run.await,
     };
-    attempt.cancel(reason).await;
+    let cancel = match ended {
+        Ok(AttemptExec {
+            captures,
+            boundary,
+            windows,
+        }) => {
+            // Still fenced: serve leaves for the exec boundary and aborts
+            // this connection's task, so the initiating client reconnects to
+            // whichever generation serves next.
+            state.handoff_exit.deposit(ExecReady {
+                hold: attempt.commit(),
+                captures,
+                boundary,
+                windows,
+            });
+            return std::future::pending().await;
+        }
+        Err(cancel) => cancel,
+    };
+    attempt.cancel(cancel.reason).await;
+    if let Some(error) = cancel.error {
+        return error;
+    }
     match daemon_handoff_report(state).await {
-        Ok(report) => match refusal {
+        Ok(report) => match cancel.refusal {
             Some(refusal) => {
                 handoff_requests::refused_forward_handoff(refusal, report.blocking_reasons)
             }
-            None => handoff_requests::cancelled_handoff(reason, report.blocking_reasons),
+            None => handoff_requests::cancelled_handoff(cancel.reason, report.blocking_reasons),
         },
         Err(error) => error,
     }
+}
+
+/// One attempt from forward preparation to the exec boundary's inputs.
+/// Dropping it, on the initiator's `Cancel`, releases whatever it holds:
+/// captures return their masters and every Window's continuation channel
+/// closes.
+async fn run_handoff_attempt<F, Prepared>(
+    state: &Arc<DaemonState>,
+    attempt: &mut HandoffAttempt,
+    initiator: Option<&mut HandoffInitiator>,
+    prepare_forward: impl FnOnce(Arc<DaemonState>) -> F,
+) -> Result<AttemptExec, AttemptCancel>
+where
+    F: Future<Output = Result<Prepared, handoff_requests::ForwardRefusal>> + Send + 'static,
+    Prepared: ForwardPreparation,
+{
+    // Preparation borrows the retained rollback authority and runs before
+    // the fence (Plan 0061 D2), so PTY reads and requests continue meanwhile.
+    let forward = match attempt.run_held(prepare_forward(Arc::clone(state))).await {
+        Ok(Ok(forward)) => forward,
+        Ok(Err(refusal)) => {
+            return Err(AttemptCancel {
+                reason: refusal.cancel_reason(),
+                refusal: Some(refusal),
+                error: None,
+            });
+        }
+        Err(reason) => return Err(reason.into()),
+    };
+    fence_for_handoff(attempt).await?;
+    let windows = prepare_handoff_windows(state, &forward, initiator).await?;
+    let prepared = prepare_fenced_handoff(state, forward).await?;
+    match prepared.into_exec() {
+        Ok((captures, boundary)) => Ok(AttemptExec {
+            captures,
+            boundary,
+            windows,
+        }),
+        // No exec authority: release everything it holds.
+        Err(prepared) => {
+            prepared.release().await;
+            Err(HandoffCancelReason::Failed.into())
+        }
+    }
+}
+
+/// One Window as an attempt tracks it until the prompt is answered.
+struct AttemptWindow {
+    index: u8,
+    pid: u32,
+    start_time: Option<u64>,
+    state: AttemptWindowState,
+}
+
+enum AttemptWindowState {
+    /// Sent its prepare frame; the daemon holds its continuation end.
+    Prepared {
+        anchor_connection_id: u64,
+        process: handoff_windows::WindowProcess,
+        continuation: std::os::fd::OwnedFd,
+        acknowledged: bool,
+        /// The writer's report: `Some(true)` once the whole frame was
+        /// written, `Some(false)` when it could not be.
+        sent: Option<bool>,
+    },
+    /// An anchor not pinned, or running a client image no Window may run;
+    /// it was sent nothing.
+    Unpinned,
+    /// A trusted-UI process with attachments and no anchor.
+    Undeclared,
+    /// The process exited; it is dropped without asking.
+    Exited,
+}
+
+impl AttemptWindow {
+    /// Applies one event; returns whether it settled the Window, so the
+    /// wait need learn nothing more about it.
+    ///
+    /// A Window takes part only once it acknowledged and its writer reported
+    /// the whole frame written, in either order: a fast acknowledgement can
+    /// arrive before the report. A frame that could not be sent is final: it
+    /// revokes an acknowledgement taken before, and any later one is
+    /// ignored, so a Window whose continuation channel may never have
+    /// arrived does not take part.
+    fn apply(&mut self, event: handoff_windows::WindowEvent) -> bool {
+        let settled_before = self.settled();
+        if let AttemptWindowState::Prepared {
+            acknowledged, sent, ..
+        } = &mut self.state
+        {
+            match event {
+                handoff_windows::WindowEvent::Acknowledged(_) => {
+                    *acknowledged = *sent != Some(false);
+                }
+                handoff_windows::WindowEvent::Sent(_) => {
+                    if sent.is_none() {
+                        *sent = Some(true);
+                    }
+                }
+                handoff_windows::WindowEvent::NotSent(_) => {
+                    *sent = Some(false);
+                    *acknowledged = false;
+                }
+                handoff_windows::WindowEvent::Exited(_) => self.state = AttemptWindowState::Exited,
+            }
+        }
+        !settled_before && self.settled()
+    }
+
+    /// Whether a prepared Window takes part, could not be sent its frame, or
+    /// exited.
+    const fn settled(&self) -> bool {
+        match self.state {
+            AttemptWindowState::Prepared {
+                acknowledged, sent, ..
+            } => matches!(sent, Some(false)) || (acknowledged && matches!(sent, Some(true))),
+            AttemptWindowState::Exited => true,
+            AttemptWindowState::Unpinned | AttemptWindowState::Undeclared => false,
+        }
+    }
+
+    /// Why the prompt names this Window, or `None` when it takes part or
+    /// was dropped.
+    const fn issue(&self) -> Option<splinterm_protocol::HandoffWindowIssue> {
+        match self.state {
+            AttemptWindowState::Prepared {
+                acknowledged: true,
+                sent: Some(true),
+                ..
+            }
+            | AttemptWindowState::Exited => None,
+            AttemptWindowState::Prepared { .. } => {
+                Some(splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)
+            }
+            AttemptWindowState::Unpinned => Some(splinterm_protocol::HandoffWindowIssue::Unpinned),
+            AttemptWindowState::Undeclared => {
+                Some(splinterm_protocol::HandoffWindowIssue::Undeclared)
+            }
+        }
+    }
+}
+
+/// Prepares every declared Window for the handoff, waits for their
+/// acknowledgements, and asks the initiator about every Window that cannot
+/// take part (operator decision D10). It runs under the fence, before
+/// capture.
+///
+/// 1. It takes the registry's Windows and marks the attempt, so no Window
+///    declares an anchor this attempt would miss
+///    ([`handoff_windows::begin_attempt`]). More than
+///    [`splinterm_protocol::MAX_HANDOFF_WINDOWS`] anchors and undeclared
+///    processes together cancel as `Blocked`.
+/// 2. Each anchor whose process is still pinned and runs a client image a
+///    Window may run ([`window_client_identities`]) is sent its prepare frame
+///    ([`send_window_prepare`]). One not pinned, or running another image,
+///    is sent nothing and is named as unpinned; one whose process exited is
+///    dropped.
+/// 3. It waits up to [`HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT`] for every
+///    acknowledgement that counts: the anchor answered and its writer
+///    reported the whole frame written. A Window whose process exits
+///    meanwhile is dropped without asking.
+/// 4. When a prepared Window did not acknowledge, an anchor is unpinned, or a
+///    trusted-UI process holds attachments without an anchor, it sends one
+///    `HandoffDecisionRequired` on the initiator's in-flight `Execute`,
+///    naming each with the Dojos the daemon's Topology holds for its
+///    attachments, and, once the writer has written it (within
+///    [`HANDOFF_PROMPT_DELIVERY_TIMEOUT`]), waits up to
+///    [`HANDOFF_DECISION_DEADLINE`] for the answer. A decision naming exactly those Windows drops them, closing
+///    their continuation channels, and the handoff continues without them;
+///    any other is refused with `InvalidArgument` and cancels as `Failed`.
+///    No answer cancels as `TimedOut`, and so does a prompt with no
+///    initiator to ask. The initiator's `Cancel` is handled by
+///    [`execute_daemon_handoff_with`]. A Window whose process exits while
+///    the initiator decides is dropped too.
+///
+/// The fence stays held throughout, so input stays paused everywhere for up
+/// to about 27 s. Every cancel drops each continuation end the daemon holds,
+/// so a prepared Window reads end of file with no outcome and knows the
+/// attempt ended.
+async fn prepare_handoff_windows<F: ForwardPreparation>(
+    state: &DaemonState,
+    forward: &F,
+    initiator: Option<&mut HandoffInitiator>,
+) -> Result<handoff_windows::HandoffWindowParticipation, AttemptCancel> {
+    let (attempt, anchors, undeclared) = handoff_windows::begin_attempt(&state.handoff_windows);
+    if anchors.is_empty() && undeclared.is_empty() {
+        return Ok(handoff_windows::HandoffWindowParticipation::new(
+            Vec::new(),
+            attempt,
+        ));
+    }
+    if anchors.len() + undeclared.len() > splinterm_protocol::MAX_HANDOFF_WINDOWS {
+        warn!(
+            anchors = anchors.len(),
+            undeclared = undeclared.len(),
+            "more Windows than a handoff can name; the handoff is blocked"
+        );
+        return Err(HandoffCancelReason::Blocked.into());
+    }
+    let mut windows = prepare_and_await_windows(state, forward, anchors, undeclared).await?;
+    let prompted = windows
+        .iter()
+        .filter_map(|window| window.issue().map(|issue| (window, issue)))
+        .map(|(window, issue)| (window.index, window.pid, window.start_time, issue))
+        .collect::<Vec<_>>();
+    if !prompted.is_empty() {
+        let Some(initiator) = initiator else {
+            warn!("Windows cannot take part in the handoff and no initiator can be asked");
+            return Err(HandoffCancelReason::TimedOut.into());
+        };
+        ask_about_windows(state, initiator, &prompted).await?;
+        // A Window whose process exited while the initiator decided is
+        // dropped as well.
+        drop_exited_windows(&mut windows);
+        info!(
+            dropped = prompted.len(),
+            "daemon handoff proceeds without the Windows the initiator named"
+        );
+    }
+    let participating = participating_windows(windows);
+    info!(
+        windows = participating.len(),
+        "daemon handoff: Windows acknowledged their prepare frames"
+    );
+    Ok(handoff_windows::HandoffWindowParticipation::new(
+        participating,
+        attempt,
+    ))
+}
+
+/// Numbers every anchor and then every undeclared process in this attempt,
+/// sends each pinned anchor that runs a client image a Window may run its
+/// prepare frame, and waits for the acknowledgements
+/// ([`await_window_acknowledgements`]). Returns every Window with what the
+/// wait learned.
+async fn prepare_and_await_windows<F: ForwardPreparation>(
+    state: &DaemonState,
+    forward: &F,
+    anchors: Vec<handoff_windows::AnchorSnapshot>,
+    undeclared: Vec<handoff_windows::UndeclaredProcess>,
+) -> Result<Vec<AttemptWindow>, AttemptCancel> {
+    let eligible = window_client_identities(state);
+    let deadline = time::Instant::now() + HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT;
+    let (events_sender, events) = mpsc::unbounded_channel();
+    let mut windows = Vec::with_capacity(anchors.len() + undeclared.len());
+    let mut watchers = Vec::new();
+    let mut indices = 0_u8..;
+    for anchor in anchors {
+        let index = indices.next().unwrap_or(u8::MAX);
+        let (pid, start_time) = (anchor.process.pid, anchor.process.start_time);
+        let window_state = match anchor.process.pin() {
+            handoff_windows::ProcessPin::Exited => AttemptWindowState::Exited,
+            handoff_windows::ProcessPin::Unpinned => AttemptWindowState::Unpinned,
+            handoff_windows::ProcessPin::Live if !eligible.contains(&anchor.process.executable) => {
+                AttemptWindowState::Unpinned
+            }
+            handoff_windows::ProcessPin::Live => {
+                let process = anchor.process.clone();
+                let anchor_connection_id = anchor.connection_id;
+                let (continuation, enqueue) =
+                    send_window_prepare(state, forward, anchor, index, &events_sender, deadline)?;
+                watchers.push(enqueue);
+                watchers.push(watch_prepared_window(
+                    index,
+                    &process,
+                    events_sender.clone(),
+                ));
+                AttemptWindowState::Prepared {
+                    anchor_connection_id,
+                    process,
+                    continuation,
+                    acknowledged: false,
+                    sent: None,
+                }
+            }
+        };
+        windows.push(AttemptWindow {
+            index,
+            pid,
+            start_time,
+            state: window_state,
+        });
+    }
+    for process in undeclared {
+        windows.push(AttemptWindow {
+            index: indices.next().unwrap_or(u8::MAX),
+            pid: process.pid,
+            start_time: process.start_time,
+            state: AttemptWindowState::Undeclared,
+        });
+    }
+    await_window_acknowledgements(state, &mut windows, events, watchers, deadline).await;
+    Ok(windows)
+}
+
+/// Waits until every prepared Window acknowledged, exited, or could not be
+/// sent its frame, or until `deadline`. Then it ends every pending
+/// acknowledgement, so a later one fails, takes the ones that succeeded
+/// meanwhile, and drops each Window whose process has exited since.
+async fn await_window_acknowledgements(
+    state: &DaemonState,
+    windows: &mut [AttemptWindow],
+    mut events: mpsc::UnboundedReceiver<handoff_windows::WindowEvent>,
+    watchers: Vec<AbortOnDrop>,
+    deadline: time::Instant,
+) {
+    let mut outstanding = windows
+        .iter()
+        .filter(|window| matches!(window.state, AttemptWindowState::Prepared { .. }))
+        .count();
+    while outstanding > 0 {
+        let Ok(Some(event)) = time::timeout_at(deadline, events.recv()).await else {
+            break;
+        };
+        if apply_window_event(state, windows, event) {
+            outstanding -= 1;
+        }
+    }
+    // Every acknowledgement that succeeded before this is already queued.
+    state
+        .handoff_windows
+        .lock()
+        .unwrap()
+        .close_acknowledgements();
+    drop(watchers);
+    while let Ok(event) = events.try_recv() {
+        apply_window_event(state, windows, event);
+    }
+    drop_exited_windows(windows);
+}
+
+/// Drops, without asking, each Window whose process has exited. A pidfd
+/// that cannot be polled leaves the Window in place, to be named.
+fn drop_exited_windows(windows: &mut [AttemptWindow]) {
+    for window in windows {
+        if let AttemptWindowState::Prepared { process, .. } = &window.state
+            && process.pin() == handoff_windows::ProcessPin::Exited
+        {
+            window.state = AttemptWindowState::Exited;
+        }
+    }
+}
+
+/// The Windows that acknowledged and still take part.
+fn participating_windows(windows: Vec<AttemptWindow>) -> Vec<handoff_windows::ParticipatingWindow> {
+    windows
+        .into_iter()
+        .filter_map(|window| match window.state {
+            AttemptWindowState::Prepared {
+                anchor_connection_id,
+                process,
+                continuation,
+                acknowledged: true,
+                sent: Some(true),
+            } => Some(handoff_windows::ParticipatingWindow {
+                index: window.index,
+                anchor_connection_id,
+                process,
+                continuation,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Applies one event to its Window. A frame that could not be sent also ends
+/// that anchor's pending acknowledgement in the registry.
+fn apply_window_event(
+    state: &DaemonState,
+    windows: &mut [AttemptWindow],
+    event: handoff_windows::WindowEvent,
+) -> bool {
+    let (handoff_windows::WindowEvent::Acknowledged(index)
+    | handoff_windows::WindowEvent::Exited(index)
+    | handoff_windows::WindowEvent::Sent(index)
+    | handoff_windows::WindowEvent::NotSent(index)) = event;
+    let Some(window) = windows.iter_mut().find(|window| window.index == index) else {
+        return false;
+    };
+    if let (
+        handoff_windows::WindowEvent::NotSent(_),
+        AttemptWindowState::Prepared {
+            anchor_connection_id,
+            ..
+        },
+    ) = (event, &window.state)
+    {
+        state
+            .handoff_windows
+            .lock()
+            .unwrap()
+            .abandon_acknowledgement(*anchor_connection_id);
+    }
+    window.apply(event)
+}
+
+/// Sends one Window its prepare frame and returns the daemon end of its
+/// continuation channel, with the task that queues the frame.
+///
+/// The channel is a `SOCK_SEQPACKET` pair, close-on-exec, with `SO_PASSCRED`
+/// on the daemon end so every later message carries kernel credentials (ADR
+/// 0011). The frame carries a fresh read-only descriptor of the sealed
+/// forward client snapshot ([`ForwardPreparation::open_client_snapshot`])
+/// and the client end, in that order, through the anchor connection's
+/// writer ([`write_handoff_prepare`]); the writer closes the daemon's copies
+/// of both once they are sent, and reports `Sent` or `NotSent` into
+/// `events` ([`handoff_windows::PrepareSendReport`]). The anchor's
+/// acknowledgement opens before the frame is queued, so a fast answer is
+/// never lost; it counts only once the writer reports the whole frame
+/// written. The frame waits for room in the anchor's control queue in its
+/// own task, so the anchors' waits overlap under the shared `deadline`. A
+/// frame that cannot be queued by then, or whose task the attempt drops, is
+/// dropped, which closes its descriptors and reports it not sent for this
+/// attempt only.
+///
+/// # Errors
+/// `Failed` when the channel or the snapshot descriptor cannot be made.
+fn send_window_prepare<F: ForwardPreparation>(
+    state: &DaemonState,
+    forward: &F,
+    anchor: handoff_windows::AnchorSnapshot,
+    index: u8,
+    events: &mpsc::UnboundedSender<handoff_windows::WindowEvent>,
+    deadline: time::Instant,
+) -> Result<(std::os::fd::OwnedFd, AbortOnDrop), AttemptCancel> {
+    let failed = |what: &str, error: &dyn std::fmt::Display| {
+        warn!(%error, "daemon handoff: {what} for a Window failed");
+        AttemptCancel::from(HandoffCancelReason::Failed)
+    };
+    let (daemon_end, client_end) = rustix::net::socketpair(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::SEQPACKET,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )
+    .map_err(|error| failed("the continuation channel", &error))?;
+    rustix::net::sockopt::set_socket_passcred(&daemon_end, true)
+        .map_err(|error| failed("continuation credentials", &error))?;
+    let (snapshot, client_snapshot) = forward
+        .open_client_snapshot()
+        .map_err(|error| failed("the client snapshot descriptor", &error))?;
+    let prepare_id = NEXT_HANDOFF_PREPARE.fetch_add(1, Ordering::Relaxed);
+    let prepare = splinterm_protocol::HandoffPrepare {
+        daemon_generation: state.daemon_generation,
+        prepare_id,
+        descriptors: splinterm_protocol::HANDOFF_PREPARE_DESCRIPTORS,
+        client_snapshot,
+    };
+    prepare
+        .validate()
+        .map_err(|error| failed("the prepare frame", &error.message))?;
+    state.handoff_windows.lock().unwrap().await_acknowledgement(
+        anchor.connection_id,
+        state.daemon_generation,
+        prepare_id,
+        index,
+        events.clone(),
+    );
+    let frame = ControlFrame::HandoffPrepare(HandoffPrepareSend {
+        prepare,
+        descriptors: splinterm_protocol::handoff_prepare::HandoffPrepareDescriptors::new(
+            snapshot, client_end,
+        ),
+        sent: handoff_windows::PrepareSendReport::new(index, events.clone()),
+    });
+    let handoff_windows::AnchorSnapshot {
+        connection_id,
+        control,
+        ..
+    } = anchor;
+    // Each anchor's frame waits for room in its own control queue in its
+    // own task, so one congested anchor cannot use up the shared deadline
+    // of the anchors after it.
+    let enqueue = AbortOnDrop::new(tokio::spawn(async move {
+        if !matches!(
+            time::timeout_at(deadline, control.send(frame)).await,
+            Ok(Ok(()))
+        ) {
+            warn!(
+                connection_id,
+                "a Window's prepare frame could not be queued"
+            );
+        }
+    }));
+    Ok((daemon_end, enqueue))
+}
+
+/// Watches one prepared Window until dropped and reports its process's
+/// exit.
+fn watch_prepared_window(
+    index: u8,
+    process: &handoff_windows::WindowProcess,
+    events: mpsc::UnboundedSender<handoff_windows::WindowEvent>,
+) -> AbortOnDrop {
+    let pidfd = process
+        .pidfd
+        .as_deref()
+        .and_then(|pidfd| rustix::io::fcntl_dupfd_cloexec(pidfd, 0).ok())
+        .and_then(|pidfd| tokio::io::unix::AsyncFd::new(pidfd).ok());
+    AbortOnDrop::new(tokio::spawn(async move {
+        // Only a readable pidfd reports an exit. One that cannot be
+        // watched leaves the Window to the final sweep, which names it.
+        let watched = match &pidfd {
+            Some(pidfd) => pidfd.readable().await.is_ok(),
+            None => false,
+        };
+        if !watched {
+            std::future::pending::<()>().await;
+        }
+        let _ = events.send(handoff_windows::WindowEvent::Exited(index));
+    }))
+}
+
+/// Holds an initiator's decision prompt open; dropping it closes the prompt.
+struct AwaitingDecision(Arc<InitiatorAnswers>);
+
+impl AwaitingDecision {
+    fn arm(answers: Arc<InitiatorAnswers>) -> Self {
+        answers.unanswered_prompt.store(true, Ordering::SeqCst);
+        answers.awaiting_decision.store(true, Ordering::SeqCst);
+        Self(answers)
+    }
+}
+
+impl Drop for AwaitingDecision {
+    fn drop(&mut self) {
+        self.0.awaiting_decision.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Asks the initiator whether to proceed without the `prompted` Windows
+/// (operator decision D10) and returns once it names exactly those.
+///
+/// # Errors
+/// `TimedOut` when the prompt is not written within
+/// [`HANDOFF_PROMPT_DELIVERY_TIMEOUT`] or no answer arrives within
+/// [`HANDOFF_DECISION_DEADLINE`] after that,
+/// and `Failed`, answered with `InvalidArgument`, for a decision that does
+/// not name exactly the prompted Windows.
+async fn ask_about_windows(
+    state: &DaemonState,
+    initiator: &mut HandoffInitiator,
+    prompted: &[(u8, u32, Option<u64>, splinterm_protocol::HandoffWindowIssue)],
+) -> Result<(), AttemptCancel> {
+    let attached = {
+        let registry = state.handoff_windows.lock().unwrap();
+        prompted
+            .iter()
+            .map(|&(_, pid, start_time, _)| registry.attached_splints(pid, start_time))
+            .collect::<Vec<_>>()
+    };
+    let windows = {
+        let topology = state.topology.read().await;
+        prompted
+            .iter()
+            .zip(&attached)
+            .map(|(&(index, pid, _, reason), splints)| {
+                splinterm_protocol::HandoffUnresponsiveWindow {
+                    index,
+                    pid,
+                    reason,
+                    dojos: handoff_windows::window_dojos(&topology, splints),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let deadline_ms = u32::try_from(HANDOFF_DECISION_DEADLINE.as_millis())
+        .unwrap_or(splinterm_protocol::MAX_HANDOFF_DECISION_DEADLINE_MS);
+    if let Err(error) = splinterm_protocol::validate_handoff_decision_required(
+        initiator.request_id,
+        state.daemon_generation,
+        deadline_ms,
+        &windows,
+    ) {
+        error!(error = %error.message, "daemon handoff built an invalid decision prompt");
+        return Err(HandoffCancelReason::Failed.into());
+    }
+    let expected = windows
+        .iter()
+        .map(|window| window.index)
+        .collect::<HashSet<_>>();
+    // Armed before the prompt is queued, so an immediate answer is taken,
+    // and disarmed however this ends, a dropped attempt included, so no
+    // answer is taken once nothing waits for it.
+    let awaiting = AwaitingDecision::arm(Arc::clone(&initiator.answers));
+    let prompt = ServerFrame::HandoffDecisionRequired {
+        request_id: initiator.request_id,
+        daemon_generation: state.daemon_generation,
+        deadline_ms,
+        windows,
+    };
+    // The advertised deadline counts from when the writer has written the
+    // prompt, not from when it was queued behind other frames. Delivery has
+    // its own bound, so a writer that never confirms still cancels.
+    let (written, confirmation) = tokio::sync::oneshot::channel();
+    let delivered = time::timeout(HANDOFF_PROMPT_DELIVERY_TIMEOUT, async {
+        initiator
+            .control
+            .send(ControlFrame::Confirmed {
+                frame: prompt,
+                written,
+            })
+            .await
+            .ok()?;
+        confirmation.await.ok().filter(|&written| written)
+    })
+    .await;
+    if !matches!(delivered, Ok(Some(true))) {
+        info!("daemon handoff decision prompt was not delivered in time");
+        return Err(HandoffCancelReason::TimedOut.into());
+    }
+    let answer = time::timeout(HANDOFF_DECISION_DEADLINE, initiator.decisions.recv()).await;
+    drop(awaiting);
+    let proceed_without = match answer {
+        Ok(Some(proceed_without)) => proceed_without,
+        Ok(None) => return Err(HandoffCancelReason::Failed.into()),
+        Err(_) => {
+            info!("daemon handoff decision timed out");
+            return Err(HandoffCancelReason::TimedOut.into());
+        }
+    };
+    let named = proceed_without.iter().copied().collect::<HashSet<_>>();
+    if splinterm_protocol::validate_handoff_decision(initiator.request_id, &proceed_without)
+        .is_err()
+        || named != expected
+    {
+        return Err(AttemptCancel {
+            reason: HandoffCancelReason::Failed,
+            refusal: None,
+            error: Some(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "a handoff decision must name exactly the prompted Windows",
+            )),
+        });
+    }
+    Ok(())
+}
+
+/// Reopens a sealed client snapshot read-only through `/proc/self/fd`.
+///
+/// A fresh open, not a `dup`: the Window gets its own read-only open file
+/// description, so it can neither write through it (the seals forbid that
+/// anyway) nor move the daemon's file offset. The reopened descriptor must
+/// name the same sealed regular file, with the size and every seal the frame
+/// promises; the Window checks the same again on receipt.
+fn reopen_client_snapshot(
+    descriptor: std::os::fd::BorrowedFd<'_>,
+    expected: splinterm_protocol::HandoffClientSnapshot,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    let reopened = rustix::fs::open(
+        format!("/proc/self/fd/{}", descriptor.as_raw_fd()).as_str(),
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let status = rustix::fs::fstat(&reopened)?;
+    let seals = rustix::fs::fcntl_get_seals(&reopened)?;
+    if rustix::fs::FileType::from_raw_mode(status.st_mode) != rustix::fs::FileType::RegularFile
+        || status.st_dev != expected.device
+        || status.st_ino != expected.inode
+        || u64::try_from(status.st_size).ok() != Some(expected.size)
+        || !seals.contains(splinterm_protocol::handoff_prepare::REQUIRED_CLIENT_SNAPSHOT_SEALS)
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "the reopened client snapshot is not the sealed snapshot",
+        ));
+    }
+    Ok(reopened)
 }
 
 /// Prepares the installed forward pair on a blocking thread: sealed
@@ -10764,6 +12012,19 @@ trait ForwardPreparation: Send + Sized + 'static {
         self,
         manifests: Self::Manifests,
     ) -> Result<Box<dyn ExecBoundaryInputs>, (Self, Self::Manifests)>;
+
+    /// A fresh read-only descriptor of the sealed forward client snapshot,
+    /// for one Window's prepare frame, with the identity the frame names
+    /// (Plan 0061 M3.13b1). Test preparations hold no snapshot unless a test
+    /// supplies one, and refuse.
+    fn open_client_snapshot(
+        &self,
+    ) -> std::io::Result<(
+        std::os::fd::OwnedFd,
+        splinterm_protocol::HandoffClientSnapshot,
+    )> {
+        Err(std::io::Error::from(ErrorKind::Unsupported))
+    }
 }
 
 impl ForwardPreparation for ForwardHandoffAuthority {
@@ -10794,6 +12055,23 @@ impl ForwardPreparation for ForwardHandoffAuthority {
             warn!(%error, "handoff manifests could not be built");
             HandoffCancelReason::Failed
         })
+    }
+
+    fn open_client_snapshot(
+        &self,
+    ) -> std::io::Result<(
+        std::os::fd::OwnedFd,
+        splinterm_protocol::HandoffClientSnapshot,
+    )> {
+        let client = self.snapshots().forward().client();
+        let identity = client.snapshot();
+        let expected = splinterm_protocol::HandoffClientSnapshot {
+            device: identity.device,
+            inode: identity.inode,
+            size: identity.size,
+            sha256: identity.sha256,
+        };
+        reopen_client_snapshot(client.descriptor(), expected).map(|reopened| (reopened, expected))
     }
 
     fn exec_inputs(
@@ -11586,7 +12864,7 @@ fn spawn_topology_subscription(
 
 struct SubscriptionOutputs {
     outbound: mpsc::Sender<QueuedServerFrame>,
-    control: mpsc::Sender<ServerFrame>,
+    control: mpsc::Sender<ControlFrame>,
 }
 
 struct SubscriptionAudit {
@@ -11728,17 +13006,17 @@ async fn send_final_subscription_frames(
 }
 
 async fn send_access_revoked(
-    control: &mpsc::Sender<ServerFrame>,
+    control: &mpsc::Sender<ControlFrame>,
     subscription_id: u64,
     sequence: u64,
     grant_id: u64,
 ) {
     let _ = control
-        .send(ServerFrame::Event {
+        .send(ControlFrame::Frame(ServerFrame::Event {
             subscription_id,
             sequence,
             event: SubscriptionEvent::AccessRevoked { grant_id },
-        })
+        }))
         .await;
 }
 
@@ -11796,13 +13074,13 @@ fn spawn_subscription(
                     let revision = current_revision(&handle, access.scrollback_rows).await;
                     let _ = outputs
                         .control
-                        .send(ServerFrame::Event {
+                        .send(ControlFrame::Frame(ServerFrame::Event {
                             subscription_id: id,
                             sequence,
                             event: SubscriptionEvent::ResyncRequired {
                                 current_revision: revision,
                             },
-                        })
+                        }))
                         .await;
                     break;
                 }
@@ -11869,13 +13147,13 @@ fn spawn_subscription(
                             let revision = current_revision(&handle, access.scrollback_rows).await;
                             let _ = outputs
                                 .control
-                                .send(ServerFrame::Event {
+                                .send(ControlFrame::Frame(ServerFrame::Event {
                                     subscription_id: id,
                                     sequence,
                                     event: SubscriptionEvent::ResyncRequired {
                                         current_revision: revision,
                                     },
-                                })
+                                }))
                                 .await;
                             break;
                         }
@@ -11895,13 +13173,13 @@ fn spawn_subscription(
                             let revision = current_revision(&handle, access.scrollback_rows).await;
                             let _ = outputs
                                 .control
-                                .send(ServerFrame::Event {
+                                .send(ControlFrame::Frame(ServerFrame::Event {
                                     subscription_id: id,
                                     sequence,
                                     event: SubscriptionEvent::ResyncRequired {
                                         current_revision: revision,
                                     },
-                                })
+                                }))
                                 .await;
                             break;
                         };
@@ -11924,13 +13202,13 @@ fn spawn_subscription(
                             let revision = current_revision(&handle, access.scrollback_rows).await;
                             let _ = outputs
                                 .control
-                                .send(ServerFrame::Event {
+                                .send(ControlFrame::Frame(ServerFrame::Event {
                                     subscription_id: id,
                                     sequence,
                                     event: SubscriptionEvent::ResyncRequired {
                                         current_revision: revision,
                                     },
-                                })
+                                }))
                                 .await;
                             break;
                         }
@@ -12108,22 +13386,41 @@ fn frame_trace_identity(frame: &ServerFrame) -> Option<(u64, u64, u64, u64)> {
     }
 }
 
+/// Writes one connection's frames, control frames first.
+///
+/// Every frame, and every frame of a terminal transaction, is written
+/// completely before the next is taken, so each item starts at a frame
+/// boundary with no earlier frame partly written. A handoff prepare frame
+/// relies on that ([`write_handoff_prepare`]).
 async fn write_frames(
     mut writer: OwnedWriteHalf,
     mut normal: mpsc::Receiver<QueuedServerFrame>,
-    mut control: mpsc::Receiver<ServerFrame>,
+    mut control: mpsc::Receiver<ControlFrame>,
     terminal_transaction_memory: Arc<Semaphore>,
 ) {
     loop {
-        let (frame, _publication_reservation) = tokio::select! {
+        let (frame, _publication_reservation, written) = tokio::select! {
             biased;
             frame = control.recv() => {
-                let Some(frame) = frame else { break };
-                (frame, None)
+                match frame {
+                    None => break,
+                    Some(ControlFrame::Frame(frame)) => (frame, None, None),
+                    // A frame nothing waits for any more, such as a decision
+                    // prompt whose attempt cancelled while it was queued, is
+                    // not written.
+                    Some(ControlFrame::Confirmed { written, .. }) if written.is_closed() => continue,
+                    Some(ControlFrame::Confirmed { frame, written }) => (frame, None, Some(written)),
+                    Some(ControlFrame::HandoffPrepare(prepare)) => {
+                        if write_handoff_prepare(&mut writer, prepare).await {
+                            continue;
+                        }
+                        return;
+                    }
+                }
             }
             queued = normal.recv() => {
                 let Some(queued) = queued else { break };
-                (queued.frame, queued.terminal_publication)
+                (queued.frame, queued.terminal_publication, None)
             }
         };
         let identity = frame_trace_identity(&frame);
@@ -12169,13 +13466,15 @@ async fn write_frames(
             );
         }
         let write_started = perf_trace_enabled().then(Instant::now);
+        let mut complete = true;
         for encoded in &encoded_frames {
-            if time::timeout(WRITE_TIMEOUT, writer.write_all(encoded))
-                .await
-                .is_err()
-            {
-                return;
+            match time::timeout(WRITE_TIMEOUT, writer.write_all(encoded)).await {
+                Ok(result) => complete &= result.is_ok(),
+                Err(_) => return,
             }
+        }
+        if let Some(written) = written {
+            let _ = written.send(complete);
         }
         if let (Some(started), Some((subscription_id, sequence, base_revision, revision))) =
             (write_started, identity)
@@ -12196,6 +13495,64 @@ async fn write_frames(
                 },
             );
         }
+    }
+}
+
+/// Writes one handoff prepare frame with its two descriptors (the Plan 0061
+/// M3.13 sender rule).
+///
+/// [`write_frames`] calls it only between frames, so the frame starts at a
+/// frame boundary. Its first `sendmsg` attaches both descriptors to the
+/// frame's first byte; a stream socket never merges that ancillary data into
+/// an earlier write, so a receiver reading exact-length headers gets them
+/// with this frame's header read and with no other read
+/// ([`splinterm_protocol::handoff_prepare`]). Whatever the kernel did not
+/// take is written next, before any other frame. The writer's copies of the
+/// descriptors close once that first write succeeds, since the queued
+/// message holds its own references, or when the send fails. The whole frame
+/// shares [`WRITE_TIMEOUT`] like any other.
+///
+/// Returns whether the frame was written completely. A failure ends the
+/// writer, as any failed write does, and so the connection.
+async fn write_handoff_prepare(writer: &mut OwnedWriteHalf, send: HandoffPrepareSend) -> bool {
+    let HandoffPrepareSend {
+        prepare,
+        descriptors,
+        sent,
+    } = send;
+    let written = time::timeout(WRITE_TIMEOUT, async {
+        let encoded = splinterm_protocol::handoff_prepare::encode_handoff_prepare(&prepare).ok()?;
+        let stream: &UnixStream = writer.as_ref();
+        let first = stream
+            .async_io(tokio::io::Interest::WRITABLE, || {
+                splinterm_protocol::handoff_prepare::send_handoff_prepare(
+                    stream.as_fd(),
+                    &encoded,
+                    &descriptors,
+                )
+                .map_err(handoff_descriptor_io_error)
+            })
+            .await
+            .ok()?;
+        drop(descriptors);
+        writer.write_all(&encoded[first..]).await.ok()
+    })
+    .await
+    .is_ok_and(|written| written.is_some());
+    sent.report(written);
+    written
+}
+
+/// Maps a descriptor transport failure for Tokio's readiness loop, which
+/// retries a `WOULDBLOCK` once the socket is writable again.
+fn handoff_descriptor_io_error(
+    error: splinterm_protocol::handoff_prepare::HandoffDescriptorError,
+) -> std::io::Error {
+    match error {
+        splinterm_protocol::handoff_prepare::HandoffDescriptorError::Io(errno) => {
+            std::io::Error::from_raw_os_error(errno.raw_os_error())
+        }
+        other => std::io::Error::other(other),
     }
 }
 
@@ -12262,8 +13619,11 @@ async fn send_response(
         .await
         .context("writer closed")
 }
-async fn send_control(sender: &mpsc::Sender<ServerFrame>, frame: ServerFrame) -> Result<()> {
-    sender.send(frame).await.context("writer closed")
+async fn send_control(sender: &mpsc::Sender<ControlFrame>, frame: ServerFrame) -> Result<()> {
+    sender
+        .send(ControlFrame::Frame(frame))
+        .await
+        .context("writer closed")
 }
 fn protocol_error(request_id: Option<u64>, code: ErrorCode, message: &str) -> ServerFrame {
     ServerFrame::Error {
@@ -12924,6 +14284,7 @@ mod tests {
                     reader,
                     &task_state,
                     &peer,
+                    None,
                     41,
                     &outbound,
                     &control,
@@ -12945,7 +14306,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 controls.recv().await,
-                Some(ServerFrame::Hello { .. })
+                Some(ControlFrame::Frame(ServerFrame::Hello { .. }))
             ));
             let frame =
                 splinterm_protocol::encode_frame(&ClientFrame::Cancel { request_id: 7 }).unwrap();
@@ -12975,7 +14336,7 @@ mod tests {
                 state.policy_reloads.send(1).unwrap();
                 assert!(matches!(
                     controls.recv().await,
-                    Some(ServerFrame::Error { .. })
+                    Some(ControlFrame::Frame(ServerFrame::Error { .. }))
                 ));
             } else {
                 state.connection_revocations.send(41).unwrap();
@@ -13050,6 +14411,7 @@ mod tests {
                     reader,
                     &task_state,
                     &peer,
+                    None,
                     41,
                     &outbound,
                     &control,
@@ -13077,7 +14439,7 @@ mod tests {
             }
             assert!(matches!(
                 controls.recv().await,
-                Some(ServerFrame::Hello { .. })
+                Some(ControlFrame::Frame(ServerFrame::Hello { .. }))
             ));
             assert!(matches!(
                 responses.recv().await.unwrap().frame,
@@ -13116,6 +14478,7 @@ mod tests {
                     reader,
                     &task_state,
                     &peer,
+                    None,
                     41,
                     &outbound,
                     &control,
@@ -13142,17 +14505,17 @@ mod tests {
             }
             assert!(matches!(
                 controls.recv().await,
-                Some(ServerFrame::Hello { .. })
+                Some(ControlFrame::Frame(ServerFrame::Hello { .. }))
             ));
             assert!(matches!(
                 controls.recv().await,
-                Some(ServerFrame::Error {
+                Some(ControlFrame::Frame(ServerFrame::Error {
                     request_id: None,
                     error: ProtocolError {
                         code: ErrorCode::InvalidFrame,
                         ..
                     },
-                })
+                }))
             ));
             task.await.unwrap().unwrap();
             assert!(responses.try_recv().is_err());
@@ -14011,6 +15374,9 @@ mod tests {
             daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
             handoff_listeners: None,
             handoff_exit: HandoffExit::default(),
+            handoff_windows: Arc::default(),
+            handoff_initiators: StdMutex::default(),
+            handoff_client_identities: StdMutex::default(),
             handoff_faults: StdMutex::default(),
             handoff_capture_limits: StdMutex::new(CaptureLimits::DEFAULT),
             owner_home: Some(PathBuf::from("/home/test")),
@@ -15605,6 +16971,7 @@ mod tests {
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
+                prepare_id: 1,
             },
         ];
         // Development terminal access and remote human roles never stand in
@@ -15764,7 +17131,7 @@ mod tests {
         );
         let revision = state.topology.read().await.revision();
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let refused = execute_daemon_handoff(&state, &report).await;
+        let refused = execute_daemon_handoff(&state, &report, None).await;
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
         assert_eq!(
@@ -15800,6 +17167,7 @@ mod tests {
             &state,
             &report,
             handoff_requests::live_handoff_support(report.build.provenance),
+            None,
             {
                 let prepared = Arc::clone(&prepared);
                 move |_| async move {
@@ -15822,7 +17190,7 @@ mod tests {
             refused.message
         );
         // The shipped wrapper gives the same answer.
-        let shipped = execute_daemon_handoff(&state, &report).await;
+        let shipped = execute_daemon_handoff(&state, &report, None).await;
         assert_eq!(shipped.message, refused.message);
         assert_eq!(
             shipped.handoff_blocking_reasons,
@@ -15841,7 +17209,7 @@ mod tests {
         state: &Arc<DaemonState>,
         report: &splinterm_protocol::HandoffReport,
     ) -> ProtocolError {
-        execute_daemon_handoff_with(state, report, Ok(()), |_| async { Ok(()) }).await
+        execute_daemon_handoff_with(state, report, Ok(()), None, |_| async { Ok(()) }).await
     }
 
     /// Every handoff status phase queued for a topology hub subscriber.
@@ -15980,6 +17348,7 @@ mod tests {
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
+                prepare_id: 1,
             },
         ];
         let fenced = [
@@ -16191,7 +17560,7 @@ mod tests {
         let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Preparing);
         assert_eq!(
-            execute_daemon_handoff(&state, &report).await.code,
+            execute_daemon_handoff(&state, &report, None).await.code,
             ErrorCode::HandoffInProgress
         );
         assert_eq!(
@@ -16200,7 +17569,7 @@ mod tests {
         );
         attempt.fence().await.unwrap();
         assert_eq!(
-            execute_daemon_handoff(&state, &report).await.code,
+            execute_daemon_handoff(&state, &report, None).await.code,
             ErrorCode::HandoffInProgress
         );
         // A dry run takes no topology permit, so it answers under the fence.
@@ -16961,7 +18330,7 @@ mod tests {
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let forward = Arc::new(());
-        let error = execute_daemon_handoff_with(&state, &report, Ok(()), {
+        let error = execute_daemon_handoff_with(&state, &report, Ok(()), None, {
             let forward = Arc::clone(&forward);
             move |state: Arc<DaemonState>| async move {
                 // Still `Preparing`: nothing is fenced and requests run.
@@ -16998,7 +18367,8 @@ mod tests {
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let error =
-            execute_daemon_handoff_with(&state, &report, Ok(()), prepare_forward_handoff).await;
+            execute_daemon_handoff_with(&state, &report, Ok(()), None, prepare_forward_handoff)
+                .await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.message,
@@ -17024,7 +18394,7 @@ mod tests {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff_with(&state, &report, Ok(()), |_| async {
+        let error = execute_daemon_handoff_with(&state, &report, Ok(()), None, |_| async {
             Err::<(), _>(handoff_requests::ForwardRefusal::NoInstalledUpgrade)
         })
         .await;
@@ -17315,7 +18685,7 @@ mod tests {
             let execute = tokio::spawn({
                 let state = Arc::clone(&state);
                 async move {
-                    execute_daemon_handoff_with(&state, &report, Ok(()), |_| async {
+                    execute_daemon_handoff_with(&state, &report, Ok(()), None, |_| async {
                         Ok(ExecTestPreparation)
                     })
                     .await
@@ -19942,5 +21312,1516 @@ mod tests {
             ephemeral_access_scopes(&[authorization::OperationScope::AgentStatusReport]),
             Some(vec![AccessScope::AgentStatusReport])
         );
+    }
+
+    // Plan 0061 M3.13b1: Window participation on the old side. Every test
+    // drives the gate with live handoff support passed as `Ok(())`, so all of
+    // them run while `handoff_requests::WINDOW_CONTINUITY_READY` is false.
+
+    /// A sealed memfd standing in for the forward client snapshot.
+    fn sealed_test_client_snapshot() -> (
+        std::os::fd::OwnedFd,
+        splinterm_protocol::HandoffClientSnapshot,
+    ) {
+        let snapshot = rustix::fs::memfd_create(
+            "splinterd-test-client",
+            rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        let bytes = b"\x7fELF stand-in forward client";
+        assert_eq!(rustix::io::write(&snapshot, bytes).unwrap(), bytes.len());
+        rustix::fs::fcntl_add_seals(
+            &snapshot,
+            splinterm_protocol::handoff_prepare::REQUIRED_CLIENT_SNAPSHOT_SEALS,
+        )
+        .unwrap();
+        let status = rustix::fs::fstat(&snapshot).unwrap();
+        let identity = splinterm_protocol::HandoffClientSnapshot {
+            device: status.st_dev,
+            inode: status.st_ino,
+            size: u64::try_from(status.st_size).unwrap(),
+            sha256: [0x5c; 32],
+        };
+        (snapshot, identity)
+    }
+
+    /// A forward preparation for Window tests: a sealed stand-in client
+    /// snapshot, and [`ExecTestPreparation`]'s stand-in exec inputs, so a
+    /// complete attempt waits for serve with its Windows.
+    struct WindowTestPreparation {
+        snapshot: std::os::fd::OwnedFd,
+        identity: splinterm_protocol::HandoffClientSnapshot,
+    }
+
+    impl WindowTestPreparation {
+        fn new() -> Self {
+            let (snapshot, identity) = sealed_test_client_snapshot();
+            Self { snapshot, identity }
+        }
+    }
+
+    impl ForwardPreparation for WindowTestPreparation {
+        type Manifests = ();
+
+        fn build_manifests(
+            &self,
+            _: &DaemonState,
+            _: &Topology,
+            _: &HandoffCaptures,
+        ) -> Result<(), HandoffCancelReason> {
+            Ok(())
+        }
+
+        fn exec_inputs(self, (): ()) -> Result<Box<dyn ExecBoundaryInputs>, (Self, ())> {
+            ExecTestPreparation
+                .exec_inputs(())
+                .map_err(|(ExecTestPreparation, ())| (self, ()))
+        }
+
+        fn open_client_snapshot(
+            &self,
+        ) -> std::io::Result<(
+            std::os::fd::OwnedFd,
+            splinterm_protocol::HandoffClientSnapshot,
+        )> {
+            reopen_client_snapshot(self.snapshot.as_fd(), self.identity)
+                .map(|reopened| (reopened, self.identity))
+        }
+    }
+
+    /// A process standing in for one Window's client, killed and reaped on
+    /// drop.
+    struct TestWindowProcess(std::process::Child);
+
+    impl TestWindowProcess {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .expect("spawn a stand-in Window process"),
+            )
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+
+        /// The process as an anchor pins it, running `executable`.
+        fn pinned(
+            &self,
+            executable: handoff_windows::FileIdentity,
+        ) -> handoff_windows::WindowProcess {
+            let pid = self.pid();
+            let pidfd = rustix::process::pidfd_open(
+                rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
+                rustix::process::PidfdFlags::empty(),
+            )
+            .unwrap();
+            handoff_windows::WindowProcess {
+                pid,
+                start_time: agent_status::process_start_time(pid),
+                pidfd: Some(Arc::new(pidfd)),
+                executable,
+            }
+        }
+
+        fn exit(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    impl Drop for TestWindowProcess {
+        fn drop(&mut self) {
+            self.exit();
+        }
+    }
+
+    const INSTALLED_CLIENT: handoff_windows::FileIdentity = handoff_windows::FileIdentity {
+        device: 41,
+        inode: 1001,
+    };
+    const ROLLBACK_CLIENT: handoff_windows::FileIdentity = handoff_windows::FileIdentity {
+        device: 41,
+        inode: 1002,
+    };
+    const OTHER_CLIENT: handoff_windows::FileIdentity = handoff_windows::FileIdentity {
+        device: 41,
+        inode: 1003,
+    };
+
+    /// A daemon whose installed client is [`INSTALLED_CLIENT`] and whose
+    /// retained rollback client is [`ROLLBACK_CLIENT`].
+    fn window_test_state() -> Arc<DaemonState> {
+        let state = test_state(false);
+        *state.handoff_client_identities.lock().unwrap() =
+            Some((Some(INSTALLED_CLIENT), Some(ROLLBACK_CLIENT)));
+        state
+    }
+
+    /// One declared test Window: its anchor connection over a socket pair,
+    /// served by the daemon's own writer, and the client's blocking end.
+    struct TestWindow {
+        connection_id: u64,
+        client: Option<std::os::unix::net::UnixStream>,
+        /// Whether the server `Hello`, which must come first, was read.
+        greeted: bool,
+        outbound: mpsc::Sender<QueuedServerFrame>,
+        _reader: OwnedReadHalf,
+        writer: AbortOnDrop,
+    }
+
+    /// The server `Hello` a test anchor's declaration queues.
+    fn test_hello() -> ControlFrame {
+        ServerFrame::Hello {
+            version: PROTOCOL_VERSION,
+            limits: server_limits(),
+            development_terminal_access: false,
+            daemon_hostname: None,
+            daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
+        }
+        .into()
+    }
+
+    fn declare_test_window(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+        process: handoff_windows::WindowProcess,
+    ) -> TestWindow {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server.set_nonblocking(true).unwrap();
+        let (reader, writer) = UnixStream::from_std(server).unwrap().into_split();
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
+        let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
+        let writer = AbortOnDrop::new(tokio::spawn(write_frames(
+            writer,
+            outbound_rx,
+            control_rx,
+            Arc::clone(&state.terminal_transaction_memory),
+        )));
+        let mut windows = state.handoff_windows.lock().unwrap();
+        windows.register_connection(connection_id, process.pid, process.start_time);
+        windows
+            .declare_anchor(connection_id, process, control, test_hello())
+            .unwrap();
+        TestWindow {
+            connection_id,
+            client: Some(client),
+            greeted: false,
+            outbound,
+            _reader: reader,
+            writer,
+        }
+    }
+
+    impl TestWindow {
+        /// Reads the next frame after the server `Hello`, which must be the
+        /// Window's first frame and carry no descriptors.
+        async fn read_frame(
+            &mut self,
+        ) -> (
+            ServerFrame,
+            Option<splinterm_protocol::handoff_prepare::HandoffPrepareDescriptors>,
+        ) {
+            if !self.greeted {
+                let (hello, descriptors) = self.read_raw_frame().await;
+                assert!(
+                    matches!(hello, ServerFrame::Hello { .. }) && descriptors.is_none(),
+                    "the Window's first frame is its Hello: {hello:?}"
+                );
+                self.greeted = true;
+            }
+            self.read_raw_frame().await
+        }
+
+        /// Reads one frame as a Plan 0061 M3.14 receiver does: exact-length
+        /// header and body reads with `recv_with_descriptors`. Descriptors
+        /// are accepted only with the header's first read.
+        async fn read_raw_frame(
+            &mut self,
+        ) -> (
+            ServerFrame,
+            Option<splinterm_protocol::handoff_prepare::HandoffPrepareDescriptors>,
+        ) {
+            let client = self.client.take().unwrap();
+            let (client, frame, descriptors) = tokio::task::spawn_blocking(move || {
+                let mut descriptors = None;
+                let mut header = [0_u8; 4];
+                let mut filled = 0;
+                while filled < header.len() {
+                    let received = splinterm_protocol::handoff_prepare::recv_with_descriptors(
+                        client.as_fd(),
+                        &mut header[filled..],
+                    )
+                    .unwrap();
+                    assert_ne!(received.bytes, 0, "the Window's connection closed");
+                    if received.descriptors.is_some() {
+                        assert_eq!(filled, 0, "descriptors arrived inside a frame header");
+                        descriptors = received.descriptors;
+                    }
+                    filled += received.bytes;
+                }
+                let mut body = vec![0_u8; u32::from_be_bytes(header) as usize];
+                let mut filled = 0;
+                while filled < body.len() {
+                    let received = splinterm_protocol::handoff_prepare::recv_with_descriptors(
+                        client.as_fd(),
+                        &mut body[filled..],
+                    )
+                    .unwrap();
+                    assert_ne!(received.bytes, 0, "the Window's connection closed");
+                    assert!(
+                        received.descriptors.is_none(),
+                        "descriptors arrived with a frame body"
+                    );
+                    filled += received.bytes;
+                }
+                let frame: ServerFrame = serde_json::from_slice(&body).unwrap();
+                (client, frame, descriptors)
+            })
+            .await
+            .unwrap();
+            self.client = Some(client);
+            (frame, descriptors)
+        }
+
+        /// Reads this Window's prepare frame and checks its descriptors.
+        async fn read_prepare(
+            &mut self,
+        ) -> (
+            splinterm_protocol::HandoffPrepare,
+            splinterm_protocol::handoff_prepare::HandoffPrepareDescriptors,
+        ) {
+            let (frame, descriptors) = self.read_frame().await;
+            splinterm_protocol::handoff_prepare::accept_handoff_prepare(&frame, descriptors)
+                .expect("a valid prepare frame with its two descriptors")
+                .expect("a prepare frame")
+        }
+    }
+
+    /// Acknowledges `prepare` on `connection_id`, echoing its generation and
+    /// id, as a Window does.
+    async fn acknowledge(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+        prepare: &splinterm_protocol::HandoffPrepare,
+    ) -> Result<Response, ErrorCode> {
+        acknowledge_with(
+            state,
+            connection_id,
+            prepare.daemon_generation,
+            prepare.prepare_id,
+        )
+        .await
+    }
+
+    async fn acknowledge_with(
+        state: &Arc<DaemonState>,
+        connection_id: u64,
+        daemon_generation: u64,
+        prepare_id: u64,
+    ) -> Result<Response, ErrorCode> {
+        handle_request(
+            Request::AcknowledgeHandoffPrepare {
+                daemon_generation,
+                prepare_id,
+            },
+            state,
+            &PeerIdentity::for_test(),
+            connection_id,
+            0,
+            true,
+            false,
+        )
+        .await
+        .map(|handled| handled.response)
+        .map_err(|error| error.code)
+    }
+
+    /// Whether the peer of a continuation end reads end of file.
+    fn continuation_closed(continuation: std::os::fd::BorrowedFd<'_>) -> bool {
+        let mut byte = [0_u8; 1];
+        matches!(
+            rustix::net::recv(
+                continuation,
+                &mut byte[..],
+                rustix::net::RecvFlags::DONTWAIT
+            ),
+            Ok((0, _))
+        )
+    }
+
+    fn spawn_window_execute(
+        state: &Arc<DaemonState>,
+        initiator: Option<HandoffInitiator>,
+    ) -> JoinHandle<ProtocolError> {
+        let state = Arc::clone(state);
+        tokio::spawn(async move {
+            let report = gated_handoff_report(&state).await;
+            execute_daemon_handoff_with(&state, &report, Ok(()), initiator, |_| async {
+                Ok(WindowTestPreparation::new())
+            })
+            .await
+        })
+    }
+
+    /// Waits for a complete attempt to leave its exec inputs for serve, then
+    /// stops the request that ran it.
+    async fn take_exec_ready(state: &DaemonState, execute: JoinHandle<ProtocolError>) -> ExecReady {
+        time::timeout(Duration::from_secs(10), async {
+            while !state.handoff_exit.is_ready() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a complete attempt waits for serve");
+        execute.abort();
+        assert!(execute.await.unwrap_err().is_cancelled());
+        state.handoff_exit.take().unwrap()
+    }
+
+    /// Takes the decision prompt and confirms it written, as the
+    /// initiator's writer would.
+    async fn decision_prompt(
+        prompts: &mut mpsc::Receiver<ControlFrame>,
+    ) -> (u64, u32, Vec<splinterm_protocol::HandoffUnresponsiveWindow>) {
+        let (prompt, written) = unconfirmed_decision_prompt(prompts).await;
+        written.send(true).unwrap();
+        prompt
+    }
+
+    /// Takes the decision prompt without confirming it written.
+    async fn unconfirmed_decision_prompt(
+        prompts: &mut mpsc::Receiver<ControlFrame>,
+    ) -> (
+        (u64, u32, Vec<splinterm_protocol::HandoffUnresponsiveWindow>),
+        tokio::sync::oneshot::Sender<bool>,
+    ) {
+        match time::timeout(Duration::from_secs(10), prompts.recv()).await {
+            Ok(Some(ControlFrame::Confirmed {
+                frame:
+                    ServerFrame::HandoffDecisionRequired {
+                        request_id,
+                        daemon_generation,
+                        deadline_ms,
+                        windows,
+                    },
+                written,
+            })) => {
+                assert_eq!(request_id, 9);
+                ((daemon_generation, deadline_ms, windows), written)
+            }
+            _ => panic!("the initiator was not asked"),
+        }
+    }
+
+    /// A Lair whose one Dojo holds one Splint, for naming Dojos in a prompt.
+    async fn named_lair(state: &DaemonState) -> (LairId, DojoId, SplintId) {
+        let lair = Lair::new("work", PathBuf::from("/tmp"));
+        let ids = (
+            lair.id,
+            lair.dojos[0].id,
+            layout_splint_ids(&lair.dojos[0].root)[0],
+        );
+        let mut topology = state.topology.write().await;
+        let revision = topology.revision();
+        topology.insert_lair_at(revision, lair).unwrap();
+        ids
+    }
+
+    /// At most one anchor per process, at most 64 in all, none whose Hello
+    /// cannot be queued, and none while an attempt holds its Windows.
+    fn assert_anchor_declaration_bounds(state: &DaemonState) {
+        // At most one anchor per process, and at most 64 in all.
+        let fake = |pid: u32| handoff_windows::WindowProcess {
+            pid,
+            start_time: Some(u64::from(pid)),
+            pidfd: None,
+            executable: INSTALLED_CLIENT,
+        };
+        // Each declaration queues its Hello on this one test channel.
+        let (control, _controls) = mpsc::channel(256);
+        {
+            let mut windows = state.handoff_windows.lock().unwrap();
+            for connection_id in 1..=64 {
+                let pid = 1000 + u32::try_from(connection_id).unwrap();
+                windows.register_connection(connection_id, pid, Some(u64::from(pid)));
+                windows
+                    .declare_anchor(connection_id, fake(pid), control.clone(), test_hello())
+                    .unwrap();
+            }
+            assert_eq!(
+                windows.declare_anchor(65, fake(5000), control.clone(), test_hello()),
+                Err(handoff_windows::AnchorRefusal::Full)
+            );
+            windows.remove_connection(64);
+            assert_eq!(
+                windows.declare_anchor(66, fake(1001), control.clone(), test_hello()),
+                Err(handoff_windows::AnchorRefusal::AlreadyDeclared)
+            );
+            // An anchor whose Hello cannot be queued is not declared.
+            let (closed, closed_receiver) = mpsc::channel(1);
+            drop(closed_receiver);
+            assert_eq!(
+                windows.declare_anchor(68, fake(7000), closed, test_hello()),
+                Err(handoff_windows::AnchorRefusal::WriterClosed)
+            );
+            assert!(!windows.is_anchor(68));
+        }
+        // No Window declares while an attempt holds its Windows.
+        let (attempt, anchors, undeclared) = handoff_windows::begin_attempt(&state.handoff_windows);
+        assert_eq!((anchors.len(), undeclared.len()), (63, 0));
+        assert_eq!(
+            state.handoff_windows.lock().unwrap().declare_anchor(
+                67,
+                fake(6000),
+                control.clone(),
+                test_hello()
+            ),
+            Err(handoff_windows::AnchorRefusal::HandoffInProgress)
+        );
+        drop(attempt);
+        state
+            .handoff_windows
+            .lock()
+            .unwrap()
+            .declare_anchor(67, fake(6000), control.clone(), test_hello())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn window_anchors_need_the_trusted_ui_role_are_bounded_and_deregister() {
+        time::timeout(Duration::from_secs(5), async {
+            // Any role but the trusted UI is refused, not ignored.
+            let state = test_state(false);
+            let peer = PeerIdentity::for_test();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let (reader, _writer) = server.into_split();
+            let (outbound, _responses) = mpsc::channel(4);
+            let (control, mut controls) = mpsc::channel(4);
+            let (_closed, writer_closed) = watch::channel(false);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                Box::pin(serve_authenticated(
+                    reader,
+                    &task_state,
+                    &peer,
+                    None,
+                    41,
+                    &outbound,
+                    &control,
+                    writer_closed,
+                ))
+                .await
+            });
+            client
+                .write_all(
+                    &splinterm_protocol::encode_frame(&ClientFrame::Hello {
+                        minimum_version: PROTOCOL_VERSION,
+                        maximum_version: PROTOCOL_VERSION,
+                        role: ClientRole::Automation,
+                        handoff_window: true,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                controls.recv().await,
+                Some(ControlFrame::Frame(ServerFrame::Error {
+                    request_id: None,
+                    error: ProtocolError {
+                        code: ErrorCode::Unauthorized,
+                        ..
+                    },
+                }))
+            ));
+            assert!(task.await.unwrap().is_err());
+            assert_eq!(state.handoff_windows.lock().unwrap().anchor_count(), 0);
+            // A daemon that can identify neither client admits no Window.
+            assert!(window_client_identities(&state).is_empty());
+
+            assert_anchor_declaration_bounds(&state);
+            // Connection cleanup deregisters the anchor and the connection.
+            let before = state.handoff_windows.lock().unwrap().connection_count();
+            cleanup_connection(&state, 1).await;
+            let windows = state.handoff_windows.lock().unwrap();
+            assert!(!windows.is_anchor(1));
+            assert_eq!(windows.anchor_count(), 63);
+            assert_eq!(windows.connection_count(), before - 1);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn the_initiator_link_takes_only_its_cancel_and_one_prompted_answer() {
+        let (control, _controls) = mpsc::channel(CONTROL_QUEUE);
+        let mut initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        assert!(
+            answers
+                .accept(ClientFrame::HandoffDecision {
+                    request_id: 9,
+                    proceed_without: vec![0],
+                })
+                .is_err(),
+            "an answer before the prompt"
+        );
+        assert!(
+            answers
+                .accept(ClientFrame::Cancel { request_id: 8 })
+                .is_err()
+        );
+        assert!(
+            answers
+                .accept(ClientFrame::Request {
+                    request_id: 10,
+                    diagnostic_correlation: None,
+                    request: Request::Ping,
+                })
+                .is_err()
+        );
+        answers.awaiting_decision.store(true, Ordering::SeqCst);
+        let answer = ClientFrame::HandoffDecision {
+            request_id: 9,
+            proceed_without: vec![2, 0],
+        };
+        answers.accept(answer.clone()).unwrap();
+        assert!(answers.accept(answer).is_err(), "a second answer");
+        assert_eq!(initiator.decisions.try_recv().unwrap(), [2, 0]);
+        assert!(!answers.cancelled.is_cancelled());
+        answers
+            .accept(ClientFrame::Cancel { request_id: 9 })
+            .unwrap();
+        assert!(answers.cancelled.is_cancelled());
+    }
+
+    /// A terminal snapshot event too large for one frame, so it travels as a
+    /// terminal transaction.
+    fn chunked_snapshot_event() -> ServerFrame {
+        ServerFrame::Event {
+            subscription_id: 1,
+            sequence: 1,
+            event: SubscriptionEvent::Snapshot {
+                snapshot: TerminalSnapshot {
+                    splint_id: SplintId::new(),
+                    incarnation: 1,
+                    revision: 1,
+                    columns: 1,
+                    rows: 1,
+                    cursor_column: 0,
+                    cursor_row: 0,
+                    cursor_deferred_wrap: false,
+                    active_screen: WireActiveScreen::Normal,
+                    input_modes: TerminalInputModes {
+                        application_cursor: false,
+                        application_keypad: false,
+                        focus_reporting: false,
+                        bracketed_paste: false,
+                        cursor_visible: true,
+                        cursor_blink: false,
+                        mouse_tracking: WireMouseTracking::None,
+                        sgr_mouse: false,
+                    },
+                    palette: vec![0; 256],
+                    default_colors: [0; 3],
+                    title: "x".repeat(MAX_FRAME_BYTES + 1),
+                    visible_rows: Vec::new(),
+                    history_generation: 1,
+                    oldest_available_scrollback_row_id: None,
+                    newest_available_scrollback_row_id: None,
+                    scrollback_rows: Vec::new(),
+                    available_scrollback_rows: 0,
+                    omitted_oldest_scrollback_rows: 0,
+                    images: None,
+                    exited_code: None,
+                    exited_signal: None,
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prepare_frame_reaches_its_anchor_at_a_frame_boundary_after_a_terminal_transaction() {
+        let state = window_test_state();
+        let process = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
+        // A terminal transaction is being written when the prepare frame is
+        // queued: the writer finishes every chunk first.
+        window
+            .outbound
+            .send(QueuedServerFrame::from(chunked_snapshot_event()))
+            .await
+            .unwrap();
+        let (start, descriptors) = window.read_frame().await;
+        let ServerFrame::TerminalTransactionStart { chunks, .. } = start else {
+            panic!("a terminal transaction starts: {start:?}");
+        };
+        assert!(chunks >= 2 && descriptors.is_none());
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let execute = spawn_window_execute(&state, None);
+        for index in 0..chunks {
+            let (chunk, descriptors) = window.read_frame().await;
+            assert!(
+                matches!(chunk, ServerFrame::TerminalTransactionChunk { index: received, .. } if received == index)
+            );
+            assert!(descriptors.is_none());
+        }
+        let (prepare, descriptors) = window.read_prepare().await;
+        assert_eq!(prepare.daemon_generation, state.daemon_generation);
+        assert_eq!(
+            prepare.descriptors,
+            splinterm_protocol::HANDOFF_PREPARE_DESCRIPTORS
+        );
+        // The snapshot is a fresh read-only open, close-on-exec.
+        let flags = rustix::fs::fcntl_getfl(descriptors.client_snapshot()).unwrap();
+        assert_eq!(
+            flags & rustix::fs::OFlags::ACCMODE,
+            rustix::fs::OFlags::RDONLY
+        );
+        assert!(
+            rustix::io::fcntl_getfd(descriptors.client_snapshot())
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        assert_eq!(
+            acknowledge(&state, window.connection_id, &prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        let exec = take_exec_ready(&state, execute).await;
+        let [participant] = exec.windows.windows.as_slice() else {
+            panic!("exactly the one Window takes part");
+        };
+        assert_eq!(
+            (participant.index, participant.anchor_connection_id),
+            (0, 11)
+        );
+        assert_eq!(participant.process.pid, process.pid());
+        assert!(rustix::net::sockopt::socket_passcred(&participant.continuation).unwrap());
+        assert!(!continuation_closed(descriptors.continuation()));
+        exec.cancel(HandoffCancelReason::Failed).await;
+        // Cancel closes the daemon end: the Window reads end of file.
+        assert!(continuation_closed(descriptors.continuation()));
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Failed),
+            ]
+        );
+    }
+
+    /// Checks the participant binding while the attempt waits. Anchor 11 was
+    /// sent `first` and anchor 12 `second`; anchor 13 was sent nothing;
+    /// connection 99 is no anchor. A wrong generation, another frame's id, or
+    /// a zero id changes nothing: anchor 11's exact answer then counts, once.
+    async fn assert_acknowledgement_binding(
+        state: &Arc<DaemonState>,
+        first: &splinterm_protocol::HandoffPrepare,
+        second: &splinterm_protocol::HandoffPrepare,
+    ) {
+        assert_ne!(first.prepare_id, second.prepare_id);
+        let generation = first.daemon_generation;
+        for (connection_id, daemon_generation, prepare_id, expected) in [
+            (11, generation + 1, first.prepare_id, ErrorCode::NotFound),
+            (11, generation, second.prepare_id, ErrorCode::NotFound),
+            (12, generation, first.prepare_id, ErrorCode::NotFound),
+            (11, generation, 0, ErrorCode::InvalidArgument),
+            (13, generation, first.prepare_id, ErrorCode::NotFound),
+            (99, generation, first.prepare_id, ErrorCode::Unauthorized),
+        ] {
+            assert_eq!(
+                acknowledge_with(state, connection_id, daemon_generation, prepare_id).await,
+                Err(expected),
+                "connection {connection_id}, generation {daemon_generation}, id {prepare_id}"
+            );
+        }
+        assert_eq!(
+            acknowledge(state, 11, first).await,
+            Ok(Response::Acknowledged)
+        );
+        assert_eq!(
+            acknowledge(state, 11, first).await,
+            Err(ErrorCode::NotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledgements_bind_to_the_anchor_and_generation_and_a_cancel_closes_every_window() {
+        use splinterm_protocol::HandoffWindowIssue::{NoAcknowledgement, Undeclared, Unpinned};
+        let state = window_test_state();
+        let generation = state.daemon_generation;
+        let (lair_id, dojo_id, splint_id) = named_lair(&state).await;
+        let (first, second, unpinned, undeclared) = (
+            TestWindowProcess::spawn(),
+            TestWindowProcess::spawn(),
+            TestWindowProcess::spawn(),
+            TestWindowProcess::spawn(),
+        );
+        let mut first_window = declare_test_window(&state, 11, first.pinned(INSTALLED_CLIENT));
+        let mut second_window = declare_test_window(&state, 12, second.pinned(INSTALLED_CLIENT));
+        let _second_attached = handoff_windows::attach(&state.handoff_windows, 12, splint_id);
+        let mut unpinned_process = unpinned.pinned(INSTALLED_CLIENT);
+        unpinned_process.pidfd = None;
+        let _unpinned_window = declare_test_window(&state, 13, unpinned_process);
+        // A trusted-UI process that holds an attachment but declared no anchor.
+        state.handoff_windows.lock().unwrap().register_connection(
+            14,
+            undeclared.pid(),
+            agent_status::process_start_time(undeclared.pid()),
+        );
+        let _undeclared_attached = handoff_windows::attach(&state.handoff_windows, 14, splint_id);
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let execute = spawn_window_execute(&state, Some(initiator));
+
+        let (first_prepare, first_descriptors) = first_window.read_prepare().await;
+        let (second_prepare, second_descriptors) = second_window.read_prepare().await;
+        assert_eq!(second_prepare.daemon_generation, generation);
+        // Only the anchor the frame went to, for its generation, once.
+        assert_acknowledgement_binding(&state, &first_prepare, &second_prepare).await;
+
+        let (prompt_generation, deadline_ms, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(prompt_generation, generation);
+        assert_eq!(
+            Duration::from_millis(u64::from(deadline_ms)),
+            HANDOFF_DECISION_DEADLINE
+        );
+        let named = vec![splinterm_protocol::HandoffWindowDojo {
+            lair_id,
+            dojo_id,
+            name: "Dojo 1".to_owned(),
+        }];
+        let named_window =
+            |index, pid, reason, dojos| splinterm_protocol::HandoffUnresponsiveWindow {
+                index,
+                pid,
+                reason,
+                dojos,
+            };
+        assert_eq!(
+            windows,
+            [
+                named_window(1, second.pid(), NoAcknowledgement, named.clone()),
+                named_window(2, unpinned.pid(), Unpinned, Vec::new()),
+                named_window(3, undeclared.pid(), Undeclared, named),
+            ]
+        );
+        // The wait is over: a late acknowledgement fails.
+        assert_eq!(
+            acknowledge(&state, 12, &second_prepare).await,
+            Err(ErrorCode::NotFound)
+        );
+        assert!(state.handoff_gate.is_fenced(), "the fence holds meanwhile");
+        answers
+            .accept(ClientFrame::Cancel { request_id: 9 })
+            .unwrap();
+        let error = execute.await.unwrap();
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Requested),
+            ]
+        );
+        // Every prepared Window reads end of file, and nothing is pending.
+        assert!(continuation_closed(first_descriptors.continuation()));
+        assert!(continuation_closed(second_descriptors.continuation()));
+        // The prompt closed with the attempt: one late answer to it is
+        // dropped, keeping the connection, and a second is refused.
+        let late_answer = || ClientFrame::HandoffDecision {
+            request_id: 9,
+            proceed_without: vec![1, 2, 3],
+        };
+        answers.accept(late_answer()).unwrap();
+        assert!(answers.accept(late_answer()).is_err());
+        assert_eq!(
+            acknowledge(&state, 12, &second_prepare).await,
+            Err(ErrorCode::NotFound)
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(!state.handoff_exit.is_ready());
+    }
+
+    #[tokio::test]
+    async fn proceeding_without_the_prompted_windows_drops_them_and_capture_continues() {
+        let state = window_test_state();
+        let (kept, dropped) = (TestWindowProcess::spawn(), TestWindowProcess::spawn());
+        let mut kept_window = declare_test_window(&state, 11, kept.pinned(INSTALLED_CLIENT));
+        let mut dropped_window = declare_test_window(&state, 12, dropped.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        let (kept_prepare, kept_descriptors) = kept_window.read_prepare().await;
+        let (_, dropped_descriptors) = dropped_window.read_prepare().await;
+        assert_eq!(
+            acknowledge(&state, 11, &kept_prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.reason))
+                .collect::<Vec<_>>(),
+            [(1, splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)]
+        );
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![1],
+            })
+            .unwrap();
+        let exec = take_exec_ready(&state, execute).await;
+        let [participant] = exec.windows.windows.as_slice() else {
+            panic!("only the acknowledged Window takes part");
+        };
+        assert_eq!(participant.anchor_connection_id, 11);
+        assert!(continuation_closed(dropped_descriptors.continuation()));
+        assert!(!continuation_closed(kept_descriptors.continuation()));
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(kept_descriptors.continuation()));
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_decision_cancels_the_handoff_as_timed_out() {
+        let state = window_test_state();
+        let silent = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, silent.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
+        let (_, descriptors) = window.read_prepare().await;
+        decision_prompt(&mut prompts).await;
+        let error = execute.await.unwrap();
+        assert_eq!(error.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::TimedOut),
+            ]
+        );
+        assert!(continuation_closed(descriptors.continuation()));
+    }
+
+    #[tokio::test]
+    async fn a_decision_naming_other_windows_is_refused_and_cancels() {
+        let state = window_test_state();
+        let silent = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, silent.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        let (_, descriptors) = window.read_prepare().await;
+        decision_prompt(&mut prompts).await;
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![0, 5],
+            })
+            .unwrap();
+        let error = execute.await.unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::Failed),
+            ]
+        );
+        assert!(continuation_closed(descriptors.continuation()));
+    }
+
+    #[tokio::test]
+    async fn a_window_that_exits_during_the_wait_is_dropped_without_asking() {
+        let state = window_test_state();
+        let mut exiting = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, exiting.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
+        let (_, descriptors) = window.read_prepare().await;
+        exiting.exit();
+        let exec = take_exec_ready(&state, execute).await;
+        assert!(exec.windows.windows.is_empty());
+        assert!(prompts.try_recv().is_err(), "nobody was asked");
+        assert!(continuation_closed(descriptors.continuation()));
+        exec.cancel(HandoffCancelReason::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn a_window_still_running_the_rollback_client_may_take_part() {
+        let state = window_test_state();
+        let (old_client, other) = (TestWindowProcess::spawn(), TestWindowProcess::spawn());
+        // The package upgrade replaced the client: this Window still runs the
+        // rollback pair's inode, which `<prefix>/splinterm` no longer names.
+        let mut stale_window = declare_test_window(&state, 11, old_client.pinned(ROLLBACK_CLIENT));
+        let _other_window = declare_test_window(&state, 12, other.pinned(OTHER_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        let (stale_prepare, descriptors) = stale_window.read_prepare().await;
+        assert_eq!(
+            acknowledge(&state, 11, &stale_prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        // A Window running any other image is sent nothing.
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.pid, window.reason))
+                .collect::<Vec<_>>(),
+            [(
+                1,
+                other.pid(),
+                splinterm_protocol::HandoffWindowIssue::Unpinned
+            )]
+        );
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![1],
+            })
+            .unwrap();
+        let exec = take_exec_ready(&state, execute).await;
+        assert_eq!(exec.windows.windows.len(), 1);
+        assert_eq!(exec.windows.windows[0].process.executable, ROLLBACK_CLIENT);
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(descriptors.continuation()));
+    }
+
+    #[test]
+    fn a_frame_that_could_not_be_sent_outranks_any_acknowledgement() {
+        use handoff_windows::WindowEvent::{Acknowledged, NotSent, Sent};
+        let window = |events: &[handoff_windows::WindowEvent]| {
+            let (continuation, _peer) = rustix::net::socketpair(
+                rustix::net::AddressFamily::UNIX,
+                rustix::net::SocketType::SEQPACKET,
+                rustix::net::SocketFlags::CLOEXEC,
+                None,
+            )
+            .unwrap();
+            let mut window = AttemptWindow {
+                index: 0,
+                pid: 1,
+                start_time: Some(1),
+                state: AttemptWindowState::Prepared {
+                    anchor_connection_id: 11,
+                    process: handoff_windows::WindowProcess {
+                        pid: 1,
+                        start_time: Some(1),
+                        pidfd: None,
+                        executable: INSTALLED_CLIENT,
+                    },
+                    continuation,
+                    acknowledged: false,
+                    sent: None,
+                },
+            };
+            let resolved = events
+                .iter()
+                .map(|&event| window.apply(event))
+                .collect::<Vec<_>>();
+            (window.issue(), resolved)
+        };
+        let unacknowledged = Some(splinterm_protocol::HandoffWindowIssue::NoAcknowledgement);
+        // An acknowledgement counts only with the writer's full-send report,
+        // in either order.
+        assert_eq!(window(&[Acknowledged(0)]), (unacknowledged, vec![false]));
+        assert_eq!(
+            window(&[Acknowledged(0), Sent(0)]),
+            (None, vec![false, true])
+        );
+        assert_eq!(
+            window(&[Sent(0), Acknowledged(0)]),
+            (None, vec![false, true])
+        );
+        // A frame that could not be sent is final.
+        assert_eq!(
+            window(&[NotSent(0), Acknowledged(0)]),
+            (unacknowledged, vec![true, false])
+        );
+        assert_eq!(
+            window(&[Acknowledged(0), NotSent(0)]),
+            (unacknowledged, vec![false, true])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_whose_frame_could_not_be_sent_is_named_even_if_it_acknowledges() {
+        let state = window_test_state();
+        let process = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
+        // The Window's end closes, so its writer fails on the frame.
+        drop(window.client.take());
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        time::timeout(Duration::from_secs(5), async {
+            while !window.writer.task.as_ref().unwrap().is_finished() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the writer fails");
+        // Whether or not this answer is taken, it is never credited. The
+        // frame never arrived, so its id is the next one this process issued;
+        // under parallel tests the guess may be stale, which only weakens it.
+        let _ = acknowledge_with(
+            &state,
+            11,
+            state.daemon_generation,
+            NEXT_HANDOFF_PREPARE
+                .load(Ordering::Relaxed)
+                .saturating_sub(1),
+        )
+        .await;
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.reason))
+                .collect::<Vec<_>>(),
+            [(0, splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)]
+        );
+        answers
+            .accept(ClientFrame::Cancel { request_id: 9 })
+            .unwrap();
+        assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
+    }
+
+    #[tokio::test]
+    async fn an_acknowledgement_for_an_earlier_attempts_prepare_never_completes_the_next() {
+        let state = window_test_state();
+        let generation = state.daemon_generation;
+        let process = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
+        // Attempts N and N+1: the Window answers neither in time, and both are
+        // cancelled.
+        let mut earlier = Vec::new();
+        for _ in 0..2 {
+            let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+            let initiator = HandoffInitiator::new(9, control);
+            let answers = Arc::clone(&initiator.answers);
+            let execute = spawn_window_execute(&state, Some(initiator));
+            let (prepare, unanswered) = window.read_prepare().await;
+            decision_prompt(&mut prompts).await;
+            answers
+                .accept(ClientFrame::Cancel { request_id: 9 })
+                .unwrap();
+            assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
+            assert!(continuation_closed(unanswered.continuation()));
+            earlier.push(prepare);
+        }
+        // Attempt N+2 names the same generation but a new prepare id. The
+        // Window's late answers to both cancelled frames match nothing and
+        // change nothing; its answer to N+2's frame then counts.
+        let (control, _prompts) = mpsc::channel(CONTROL_QUEUE);
+        let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
+        let (current, current_descriptors) = window.read_prepare().await;
+        assert_eq!(current.daemon_generation, generation);
+        assert!(
+            earlier
+                .iter()
+                .all(|prepare| prepare.prepare_id != current.prepare_id)
+        );
+        for late in &earlier {
+            assert_eq!(
+                acknowledge(&state, 11, late).await,
+                Err(ErrorCode::NotFound),
+                "the late answer to prepare {}",
+                late.prepare_id
+            );
+        }
+        assert_eq!(
+            acknowledge(&state, 11, &current).await,
+            Ok(Response::Acknowledged)
+        );
+        let exec = take_exec_ready(&state, execute).await;
+        assert_eq!(exec.windows.windows.len(), 1);
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(current_descriptors.continuation()));
+    }
+
+    #[tokio::test]
+    async fn a_window_that_exits_while_the_initiator_decides_does_not_take_part() {
+        let state = window_test_state();
+        let (mut exiting, silent) = (TestWindowProcess::spawn(), TestWindowProcess::spawn());
+        let mut exiting_window = declare_test_window(&state, 11, exiting.pinned(INSTALLED_CLIENT));
+        let mut silent_window = declare_test_window(&state, 12, silent.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        let (exiting_prepare, _) = exiting_window.read_prepare().await;
+        silent_window.read_prepare().await;
+        assert_eq!(
+            acknowledge(&state, 11, &exiting_prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        decision_prompt(&mut prompts).await;
+        exiting.exit();
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![1],
+            })
+            .unwrap();
+        let exec = take_exec_ready(&state, execute).await;
+        assert!(exec.windows.windows.is_empty());
+        exec.cancel(HandoffCancelReason::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn the_decision_deadline_counts_from_when_the_prompt_is_written() {
+        let state = window_test_state();
+        let silent = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, silent.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        window.read_prepare().await;
+        let (_, written) = unconfirmed_decision_prompt(&mut prompts).await;
+        // A congested writer takes most of the advertised deadline to write
+        // the prompt; the initiator still gets the whole deadline after it.
+        time::sleep(HANDOFF_DECISION_DEADLINE * 3 / 4).await;
+        written.send(true).unwrap();
+        time::sleep(HANDOFF_DECISION_DEADLINE * 3 / 4).await;
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![0],
+            })
+            .unwrap();
+        let exec = take_exec_ready(&state, execute).await;
+        assert!(exec.windows.windows.is_empty());
+        exec.cancel(HandoffCancelReason::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn a_decision_prompt_the_writer_never_writes_cancels_as_timed_out() {
+        let state = window_test_state();
+        let silent = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, silent.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
+        window.read_prepare().await;
+        // The writer fails on the prompt: it never reports it written.
+        let (_, written) = unconfirmed_decision_prompt(&mut prompts).await;
+        written.send(false).unwrap();
+        assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            handoff_status_phases(&mut subscription),
+            [
+                HandoffStatusPhase::Preparing,
+                HandoffStatusPhase::Fenced,
+                cancelled(HandoffCancelReason::TimedOut),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prepare_that_was_never_queued_does_not_affect_the_next_attempt() {
+        let state = window_test_state();
+        let process = TestWindowProcess::spawn();
+        let window_process = process.pinned(INSTALLED_CLIENT);
+        // The anchor's control queue holds one frame and its Hello fills it:
+        // nothing drains it during the first attempt.
+        let (control, control_rx) = mpsc::channel(1);
+        {
+            let mut windows = state.handoff_windows.lock().unwrap();
+            windows.register_connection(11, window_process.pid, window_process.start_time);
+            windows
+                .declare_anchor(11, window_process, control, test_hello())
+                .unwrap();
+        }
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.reason))
+                .collect::<Vec<_>>(),
+            [(0, splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)]
+        );
+        answers
+            .accept(ClientFrame::Cancel { request_id: 9 })
+            .unwrap();
+        assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
+        // Its writer starts now. The next attempt prepares and accepts the
+        // Window as if nothing had happened.
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server.set_nonblocking(true).unwrap();
+        let (reader, writer) = UnixStream::from_std(server).unwrap().into_split();
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
+        let mut window = TestWindow {
+            connection_id: 11,
+            client: Some(client),
+            greeted: false,
+            outbound,
+            _reader: reader,
+            writer: AbortOnDrop::new(tokio::spawn(write_frames(
+                writer,
+                outbound_rx,
+                control_rx,
+                Arc::clone(&state.terminal_transaction_memory),
+            ))),
+        };
+        let (control, _prompts) = mpsc::channel(CONTROL_QUEUE);
+        let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
+        let (prepare, descriptors) = window.read_prepare().await;
+        assert_eq!(
+            acknowledge(&state, window.connection_id, &prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        let exec = take_exec_ready(&state, execute).await;
+        assert_eq!(exec.windows.windows.len(), 1);
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(descriptors.continuation()));
+    }
+
+    #[tokio::test]
+    async fn a_decision_prompt_cancelled_while_queued_is_never_written() {
+        let state = test_state(false);
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server.set_nonblocking(true).unwrap();
+        let (reader, writer) = UnixStream::from_std(server).unwrap().into_split();
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
+        let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
+        let writer = AbortOnDrop::new(tokio::spawn(write_frames(
+            writer,
+            outbound_rx,
+            control_rx,
+            Arc::clone(&state.terminal_transaction_memory),
+        )));
+        let mut initiator = TestWindow {
+            connection_id: 41,
+            client: Some(client),
+            greeted: true,
+            outbound,
+            _reader: reader,
+            writer,
+        };
+        // The writer is blocked inside a terminal transaction the client is
+        // not reading yet.
+        initiator
+            .outbound
+            .send(QueuedServerFrame::from(chunked_snapshot_event()))
+            .await
+            .unwrap();
+        let (start, _) = initiator.read_frame().await;
+        let ServerFrame::TerminalTransactionStart { chunks, .. } = start else {
+            panic!("a terminal transaction starts: {start:?}");
+        };
+        // The prompt is queued behind it, then its attempt cancels.
+        let (written, confirmation) = tokio::sync::oneshot::channel();
+        control
+            .send(ControlFrame::Confirmed {
+                frame: ServerFrame::HandoffDecisionRequired {
+                    request_id: 9,
+                    daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
+                    deadline_ms: 20_000,
+                    windows: Vec::new(),
+                },
+                written,
+            })
+            .await
+            .unwrap();
+        drop(confirmation);
+        control
+            .send(ControlFrame::Frame(ServerFrame::Response {
+                request_id: 9,
+                result: Response::Pong,
+            }))
+            .await
+            .unwrap();
+        for _ in 0..chunks {
+            initiator.read_frame().await;
+        }
+        let (next, _) = initiator.read_frame().await;
+        assert!(
+            matches!(
+                next,
+                ServerFrame::Response {
+                    request_id: 9,
+                    result: Response::Pong,
+                }
+            ),
+            "the cancelled prompt was not written: {next:?}"
+        );
+    }
+
+    #[test]
+    fn one_late_answer_to_a_prompt_nothing_waits_for_is_dropped() {
+        let (control, _controls) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let decision = || ClientFrame::HandoffDecision {
+            request_id: 9,
+            proceed_without: vec![0],
+        };
+        // No prompt was ever queued: an answer is a protocol violation.
+        assert!(answers.accept(decision()).is_err());
+        assert!(!answers.take_late_answer(9));
+        // A prompt was queued, then its attempt stopped waiting (a Cancel or a
+        // timeout drops the guard) before the client's answer arrived.
+        drop(AwaitingDecision::arm(Arc::clone(&answers)));
+        answers.accept(decision()).unwrap();
+        assert!(answers.accept(decision()).is_err(), "a second late answer");
+        // After the request ended, the connection's main loop drops one late
+        // answer for that request the same way, and no other.
+        drop(AwaitingDecision::arm(Arc::clone(&answers)));
+        assert!(!answers.take_late_answer(8));
+        assert!(answers.take_late_answer(9));
+        assert!(!answers.take_late_answer(9));
+        // An answer taken while the prompt waits leaves no late answer.
+        let awaiting = AwaitingDecision::arm(Arc::clone(&answers));
+        answers.accept(decision()).unwrap();
+        drop(awaiting);
+        assert!(!answers.take_late_answer(9));
+        drop(initiator);
+    }
+
+    #[tokio::test]
+    async fn an_anchor_connection_cannot_start_a_handoff_but_may_ask_for_a_dry_run() {
+        let state = window_test_state();
+        let process = TestWindowProcess::spawn();
+        let _window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        // Execute on the anchor is refused before the gate: nothing begins.
+        let refused = handle_authorized_request(
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::Execute,
+            },
+            &state,
+            &PeerIdentity::for_test(),
+            11,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+            &mut HandoffAdmission::unfenced(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidArgument);
+        assert!(
+            refused.message.contains("separate connection"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(handoff_status_phases(&mut subscription).is_empty());
+        assert!(state.handoff_initiators.lock().unwrap().is_empty());
+        // A dry run on the anchor, and Execute on any other connection, pass
+        // this check and meet the ordinary handler.
+        for (connection_id, mode) in [
+            (11, splinterm_protocol::DaemonHandoffMode::DryRun),
+            (12, splinterm_protocol::DaemonHandoffMode::Execute),
+        ] {
+            refuse_handoff_from_anchor(&state, connection_id, mode).unwrap();
+        }
+        let dry_run = handle_authorized_request(
+            Request::PrepareDaemonHandoff {
+                mode: splinterm_protocol::DaemonHandoffMode::DryRun,
+            },
+            &state,
+            &PeerIdentity::for_test(),
+            11,
+            true,
+            false,
+            &RequestAuthorizationContext::default(),
+            &mut HandoffAdmission::unfenced(),
+        )
+        .await
+        .unwrap_err();
+        // The unit-test peer is not the installed client, so the ordinary
+        // trusted-UI check answers, not the anchor refusal.
+        assert_eq!(dry_run.code, ErrorCode::Unauthorized);
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_congested_anchor_does_not_starve_the_anchors_after_it() {
+        let state = window_test_state();
+        let (congested, healthy) = (TestWindowProcess::spawn(), TestWindowProcess::spawn());
+        // Anchor 11 comes first; its control queue holds one frame, its Hello
+        // fills it, and nothing ever drains it.
+        let congested_process = congested.pinned(INSTALLED_CLIENT);
+        let (control, _never_drained) = mpsc::channel(1);
+        {
+            let mut windows = state.handoff_windows.lock().unwrap();
+            windows.register_connection(11, congested_process.pid, congested_process.start_time);
+            windows
+                .declare_anchor(11, congested_process, control, test_hello())
+                .unwrap();
+        }
+        let mut healthy_window = declare_test_window(&state, 12, healthy.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        // The healthy anchor is prepared at once, not after the congested
+        // one's wait, and acknowledges well within the shared deadline.
+        let (prepare, descriptors) = time::timeout(
+            HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT / 2,
+            healthy_window.read_prepare(),
+        )
+        .await
+        .expect("the healthy anchor's frame is not held behind the congested one");
+        assert_eq!(
+            acknowledge(&state, 12, &prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        // Only the congested anchor is named.
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.reason))
+                .collect::<Vec<_>>(),
+            [(0, splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)]
+        );
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![0],
+            })
+            .unwrap();
+        let exec = take_exec_ready(&state, execute).await;
+        let [participant] = exec.windows.windows.as_slice() else {
+            panic!("only the healthy anchor takes part");
+        };
+        assert_eq!(participant.anchor_connection_id, 12);
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(descriptors.continuation()));
     }
 }

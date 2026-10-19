@@ -326,6 +326,7 @@ mod tests {
         assert_eq!(
             for_request(&Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
+                prepare_id: 1,
             }),
             RequestAuthorization::TrustedUi
         );

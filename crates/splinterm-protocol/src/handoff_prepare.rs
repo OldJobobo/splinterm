@@ -318,6 +318,7 @@ mod tests {
         let stat = fstat(snapshot).unwrap();
         HandoffPrepare {
             daemon_generation: 1,
+            prepare_id: 1,
             descriptors: HANDOFF_PREPARE_DESCRIPTORS,
             client_snapshot: HandoffClientSnapshot {
                 device: stat.st_dev,
@@ -601,6 +602,10 @@ mod tests {
                 ..valid
             },
             HandoffPrepare {
+                prepare_id: 0,
+                ..valid
+            },
+            HandoffPrepare {
                 descriptors: 1,
                 ..valid
             },
@@ -660,6 +665,7 @@ mod tests {
     fn handoff_prepare_frame_has_an_explicit_wire_shape() {
         let prepare = HandoffPrepare {
             daemon_generation: 3,
+            prepare_id: 17,
             descriptors: HANDOFF_PREPARE_DESCRIPTORS,
             client_snapshot: HandoffClientSnapshot {
                 device: 5,
@@ -675,6 +681,7 @@ mod tests {
                 "type": "handoff_prepare",
                 "prepare": {
                     "daemon_generation": 3,
+                    "prepare_id": 17,
                     "descriptors": 2,
                     "client_snapshot": {
                         "device": 5,

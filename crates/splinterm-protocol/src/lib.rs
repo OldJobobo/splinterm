@@ -184,6 +184,17 @@ pub enum ClientFrame {
         /// descriptors (Plan 0061 M3.14). Until then any `HandoffPrepare`
         /// ends the client's connection, so a declared Window would lose its
         /// anchor in every handoff instead of being listed as undeclared.
+        ///
+        /// The daemon accepts it only with the trusted UI role from the
+        /// installed graphical client, at most once per Window process and
+        /// for at most [`MAX_HANDOFF_WINDOWS`] Windows, and never while a
+        /// handoff already holds its Windows; any other declaration fails
+        /// the handshake. Only the anchor may acknowledge its prepare frame
+        /// ([`Request::AcknowledgeHandoffPrepare`]), so an anchor connection
+        /// cannot itself start a handoff: `PrepareDaemonHandoff { Execute }`
+        /// on it fails with [`ErrorCode::InvalidArgument`] before anything
+        /// begins, while a dry run is answered. The initiator uses a separate
+        /// connection.
         #[serde(default, skip_serializing_if = "bool_is_false")]
         handoff_window: bool,
     },
@@ -892,12 +903,22 @@ pub enum Request {
     },
     /// Trusted local graphical UI only. A Window that received a
     /// [`ServerFrame::HandoffPrepare`] frame acknowledges it once it holds
-    /// the descriptors and its resume record, naming the generation the frame
-    /// came from. An acknowledgement that matches no pending handoff prepare,
-    /// because none was sent, it was cancelled, or the generation differs,
-    /// fails with [`ErrorCode::NotFound`] and changes nothing.
+    /// the descriptors and its resume record, echoing the frame's generation
+    /// and `prepare_id`, on the anchor connection the frame came on
+    /// (`Hello.handoff_window`). The daemon authorizes it by that binding:
+    /// that connection only, once, while the daemon waits for exactly that
+    /// prepare, from the same pinned process. It does not re-check the
+    /// installed client, because after a package upgrade every running Window
+    /// executes the replaced image. A zero generation or id is
+    /// [`ErrorCode::InvalidArgument`] ([`validate_handoff_acknowledgement`]).
+    /// An acknowledgement that matches no pending handoff prepare, because
+    /// none was sent, it was cancelled or already acknowledged, the wait
+    /// ended, or the generation or id differs (a late answer to an earlier
+    /// attempt's frame among them), fails with [`ErrorCode::NotFound`] and
+    /// changes nothing.
     AcknowledgeHandoffPrepare {
         daemon_generation: u64,
+        prepare_id: u64,
     },
 }
 
@@ -2649,18 +2670,25 @@ pub struct HandoffClientSnapshot {
 pub struct HandoffPrepare {
     /// Generation of the daemon that is handing off.
     pub daemon_generation: u64,
+    /// Identifies this frame among every prepare frame the daemon process
+    /// sends: nonzero and never reused, so one attempt's late answer never
+    /// matches a later attempt's frame, which names the same generation.
+    /// The Window echoes it in [`Request::AcknowledgeHandoffPrepare`].
+    pub prepare_id: u64,
     /// Attached descriptor count; always [`HANDOFF_PREPARE_DESCRIPTORS`].
     pub descriptors: usize,
     pub client_snapshot: HandoffClientSnapshot,
 }
 
 impl HandoffPrepare {
-    /// Validates generation, descriptor count, and snapshot bounds.
+    /// Validates generation, prepare id, descriptor count, and snapshot
+    /// bounds.
     ///
     /// # Errors
     /// Returns `InvalidArgument` for a malformed or out-of-bounds frame.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.daemon_generation == 0
+            || self.prepare_id == 0
             || self.descriptors != HANDOFF_PREPARE_DESCRIPTORS
             || !(1..=MAX_HANDOFF_CLIENT_SNAPSHOT_BYTES).contains(&self.client_snapshot.size)
             || self.client_snapshot.sha256 == [0; 32]
@@ -2672,6 +2700,24 @@ impl HandoffPrepare {
         }
         Ok(())
     }
+}
+
+/// Validates one [`Request::AcknowledgeHandoffPrepare`]: a nonzero
+/// generation and prepare id, as every prepare frame carries.
+///
+/// # Errors
+/// Returns `InvalidArgument` for a zero generation or prepare id.
+pub fn validate_handoff_acknowledgement(
+    daemon_generation: u64,
+    prepare_id: u64,
+) -> Result<(), ProtocolError> {
+    if daemon_generation == 0 || prepare_id == 0 {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "handoff prepare acknowledgement is invalid",
+        ));
+    }
+    Ok(())
 }
 
 /// Why a trusted local Window cannot take part in a handoff.
@@ -5993,16 +6039,38 @@ mod tests {
 
         let acknowledge = Request::AcknowledgeHandoffPrepare {
             daemon_generation: 3,
+            prepare_id: 17,
         };
         let value = serde_json::to_value(&acknowledge).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({"type": "acknowledge_handoff_prepare", "daemon_generation": 3})
+            serde_json::json!({
+                "type": "acknowledge_handoff_prepare",
+                "daemon_generation": 3,
+                "prepare_id": 17
+            })
         );
         assert_eq!(
             serde_json::from_value::<Request>(value).unwrap(),
             acknowledge
         );
+        // The prepare id is required on the wire.
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "type": "acknowledge_handoff_prepare",
+                "daemon_generation": 3
+            }))
+            .is_err()
+        );
+        validate_handoff_acknowledgement(3, 17).unwrap();
+        for (daemon_generation, prepare_id) in [(0, 17), (3, 0)] {
+            assert_eq!(
+                validate_handoff_acknowledgement(daemon_generation, prepare_id)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+        }
 
         let hello = ServerFrame::Hello {
             version: PROTOCOL_VERSION,
