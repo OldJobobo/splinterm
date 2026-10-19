@@ -77,7 +77,7 @@ jobs:
           # --no-renames lists both sides of a move; a failed diff fails closed.
           git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA" >changed-paths.txt
           cat changed-paths.txt
-          if grep -Eq '^(nix/|packaging/|dist/)|^(flake\.nix|flake\.lock|Cargo\.lock|rust-toolchain.*|\.github/workflows/ci\.yml|crates/splinterm/src/(app/local_service|remote|renderer/fonts|wayland)\.rs)$|(^|/)Cargo\.toml$' changed-paths.txt; then
+          if grep -Eq '^(nix/|packaging/|dist/|config/|tools/automation/|tools/package/)|^(flake\.nix|flake\.lock|Cargo\.lock|rust-toolchain.*|\.github/workflows/ci\.yml|crates/splinterm/src/(app/local_service|remote|renderer/fonts|wayland)\.rs)$|(^|/)Cargo\.toml$' changed-paths.txt; then
             echo 'nix=true' >>"$GITHUB_OUTPUT"
           else
             echo 'nix=false' >>"$GITHUB_OUTPUT"

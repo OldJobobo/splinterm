@@ -148,6 +148,10 @@ class CiWorkflowTests(unittest.TestCase):
             "crates/splinterd/Cargo.toml",
             "rust-toolchain.toml",
             ".github/workflows/ci.yml",
+            # Inputs nix/package.nix installs, patches, or runs.
+            "config/splinterm/presets.toml",
+            "tools/automation/splinterm-dojo-picker.py",
+            "tools/package/generate-package-provenance.py",
             # nix/package.nix patches these sources with substituteInPlace.
             "crates/splinterm/src/app/local_service.rs",
             "crates/splinterm/src/remote.rs",

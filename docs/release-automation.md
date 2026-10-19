@@ -147,7 +147,8 @@ its superseded run. Push and merge-group runs are never cancelled or replaced.
 
 The `nix` job takes the longest. On a pull request it runs only when the
 `changes` job finds a path in the pull request's range that touches
-`nix/`, `flake.nix`, `flake.lock`, `packaging/`, `dist/`, `Cargo.lock`, any
+`nix/`, `flake.nix`, `flake.lock`, `packaging/`, `dist/`, `config/`,
+`tools/automation/`, `tools/package/`, `Cargo.lock`, any
 `Cargo.toml`, `rust-toolchain*`, `.github/workflows/ci.yml`, or one of the
 sources `nix/package.nix` patches (`crates/splinterm/src/app/local_service.rs`,
 `remote.rs`, `renderer/fonts.rs`, `wayland.rs`). It always runs
