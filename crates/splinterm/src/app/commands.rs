@@ -377,8 +377,9 @@ pub(in crate::app) enum Command {
         /// Start the upgrade now. When open Windows cannot take part, ask
         /// before closing them; their terminals keep running. Asks in the
         /// terminal, or in a dialog when there is none or when run inside a
-        /// Splinterm terminal, whose input the upgrade pauses. No answer
-        /// cancels.
+        /// Splinterm terminal, whose input the upgrade pauses. In the dialog
+        /// only G or the green area proceeds; D, Escape and Enter cancel. No
+        /// answer cancels.
         #[arg(long)]
         now: bool,
     },
@@ -696,6 +697,7 @@ mod tests {
             "4 unavailable",
             "5 another upgrade in progress",
             "6 rolled back",
+            "only G or the green area proceeds",
             "7 connection closed but the result is unconfirmed",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in {help}");

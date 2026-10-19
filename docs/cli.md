@@ -208,18 +208,25 @@ picker (`splinterm dojos`). Input stays paused in every Window until the answer.
   unrecognized answer, end of input, or no answer before the daemon's deadline
   cancels.
 - Without a terminal, or when the command runs inside a Splinterm terminal
-  (whose input the upgrade pauses), a small trusted dialog in the style of the
-  access consent dialog asks instead. `D`, `Escape`, or the red left area
-  cancels; `G`, `Enter`, or the green right area proceeds. Closing the dialog or
-  not answering cancels. Without a graphical session either, the upgrade is
+  (whose input the upgrade pauses), a small trusted dialog titled
+  "Splinterm — Upgrade", in the style of the access consent dialog, asks
+  instead. `D`, `Escape`, `Enter`, or the red left area cancels; only `G` or the
+  green right area proceeds. Keys and the proceed click count only after the
+  dialog has had focus for about 600 ms, and held or repeating keys never count,
+  so typing already under way cannot answer it. Closing the dialog or not
+  answering cancels. If the list of Windows is too long for the dialog, the last
+  line counts the rest. Without a graphical session either, the upgrade is
   cancelled.
 
 A committed upgrade never answers the request: the old daemon closes the
 connection and starts the installed build. A connection that closes for another
-reason, such as a stopped service, looks the same, so the command then
+reason, such as a stopped service or a crash, looks the same, so the command then
 reconnects for up to 15 seconds and reports which daemon serves. An upgrade
 serves the next generation with the new build. A rollback serves the same
-generation with the previous build. A fresh start serves generation 1.
+generation with the previous build. A fresh start serves generation 1. Only once
+an upgrade or a rollback is confirmed does the command say that the dropped
+Windows' terminals keep running; otherwise it says that what happened to them is
+unknown.
 
 Only the installed `splinterm` beside the running `splinterd` may ask: on
 packaged systems `/usr/bin/splinterm`, matched by device and inode. A

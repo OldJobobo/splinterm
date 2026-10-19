@@ -246,7 +246,7 @@ pub(in crate::app) fn run_consent_client() -> Result<()> {
     let (decision, receiver) = std_mpsc::channel();
     run_window(WindowOptions {
         snapshot: Some(consent_snapshot(&prompt)),
-        trusted_consent: Some(TrustedConsentUi { decision }),
+        trusted_consent: Some(TrustedConsentUi::access_consent(decision)),
         ..WindowOptions::default()
     })?;
     let granted = receiver.try_recv().unwrap_or(false);

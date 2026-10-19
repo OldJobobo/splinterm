@@ -1,6 +1,6 @@
 //! Platform-independent construction options for graphical windows and panes.
 
-use std::{path::PathBuf, sync::mpsc::Sender as StdSender};
+use std::{path::PathBuf, sync::mpsc::Sender as StdSender, time::Instant};
 
 use tokio::sync::{
     mpsc::{Receiver, Sender},
@@ -21,12 +21,59 @@ use crate::{
 };
 
 use super::{
-    AuthorityStatus, SessionPickerUi, WindowCommand, WindowDojoIdentity, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate,
+    AuthorityStatus, SessionPickerUi, TrustedDialogKey, TrustedDialogKind, WindowCommand,
+    WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
 };
 
+/// A trusted dialog Window's answer channel and kind. Build it with
+/// [`TrustedConsentUi::access_consent`] or [`TrustedConsentUi::upgrade`].
 pub struct TrustedConsentUi {
     pub decision: StdSender<bool>,
+    pub(crate) kind: TrustedDialogKind,
+    /// When the Window first gained keyboard focus; the upgrade question
+    /// arms itself from it.
+    pub(crate) focused_at: Option<Instant>,
+}
+
+impl TrustedConsentUi {
+    /// The access consent dialog, with its original keys and title.
+    #[must_use]
+    pub fn access_consent(decision: StdSender<bool>) -> Self {
+        Self {
+            decision,
+            kind: TrustedDialogKind::AccessConsent,
+            focused_at: None,
+        }
+    }
+
+    /// The upgrade question: only `G` or the green area proceeds, after an
+    /// arming delay; `Enter`, `Escape` and `D` cancel.
+    #[must_use]
+    pub fn upgrade(decision: StdSender<bool>) -> Self {
+        Self {
+            decision,
+            kind: TrustedDialogKind::Upgrade,
+            focused_at: None,
+        }
+    }
+
+    /// Records the first keyboard focus; later focus changes keep it.
+    pub(crate) fn note_focus(&mut self, now: Instant) {
+        self.focused_at.get_or_insert(now);
+    }
+
+    pub(crate) fn key_decision(
+        &self,
+        key: TrustedDialogKey,
+        repeat: bool,
+        now: Instant,
+    ) -> Option<bool> {
+        self.kind.key_decision(key, repeat, self.focused_at, now)
+    }
+
+    pub(crate) fn click_decision(&self, proceed_area: bool, now: Instant) -> Option<bool> {
+        self.kind.click_decision(proceed_area, self.focused_at, now)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -23,6 +23,10 @@ impl KeyboardHandler for App {
         _keysyms: &[Keysym],
     ) {
         if surface == self.surface.window.wl_surface() {
+            // A trusted dialog arms its delayed actions from the first focus.
+            if let Some(consent) = self.modal.trusted_consent.as_mut() {
+                consent.note_focus(Instant::now());
+            }
             self.set_ime_focus(true);
             self.presentation.full_redraw = true;
             if self.panes.input_modes().focus_reporting && !self.modal.input_modal_open() {
@@ -640,8 +644,12 @@ impl KeyboardHandler for App {
         {
             return;
         }
-        if self.modal.trusted_consent.is_some() {
-            self.handle_key(&event, queue_handle);
+        if let Some(consent) = &self.modal.trusted_consent {
+            // The upgrade question ignores repeats, including those of a key
+            // already held when it gained focus.
+            if !consent.kind.ignores_repeats() {
+                self.handle_key(&event, queue_handle);
+            }
             return;
         }
         if let Some(action) = font_zoom_action(shortcut) {

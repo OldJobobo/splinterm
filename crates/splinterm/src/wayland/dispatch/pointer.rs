@@ -179,10 +179,17 @@ impl PointerHandler for App {
                         }
                         continue;
                     }
-                    if self.modal.trusted_consent.is_some() && button == BTN_LEFT {
+                    if let Some(consent) = &self.modal.trusted_consent
+                        && button == BTN_LEFT
+                    {
                         let (x, y) = event.position;
                         if y >= f64::from(self.surface.logical_height) * 0.78 {
-                            self.decide_consent(x >= f64::from(self.surface.logical_width) / 2.0);
+                            let proceed_area = x >= f64::from(self.surface.logical_width) / 2.0;
+                            if let Some(granted) =
+                                consent.click_decision(proceed_area, std::time::Instant::now())
+                            {
+                                self.decide_consent(granted);
+                            }
                         }
                         continue;
                     }

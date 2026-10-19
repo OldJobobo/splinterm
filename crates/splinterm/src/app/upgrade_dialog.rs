@@ -13,9 +13,11 @@
 //! holds no anchor; it only shows the question and returns one bit, and the
 //! command treats a missing, late, or unauthenticated reply as cancel.
 //!
-//! The dialog keeps the consent Window's keys and pointer areas, which this
-//! slice does not change (they live in `wayland.rs`): `D` or `Escape` and the
-//! red left area cancel; `G` or `Enter` and the green right area proceed.
+//! Its keys differ from consent because proceeding closes Windows: `D`,
+//! `Escape`, `Enter`, and the red left area cancel; only `G` or the green
+//! right area proceeds. Keys and the proceed click count only 600 ms after
+//! the Window first gains focus, and key repeats never count
+//! (`frontend::trusted_dialog`). The Window title is "Splinterm — Upgrade".
 
 use std::{
     fmt::Write as _,
@@ -134,38 +136,98 @@ fn window_line(window: &HandoffUnresponsiveWindow) -> String {
 
 /// The dialog text: the Windows, what proceeding does, and how to answer.
 fn dialog_lines(prompt: &UpgradeDialogPrompt) -> Vec<String> {
+    let count = prompt.windows.len();
     let mut lines = vec![
         "TRUSTED SPLINTERM UPGRADE QUESTION".to_owned(),
         String::new(),
-        "splinterd is upgrading. These Windows cannot take part:".to_owned(),
+        format!(
+            "splinterd is upgrading. {count} Window{} cannot take part:",
+            if count == 1 { "" } else { "s" }
+        ),
     ];
-    lines.extend(prompt.windows.iter().map(window_line));
-    lines.extend([
-        String::new(),
-        "Proceeding closes these Windows. Their terminals keep running in the".to_owned(),
-        "upgraded daemon; reopen them from the Recent Dojos picker.".to_owned(),
-        "Input is paused in every Window until you answer.".to_owned(),
+    // Every Window gets a line while they fit; past that, the last line
+    // counts the rest, so the number that would close is always visible.
+    if count <= MAX_LISTED_WINDOWS {
+        lines.extend(prompt.windows.iter().map(window_line));
+    } else {
+        let shown = MAX_LISTED_WINDOWS - 1;
+        lines.extend(prompt.windows[..shown].iter().map(window_line));
+        let rest = &prompt.windows[shown..];
+        let dojos: usize = rest.iter().map(|window| window.dojos.len()).sum();
+        lines.push(format!(
+            "  +{} more Windows ({dojos} Dojo{})",
+            rest.len(),
+            if dojos == 1 { "" } else { "s" }
+        ));
+    }
+    lines.extend(DIALOG_FOOTER.map(str::to_owned));
+    lines.insert(
+        lines.len() - 3,
         format!(
             "Closing this dialog, or no answer within {} seconds, cancels.",
             prompt.respond_within_seconds
         ),
-        String::new(),
-        "D / Escape: CANCEL the upgrade     G / Enter: PROCEED without them".to_owned(),
-        "Click the red left area to cancel or the green right area to proceed.".to_owned(),
-    ]);
+    );
     lines
+}
+
+/// The explanation and the actions, always shown in full below the list.
+/// The deadline line is inserted before the last three.
+const DIALOG_FOOTER: [&str; 7] = [
+    "",
+    "Proceeding closes these Windows. Their terminals keep running in the",
+    "upgraded daemon; reopen them from the Recent Dojos picker.",
+    "Input is paused in every Window until you answer.",
+    "",
+    "[D / Esc / Enter  Cancel]     [G  Proceed]",
+    "Click the red left area to cancel or the green right area to proceed.",
+];
+
+/// Lines above and below the Window list: the three header lines, the
+/// footer, and its deadline line.
+const FIXED_DIALOG_LINES: usize = 3 + DIALOG_FOOTER.len() + 1;
+
+/// The tallest dialog, in terminal rows. The static snapshot cannot scroll,
+/// so the dialog is sized to its content within this bound.
+const MAX_DIALOG_ROWS: usize = 40;
+
+/// The most Window lines that fit above the action areas of the tallest
+/// dialog; a longer list is summarized in its last line.
+const MAX_LISTED_WINDOWS: usize = MAX_DIALOG_ROWS * TEXT_ROWS_PERCENT / 100 - FIXED_DIALOG_LINES;
+
+/// The dialog's rows: enough that its text ends above the action areas,
+/// which cover the bottom 22% of the Window.
+fn dialog_rows(lines: usize) -> usize {
+    (lines * 100).div_ceil(TEXT_ROWS_PERCENT).max(18)
 }
 
 fn dialog_snapshot(prompt: &UpgradeDialogPrompt) -> TerminalSnapshot {
     let lines = dialog_lines(prompt);
-    let rows = (lines.len() * 100).div_ceil(TEXT_ROWS_PERCENT);
+    let rows = dialog_rows(lines.len());
     static_dialog_snapshot(
         lines,
-        rows.max(18),
+        rows,
         "Upgrade question",
         splinterm_core::SplintId::new(),
         0,
     )
+}
+
+/// Window options that show the whole snapshot: the grid is sized to it.
+fn dialog_window_options(
+    prompt: &UpgradeDialogPrompt,
+    decision: std_mpsc::Sender<bool>,
+) -> WindowOptions {
+    let snapshot = dialog_snapshot(prompt);
+    let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
+    let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
+    WindowOptions {
+        snapshot: Some(snapshot),
+        trusted_consent: Some(TrustedConsentUi::upgrade(decision)),
+        initial_columns: columns,
+        initial_rows: rows,
+        ..WindowOptions::default()
+    }
 }
 
 /// The hidden `upgrade-dialog` child: reads one prompt on stdin, shows it,
@@ -188,11 +250,7 @@ pub(in crate::app) fn run_upgrade_dialog_client() -> Result<()> {
         bail!("the upgrade command that asked has exited");
     }
     let (decision, receiver) = std_mpsc::channel();
-    run_window(WindowOptions {
-        snapshot: Some(dialog_snapshot(&prompt)),
-        trusted_consent: Some(TrustedConsentUi { decision }),
-        ..WindowOptions::default()
-    })?;
+    run_window(dialog_window_options(&prompt, decision))?;
     let proceed = receiver.try_recv().unwrap_or(false);
     write_private_frame_bounded(
         &mut io::stdout().lock(),
@@ -371,23 +429,73 @@ mod tests {
     }
 
     #[test]
-    fn every_window_gets_a_line_above_the_action_areas() {
+    fn the_largest_prompt_fits_the_bounded_dialog_with_a_count_and_the_actions() {
         let windows = (1..=64).map(|pid| window(pid, 32, 128)).collect::<Vec<_>>();
         let dialog = prompt(windows);
         let lines = dialog_lines(&dialog);
+        let listed = lines
+            .iter()
+            .filter(|line| line.starts_with("  • PID "))
+            .count();
+        assert_eq!(listed, MAX_LISTED_WINDOWS - 1);
+        let summary = format!(
+            "  +{} more Windows ({} Dojos)",
+            64 - listed,
+            (64 - listed) * 32
+        );
+        assert!(lines.contains(&summary), "{lines:#?}");
+        assert!(
+            lines[2].contains("64 Windows cannot take part"),
+            "{}",
+            lines[2]
+        );
+        for footer in DIALOG_FOOTER.iter().filter(|line| !line.is_empty()) {
+            assert!(
+                lines.iter().any(|line| line == footer),
+                "missing {footer:?}"
+            );
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("no answer within 18 seconds"))
+        );
+        assert!(lines.iter().all(|line| line.len() <= MAX_DIALOG_COLUMNS));
+        let (decision, _receiver) = std_mpsc::channel();
+        let options = dialog_window_options(&dialog, decision);
+        let snapshot = options.snapshot.as_ref().unwrap();
+        assert!(snapshot.rows <= MAX_DIALOG_ROWS, "{}", snapshot.rows);
+        // The grid shows the whole snapshot, and the text ends above the
+        // bottom 22% the action areas cover.
+        assert_eq!(usize::from(options.initial_rows), snapshot.rows);
+        assert_eq!(usize::from(options.initial_columns), snapshot.columns);
+        assert!(lines.len() * 100 <= snapshot.rows * TEXT_ROWS_PERCENT);
+        assert_eq!(snapshot.visible_rows.len(), snapshot.rows);
+        assert_eq!(snapshot.title, "Upgrade question");
+        assert_eq!(snapshot.cursor_row, -1);
+    }
+
+    #[test]
+    fn every_window_is_listed_while_the_list_fits() {
+        let windows = (1..=u32::try_from(MAX_LISTED_WINDOWS).unwrap())
+            .map(|pid| window(pid, 32, 128))
+            .collect::<Vec<_>>();
+        let lines = dialog_lines(&prompt(windows));
         assert_eq!(
             lines
                 .iter()
                 .filter(|line| line.starts_with("  • PID "))
                 .count(),
-            64
+            MAX_LISTED_WINDOWS
         );
-        assert!(lines.iter().all(|line| line.len() <= MAX_DIALOG_COLUMNS));
-        let snapshot = dialog_snapshot(&dialog);
-        // The text ends above the bottom 22% the action areas cover.
-        assert!(lines.len() * 100 <= snapshot.rows * TEXT_ROWS_PERCENT);
-        assert_eq!(snapshot.title, "Upgrade question");
-        assert_eq!(snapshot.cursor_row, -1);
+        assert!(!lines.iter().any(|line| line.contains("more Windows")));
+        assert!(dialog_rows(lines.len()) <= MAX_DIALOG_ROWS);
+        let single = dialog_lines(&prompt(vec![window(5, 0, 0)]));
+        assert!(
+            single[2].contains("1 Window cannot take part"),
+            "{}",
+            single[2]
+        );
     }
 
     #[test]
@@ -398,8 +506,9 @@ mod tests {
         assert!(text.contains("terminals keep running"));
         assert!(text.contains("Recent Dojos picker"));
         assert!(text.contains("no answer within 18 seconds, cancels"));
-        assert!(text.contains("D / Escape: CANCEL"));
-        assert!(text.contains("G / Enter: PROCEED"));
+        assert!(text.contains("[D / Esc / Enter  Cancel]"));
+        assert!(text.contains("[G  Proceed]"));
+        assert!(!text.contains("G / Enter"));
     }
 
     #[test]
