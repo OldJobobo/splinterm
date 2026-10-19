@@ -17,7 +17,7 @@ establish graphical acceptance on every NixOS compositor.
 Add Splinterm to your configuration flake and commit the resulting `flake.lock`:
 
 ```nix
-inputs.splinterm.url = "github:OldJobobo/splinterm/<reviewed-revision>";
+inputs.splinterm.url = "github:ministry-of-taste/splinterm/<reviewed-revision>";
 ```
 
 Replace `<reviewed-revision>` with a reviewed 0.1 maintenance commit containing

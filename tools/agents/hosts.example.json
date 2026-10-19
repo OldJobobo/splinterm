@@ -2,7 +2,7 @@
   "wintermute": {
     "ssh_target": "wintermute",
     "state_dir": "/home/YOUR_USER/.local/state/splinterm-agents",
-    "repo_url": "https://github.com/OldJobobo/splinterm.git",
+    "repo_url": "https://github.com/ministry-of-taste/splinterm.git",
     "pi": "/absolute/path/to/pinned/pi",
     "pi_version": "1.3.0",
     "provider": "YOUR_PROVIDER",
@@ -11,7 +11,7 @@
   "nixos-reader": {
     "ssh_target": "YOUR_RESTRICTED_WORKER@YOUR_NIX_HOST",
     "state_dir": "/home/YOUR_RESTRICTED_WORKER/.local/state/splinterm-agents",
-    "repo_url": "https://github.com/OldJobobo/splinterm.git",
+    "repo_url": "https://github.com/ministry-of-taste/splinterm.git",
     "pi": "/etc/profiles/per-user/YOUR_RESTRICTED_WORKER/bin/pi",
     "pi_version": "1.3.0",
     "python": "/etc/profiles/per-user/YOUR_RESTRICTED_WORKER/bin/python3",
@@ -24,7 +24,7 @@
   "wintermute-build": {
     "ssh_target": "YOUR_RESTRICTED_WORKER@wintermute",
     "state_dir": "/home/YOUR_RESTRICTED_WORKER/.local/state/splinterm-builds",
-    "repo_url": "https://github.com/OldJobobo/splinterm.git",
+    "repo_url": "https://github.com/ministry-of-taste/splinterm.git",
     "pi": "/absolute/path/to/pinned/pi",
     "pi_version": "1.3.0",
     "provider": "YOUR_PROVIDER",

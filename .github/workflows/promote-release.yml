@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  RELEASE_REPOSITORY: OldJobobo/splinterm
+  RELEASE_REPOSITORY: ministry-of-taste/splinterm
 
 concurrency:
   group: versioned-release-promotion

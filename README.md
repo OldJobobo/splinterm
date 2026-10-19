@@ -81,7 +81,7 @@ For the newest published versioned release package, use Foot or another terminal
 not owned by `splinterd`, then clone the public repository and run:
 
 ```bash
-git clone https://github.com/OldJobobo/splinterm.git
+git clone https://github.com/ministry-of-taste/splinterm.git
 cd splinterm
 ./install.sh
 ```

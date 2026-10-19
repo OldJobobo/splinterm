@@ -14,7 +14,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
-REPOSITORY = "OldJobobo/splinterm"
+REPOSITORY = "ministry-of-taste/splinterm"
 COMMIT = "a" * 40
 BRANCH = "main"
 RUN_ID = 4242

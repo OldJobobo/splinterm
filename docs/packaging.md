@@ -7,7 +7,7 @@ Splinterm **0.1.1 is the current stable release** for x86_64 Omarchy/Arch Linux
 with native Wayland under Hyprland. Newer release candidates are prereleases,
 not new stable releases. Stable notes and immutable assets:
 
-https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
+https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.1
 
 `packaging/PKGBUILD` produces split packages for reviewed local and CI builds.
 Its version comes from the checked-out commit; `main` is development code, not

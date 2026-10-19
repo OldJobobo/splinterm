@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repository=OldJobobo/splinterm
+repository=ministry-of-taste/splinterm
 assume_yes=false
 source_build=false
 run_checks=false

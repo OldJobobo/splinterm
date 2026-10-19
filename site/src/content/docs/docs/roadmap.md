@@ -5,7 +5,7 @@ description: Product direction from stable 0.1.1 toward a broader 1.0 support co
 
 Splinterm's roadmap uses **Now / Next / Later / Explore** horizons instead of release dates. These horizons describe intended product outcomes. They are not delivery dates, implementation order, compatibility guarantees, or promises that every listed idea will ship.
 
-[Current status](/docs/status/) remains the authority for what works today. The repository [product roadmap](https://github.com/OldJobobo/splinterm/blob/main/docs/product-roadmap.md) contains the full strategic rationale. Maintainer dependency order, implementation plans, and delivery gates are tracked separately from the public product repository; accepted decisions needed to understand shipped behavior are promoted into public ADRs and documentation.
+[Current status](/docs/status/) remains the authority for what works today. The repository [product roadmap](https://github.com/ministry-of-taste/splinterm/blob/main/docs/product-roadmap.md) contains the full strategic rationale. Maintainer dependency order, implementation plans, and delivery gates are tracked separately from the public product repository; accepted decisions needed to understand shipped behavior are promoted into public ADRs and documentation.
 
 Stable 0.1.1 is available on the documented Omarchy/Arch target. The future 1.0
 support contract below is a roadmap goal, not a guarantee added by that release.

@@ -79,7 +79,7 @@ finalization changed workspace/package version metadata and release notes,
 not runtime source, configuration, dependencies, or fixtures.
 
 Current stable release notes and assets:
-https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
+https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.1
 
 The release adds the RC series' Explorer navigation and context actions,
 activity filters, opt-in ligatures, bounded local clipboard-image saving,
@@ -124,12 +124,12 @@ and source-built and prebuilt Arch packages.
 
 Historical 0.1.0 release notes and assets:
 
-https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0
+https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0
 
 The subsequent `v0.1.1-rc.2`, published on 2026-09-15, and `v0.1.1-rc.3`
 are historical prereleases now superseded by stable `v0.1.1`. Release listing:
 
-https://github.com/OldJobobo/splinterm/releases
+https://github.com/ministry-of-taste/splinterm/releases
 
 **Splinterm 0.1 does not support live daemon upgrade handoff.** Stopping or
 replacing the daemon ends its child processes; saved topology does not
@@ -143,7 +143,7 @@ The beta and alpha records below describe earlier releases, not current maturity
 
 ## Beta 2 release
 
-[`v0.1.0-beta2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta2)
+[`v0.1.0-beta2`](https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0-beta2)
 was published as a GitHub prerelease on 2026-08-24 and distributed through both
 AUR package bases as `0.1.0beta2-1`. Beta 2 adds configurable Window-owned
 terminal lifetimes with atomic promotion to persistent Lairs, follows the
@@ -178,7 +178,7 @@ upgrade and rollback workflow.
 
 ## Beta 1 release
 
-[`v0.1.0-beta1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-beta1)
+[`v0.1.0-beta1`](https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0-beta1)
 was published as a GitHub prerelease on 2026-08-17 and distributed through both
 AUR package bases as `0.1.0beta1-1`. Beta 1 accepts wide terminal grids through
 `480×128`, bounds sparse terminal publication ownership and accounting, and
@@ -213,7 +213,7 @@ accepted Alpha3 command, persistence, input, and Omarchy integration behavior.
 
 ## Alpha3.3 release
 
-[`v0.1.0-alpha3.3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.3)
+[`v0.1.0-alpha3.3`](https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0-alpha3.3)
 was published as a GitHub prerelease on 2026-08-14 and distributed through both
 AUR package bases as `0.1.0alpha3.3-1`. New persistent and transient Lairs start
 with `Dojo 1`; later implicit Dojo names advance from the highest exact canonical
@@ -245,7 +245,7 @@ exhaustion is reported as a stable machine `invalid_argument`.
 
 ## Alpha3.2 release
 
-[`v0.1.0-alpha3.2`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.2)
+[`v0.1.0-alpha3.2`](https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0-alpha3.2)
 was published as a GitHub prerelease on 2026-08-14 and distributed through both
 AUR package bases as `0.1.0alpha3.2-1`. It prevents held Backspace and other
 ordinary terminal input from terminating the Wayland client when a pane's
@@ -276,7 +276,7 @@ boundaries, and safe across pane teardown; file-drop input uses the same path.
 
 ## Alpha3.1 release
 
-[`v0.1.0-alpha3.1`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3.1)
+[`v0.1.0-alpha3.1`](https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0-alpha3.1)
 was published as a GitHub prerelease on 2026-08-14 and distributed through both
 AUR package bases as `0.1.0alpha3.1-1`. It hides the initial tab strip for
 command-bearing private XDG launches, keeps transient Lairs non-persistent while
@@ -308,7 +308,7 @@ theme-provided background role at the configured terminal alpha.
 
 ## Alpha3 release
 
-[`v0.1.0-alpha3`](https://github.com/OldJobobo/splinterm/releases/tag/v0.1.0-alpha3)
+[`v0.1.0-alpha3`](https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.0-alpha3)
 was published as a GitHub prerelease on 2026-08-14 and distributed through both
 AUR package bases as `0.1.0alpha3-1`.
 

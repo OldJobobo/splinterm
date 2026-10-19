@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/oldjobobo/splinterm/tools/benchmark/headless-multiplexer-schema.json",
+  "$id": "https://github.com/ministry-of-taste/splinterm/tools/benchmark/headless-multiplexer-schema.json",
   "title": "Splinterbench headless multiplexer orchestration evidence",
   "type": "object",
   "additionalProperties": false,

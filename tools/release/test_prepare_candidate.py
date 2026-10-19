@@ -152,14 +152,14 @@ class PrepareCandidateTests(unittest.TestCase):
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
         with self.assertRaisesRegex(ValueError, "release tag already exists"):
             MODULE.validate_candidate(
-                "OldJobobo/splinterm", commit, version, "v0.1.0-rc.2"
+                "ministry-of-taste/splinterm", commit, version, "v0.1.0-rc.2"
             )
 
     def test_mismatched_version_fails_before_build(self) -> None:
         commit = MODULE.run(["git", "rev-parse", "HEAD"])
         with self.assertRaisesRegex(ValueError, "does not match Cargo.toml"):
             MODULE.validate_candidate(
-                "OldJobobo/splinterm",
+                "ministry-of-taste/splinterm",
                 commit,
                 "9.9.9-alpha9",
                 "v0.1.0-beta3",
@@ -219,7 +219,7 @@ class PrepareCandidateTests(unittest.TestCase):
             "branch": "main",
             "commit": "a" * 40,
             "run_id": 42,
-            "run_url": "https://github.com/OldJobobo/splinterm/actions/runs/42",
+            "run_url": "https://github.com/ministry-of-taste/splinterm/actions/runs/42",
             "check_job": "check",
             "status": "completed",
             "conclusion": "success",
@@ -229,7 +229,7 @@ class PrepareCandidateTests(unittest.TestCase):
             path.write_text(json.dumps(value), encoding="utf-8")
             self.assertEqual(
                 MODULE.validate_ci_attestation(
-                    path, "OldJobobo/splinterm", "a" * 40
+                    path, "ministry-of-taste/splinterm", "a" * 40
                 ),
                 value,
             )
@@ -237,7 +237,7 @@ class PrepareCandidateTests(unittest.TestCase):
             path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "event"):
                 MODULE.validate_ci_attestation(
-                    path, "OldJobobo/splinterm", "a" * 40
+                    path, "ministry-of-taste/splinterm", "a" * 40
                 )
 
     def test_manifest_example_is_json_serializable(self) -> None:
