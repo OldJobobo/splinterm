@@ -60,6 +60,7 @@ use super::{
         automation_launch, create_request, launch_parameters, new_dojo_request_for, remember_dojo,
     },
     sessions::{launch, reopen_recent, run_dojos, run_dojos_from, select_dojo, xdg_launch},
+    upgrade_dialog::run_upgrade_dialog_client,
 };
 
 #[allow(
@@ -92,6 +93,8 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Launch { .. }
             | Command::XdgLaunch { .. }
             | Command::Consent
+            | Command::Upgrade { .. }
+            | Command::UpgradeDialog
             | Command::Diagnostics { .. }
             | Command::Config { .. }
             | Command::Keymap { .. }
@@ -166,6 +169,8 @@ pub(crate) async fn run() -> Result<()> {
         && matches!(
             command,
             Command::Consent
+                | Command::UpgradeDialog
+                | Command::Upgrade { .. }
                 | Command::Remotes
                 | Command::Diagnostics { .. }
                 | Command::Config { .. }
@@ -182,6 +187,9 @@ pub(crate) async fn run() -> Result<()> {
         usage_error(
             "--remote cannot select local service, relay, policy, consent, or remote chooser commands",
         );
+    }
+    if let Command::Upgrade { now } = command {
+        return super::upgrade::run(now).await;
     }
     if let Command::Diagnostics {
         last_exit,
@@ -366,6 +374,7 @@ fn graphical_command(command: &Command) -> bool {
             | Command::Launch { .. }
             | Command::XdgLaunch { .. }
             | Command::Consent
+            | Command::UpgradeDialog
     ) || matches!(
         command,
         Command::Preset {
@@ -434,6 +443,9 @@ async fn run_configured_command(
         Command::Consent => tokio::task::spawn_blocking(run_consent_client)
             .await
             .context("trusted consent task failed")?,
+        Command::UpgradeDialog => tokio::task::spawn_blocking(run_upgrade_dialog_client)
+            .await
+            .context("trusted upgrade dialog task failed")?,
         Command::Preset {
             command:
                 PresetCommand::Run {
@@ -483,6 +495,8 @@ async fn run_headless(
         | Command::Launch { .. }
         | Command::XdgLaunch { .. }
         | Command::Consent
+        | Command::Upgrade { .. }
+        | Command::UpgradeDialog
         | Command::Diagnostics { .. }
         | Command::Config { .. }
         | Command::Keymap { .. }

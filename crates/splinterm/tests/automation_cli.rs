@@ -1991,3 +1991,313 @@ fn agent_status_get_and_inspect_add_status_only_when_reported() {
     assert_eq!(document["operation"], "agent_status_get");
     assert_eq!(document["error"]["code"], "not_found");
 }
+
+// `splinterm upgrade` is a human trusted-UI command, not a machine operation;
+// these tests drive it against a scripted daemon.
+
+fn accept_trusted_upgrade_client(listener: &UnixListener, generation: u64) -> UnixStream {
+    let (mut stream, _) = listener.accept().unwrap();
+    assert!(matches!(
+        read_client_frame(&mut stream),
+        ClientFrame::Hello {
+            role: ClientRole::TrustedUi,
+            handoff_window: false,
+            ..
+        }
+    ));
+    stream
+        .write_all(
+            &encode_frame(&ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: generation,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    stream
+}
+
+fn expect_handoff_request(
+    stream: &mut UnixStream,
+    expected: splinterm_protocol::DaemonHandoffMode,
+) -> u64 {
+    match read_client_frame(stream) {
+        ClientFrame::Request {
+            request_id,
+            request: splinterm_protocol::Request::PrepareDaemonHandoff { mode },
+            ..
+        } if mode == expected => request_id,
+        other => panic!("expected a {expected:?} handoff request, got {other:?}"),
+    }
+}
+
+fn upgrade_report(
+    generation: u64,
+    identity: u8,
+    unsupported: bool,
+) -> splinterm_protocol::HandoffReport {
+    let range = splinterm_protocol::HandoffVersionRange {
+        minimum: 1,
+        maximum: 1,
+    };
+    splinterm_protocol::HandoffReport {
+        daemon_generation: generation,
+        build: splinterm_protocol::HandoffBuild {
+            version: format!("0.2.{identity}"),
+            identity: [identity; splinterm_protocol::HANDOFF_BUILD_IDENTITY_BYTES],
+            provenance: splinterm_protocol::HandoffBuildProvenance::ReleaseCandidate,
+        },
+        private_protocol: range,
+        handoff_protocol: range,
+        terminal_checkpoint: range,
+        descriptor_manifest: range,
+        lairs: 1,
+        transient_lairs: 0,
+        dojos: 1,
+        live_splints: 1,
+        rollback_available: true,
+        blocking_reasons: if unsupported {
+            vec![splinterm_protocol::HandoffBlockingReason::Unsupported]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn answer_dry_run(stream: &mut UnixStream, report: splinterm_protocol::HandoffReport) {
+    let request_id = expect_handoff_request(stream, splinterm_protocol::DaemonHandoffMode::DryRun);
+    send_response(stream, request_id, Response::HandoffReport { report });
+}
+
+fn send_handoff_unavailable(stream: &mut UnixStream, request_id: u64, message: &str) {
+    let frame = ServerFrame::Error {
+        request_id: Some(request_id),
+        error: ProtocolError {
+            message: message.to_owned(),
+            ..ProtocolError::handoff_unavailable(vec![
+                splinterm_protocol::HandoffBlockingReason::Unsupported,
+            ])
+        },
+    };
+    stream.write_all(&encode_frame(&frame).unwrap()).unwrap();
+}
+
+fn run_upgrade(arguments: &[&str], socket: &std::path::Path) -> Output {
+    binary()
+        .env("SPLINTERM_SOCKET", socket)
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("SPLINTERM_SPLINT_ID")
+        .stdin(std::process::Stdio::null())
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn upgrade_without_now_prints_the_report_and_changes_nothing() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 1);
+        answer_dry_run(&mut stream, upgrade_report(1, 1, true));
+        // No Execute follows a dry run.
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+    });
+    let output = run_upgrade(&["upgrade"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Daemon: generation 1 · Splinterm 0.2.1 · release package"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Live upgrade: not available now."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("not available in this build yet"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("systemctl --user stop splinterd.service"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn upgrade_now_refused_for_window_continuity_exits_unavailable_with_the_restart_path() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 1);
+        answer_dry_run(&mut stream, upgrade_report(1, 1, true));
+        let request_id =
+            expect_handoff_request(&mut stream, splinterm_protocol::DaemonHandoffMode::Execute);
+        send_handoff_unavailable(
+            &mut stream,
+            request_id,
+            "daemon handoff is unavailable: live handoff is not available in this release because open Windows cannot survive it yet; restart the daemon to run the upgraded build",
+        );
+    });
+    let output = run_upgrade(&["upgrade", "--now"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Live upgrade is not available now."),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("open Windows cannot survive it yet"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Nothing changed"), "{stderr}");
+    assert!(
+        stderr.contains("systemctl --user daemon-reload"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn upgrade_now_cancels_a_window_prompt_it_cannot_show() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 1);
+        answer_dry_run(&mut stream, upgrade_report(1, 1, false));
+        let request_id =
+            expect_handoff_request(&mut stream, splinterm_protocol::DaemonHandoffMode::Execute);
+        let prompt = ServerFrame::HandoffDecisionRequired {
+            request_id,
+            daemon_generation: 1,
+            deadline_ms: 20_000,
+            windows: vec![splinterm_protocol::HandoffUnresponsiveWindow {
+                index: 0,
+                pid: 4242,
+                reason: splinterm_protocol::HandoffWindowIssue::NoAcknowledgement,
+                dojos: Vec::new(),
+            }],
+        };
+        stream.write_all(&encode_frame(&prompt).unwrap()).unwrap();
+        // Neither a terminal nor a graphical session: the answer is cancel.
+        assert_eq!(
+            read_client_frame(&mut stream),
+            ClientFrame::Cancel { request_id }
+        );
+        send_handoff_unavailable(
+            &mut stream,
+            request_id,
+            "daemon handoff is unavailable: it was cancelled",
+        );
+    });
+    let output = run_upgrade(&["upgrade", "--now"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no graphical session"), "{stderr}");
+    assert!(stderr.contains("Upgrade cancelled."), "{stderr}");
+}
+
+#[test]
+fn upgrade_now_reports_a_handoff_and_confirms_the_next_build() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 1);
+        answer_dry_run(&mut stream, upgrade_report(1, 1, false));
+        expect_handoff_request(&mut stream, splinterm_protocol::DaemonHandoffMode::Execute);
+        // Committed: the old generation closes the connection unanswered.
+        drop(stream);
+        let mut next = accept_trusted_upgrade_client(&listener, 2);
+        answer_dry_run(&mut next, upgrade_report(2, 2, false));
+    });
+    let output = run_upgrade(&["upgrade", "--now"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("as a committed upgrade does"), "{stdout}");
+    assert!(
+        stdout.contains("Upgrade complete: generation 2 runs Splinterm 0.2.2 (was generation 1, Splinterm 0.2.1)."),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn upgrade_from_an_untrusted_client_explains_the_installed_client_rule() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 1);
+        let request_id =
+            expect_handoff_request(&mut stream, splinterm_protocol::DaemonHandoffMode::DryRun);
+        let frame = ServerFrame::Error {
+            request_id: Some(request_id),
+            error: ProtocolError::new(
+                ErrorCode::Unauthorized,
+                "request requires the installed trusted graphical client",
+            ),
+        };
+        stream.write_all(&encode_frame(&frame).unwrap()).unwrap();
+    });
+    let output = run_upgrade(&["upgrade", "--now"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("installed splinterm beside the running splinterd"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("device and inode"), "{stderr}");
+}
+
+#[test]
+fn upgrade_rejects_machine_output_and_remote_endpoints() {
+    for arguments in [
+        vec!["--output", "json", "upgrade"],
+        vec!["--output", "human", "upgrade", "--now"],
+        vec!["--timeout-ms", "10", "upgrade"],
+        vec!["--remote", "server", "upgrade"],
+        vec!["upgrade", "--yes"],
+    ] {
+        let output = binary().args(&arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+    }
+}
+
+#[test]
+fn upgrade_now_reports_a_rollback_on_stderr_with_exit_six() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 3);
+        answer_dry_run(&mut stream, upgrade_report(3, 1, false));
+        expect_handoff_request(&mut stream, splinterm_protocol::DaemonHandoffMode::Execute);
+        drop(stream);
+        // A rollback adopts the old generation number with the old build.
+        let mut next = accept_trusted_upgrade_client(&listener, 3);
+        answer_dry_run(&mut next, upgrade_report(3, 1, false));
+    });
+    let output = run_upgrade(&["upgrade", "--now"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(6));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("the same daemon process still runs generation 3 with the previous build"),
+        "{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("did not complete"));
+}

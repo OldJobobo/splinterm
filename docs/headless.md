@@ -223,6 +223,14 @@ fails, inspect the user journal, verify `XDG_RUNTIME_DIR`/`HOME`, validate the
 policy, and ensure no unsafe stale object occupies the socket path. Do not remove
 unknown files or weaken ownership checks to force startup.
 
+`splinterm upgrade` reports whether the running daemon could hand its terminals
+to the installed build without a restart, and `splinterm upgrade --now` starts
+that live upgrade. Live upgrade is not enabled in this release, so both report
+it as unavailable and the restart procedure above remains the upgrade path. The
+command never restarts the daemon itself. See
+[Daemon upgrade](cli.md#daemon-upgrade) for its prompts, trust rule, and exit
+statuses.
+
 ## Accepted 0.2 upgrade contract (not implemented)
 
 The preceding restart procedure remains authoritative until the guarded
@@ -230,8 +238,10 @@ in-place re-exec contract in [ADR 0011](adr/0011-guarded-in-place-daemon-reexec.
 is implemented and released. The accepted `0.2.0` target distinguishes four paths:
 
 - **matching** — the installed and running build identities match;
-- **compatible** — explicit handoff and checkpoint ranges overlap, so the next
-  human launcher invocation performs a guarded in-place handoff automatically;
+- **compatible** — explicit handoff and checkpoint ranges overlap, so a guarded
+  in-place handoff can run. The first initiator is the explicit
+  `splinterm upgrade --now` command; performing it automatically on the next
+  human launcher invocation is planned for later;
 - **idle incompatible** — no live Splint can be lost, so a bounded restart is
   allowed; and
 - **active incompatible** — launch blocks until the user explicitly confirms a

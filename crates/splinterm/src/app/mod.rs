@@ -23,6 +23,8 @@ mod sessions;
 mod shell_integration;
 mod theme_watch;
 mod topology_manager;
+mod upgrade;
+mod upgrade_dialog;
 mod window;
 
 pub(crate) use cli::run;

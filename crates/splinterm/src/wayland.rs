@@ -135,8 +135,8 @@ use crate::frontend::{
     LairExplorerUi, LairPromptKind, PerfTraceCorrelation, SelectorKind, SessionPickerCatalog,
     SessionPickerCreationTarget, SessionPickerDecision, SessionPickerTarget, SessionPickerUi,
     TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch, TabMenuRightPress,
-    TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, WindowCommand,
-    WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
+    TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, TrustedDialogKey,
+    WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
     WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, command_dispatch,
     lair_lifecycle_command, tab_menu_right_press,
 };
@@ -2814,10 +2814,21 @@ fn search_paint_rect(content: Rect, explorer: Option<&LairExplorerLayout>) -> Op
     })
 }
 
+/// The trusted dialog key a keysym is, if any.
+const fn trusted_dialog_key(keysym: Keysym) -> TrustedDialogKey {
+    match keysym {
+        Keysym::g | Keysym::G => TrustedDialogKey::G,
+        Keysym::d | Keysym::D => TrustedDialogKey::D,
+        Keysym::Return | Keysym::KP_Enter => TrustedDialogKey::Enter,
+        Keysym::Escape => TrustedDialogKey::Escape,
+        _ => TrustedDialogKey::Other,
+    }
+}
+
 /// The title a Window maps with, before any snapshot or modal updates it.
 fn initial_window_title(options: &WindowOptions) -> String {
-    if options.trusted_consent.is_some() {
-        "Splinterm — Trusted Access Request".to_owned()
+    if let Some(consent) = &options.trusted_consent {
+        consent.kind.window_title().to_owned()
     } else if let Some(picker) = &options.session_picker {
         picker.standalone_title().to_owned()
     } else {
@@ -8105,13 +8116,13 @@ impl App {
             }
             return;
         }
-        if self.modal.trusted_consent.is_some() {
-            match event.keysym {
-                Keysym::g | Keysym::G | Keysym::Return | Keysym::KP_Enter => {
-                    self.decide_consent(true);
-                }
-                Keysym::d | Keysym::D | Keysym::Escape => self.decide_consent(false),
-                _ => {}
+        if let Some(consent) = &self.modal.trusted_consent {
+            // Repeats never reach here for a kind that ignores them
+            // (`repeat_key`), so every key seen is a fresh press.
+            if let Some(granted) =
+                consent.key_decision(trusted_dialog_key(event.keysym), false, Instant::now())
+            {
+                self.decide_consent(granted);
             }
             return;
         }
@@ -13655,6 +13666,41 @@ mod tests {
         assert_eq!(options.app_id, crate::config::APP_ID);
         assert!(options.initial_tab_strip_visible);
         assert!(options.controller_title);
+    }
+
+    #[test]
+    fn trusted_dialogs_map_with_their_own_titles() {
+        let (decision, _receiver) = std::sync::mpsc::channel();
+        let consent = WindowOptions {
+            trusted_consent: Some(TrustedConsentUi::access_consent(decision.clone())),
+            ..WindowOptions::default()
+        };
+        assert_eq!(
+            initial_window_title(&consent),
+            "Splinterm — Trusted Access Request"
+        );
+        let upgrade = WindowOptions {
+            trusted_consent: Some(TrustedConsentUi::upgrade(decision)),
+            ..WindowOptions::default()
+        };
+        assert_eq!(initial_window_title(&upgrade), "Splinterm — Upgrade");
+    }
+
+    #[test]
+    fn trusted_dialog_keys_keep_the_consent_keysyms() {
+        for (keysym, key) in [
+            (Keysym::g, TrustedDialogKey::G),
+            (Keysym::G, TrustedDialogKey::G),
+            (Keysym::d, TrustedDialogKey::D),
+            (Keysym::D, TrustedDialogKey::D),
+            (Keysym::Return, TrustedDialogKey::Enter),
+            (Keysym::KP_Enter, TrustedDialogKey::Enter),
+            (Keysym::Escape, TrustedDialogKey::Escape),
+            (Keysym::y, TrustedDialogKey::Other),
+            (Keysym::space, TrustedDialogKey::Other),
+        ] {
+            assert_eq!(trusted_dialog_key(keysym), key, "{keysym:?}");
+        }
     }
 
     #[test]

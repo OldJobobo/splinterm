@@ -10,6 +10,7 @@ mod options;
 mod picker;
 mod text_edit;
 mod topology;
+mod trusted_dialog;
 
 pub(crate) use action_menu::{
     BuiltInCommandDispatch, BuiltInCommandId, COMMAND_PALETTE_PAGE_ITEMS, CommandControlAction,
@@ -43,3 +44,4 @@ pub use topology::{
     LairPromptTarget, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
     SessionPickerTarget, WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate,
 };
+pub(crate) use trusted_dialog::{TrustedDialogKey, TrustedDialogKind};

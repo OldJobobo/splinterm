@@ -154,6 +154,7 @@ concurrent relaunch cannot silently retarget the operation.
 | `close SPLINT_ID` | Remove an exited leaf and collapse its parent branch. |
 | `close-dojo DOJO_ID` | Remove a Dojo only when all its Splints have exited. |
 | `reset` | Stop the daemon, move all session state to a backup, and restart cleanly. |
+| `upgrade [--now]` | Report whether a live daemon upgrade could run, or start one with `--now`. Live upgrade is not enabled in this release; see [Daemon upgrade](#daemon-upgrade). |
 
 Human `kill` and `reset` prompt unless `--yes` is supplied. Human `close` and
 `close-dojo` remove only already-exited topology and do not add another
@@ -164,6 +165,88 @@ Restore operations are explicit—saved argv is never executed automatically.
 A stable Splint ID names the persistent leaf. Every process start increments its
 positive **incarnation**. Machine clients use incarnation preconditions to reject
 stale targets rather than acting on a replacement process.
+
+## Daemon upgrade
+
+```bash
+splinterm upgrade         # report only; changes nothing
+splinterm upgrade --now   # start a live upgrade
+```
+
+A live upgrade hands every running terminal from the running `splinterd` to the
+installed build without stopping them. **It is not enabled in this release:**
+`splinterm upgrade` reports it as unavailable, and `--now` is refused with the
+same explanation. Nix installations are refused for all of Splinterm 0.2.0.
+Until live upgrade is available, restarting the daemon is the upgrade path. Run
+these commands from a terminal Splinterm does not own (a text console or another
+terminal emulator), because stopping the daemon ends every running terminal:
+
+```bash
+systemctl --user stop splinterd.service
+systemctl --user daemon-reload
+systemctl --user start splinterd.service
+```
+
+A daemon that is not an installed package build, such as one started from a
+development checkout, is restarted the way it was started. The command never
+restarts anything by itself.
+
+Without `--now`, the command prints the running daemon's generation, build and
+provenance, its session counts, whether it kept a rollback copy, its
+compatibility ranges, and every reason a live upgrade cannot run now: open
+transient Lairs, a daemon that is not an installed package build, a missing
+rollback copy, or a build without live-upgrade support.
+
+With `--now`, open Windows that cannot take part in the upgrade are listed with
+their process ID, the reason, and their Dojos, and the command asks whether to
+cancel or to proceed without them. Proceeding closes those Windows; their
+terminals keep running in the upgraded daemon and reopen from the Recent Dojos
+picker (`splinterm dojos`). Input stays paused in every Window until the answer.
+
+- When stdin and stderr are terminals, the question is asked on stderr as
+  `[c]ancel / [p]roceed`. Only `p` or `proceed` proceeds; an empty or
+  unrecognized answer, end of input, or no answer before the daemon's deadline
+  cancels.
+- Without a terminal, or when the command runs inside a Splinterm terminal
+  (whose input the upgrade pauses), a small trusted dialog titled
+  "Splinterm — Upgrade", in the style of the access consent dialog, asks
+  instead. `D`, `Escape`, `Enter`, or the red left area cancels; only `G` or the
+  green right area proceeds. Keys and the proceed click count only after the
+  dialog has had focus for about 600 ms, and held or repeating keys never count,
+  so typing already under way cannot answer it. Closing the dialog or not
+  answering cancels. If the list of Windows is too long for the dialog, the last
+  line counts the rest. Without a graphical session either, the upgrade is
+  cancelled.
+
+A committed upgrade never answers the request: the old daemon closes the
+connection and starts the installed build. A connection that closes for another
+reason, such as a stopped service or a crash, looks the same, so the command then
+reconnects for up to 15 seconds and reports which daemon serves. A live upgrade
+and a rollback both replace the daemon's program in place, so the daemon keeps
+its process ID and start time, which the command records before the upgrade
+and checks after it. A restarted daemon is a new process, even when it reports
+the same generation and build. In the same process, an upgrade serves the next
+generation with the new build and a rollback serves the same generation with
+the previous build. Only once an upgrade or a rollback is confirmed this way
+does the command say that the dropped Windows' terminals keep running;
+otherwise it says that what happened to them is unknown.
+
+Only the installed `splinterm` beside the running `splinterd` may ask: on
+packaged systems `/usr/bin/splinterm`, matched by device and inode. A
+development build or a copy earlier on `PATH` is refused as unauthorized. The
+command has no machine output and rejects `--output`, `--schema-major`,
+`--timeout-ms`, and `--remote`.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | The report was shown, or the upgrade completed: the same daemon process serves the next generation with the new build. |
+| 1 | Error: no daemon, not the installed trusted client, a refused request, an invalid daemon response, or, after the connection closed, a restarted daemon (a new process, whose terminals most likely ended) or the same process with neither an upgrade nor a rollback. |
+| 2 | Usage error. |
+| 3 | Cancelled by the answer, by closing the dialog, by no answer in time, or because nothing could ask. Nothing changed. |
+| 4 | Live upgrade is unavailable now. Nothing changed. |
+| 5 | Another upgrade is already in progress. |
+| 6 | The upgrade did not complete: the same daemon process serves the same generation with the previous build, after a rollback or because it never left. Terminals were kept. |
+| 7 | The connection closed as a committed upgrade's does, but the result is unconfirmed: no daemon answered within 15 seconds, or the daemon process could not be identified (for example from another PID namespace). Run `splinterm upgrade` to check. |
 
 ## Terminal observation and input
 
