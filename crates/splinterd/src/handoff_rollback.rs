@@ -555,7 +555,7 @@ fn require_rolling_back(lifecycle: &HandoffLifecycle) -> Result<(), RollbackErro
     }
 }
 
-fn staged_owners(
+pub(crate) fn staged_owners(
     authorities: &CandidateStagedAuthorities,
 ) -> Result<Vec<HandoffDescriptor<'_>>, RollbackError> {
     let manifest = &authorities.manifest;
@@ -598,6 +598,18 @@ fn staged_owners(
         let checkpoint = terminal_checkpoint_slot(&splint.evidence)
             .map_err(|error| RollbackError::RollbackManifest(error.to_string()))?;
         owners.push(owner(checkpoint, splint.checkpoint_descriptor.as_fd()));
+    }
+    // Every carried Window, an exited one included: staging dropped it
+    // logically but kept its owners, which the rollback manifest records.
+    for window in &authorities.windows {
+        owners.push(owner(
+            HandoffDescriptorSlot::ClientProcess(window.record.index),
+            window.process.as_fd(),
+        ));
+        owners.push(owner(
+            HandoffDescriptorSlot::Continuation(window.record.index),
+            window.continuation.as_fd(),
+        ));
     }
     Ok(owners)
 }

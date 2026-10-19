@@ -20,6 +20,7 @@ pub(crate) mod handoff_manifest;
 pub mod handoff_preflight;
 pub mod handoff_prepare;
 pub mod handoff_rollback;
+pub mod handoff_window_carry;
 pub mod image_transport;
 pub mod install_prefix;
 #[cfg(feature = "integration-test")]

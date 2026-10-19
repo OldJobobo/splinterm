@@ -1130,6 +1130,11 @@ struct DaemonState {
     /// The initiating connection's side of an in-flight `Execute`, by
     /// connection, until its handler takes it; see [`HandoffInitiator`].
     handoff_initiators: StdMutex<HashMap<u64, HandoffInitiator>>,
+    /// The Windows an adopted daemon carried across its handoff and holds,
+    /// with their controller placeholders, for resume claims until the hold
+    /// expires (Plan 0061 M3.13c). Empty in every other daemon. No
+    /// controller is granted from it before a valid claim (M3.16).
+    handoff_window_hold: StdMutex<splinterd::handoff_window_carry::HandoffWindowHold>,
     /// Replaces the installed and rollback client identities Window
     /// participation is checked against; see [`window_client_sources`].
     #[cfg(test)]
@@ -2088,6 +2093,10 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         reclaimed_slices = committed.reclaimed_slices.len(),
         unreclaimed_slices = committed.unreclaimed_slices.len(),
         closed_unexpected = committed.closed_unexpected,
+        windows_announced = committed.window_announcement.announced,
+        windows_exited = committed.window_announcement.exited,
+        windows_unsent = committed.window_announcement.unsent,
+        held_controllers = committed.window_announcement.placeholders,
         "daemon handoff: adoption committed"
     );
     if committed.install_pair_mismatch {
@@ -2107,6 +2116,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         listener,
         image_listener,
         handoff_listeners,
+        windows,
         ..
     } = committed;
     // The forward client snapshot closes here: nothing relaunches from it
@@ -2137,6 +2147,9 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         daemon_generation,
         handoff_listeners: Some(handoff_listeners),
     });
+    // The carried Windows were sent their outcome at commit; the daemon
+    // holds them until their resume claims (M3.16) or the hold expires.
+    *state.handoff_window_hold.lock().unwrap() = windows;
     record_policy_reload(&state, &policy_generation).await;
     record_handoff_adoption_audit(&state, rollback).await;
     // Durable before anything serves: the excluded Splints' real exits and
@@ -3251,6 +3264,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         handoff_exit: HandoffExit::default(),
         handoff_windows: Arc::default(),
         handoff_initiators: StdMutex::default(),
+        handoff_window_hold: StdMutex::default(),
         #[cfg(test)]
         handoff_client_identities: StdMutex::default(),
         #[cfg(test)]
@@ -15523,6 +15537,7 @@ mod tests {
             handoff_exit: HandoffExit::default(),
             handoff_windows: Arc::default(),
             handoff_initiators: StdMutex::default(),
+            handoff_window_hold: StdMutex::default(),
             handoff_client_identities: StdMutex::default(),
             handoff_faults: StdMutex::default(),
             handoff_capture_limits: StdMutex::new(CaptureLimits::DEFAULT),
