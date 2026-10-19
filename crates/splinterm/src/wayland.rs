@@ -3048,11 +3048,27 @@ fn classify_theme_update(current: ResolvedTheme, next: ResolvedTheme) -> ThemeUp
     next_pixels.shell.text_size_px = None;
     current_pixels.shell.text_size_held = false;
     next_pixels.shell.text_size_held = false;
+    // A strip height change moves the content area, as hiding or showing the
+    // strip does, and repaints no pane pixels.
+    current_pixels.shell.bar_size_px = 0;
+    next_pixels.shell.bar_size_px = 0;
     ThemeUpdateImpact {
         rebuild_pixels: current_pixels != next_pixels,
         reconcile_effect,
         relayout_tab_strip: tab_strip_logical_height(current) != tab_strip_logical_height(next),
     }
+}
+
+/// Whether a live strip height change still needs its own pane resize once
+/// a frame's updates are applied. A font reconciliation in the same pass
+/// already resized every pane from the new content area with the new cell
+/// metrics, so a second resize would only reflow the panes twice.
+const fn strip_relayout_needs_resize(
+    strip_relayout: bool,
+    font_reconciled: bool,
+    configured: bool,
+) -> bool {
+    strip_relayout && !font_reconciled && configured
 }
 
 fn background_effect_capability_bits(flags: WEnum<BackgroundCapability>) -> u32 {
@@ -6834,18 +6850,15 @@ impl App {
         Ok(true)
     }
 
-    /// Follows a live `[bar] size-horizontal` change: the strip, and with it
-    /// the content area below, takes the new height the way showing or hiding
-    /// the strip does. Overlays positioned from the content area follow it on
-    /// the next draw.
-    fn relayout_tab_strip(&mut self) -> Result<()> {
+    /// Follows a live strip height change: the strip, and with it the content
+    /// area below, takes the new height the way showing or hiding the strip
+    /// does. Overlays positioned from the content area follow it on the next
+    /// draw. The panes are resized once the frame's updates are applied, so a
+    /// text size change in the same pass resizes them only once.
+    fn relayout_tab_strip(&mut self) {
         self.invalidate_tab_strip_text();
         self.presentation.full_redraw = true;
         self.update_ime_cursor_rectangle();
-        if self.surface.configured {
-            self.emit_resize()?;
-        }
-        Ok(())
     }
 
     fn apply_font_zoom(
@@ -9206,7 +9219,7 @@ impl App {
             .set_background_alpha(theme.background_alpha);
         self.presentation.theme = theme;
         if impact.relayout_tab_strip {
-            self.invalidate_tab_strip_text();
+            self.relayout_tab_strip();
         }
         if !impact.rebuild_pixels {
             return impact;
@@ -9381,6 +9394,7 @@ impl App {
         let mut rebuild_all_inactive = false;
         let mut effect_desired_changed = false;
         let mut font_reconciled = false;
+        let mut strip_relayout = false;
         if let Some(update) = next_theme {
             if inline_picker_open {
                 retain_newest_theme(&mut self.modal.deferred_picker_theme, update);
@@ -9391,9 +9405,8 @@ impl App {
                 full_frame_reload |= impact.rebuild_pixels;
                 rebuild_all_inactive |= impact.rebuild_pixels;
                 effect_desired_changed |= impact.reconcile_effect;
-                if impact.relayout_tab_strip {
-                    self.relayout_tab_strip()?;
-                }
+                strip_relayout |= impact.relayout_tab_strip;
+                visual_changed |= impact.relayout_tab_strip;
             }
         }
         for update in pending {
@@ -9765,9 +9778,8 @@ impl App {
                         full_frame_reload |= impact.rebuild_pixels;
                         rebuild_all_inactive |= impact.rebuild_pixels;
                         effect_desired_changed |= impact.reconcile_effect;
-                        if impact.relayout_tab_strip {
-                            self.relayout_tab_strip()?;
-                        }
+                        strip_relayout |= impact.relayout_tab_strip;
+                        visual_changed |= impact.relayout_tab_strip;
                     }
                 }
                 WindowUpdate::Font(update) => {
@@ -9830,6 +9842,12 @@ impl App {
             visual_changed = true;
             focused_visual_changed = true;
             self.presentation.full_redraw = true;
+        }
+        // A strip height change resizes the panes here, once: a font
+        // reconciliation above has already resized them from the new content
+        // area, while a rejected or unchanged font still needs this resize.
+        if strip_relayout_needs_resize(strip_relayout, font_reconciled, self.surface.configured) {
+            self.emit_resize()?;
         }
         if !self.panes.pending_exited_splints.is_empty() {
             let topology_queue_open =
@@ -11867,14 +11885,21 @@ mod tests {
         let current = ResolvedTheme::default();
         let mut taller = current;
         taller.shell.bar_size_px = 30;
+        // Like hiding or showing the strip, it moves the content area and
+        // repaints no pane pixels.
         assert_eq!(
             classify_theme_update(current, taller),
             ThemeUpdateImpact {
-                rebuild_pixels: true,
+                rebuild_pixels: false,
                 reconcile_effect: false,
                 relayout_tab_strip: true,
             }
         );
+        // A palette change alongside it still rebuilds pixels.
+        let mut repainted = taller;
+        repainted.foreground ^= 0x00ff_ffff;
+        let impact = classify_theme_update(current, repainted);
+        assert!(impact.relayout_tab_strip && impact.rebuild_pixels);
         // Other shell settings leave the strip where it is.
         let mut panels = current;
         panels.shell.menu_alpha = u16::MAX / 2;
@@ -11887,7 +11912,23 @@ mod tests {
         let mut scaled = text;
         scaled.shell.bar_size_px = 35;
         let impact = classify_theme_update(current, scaled);
-        assert!(impact.relayout_tab_strip && impact.rebuild_pixels);
+        assert!(impact.relayout_tab_strip && !impact.rebuild_pixels);
+    }
+
+    #[test]
+    fn a_strip_relayout_resizes_the_panes_once_per_frame() {
+        // omarchy-display-text-size 16 changes base-size: the strip relayout
+        // and the followed text size land in one pass. The font
+        // reconciliation already resized every pane from the new content
+        // area, so the strip adds no second resize.
+        assert!(!strip_relayout_needs_resize(true, true, true));
+        // A bar edit alone, or a font change that was rejected (at maximum
+        // zoom) or left the raster unchanged, still resizes the panes.
+        assert!(strip_relayout_needs_resize(true, false, true));
+        // No strip change, or no configured surface yet: nothing to resize.
+        assert!(!strip_relayout_needs_resize(false, false, true));
+        assert!(!strip_relayout_needs_resize(false, true, true));
+        assert!(!strip_relayout_needs_resize(true, false, false));
     }
 
     #[test]

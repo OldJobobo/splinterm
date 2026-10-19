@@ -786,10 +786,11 @@ fn bounded_px(value: i64) -> f64 {
 ///   digits.
 /// - The result is rounded as `Math.round` does, then clamped.
 ///
-/// A rejected value is reported once, and so is a clamped result while a
-/// layer sets `size-horizontal`. A bar that only `base-size` pushes out of
-/// range clamps silently, so a text size change is never reported as a bar
-/// problem.
+/// A rejected value is reported once, and so is a clamp when the configured
+/// `size-horizontal` is itself outside the limits. A bar that `base-size`
+/// scaling pushes out of range clamps silently: Omarchy's rendered template
+/// always sets `size-horizontal = 26`, so a text size change is never
+/// reported as a bar problem.
 fn resolve_bar_size(
     size: Option<(&Path, &str)>,
     scale_with_font: Option<(&Path, &str)>,
@@ -847,13 +848,15 @@ fn resolve_bar_size(
         reason = "the value is a whole number clamped into the u16 bar size limits"
     )]
     let px = clamped as u16;
-    if !(f64::from(minimum)..=f64::from(maximum)).contains(&scaled)
-        && let Some((origin, _)) = size
+    let limits = f64::from(minimum)..=f64::from(maximum);
+    if !limits.contains(&scaled)
+        && !limits.contains(&size_px)
+        && let Some((origin, raw)) = size
     {
         diagnostics.push((
             OmarchyShellConcern::BarSize,
             format!(
-                "{}: the Omarchy bar is {scaled} px tall, outside the {minimum} to {maximum} px the tab strip takes; using {px} px",
+                "{}: [bar] size-horizontal {raw:?} is outside {minimum} to {maximum} px; using {px} px for the tab strip",
                 origin.display()
             ),
         ));
@@ -3439,29 +3442,38 @@ mod tests {
                 .bar_size_px,
             40
         );
-        // The clamp applies after scaling, reported against the bar layer.
+        // The clamp applies after scaling. A bar that base-size pushes out of
+        // range clamps silently, even with the template's size-horizontal =
+        // 26 in the theme layer as on every stock Omarchy desktop.
         let large = bar("[bar]\nsize-horizontal = 26\n", "[font]\nbase-size = 24\n");
         assert_eq!(large.settings.bar_size_px, 48);
-        assert_eq!(large.diagnostics.len(), 1, "{:?}", large.diagnostics);
-        assert_eq!(large.diagnostics[0].0, OmarchyShellConcern::BarSize);
+        assert!(large.diagnostics.is_empty(), "{:?}", large.diagnostics);
+        // Here only the 6 px text size's own point-size diagnostic remains.
+        for theme in ["", "[bar]\nsize-horizontal = 26\n"] {
+            let small = bar(theme, "[font]\nbase-size = 6\n");
+            assert_eq!(small.settings.bar_size_px, 20);
+            assert_eq!(small.diagnostics.len(), 1, "{:?}", small.diagnostics);
+            assert_eq!(small.diagnostics[0].0, OmarchyShellConcern::TextSize);
+        }
+        // A configured size outside the limits is reported when it is
+        // clamped, against the layer that set it...
+        let huge = bar("[bar]\nsize-horizontal = 60\n", "[font]\nbase-size = 12\n");
+        assert_eq!(huge.settings.bar_size_px, 48);
+        assert_eq!(huge.diagnostics.len(), 1, "{:?}", huge.diagnostics);
         assert!(
-            large.diagnostics[0].1.contains("52 px"),
-            "{:?}",
-            large.diagnostics
-        );
-        // A bar that only base-size pushes out of range clamps silently; here
-        // only the 6 px text size's own point-size diagnostic is reported.
-        let small = bar("", "[font]\nbase-size = 6\n");
-        assert_eq!(small.settings.bar_size_px, 20);
-        assert_eq!(small.diagnostics.len(), 1, "{:?}", small.diagnostics);
-        assert_eq!(small.diagnostics[0].0, OmarchyShellConcern::TextSize);
-        let theme_small = bar("[bar]\nsize-horizontal = 26\n", "[font]\nbase-size = 6\n");
-        assert!(
-            theme_small.diagnostics[0]
+            huge.diagnostics[0]
                 .1
-                .starts_with("theme/shell.toml: the Omarchy bar is 13 px"),
+                .starts_with("theme/shell.toml: [bar] size-horizontal \"60\" is outside"),
             "{:?}",
-            theme_small.diagnostics
+            huge.diagnostics
+        );
+        // ...but not when base-size scales it back into range.
+        let rescaled = bar("[bar]\nsize-horizontal = 60\n", "[font]\nbase-size = 8\n");
+        assert_eq!(rescaled.settings.bar_size_px, 40);
+        assert!(
+            rescaled.diagnostics.is_empty(),
+            "{:?}",
+            rescaled.diagnostics
         );
         // base-size follows parseInt with the shell's 1 px floor; one without
         // digits leaves the 12 px scale, and only its text-size diagnostic.

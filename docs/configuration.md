@@ -935,6 +935,8 @@ choosing the theme directory with the same order and brief-gap grace as the
 native theme.
 While `config.ini` sets a font size, Splinterm does not report `base-size`
 problems, and with a JSON palette it does not report panel alpha problems.
+Bar size problems are reported in every case, because every palette follows
+the bar.
 
 To opt out, set a size in `config.ini`, for example:
 
@@ -976,11 +978,14 @@ Splinterm reads these keys as the shell does:
 * `scale-with-font` accepts `true`, `1`, `yes` and `on`, or `false`, `0`, `no`
   and `off`, in any case. Anything else keeps it on.
 
-Rejected values are reported once. A height clamped to 20–48 px is reported
-once while a layer sets `size-horizontal`. A height that only `base-size`
-pushes out of that range is clamped without a report.
-`[bar] size-vertical` sizes side bars and is ignored. An explicit `main.theme`
-JSON keeps the 26 px strip and ignores these values.
+Rejected values are reported once. A clamp to 20–48 px is reported once when
+the configured `size-horizontal` is itself outside that range. A height that
+only `base-size` scaling pushes out of the range is clamped without a report,
+so a text size change never reports a bar problem. Omarchy's template always
+sets `size-horizontal = 26`. `[bar] size-vertical` sizes side bars and is
+ignored. The bar height is not a palette setting, so an explicit `main.theme`
+JSON palette follows it too, from the same Omarchy `shell.toml` layers it
+reads the text size from.
 
 Everything in the strip scales with it. The close and new-tab controls are
 square at the strip height, the active-tab underline is 2 px for strips up to
