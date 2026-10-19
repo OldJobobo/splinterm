@@ -649,7 +649,8 @@ impl CandidateBootstrap {
     /// exited Window passes; a wrong descriptor type, or a live process
     /// that is not the recorded one, fails a forward candidate's staging
     /// and is dropped (`false`) by a rollback generation
-    /// ([`window_verdict`]).
+    /// ([`window_verdict`]). A continuation end the rollback generation
+    /// refused takes no part in the alias check; every accepted role does.
     fn verify_descriptor_roles(&self) -> Result<BTreeMap<u8, bool>, CandidateBootstrapError> {
         #[derive(Eq, Ord, PartialEq, PartialOrd)]
         enum ObjectKey {
@@ -709,7 +710,10 @@ impl CandidateBootstrap {
                 // process. Pidfds share one anonymous inode on older
                 // kernels, so the inode cannot serve.
                 // A rollback generation drops a Window it refuses instead of
-                // failing ([`window_verdict`]).
+                // failing ([`window_verdict`]). A refused pidfd keeps this
+                // key too: it names the Window index, never the descriptor's
+                // object, so it cannot collide with another role whatever
+                // object the descriptor really is.
                 HandoffDescriptorSlot::ClientProcess(index) => {
                     let record = self
                         .window_record(index)
@@ -735,8 +739,16 @@ impl CandidateBootstrap {
                         slot,
                         verify_continuation(descriptor, &stat, slot).map(|()| true),
                     )?;
+                    // `usable` is false only for a rollback generation's
+                    // refusal. That descriptor is no authority, so it joins
+                    // no alias check: a duplicate of another inherited role
+                    // (the listener, say) would otherwise fail staging with
+                    // `DescriptorAlias` and end the rollback over the one
+                    // Window it drops. Its owner is still held, and commit
+                    // closes it, which leaves the shared object open.
                     if !usable {
                         windows.insert(index, false);
+                        continue;
                     }
                     ObjectKey::Inode(stat.st_dev, stat.st_ino)
                 }
@@ -1939,6 +1951,95 @@ mod tests {
             bootstrap.verify_descriptor_roles().unwrap(),
             BTreeMap::from([(0, true)])
         );
+    }
+
+    /// A refused Window descriptor that duplicates another inherited role
+    /// (here the listener, at a distinct number) is no authority: a rollback
+    /// generation drops the Window rather than reading the duplicate as an
+    /// alias, which would end the rollback and every carried Splint. A
+    /// forward candidate still refuses it, so it rolls back.
+    #[test]
+    fn a_refused_window_descriptor_duplicating_another_role_is_dropped_not_an_alias() {
+        let window = test_window();
+        let process = HandoffDescriptorSlot::ClientProcess(0);
+        let continuation = HandoffDescriptorSlot::Continuation(0);
+        for refused in [process, continuation] {
+            let mut idle = idle_owners();
+            let mut owners = std::mem::take(&mut idle.owners);
+            let listener = owners
+                .iter()
+                .find(|(slot, _)| *slot == HandoffDescriptorSlot::Listener)
+                .unwrap()
+                .1
+                .try_clone()
+                .unwrap();
+            let (pidfd, channel) = if refused == process {
+                (listener, window.continuation.try_clone().unwrap())
+            } else {
+                (window.pidfd.try_clone().unwrap(), listener)
+            };
+            owners.push((process, pidfd));
+            owners.push((continuation, channel));
+            let mut bootstrap = bootstrap_with_windows(owners, vec![window.record.clone()]);
+            let forward = bootstrap.verify_descriptor_roles();
+            assert!(
+                matches!(forward, Err(CandidateBootstrapError::DescriptorRole(slot)) if slot == refused),
+                "{refused:?}: {forward:?}"
+            );
+            bootstrap.manifest.kind = ManifestKind::Rollback;
+            assert_eq!(
+                bootstrap.verify_descriptor_roles().unwrap(),
+                BTreeMap::from([(0, false)]),
+                "{refused:?}"
+            );
+            // Dropping the Window leaves its owners for commit to close.
+            assert_eq!(bootstrap.claims.len(), bootstrap.manifest.descriptors.len());
+            assert!(bootstrap.claims.contains(process));
+            assert!(bootstrap.claims.contains(continuation));
+        }
+    }
+
+    /// Accepted Window descriptors stay in the alias check on both sides:
+    /// two Windows sharing one valid continuation socket fail staging.
+    #[test]
+    fn accepted_continuations_that_share_one_socket_are_an_alias_on_both_sides() {
+        let first = test_window();
+        let mut second = test_window();
+        second.record.index = 1;
+        second.record.old_connections = vec![8];
+        let mut idle = idle_owners();
+        let mut owners = std::mem::take(&mut idle.owners);
+        owners.push((
+            HandoffDescriptorSlot::ClientProcess(0),
+            first.pidfd.try_clone().unwrap(),
+        ));
+        owners.push((
+            HandoffDescriptorSlot::Continuation(0),
+            first.continuation.try_clone().unwrap(),
+        ));
+        owners.push((
+            HandoffDescriptorSlot::ClientProcess(1),
+            second.pidfd.try_clone().unwrap(),
+        ));
+        owners.push((
+            HandoffDescriptorSlot::Continuation(1),
+            first.continuation.try_clone().unwrap(),
+        ));
+        let mut bootstrap =
+            bootstrap_with_windows(owners, vec![first.record.clone(), second.record.clone()]);
+        for kind in [ManifestKind::Forward, ManifestKind::Rollback] {
+            bootstrap.manifest.kind = kind;
+            let result = bootstrap.verify_descriptor_roles();
+            assert!(
+                matches!(
+                    result,
+                    Err(CandidateBootstrapError::DescriptorAlias(
+                        HandoffDescriptorSlot::Continuation(1)
+                    ))
+                ),
+                "{kind:?}: {result:?}"
+            );
+        }
     }
 
     /// A Window that fails its check fails staging like any other invalid

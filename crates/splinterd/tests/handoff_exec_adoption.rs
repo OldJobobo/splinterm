@@ -49,6 +49,10 @@
 //! daemon's `Adopted` outcome naming generation 2 after adoption, or the
 //! rollback daemon's `RolledBack` naming generation 1 after a rollback,
 //! which also proves the failed forward candidate sent nothing first.
+//! One more rollback case records a duplicate of the listener at
+//! `Continuation(0)`: the forward candidate refuses it at staging, and the
+//! rollback generation drops that Window, rather than reading the duplicate
+//! as an alias of the listener, and serves every carried Splint.
 //!
 //! # Why the boundary is driven at the function level
 //!
@@ -168,6 +172,9 @@ const PENDING_SIGTERM: &str = "SPLINTERD_EXEC_ADOPTION_PENDING_SIGTERM";
 const TAMPER_ROLLBACK_IMAGE: &str = "SPLINTERD_EXEC_ADOPTION_TAMPER_ROLLBACK_IMAGE";
 /// The stage carries one stand-in Window across exec.
 const WINDOW: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW";
+/// The stage records a duplicate of its listener, not the Window's
+/// continuation end, at `Continuation(0)`.
+const ALIAS_WINDOW_CONTINUATION: &str = "SPLINTERD_EXEC_ADOPTION_ALIAS_WINDOW_CONTINUATION";
 /// Where the stand-in Window writes the first continuation packet it reads.
 const WINDOW_OUTCOME: &str = "window-outcome.bin";
 /// The stand-in Window's one old connection, which held a controller.
@@ -194,9 +201,10 @@ const FAULT_POINTS: [CandidateFaultPoint; 6] = [
     CandidateFaultPoint::ScopeAdoption,
     CandidateFaultPoint::ActorStaging,
 ];
-const CASES: [&str; 8] = [
+const CASES: [&str; 9] = [
     "adopt",
     "rollback",
+    "rollback-dropped-window",
     "rollback-of-rollback",
     "pending-sigterm",
     "tampered-rollback-image",
@@ -263,6 +271,7 @@ fn main() -> ExitCode {
             pending_sigterm: env::var_os(PENDING_SIGTERM).is_some(),
             tamper_rollback_image: env::var_os(TAMPER_ROLLBACK_IMAGE).is_some(),
             window: env::var_os(WINDOW).is_some(),
+            alias_window_continuation: env::var_os(ALIAS_WINDOW_CONTINUATION).is_some(),
             fault: None,
         }),
         Some(stage) => panic!("unknown stage {stage:?}"),
@@ -277,6 +286,8 @@ fn main() -> ExitCode {
             println!("handoff_exec_adoption: adopt passed");
             rollback_case();
             println!("handoff_exec_adoption: rollback passed");
+            rollback_dropped_window_case();
+            println!("handoff_exec_adoption: rollback-dropped-window passed");
             rollback_of_rollback_case();
             println!("handoff_exec_adoption: rollback-of-rollback passed");
             pending_sigterm_case(false);
@@ -321,6 +332,9 @@ struct StageOptions {
     tamper_rollback_image: bool,
     /// Carry one stand-in Window across exec.
     window: bool,
+    /// With `window`, record a duplicate of the listener at
+    /// `Continuation(0)` instead of the Window's continuation end.
+    alias_window_continuation: bool,
     /// Candidate fault points, as `CANDIDATE_FAULT_ENV` spells them; the
     /// parent sets the variable, and it crosses both execs.
     fault: Option<String>,
@@ -423,6 +437,10 @@ fn old_generation_stage(options: &StageOptions) -> ! {
 
     let stopped = hand_off_and_stop();
     let window = options.window.then(|| spawn_window(&directory));
+    // The listener's object at a distinct close-on-exec number.
+    let listener_duplicate = options
+        .alias_window_continuation
+        .then(|| control.try_clone().unwrap());
     // The excluded child is still an unreaped zombie of this process: only
     // the forward daemon can reap it and record its real exit.
     assert_eq!(
@@ -480,7 +498,9 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         ));
         owners.push(HandoffDescriptor::new(
             HandoffDescriptorSlot::Continuation(0),
-            window.continuation.as_fd(),
+            listener_duplicate
+                .as_ref()
+                .map_or_else(|| window.continuation.as_fd(), AsFd::as_fd),
         ));
     }
     let (forward_bytes, rollback_bytes) = manifest_pair(
@@ -1081,6 +1101,7 @@ impl Stage {
         command.env_remove(PENDING_SIGTERM);
         command.env_remove(TAMPER_ROLLBACK_IMAGE);
         command.env_remove(WINDOW);
+        command.env_remove(ALIAS_WINDOW_CONTINUATION);
         command.env_remove(CANDIDATE_FAULT_ENV);
         if options.remove_forward_client {
             command.env(REMOVE_FORWARD_CLIENT, "1");
@@ -1093,6 +1114,9 @@ impl Stage {
         }
         if options.window {
             command.env(WINDOW, "1");
+        }
+        if options.alias_window_continuation {
+            command.env(ALIAS_WINDOW_CONTINUATION, "1");
         }
         if let Some(fault) = options.fault {
             command.env(CANDIDATE_FAULT_ENV, fault);
@@ -1947,6 +1971,51 @@ fn rollback_case() {
     ] {
         assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
     }
+    assert!(!logs.contains("rollback failed"), "{logs}");
+    shut_down(&mut stage, &record, &[launched]);
+}
+
+/// The old generation recorded a duplicate of its listener, at a distinct
+/// number, as the Window's continuation end. The forward candidate refuses
+/// it at staging and rolls back. The rollback generation refuses the same
+/// descriptor and drops the Window: the refused duplicate is no authority,
+/// so it is not an alias of the listener, and every carried Splint is
+/// served (review of #167).
+fn rollback_dropped_window_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            window: true,
+            alias_window_continuation: true,
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    let launched = assert_rolled_back(&mut stage, &directory, &record, false, false);
+    let logs = stage.logs();
+    let committed = log_line(&logs, "daemon handoff: adoption committed");
+    for expected in [
+        "windows_announced=0",
+        "windows_exited=1",
+        "windows_unsent=0",
+        "held_controllers=0",
+    ] {
+        assert!(
+            committed.contains(expected),
+            "missing {expected:?} in {committed:?}\n{logs}"
+        );
+    }
+    for expected in [
+        // The forward candidate refused the duplicate at staging.
+        "phase=\"staging\"",
+        "candidate descriptor for Continuation(0) has the wrong kernel object type",
+        // The rollback generation dropped the Window instead.
+        "daemon handoff rollback: dropping a carried Window it cannot accept",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
+    assert!(!logs.contains("aliases another role"), "{logs}");
     assert!(!logs.contains("rollback failed"), "{logs}");
     shut_down(&mut stage, &record, &[launched]);
 }
