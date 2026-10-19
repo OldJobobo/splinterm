@@ -1695,8 +1695,20 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
     // then succeeds at once. Without one thread the executor would refuse
     // in any case, so this does not exec.
     let single_threaded = wait_until_single_threaded();
+    // A failed capture still rolls back, with nothing replayed: refusing
+    // would exit and hang up every carried Splint, while a termination it
+    // may have missed only degrades a requested stop to the service
+    // manager's timeout and kill.
     let pending = match (&single_threaded, signals) {
-        (Ok(()), Some(mut signals)) => captured_terminations(&mut signals),
+        (Ok(()), Some(mut signals)) => {
+            captured_terminations(&mut signals).unwrap_or_else(|error| {
+                error!(
+                    %error,
+                    "cannot capture taken termination signals; rolling back without replaying any"
+                );
+                PendingTermination::default()
+            })
+        }
         _ => PendingTermination::default(),
     };
     let rollback_edge = recovery.has_rollback_edge();
@@ -1774,18 +1786,16 @@ fn block_for_rollback() -> Option<BlockedHandoffSignals> {
 /// fresh duplicate of the pipe, so one park of its driver broadcasts what is
 /// still recorded; polling the streams then sees every taken signal. Nothing
 /// is lost between the failure and the exec.
-fn captured_terminations(signals: &mut DaemonSignals) -> PendingTermination {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+///
+/// # Errors
+/// The runtime that polls the streams cannot be built. Nothing is known
+/// about taken signals then, so a caller must not treat it as an empty
+/// capture.
+fn captured_terminations(signals: &mut DaemonSignals) -> std::io::Result<PendingTermination> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            warn!(%error, "cannot build the runtime that captures taken termination signals");
-            return PendingTermination::default();
-        }
-    };
-    runtime.block_on(async {
+        .build()?;
+    Ok(runtime.block_on(async {
         // Parks the driver at least once, which flushes the self-pipe.
         time::sleep(Duration::from_millis(10)).await;
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -1796,7 +1806,7 @@ fn captured_terminations(signals: &mut DaemonSignals) -> PendingTermination {
             terminate: taken(&mut signals.terminate, &mut context),
             interrupt: taken(&mut signals.interrupt, &mut context),
         }
-    })
+    }))
 }
 
 /// The inputs a candidate builds on the serving runtime before adopting.
@@ -2436,10 +2446,12 @@ fn wait_until_single_threaded() -> Result<(), HandoffCoordinatorError> {
 /// before.
 ///
 /// # Errors
-/// `ExecBoundaryError::Guard` when one thread is not reached in time. The
-/// caller must then not cross; the block is released, and anything the
-/// handlers took stays with this generation's signal streams for the
-/// resumed round.
+/// `ExecBoundaryError::Guard` when one thread is not reached in time, and
+/// `ExecBoundaryError::SignalCarry` when the capture runtime cannot be built
+/// or a taken termination cannot be made pending again. The caller must
+/// then not cross; the block is released, and anything the handlers took
+/// reaches the resumed round, from the signal streams or as a pending
+/// signal.
 fn carry_taken_terminations(
     signals: Option<&mut DaemonSignals>,
 ) -> Result<Option<BlockedHandoffSignals>, ExecBoundaryError> {
@@ -2462,15 +2474,18 @@ fn carry_taken_terminations_with(
     };
     single_threaded().map_err(ExecBoundaryError::Guard)?;
     if let Some(signals) = signals {
-        let taken = captured_terminations(signals);
+        // Neither failure may let the boundary cross: exec would drop a
+        // termination this image's handlers took. Resuming keeps it, in the
+        // streams (capture failed before polling them) or pending under the
+        // block, for the resumed round.
+        let taken = captured_terminations(signals).map_err(ExecBoundaryError::SignalCarry)?;
         for (taken, signal) in [
             (taken.terminate, nix::sys::signal::Signal::SIGTERM),
             (taken.interrupt, nix::sys::signal::Signal::SIGINT),
         ] {
-            if taken
-                && let Err(error) = splinterd::handoff_exec::replay_blocked_signal(&blocked, signal)
-            {
-                warn!(%error, ?signal, "cannot carry a termination request across the exec boundary");
+            if taken {
+                splinterd::handoff_exec::replay_blocked_signal(&blocked, signal)
+                    .map_err(ExecBoundaryError::SignalCarry)?;
             }
         }
     }

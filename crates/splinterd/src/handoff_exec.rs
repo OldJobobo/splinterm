@@ -511,6 +511,11 @@ pub enum ExecBoundaryError {
     Inheritance(#[source] DescriptorHandoffError),
     #[error("cannot block the handoff signals: {0}")]
     SignalMask(#[source] io::Error),
+    /// A termination request this generation's handlers may have taken
+    /// cannot be captured or made pending again, so a successful exec could
+    /// lose it. The old generation resumes and handles it itself.
+    #[error("cannot carry taken termination requests across exec: {0}")]
+    SignalCarry(#[source] io::Error),
     /// The plan names no forward daemon. Either the attempt has none, or
     /// the binary did not arm the exec call site because live handoff is not
     /// supported (see the module documentation, "Staging").
