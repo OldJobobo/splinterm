@@ -2,17 +2,32 @@
 //!
 //! A dry run reports what the running daemon knows cheaply. It never fences,
 //! captures, or opens the installed candidate. `Execute` is refused before
-//! the old-side gate (Plan 0061 M3.6) runs whenever anything but
-//! `Unsupported` blocks it. The gate then prepares the installed forward pair
-//! beside the retained rollback pair, fences, captures every live Splint, and
-//! builds the manifests (M3.7), then stops the runtime and crosses the exec
-//! boundary (M3.9). Only `integration-test` builds exec there (M3.10); every
-//! other build resumes in process until M3.11b enables production exec,
-//! now that the M3.11a rollback executor exists.
-//! Every resume ticket claim fails closed because this daemon
-//! issues no tickets (M3.16). No handoff prepare is ever
-//! pending, so every Window acknowledgement finds nothing to acknowledge
-//! (M3.13).
+//! the old-side gate (Plan 0061 M3.6) runs whenever the report names any
+//! blocking reason, `Unsupported` included, and whenever
+//! [`live_handoff_support`] refuses. Once allowed, the gate prepares the
+//! installed forward pair beside the retained rollback pair, fences,
+//! captures every live Splint, and builds the manifests (M3.7). It then
+//! stops the runtime and crosses the exec boundary (M3.9), where the binary
+//! arms the forward exec (M3.10) only when [`live_handoff_support`] allows
+//! it.
+//!
+//! # Staging (Plan 0061 M3.11b)
+//!
+//! Production builds contain the forward exec and the M3.11a rollback
+//! executor. [`live_handoff_support`] is the one decision that keeps a
+//! running daemon from using them. It reports `Unsupported` for:
+//!
+//! * a Nix-store build, for all of Splinterm 0.2.0 (operator decision
+//!   2026-10-18): live upgrade ships for Arch and AUR packages only, and a
+//!   Nix-provenance daemon upgrades by restarting;
+//! * every build while [`WINDOW_CONTINUITY_READY`] is false. Windows do not
+//!   survive a handoff yet: without the client banner and reconnect (M3.12)
+//!   and the continuation, resume, and ticket work (M3.13 to M3.16), every
+//!   open Window would lose its daemon.
+//!
+//! Every resume ticket claim fails closed because this daemon issues no
+//! tickets (M3.16). No handoff prepare is ever pending, so every Window
+//! acknowledgement finds nothing to acknowledge (M3.13).
 
 use splinterd::{
     handoff_compatibility::{HandoffCapabilities, VersionRange},
@@ -33,6 +48,110 @@ use tracing::{debug, warn};
 /// The generation a freshly started daemon serves. Each adopted handoff will
 /// publish a later one.
 pub(crate) const FRESH_DAEMON_GENERATION: u64 = 1;
+
+/// Whether open Windows survive a live handoff. Until they do, live handoff
+/// stays unavailable in every build (see the module documentation).
+///
+/// Window continuity is the client banner and reconnect (Plan 0061 M3.12)
+/// and the Window continuation, resume, and ticket work (M3.13 to M3.16).
+/// Setting this to `true` is the production enablement step for live
+/// handoff. It may happen only once that work has landed, the M3.17 proofs
+/// pass, and VM acceptance is recorded. No build feature, environment
+/// variable, or test seam overrides it. Unit tests reach the gate only
+/// through [`live_handoff_support_with`], with readiness passed explicitly.
+pub(crate) const WINDOW_CONTINUITY_READY: bool = false;
+
+/// Why this daemon cannot perform a live handoff at all. On the wire every
+/// cause is [`HandoffBlockingReason::Unsupported`]; the cause is named only
+/// in an `Execute` refusal's message and the daemon's log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LiveHandoffUnsupported {
+    /// A Nix-store build. Live handoff is refused for all of Splinterm
+    /// 0.2.0, and these daemons upgrade by restarting.
+    NixStore,
+    /// Windows do not survive a handoff yet ([`WINDOW_CONTINUITY_READY`]).
+    WindowContinuityPending,
+    /// The build identity compiled into this daemon is unreadable, so its
+    /// provenance is unknown. A correctly built daemon never reports this.
+    UnknownProvenance,
+}
+
+impl LiveHandoffUnsupported {
+    /// The cause, worded for an `Execute` refusal.
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::NixStore => {
+                "live handoff is not supported for Nix-store installations in Splinterm 0.2.0; restart the daemon to run the upgraded build"
+            }
+            Self::WindowContinuityPending => {
+                "live handoff is not available in this release because open Windows cannot survive it yet; restart the daemon to run the upgraded build"
+            }
+            Self::UnknownProvenance => {
+                "live handoff is not available because this daemon's build provenance is unknown"
+            }
+        }
+    }
+}
+
+/// The one decision that allows live handoff (Plan 0061 M3.11b): the
+/// dry-run report adds `Unsupported` exactly when this refuses, `Execute`
+/// is refused before the gate whenever it refuses, and the binary arms the
+/// forward exec only when it allows.
+///
+/// Nix is detected from the compiled build provenance (`nix-store`, which
+/// `nix/package.nix` sets for a clean Nix build). A Nix build from a dirty
+/// tree is `unpackaged` and is refused as not packaged. A daemon under
+/// `/nix/store` that claims any other provenance cannot retain rollback
+/// authority, because a package record's location must match its kind.
+///
+/// # Errors
+/// Returns the cause whenever live handoff is unavailable. Nix is checked
+/// first, so a Nix-store daemon keeps being named as such after window
+/// continuity lands.
+pub(crate) fn live_handoff_support(
+    provenance: HandoffBuildProvenance,
+) -> Result<(), LiveHandoffUnsupported> {
+    live_handoff_support_with(provenance, WINDOW_CONTINUITY_READY)
+}
+
+/// [`live_handoff_support`] with window-continuity readiness passed in.
+/// Production passes only [`WINDOW_CONTINUITY_READY`]; only unit tests pass
+/// anything else.
+fn live_handoff_support_with(
+    provenance: HandoffBuildProvenance,
+    window_continuity_ready: bool,
+) -> Result<(), LiveHandoffUnsupported> {
+    if provenance == HandoffBuildProvenance::NixStore {
+        return Err(LiveHandoffUnsupported::NixStore);
+    }
+    if !window_continuity_ready {
+        return Err(LiveHandoffUnsupported::WindowContinuityPending);
+    }
+    Ok(())
+}
+
+/// [`live_handoff_support`] for the build compiled into this process. The
+/// exec boundary uses it to decide whether to arm the forward exec. An
+/// unreadable build identity refuses.
+///
+/// # Errors
+/// As [`live_handoff_support`], or `UnknownProvenance`.
+pub(crate) fn compiled_live_handoff_support() -> Result<(), LiveHandoffUnsupported> {
+    let running =
+        compiled_handoff_generation().map_err(|_| LiveHandoffUnsupported::UnknownProvenance)?;
+    let provenance = compiled_build_provenance(running.capabilities)
+        .map_err(|_| LiveHandoffUnsupported::UnknownProvenance)?;
+    live_handoff_support(wire_provenance(provenance.kind))
+}
+
+const fn wire_provenance(kind: BuildProvenanceKind) -> HandoffBuildProvenance {
+    match kind {
+        BuildProvenanceKind::Unpackaged => HandoffBuildProvenance::Unpackaged,
+        BuildProvenanceKind::LocalCommittedHead => HandoffBuildProvenance::LocalCommittedHead,
+        BuildProvenanceKind::ReleaseCandidate => HandoffBuildProvenance::ReleaseCandidate,
+        BuildProvenanceKind::NixStore => HandoffBuildProvenance::NixStore,
+    }
+}
 
 /// What startup learned about the daemon's rollback authority.
 pub(crate) enum RollbackAuthority {
@@ -175,13 +294,9 @@ pub(crate) fn handoff_report(
     let build = HandoffBuild {
         version: provenance.build_version.to_owned(),
         identity: provenance.pair_build_identity.as_bytes(),
-        provenance: match provenance.kind {
-            BuildProvenanceKind::Unpackaged => HandoffBuildProvenance::Unpackaged,
-            BuildProvenanceKind::LocalCommittedHead => HandoffBuildProvenance::LocalCommittedHead,
-            BuildProvenanceKind::ReleaseCandidate => HandoffBuildProvenance::ReleaseCandidate,
-            BuildProvenanceKind::NixStore => HandoffBuildProvenance::NixStore,
-        },
+        provenance: wire_provenance(provenance.kind),
     };
+    let support = live_handoff_support(build.provenance);
     let report = report_from(
         daemon_generation,
         build,
@@ -189,11 +304,14 @@ pub(crate) fn handoff_report(
         topology,
         live_splints,
         rollback,
+        support,
     );
     report.validate().map_err(|_| unavailable())?;
     Ok(report)
 }
 
+/// The report for `build`, where `support` is [`live_handoff_support`] for
+/// `build.provenance` (unit tests pass [`live_handoff_support_with`]).
 fn report_from(
     daemon_generation: u64,
     build: HandoffBuild,
@@ -201,6 +319,7 @@ fn report_from(
     topology: &Topology,
     live_splints: usize,
     rollback: &RollbackAuthority,
+    support: Result<(), LiveHandoffUnsupported>,
 ) -> HandoffReport {
     // An unpackaged build has no installed pair, whatever startup found.
     let rollback = if build.provenance == HandoffBuildProvenance::Unpackaged {
@@ -230,8 +349,11 @@ fn report_from(
         });
     }
     blocking_reasons.extend(rollback.blocking_reason());
-    // No live handoff completes before capture, exec, and adoption land.
-    blocking_reasons.push(HandoffBlockingReason::Unsupported);
+    // Nix-store builds for 0.2.0, and every build until window continuity.
+    if let Err(unsupported) = support {
+        debug!(?unsupported, "live handoff is unsupported");
+        blocking_reasons.push(HandoffBlockingReason::Unsupported);
+    }
     HandoffReport {
         daemon_generation,
         build,
@@ -248,27 +370,39 @@ fn report_from(
     }
 }
 
-/// Refuses `Execute` before the handoff gate runs when the report names any
-/// reason other than `Unsupported`.
+/// Refuses `Execute` before the handoff gate runs when `support` refuses
+/// live handoff or the report names any blocking reason.
 ///
-/// `Unsupported` alone lets the gate prepare the forward pair, then fence,
-/// re-check, drain, and persist; the attempt then cancels, because capture
-/// and exec do not exist yet. Every other reason (transient Lairs, no
-/// rollback authority) refuses without preparing or fencing anything.
+/// `support` is [`live_handoff_support`] for the report's build, evaluated
+/// by the caller at `Execute` time and not read back from the report. Unit
+/// tests that drive the gate pass `Ok(())`. A refusal for unsupported live
+/// handoff names its cause (Nix, or window continuity) in the message, and
+/// its reasons always include `Unsupported`. Since Plan 0061 M3.11b,
+/// `Unsupported` refuses like every other reason: no part of the gate runs
+/// (no forward preparation, fence, capture, or runtime stop) while live
+/// handoff is unavailable.
 ///
 /// # Errors
 /// Returns `HandoffUnavailable` naming every reason the report names.
-pub(crate) fn refuse_blocked_execute(report: &HandoffReport) -> Result<(), ProtocolError> {
-    if report
-        .blocking_reasons
-        .iter()
-        .all(|reason| matches!(reason, HandoffBlockingReason::Unsupported))
-    {
-        Ok(())
-    } else {
-        Err(ProtocolError::handoff_unavailable(
+pub(crate) fn refuse_blocked_execute(
+    report: &HandoffReport,
+    support: Result<(), LiveHandoffUnsupported>,
+) -> Result<(), ProtocolError> {
+    match support {
+        Err(unsupported) => {
+            let mut reasons = report.blocking_reasons.clone();
+            if !reasons.contains(&HandoffBlockingReason::Unsupported) {
+                reasons.push(HandoffBlockingReason::Unsupported);
+            }
+            Err(ProtocolError {
+                message: format!("daemon handoff is unavailable: {}", unsupported.message()),
+                ..ProtocolError::handoff_unavailable(reasons)
+            })
+        }
+        Ok(()) if report.blocking_reasons.is_empty() => Ok(()),
+        Ok(()) => Err(ProtocolError::handoff_unavailable(
             report.blocking_reasons.clone(),
-        ))
+        )),
     }
 }
 
@@ -374,6 +508,7 @@ mod tests {
             &Topology::new(),
             0,
             &RollbackAuthority::Unavailable,
+            live_handoff_support(HandoffBuildProvenance::Unpackaged),
         );
         report.validate().unwrap();
         assert!(!report.rollback_available);
@@ -396,6 +531,7 @@ mod tests {
             &topology,
             0,
             &RollbackAuthority::NotPackaged,
+            live_handoff_support(HandoffBuildProvenance::Unpackaged),
         );
         report.validate().unwrap();
         assert_eq!(report.daemon_generation, 1);
@@ -409,15 +545,140 @@ mod tests {
                 HandoffBlockingReason::Unsupported
             ]
         );
-        let refused = refuse_blocked_execute(&report)
-            .expect_err("an unpackaged daemon refuses execute before the gate runs");
+        let refused =
+            refuse_blocked_execute(&report, live_handoff_support(report.build.provenance))
+                .expect_err("an unpackaged daemon refuses execute before the gate runs");
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
     }
 
+    /// Nix is refused for all of 0.2.0, whatever window continuity says, and
+    /// the `Execute` refusal names it.
     #[test]
-    fn only_an_unsupported_report_reaches_the_handoff_gate() {
-        let unsupported = report_from(
+    fn a_nix_store_build_is_unsupported_and_execute_names_nix() {
+        for ready in [false, true] {
+            assert_eq!(
+                live_handoff_support_with(HandoffBuildProvenance::NixStore, ready),
+                Err(LiveHandoffUnsupported::NixStore)
+            );
+        }
+        assert_eq!(
+            live_handoff_support(HandoffBuildProvenance::NixStore),
+            Err(LiveHandoffUnsupported::NixStore)
+        );
+        let nix = HandoffBuild {
+            provenance: HandoffBuildProvenance::NixStore,
+            ..build()
+        };
+        // Even with window continuity ready.
+        let support = live_handoff_support_with(nix.provenance, true);
+        let report = report_from(
+            FRESH_DAEMON_GENERATION,
+            nix,
+            capabilities(),
+            &Topology::new(),
+            0,
+            &RollbackAuthority::Unavailable,
+            support,
+        );
+        report.validate().unwrap();
+        assert_eq!(report.build.provenance, HandoffBuildProvenance::NixStore);
+        assert_eq!(
+            report.blocking_reasons,
+            [
+                HandoffBlockingReason::RollbackUnavailable,
+                HandoffBlockingReason::Unsupported
+            ]
+        );
+        let refused = refuse_blocked_execute(&report, support).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            refused.message,
+            "daemon handoff is unavailable: live handoff is not supported for Nix-store installations in Splinterm 0.2.0; restart the daemon to run the upgraded build"
+        );
+        assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
+        // With nothing else blocking, Nix alone still refuses, as Unsupported.
+        let mut alone = report;
+        alone.blocking_reasons.clear();
+        let refused = refuse_blocked_execute(&alone, support).unwrap_err();
+        assert!(refused.message.contains("Nix-store"), "{}", refused.message);
+        assert_eq!(
+            refused.handoff_blocking_reasons,
+            [HandoffBlockingReason::Unsupported]
+        );
+    }
+
+    /// A packaged Arch build is unsupported only until window continuity
+    /// lands; once it has, nothing in the decision blocks it.
+    #[test]
+    fn a_packaged_build_is_unsupported_only_until_window_continuity() {
+        for provenance in [
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::LocalCommittedHead,
+        ] {
+            // The shipped decision: window continuity has not landed.
+            assert_eq!(
+                live_handoff_support(provenance),
+                Err(LiveHandoffUnsupported::WindowContinuityPending)
+            );
+            assert_eq!(
+                live_handoff_support_with(provenance, false),
+                Err(LiveHandoffUnsupported::WindowContinuityPending)
+            );
+            assert_eq!(live_handoff_support_with(provenance, true), Ok(()));
+
+            let packaged = HandoffBuild {
+                provenance,
+                ..build()
+            };
+            let pending = report_from(
+                FRESH_DAEMON_GENERATION,
+                packaged.clone(),
+                capabilities(),
+                &Topology::new(),
+                0,
+                &RollbackAuthority::Unavailable,
+                live_handoff_support(provenance),
+            );
+            pending.validate().unwrap();
+            assert_eq!(
+                pending.blocking_reasons,
+                [
+                    HandoffBlockingReason::RollbackUnavailable,
+                    HandoffBlockingReason::Unsupported
+                ]
+            );
+            let refused =
+                refuse_blocked_execute(&pending, live_handoff_support(provenance)).unwrap_err();
+            assert_eq!(
+                refused.message,
+                "daemon handoff is unavailable: live handoff is not available in this release because open Windows cannot survive it yet; restart the daemon to run the upgraded build"
+            );
+            assert_eq!(refused.handoff_blocking_reasons, pending.blocking_reasons);
+
+            // Forced ready (test only): no Unsupported reason remains.
+            let ready = report_from(
+                FRESH_DAEMON_GENERATION,
+                packaged,
+                capabilities(),
+                &Topology::new(),
+                0,
+                &RollbackAuthority::Unavailable,
+                live_handoff_support_with(provenance, true),
+            );
+            ready.validate().unwrap();
+            assert_eq!(
+                ready.blocking_reasons,
+                [HandoffBlockingReason::RollbackUnavailable]
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_supported_report_without_reasons_reaches_the_handoff_gate() {
+        let supported = Ok(());
+        let unsupported = Err(LiveHandoffUnsupported::WindowContinuityPending);
+        let blocked = report_from(
             FRESH_DAEMON_GENERATION,
             HandoffBuild {
                 provenance: HandoffBuildProvenance::ReleaseCandidate,
@@ -427,11 +688,28 @@ mod tests {
             &Topology::new(),
             0,
             &RollbackAuthority::Unavailable,
+            unsupported,
         );
-        let mut gated = unsupported.clone();
-        gated.blocking_reasons = vec![HandoffBlockingReason::Unsupported];
-        assert!(refuse_blocked_execute(&gated).is_ok());
-        let refused = refuse_blocked_execute(&unsupported).unwrap_err();
+        let mut gated = blocked.clone();
+        gated.blocking_reasons.clear();
+        assert!(refuse_blocked_execute(&gated, supported).is_ok());
+        // Unsupported support refuses a report without reasons, and names
+        // Unsupported.
+        let refused = refuse_blocked_execute(&gated, unsupported).unwrap_err();
+        assert_eq!(
+            refused.handoff_blocking_reasons,
+            [HandoffBlockingReason::Unsupported]
+        );
+        // `Unsupported` in the report refuses on its own now.
+        let mut unsupported_only = gated.clone();
+        unsupported_only.blocking_reasons = vec![HandoffBlockingReason::Unsupported];
+        let refused = refuse_blocked_execute(&unsupported_only, supported).unwrap_err();
+        assert_eq!(refused.message, "daemon handoff is unavailable");
+        assert_eq!(
+            refused.handoff_blocking_reasons,
+            [HandoffBlockingReason::Unsupported]
+        );
+        let refused = refuse_blocked_execute(&blocked, unsupported).unwrap_err();
         assert_eq!(
             refused.handoff_blocking_reasons,
             [
@@ -446,9 +724,9 @@ mod tests {
             HandoffCancelReason::Failed,
             HandoffCancelReason::TimedOut,
         ] {
-            let cancelled = cancelled_handoff(reason, gated.blocking_reasons.clone());
+            let cancelled = cancelled_handoff(reason, blocked.blocking_reasons.clone());
             assert_eq!(cancelled.code, ErrorCode::HandoffUnavailable);
-            assert_eq!(cancelled.handoff_blocking_reasons, gated.blocking_reasons);
+            assert_eq!(cancelled.handoff_blocking_reasons, blocked.blocking_reasons);
             assert!(
                 cancelled
                     .message
@@ -480,6 +758,7 @@ mod tests {
             &topology,
             7,
             &RollbackAuthority::Unavailable,
+            live_handoff_support(HandoffBuildProvenance::ReleaseCandidate),
         );
         report.validate().unwrap();
         assert_eq!(report.lairs, transient_count + 1);
@@ -525,6 +804,12 @@ mod tests {
                 .blocking_reasons
                 .contains(&HandoffBlockingReason::Unsupported)
         );
+        // The exec boundary's view of this build agrees with the report's.
+        assert_eq!(
+            compiled_live_handoff_support(),
+            live_handoff_support(report.build.provenance)
+        );
+        assert!(compiled_live_handoff_support().is_err());
     }
 
     #[test]

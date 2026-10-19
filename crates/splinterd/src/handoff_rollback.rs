@@ -45,9 +45,11 @@
 //! runtime, its blocking pool, and the workload unit manager (shut down
 //! before the runtime, so no workload scope can be stopped). A candidate
 //! that had released its signals blocks them on its main thread the moment
-//! it decides to roll back, before that teardown, and captures what its
-//! handlers took only after it, so no termination is lost between the
-//! failure and the exec. Then, in order:
+//! it decides to roll back, before that teardown. Then it waits until the
+//! process has exactly one thread, because a blocking task the runtime
+//! abandoned may still be able to take a signal. Only then does it capture
+//! what its handlers took, so no termination is lost between the failure
+//! and the exec. Then, in order:
 //!
 //! 1. check the lifecycle is rolling back;
 //! 2. take the rollback manifest: the counterpart staging already decoded
@@ -85,6 +87,40 @@
 //! (adoption retained each one, and the manager was shut down first), and a
 //! systemd service reports failed. An exec failure past the kernel's point
 //! of no return kills the process with the same outcome and no fall-through.
+//!
+//! # Failures rollback cannot cure
+//!
+//! Rollback recovers a candidate whose own image or build failed. It does
+//! not recover from a refusal caused by state that both generations read the
+//! same way. The rollback daemon runs the same adoption
+//! ([`crate::handoff_adoption`]) against the same files, descriptors, and
+//! session. So when the forward candidate failed one of the checks below,
+//! its rollback almost always fails the same check, takes the `Failed` edge,
+//! and exits as described above:
+//!
+//! * the durable Topology: its revision against the manifest's
+//!   (`AdoptionError::TopologyRevision`, for example when the state file was
+//!   replaced or another writer saved it after the fence), and each carried
+//!   Splint's presence, Lair and Dojo, incarnation, and running state there
+//!   (`MissingSplint`, `SplintPlacement`, `IncarnationMismatch`,
+//!   `NotRunning`);
+//! * loading durable state at all: the metadata store or the Topology file
+//!   cannot be found, read, or decoded (`DaemonStartup`);
+//! * the install prefix recorded in the manifest no longer resolving to a
+//!   valid prefix (`InstallPrefix`). Only a changed forward pair is
+//!   tolerated on the rollback side;
+//! * an inherited listener that is not a listening Unix stream socket
+//!   (`InvalidListener`). The same descriptor crosses both execs;
+//! * required workload cgroups without a reachable systemd user manager
+//!   (`WorkloadCgroupsUnavailable`), and a running child whose retained
+//!   scope systemd refuses to hand over (`WorkloadScope`), for as long as
+//!   that session state persists.
+//!
+//! A transient condition (a single failed systemd call, a failed task, a
+//! runtime that could not be built) can succeed on the second attempt. A
+//! deterministic one cannot. The Plan 0061 M3.17 proofs and VM acceptance
+//! must cover these rows before live handoff is enabled
+//! (`WINDOW_CONTINUITY_READY` in the binary's `handoff_requests`).
 //!
 //! # Compatibility of what the rollback generation trusts
 //!

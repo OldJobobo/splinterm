@@ -35,7 +35,7 @@ use splinterd::{
     TerminalPublicationMemoryLease, authorization,
     cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager},
     executable_identity,
-    handoff_coordinator::ForwardHandoffAuthority,
+    handoff_coordinator::{ForwardHandoffAuthority, HandoffCoordinatorError, HandoffProcessGuard},
     handoff_descriptors::{HandoffDescriptor, HandoffDescriptorSlot},
     handoff_exec::{
         BlockedHandoffSignals, ExecBoundaryError, ExecInheritancePlan,
@@ -46,7 +46,9 @@ use splinterd::{
         CaptureLimits, HandedOffCapture, HandoffCaptures, ListenerDescriptors, ManifestInputs,
         PreparedManifests, build_handoff_manifests, capture_live_splints,
     },
-    handoff_rollback::{PendingTermination, PreCommitRecovery, RollbackExec, execute_rollback},
+    handoff_rollback::{
+        PendingTermination, PreCommitRecovery, RollbackError, RollbackExec, execute_rollback,
+    },
     image_transport::{TransferAdmission, TransferAdmissionError, sealed_image_memfd},
     install_prefix::InstallPrefix,
     policy,
@@ -1350,10 +1352,14 @@ fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 ///
 /// A round that leaves serve for the exec boundary stops its runtime and the
 /// systemd connection and crosses the boundary ([`stop_runtime_and_cross`]).
-/// A successful exec never returns. Every build but `integration-test` has
-/// no forward exec call site (Plan 0061 M3.11b gates it), so the boundary
-/// always comes back there, and the next round serves the same generation
-/// again on a new runtime ([`StartupSource::Resumed`]).
+/// A successful exec never returns. Every build contains the forward exec
+/// since Plan 0061 M3.11b, but no round leaves serve for the boundary while
+/// [`handoff_requests::live_handoff_support`] refuses, because `Execute` is
+/// refused before the gate. That covers every build until window continuity
+/// lands, and Nix-store builds in 0.2.0, and the boundary arms the exec only
+/// under the same decision ([`arm_forward_exec`]). When the boundary comes
+/// back, the next round serves the same generation again on a new runtime
+/// ([`StartupSource::Resumed`]).
 ///
 /// An adopted round that fails before its commit, or whose runtime cannot
 /// even be built, rolls back instead ([`roll_back`]): its runtime stops
@@ -1408,8 +1414,11 @@ fn run_daemon(source: StartupSource) -> Result<()> {
                 runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
                 return Err(roll_back(*failure));
             }
-            RoundEnd::Handoff { stopped, signals } => {
-                let resumed = stop_runtime_and_cross(runtime, *stopped);
+            RoundEnd::Handoff {
+                stopped,
+                mut signals,
+            } => {
+                let resumed = stop_runtime_and_cross(runtime, *stopped, Some(&mut signals));
                 source = StartupSource::Resumed {
                     resumed: Box::new(resumed),
                     signals,
@@ -1633,9 +1642,13 @@ struct CandidateFailure {
 /// descriptor with the unchanged PTYs and the rollback manifest (Plan 0037
 /// "Failure and rollback", item 5; [`execute_rollback`]). A successful
 /// rollback never returns: this process becomes the rollback daemon, which
-/// adopts and serves the original generation. Called only once the process
-/// is single-threaded: before any runtime exists, or after `run_daemon` shut
-/// down the workload unit manager and then the runtime.
+/// adopts and serves the original generation. Called only once every
+/// runtime is gone: before any runtime exists, or after `run_daemon` shut
+/// down the workload unit manager and then the runtime. It first waits
+/// until the process has one thread (a blocking task the runtime abandoned
+/// may still be running), and only then captures taken terminations. If one
+/// thread is not reached in time it does not exec, and reports the guard
+/// refusal.
 ///
 /// Returns the error `main` exits with when rollback is impossible: the
 /// failed candidate is itself a rollback generation (no rollback edge), or
@@ -1673,13 +1686,19 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
     {
         error!(%error, "workload unit manager did not shut down cleanly before rollback");
     }
-    // No runtime thread exists any more and, once the signals were
-    // released, the main thread holds them blocked: nothing can take a
-    // termination from here on, and whatever a handler took before is
-    // captured now.
-    let pending = signals.map_or_else(PendingTermination::default, |mut signals| {
-        captured_terminations(&mut signals)
-    });
+    // Once the signals were released, the main thread holds them blocked.
+    // The capture is complete only once no other thread is left: a blocking
+    // task that outlived the runtime's shutdown still runs with the signals
+    // unblocked, and a termination its handler took after the capture would
+    // be lost with this image once that thread exited. So wait for one
+    // thread first. Nothing here starts another, so the executor's own guard
+    // then succeeds at once. Without one thread the executor would refuse
+    // in any case, so this does not exec.
+    let single_threaded = wait_until_single_threaded();
+    let pending = match (&single_threaded, signals) {
+        (Ok(()), Some(mut signals)) => captured_terminations(&mut signals),
+        _ => PendingTermination::default(),
+    };
     let rollback_edge = recovery.has_rollback_edge();
     error!(
         phase,
@@ -1695,19 +1714,22 @@ fn roll_back(failure: CandidateFailure) -> anyhow::Error {
             "daemon handoff: rolling back to the previous generation with the unchanged descriptors"
         );
     }
-    let rollback = execute_rollback(
-        recovery,
-        &RollbackExec {
-            program: env::args_os()
-                .next()
-                .unwrap_or_else(|| OsString::from("splinterd")),
-            workload_cgroups_required: require_workload_cgroups,
-            environment: splinterd::handoff_exec::exec_environment(),
-            guard_deadline: Instant::now() + HANDOFF_GUARD_WAIT,
-            pending,
-        },
-        blocked,
-    );
+    let rollback = match single_threaded {
+        Ok(()) => execute_rollback(
+            recovery,
+            &RollbackExec {
+                program: env::args_os()
+                    .next()
+                    .unwrap_or_else(|| OsString::from("splinterd")),
+                workload_cgroups_required: require_workload_cgroups,
+                environment: splinterd::handoff_exec::exec_environment(),
+                guard_deadline: Instant::now() + HANDOFF_GUARD_WAIT,
+                pending,
+            },
+            blocked,
+        ),
+        Err(error) => RollbackError::Guard(error),
+    };
     error!(
         phase,
         %rollback,
@@ -1741,8 +1763,9 @@ fn block_for_rollback() -> Option<BlockedHandoffSignals> {
 /// after teardown, for the executor to make pending again under the blocked
 /// mask so the rollback daemon performs the ordered shutdown it asked for.
 ///
-/// Called only once no runtime thread is left and the main thread holds the
-/// signals blocked ([`block_for_rollback`]), so no handler can run any more.
+/// Called only once no runtime thread is left, the process has one thread
+/// ([`wait_until_single_threaded`]), and the main thread holds the signals
+/// blocked ([`block_for_rollback`]), so no handler can run any more.
 /// Tokio's handler records a signal in its process-global registry and then
 /// writes its self-pipe; a signal driver drains the pipe, then broadcasts to
 /// the streams. A signal a handler took before teardown was therefore either
@@ -2308,12 +2331,24 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
 ///    the boundary writes and seals them, so no status is lost between the
 ///    manifest build and exec.
 ///
+/// Right before the boundary, [`cross_boundary`] blocks SIGINT, SIGTERM, and
+/// SIGHUP on this thread, waits until it is the only thread, and makes a
+/// termination this round's handlers took after serve left pending again
+/// (for example `systemctl stop` while the runtime stopped). The signal then
+/// crosses a successful exec to the candidate instead of being lost
+/// ([`carry_taken_terminations`]). If one thread is not reached, the boundary
+/// is not crossed. When the boundary returns, the block is released before
+/// the resumed round builds its runtime. The pending signal then reaches
+/// this generation's handler, and the resumed round acts on it as before.
+/// Unit tests pass no `signals`, and only the block and the wait are taken.
+///
 /// A fresh manager is connected after the boundary released the guard; the
 /// shut-down one is never used again, so no retained identity is adopted
 /// into two managers.
 fn stop_runtime_and_cross(
     runtime: tokio::runtime::Runtime,
     stopped: StoppedForHandoff,
+    signals: Option<&mut DaemonSignals>,
 ) -> ResumedDaemon {
     let StoppedForHandoff {
         state,
@@ -2338,6 +2373,7 @@ fn stop_runtime_and_cross(
             &listeners,
             &handed_off,
             actors_handed_off,
+            signals,
         ),
         Err(error) => error,
     };
@@ -2363,6 +2399,82 @@ fn stop_runtime_and_cross(
         policy_path: policy::configured_path(),
         boundary_failure: reason,
     }
+}
+
+/// Waits up to [`HANDOFF_GUARD_WAIT`] until this process has exactly one
+/// thread, then releases the guard at once. Once it succeeds on a thread
+/// that starts none, the process stays single-threaded, and a later guard
+/// acquisition (the exec boundary's, the rollback executor's) succeeds at
+/// once.
+///
+/// # Errors
+/// The guard's refusal, typically `ProcessNotSingleThreaded` when a blocking
+/// task that the runtime abandoned still runs.
+fn wait_until_single_threaded() -> Result<(), HandoffCoordinatorError> {
+    HandoffProcessGuard::acquire_until(Instant::now() + HANDOFF_GUARD_WAIT).map(drop)
+}
+
+/// Blocks SIGINT, SIGTERM, and SIGHUP on the old generation's main thread
+/// once its runtime has stopped, waits until it is the only thread
+/// ([`wait_until_single_threaded`]), and then makes each SIGTERM or SIGINT
+/// its handlers took pending again ([`captured_terminations`]), so it
+/// crosses the exec boundary. This mirrors the candidate's rollback teardown
+/// ([`block_for_rollback`]).
+///
+/// The capture is complete only once no other thread is left. A blocking
+/// task that outlived the runtime's shutdown (a metadata save, or the D-Bus
+/// worker after a failed manager shutdown) still runs with the signals
+/// unblocked. Its handler could record a termination after an early capture.
+/// The thread could then exit, letting the boundary's guard succeed, and
+/// the termination would be lost with this image. Waiting first closes that
+/// window. From then on a termination is either already recorded, which the
+/// capture sees, or is kernel-pending on this thread, the only one left.
+///
+/// Returns the block, which the caller holds until the boundary returns.
+/// A SIGHUP is not replayed: an adopting candidate reloads the policy anyway.
+/// A failed block changes nothing: the boundary still blocks for itself, as
+/// before.
+///
+/// # Errors
+/// `ExecBoundaryError::Guard` when one thread is not reached in time. The
+/// caller must then not cross; the block is released, and anything the
+/// handlers took stays with this generation's signal streams for the
+/// resumed round.
+fn carry_taken_terminations(
+    signals: Option<&mut DaemonSignals>,
+) -> Result<Option<BlockedHandoffSignals>, ExecBoundaryError> {
+    carry_taken_terminations_with(signals, wait_until_single_threaded)
+}
+
+/// [`carry_taken_terminations`] with the single-thread wait supplied. Only
+/// a unit test passes another wait, because libtest's own threads make the
+/// real one time out.
+fn carry_taken_terminations_with(
+    signals: Option<&mut DaemonSignals>,
+    single_threaded: impl FnOnce() -> Result<(), HandoffCoordinatorError>,
+) -> Result<Option<BlockedHandoffSignals>, ExecBoundaryError> {
+    let blocked = match BlockedHandoffSignals::block() {
+        Ok(blocked) => blocked,
+        Err(error) => {
+            warn!(%error, "cannot block the handoff signals after the runtime stopped");
+            return Ok(None);
+        }
+    };
+    single_threaded().map_err(ExecBoundaryError::Guard)?;
+    if let Some(signals) = signals {
+        let taken = captured_terminations(signals);
+        for (taken, signal) in [
+            (taken.terminate, nix::sys::signal::Signal::SIGTERM),
+            (taken.interrupt, nix::sys::signal::Signal::SIGINT),
+        ] {
+            if taken
+                && let Err(error) = splinterd::handoff_exec::replay_blocked_signal(&blocked, signal)
+            {
+                warn!(%error, ?signal, "cannot carry a termination request across the exec boundary");
+            }
+        }
+    }
+    Ok(Some(blocked))
 }
 
 /// Connects the resumed round's fresh workload unit manager, bounded by the
@@ -2396,14 +2508,18 @@ fn connect_resumed_workload_units(_: bool) -> Option<WorkloadUnitManager> {
     None
 }
 
-/// Checks what the boundary needs, then crosses it. Returns why the old
-/// generation resumes.
+/// Checks what the boundary needs, carries taken terminations
+/// ([`carry_taken_terminations`]), then crosses it. Returns why the old
+/// generation resumes. The carried block is released when this returns,
+/// before the resumed round builds a runtime. A process that does not
+/// reach one thread is not crossed.
 fn cross_boundary(
     state: &DaemonState,
     boundary: &dyn ExecBoundaryInputs,
     listeners: &DaemonListeners,
     handed_off: &[HandedOffCapture],
     actors_handed_off: bool,
+    signals: Option<&mut DaemonSignals>,
 ) -> ExecBoundaryError {
     if !actors_handed_off {
         return ExecBoundaryError::ActorsNotHandedOff;
@@ -2419,8 +2535,15 @@ fn cross_boundary(
     }
     match boundary.plan(listeners, handed_off) {
         Ok(plan) => {
-            #[cfg(feature = "integration-test")]
             let plan = arm_forward_exec(state, boundary, plan);
+            // Held until the boundary returns. Without exec, a termination
+            // made pending again is delivered to this generation's handler
+            // once it drops, before any runtime thread exists to inherit the
+            // mask.
+            let _carried = match carry_taken_terminations(signals) {
+                Ok(carried) => carried,
+                Err(not_single_threaded) => return not_single_threaded,
+            };
             cross_exec_boundary(&plan, Instant::now() + HANDOFF_GUARD_WAIT)
         }
         Err(error) => error,
@@ -2428,21 +2551,32 @@ fn cross_boundary(
 }
 
 /// Arms the exec call site with the attempt's sealed forward daemon, when
-/// the attempt has one (Plan 0061 M3.10). Compiled only into
-/// `integration-test` builds: enabling production exec is Plan 0061
-/// M3.11b's gate, now that the M3.11a rollback executor exists (see
-/// `handoff_exec::under_guard`).
+/// the attempt has one (Plan 0061 M3.10) and live handoff is supported.
+///
+/// Compiled into every build since Plan 0061 M3.11b. The forward exec is
+/// armed only when [`handoff_requests::compiled_live_handoff_support`]
+/// allows it: never for a Nix-store build in 0.2.0, and never in any build
+/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false. `Execute` is
+/// already refused before the gate in both cases, so this second check is
+/// defence in depth. An unarmed plan returns `ExecNotWired` from the
+/// boundary, and the old generation resumes in process.
 ///
 /// The argument vector is rebuilt from this daemon's state, never copied
 /// from its own argv, which in an adopted daemon still names its activation
 /// manifest. The environment crosses unchanged (`SPLINTERM_POLICY` and the
 /// rest), as across a restart.
-#[cfg(feature = "integration-test")]
 fn arm_forward_exec<'a>(
     state: &DaemonState,
     boundary: &'a dyn ExecBoundaryInputs,
     plan: ExecInheritancePlan<'a>,
 ) -> ExecInheritancePlan<'a> {
+    if let Err(unsupported) = handoff_requests::compiled_live_handoff_support() {
+        error!(
+            ?unsupported,
+            "live handoff is unsupported; the forward exec is not armed and the old generation resumes"
+        );
+        return plan;
+    }
     let Some(daemon) = boundary.forward_daemon() else {
         return plan;
     };
@@ -10122,7 +10256,6 @@ trait ExecBoundaryInputs: Send {
     /// The sealed forward daemon image the exec call site executes, if this
     /// attempt has one. It is executed through its descriptor, never
     /// inherited.
-    #[cfg(feature = "integration-test")]
     fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         None
     }
@@ -10195,7 +10328,6 @@ impl ExecBoundaryInputs for ForwardExec {
         Ok(())
     }
 
-    #[cfg(feature = "integration-test")]
     fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         Some(self.forward.snapshots().forward().daemon().descriptor())
     }
@@ -10318,30 +10450,39 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
 /// Runs `Execute` through the handoff gate and returns the error it ends
 /// with.
 ///
-/// A second `Execute` while a handoff runs is refused as in progress, and a
-/// report naming anything but `Unsupported` refuses before the gate.
-/// Otherwise, while still `Preparing` and serving, the gate prepares the
-/// installed forward pair beside the borrowed rollback pair; then it fences,
-/// re-checks, drains, and persists; then it captures every live Splint and
-/// builds the validated manifests ([`prepare_fenced_handoff`]). A complete
-/// attempt with exec authority then commits its gate and leaves it for serve
-/// ([`HandoffExit`]), which stops the runtime and crosses the exec boundary
-/// (M3.9); this request never answers, because serve ends its connection on
-/// the way out. Every other ending releases what the attempt prepared,
-/// cancels, and answers `HandoffUnavailable` with a fresh report's reasons,
-/// which name `Unsupported`.
+/// A second `Execute` while a handoff runs is refused as in progress. Any
+/// other `Execute` is refused before the gate when
+/// [`handoff_requests::live_handoff_support`] refuses live handoff, or when
+/// the report names any blocking reason. The function refuses every build
+/// until window continuity lands, and Nix-store builds in 0.2.0 (Plan 0061
+/// M3.11b). Otherwise, while still `Preparing` and serving, the gate
+/// prepares the installed forward pair beside the borrowed rollback pair.
+/// It then fences, re-checks, drains, and persists, and then captures every
+/// live Splint and builds the validated manifests
+/// ([`prepare_fenced_handoff`]). A complete attempt with exec authority then
+/// commits its gate and leaves it for serve ([`HandoffExit`]), which stops
+/// the runtime and crosses the exec boundary (M3.9). This request never
+/// answers, because serve ends its connection on the way out. Every other
+/// ending releases what the attempt prepared, cancels, and answers
+/// `HandoffUnavailable` with a fresh report's reasons.
 async fn execute_daemon_handoff(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
 ) -> ProtocolError {
-    execute_daemon_handoff_with(state, report, prepare_forward_handoff).await
+    // Evaluated here, not read back from the report's reasons. The report's
+    // provenance is the one compiled into this daemon.
+    let support = handoff_requests::live_handoff_support(report.build.provenance);
+    execute_daemon_handoff_with(state, report, support, prepare_forward_handoff).await
 }
 
-/// [`execute_daemon_handoff`] with the forward preparation step supplied, so
-/// tests can drive the gate past it without a packaged installation.
+/// [`execute_daemon_handoff`] with live handoff support and the forward
+/// preparation step supplied. Only unit tests pass `Ok(())` for a build
+/// whose support refuses, so that they can drive the gate past it without a
+/// packaged installation or window continuity.
 async fn execute_daemon_handoff_with<F, Prepared>(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
+    support: Result<(), handoff_requests::LiveHandoffUnsupported>,
     prepare_forward: impl FnOnce(Arc<DaemonState>) -> F,
 ) -> ProtocolError
 where
@@ -10351,7 +10492,7 @@ where
     if state.handoff_gate.phase() != HandoffGatePhase::Idle {
         return handoff_in_progress();
     }
-    if let Err(refused) = handoff_requests::refuse_blocked_execute(report) {
+    if let Err(refused) = handoff_requests::refuse_blocked_execute(report, support) {
         return refused;
     }
     let mut attempt = match HandoffAttempt::begin(state).await {
@@ -15380,11 +15521,62 @@ mod tests {
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
     }
 
-    /// The `Execute` report that lets the gate run: `Unsupported` alone.
+    /// The report of a daemon nothing blocks. With live handoff support
+    /// passed as `Ok(())` (unit tests only), it lets the gate run.
     async fn gated_handoff_report(state: &DaemonState) -> splinterm_protocol::HandoffReport {
         let mut report = daemon_handoff_report(state).await.unwrap();
-        report.blocking_reasons = vec![splinterm_protocol::HandoffBlockingReason::Unsupported];
+        report.blocking_reasons.clear();
         report
+    }
+
+    /// The shipped `Execute` evaluates live handoff support itself. Even a
+    /// report that names no reason is refused before the gate while window
+    /// continuity has not landed. The answer names `Unsupported` and the
+    /// cause, and nothing is fenced, prepared, or broadcast.
+    #[tokio::test]
+    async fn execute_is_refused_before_the_gate_while_live_handoff_is_unsupported() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let revision = state.topology.read().await.revision();
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = execute_daemon_handoff_with(
+            &state,
+            &report,
+            handoff_requests::live_handoff_support(report.build.provenance),
+            {
+                let prepared = Arc::clone(&prepared);
+                move |_| async move {
+                    prepared.store(true, Ordering::SeqCst);
+                    Ok(ExecTestPreparation)
+                }
+            },
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            refused.handoff_blocking_reasons,
+            [splinterm_protocol::HandoffBlockingReason::Unsupported]
+        );
+        assert!(
+            refused
+                .message
+                .contains("open Windows cannot survive it yet"),
+            "{}",
+            refused.message
+        );
+        // The shipped wrapper gives the same answer.
+        let shipped = execute_daemon_handoff(&state, &report).await;
+        assert_eq!(shipped.message, refused.message);
+        assert_eq!(
+            shipped.handoff_blocking_reasons,
+            refused.handoff_blocking_reasons
+        );
+        assert!(!prepared.load(Ordering::SeqCst));
+        assert!(handoff_status_phases(&mut subscription).is_empty());
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(!state.handoff_exit.is_ready());
+        assert_eq!(state.topology.read().await.revision(), revision);
     }
 
     /// Runs `Execute` as a packaged daemon with an installed upgrade would:
@@ -15393,7 +15585,7 @@ mod tests {
         state: &Arc<DaemonState>,
         report: &splinterm_protocol::HandoffReport,
     ) -> ProtocolError {
-        execute_daemon_handoff_with(state, report, |_| async { Ok(()) }).await
+        execute_daemon_handoff_with(state, report, Ok(()), |_| async { Ok(()) }).await
     }
 
     /// Every handoff status phase queued for a topology hub subscriber.
@@ -16054,8 +16246,8 @@ mod tests {
         let (outbound, mut frames) = mpsc::channel(8);
         let task = AbortOnDrop::new(spawn_topology_subscription(7, subscription, outbound, None));
         let error = execute_with_forward_prepared(&state, &report).await;
-        // Capture and exec do not exist yet: the attempt cancels as failed
-        // and the answer still names `Unsupported`.
+        // A preparation without exec authority: the attempt cancels as
+        // failed, and the fresh report still names `Unsupported`.
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.handoff_blocking_reasons,
@@ -16253,7 +16445,7 @@ mod tests {
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let forward = Arc::new(());
-        let error = execute_daemon_handoff_with(&state, &report, {
+        let error = execute_daemon_handoff_with(&state, &report, Ok(()), {
             let forward = Arc::clone(&forward);
             move |state: Arc<DaemonState>| async move {
                 // Still `Preparing`: nothing is fenced and requests run.
@@ -16284,11 +16476,13 @@ mod tests {
     async fn a_forward_preparation_failure_cancels_before_the_fence() {
         // The production step: a development daemon retains no rollback
         // authority, so preparation fails. (`Execute` refuses such a daemon
-        // before the gate; the gated report lets it through here.)
+        // before the gate; the gated report and forced support let it
+        // through here.)
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff(&state, &report).await;
+        let error =
+            execute_daemon_handoff_with(&state, &report, Ok(()), prepare_forward_handoff).await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.message,
@@ -16314,7 +16508,7 @@ mod tests {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff_with(&state, &report, |_| async {
+        let error = execute_daemon_handoff_with(&state, &report, Ok(()), |_| async {
             Err::<(), _>(handoff_requests::ForwardRefusal::NoInstalledUpgrade)
         })
         .await;
@@ -16605,7 +16799,7 @@ mod tests {
             let execute = tokio::spawn({
                 let state = Arc::clone(&state);
                 async move {
-                    execute_daemon_handoff_with(&state, &report, |_| async {
+                    execute_daemon_handoff_with(&state, &report, Ok(()), |_| async {
                         Ok(ExecTestPreparation)
                     })
                     .await
@@ -16642,7 +16836,7 @@ mod tests {
                 .collect::<Vec<_>>();
             (stopped, live, exited, plain)
         });
-        let mut resumed = stop_runtime_and_cross(runtime, stopped);
+        let mut resumed = stop_runtime_and_cross(runtime, stopped, None);
         assert!(!resumed.workload_cgroups_required);
         // A required daemon had a manager before the handoff; unit tests
         // never have one, so the old round runs unrequired and only the
@@ -16801,6 +16995,115 @@ mod tests {
             }
         });
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Whether `signal` is pending for the calling thread (`raise` targets
+    /// it), from `/proc/thread-self/status`.
+    fn pending_on_this_thread(signal: nix::sys::signal::Signal) -> bool {
+        let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+        let pending = status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigPnd:"))
+            .unwrap()
+            .trim();
+        u64::from_str_radix(pending, 16).unwrap() & (1_u64 << (signal as i32 - 1)) != 0
+    }
+
+    fn blocked_on_this_thread(signal: nix::sys::signal::Signal) -> bool {
+        let mut mask = nix::sys::signal::SigSet::empty();
+        nix::sys::signal::pthread_sigmask(
+            nix::sys::signal::SigmaskHow::SIG_BLOCK,
+            None,
+            Some(&mut mask),
+        )
+        .unwrap();
+        mask.contains(signal)
+    }
+
+    /// Raises `signal` on this thread, where the installed handler takes it,
+    /// and lets a signal driver broadcast it to the streams.
+    fn take_signal(signal: nix::sys::signal::Signal) {
+        nix::sys::signal::raise(signal).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { time::sleep(Duration::from_millis(20)).await });
+    }
+
+    /// Whether each stream yields exactly once (`terminate`) or never
+    /// (`interrupt`) on a fresh runtime, as a resumed round's would.
+    fn assert_resumed_round_sees_one_terminate(signals: &mut DaemonSignals) {
+        daemon_runtime().block_on(async {
+            assert_eq!(
+                time::timeout(Duration::from_secs(2), signals.terminate.recv()).await,
+                Ok(Some(())),
+                "the resumed round sees the termination"
+            );
+            assert!(
+                time::timeout(Duration::from_millis(200), signals.terminate.recv())
+                    .await
+                    .is_err(),
+                "exactly once"
+            );
+            assert!(
+                time::timeout(Duration::from_millis(200), signals.interrupt.recv())
+                    .await
+                    .is_err(),
+                "no interrupt was taken"
+            );
+        });
+    }
+
+    /// Both halves of the old generation's termination carry, in one test
+    /// because the signal streams are process-global.
+    ///
+    /// With one thread reached (the wait stubbed, since libtest's threads
+    /// keep the real one refused), a SIGTERM a handler took before the
+    /// runtime stopped is consumed from the streams and made pending again
+    /// under the block, so it would cross exec. Without exec, releasing the
+    /// block delivers it to the handler, and a new runtime sees it exactly
+    /// once. With the real wait, which times out here as it does while an
+    /// abandoned blocking thread runs, the carry refuses with the guard
+    /// error. Nothing is captured or replayed, the block is released, and
+    /// the termination stays with the streams for the resumed round.
+    #[test]
+    fn the_old_generation_carries_a_taken_termination_only_once_single_threaded() {
+        use nix::sys::signal::Signal;
+
+        let mut signals = {
+            let runtime = daemon_runtime();
+            let _entered = runtime.enter();
+            DaemonSignals::install().unwrap()
+        };
+        assert!(!blocked_on_this_thread(Signal::SIGTERM));
+
+        take_signal(Signal::SIGTERM);
+        let carried = carry_taken_terminations_with(Some(&mut signals), || Ok(()))
+            .unwrap()
+            .expect("the handoff signals are blocked");
+        assert!(blocked_on_this_thread(Signal::SIGTERM));
+        assert!(pending_on_this_thread(Signal::SIGTERM), "replayed pending");
+        assert!(!pending_on_this_thread(Signal::SIGINT));
+        drop(carried);
+        assert!(!blocked_on_this_thread(Signal::SIGTERM));
+        assert!(!pending_on_this_thread(Signal::SIGTERM), "delivered");
+        assert_resumed_round_sees_one_terminate(&mut signals);
+
+        take_signal(Signal::SIGTERM);
+        let refused = carry_taken_terminations(Some(&mut signals));
+        assert!(
+            matches!(
+                refused,
+                Err(ExecBoundaryError::Guard(
+                    HandoffCoordinatorError::ProcessNotSingleThreaded { .. }
+                ))
+            ),
+            "{refused:?}"
+        );
+        assert!(!blocked_on_this_thread(Signal::SIGTERM), "block released");
+        assert!(!pending_on_this_thread(Signal::SIGTERM), "nothing replayed");
+        assert_resumed_round_sees_one_terminate(&mut signals);
     }
 
     /// Libtest's own threads keep the process guard refused, so this round is

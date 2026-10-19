@@ -61,6 +61,12 @@ harness = false
 name = "handoff_exec_adoption"
 harness = false
 
+# The forward exec call site in a build without the integration-test feature
+# (Plan 0061 M3.11b): its stages cross the guarded boundary and really exec.
+[[test]]
+name = "handoff_exec_production"
+harness = false
+
 # A workspace `unsafe_code = "forbid"` cannot be overridden locally. The package
 # has exactly two audited post-exec invocations of the inherited-FD leaf crate
 # (the candidate claim and the sealed-preflight launcher's closure), so it
