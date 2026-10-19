@@ -2226,7 +2226,7 @@ fn upgrade_now_reports_a_handoff_and_confirms_the_next_build() {
     let _ = fs::remove_file(&socket);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("accepted the upgrade"), "{stdout}");
+    assert!(stdout.contains("as a committed upgrade does"), "{stdout}");
     assert!(
         stdout.contains("Upgrade complete: generation 2 runs Splinterm 0.2.2 (was generation 1, Splinterm 0.2.1)."),
         "{stdout}"
@@ -2275,4 +2275,29 @@ fn upgrade_rejects_machine_output_and_remote_endpoints() {
         assert_eq!(output.status.code(), Some(2), "{arguments:?}");
         assert!(output.stdout.is_empty(), "{arguments:?}");
     }
+}
+
+#[test]
+fn upgrade_now_reports_a_rollback_on_stderr_with_exit_six() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_trusted_upgrade_client(&listener, 3);
+        answer_dry_run(&mut stream, upgrade_report(3, 1, false));
+        expect_handoff_request(&mut stream, splinterm_protocol::DaemonHandoffMode::Execute);
+        drop(stream);
+        // A rollback adopts the old generation number with the old build.
+        let mut next = accept_trusted_upgrade_client(&listener, 3);
+        answer_dry_run(&mut next, upgrade_report(3, 1, false));
+    });
+    let output = run_upgrade(&["upgrade", "--now"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(6));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("The upgrade did not complete: generation 3 still runs the previous build"),
+        "{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("did not complete"));
 }

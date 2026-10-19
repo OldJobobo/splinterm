@@ -784,6 +784,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_the_execute_future_mid_flight_cancels_and_closes() {
+        let (mut connection, server_task) = connect(|mut server| {
+            tokio::spawn(async move {
+                accept_hello(&mut server).await;
+                let request_id = expect_execute(&mut server).await;
+                write_server_frame(&mut server, &prompt(request_id, 20_000)).await;
+                // The caller gives up while its callback is still deciding:
+                // one Cancel for the request, then the connection closes.
+                assert_eq!(
+                    read_client_frame(&mut server).await,
+                    Some(ClientFrame::Cancel { request_id })
+                );
+                assert_eq!(read_client_frame(&mut server).await, None);
+            })
+        })
+        .await;
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(200),
+            connection.execute_daemon_handoff(|_| std::future::pending::<HandoffDecision>()),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the execute future was not abandoned");
+        server_task.await.unwrap();
+        assert!(connection.request(Request::Ping).await.is_err());
+    }
+
+    #[tokio::test]
     async fn a_final_answer_while_deciding_drops_the_callback() {
         let (mut connection, server_task) = connect(|mut server| {
             tokio::spawn(async move {

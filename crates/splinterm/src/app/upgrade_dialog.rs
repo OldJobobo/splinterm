@@ -22,7 +22,7 @@ use std::{
     io,
     os::{fd::OwnedFd, unix::net::UnixStream},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, mpsc as std_mpsc},
+    sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
 
@@ -59,6 +59,8 @@ const TEXT_ROWS_PERCENT: usize = 72;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct UpgradeDialogPrompt {
     capability: Vec<u8>,
+    /// The asking command, which the child checks is still its parent.
+    parent_pid: u32,
     respond_within_seconds: u64,
     windows: Vec<HandoffUnresponsiveWindow>,
 }
@@ -66,6 +68,7 @@ struct UpgradeDialogPrompt {
 impl UpgradeDialogPrompt {
     fn validate(&self) -> Result<()> {
         let valid = self.capability.len() == CAPABILITY_BYTES
+            && self.parent_pid > 0
             && !self.windows.is_empty()
             && self.windows.len() <= MAX_HANDOFF_WINDOWS
             && self.windows.iter().all(|window| {
@@ -167,10 +170,23 @@ fn dialog_snapshot(prompt: &UpgradeDialogPrompt) -> TerminalSnapshot {
 
 /// The hidden `upgrade-dialog` child: reads one prompt on stdin, shows it,
 /// and writes the answer on stdout. Closing the Window answers cancel.
+///
+/// It dies with the command that asked. The workspace forbids `unsafe`, so
+/// the child cannot be given a `pre_exec` hook; instead it sets its own
+/// parent-death signal (`PR_SET_PDEATHSIG`, through rustix) before anything
+/// else, then checks that its parent is still the command named in the
+/// prompt, which covers a parent that died before the signal was set. The
+/// signal follows the thread that spawned the child, the runtime thread that
+/// drives the command for as long as the process lives.
 pub(in crate::app) fn run_upgrade_dialog_client() -> Result<()> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
+        .context("tie the upgrade dialog to its command")?;
     let prompt: UpgradeDialogPrompt =
         read_private_frame_bounded(&mut io::stdin().lock(), MAX_UPGRADE_DIALOG_FRAME_BYTES)?;
     prompt.validate()?;
+    if !is_parent(prompt.parent_pid, rustix::process::getppid()) {
+        bail!("the upgrade command that asked has exited");
+    }
     let (decision, receiver) = std_mpsc::channel();
     run_window(WindowOptions {
         snapshot: Some(dialog_snapshot(&prompt)),
@@ -188,32 +204,46 @@ pub(in crate::app) fn run_upgrade_dialog_client() -> Result<()> {
     )
 }
 
-/// Kills and reaps the dialog child unless it already finished, so an
+/// Whether `parent` (from `getppid`) is the command that sent the prompt.
+/// An orphaned child is reparented to init or a subreaper, never to it.
+fn is_parent(expected: u32, parent: Option<rustix::process::Pid>) -> bool {
+    i32::try_from(expected).is_ok_and(|expected| rustix::process::Pid::as_raw(parent) == expected)
+}
+
+/// Kills and reaps the dialog child unless it already answered, so an
 /// abandoned question (the daemon ended the attempt, or the deadline passed)
 /// never leaves a dialog on screen.
-struct DialogChild(Arc<Mutex<Option<Child>>>);
+struct DialogChild(Option<Child>);
 
 impl DialogChild {
-    /// Waits briefly for a child that has answered to exit, then reaps it.
-    fn finish(&self) {
-        let Some(mut child) = self.0.lock().ok().and_then(|mut child| child.take()) else {
+    /// Hands a child that has answered to a detached thread, which gives it
+    /// a moment to exit and then reaps it, so the answer reaches the daemon
+    /// without waiting on the child.
+    fn finish(mut self) {
+        let Some(mut child) = self.0.take() else {
             return;
         };
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(2) {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
+        // Without a thread the child still exits on its own after replying,
+        // and init reaps it once this process exits.
+        let _ = std::thread::Builder::new()
+            .name("upgrade-dialog-reaper".to_owned())
+            .spawn(move || {
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(2) {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            });
     }
 }
 
 impl Drop for DialogChild {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.lock().ok().and_then(|mut child| child.take()) {
+        if let Some(mut child) = self.0.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -245,6 +275,7 @@ pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Resu
     let capability = capability()?;
     let request = UpgradeDialogPrompt {
         capability: capability.clone(),
+        parent_pid: std::process::id(),
         respond_within_seconds: prompt.respond_within.as_secs(),
         windows: prompt.windows,
     };
@@ -260,7 +291,7 @@ pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Resu
         .stderr(Stdio::null())
         .spawn()
         .context("launch the upgrade dialog")?;
-    let guard = DialogChild(Arc::new(Mutex::new(Some(process))));
+    let guard = DialogChild(Some(process));
     let budget = prompt.respond_within;
     let reply = tokio::task::spawn_blocking(move || -> Result<UpgradeDialogReply> {
         parent.set_write_timeout(Some(budget))?;
@@ -303,6 +334,7 @@ mod tests {
     fn prompt(windows: Vec<HandoffUnresponsiveWindow>) -> UpgradeDialogPrompt {
         UpgradeDialogPrompt {
             capability: vec![9; CAPABILITY_BYTES],
+            parent_pid: 1234,
             respond_within_seconds: 18,
             windows,
         }
@@ -393,12 +425,47 @@ mod tests {
     fn a_dropped_question_kills_and_reaps_its_dialog() {
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         let pid = child.id();
-        drop(DialogChild(Arc::new(Mutex::new(Some(child)))));
+        drop(DialogChild(Some(child)));
         // Reaped: the pid no longer names our child.
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
                 || std::fs::read_to_string(format!("/proc/{pid}/stat"))
                     .is_ok_and(|stat| !stat.contains("(sleep)"))
         );
+    }
+
+    #[test]
+    fn finishing_an_answered_dialog_never_blocks_the_caller() {
+        // A child that lingers after answering is reaped in the background.
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let started = Instant::now();
+        DialogChild(Some(child)).finish();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // The reaper kills it after its grace period.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline
+            && std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.contains("(sleep)"))
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.contains("(sleep)"))
+        );
+    }
+
+    #[test]
+    fn only_the_asking_command_counts_as_the_parent() {
+        let parent = rustix::process::getppid();
+        let raw = u32::try_from(rustix::process::Pid::as_raw(parent)).unwrap();
+        assert!(is_parent(raw, parent));
+        // Reparented to init, or to a subreaper.
+        if raw != 1 {
+            assert!(!is_parent(raw, rustix::process::Pid::from_raw(1)));
+        }
+        assert!(!is_parent(raw, None));
+        assert!(!is_parent(u32::MAX, parent));
     }
 }

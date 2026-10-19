@@ -187,7 +187,9 @@ systemctl --user daemon-reload
 systemctl --user start splinterd.service
 ```
 
-The command never restarts anything by itself.
+A daemon that is not an installed package build, such as one started from a
+development checkout, is restarted the way it was started. The command never
+restarts anything by itself.
 
 Without `--now`, the command prints the running daemon's generation, build and
 provenance, its session counts, whether it kept a rollback copy, its
@@ -212,7 +214,12 @@ picker (`splinterm dojos`). Input stays paused in every Window until the answer.
   not answering cancels. Without a graphical session either, the upgrade is
   cancelled.
 
-After a handoff the command reconnects and reports which build now serves.
+A committed upgrade never answers the request: the old daemon closes the
+connection and starts the installed build. A connection that closes for another
+reason, such as a stopped service, looks the same, so the command then
+reconnects for up to 15 seconds and reports which daemon serves. An upgrade
+serves the next generation with the new build. A rollback serves the same
+generation with the previous build. A fresh start serves generation 1.
 
 Only the installed `splinterm` beside the running `splinterd` may ask: on
 packaged systems `/usr/bin/splinterm`, matched by device and inode. A
@@ -222,13 +229,14 @@ command has no machine output and rejects `--output`, `--schema-major`,
 
 | Exit status | Meaning |
 | --- | --- |
-| 0 | The report was shown, or the daemon handed off; the last line says which build serves. |
-| 1 | Error: no daemon, not the installed trusted client, a refused request, an invalid daemon response, or, after a handoff, no later daemon generation serving. |
+| 0 | The report was shown, or the upgrade completed: the next generation serves the new build. |
+| 1 | Error: no daemon, not the installed trusted client, a refused request, an invalid daemon response, or, after the connection closed, a daemon that is neither the next generation nor a rollback, such as a fresh start. |
 | 2 | Usage error. |
 | 3 | Cancelled by the answer, by closing the dialog, by no answer in time, or because nothing could ask. Nothing changed. |
 | 4 | Live upgrade is unavailable now. Nothing changed. |
 | 5 | Another upgrade is already in progress. |
-| 6 | The daemon handed off, but the upgrade rolled back to the previous build. Terminals were kept. |
+| 6 | The upgrade did not complete: the same generation serves the previous build after a rollback, or the running daemon never left. Terminals were kept. |
+| 7 | The connection closed as a committed upgrade's does, but no daemon answered within 15 seconds, so the result is unconfirmed. Run `splinterm upgrade` to check. |
 
 ## Terminal observation and input
 
