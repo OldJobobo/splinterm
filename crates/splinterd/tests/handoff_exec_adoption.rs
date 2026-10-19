@@ -37,6 +37,19 @@
 //! Splint. After every adoption and rollback, no daemon thread and no newly
 //! launched Splint holds SIGINT, SIGTERM, or SIGHUP blocked.
 //!
+//! # A carried Window
+//!
+//! The adopt and rollback cases also carry one Window (Plan 0061 M3.13b2 and
+//! M3.13c): a stand-in client process the stage spawns with the client end
+//! of a credentialed `SOCK_SEQPACKET` continuation channel. The stage
+//! records it in both manifests with its pidfd at `ClientProcess(0)`, the
+//! daemon end at `Continuation(0)`, and the first carried Splint's
+//! controller `HeldBy` its connection, and exec carries both descriptors.
+//! The stand-in writes the first packet it reads to a file: the forward
+//! daemon's `Adopted` outcome naming generation 2 after adoption, or the
+//! rollback daemon's `RolledBack` naming generation 1 after a rollback,
+//! which also proves the failed forward candidate sent nothing first.
+//!
 //! # Why the boundary is driven at the function level
 //!
 //! The real request path (a trusted-UI `PrepareDaemonHandoff { Execute }`
@@ -130,7 +143,9 @@ use splinterm_core::{
 use splinterm_protocol::{
     ClientFrame, ClientRole, ControlMode, LaunchParameters, MAX_FRAME_BYTES,
     MAX_IMAGE_BYTES_PER_DAEMON, PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame,
-    TerminalSnapshot, encode_frame, image_content_socket_path,
+    TerminalSnapshot, encode_frame,
+    handoff_outcome::{HandoffOutcome, HandoffOutcomeKind},
+    image_content_socket_path,
 };
 use splinterm_pty::{LinuxPtyBackend, PtyCommand};
 use splinterm_terminal::{
@@ -151,6 +166,25 @@ const PENDING_SIGTERM: &str = "SPLINTERD_EXEC_ADOPTION_PENDING_SIGTERM";
 /// The stage records a wrong SHA-256 for the rollback daemon snapshot in
 /// both manifests, so staging and the rollback executor both refuse it.
 const TAMPER_ROLLBACK_IMAGE: &str = "SPLINTERD_EXEC_ADOPTION_TAMPER_ROLLBACK_IMAGE";
+/// The stage carries one stand-in Window across exec.
+const WINDOW: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW";
+/// Where the stand-in Window writes the first continuation packet it reads.
+const WINDOW_OUTCOME: &str = "window-outcome.bin";
+/// The stand-in Window's one old connection, which held a controller.
+const WINDOW_CONNECTION: u64 = 41;
+/// The stand-in Window: reads one packet from the inherited continuation
+/// end named by its first argument (end of file reads as empty, and it
+/// gives up after two minutes) and writes it atomically to its second.
+const FAKE_WINDOW: &str = r#"
+import os, select, socket, sys
+channel = socket.socket(fileno=int(sys.argv[1]))
+ready, _, _ = select.select([channel], [], [], 120)
+data = channel.recv(64) if ready else b"timeout"
+partial = sys.argv[2] + ".partial"
+with open(partial, "wb") as out:
+    out.write(data)
+os.rename(partial, sys.argv[2])
+"#;
 /// Every pre-commit step the fault matrix fails the forward candidate at.
 const FAULT_POINTS: [CandidateFaultPoint; 6] = [
     CandidateFaultPoint::Staging,
@@ -228,6 +262,7 @@ fn main() -> ExitCode {
             remove_forward_client: env::var_os(REMOVE_FORWARD_CLIENT).is_some(),
             pending_sigterm: env::var_os(PENDING_SIGTERM).is_some(),
             tamper_rollback_image: env::var_os(TAMPER_ROLLBACK_IMAGE).is_some(),
+            window: env::var_os(WINDOW).is_some(),
             fault: None,
         }),
         Some(stage) => panic!("unknown stage {stage:?}"),
@@ -271,6 +306,10 @@ fn main() -> ExitCode {
 /// How one stage's old generation behaves, and what fails its forward
 /// candidate.
 #[derive(Clone, Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches, each one environment variable the stage reads"
+)]
 struct StageOptions {
     /// Remove the forward client after building the manifests, so forward
     /// adoption refuses the prefix (rollback adoption only reports it).
@@ -280,6 +319,8 @@ struct StageOptions {
     pending_sigterm: bool,
     /// Record a wrong digest for the rollback daemon snapshot.
     tamper_rollback_image: bool,
+    /// Carry one stand-in Window across exec.
+    window: bool,
     /// Candidate fault points, as `CANDIDATE_FAULT_ENV` spells them; the
     /// parent sets the variable, and it crosses both execs.
     fault: Option<String>,
@@ -298,6 +339,8 @@ struct StageRecord {
     lair_id: LairId,
     carried: Vec<RecordedSplint>,
     excluded: RecordedSplint,
+    /// The stand-in Window's process, when the stage carries one.
+    window_pid: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -379,6 +422,7 @@ fn old_generation_stage(options: &StageOptions) -> ! {
     let image = bound_listener(&image_content_socket_path(&socket));
 
     let stopped = hand_off_and_stop();
+    let window = options.window.then(|| spawn_window(&directory));
     // The excluded child is still an unreaped zombie of this process: only
     // the forward daemon can reap it and record its real exit.
     assert_eq!(
@@ -429,6 +473,16 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         ));
         owners.push(capture.checkpoint.handoff_descriptor());
     }
+    if let Some(window) = &window {
+        owners.push(HandoffDescriptor::new(
+            HandoffDescriptorSlot::ClientProcess(0),
+            window.pidfd.as_fd(),
+        ));
+        owners.push(HandoffDescriptor::new(
+            HandoffDescriptorSlot::Continuation(0),
+            window.continuation.as_fd(),
+        ));
+    }
     let (forward_bytes, rollback_bytes) = manifest_pair(
         &prefix,
         &snapshots,
@@ -437,6 +491,7 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         lair_id,
         revision,
         options.tamper_rollback_image,
+        window.as_ref(),
     );
     let recorded = owners
         .iter()
@@ -472,6 +527,7 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         lair_id,
         carried: stopped.carried.clone(),
         excluded: stopped.excluded,
+        window_pid: window.as_ref().map(|window| window.pid),
     };
     write_atomically(
         &directory.join(RECORD),
@@ -495,6 +551,67 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         },
     );
     panic!("the exec boundary returned instead of executing the forward daemon: {reason}");
+}
+
+/// A stand-in Window as the old generation carries it: its process, pinned
+/// by a pidfd, and the daemon end of its continuation channel.
+struct StandInWindow {
+    pid: u32,
+    start_time: u64,
+    executable: (u64, u64),
+    pidfd: OwnedFd,
+    continuation: OwnedFd,
+}
+
+/// Spawns the stand-in Window with the client end of a fresh credentialed
+/// `SOCK_SEQPACKET` pair. Only the client end is ever inheritable, and only
+/// until the child has it: the stage closes its copy at once, so nothing
+/// inheritable reaches the exec boundary's audit.
+fn spawn_window(directory: &Path) -> StandInWindow {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let (continuation, client) = rustix::net::socketpair(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::SEQPACKET,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    rustix::net::sockopt::set_socket_passcred(&continuation, true).unwrap();
+    rustix::io::fcntl_setfd(&client, rustix::io::FdFlags::empty()).unwrap();
+    let child = Command::new("python3")
+        .arg("-c")
+        .arg(FAKE_WINDOW)
+        .arg(client.as_raw_fd().to_string())
+        .arg(directory.join(WINDOW_OUTCOME))
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn the stand-in Window");
+    drop(client);
+    let pid = child.id();
+    // Never waited for here: the adopting daemon inherits it as a child.
+    drop(child);
+    let pidfd = rustix::process::pidfd_open(
+        Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .unwrap();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start_time = stat[stat.rfind(')').unwrap() + 1..]
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let executable = fs::metadata(format!("/proc/{pid}/exe")).unwrap();
+    StandInWindow {
+        pid,
+        start_time,
+        executable: (executable.dev(), executable.ino()),
+        pidfd,
+        continuation,
+    }
 }
 
 /// Installs `bytes` at `path` the way a package upgrade does: a new inode
@@ -767,6 +884,7 @@ fn executable_image(snapshot: &SealedExecutableSnapshot) -> Value {
 /// rollback pair is this build unsalted, the forward pair the salted image.
 #[allow(
     clippy::too_many_lines,
+    clippy::too_many_arguments,
     reason = "one fixture binds every carried role into one manifest pair"
 )]
 fn manifest_pair(
@@ -777,6 +895,7 @@ fn manifest_pair(
     lair_id: LairId,
     revision: u64,
     tamper_rollback_image: bool,
+    window: Option<&StandInWindow>,
 ) -> (Vec<u8>, Vec<u8>) {
     let compiled = compiled_handoff_generation().unwrap();
     let source = generation(compiled.build_identity, compiled.build_version);
@@ -823,6 +942,21 @@ fn manifest_pair(
             })
         })
         .collect::<Vec<_>>();
+    let mut splints = splints;
+    let windows = window.map_or_else(Vec::new, |window| {
+        // The first carried Splint's controller was the Window's.
+        splints[0]["controller"] = json!({
+            "held_by": { "window": 0, "connection": WINDOW_CONNECTION },
+        });
+        vec![json!({
+            "index": 0,
+            "pid": window.pid,
+            "start_time": window.start_time,
+            "client_device": window.executable.0,
+            "client_inode": window.executable.1,
+            "old_connections": [WINDOW_CONNECTION],
+        })]
+    });
     let excluded = stopped.excluded;
     let descriptors = owners
         .iter()
@@ -872,6 +1006,7 @@ fn manifest_pair(
             "child_pid": excluded.child_pid,
             "exit": null,
         }],
+        "windows": windows,
         "descriptors": descriptors,
     });
     if tamper_rollback_image {
@@ -945,6 +1080,7 @@ impl Stage {
         command.env_remove(REMOVE_FORWARD_CLIENT);
         command.env_remove(PENDING_SIGTERM);
         command.env_remove(TAMPER_ROLLBACK_IMAGE);
+        command.env_remove(WINDOW);
         command.env_remove(CANDIDATE_FAULT_ENV);
         if options.remove_forward_client {
             command.env(REMOVE_FORWARD_CLIENT, "1");
@@ -954,6 +1090,9 @@ impl Stage {
         }
         if options.tamper_rollback_image {
             command.env(TAMPER_ROLLBACK_IMAGE, "1");
+        }
+        if options.window {
+            command.env(WINDOW, "1");
         }
         if let Some(fault) = options.fault {
             command.env(CANDIDATE_FAULT_ENV, fault);
@@ -1021,6 +1160,25 @@ impl Stage {
             assert!(
                 Instant::now() < deadline,
                 "stage never reached exec\n{}",
+                self.logs()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Waits for the first packet the stand-in Window read and decodes it.
+    fn window_outcome(&mut self) -> HandoffOutcome {
+        let path = self.directory.join(WINDOW_OUTCOME);
+        let deadline = Instant::now() + STAGE_WAIT;
+        loop {
+            if let Ok(packet) = fs::read(&path) {
+                return HandoffOutcome::decode(&packet).unwrap_or_else(|error| {
+                    panic!("the Window read {packet:?}: {error}\n{}", self.logs())
+                });
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the Window never read an outcome\n{}",
                 self.logs()
             );
             thread::sleep(Duration::from_millis(20));
@@ -1346,7 +1504,13 @@ async fn connect_adopted(stage: &mut Stage, socket: &Path) -> (Client, u64) {
 /// adopts, commits, and serves as generation 2 in the same process.
 fn adopt_case() {
     let directory = TestDirectory::new();
-    let mut stage = Stage::launch(&directory, StageOptions::default());
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            window: true,
+            ..StageOptions::default()
+        },
+    );
     let record = stage.record();
     let pid = record.pid;
     // The stage is the launcher's only child.
@@ -1407,10 +1571,23 @@ fn adopt_case() {
         "excluded=1",
         "excluded_exit_unknown=0",
         "closed_unexpected=0",
+        "windows_announced=1",
+        "windows_exited=0",
+        "windows_unsent=0",
+        "held_controllers=1",
         "daemon handoff: adopted generation published",
     ] {
         assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
     }
+    // The carried Window read exactly the forward daemon's outcome.
+    assert!(record.window_pid.is_some());
+    assert_eq!(
+        stage.window_outcome(),
+        HandoffOutcome {
+            kind: HandoffOutcomeKind::Adopted,
+            daemon_generation: record.source_daemon_generation + 1,
+        }
+    );
 
     // An ordered shutdown of the adopted daemon ends it and its Splints.
     shut_down(&mut stage, &record, &[launched]);
@@ -1734,11 +1911,28 @@ fn rollback_case() {
         &directory,
         StageOptions {
             remove_forward_client: true,
+            window: true,
             ..StageOptions::default()
         },
     );
     let record = stage.record();
     let launched = assert_rolled_back(&mut stage, &directory, &record, true, false);
+    // The failed forward candidate sent nothing; the rollback daemon sent
+    // `RolledBack` naming the generation it serves again, after its commit.
+    assert_eq!(
+        stage.window_outcome(),
+        HandoffOutcome {
+            kind: HandoffOutcomeKind::RolledBack,
+            daemon_generation: record.source_daemon_generation,
+        }
+    );
+    let committed = log_line(&stage.logs(), "daemon handoff: adoption committed").to_owned();
+    for expected in ["windows_announced=1", "held_controllers=1"] {
+        assert!(
+            committed.contains(expected),
+            "missing {expected:?} in {committed:?}"
+        );
+    }
     let logs = stage.logs();
     for expected in [
         // The forward exec happened: the forward daemon claimed and staged.
