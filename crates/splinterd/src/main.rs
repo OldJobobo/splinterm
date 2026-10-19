@@ -11569,9 +11569,9 @@ async fn prepare_and_await_windows<F: ForwardPreparation>(
             handoff_windows::ProcessPin::Live => {
                 let process = anchor.process.clone();
                 let anchor_connection_id = anchor.connection_id;
-                let continuation =
-                    send_window_prepare(state, forward, anchor, index, &events_sender, deadline)
-                        .await?;
+                let (continuation, enqueue) =
+                    send_window_prepare(state, forward, anchor, index, &events_sender, deadline)?;
+                watchers.push(enqueue);
                 watchers.push(watch_prepared_window(
                     index,
                     &process,
@@ -11707,7 +11707,7 @@ fn apply_window_event(
 }
 
 /// Sends one Window its prepare frame and returns the daemon end of its
-/// continuation channel.
+/// continuation channel, with the task that queues the frame.
 ///
 /// The channel is a `SOCK_SEQPACKET` pair, close-on-exec, with `SO_PASSCRED`
 /// on the daemon end so every later message carries kernel credentials (ADR
@@ -11719,19 +11719,22 @@ fn apply_window_event(
 /// `events` ([`handoff_windows::PrepareSendReport`]). The anchor's
 /// acknowledgement opens before the frame is queued, so a fast answer is
 /// never lost; it counts only once the writer reports the whole frame
-/// written. A frame that cannot be queued by `deadline` is dropped, which
-/// closes its descriptors and reports it not sent.
+/// written. The frame waits for room in the anchor's control queue in its
+/// own task, so the anchors' waits overlap under the shared `deadline`. A
+/// frame that cannot be queued by then, or whose task the attempt drops, is
+/// dropped, which closes its descriptors and reports it not sent for this
+/// attempt only.
 ///
 /// # Errors
 /// `Failed` when the channel or the snapshot descriptor cannot be made.
-async fn send_window_prepare<F: ForwardPreparation>(
+fn send_window_prepare<F: ForwardPreparation>(
     state: &DaemonState,
     forward: &F,
     anchor: handoff_windows::AnchorSnapshot,
     index: u8,
     events: &mpsc::UnboundedSender<handoff_windows::WindowEvent>,
     deadline: time::Instant,
-) -> Result<std::os::fd::OwnedFd, AttemptCancel> {
+) -> Result<(std::os::fd::OwnedFd, AbortOnDrop), AttemptCancel> {
     let failed = |what: &str, error: &dyn std::fmt::Display| {
         warn!(%error, "daemon handoff: {what} for a Window failed");
         AttemptCancel::from(HandoffCancelReason::Failed)
@@ -11772,16 +11775,26 @@ async fn send_window_prepare<F: ForwardPreparation>(
         ),
         sent: handoff_windows::PrepareSendReport::new(index, events.clone()),
     });
-    if !matches!(
-        time::timeout_at(deadline, anchor.control.send(frame)).await,
-        Ok(Ok(()))
-    ) {
-        warn!(
-            connection_id = anchor.connection_id,
-            "a Window's prepare frame could not be queued"
-        );
-    }
-    Ok(daemon_end)
+    let handoff_windows::AnchorSnapshot {
+        connection_id,
+        control,
+        ..
+    } = anchor;
+    // Each anchor's frame waits for room in its own control queue in its
+    // own task, so one congested anchor cannot use up the shared deadline
+    // of the anchors after it.
+    let enqueue = AbortOnDrop::new(tokio::spawn(async move {
+        if !matches!(
+            time::timeout_at(deadline, control.send(frame)).await,
+            Ok(Ok(()))
+        ) {
+            warn!(
+                connection_id,
+                "a Window's prepare frame could not be queued"
+            );
+        }
+    }));
+    Ok((daemon_end, enqueue))
 }
 
 /// Watches one prepared Window until dropped and reports its process's
@@ -22754,5 +22767,61 @@ mod tests {
         // trusted-UI check answers, not the anchor refusal.
         assert_eq!(dry_run.code, ErrorCode::Unauthorized);
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_congested_anchor_does_not_starve_the_anchors_after_it() {
+        let state = window_test_state();
+        let (congested, healthy) = (TestWindowProcess::spawn(), TestWindowProcess::spawn());
+        // Anchor 11 comes first; its control queue holds one frame, its Hello
+        // fills it, and nothing ever drains it.
+        let congested_process = congested.pinned(INSTALLED_CLIENT);
+        let (control, _never_drained) = mpsc::channel(1);
+        {
+            let mut windows = state.handoff_windows.lock().unwrap();
+            windows.register_connection(11, congested_process.pid, congested_process.start_time);
+            windows
+                .declare_anchor(11, congested_process, control, test_hello())
+                .unwrap();
+        }
+        let mut healthy_window = declare_test_window(&state, 12, healthy.pinned(INSTALLED_CLIENT));
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        // The healthy anchor is prepared at once, not after the congested
+        // one's wait, and acknowledges well within the shared deadline.
+        let (prepare, descriptors) = time::timeout(
+            HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT / 2,
+            healthy_window.read_prepare(),
+        )
+        .await
+        .expect("the healthy anchor's frame is not held behind the congested one");
+        assert_eq!(
+            acknowledge(&state, 12, &prepare).await,
+            Ok(Response::Acknowledged)
+        );
+        // Only the congested anchor is named.
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.reason))
+                .collect::<Vec<_>>(),
+            [(0, splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)]
+        );
+        answers
+            .accept(ClientFrame::HandoffDecision {
+                request_id: 9,
+                proceed_without: vec![0],
+            })
+            .unwrap();
+        let exec = take_exec_ready(&state, execute).await;
+        let [participant] = exec.windows.windows.as_slice() else {
+            panic!("only the healthy anchor takes part");
+        };
+        assert_eq!(participant.anchor_connection_id, 12);
+        exec.cancel(HandoffCancelReason::Failed).await;
+        assert!(continuation_closed(descriptors.continuation()));
     }
 }
