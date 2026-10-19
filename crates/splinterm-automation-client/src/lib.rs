@@ -42,6 +42,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod daemon_handoff;
+
+pub use daemon_handoff::{
+    DaemonHandoffOutcome, HANDOFF_DECISION_SAFETY_MARGIN, HandoffDecision, HandoffDecisionPrompt,
+};
+
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_BUFFERED_BYTES: usize = MAX_FRAME_BYTES + 4 + READ_CHUNK_BYTES;
 const MAX_QUEUED_EVENTS: usize = 64;
@@ -1935,6 +1941,25 @@ pub fn request_cancellation(error: &anyhow::Error) -> Option<RequestCancellation
         .map(|cancelled| cancelled.reason())
 }
 
+/// The daemon ended the connection cleanly between frames: no partial frame
+/// and no incomplete terminal transaction was pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonClosedConnection;
+
+impl std::fmt::Display for DaemonClosedConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("splinterd closed the connection")
+    }
+}
+
+impl std::error::Error for DaemonClosedConnection {}
+
+/// Whether an error is the daemon's clean end of file between frames.
+#[must_use]
+pub fn is_daemon_closed_connection(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<DaemonClosedConnection>().is_some()
+}
+
 /// Extracts a daemon protocol error retained through the anyhow boundary.
 #[must_use]
 pub fn protocol_error(error: &anyhow::Error) -> Option<&splinterm_protocol::ProtocolError> {
@@ -3627,6 +3652,17 @@ impl Connection {
     }
 
     async fn read_server_frame(&mut self) -> Result<ServerFrame> {
+        self.read_server_frame_with(false).await
+    }
+
+    /// Reads one server frame. Only the in-flight `Execute` of
+    /// [`Connection::execute_daemon_handoff`] passes `accept_decision_prompt`;
+    /// everywhere else a decision prompt is a protocol violation. A clean end
+    /// of file between frames fails with [`DaemonClosedConnection`].
+    async fn read_server_frame_with(
+        &mut self,
+        accept_decision_prompt: bool,
+    ) -> Result<ServerFrame> {
         self.ensure_usable()?;
         loop {
             let buffered = &self.read_buffer[self.read_offset..];
@@ -3657,9 +3693,11 @@ impl Connection {
                         Some(ServerFrame::HandoffPrepare { .. }) => {
                             bail!("splinterd sent a handoff prepare frame outside a handoff")
                         }
-                        // This client never executes a handoff, so no
-                        // decision prompt can belong to one of its requests.
-                        Some(ServerFrame::HandoffDecisionRequired { .. }) => {
+                        // Only an executing handoff request can be asked
+                        // about Windows; any other prompt is unsolicited.
+                        Some(ServerFrame::HandoffDecisionRequired { .. })
+                            if !accept_decision_prompt =>
+                        {
                             bail!("splinterd sent a handoff decision prompt outside a handoff")
                         }
                         Some(frame) => return Ok(frame),
@@ -3684,7 +3722,7 @@ impl Connection {
                     bail!("splinterd closed an incomplete terminal frame transaction");
                 }
                 if self.read_buffer.is_empty() {
-                    bail!("splinterd closed the connection");
+                    return Err(anyhow::Error::new(DaemonClosedConnection));
                 }
                 bail!("splinterd closed a partial frame");
             }
