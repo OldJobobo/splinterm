@@ -11,10 +11,15 @@
 //!
 //! Nothing here clears close-on-exec, prepares inheritance, seals a manifest,
 //! or stops the runtime; [`crate::handoff_exec`] does that (M3.9). A capture
-//! is a lease: dropping [`HandoffCaptures`], on any path, only resumes each
-//! actor. It never ends an actor, signals a child, or releases a placement.
-//! Only [`HandoffCaptures::hand_off`] ends the actors, and it ends them for
-//! handoff: no child is signalled and every placement is retained.
+//! is a lease: dropping [`HandoffCaptures`], on any path, only returns each
+//! actor's master so the actor can try to resume reading. Nothing here ends
+//! an actor, signals a child, or releases a placement. The actor's own
+//! restoration can fail, though (its master cannot be adopted again, its
+//! replacement reader cannot be registered, or it already ended); it then
+//! takes its documented error path and kills and reaps its child
+//! ([`PreparedPtyHandoff`]). Only [`HandoffCaptures::hand_off`] ends the
+//! actors deliberately, and it ends them for handoff: no child is signalled
+//! and every placement is retained.
 //!
 //! Agent status is connection-owned and dropped across a handoff (Plan 0061
 //! D6), so no manifest carries it.
@@ -225,6 +230,11 @@ impl CaptureFailure {
 
 /// One captured Splint: its actor's lease and its sealed checkpoint, linked
 /// to the slot index its PTY master and checkpoint share in the manifest.
+///
+/// The checkpoint body carries its own budget share
+/// ([`SealedCheckpointBody::reservation`]), not the lease, so the share
+/// returns only once the body's memfd has closed, whichever field drops
+/// first and wherever the body moves.
 #[derive(Debug)]
 pub struct CapturedSplint {
     lease: PreparedPtyHandoff,
@@ -276,8 +286,10 @@ impl ExcludedSplint {
 
 /// Every live Splint captured at the fence, in ascending slot order.
 ///
-/// Dropping it resumes every actor without waiting; [`Self::release`] waits
-/// until each actor reads again.
+/// Dropping it returns every actor's master without waiting, and each actor
+/// tries to resume reading; [`Self::release`] waits for each actor's answer.
+/// An actor whose restoration fails kills and reaps its child instead
+/// ([`PreparedPtyHandoff`]).
 #[derive(Debug)]
 pub struct HandoffCaptures {
     captured: Vec<CapturedSplint>,
@@ -327,10 +339,12 @@ impl HandoffCaptures {
         (handed_off, self.excluded)
     }
 
-    /// Resumes every captured actor and waits, within the capture's per-actor
-    /// deadline, until each has its reader back. An actor that does not
-    /// acknowledge in time still resumes: its lease sent the resume, or sends
-    /// it when the abandoned wait drops the lease.
+    /// Returns every captured actor's master and waits, within the capture's
+    /// per-actor deadline, until each acknowledges. An actor that does not
+    /// acknowledge in time still gets its master back: its lease sent the
+    /// resume, or sends it when the abandoned wait drops the lease. An actor
+    /// that cannot restore reading is logged here and kills and reaps its
+    /// child ([`PreparedPtyHandoff::resume`]); release does not retry it.
     pub async fn release(self) {
         let mut resumes = JoinSet::new();
         for CapturedSplint { lease, checkpoint } in self.captured {
@@ -435,8 +449,9 @@ enum ActorCapture {
 /// Cancels on the first missed deadline, a non-exit refusal, a second
 /// refusal while the process lives, the aggregate cap, or a failed task.
 /// Before returning, every outstanding attempt has ended and every lease
-/// already acquired has been dropped, which resumes its actor and returns
-/// its budget reservation.
+/// already acquired has been dropped, which returns its master to its actor
+/// (which then tries to resume reading; see [`PreparedPtyHandoff`]), and
+/// every sealed body has been dropped, which returns its budget reservation.
 pub async fn capture_live_splints<F, Fut>(
     handles: Vec<LiveSplintHandle>,
     limits: CaptureLimits,
@@ -473,7 +488,7 @@ where
         }
         Err(failure) => {
             // Abort and wait out every outstanding attempt: one that already
-            // holds a lease drops it, which resumes its actor.
+            // holds a lease drops it, which returns its master to its actor.
             attempts.shutdown().await;
             drop(captured);
             Err(failure)
@@ -531,7 +546,7 @@ where
     let mut retried = false;
     loop {
         // A missed deadline drops the attempt: a pending command is withdrawn
-        // and a lease already granted is dropped, so the actor resumes.
+        // and a lease already granted is dropped, returning its master.
         let error = match time::timeout(timeout, prepare(handle.clone(), budget.clone())).await {
             Err(_) => return Err(CaptureFailure::TimedOut { splint_id, timeout }),
             Ok(Ok(lease)) => return Ok(ActorCapture::Captured(Box::new(lease))),
@@ -1776,6 +1791,42 @@ pub(crate) mod tests {
         .await
         .expect("every reservation is returned");
         fleet.assert_all_echo("after-budget").await;
+        fleet.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_checkpoint_body_keeps_its_budget_share_after_its_lease_resumes() {
+        let fleet = Fleet::spawn(&[CAT]).await;
+        fleet.assert_all_echo("settled").await;
+        let seen = Arc::new(std::sync::Mutex::new(None::<HandoffCheckpointBudget>));
+        let mut captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, {
+            let seen = Arc::clone(&seen);
+            move |handle: LiveSplintHandle, budget: HandoffCheckpointBudget| {
+                *seen.lock().unwrap() = Some(budget.clone());
+                async move { handle.prepare_pty_handoff_within(&budget).await }
+            }
+        })
+        .await
+        .unwrap();
+        let budget = seen.lock().unwrap().clone().unwrap();
+        let CapturedSplint { lease, checkpoint } = captures.captured.remove(0);
+        let size = checkpoint.body().identity().size;
+        assert_eq!(budget.reserved(), size);
+        assert_eq!(
+            checkpoint
+                .body()
+                .reservation()
+                .map(crate::CheckpointReservation::bytes),
+            Some(size)
+        );
+        // The lease resumes its actor while the body it gave up is retained:
+        // the share stays with the body, not the lease.
+        lease.resume().await.unwrap();
+        assert_eq!(budget.reserved(), size, "the retained body keeps its share");
+        drop(checkpoint);
+        assert_eq!(budget.reserved(), 0);
+        drop(captures);
+        fleet.assert_all_echo("after-resume").await;
         fleet.shutdown().await;
     }
 

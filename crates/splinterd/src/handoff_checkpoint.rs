@@ -21,6 +21,7 @@ use splinterm_terminal::{
 use thiserror::Error;
 
 use crate::{
+    CheckpointReservation,
     handoff_descriptors::{HandoffDescriptor, HandoffDescriptorSlot},
     handoff_manifest::{BodyDisposition, ManifestDescriptor},
 };
@@ -37,10 +38,22 @@ pub struct CheckpointBodyIdentity {
     pub seals: SealFlags,
 }
 
+/// One sealed terminal checkpoint, and the share of a handoff checkpoint
+/// budget it was sealed against, if any.
+///
+/// The body and its share are one ownership unit: wherever the body moves
+/// (out of its capture lease, into [`LinkedCheckpointBody`], across exec
+/// preparation), the share moves with it, and only dropping the body returns
+/// it. A lease that is resumed or consumed after its body was taken can
+/// therefore never return a share whose sealed memory still exists.
 #[derive(Debug)]
 pub struct SealedCheckpointBody {
     identity: CheckpointBodyIdentity,
     descriptor: OwnedFd,
+    /// Declared after `descriptor` because fields drop in declaration order:
+    /// the memfd closes before the share returns, so the budget never counts
+    /// fewer bytes than the sealed checkpoint memory that still exists.
+    reservation: Option<CheckpointReservation>,
 }
 
 impl SealedCheckpointBody {
@@ -96,7 +109,22 @@ impl SealedCheckpointBody {
         Ok(Self {
             identity,
             descriptor,
+            reservation: None,
         })
+    }
+
+    /// Makes this body carry `reservation`, its share of a handoff checkpoint
+    /// budget, until the body itself is dropped.
+    #[must_use]
+    pub(crate) fn with_reservation(mut self, reservation: Option<CheckpointReservation>) -> Self {
+        self.reservation = reservation;
+        self
+    }
+
+    /// The budget share this body carries, if it was sealed against one.
+    #[must_use]
+    pub const fn reservation(&self) -> Option<&CheckpointReservation> {
+        self.reservation.as_ref()
     }
 
     #[must_use]
