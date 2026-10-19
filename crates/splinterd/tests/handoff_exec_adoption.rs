@@ -44,8 +44,12 @@
 //! client: a `splinterm` copy at the private prefix would satisfy
 //! trusted-UI matching, but
 //!
+//! * live handoff is unsupported in every build until window continuity
+//!   lands (the binary's `live_handoff_support`, Plan 0061 M3.11b), so the
+//!   report names `Unsupported` and `Execute` is refused before the gate,
+//!   whatever else holds. No feature or seam overrides that decision;
 //! * `cargo test` builds are unpackaged (zero source commit), so the report
-//!   names `NotPackaged` and `Execute` is refused before the gate;
+//!   names `NotPackaged` too;
 //! * the running daemon retains rollback authority, and finds the forward
 //!   pair's package record, only beside `/usr/bin` or a `/nix/store` output
 //!   (`package_provenance_path`), never at a private prefix, and a package
@@ -55,7 +59,11 @@
 //!
 //! So this test builds the manifests from the stage's real captures through
 //! `encode_manifest_pair_for_integration_test`, and everything from the
-//! exec boundary on is the production code. The salted forward pair's
+//! exec boundary on is the production code. Since M3.11b the boundary's
+//! forward exec is compiled into every build. This target still needs the
+//! `integration-test` feature for its salt and package-owner seams, and
+//! `handoff_exec_production` proves the exec call site in a build without
+//! the feature. The salted forward pair's
 //! package provenance treatment is pinned by
 //! `package_provenance::tests::a_salted_record_verifies_only_with_its_own_salt`.
 //!

@@ -21,12 +21,23 @@
 //! 5. when exec does not happen, restore close-on-exec, release the guard,
 //!    and restore the signal mask.
 //!
-//! Step 4 is compiled only into `integration-test` builds (Plan 0061 M3.10).
-//! The forward candidate adopts and serves in every build, and since Plan
-//! 0061 M3.11a a candidate failure before its commit rolls back through
-//! [`crate::handoff_rollback`]; enabling the forward exec in production
-//! builds is M3.11b's decision. Every other build keeps the M3.9 behaviour:
-//! the boundary always returns, and the old generation resumes in process
+//! # Staging: the exec ships, live handoff stays unavailable
+//!
+//! Since Plan 0061 M3.11b, step 4 is compiled into every build, production
+//! included. The forward candidate adopts and serves in every build, and a
+//! candidate that fails before its commit rolls back through
+//! [`crate::handoff_rollback`] (M3.11a). One function in the binary,
+//! `handoff_requests::live_handoff_support`, decides whether a running
+//! daemon ever reaches the boundary. It refuses every build until window
+//! continuity lands (its `WINDOW_CONTINUITY_READY` flag, Plan 0061 M3.13 to
+//! M3.16), and it refuses a Nix-store build for all of 0.2.0 (operator
+//! decision 2026-10-18). The dry-run report and `Execute` both use it, so
+//! `Execute` is refused before the handoff gate. The binary arms this call
+//! site ([`ExecInheritancePlan::with_forward_daemon`]) only when the
+//! function allows live handoff. This module has no switch of its own: a
+//! plan without a forward daemon returns [`ExecBoundaryError::ExecNotWired`].
+//!
+//! Whenever the boundary returns, the old generation resumes in process
 //! (Plan 0061 D5) with [`resume_handed_off`]: every Splint keeps running and
 //! every client reconnects to the same daemon generation.
 //!
@@ -160,20 +171,17 @@ pub struct ExecInheritancePlan<'fd> {
     descriptors: Vec<HandoffDescriptor<'fd>>,
     /// What the exec call site executes; without it the boundary returns
     /// [`ExecBoundaryError::ExecNotWired`].
-    #[cfg(feature = "integration-test")]
     forward: Option<ForwardDaemonExec<'fd>>,
 }
 
 /// The sealed forward daemon image and the exact argument and environment
 /// vectors the exec call site hands it.
-#[cfg(feature = "integration-test")]
 pub struct ForwardDaemonExec<'fd> {
     daemon: BorrowedFd<'fd>,
     arguments: Vec<std::ffi::CString>,
     environment: Vec<std::ffi::CString>,
 }
 
-#[cfg(feature = "integration-test")]
 impl std::fmt::Debug for ForwardDaemonExec<'_> {
     // The environment may hold credentials; only its size is diagnostic.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -264,7 +272,6 @@ impl<'fd> ExecInheritancePlan<'fd> {
         Ok(Self {
             manifests,
             descriptors,
-            #[cfg(feature = "integration-test")]
             forward: None,
         })
     }
@@ -272,7 +279,6 @@ impl<'fd> ExecInheritancePlan<'fd> {
     /// The number the manifests record for the forward manifest
     /// (`CheckpointManifest`), which the forward daemon's activation flag
     /// names.
-    #[cfg(feature = "integration-test")]
     #[must_use]
     pub fn forward_manifest_descriptor(&self) -> Option<RawFd> {
         self.descriptors
@@ -285,7 +291,9 @@ impl<'fd> ExecInheritancePlan<'fd> {
     /// exact vectors exec passes it; see [`candidate_daemon_arguments`] and
     /// [`exec_environment`]. The image is executed through its descriptor,
     /// which stays close-on-exec and is not among the inherited ones.
-    #[cfg(feature = "integration-test")]
+    ///
+    /// The binary arms a plan only when live handoff is supported (see the
+    /// module documentation, "Staging"). This method checks nothing itself.
     #[must_use]
     pub fn with_forward_daemon(
         mut self,
@@ -504,12 +512,12 @@ pub enum ExecBoundaryError {
     Inheritance(#[source] DescriptorHandoffError),
     #[error("cannot block the handoff signals: {0}")]
     SignalMask(#[source] io::Error),
-    /// This build does not exec (every build but `integration-test` until
-    /// Plan 0061 M3.11b), or the plan names no forward daemon.
-    #[error("exec of the forward daemon is not enabled (Plan 0061 M3.11b gates it)")]
+    /// The plan names no forward daemon. Either the attempt has none, or
+    /// the binary did not arm the exec call site because live handoff is not
+    /// supported (see the module documentation, "Staging").
+    #[error("exec of the forward daemon is not armed for this attempt")]
     ExecNotWired,
     /// `execveat` of the forward daemon returned.
-    #[cfg(feature = "integration-test")]
     #[error("exec of the forward daemon failed: {0}")]
     Exec(#[source] io::Error),
     #[error("injected exec boundary fault at {0:?}")]
@@ -524,14 +532,13 @@ pub enum ExecBoundaryError {
 /// Runs the exec boundary and returns why the old generation resumes.
 ///
 /// See the module documentation for the steps. A successful exec never
-/// returns; a build without the exec call site (every build but
-/// `integration-test`, Plan 0061 M3.10) always returns, at the latest with
-/// [`ExecBoundaryError::ExecNotWired`]. Every return has released the guard,
-/// and every one after inheritance preparation has restored close-on-exec
-/// (or reports in [`ExecBoundaryError::Restore`] that it could not, after
-/// which the inheritance value's drop retried). Sealing is permanent: a
-/// resumed generation discards both sealed memfds, and a later attempt
-/// builds new ones.
+/// returns. A plan without a forward daemon always returns, at the latest
+/// with [`ExecBoundaryError::ExecNotWired`]. Every return has released the
+/// guard, and every one after inheritance preparation has restored
+/// close-on-exec (or reports in [`ExecBoundaryError::Restore`] that it could
+/// not, after which the inheritance value's drop retried). Sealing is
+/// permanent: a resumed generation discards both sealed memfds, and a later
+/// attempt builds new ones.
 ///
 /// The caller must have stopped every thread it owns: the Tokio runtime,
 /// its blocking pool, and the systemd connection. Until the guard is taken
@@ -627,25 +634,26 @@ fn under_guard(
         Err(error) => return ExecBoundaryError::Inheritance(error),
     };
 
-    // ---- The exec call site (Plan 0061 M3.10) ----
+    // ---- The exec call site (Plan 0061 M3.10; every build since M3.11b) ----
     // `execveat(forward_daemon, "", argv, envp, AT_EMPTY_PATH)` of the sealed
-    // forward daemon snapshot, compiled ONLY into `integration-test` builds
-    // ([`exec_forward_daemon`]). It returns only when exec fails, and that
-    // failure takes this same restore-and-resume path. SIGINT, SIGTERM, and
-    // SIGHUP are blocked (`cross_with`), so they cross exec pending.
+    // forward daemon snapshot ([`exec_forward_daemon`]). It returns only when
+    // exec fails or the plan names no forward daemon. Either way it takes
+    // this same restore-and-resume path. SIGINT, SIGTERM, and SIGHUP are
+    // blocked (`cross_with`), so they cross exec pending. A candidate that
+    // fails before its adoption commit re-executes the sealed rollback
+    // daemon with the unchanged PTYs instead of exiting
+    // ([`crate::handoff_rollback`]).
     //
-    // HARD GATE (Plan 0061 M3.11b): the cooperative rollback executor exists
-    // since M3.11a ([`crate::handoff_rollback`]), so a candidate that fails
-    // before its adoption commit re-executes the sealed rollback daemon with
-    // the unchanged PTYs instead of exiting. Enabling this arm outside
-    // `integration-test` is M3.11b's decision, with its security review, not
-    // a flag: there is no runtime switch, and a normal build has no forward
-    // exec code at all.
+    // HARD GATE (Plan 0061 M3.11b): this call site is compiled into
+    // production builds, but a running daemon reaches it only through a plan
+    // the binary armed. The binary arms a plan, and accepts `Execute` at all,
+    // only when `handoff_requests::live_handoff_support` allows live
+    // handoff. That function refuses Nix-store builds for 0.2.0, and every
+    // build while `WINDOW_CONTINUITY_READY` is false. Flipping that flag is
+    // the production enablement step, gated by the M3.17 proofs and VM
+    // acceptance (see the module documentation, "Staging").
     let failure = match stage(&mut hook, ExecBoundaryStage::Exec) {
         Err(failure) => failure,
-        #[cfg(not(feature = "integration-test"))]
-        Ok(()) => ExecBoundaryError::ExecNotWired,
-        #[cfg(feature = "integration-test")]
         Ok(()) => exec_forward_daemon(plan),
     };
 
@@ -666,15 +674,16 @@ fn under_guard(
 }
 
 /// Executes the forward daemon the plan names, from its sealed snapshot
-/// descriptor, and returns only when exec fails.
+/// descriptor. Returns only when exec fails, or at once with
+/// [`ExecBoundaryError::ExecNotWired`] for a plan the binary did not arm.
 ///
-/// Compiled only into `integration-test` builds: enabling exec in a
-/// production build is Plan 0061 M3.11b's gate; see the call site in
-/// `under_guard`. Called with the handoff signals blocked and the process
-/// guard held, after both manifests are sealed and exactly the recorded
-/// descriptors were made inheritable; the image descriptor itself stays
-/// close-on-exec, which `execveat(AT_EMPTY_PATH)` of an ELF image permits.
-#[cfg(feature = "integration-test")]
+/// Compiled into every build since Plan 0061 M3.11b. What keeps a running
+/// daemon from reaching it is described at the call site in `under_guard`
+/// and in the module documentation ("Staging"). Called with the handoff
+/// signals blocked and the process guard held, after both manifests are
+/// sealed and exactly the recorded descriptors were made inheritable. The
+/// image descriptor itself stays close-on-exec, which
+/// `execveat(AT_EMPTY_PATH)` of an ELF image permits.
 fn exec_forward_daemon(plan: &ExecInheritancePlan<'_>) -> ExecBoundaryError {
     let Some(forward) = &plan.forward else {
         return ExecBoundaryError::ExecNotWired;
@@ -701,8 +710,9 @@ fn exec_forward_daemon(plan: &ExecInheritancePlan<'_>) -> ExecBoundaryError {
 /// `execveat(rollback_daemon, "", argv, envp, AT_EMPTY_PATH)` of the sealed
 /// rollback daemon snapshot a forward candidate inherited. Compiled into
 /// every build: it is the only way back for a forward candidate that failed
-/// before its adoption commit, and a production build reaches it only once
-/// a forward exec exists there (M3.11b).
+/// before its adoption commit. A production daemon becomes such a candidate
+/// only through a forward exec, which live handoff support gates (see the
+/// module documentation, "Staging").
 ///
 /// The `_guard` and `_signals` parameters are the proof the call site
 /// requires: the process is single-threaded, SIGINT, SIGTERM, and SIGHUP are

@@ -1,6 +1,8 @@
 //! The old daemon's exec boundary under the real process guard, ending in the
-//! in-process resume that stands in for exec until M3.10 (Plan 0061 M3.9,
-//! operator decision D5).
+//! in-process resume (Plan 0061 M3.9, operator decision D5). Here the plan
+//! names no forward daemon, as the binary leaves it whenever live handoff is
+//! unsupported (M3.11b), so the boundary returns `ExecNotWired` and the old
+//! generation resumes. A failed forward exec takes the same path.
 //!
 //! Real PTY Splints are captured, ended for handoff, and the Tokio runtime is
 //! dropped; the boundary then takes the guard, seals both manifest memfds,

@@ -1350,10 +1350,14 @@ fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 ///
 /// A round that leaves serve for the exec boundary stops its runtime and the
 /// systemd connection and crosses the boundary ([`stop_runtime_and_cross`]).
-/// A successful exec never returns. Every build but `integration-test` has
-/// no forward exec call site (Plan 0061 M3.11b gates it), so the boundary
-/// always comes back there, and the next round serves the same generation
-/// again on a new runtime ([`StartupSource::Resumed`]).
+/// A successful exec never returns. Every build contains the forward exec
+/// since Plan 0061 M3.11b, but no round leaves serve for the boundary while
+/// [`handoff_requests::live_handoff_support`] refuses, because `Execute` is
+/// refused before the gate. That covers every build until window continuity
+/// lands, and Nix-store builds in 0.2.0, and the boundary arms the exec only
+/// under the same decision ([`arm_forward_exec`]). When the boundary comes
+/// back, the next round serves the same generation again on a new runtime
+/// ([`StartupSource::Resumed`]).
 ///
 /// An adopted round that fails before its commit, or whose runtime cannot
 /// even be built, rolls back instead ([`roll_back`]): its runtime stops
@@ -2419,7 +2423,6 @@ fn cross_boundary(
     }
     match boundary.plan(listeners, handed_off) {
         Ok(plan) => {
-            #[cfg(feature = "integration-test")]
             let plan = arm_forward_exec(state, boundary, plan);
             cross_exec_boundary(&plan, Instant::now() + HANDOFF_GUARD_WAIT)
         }
@@ -2428,21 +2431,32 @@ fn cross_boundary(
 }
 
 /// Arms the exec call site with the attempt's sealed forward daemon, when
-/// the attempt has one (Plan 0061 M3.10). Compiled only into
-/// `integration-test` builds: enabling production exec is Plan 0061
-/// M3.11b's gate, now that the M3.11a rollback executor exists (see
-/// `handoff_exec::under_guard`).
+/// the attempt has one (Plan 0061 M3.10) and live handoff is supported.
+///
+/// Compiled into every build since Plan 0061 M3.11b. The forward exec is
+/// armed only when [`handoff_requests::compiled_live_handoff_support`]
+/// allows it: never for a Nix-store build in 0.2.0, and never in any build
+/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false. `Execute` is
+/// already refused before the gate in both cases, so this second check is
+/// defence in depth. An unarmed plan returns `ExecNotWired` from the
+/// boundary, and the old generation resumes in process.
 ///
 /// The argument vector is rebuilt from this daemon's state, never copied
 /// from its own argv, which in an adopted daemon still names its activation
 /// manifest. The environment crosses unchanged (`SPLINTERM_POLICY` and the
 /// rest), as across a restart.
-#[cfg(feature = "integration-test")]
 fn arm_forward_exec<'a>(
     state: &DaemonState,
     boundary: &'a dyn ExecBoundaryInputs,
     plan: ExecInheritancePlan<'a>,
 ) -> ExecInheritancePlan<'a> {
+    if let Err(unsupported) = handoff_requests::compiled_live_handoff_support() {
+        error!(
+            ?unsupported,
+            "live handoff is unsupported; the forward exec is not armed and the old generation resumes"
+        );
+        return plan;
+    }
     let Some(daemon) = boundary.forward_daemon() else {
         return plan;
     };
@@ -10122,7 +10136,6 @@ trait ExecBoundaryInputs: Send {
     /// The sealed forward daemon image the exec call site executes, if this
     /// attempt has one. It is executed through its descriptor, never
     /// inherited.
-    #[cfg(feature = "integration-test")]
     fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         None
     }
@@ -10195,7 +10208,6 @@ impl ExecBoundaryInputs for ForwardExec {
         Ok(())
     }
 
-    #[cfg(feature = "integration-test")]
     fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         Some(self.forward.snapshots().forward().daemon().descriptor())
     }
@@ -10318,30 +10330,39 @@ async fn fence_for_handoff(attempt: &mut HandoffAttempt) -> Result<(), HandoffCa
 /// Runs `Execute` through the handoff gate and returns the error it ends
 /// with.
 ///
-/// A second `Execute` while a handoff runs is refused as in progress, and a
-/// report naming anything but `Unsupported` refuses before the gate.
-/// Otherwise, while still `Preparing` and serving, the gate prepares the
-/// installed forward pair beside the borrowed rollback pair; then it fences,
-/// re-checks, drains, and persists; then it captures every live Splint and
-/// builds the validated manifests ([`prepare_fenced_handoff`]). A complete
-/// attempt with exec authority then commits its gate and leaves it for serve
-/// ([`HandoffExit`]), which stops the runtime and crosses the exec boundary
-/// (M3.9); this request never answers, because serve ends its connection on
-/// the way out. Every other ending releases what the attempt prepared,
-/// cancels, and answers `HandoffUnavailable` with a fresh report's reasons,
-/// which name `Unsupported`.
+/// A second `Execute` while a handoff runs is refused as in progress. Any
+/// other `Execute` is refused before the gate when
+/// [`handoff_requests::live_handoff_support`] refuses live handoff, or when
+/// the report names any blocking reason. The function refuses every build
+/// until window continuity lands, and Nix-store builds in 0.2.0 (Plan 0061
+/// M3.11b). Otherwise, while still `Preparing` and serving, the gate
+/// prepares the installed forward pair beside the borrowed rollback pair.
+/// It then fences, re-checks, drains, and persists, and then captures every
+/// live Splint and builds the validated manifests
+/// ([`prepare_fenced_handoff`]). A complete attempt with exec authority then
+/// commits its gate and leaves it for serve ([`HandoffExit`]), which stops
+/// the runtime and crosses the exec boundary (M3.9). This request never
+/// answers, because serve ends its connection on the way out. Every other
+/// ending releases what the attempt prepared, cancels, and answers
+/// `HandoffUnavailable` with a fresh report's reasons.
 async fn execute_daemon_handoff(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
 ) -> ProtocolError {
-    execute_daemon_handoff_with(state, report, prepare_forward_handoff).await
+    // Evaluated here, not read back from the report's reasons. The report's
+    // provenance is the one compiled into this daemon.
+    let support = handoff_requests::live_handoff_support(report.build.provenance);
+    execute_daemon_handoff_with(state, report, support, prepare_forward_handoff).await
 }
 
-/// [`execute_daemon_handoff`] with the forward preparation step supplied, so
-/// tests can drive the gate past it without a packaged installation.
+/// [`execute_daemon_handoff`] with live handoff support and the forward
+/// preparation step supplied. Only unit tests pass `Ok(())` for a build
+/// whose support refuses, so that they can drive the gate past it without a
+/// packaged installation or window continuity.
 async fn execute_daemon_handoff_with<F, Prepared>(
     state: &Arc<DaemonState>,
     report: &splinterm_protocol::HandoffReport,
+    support: Result<(), handoff_requests::LiveHandoffUnsupported>,
     prepare_forward: impl FnOnce(Arc<DaemonState>) -> F,
 ) -> ProtocolError
 where
@@ -10351,7 +10372,7 @@ where
     if state.handoff_gate.phase() != HandoffGatePhase::Idle {
         return handoff_in_progress();
     }
-    if let Err(refused) = handoff_requests::refuse_blocked_execute(report) {
+    if let Err(refused) = handoff_requests::refuse_blocked_execute(report, support) {
         return refused;
     }
     let mut attempt = match HandoffAttempt::begin(state).await {
@@ -15380,11 +15401,62 @@ mod tests {
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
     }
 
-    /// The `Execute` report that lets the gate run: `Unsupported` alone.
+    /// The report of a daemon nothing blocks. With live handoff support
+    /// passed as `Ok(())` (unit tests only), it lets the gate run.
     async fn gated_handoff_report(state: &DaemonState) -> splinterm_protocol::HandoffReport {
         let mut report = daemon_handoff_report(state).await.unwrap();
-        report.blocking_reasons = vec![splinterm_protocol::HandoffBlockingReason::Unsupported];
+        report.blocking_reasons.clear();
         report
+    }
+
+    /// The shipped `Execute` evaluates live handoff support itself. Even a
+    /// report that names no reason is refused before the gate while window
+    /// continuity has not landed. The answer names `Unsupported` and the
+    /// cause, and nothing is fenced, prepared, or broadcast.
+    #[tokio::test]
+    async fn execute_is_refused_before_the_gate_while_live_handoff_is_unsupported() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let revision = state.topology.read().await.revision();
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = execute_daemon_handoff_with(
+            &state,
+            &report,
+            handoff_requests::live_handoff_support(report.build.provenance),
+            {
+                let prepared = Arc::clone(&prepared);
+                move |_| async move {
+                    prepared.store(true, Ordering::SeqCst);
+                    Ok(ExecTestPreparation)
+                }
+            },
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            refused.handoff_blocking_reasons,
+            [splinterm_protocol::HandoffBlockingReason::Unsupported]
+        );
+        assert!(
+            refused
+                .message
+                .contains("open Windows cannot survive it yet"),
+            "{}",
+            refused.message
+        );
+        // The shipped wrapper gives the same answer.
+        let shipped = execute_daemon_handoff(&state, &report).await;
+        assert_eq!(shipped.message, refused.message);
+        assert_eq!(
+            shipped.handoff_blocking_reasons,
+            refused.handoff_blocking_reasons
+        );
+        assert!(!prepared.load(Ordering::SeqCst));
+        assert!(handoff_status_phases(&mut subscription).is_empty());
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(!state.handoff_exit.is_ready());
+        assert_eq!(state.topology.read().await.revision(), revision);
     }
 
     /// Runs `Execute` as a packaged daemon with an installed upgrade would:
@@ -15393,7 +15465,7 @@ mod tests {
         state: &Arc<DaemonState>,
         report: &splinterm_protocol::HandoffReport,
     ) -> ProtocolError {
-        execute_daemon_handoff_with(state, report, |_| async { Ok(()) }).await
+        execute_daemon_handoff_with(state, report, Ok(()), |_| async { Ok(()) }).await
     }
 
     /// Every handoff status phase queued for a topology hub subscriber.
@@ -16054,8 +16126,8 @@ mod tests {
         let (outbound, mut frames) = mpsc::channel(8);
         let task = AbortOnDrop::new(spawn_topology_subscription(7, subscription, outbound, None));
         let error = execute_with_forward_prepared(&state, &report).await;
-        // Capture and exec do not exist yet: the attempt cancels as failed
-        // and the answer still names `Unsupported`.
+        // A preparation without exec authority: the attempt cancels as
+        // failed, and the fresh report still names `Unsupported`.
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.handoff_blocking_reasons,
@@ -16253,7 +16325,7 @@ mod tests {
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
         let forward = Arc::new(());
-        let error = execute_daemon_handoff_with(&state, &report, {
+        let error = execute_daemon_handoff_with(&state, &report, Ok(()), {
             let forward = Arc::clone(&forward);
             move |state: Arc<DaemonState>| async move {
                 // Still `Preparing`: nothing is fenced and requests run.
@@ -16284,11 +16356,13 @@ mod tests {
     async fn a_forward_preparation_failure_cancels_before_the_fence() {
         // The production step: a development daemon retains no rollback
         // authority, so preparation fails. (`Execute` refuses such a daemon
-        // before the gate; the gated report lets it through here.)
+        // before the gate; the gated report and forced support let it
+        // through here.)
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff(&state, &report).await;
+        let error =
+            execute_daemon_handoff_with(&state, &report, Ok(()), prepare_forward_handoff).await;
         assert_eq!(error.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             error.message,
@@ -16314,7 +16388,7 @@ mod tests {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
         let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
-        let error = execute_daemon_handoff_with(&state, &report, |_| async {
+        let error = execute_daemon_handoff_with(&state, &report, Ok(()), |_| async {
             Err::<(), _>(handoff_requests::ForwardRefusal::NoInstalledUpgrade)
         })
         .await;
@@ -16605,7 +16679,7 @@ mod tests {
             let execute = tokio::spawn({
                 let state = Arc::clone(&state);
                 async move {
-                    execute_daemon_handoff_with(&state, &report, |_| async {
+                    execute_daemon_handoff_with(&state, &report, Ok(()), |_| async {
                         Ok(ExecTestPreparation)
                     })
                     .await
