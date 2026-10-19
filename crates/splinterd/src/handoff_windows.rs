@@ -23,15 +23,17 @@
 //! is the one it pinned; see [`HandoffWindows::pending_acknowledgement`].
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     os::fd::OwnedFd,
     path::Path,
     sync::{Arc, Mutex},
 };
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use splinterm_core::SplintId;
-use splinterm_protocol::MAX_HANDOFF_WINDOWS;
+use splinterm_core::{SplintId, Topology};
+use splinterm_protocol::{
+    HandoffWindowDojo, MAX_HANDOFF_DOJO_NAME_BYTES, MAX_HANDOFF_WINDOW_DOJOS, MAX_HANDOFF_WINDOWS,
+};
 use tokio::sync::mpsc;
 
 use crate::ControlFrame;
@@ -376,6 +378,15 @@ impl HandoffWindows {
             anchor.pending = None;
         }
     }
+
+    /// Every Splint the process's trusted-UI connections are attached to.
+    pub(crate) fn attached_splints(&self, pid: u32, start_time: Option<u64>) -> HashSet<SplintId> {
+        self.connections
+            .values()
+            .filter(|connection| connection.is_process(pid, start_time))
+            .flat_map(|connection| connection.attached.keys().copied())
+            .collect()
+    }
 }
 
 /// One attempt's mark on the registry. While it lives, no anchor is
@@ -489,4 +500,31 @@ impl HandoffWindowParticipation {
             _attempt: attempt,
         }
     }
+}
+
+/// The Dojos holding any of `splints`, named for a decision prompt in
+/// Topology order, at most [`MAX_HANDOFF_WINDOW_DOJOS`]. A Dojo whose name a
+/// prompt cannot carry is left out.
+pub(crate) fn window_dojos(
+    topology: &Topology,
+    splints: &HashSet<SplintId>,
+) -> Vec<HandoffWindowDojo> {
+    topology
+        .lairs()
+        .flat_map(|lair| lair.dojos.iter().map(move |dojo| (lair.id, dojo)))
+        .filter(|(_, dojo)| {
+            splints
+                .iter()
+                .any(|&splint_id| dojo.root.find_splint(splint_id).is_some())
+                && !dojo.name.is_empty()
+                && dojo.name.len() <= MAX_HANDOFF_DOJO_NAME_BYTES
+                && dojo.name.trim() == dojo.name
+        })
+        .take(MAX_HANDOFF_WINDOW_DOJOS)
+        .map(|(lair_id, dojo)| HandoffWindowDojo {
+            lair_id,
+            dojo_id: dojo.id,
+            name: dojo.name.clone(),
+        })
+        .collect()
 }
