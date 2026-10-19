@@ -184,6 +184,13 @@ pub enum ClientFrame {
         /// descriptors (Plan 0061 M3.14). Until then any `HandoffPrepare`
         /// ends the client's connection, so a declared Window would lose its
         /// anchor in every handoff instead of being listed as undeclared.
+        ///
+        /// The daemon accepts it only with the trusted UI role from the
+        /// installed graphical client, at most once per Window process and
+        /// for at most [`MAX_HANDOFF_WINDOWS`] Windows, and never while a
+        /// handoff already holds its Windows; any other declaration fails
+        /// the handshake. Only the anchor may acknowledge its prepare frame
+        /// ([`Request::AcknowledgeHandoffPrepare`]).
         #[serde(default, skip_serializing_if = "bool_is_false")]
         handoff_window: bool,
     },
@@ -893,9 +900,15 @@ pub enum Request {
     /// Trusted local graphical UI only. A Window that received a
     /// [`ServerFrame::HandoffPrepare`] frame acknowledges it once it holds
     /// the descriptors and its resume record, naming the generation the frame
-    /// came from. An acknowledgement that matches no pending handoff prepare,
-    /// because none was sent, it was cancelled, or the generation differs,
-    /// fails with [`ErrorCode::NotFound`] and changes nothing.
+    /// came from, on the anchor connection the frame came on
+    /// (`Hello.handoff_window`). The daemon authorizes it by that binding:
+    /// that connection only, once, while the daemon waits, from the same
+    /// pinned process. It does not re-check the installed client, because
+    /// after a package upgrade every running Window executes the replaced
+    /// image. An acknowledgement that matches no pending handoff prepare,
+    /// because none was sent, it was cancelled or already acknowledged, the
+    /// wait ended, or the generation differs, fails with
+    /// [`ErrorCode::NotFound`] and changes nothing.
     AcknowledgeHandoffPrepare {
         daemon_generation: u64,
     },

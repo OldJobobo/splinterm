@@ -115,6 +115,13 @@ impl PeerIdentity {
         self.start_time
     }
 
+    /// Device and inode of the file the peer executed when its connection
+    /// was verified. A package upgrade leaves a running client on this inode,
+    /// so it keeps naming the image the peer actually runs.
+    pub const fn executable_file(&self) -> (u64, u64) {
+        (self.executable_device, self.executable_inode)
+    }
+
     pub fn audit_peer(&self) -> Option<AuditPeer> {
         let executable = self.persistent_executable.as_ref()?;
         Some(AuditPeer {
@@ -321,6 +328,18 @@ impl PeerMonitor {
             .await
             .context("peer pidfd monitor failed")?;
         Ok(())
+    }
+
+    /// A second close-on-exec descriptor for the pinned peer process, so a
+    /// handoff can keep the binding after this connection's monitor ends
+    /// (Plan 0061 M3.13b1). Both name the one process the connection was
+    /// verified against; a reused PID matches neither.
+    ///
+    /// # Errors
+    /// Fails when the descriptor cannot be duplicated.
+    pub fn duplicate_pidfd(&self) -> Result<OwnedFd> {
+        rustix::io::fcntl_dupfd_cloexec(self.pidfd.get_ref(), 0)
+            .context("cannot duplicate the peer pidfd")
     }
 }
 
