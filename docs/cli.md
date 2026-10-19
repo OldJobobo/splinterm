@@ -221,12 +221,15 @@ picker (`splinterm dojos`). Input stays paused in every Window until the answer.
 A committed upgrade never answers the request: the old daemon closes the
 connection and starts the installed build. A connection that closes for another
 reason, such as a stopped service or a crash, looks the same, so the command then
-reconnects for up to 15 seconds and reports which daemon serves. An upgrade
-serves the next generation with the new build. A rollback serves the same
-generation with the previous build. A fresh start serves generation 1. Only once
-an upgrade or a rollback is confirmed does the command say that the dropped
-Windows' terminals keep running; otherwise it says that what happened to them is
-unknown.
+reconnects for up to 15 seconds and reports which daemon serves. A live upgrade
+and a rollback both replace the daemon's program in place, so the daemon keeps
+its process ID and start time, which the command records before the upgrade
+and checks after it. A restarted daemon is a new process, even when it reports
+the same generation and build. In the same process, an upgrade serves the next
+generation with the new build and a rollback serves the same generation with
+the previous build. Only once an upgrade or a rollback is confirmed this way
+does the command say that the dropped Windows' terminals keep running;
+otherwise it says that what happened to them is unknown.
 
 Only the installed `splinterm` beside the running `splinterd` may ask: on
 packaged systems `/usr/bin/splinterm`, matched by device and inode. A
@@ -236,14 +239,14 @@ command has no machine output and rejects `--output`, `--schema-major`,
 
 | Exit status | Meaning |
 | --- | --- |
-| 0 | The report was shown, or the upgrade completed: the next generation serves the new build. |
-| 1 | Error: no daemon, not the installed trusted client, a refused request, an invalid daemon response, or, after the connection closed, a daemon that is neither the next generation nor a rollback, such as a fresh start. |
+| 0 | The report was shown, or the upgrade completed: the same daemon process serves the next generation with the new build. |
+| 1 | Error: no daemon, not the installed trusted client, a refused request, an invalid daemon response, or, after the connection closed, a restarted daemon (a new process, whose terminals most likely ended) or the same process with neither an upgrade nor a rollback. |
 | 2 | Usage error. |
 | 3 | Cancelled by the answer, by closing the dialog, by no answer in time, or because nothing could ask. Nothing changed. |
 | 4 | Live upgrade is unavailable now. Nothing changed. |
 | 5 | Another upgrade is already in progress. |
-| 6 | The upgrade did not complete: the same generation serves the previous build after a rollback, or the running daemon never left. Terminals were kept. |
-| 7 | The connection closed as a committed upgrade's does, but no daemon answered within 15 seconds, so the result is unconfirmed. Run `splinterm upgrade` to check. |
+| 6 | The upgrade did not complete: the same daemon process serves the same generation with the previous build, after a rollback or because it never left. Terminals were kept. |
+| 7 | The connection closed as a committed upgrade's does, but the result is unconfirmed: no daemon answered within 15 seconds, or the daemon process could not be identified (for example from another PID namespace). Run `splinterm upgrade` to check. |
 
 ## Terminal observation and input
 

@@ -3156,6 +3156,7 @@ pub struct Connection {
     daemon_hostname: Option<String>,
     daemon_generation: u64,
     socket_path: Option<PathBuf>,
+    daemon_pid: Option<u32>,
     trusted_ui: bool,
     unusable: bool,
 }
@@ -3279,8 +3280,20 @@ impl Connection {
         role: ClientRole,
         socket_path: Option<PathBuf>,
     ) -> Result<Self> {
+        // The listening process, as `SO_PEERCRED` reports it. A daemon keeps
+        // its PID across an in-place handoff or rollback; a restart does not.
+        // Zero means the PID is not visible from this PID namespace.
+        let daemon_pid = stream
+            .peer_cred()
+            .ok()
+            .and_then(|credentials| credentials.pid())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|&pid| pid > 0);
         let (reader, writer) = stream.into_split();
-        Self::connect_transport(Box::new(reader), Box::new(writer), role, socket_path).await
+        let mut connection =
+            Self::connect_transport(Box::new(reader), Box::new(writer), role, socket_path).await?;
+        connection.daemon_pid = daemon_pid;
+        Ok(connection)
     }
 
     async fn connect_transport(
@@ -3340,6 +3353,7 @@ impl Connection {
             daemon_hostname,
             daemon_generation,
             socket_path,
+            daemon_pid: None,
             trusted_ui: role == ClientRole::TrustedUi,
             unusable: false,
         })
@@ -3355,6 +3369,14 @@ impl Connection {
     #[must_use]
     pub const fn daemon_generation(&self) -> u64 {
         self.daemon_generation
+    }
+
+    /// The daemon process that accepted this local connection, from
+    /// `SO_PEERCRED`; `None` over a relayed transport or when its PID is not
+    /// visible from this PID namespace.
+    #[must_use]
+    pub const fn daemon_pid(&self) -> Option<u32> {
+        self.daemon_pid
     }
 
     /// Returns the bounds negotiated during the daemon handshake.
@@ -4277,6 +4299,7 @@ mod tests {
             daemon_hostname: None,
             daemon_generation: 1,
             socket_path: None,
+            daemon_pid: None,
             trusted_ui: false,
             unusable: false,
         }

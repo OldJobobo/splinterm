@@ -369,9 +369,10 @@ pub(in crate::app) enum Command {
     /// in this release; until it is, restarting the daemon is the upgrade path.
     ///
     /// Only the installed splinterm beside the running splinterd may ask.
-    /// Exit status: 0 report shown or upgraded, 1 error, 2 usage, 3 cancelled,
-    /// 4 unavailable, 5 another upgrade in progress, 6 rolled back,
-    /// 7 connection closed but the result is unconfirmed.
+    /// Exit status: 0 report shown or upgraded, 1 error (a restarted daemon
+    /// too), 2 usage, 3 cancelled, 4 unavailable, 5 another upgrade in
+    /// progress, 6 rolled back, 7 connection closed but the result is
+    /// unconfirmed.
     #[command(verbatim_doc_comment)]
     Upgrade {
         /// Start the upgrade now. When open Windows cannot take part, ask
@@ -695,10 +696,11 @@ mod tests {
             "installed splinterm beside the running splinterd",
             "3 cancelled",
             "4 unavailable",
-            "5 another upgrade in progress",
+            "1 error (a restarted daemon",
+            "5 another upgrade in",
             "6 rolled back",
             "only G or the green area proceeds",
-            "7 connection closed but the result is unconfirmed",
+            "7 connection closed but the result is",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in {help}");
         }

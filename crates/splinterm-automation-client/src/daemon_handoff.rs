@@ -567,6 +567,8 @@ mod tests {
         })
         .await;
         assert_eq!(connection.daemon_handoff_report().await.unwrap(), report());
+        // A local stream records the accepting process from SO_PEERCRED.
+        assert_eq!(connection.daemon_pid(), Some(std::process::id()));
         // A dry run leaves the connection usable.
         server_task.await.unwrap();
     }

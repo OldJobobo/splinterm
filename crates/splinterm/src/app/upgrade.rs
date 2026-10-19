@@ -54,13 +54,13 @@ const MAX_TERMINAL_ANSWER_BYTES: usize = 256;
 /// `splinterm upgrade` exit statuses. Clap's usage errors exit 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::app) enum UpgradeExit {
-    /// The report was shown, or after a handoff the next generation serves
-    /// another build.
+    /// The report was shown, or after a handoff the same daemon process
+    /// serves the next generation with another build.
     Success,
     /// The request failed: no daemon, not the installed trusted client, a
     /// refused request, an invalid daemon response, or, after the connection
-    /// closed, a daemon that is neither the next generation nor a rollback
-    /// (such as a fresh start).
+    /// closed, a restarted daemon (a new process) or the same process with
+    /// neither an upgrade nor a rollback.
     Error,
     /// The upgrade was cancelled: by the person, by closing the dialog, by
     /// no answer in time, or because no way to ask was available.
@@ -69,12 +69,13 @@ pub(in crate::app) enum UpgradeExit {
     Unavailable,
     /// Another upgrade is already running.
     InProgress,
-    /// The same generation serves the same build after the connection
-    /// closed: the upgrade rolled back (a rollback adopts the old generation
-    /// number), or never left the running daemon. Terminals were kept.
+    /// The same daemon process serves the same generation and build after
+    /// the connection closed: the upgrade rolled back (a rollback adopts the
+    /// old generation number in place), or never left. Terminals were kept.
     RolledBack,
-    /// The connection closed as a committed upgrade's does, but no daemon
-    /// answered within the confirmation window, so nothing is confirmed.
+    /// The connection closed as a committed upgrade's does, but nothing is
+    /// confirmed: no daemon answered within the confirmation window, or the
+    /// daemon process could not be identified before or after.
     Unconfirmed,
 }
 
@@ -120,6 +121,9 @@ async fn run_upgrade(now: bool) -> Result<UpgradeExit> {
         }
         return Ok(UpgradeExit::Success);
     }
+    // Recorded before the handoff, so the daemon serving afterwards can be
+    // told apart from a restarted one.
+    let process = daemon_process(&connection);
     let interactive = asks_in_terminal(
         io::stdin().is_terminal(),
         io::stderr().is_terminal(),
@@ -160,7 +164,7 @@ async fn run_upgrade(now: bool) -> Result<UpgradeExit> {
     for line in dropped_window_lines(proceeded_without, &windows) {
         println!("{line}");
     }
-    let exit = confirm_handoff(&report).await;
+    let exit = confirm_handoff(&report, process).await;
     if let Some(line) = dropped_terminals_line(exit, !proceeded_without.is_empty()) {
         if matches!(exit, UpgradeExit::Success | UpgradeExit::RolledBack) {
             println!("{line}");
@@ -421,8 +425,25 @@ pub(in crate::app) fn dropped_terminals_line(
     }
 }
 
+/// One daemon process: its PID from `SO_PEERCRED` and its start time from
+/// `/proc/<pid>/stat`. An in-place handoff and a rollback both `execve` in the
+/// same process, so both stay the same; a restart is a new process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) struct DaemonProcess {
+    pub(in crate::app) pid: u32,
+    pub(in crate::app) start_time: u64,
+}
+
+/// The process behind `connection`, or `None` when it cannot be read: a
+/// relayed transport, a PID outside this PID namespace, or no `/proc`.
+fn daemon_process(connection: &Connection) -> Option<DaemonProcess> {
+    let pid = connection.daemon_pid()?;
+    let start_time = splinterd::handoff_window_carry::process_start_time(pid)?;
+    Some(DaemonProcess { pid, start_time })
+}
+
 /// Reconnects to whichever daemon serves next and says which build that is.
-async fn confirm_handoff(previous: &HandoffReport) -> UpgradeExit {
+async fn confirm_handoff(previous: &HandoffReport, process: Option<DaemonProcess>) -> UpgradeExit {
     let started = Instant::now();
     let current = loop {
         let remaining = CONFIRMATION_WINDOW.saturating_sub(started.elapsed());
@@ -430,17 +451,22 @@ async fn confirm_handoff(previous: &HandoffReport) -> UpgradeExit {
         // so the handshake itself is bounded by what is left of the window.
         let attempt = tokio::time::timeout(remaining, async {
             let mut connection = Connection::connect().await?;
-            connection.daemon_handoff_report().await
+            let report = connection.daemon_handoff_report().await?;
+            anyhow::Ok((report, daemon_process(&connection)))
         });
         match attempt.await {
-            Ok(Ok(report)) => break Some(report),
+            Ok(Ok(current)) => break Some(current),
             _ if started.elapsed() < CONFIRMATION_WINDOW => {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             _ => break None,
         }
     };
-    let (exit, line) = confirmation_line(previous, current.as_ref());
+    let (exit, line) = confirmation_line(
+        previous,
+        process,
+        current.as_ref().map(|(report, process)| (report, *process)),
+    );
     if exit == UpgradeExit::Success {
         println!("{line}");
     } else {
@@ -449,18 +475,23 @@ async fn confirm_handoff(previous: &HandoffReport) -> UpgradeExit {
     exit
 }
 
-/// What the report from the daemon serving after the connection closed says.
+/// What the daemon serving after the connection closed shows.
 ///
-/// An adopted forward handoff serves the next generation with the installed
-/// build, which always differs (a handoff to the running identity is refused
-/// before it starts). A rollback adopts the old generation number with the
-/// old build. Anything else, such as a fresh start (always generation 1), is
-/// not a completed upgrade.
+/// Only process evidence separates a handoff from a restart: a daemon that
+/// crashed or was restarted can come back with the same generation number
+/// and build. So the same process (PID and start time) is required before
+/// anything is called upgraded or rolled back. In that process, an adopted
+/// forward handoff serves the next generation with the installed build,
+/// which always differs (a handoff to the running identity is refused before
+/// it starts), and a rollback adopts the old generation number with the old
+/// build. A different process means the daemon restarted. Without a
+/// readable process identity on either side, nothing is confirmed.
 pub(in crate::app) fn confirmation_line(
     previous: &HandoffReport,
-    current: Option<&HandoffReport>,
+    previous_process: Option<DaemonProcess>,
+    current: Option<(&HandoffReport, Option<DaemonProcess>)>,
 ) -> (UpgradeExit, String) {
-    let Some(current) = current else {
+    let Some((current, current_process)) = current else {
         return (
             UpgradeExit::Unconfirmed,
             format!(
@@ -469,6 +500,24 @@ pub(in crate::app) fn confirmation_line(
             ),
         );
     };
+    let (Some(before), Some(after)) = (previous_process, current_process) else {
+        return (
+            UpgradeExit::Unconfirmed,
+            format!(
+                "Generation {} (Splinterm {}) now serves, but its process could not be identified, so whether the daemon upgraded, rolled back or restarted, and what happened to the terminals, is unknown. Inspect `journalctl --user -u splinterd.service`.",
+                current.daemon_generation, current.build.version
+            ),
+        );
+    };
+    if before != after {
+        return (
+            UpgradeExit::Error,
+            format!(
+                "The daemon restarted: a new process (PID {}) serves generation {} (Splinterm {}), so the upgrade did not complete and its terminals most likely ended. Inspect `journalctl --user -u splinterd.service`.",
+                after.pid, current.daemon_generation, current.build.version
+            ),
+        );
+    }
     let same_build = current.build.identity == previous.build.identity;
     if previous.daemon_generation.checked_add(1) == Some(current.daemon_generation) && !same_build {
         return (
@@ -486,7 +535,7 @@ pub(in crate::app) fn confirmation_line(
         return (
             UpgradeExit::RolledBack,
             format!(
-                "The upgrade did not complete: generation {} still runs the previous build, Splinterm {}, after a rollback or because the running daemon never left. Terminals were kept; inspect `journalctl --user -u splinterd.service`.",
+                "The upgrade did not complete: the same daemon process still runs generation {} with the previous build, Splinterm {}, after a rollback or because it never left. Terminals were kept; inspect `journalctl --user -u splinterd.service`.",
                 current.daemon_generation, current.build.version
             ),
         );
@@ -494,10 +543,8 @@ pub(in crate::app) fn confirmation_line(
     (
         UpgradeExit::Error,
         format!(
-            "The upgrade did not complete: generation {} (Splinterm {}) serves instead of generation {}, which suggests the daemon restarted; terminals it ran may have ended. Inspect `journalctl --user -u splinterd.service`.",
-            current.daemon_generation,
-            current.build.version,
-            previous.daemon_generation.saturating_add(1)
+            "The upgrade did not complete: the same daemon process serves generation {} (Splinterm {}), neither the next generation with a new build nor a rollback. Inspect `journalctl --user -u splinterd.service`.",
+            current.daemon_generation, current.build.version
         ),
     )
 }
@@ -939,42 +986,67 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_distinguishes_upgrade_rollback_restart_and_silence() {
+    fn confirmation_requires_the_same_daemon_process() {
         let release = HandoffBuildProvenance::ReleaseCandidate;
+        let daemon = DaemonProcess {
+            pid: 700,
+            start_time: 12_345,
+        };
         let before = report(3, 1, release, Vec::new());
-        // A forward adoption serves the next generation with another build.
-        let (exit, line) = confirmation_line(&before, Some(&report(4, 2, release, Vec::new())));
+        let confirm = |current: &HandoffReport, process: Option<DaemonProcess>| {
+            confirmation_line(&before, Some(daemon), Some((current, process)))
+        };
+        // Same process: the next generation with another build is an upgrade.
+        let (exit, line) = confirm(&report(4, 2, release, Vec::new()), Some(daemon));
         assert_eq!(exit, UpgradeExit::Success);
         assert!(line.contains("Upgrade complete: generation 4"), "{line}");
-        // A rollback adopts the same generation with the same build.
-        let (exit, line) = confirmation_line(&before, Some(&report(3, 1, release, Vec::new())));
+        // Same process: the same generation and build is a rollback.
+        let (exit, line) = confirm(&report(3, 1, release, Vec::new()), Some(daemon));
         assert_eq!(exit, UpgradeExit::RolledBack);
         assert!(line.contains("rollback"), "{line}");
-        // A fresh start is always generation 1, whatever the build.
-        for fresh in [
-            report(1, 1, release, Vec::new()),
-            report(1, 2, release, Vec::new()),
-        ] {
-            assert_eq!(
-                confirmation_line(&before, Some(&fresh)).0,
-                UpgradeExit::Error
-            );
-        }
-        // After a package upgrade a fresh generation 1 runs a new identity:
-        // still not an upgrade of generation 1.
-        let first = report(1, 1, release, Vec::new());
-        let (exit, line) = confirmation_line(&first, Some(&report(1, 2, release, Vec::new())));
-        assert_eq!(exit, UpgradeExit::Error);
-        assert!(line.contains("restarted"), "{line}");
-        // The next generation with the same build, or a skipped generation,
-        // is not an adoption either.
+        // Same process, any other generation and build combination.
         for odd in [
             report(4, 1, release, Vec::new()),
             report(5, 2, release, Vec::new()),
+            report(3, 2, release, Vec::new()),
+            report(1, 1, release, Vec::new()),
         ] {
-            assert_eq!(confirmation_line(&before, Some(&odd)).0, UpgradeExit::Error);
+            assert_eq!(confirm(&odd, Some(daemon)).0, UpgradeExit::Error);
         }
-        let (exit, line) = confirmation_line(&before, None);
+        // A new process is a restart, whatever generation and build it
+        // reports, including a generation-1 daemon restarted at generation 1
+        // with the same build, and one that happens to look like an upgrade.
+        let restarted_pid = DaemonProcess { pid: 701, ..daemon };
+        let restarted_start = DaemonProcess {
+            start_time: 99_999,
+            ..daemon
+        };
+        let first = report(1, 1, release, Vec::new());
+        for process in [restarted_pid, restarted_start] {
+            let (exit, line) =
+                confirmation_line(&first, Some(daemon), Some((&first, Some(process))));
+            assert_eq!(exit, UpgradeExit::Error);
+            assert!(line.contains("The daemon restarted"), "{line}");
+            assert!(line.contains("most likely ended"), "{line}");
+            for current in [
+                report(3, 1, release, Vec::new()),
+                report(4, 2, release, Vec::new()),
+            ] {
+                assert_eq!(confirm(&current, Some(process)).0, UpgradeExit::Error);
+            }
+        }
+        // No process evidence on either side confirms nothing.
+        for (previous, current) in [(Some(daemon), None), (None, Some(daemon)), (None, None)] {
+            let (exit, line) = confirmation_line(
+                &before,
+                previous,
+                Some((&report(3, 1, release, Vec::new()), current)),
+            );
+            assert_eq!(exit, UpgradeExit::Unconfirmed);
+            assert!(line.contains("could not be identified"), "{line}");
+        }
+        // No daemon at all.
+        let (exit, line) = confirmation_line(&before, Some(daemon), None);
         assert_eq!(exit, UpgradeExit::Unconfirmed);
         assert!(line.contains("not confirmed"), "{line}");
         assert!(line.contains("splinterm upgrade"), "{line}");
@@ -1151,7 +1223,7 @@ mod tests {
         assert_eq!(dropped_terminals_line(UpgradeExit::Success, false), None);
         let before = report(1, 1, HandoffBuildProvenance::ReleaseCandidate, Vec::new());
         assert!(
-            confirmation_line(&before, None)
+            confirmation_line(&before, None, None)
                 .1
                 .contains("terminals is unknown")
         );

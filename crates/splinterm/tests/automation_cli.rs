@@ -2296,7 +2296,7 @@ fn upgrade_now_reports_a_rollback_on_stderr_with_exit_six() {
     assert_eq!(output.status.code(), Some(6));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("The upgrade did not complete: generation 3 still runs the previous build"),
+        stderr.contains("the same daemon process still runs generation 3 with the previous build"),
         "{stderr}"
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("did not complete"));
