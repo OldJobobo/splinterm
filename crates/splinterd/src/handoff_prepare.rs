@@ -23,8 +23,16 @@
 //!
 //! Agent status is connection-owned and dropped across a handoff (Plan 0061
 //! D6), so no manifest carries it.
+//!
+//! Each participating Window (Plan 0061 M3.13b2) is recorded in both
+//! manifests ([`ManifestWindowEvidence`]), indexed densely from 0 in the
+//! order the caller gives, with its pidfd at `ClientProcess(index)` and its
+//! continuation end at `Continuation(index)`. A controller one of its old
+//! connections held at the fence ([`HeldController`]) is recorded as
+//! `HeldBy`; every other controller is `Released`.
 
 use std::{
+    collections::HashSet,
     future::Future,
     io,
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
@@ -58,7 +66,7 @@ use crate::{
         ControllerDisposition, ExecutablePairSetEvidence, ExitDisposition, GenerationEvidence,
         HANDOFF_MANIFEST_SCHEMA_V1, HandoffId, HandoffManifestV1, MAX_MANIFEST_WINDOWS,
         ManifestDescriptor, ManifestError, ManifestExcludedSplint, ManifestKind,
-        ManifestProcessExit, ManifestPtyIdentity, ManifestPtySize, ManifestSplint,
+        ManifestProcessExit, ManifestPtyIdentity, ManifestPtySize, ManifestSplint, ManifestWindow,
         SubscriptionDisposition, decode_manifest, encode_manifest, validate_manifest_pair,
     },
     handoff_preflight::SealedPreflightReports,
@@ -605,6 +613,42 @@ pub struct ManifestInputs<'a> {
     /// The daemon's installed-prefix authority, which both manifests carry
     /// and which must name both sealed pairs' recorded source paths.
     pub install_prefix: &'a InstallPrefix,
+    /// The participating Windows, in the stable order that numbers them:
+    /// the first is index 0, and so on. Never a prompt's numbering, which
+    /// also counts Windows the attempt does not carry.
+    pub windows: &'a [ManifestWindowEvidence<'a>],
+    /// The controllers the Windows' old connections held when the fenced
+    /// attempt snapshotted them.
+    pub held_controllers: &'a [HeldController],
+}
+
+/// One participating Window as both manifests record it, with the two
+/// descriptors exec carries for it.
+#[derive(Clone, Debug)]
+pub struct ManifestWindowEvidence<'a> {
+    pub pid: u32,
+    /// The start time the anchor's process was pinned with.
+    pub start_time: u64,
+    /// Device and inode of the executable the process ran at `Hello`.
+    pub client_device: u64,
+    pub client_inode: u64,
+    /// The trusted-UI connection IDs proven to come from this process.
+    pub old_connections: Vec<u64>,
+    /// The anchor's pidfd, inherited as `ClientProcess(index)`.
+    pub process: BorrowedFd<'a>,
+    /// The daemon end of the continuation channel, inherited as
+    /// `Continuation(index)`.
+    pub continuation: BorrowedFd<'a>,
+}
+
+/// A controller lease held at the fence by one of a participating Window's
+/// old connections. Only leases without a consent grant are passed: a
+/// grant-bound lease ends with its grant, which never crosses a handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeldController {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
+    pub connection: u64,
 }
 
 /// A validated forward/rollback manifest pair, its canonical encodings, and
@@ -659,6 +703,23 @@ impl PreparedManifests {
     #[must_use]
     pub fn descriptor_count(&self) -> usize {
         self.forward.descriptors.len()
+    }
+
+    /// How many Windows the manifests carry.
+    #[must_use]
+    pub fn window_count(&self) -> usize {
+        self.forward.windows.len()
+    }
+
+    /// How many carried Splints the manifests record as held by a Window
+    /// connection.
+    #[must_use]
+    pub fn held_controller_count(&self) -> usize {
+        self.forward
+            .splints
+            .iter()
+            .filter(|splint| matches!(splint.controller, ControllerDisposition::HeldBy { .. }))
+            .count()
     }
 
     /// The served generations the forward manifest moves between.
@@ -770,11 +831,15 @@ impl<'a> ManifestAuthority<'a> {
 /// attempt.
 ///
 /// The manifests carry IDs only for topology, each captured Splint's actor
-/// evidence and slots, the three generations' executable evidence, and the
-/// served generation moving to the next. Controllers are `Released` and
-/// subscriptions `Dropped`: every client reconnects. Topology revision and
-/// durable-state generation are the same value: the fence persisted exactly
-/// this revision, and the metadata store keeps no other generation.
+/// evidence and slots, the three generations' executable evidence, the
+/// served generation moving to the next, and each participating Window
+/// (`inputs.windows`) with its two descriptor slots. A controller that one
+/// of a Window's old connections held at the fence is `HeldBy` that
+/// connection, at most one per connection; every other controller is
+/// `Released`. Subscriptions are `Dropped`: every client reconnects.
+/// Topology revision and durable-state generation are the same value: the
+/// fence persisted exactly this revision, and the metadata store keeps no
+/// other generation.
 ///
 /// Every check the candidate will run passes first: canonical encoding within
 /// the manifest byte bound, structural validation of each manifest, pair
@@ -815,9 +880,29 @@ fn build_manifests(
         &forward_storage,
         &rollback_storage,
     )?;
+    let windows = manifest_windows(inputs.windows)?;
+    for (record, evidence) in windows.iter().zip(inputs.windows) {
+        descriptors.push(descriptor(
+            HandoffDescriptorSlot::ClientProcess(record.index),
+            evidence.process.as_raw_fd(),
+        )?);
+        descriptors.push(descriptor(
+            HandoffDescriptorSlot::Continuation(record.index),
+            evidence.continuation.as_raw_fd(),
+        )?);
+    }
+    let mut leased_connections = HashSet::new();
     let mut splints = Vec::with_capacity(captures.captured.len());
     for captured in &captures.captured {
-        splints.push(manifest_splint(captured, inputs.topology)?);
+        let evidence = captured.evidence();
+        let controller = held_controller(
+            &windows,
+            inputs.held_controllers,
+            evidence.splint_id,
+            evidence.incarnation.value(),
+            &mut leased_connections,
+        );
+        splints.push(manifest_splint(captured, inputs.topology, controller)?);
         descriptors.push(descriptor(
             HandoffDescriptorSlot::PtyMaster(captured.slot()),
             captured.lease.master_raw_fd(),
@@ -858,8 +943,7 @@ fn build_manifests(
         counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
         splints,
         excluded_splints,
-        // Window continuity is not carried until M3.13b binds Windows.
-        windows: Vec::new(),
+        windows,
         descriptors,
     };
     let rollback = HandoffManifestV1 {
@@ -1056,9 +1140,66 @@ fn descriptor(
     Ok(ManifestDescriptor { slot, inherited_fd })
 }
 
+/// Each participating Window's record, indexed densely from 0 in the given
+/// order, its old connections ascending and unique.
+fn manifest_windows(
+    windows: &[ManifestWindowEvidence<'_>],
+) -> Result<Vec<ManifestWindow>, ManifestPreparationError> {
+    windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let index = u8::try_from(index)
+                .ok()
+                .filter(|_| index < MAX_MANIFEST_WINDOWS)
+                .ok_or_else(|| rejected(ManifestError::InvalidWindows))?;
+            let mut old_connections = window.old_connections.clone();
+            old_connections.sort_unstable();
+            old_connections.dedup();
+            Ok(ManifestWindow {
+                index,
+                pid: window.pid,
+                start_time: window.start_time,
+                client_device: window.client_device,
+                client_inode: window.client_inode,
+                old_connections,
+            })
+        })
+        .collect()
+}
+
+/// The controller disposition of the carried Splint `splint_id` at
+/// `incarnation`: `HeldBy` the Window connection whose lease the fenced
+/// snapshot recorded for exactly that incarnation, and `Released` for any
+/// other. A connection holds at most one lease, so one already named is
+/// not named again (`leased`).
+fn held_controller(
+    windows: &[ManifestWindow],
+    held: &[HeldController],
+    splint_id: SplintId,
+    incarnation: u64,
+    leased: &mut HashSet<u64>,
+) -> ControllerDisposition {
+    held.iter()
+        .filter(|lease| lease.splint_id == splint_id && lease.incarnation == incarnation)
+        .find_map(|lease| {
+            let window = windows
+                .iter()
+                .find(|window| window.old_connections.contains(&lease.connection))?;
+            leased
+                .insert(lease.connection)
+                .then_some(ControllerDisposition::HeldBy {
+                    window: window.index,
+                    connection: lease.connection,
+                })
+        })
+        .unwrap_or(ControllerDisposition::Released)
+}
+
 fn manifest_splint(
     captured: &CapturedSplint,
     topology: &Topology,
+    controller: ControllerDisposition,
 ) -> Result<ManifestSplint, ManifestPreparationError> {
     let evidence = captured.evidence();
     let splint_id = evidence.splint_id;
@@ -1098,7 +1239,7 @@ fn manifest_splint(
         exit: ExitDisposition::Running,
         terminal_checkpoint: captured.checkpoint.terminal_disposition(),
         image_state: captured.checkpoint.image_disposition(),
-        controller: ControllerDisposition::Released,
+        controller,
         subscriptions: SubscriptionDisposition::Dropped,
     })
 }
@@ -1890,6 +2031,8 @@ pub(crate) mod tests {
             listeners,
             daemon_generation: 1,
             install_prefix: &fixture.install_prefix,
+            windows: &[],
+            held_controllers: &[],
         };
         let owner = PackagedOwnerOverride::current_user();
         let manifests = build_manifests(&fixture.authority(), &captures, &inputs).unwrap();
@@ -1954,6 +2097,167 @@ pub(crate) mod tests {
         fleet.shutdown().await;
     }
 
+    /// Two descriptors standing in for one Window's pidfd and continuation
+    /// end; the builder records their numbers and checks nothing else.
+    fn window_descriptors() -> (OwnedFd, OwnedFd) {
+        let (daemon, _client) = rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::SEQPACKET,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let process = rustix::process::pidfd_open(
+            rustix::process::getpid(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        (process, daemon)
+    }
+
+    fn window_evidence<'a>(
+        pid: u32,
+        connections: &[u64],
+        (process, continuation): &'a (OwnedFd, OwnedFd),
+    ) -> ManifestWindowEvidence<'a> {
+        ManifestWindowEvidence {
+            pid,
+            start_time: u64::from(pid) * 10,
+            client_device: 41,
+            client_inode: u64::from(pid) + 1000,
+            old_connections: connections.to_vec(),
+            process: process.as_fd(),
+            continuation: continuation.as_fd(),
+        }
+    }
+
+    /// Both manifests record each carried Window at its position in the
+    /// input, densely from 0, with its connections ascending and unique and
+    /// its two slots; a controller is `HeldBy` only for a Window connection
+    /// whose fenced lease names the carried incarnation, and at most once per
+    /// connection; every other controller is `Released`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture checks every Window record, slot, and controller in both manifests"
+    )]
+    async fn windows_and_held_controllers_are_recorded_in_both_manifests() {
+        let fleet = Fleet::spawn(&[CAT, CAT, CAT]).await;
+        let captures = capture_live_splints(fleet.handles(), CaptureLimits::DEFAULT, prepare)
+            .await
+            .unwrap();
+        let fixture = AuthorityFixture::new();
+        let (_listener, _image_listener, listeners) = listeners();
+        let (first, second) = (window_descriptors(), window_descriptors());
+        let windows = [
+            window_evidence(4001, &[12, 11, 12], &first),
+            window_evidence(4002, &[20], &second),
+        ];
+        let carried = captures
+            .captured()
+            .iter()
+            .map(|capture| {
+                let evidence = capture.evidence();
+                (evidence.splint_id, evidence.incarnation.value())
+            })
+            .collect::<Vec<_>>();
+        let held = [
+            // Held by the first Window's connection 11.
+            HeldController {
+                splint_id: carried[0].0,
+                incarnation: carried[0].1,
+                connection: 11,
+            },
+            // A lease on another incarnation is not this Splint's.
+            HeldController {
+                splint_id: carried[1].0,
+                incarnation: carried[1].1 + 1,
+                connection: 20,
+            },
+            // A connection no Window owns, then one already named.
+            HeldController {
+                splint_id: carried[2].0,
+                incarnation: carried[2].1,
+                connection: 99,
+            },
+            HeldController {
+                splint_id: carried[2].0,
+                incarnation: carried[2].1,
+                connection: 11,
+            },
+        ];
+        let inputs = ManifestInputs {
+            topology: &fleet.topology,
+            listeners,
+            daemon_generation: 1,
+            install_prefix: &fixture.install_prefix,
+            windows: &windows,
+            held_controllers: &held,
+        };
+        let manifests = {
+            let _owner = PackagedOwnerOverride::current_user();
+            build_manifests(&fixture.authority(), &captures, &inputs).unwrap()
+        };
+        assert_eq!(manifests.window_count(), 2);
+        assert_eq!(manifests.held_controller_count(), 1);
+        assert_eq!(
+            manifests.descriptor_count(),
+            GLOBAL_DESCRIPTOR_SLOTS + 6 + 4
+        );
+        let expected = vec![
+            ManifestWindow {
+                index: 0,
+                pid: 4001,
+                start_time: 40_010,
+                client_device: 41,
+                client_inode: 5001,
+                old_connections: vec![11, 12],
+            },
+            ManifestWindow {
+                index: 1,
+                pid: 4002,
+                start_time: 40_020,
+                client_device: 41,
+                client_inode: 5002,
+                old_connections: vec![20],
+            },
+        ];
+        for manifest in [&manifests.forward, &manifests.rollback] {
+            assert_eq!(manifest.windows, expected);
+            for (index, (process, continuation)) in [(0, &first), (1, &second)] {
+                for (slot, owner) in [
+                    (HandoffDescriptorSlot::ClientProcess(index), process),
+                    (HandoffDescriptorSlot::Continuation(index), continuation),
+                ] {
+                    assert!(manifest.descriptors.contains(&ManifestDescriptor {
+                        slot,
+                        inherited_fd: u32::try_from(owner.as_raw_fd()).unwrap(),
+                    }));
+                }
+            }
+            let controller = |splint_id| {
+                manifest
+                    .splints
+                    .iter()
+                    .find(|splint| splint.splint_id == splint_id)
+                    .unwrap()
+                    .controller
+            };
+            assert_eq!(
+                controller(carried[0].0),
+                ControllerDisposition::HeldBy {
+                    window: 0,
+                    connection: 11,
+                }
+            );
+            assert_eq!(controller(carried[1].0), ControllerDisposition::Released);
+            assert_eq!(controller(carried[2].0), ControllerDisposition::Released);
+        }
+        drop(manifests);
+        captures.release().await;
+        fleet.shutdown().await;
+    }
+
     /// A Splint excluded because its process exited is recorded with its
     /// place, incarnation, child, and observed exit, and carries no
     /// descriptor.
@@ -1973,6 +2277,8 @@ pub(crate) mod tests {
             listeners,
             daemon_generation: 1,
             install_prefix: &fixture.install_prefix,
+            windows: &[],
+            held_controllers: &[],
         };
         let owner = PackagedOwnerOverride::current_user();
         let manifests = build_manifests(&fixture.authority(), &captures, &inputs).unwrap();
@@ -2018,6 +2324,8 @@ pub(crate) mod tests {
             listeners,
             daemon_generation: 1,
             install_prefix: &fixture.install_prefix,
+            windows: &[],
+            held_controllers: &[],
         };
         let _owner = PackagedOwnerOverride::current_user();
         let mut manifests = build_manifests(&fixture.authority(), &captures, &inputs).unwrap();
@@ -2161,6 +2469,7 @@ pub(crate) mod tests {
             .unwrap();
         let fixture = AuthorityFixture::new();
         let (listener, image_listener, listeners) = listeners();
+        let window = window_descriptors();
         let manifests = {
             let _owner = PackagedOwnerOverride::current_user();
             build_manifests(
@@ -2171,6 +2480,8 @@ pub(crate) mod tests {
                     listeners,
                     daemon_generation: 1,
                     install_prefix: &fixture.install_prefix,
+                    windows: &[window_evidence(4001, &[5], &window)],
+                    held_controllers: &[],
                 },
             )
             .unwrap()
@@ -2180,11 +2491,27 @@ pub(crate) mod tests {
         for runtime in runtimes {
             assert!(matches!(runtime.wait().await, Err(LiveError::HandedOff)));
         }
-        let owners = exec_owners(
+        let mut owners = exec_owners(
             [&listener, &image_listener],
             &fixture.snapshots,
             &handed_off,
         );
+        // The carried Window's pidfd and continuation end are inherited at
+        // its recorded slots, and a plan without them is refused.
+        assert!(matches!(
+            ExecInheritancePlan::for_prepared(&manifests, &owners),
+            Err(ExecBoundaryError::MissingOwner(
+                HandoffDescriptorSlot::ClientProcess(0)
+            ))
+        ));
+        owners.push(HandoffDescriptor::new(
+            HandoffDescriptorSlot::ClientProcess(0),
+            window.0.as_fd(),
+        ));
+        owners.push(HandoffDescriptor::new(
+            HandoffDescriptorSlot::Continuation(0),
+            window.1.as_fd(),
+        ));
         assert_plan_binds_recorded_numbers(&manifests, &owners);
         drop((owners, manifests));
 
@@ -2241,6 +2568,8 @@ pub(crate) mod tests {
             listeners,
             daemon_generation: 1,
             install_prefix: &fixture.install_prefix,
+            windows: &[],
+            held_controllers: &[],
         };
         // Without the test owner override, authority validation refuses the
         // test user's executables exactly as it refuses any non-root source.
@@ -2362,6 +2691,8 @@ pub(crate) mod tests {
                     listeners,
                     daemon_generation: 1,
                     install_prefix: &fixture.install_prefix,
+                    windows: &[],
+                    held_controllers: &[],
                 },
             )
             .unwrap()

@@ -44,8 +44,9 @@ use splinterd::{
         resume_handed_off,
     },
     handoff_prepare::{
-        CaptureLimits, HandedOffCapture, HandoffCaptures, ListenerDescriptors, ManifestInputs,
-        PreparedManifests, build_handoff_manifests, capture_live_splints,
+        CaptureLimits, HandedOffCapture, HandoffCaptures, HeldController, ListenerDescriptors,
+        ManifestInputs, ManifestWindowEvidence, PreparedManifests, build_handoff_manifests,
+        capture_live_splints,
     },
     handoff_rollback::{
         PendingTermination, PreCommitRecovery, RollbackError, RollbackExec, execute_rollback,
@@ -2295,8 +2296,8 @@ struct StoppedForHandoff {
     /// The attempt's gate, still fenced, with its cancellation disarmed.
     hold: HandoffHold,
     boundary: Box<dyn ExecBoundaryInputs>,
-    /// The attempt's Windows, held until the boundary returns; see
-    /// [`ExecReady::windows`].
+    /// The attempt's Windows, carried across a successful exec and closed
+    /// when the boundary returns; see [`ExecReady::windows`].
     windows: handoff_windows::HandoffWindowParticipation,
     listeners: DaemonListeners,
     handed_off: Vec<HandedOffCapture>,
@@ -2450,6 +2451,7 @@ fn stop_runtime_and_cross(
             boundary.as_ref(),
             &listeners,
             &handed_off,
+            &windows.windows,
             actors_handed_off,
             signals,
         ),
@@ -2609,6 +2611,7 @@ fn cross_boundary(
     boundary: &dyn ExecBoundaryInputs,
     listeners: &DaemonListeners,
     handed_off: &[HandedOffCapture],
+    windows: &[handoff_windows::CarriedWindow],
     actors_handed_off: bool,
     signals: Option<&mut DaemonSignals>,
 ) -> ExecBoundaryError {
@@ -2624,7 +2627,7 @@ fn cross_boundary(
     if state.handoff_listeners != Some(held) {
         return ExecBoundaryError::ListenerMismatch;
     }
-    match boundary.plan(listeners, handed_off) {
+    match boundary.plan(listeners, handed_off, windows) {
         Ok(plan) => {
             let plan = arm_forward_exec(state, boundary, plan);
             // Held until the boundary returns. Without exec, a termination
@@ -10747,9 +10750,11 @@ struct ExecReady {
     hold: HandoffHold,
     captures: HandoffCaptures,
     boundary: Box<dyn ExecBoundaryInputs>,
-    /// The Windows that acknowledged their prepare frames. They are not yet
-    /// carried: no manifest records them, and their continuation ends close
-    /// at exec or when the attempt resumes (Plan 0061 M3.13b2 adds both).
+    /// The Windows that acknowledged their prepare frames, numbered densely
+    /// as the manifests record them. Exec inherits each one's pidfd and
+    /// continuation end at its recorded slots (Plan 0061 M3.13b2); when the
+    /// boundary returns, or the attempt is cancelled, dropping this closes
+    /// every continuation end.
     windows: handoff_windows::HandoffWindowParticipation,
 }
 
@@ -10801,12 +10806,14 @@ impl HandoffExit {
 trait ExecBoundaryInputs: Send {
     /// Binds every descriptor exec inherits to the slot and number the
     /// manifests record: both listeners serve returned, both manifest
-    /// memfds, the inherited sealed executables, and each handed-off
-    /// Splint's PTY master and checkpoint.
+    /// memfds, the inherited sealed executables, each handed-off Splint's
+    /// PTY master and checkpoint, and each carried Window's pidfd and
+    /// continuation end.
     fn plan<'a>(
         &'a self,
         listeners: &'a DaemonListeners,
         splints: &'a [HandedOffCapture],
+        windows: &'a [handoff_windows::CarriedWindow],
     ) -> Result<ExecInheritancePlan<'a>, ExecBoundaryError>;
 
     /// Each carried Splint's Dojo as the manifests record it.
@@ -10842,6 +10849,7 @@ impl ExecBoundaryInputs for ForwardExec {
         &'a self,
         listeners: &'a DaemonListeners,
         splints: &'a [HandedOffCapture],
+        windows: &'a [handoff_windows::CarriedWindow],
     ) -> Result<ExecInheritancePlan<'a>, ExecBoundaryError> {
         let snapshots = self.forward.snapshots();
         let mut owners = vec![
@@ -10864,6 +10872,7 @@ impl ExecBoundaryInputs for ForwardExec {
             ),
         ];
         owners.extend(splint_descriptors(splints));
+        owners.extend(window_descriptors(windows));
         ExecInheritancePlan::for_prepared(&self.manifests, &owners)
     }
 
@@ -10900,6 +10909,26 @@ impl ExecBoundaryInputs for ForwardExec {
     fn forward_daemon(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         Some(self.forward.snapshots().forward().daemon().descriptor())
     }
+}
+
+/// Each carried Window's pidfd and continuation end at its dense manifest
+/// slots. The forward and rollback manifests record the same Windows at the
+/// same slots, so a rollback inherits exactly these too.
+fn window_descriptors(
+    windows: &[handoff_windows::CarriedWindow],
+) -> impl Iterator<Item = HandoffDescriptor<'_>> {
+    windows.iter().flat_map(|window| {
+        [
+            HandoffDescriptor::new(
+                HandoffDescriptorSlot::ClientProcess(window.slot),
+                window.pidfd.as_fd(),
+            ),
+            HandoffDescriptor::new(
+                HandoffDescriptorSlot::Continuation(window.slot),
+                window.continuation.as_fd(),
+            ),
+        ]
+    })
 }
 
 /// Each handed-off Splint's PTY master and checkpoint at its manifest slot.
@@ -11341,7 +11370,7 @@ where
     };
     fence_for_handoff(attempt).await?;
     let windows = prepare_handoff_windows(state, &forward, initiator).await?;
-    let prepared = prepare_fenced_handoff(state, forward).await?;
+    let prepared = prepare_fenced_handoff(state, forward, &windows).await?;
     match prepared.into_exec() {
         Ok((captures, boundary)) => Ok(AttemptExec {
             captures,
@@ -11534,10 +11563,16 @@ async fn prepare_handoff_windows<F: ForwardPreparation>(
         windows = participating.len(),
         "daemon handoff: Windows acknowledged their prepare frames"
     );
-    Ok(handoff_windows::HandoffWindowParticipation::new(
-        participating,
-        attempt,
-    ))
+    let participation = handoff_windows::HandoffWindowParticipation::new(participating, attempt);
+    for window in &participation.windows {
+        info!(
+            slot = window.slot,
+            prompt_index = window.prompt_index,
+            pid = window.pid,
+            "daemon handoff: carrying a Window"
+        );
+    }
+    Ok(participation)
 }
 
 /// Numbers every anchor and then every undeclared process in this attempt,
@@ -11665,7 +11700,7 @@ fn participating_windows(windows: Vec<AttemptWindow>) -> Vec<handoff_windows::Pa
                 acknowledged: true,
                 sent: Some(true),
             } => Some(handoff_windows::ParticipatingWindow {
-                index: window.index,
+                prompt_index: window.index,
                 anchor_connection_id,
                 process,
                 continuation,
@@ -12004,6 +12039,7 @@ trait ForwardPreparation: Send + Sized + 'static {
         state: &DaemonState,
         topology: &Topology,
         captures: &HandoffCaptures,
+        windows: &ManifestWindowInputs<'_>,
     ) -> Result<Self::Manifests, HandoffCancelReason>;
 
     /// The exec boundary's inputs, or both parts back when this preparation
@@ -12035,6 +12071,7 @@ impl ForwardPreparation for ForwardHandoffAuthority {
         state: &DaemonState,
         topology: &Topology,
         captures: &HandoffCaptures,
+        windows: &ManifestWindowInputs<'_>,
     ) -> Result<PreparedManifests, HandoffCancelReason> {
         // Forward preparation already required retained rollback authority.
         let handoff_requests::RollbackAuthority::Retained { authority } = &*state.rollback_handoff
@@ -12050,6 +12087,8 @@ impl ForwardPreparation for ForwardHandoffAuthority {
             listeners,
             daemon_generation: state.daemon_generation,
             install_prefix: &state.install_prefix,
+            windows: &windows.windows,
+            held_controllers: &windows.held_controllers,
         };
         build_handoff_manifests(authority, self, captures, &inputs).map_err(|error| {
             warn!(%error, "handoff manifests could not be built");
@@ -12096,6 +12135,7 @@ impl ForwardPreparation for () {
         _: &DaemonState,
         _: &Topology,
         _: &HandoffCaptures,
+        _: &ManifestWindowInputs<'_>,
     ) -> Result<(), HandoffCancelReason> {
         Ok(())
     }
@@ -12114,6 +12154,7 @@ impl<T: Send + Sync + 'static> ForwardPreparation for Arc<T> {
         _: &DaemonState,
         _: &Topology,
         _: &HandoffCaptures,
+        _: &ManifestWindowInputs<'_>,
     ) -> Result<(), HandoffCancelReason> {
         Ok(())
     }
@@ -12139,6 +12180,7 @@ impl ForwardPreparation for ExecTestPreparation {
         _: &DaemonState,
         _: &Topology,
         _: &HandoffCaptures,
+        _: &ManifestWindowInputs<'_>,
     ) -> Result<(), HandoffCancelReason> {
         Ok(())
     }
@@ -12174,6 +12216,7 @@ impl ExecBoundaryInputs for TestExecInputs {
         &'a self,
         listeners: &'a DaemonListeners,
         splints: &'a [HandedOffCapture],
+        windows: &'a [handoff_windows::CarriedWindow],
     ) -> Result<ExecInheritancePlan<'a>, ExecBoundaryError> {
         let mut owners = vec![
             HandoffDescriptor::new(HandoffDescriptorSlot::Listener, listeners.listener.as_fd()),
@@ -12191,6 +12234,7 @@ impl ExecBoundaryInputs for TestExecInputs {
             ),
         ];
         owners.extend(splint_descriptors(splints));
+        owners.extend(window_descriptors(windows));
         let recorded = owners
             .iter()
             .map(|owner| (owner.slot(), owner.raw_fd()))
@@ -12266,6 +12310,7 @@ impl<F: ForwardPreparation> PreparedHandoff<F> {
 async fn prepare_fenced_handoff<F: ForwardPreparation>(
     state: &Arc<DaemonState>,
     forward: F,
+    windows: &handoff_windows::HandoffWindowParticipation,
 ) -> Result<PreparedHandoff<F>, HandoffCancelReason> {
     #[cfg(test)]
     if take_handoff_fault(state, HandoffFault::AfterFence) {
@@ -12300,7 +12345,7 @@ async fn prepare_fenced_handoff<F: ForwardPreparation>(
             warn!(%failure, "handoff capture cancelled");
             failure.cancel_reason()
         })?;
-    match build_fenced_manifests(state, &forward, &captures).await {
+    match build_fenced_manifests(state, &forward, &captures, windows).await {
         Ok(manifests) => {
             info!(
                 captured = captures.captured().len(),
@@ -12321,23 +12366,125 @@ async fn prepare_fenced_handoff<F: ForwardPreparation>(
     }
 }
 
-/// Builds the manifests from the Topology as the fence persisted it.
+/// Builds the manifests from the Topology as the fence persisted it, with
+/// the carried Windows and the controllers their old connections hold
+/// ([`manifest_window_inputs`]).
 async fn build_fenced_manifests<F: ForwardPreparation>(
     state: &DaemonState,
     forward: &F,
     captures: &HandoffCaptures,
+    windows: &handoff_windows::HandoffWindowParticipation,
 ) -> Result<F::Manifests, HandoffCancelReason> {
     #[cfg(test)]
     if take_handoff_fault(state, HandoffFault::AfterCapture) {
         return Err(HandoffCancelReason::Failed);
     }
-    let manifests = forward.build_manifests(state, &*state.topology.read().await, captures)?;
+    let windows = manifest_window_inputs(state, windows).await;
+    let manifests =
+        forward.build_manifests(state, &*state.topology.read().await, captures, &windows)?;
     #[cfg(test)]
     if take_handoff_fault(state, HandoffFault::ManifestValidation) {
         drop(manifests);
         return Err(HandoffCancelReason::Failed);
     }
     Ok(manifests)
+}
+
+/// The carried Windows as both manifests record them, and the controller
+/// leases their old connections hold (Plan 0061 M3.13b2).
+struct ManifestWindowInputs<'a> {
+    windows: Vec<ManifestWindowEvidence<'a>>,
+    held_controllers: Vec<HeldController>,
+}
+
+/// Each carried Window's manifest evidence: its pinned process, its
+/// executable at `Hello`, its descriptors, and its old connections, which
+/// are every trusted-UI connection the registry holds for that exact
+/// process (PID and start time) plus its anchor, so a Window never names a
+/// connection another process opened. Then the controller leases those
+/// connections hold ([`held_controllers`]).
+///
+/// # The controller snapshot
+///
+/// `ControllerState` is read once, here, under its lock, after capture and
+/// with the fence up. That one snapshot is what the manifests record, and
+/// it is sound for this reason: every request that acquires or moves a
+/// lease (`AcquireControl`, `RequestControlTransfer`,
+/// `DecideControlTransfer`, `ForceControlTransfer`, and consent's forced
+/// lease, which re-checks the fence before committing) is fenced, and the
+/// fence drained any such handler already in flight before it went up
+/// (`HandoffAdmission`, #164). So no lease can be acquired after the
+/// snapshot. What can still change `ControllerState` while the attempt runs
+/// only removes authority: `ReleaseControl` (admitted while fenced), a
+/// transfer timeout (`expire_transfer` ends a pending request and leaves
+/// the lease where it is), grant expiry or revocation (`release_grant`),
+/// a Splint exit, and disconnect cleanup (`release_connection`). A lease
+/// removed after the snapshot is therefore recorded as held at most, never
+/// the reverse, and the adopting daemon never grants from the record: it
+/// only keeps a placeholder that a valid resume claim must revalidate
+/// (M3.16). Grant-bound leases are never recorded (grants do not cross a
+/// handoff), so a grant expiring during capture cannot leave a stale
+/// `HeldBy` behind either.
+async fn manifest_window_inputs<'a>(
+    state: &DaemonState,
+    participation: &'a handoff_windows::HandoffWindowParticipation,
+) -> ManifestWindowInputs<'a> {
+    let windows = {
+        let registry = state.handoff_windows.lock().unwrap();
+        participation
+            .windows
+            .iter()
+            .map(|window| {
+                let mut old_connections =
+                    registry.process_connections(window.pid, Some(window.start_time));
+                if !old_connections.contains(&window.anchor_connection_id) {
+                    old_connections.push(window.anchor_connection_id);
+                }
+                ManifestWindowEvidence {
+                    pid: window.pid,
+                    start_time: window.start_time,
+                    client_device: window.executable.device,
+                    client_inode: window.executable.inode,
+                    old_connections,
+                    process: window.pidfd.as_fd(),
+                    continuation: window.continuation.as_fd(),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let connections = windows
+        .iter()
+        .flat_map(|window| window.old_connections.iter().copied())
+        .collect::<HashSet<_>>();
+    let held_controllers = held_controllers(&*state.controller.lock().await, &connections);
+    ManifestWindowInputs {
+        windows,
+        held_controllers,
+    }
+}
+
+/// The lease each of `connections` holds, if any, ascending by connection.
+/// A grant-bound lease is left out: its grant does not cross a handoff.
+fn held_controllers(
+    controllers: &ControllerState,
+    connections: &HashSet<u64>,
+) -> Vec<HeldController> {
+    let mut held = connections
+        .iter()
+        .filter_map(|connection| {
+            let lease = controllers
+                .by_connection
+                .get(connection)
+                .and_then(|controller_id| controllers.by_id.get(controller_id))?;
+            lease.grant_id.is_none().then_some(HeldController {
+                splint_id: lease.splint_id,
+                incarnation: lease.incarnation,
+                connection: lease.connection_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    held.sort_by_key(|lease| lease.connection);
+    held
 }
 
 #[cfg(not(test))]
@@ -21368,6 +21515,7 @@ mod tests {
             _: &DaemonState,
             _: &Topology,
             _: &HandoffCaptures,
+            _: &ManifestWindowInputs<'_>,
         ) -> Result<(), HandoffCancelReason> {
             Ok(())
         }
@@ -21998,10 +22146,14 @@ mod tests {
             panic!("exactly the one Window takes part");
         };
         assert_eq!(
-            (participant.index, participant.anchor_connection_id),
-            (0, 11)
+            (
+                participant.prompt_index,
+                participant.slot,
+                participant.anchor_connection_id
+            ),
+            (0, 0, 11)
         );
-        assert_eq!(participant.process.pid, process.pid());
+        assert_eq!(participant.pid, process.pid());
         assert!(rustix::net::sockopt::socket_passcred(&participant.continuation).unwrap());
         assert!(!continuation_closed(descriptors.continuation()));
         exec.cancel(HandoffCancelReason::Failed).await;
@@ -22302,7 +22454,7 @@ mod tests {
             .unwrap();
         let exec = take_exec_ready(&state, execute).await;
         assert_eq!(exec.windows.windows.len(), 1);
-        assert_eq!(exec.windows.windows[0].process.executable, ROLLBACK_CLIENT);
+        assert_eq!(exec.windows.windows[0].executable, ROLLBACK_CLIENT);
         exec.cancel(HandoffCancelReason::Failed).await;
         assert!(continuation_closed(descriptors.continuation()));
     }
@@ -22769,6 +22921,82 @@ mod tests {
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
     }
 
+    /// The manifests name each carried Window's old connections, its
+    /// trusted-UI connections from that exact process and its anchor, and
+    /// record a controller as held only for a lease one of them holds
+    /// without a consent grant, from one snapshot of `ControllerState`.
+    #[tokio::test]
+    async fn manifest_window_inputs_group_connections_and_snapshot_their_leases() {
+        let state = window_test_state();
+        let (window, other) = (TestWindowProcess::spawn(), TestWindowProcess::spawn());
+        let process = window.pinned(INSTALLED_CLIENT);
+        let other_process = other.pinned(INSTALLED_CLIENT);
+        {
+            let mut registry = state.handoff_windows.lock().unwrap();
+            for connection_id in [11, 13] {
+                registry.register_connection(connection_id, process.pid, process.start_time);
+            }
+            registry.register_connection(20, other_process.pid, other_process.start_time);
+        }
+        let (held, granted, foreign) = (SplintId::new(), SplintId::new(), SplintId::new());
+        {
+            let mut controllers = state.controller.lock().await;
+            controllers.acquire(13, held, 4, None).unwrap();
+            // A grant-bound lease ends with its grant, which never crosses.
+            controllers.acquire(11, granted, 5, Some(77)).unwrap();
+            // Another process's connection is never the Window's.
+            controllers.acquire(20, foreign, 6, None).unwrap();
+        }
+        let (attempt, _, _) = handoff_windows::begin_attempt(&state.handoff_windows);
+        let (continuation, _client) = rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::SEQPACKET,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let participation = handoff_windows::HandoffWindowParticipation::new(
+            vec![handoff_windows::ParticipatingWindow {
+                prompt_index: 1,
+                anchor_connection_id: 11,
+                process: process.clone(),
+                continuation,
+            }],
+            attempt,
+        );
+        let [carried] = participation.windows.as_slice() else {
+            panic!("the one participant is carried");
+        };
+        assert_eq!((carried.prompt_index, carried.slot), (1, 0));
+        let inputs = manifest_window_inputs(&state, &participation).await;
+        let [evidence] = inputs.windows.as_slice() else {
+            panic!("one Window's evidence");
+        };
+        assert_eq!(evidence.pid, process.pid);
+        assert_eq!(Some(evidence.start_time), process.start_time);
+        assert_eq!(
+            (evidence.client_device, evidence.client_inode),
+            (INSTALLED_CLIENT.device, INSTALLED_CLIENT.inode)
+        );
+        assert_eq!(evidence.old_connections, [11, 13]);
+        assert_eq!(
+            inputs.held_controllers,
+            [HeldController {
+                splint_id: held,
+                incarnation: 4,
+                connection: 13,
+            }]
+        );
+        // A lease released later is not in a later snapshot. The attempt
+        // takes exactly one, so a lease released after it is recorded as
+        // held at most, never the reverse, and the adopting daemon grants
+        // nothing from the record (M3.16 revalidates a claim).
+        let lease = state.controller.lock().await.release_connection(13);
+        assert!(lease.is_some());
+        let inputs = manifest_window_inputs(&state, &participation).await;
+        assert!(inputs.held_controllers.is_empty());
+    }
+
     #[tokio::test]
     async fn a_congested_anchor_does_not_starve_the_anchors_after_it() {
         let state = window_test_state();
@@ -22821,6 +23049,9 @@ mod tests {
             panic!("only the healthy anchor takes part");
         };
         assert_eq!(participant.anchor_connection_id, 12);
+        // The prompt numbered it 1 after the dropped Window; the manifests
+        // number the carried Windows densely, so it is slot 0.
+        assert_eq!((participant.prompt_index, participant.slot), (1, 0));
         exec.cancel(HandoffCancelReason::Failed).await;
         assert!(continuation_closed(descriptors.continuation()));
     }
