@@ -72,6 +72,38 @@ class BuildContractTests(unittest.TestCase):
         ):
             remote.build_preflight(host(Path("/tmp/test")))
 
+    def test_invalid_manifest_options_fail_task_validation(self):
+        for arguments in (
+            ["--manifest-path"],
+            ["--manifest-path="],
+            ["--manifest-path", "--locked"],
+            ["--manifest-path", "--", "test-filter"],
+            ["--manifest-path", "fuzz/Cargo.toml", "--manifest-path=other/Cargo.toml"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                self.assertRaisesRegex(ValueError, "manifest-path"),
+            ):
+                remote.validate_task(
+                    {**build_task(), "commands": [["cargo", "check", *arguments]]}
+                )
+
+    def test_manifest_parser_accepts_both_forms_and_stops_at_delimiter(self):
+        for arguments in (
+            ["--manifest-path", "fuzz/Cargo.toml"],
+            ["--manifest-path=fuzz/Cargo.toml"],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    remote.cargo_manifest(["cargo", "test", *arguments]),
+                    "fuzz/Cargo.toml",
+                )
+        self.assertIsNone(
+            remote.cargo_manifest(
+                ["cargo", "test", "--", "--manifest-path=not-a-cargo-option"]
+            )
+        )
+
     def test_sandbox_has_no_host_root_home_runtime_or_env(self):
         argv = remote.sandbox_base()
         self.assertIn("--unshare-all", argv)
@@ -232,6 +264,94 @@ class BuildExecutionTests(unittest.TestCase):
             hashlib.sha256(b"compiler output\n").hexdigest(),
         )
         self.assertEqual(remote.read_json(job / "checks.json")["state"], "passed")
+
+    def test_manifest_path_value_is_prefetched_before_offline_check(self):
+        result, calls, _ = self.run_checks(
+            [0, 0],
+            commands=[["cargo", "test", "--manifest-path", "fuzz/Cargo.toml"]],
+        )
+        self.assertEqual(result["state"], "passed")
+        self.assertEqual(
+            result["checks"][0]["argv"],
+            ["/usr/bin/cargo", "fetch", "--locked", "--manifest-path=fuzz/Cargo.toml"],
+        )
+        self.assertIn("--share-net", calls[0])
+        self.assertNotIn("--share-net", calls[1])
+        self.assertEqual(calls[1][-2:], ["--manifest-path", "fuzz/Cargo.toml"])
+
+    def test_manifest_path_equals_is_prefetched_before_offline_check(self):
+        result, calls, _ = self.run_checks(
+            [0, 0],
+            commands=[["cargo", "check", "--manifest-path=fuzz/Cargo.toml"]],
+        )
+        self.assertEqual(result["state"], "passed")
+        self.assertEqual(
+            result["checks"][0]["argv"],
+            ["/usr/bin/cargo", "fetch", "--locked", "--manifest-path=fuzz/Cargo.toml"],
+        )
+        self.assertNotIn("--share-net", calls[1])
+        self.assertEqual(calls[1][-1], "--manifest-path=fuzz/Cargo.toml")
+
+    def test_fetches_each_non_fmt_manifest_once_including_default(self):
+        result, _, _ = self.run_checks(
+            [0] * 8,
+            commands=[
+                ["cargo", "fmt", "--manifest-path=fmt-only/Cargo.toml", "--check"],
+                ["cargo", "check"],
+                ["cargo", "test", "--manifest-path", "fuzz/Cargo.toml"],
+                ["cargo", "clippy", "--manifest-path=fuzz/Cargo.toml"],
+                ["cargo", "check", "--manifest-path=tools/Cargo.toml"],
+            ],
+        )
+        self.assertEqual(result["state"], "passed")
+        self.assertEqual(result["planned_checks"], 8)
+        fetches = [r["argv"] for r in result["checks"] if r["network"]]
+        self.assertEqual(
+            fetches,
+            [
+                ["/usr/bin/cargo", "fetch", "--locked"],
+                [
+                    "/usr/bin/cargo",
+                    "fetch",
+                    "--locked",
+                    "--manifest-path=fuzz/Cargo.toml",
+                ],
+                [
+                    "/usr/bin/cargo",
+                    "fetch",
+                    "--locked",
+                    "--manifest-path=tools/Cargo.toml",
+                ],
+            ],
+        )
+        self.assertEqual(
+            [r["network"] for r in result["checks"]], [True] * 3 + [False] * 5
+        )
+
+    def test_test_arguments_do_not_select_a_fetch_manifest(self):
+        result, calls, _ = self.run_checks(
+            [0, 0],
+            commands=[["cargo", "test", "--", "--manifest-path=not-a-cargo-option"]],
+        )
+        self.assertEqual(result["state"], "passed")
+        self.assertEqual(
+            result["checks"][0]["argv"], ["/usr/bin/cargo", "fetch", "--locked"]
+        )
+        self.assertEqual(calls[1][-2:], ["--", "--manifest-path=not-a-cargo-option"])
+        self.assertNotIn("--share-net", calls[1])
+
+    def test_failed_additional_manifest_fetch_stops_all_compilation(self):
+        result, _, _ = self.run_checks(
+            [0, 1],
+            commands=[
+                ["cargo", "check"],
+                ["cargo", "test", "--manifest-path=fuzz/Cargo.toml"],
+            ],
+        )
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["planned_checks"], 4)
+        self.assertEqual(len(result["checks"]), 2)
+        self.assertTrue(all(record["network"] for record in result["checks"]))
 
     def test_failed_fetch_stops_before_compilation(self):
         result, calls, _ = self.run_checks([1])

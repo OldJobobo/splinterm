@@ -182,9 +182,13 @@ tools/agents/remote --host wintermute-build result protocol-check-01
 ```
 
 The runner—not the model—executes the declared commands. It first runs
-`cargo fetch --locked` in a credential-free, network-enabled namespace when
-needed. Fetching dependencies does **not** install host packages. It then runs
-Cargo checks with enforced `--locked --offline` flags and a disconnected network
+`cargo fetch --locked` in a credential-free, network-enabled namespace for each
+distinct manifest used by non-format commands. Both `--manifest-path PATH` and
+`--manifest-path=PATH` select that manifest; commands without the option fetch the
+root workspace. Arguments after `--` are not interpreted as Cargo options.
+Missing, empty, or repeated manifest options are rejected before dispatch.
+Fetching dependencies does **not** install host packages. It then runs Cargo
+checks with enforced `--locked --offline` flags and a disconnected network
 namespace. Formatting runs skip dependency fetching and require `--check`.
 
 Build processes see a read-only source checkout and system toolchain/libraries,

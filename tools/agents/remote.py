@@ -124,6 +124,29 @@ def validate_host(host):
     return host
 
 
+def cargo_manifest(argv):
+    """Select only Cargo's manifest option, not arguments after the delimiter."""
+    manifest = None
+    arguments = iter(argv[2:])
+    for argument in arguments:
+        if argument == "--":
+            break
+        if argument == "--manifest-path":
+            value = next(arguments, None)
+            if value is None or value.startswith("-"):
+                raise ValueError("--manifest-path requires a path")
+        elif argument.startswith("--manifest-path="):
+            value = argument.split("=", 1)[1]
+        else:
+            continue
+        if not value:
+            raise ValueError("--manifest-path requires a path")
+        if manifest is not None:
+            raise ValueError("only one --manifest-path per Cargo command")
+        manifest = value
+    return manifest
+
+
 def validate_task(task):
     fields = {
         "id",
@@ -164,6 +187,7 @@ def validate_task(task):
                 raise ValueError("only cargo build/check/test/clippy/fmt are enabled")
             if argv[1] == "fmt" and "--check" not in argv:
                 raise ValueError("cargo fmt requires --check; sources are read-only")
+            cargo_manifest(argv)
     if task["authority"] not in ("main", "maint/0.1"):
         raise ValueError("authority must be main or maint/0.1")
     if not isinstance(task["base_commit"], str) or not re.fullmatch(
@@ -698,8 +722,17 @@ def execute_checks(host, task, workspace, job, deadline):
     for name in ("checks", "build-output", "build-cache"):
         private_directory(job / name, create=True)
     commands = []
-    if any(argv[1] != "fmt" for argv in task["commands"]):
-        commands.append((["/usr/bin/cargo", "fetch", "--locked"], True))
+    fetched = set()
+    for argv in task["commands"]:
+        if argv[1] == "fmt":
+            continue
+        manifest = cargo_manifest(argv)
+        if manifest not in fetched:
+            fetch = ["/usr/bin/cargo", "fetch", "--locked"]
+            if manifest is not None:
+                fetch.append(f"--manifest-path={manifest}")
+            commands.append((fetch, True))
+            fetched.add(manifest)
     for argv in task["commands"]:
         enforced = [] if argv[1] == "fmt" else ["--locked", "--offline"]
         commands.append((["/usr/bin/cargo", argv[1], *enforced, *argv[2:]], False))
