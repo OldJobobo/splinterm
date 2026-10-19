@@ -116,6 +116,18 @@
 //!   scope systemd refuses to hand over (`WorkloadScope`), for as long as
 //!   that session state persists.
 //!
+//! A carried Window's descriptors are the one exception the rollback side
+//! degrades instead of refusing. A forward candidate refuses a Window whose
+//! pidfd is not a pidfd, pins a live process other than the recorded one,
+//! or cannot be inspected, or whose continuation end is not a credentialed
+//! Unix `SOCK_SEQPACKET` socket (`DescriptorRole`, `WindowIdentity`,
+//! `Descriptor`), and rolls back as for any invalid descriptor. The
+//! rollback daemon would refuse the same descriptors the same way, and
+//! ending it would hang up every carried Splint over one Window, so a
+//! rollback generation logs the refusal and drops that Window instead: its
+//! owners stay held until commit closes them, and it gets no outcome and
+//! no controller placeholder (`candidate_bootstrap::window_verdict`).
+//!
 //! A transient condition (a single failed systemd call, a failed task, a
 //! runtime that could not be built) can succeed on the second attempt. A
 //! deterministic one cannot. The Plan 0061 M3.17 proofs and VM acceptance
@@ -555,7 +567,7 @@ fn require_rolling_back(lifecycle: &HandoffLifecycle) -> Result<(), RollbackErro
     }
 }
 
-fn staged_owners(
+pub(crate) fn staged_owners(
     authorities: &CandidateStagedAuthorities,
 ) -> Result<Vec<HandoffDescriptor<'_>>, RollbackError> {
     let manifest = &authorities.manifest;
@@ -598,6 +610,18 @@ fn staged_owners(
         let checkpoint = terminal_checkpoint_slot(&splint.evidence)
             .map_err(|error| RollbackError::RollbackManifest(error.to_string()))?;
         owners.push(owner(checkpoint, splint.checkpoint_descriptor.as_fd()));
+    }
+    // Every carried Window, an exited one included: staging dropped it
+    // logically but kept its owners, which the rollback manifest records.
+    for window in &authorities.windows {
+        owners.push(owner(
+            HandoffDescriptorSlot::ClientProcess(window.record.index),
+            window.process.as_fd(),
+        ));
+        owners.push(owner(
+            HandoffDescriptorSlot::Continuation(window.record.index),
+            window.continuation.as_fd(),
+        ));
     }
     Ok(owners)
 }

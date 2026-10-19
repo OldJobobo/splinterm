@@ -3,6 +3,7 @@
 //! Terminal DTOs in this crate are intentionally distinct from the borrowed
 //! `splinterm-terminal` and daemon runtime representations.
 
+pub mod handoff_outcome;
 pub mod handoff_prepare;
 pub mod perf_trace;
 

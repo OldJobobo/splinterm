@@ -39,6 +39,7 @@ use splinterm_protocol::{
     HandoffWindowDojo, MAX_HANDOFF_DOJO_NAME_BYTES, MAX_HANDOFF_WINDOW_DOJOS, MAX_HANDOFF_WINDOWS,
 };
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::ControlFrame;
 
@@ -446,6 +447,19 @@ impl HandoffWindows {
         }
     }
 
+    /// Every trusted-UI connection registered for the process, ascending:
+    /// the old connections a carried Window's manifest record names.
+    pub(crate) fn process_connections(&self, pid: u32, start_time: Option<u64>) -> Vec<u64> {
+        let mut connections = self
+            .connections
+            .iter()
+            .filter(|(_, connection)| connection.is_process(pid, start_time))
+            .map(|(&connection_id, _)| connection_id)
+            .collect::<Vec<_>>();
+        connections.sort_unstable();
+        connections
+    }
+
     /// Every Splint the process's trusted-UI connections are attached to.
     pub(crate) fn attached_splints(&self, pid: u32, start_time: Option<u64>) -> HashSet<SplintId> {
         self.connections
@@ -528,16 +542,9 @@ impl Drop for WindowAttachment {
 }
 
 /// One Window that acknowledged its prepare frame and stays in the attempt.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Plan 0061 M3.13b2 records these in the manifests and carries them across exec"
-    )
-)]
 pub(crate) struct ParticipatingWindow {
     /// The Window's index in this attempt's prompt numbering.
-    pub(crate) index: u8,
+    pub(crate) prompt_index: u8,
     pub(crate) anchor_connection_id: u64,
     pub(crate) process: WindowProcess,
     /// The daemon end of the Window's continuation channel. Dropping it ends
@@ -545,25 +552,79 @@ pub(crate) struct ParticipatingWindow {
     pub(crate) continuation: OwnedFd,
 }
 
-/// The Windows one attempt keeps, with its mark on the registry.
+/// One Window the attempt carries across exec (Plan 0061 M3.13b2): what its
+/// manifest record names, and the two descriptors exec inherits for it.
+pub(crate) struct CarriedWindow {
+    /// The Window's dense manifest index, from 0 in prompt order over the
+    /// carried Windows only: its descriptors are inherited at
+    /// `ClientProcess(slot)` and `Continuation(slot)`. A prompt index also
+    /// counts Windows dropped by a decision and is never used as a slot.
+    pub(crate) slot: u8,
+    /// The Window's index in the attempt's prompt numbering, for diagnostics.
+    pub(crate) prompt_index: u8,
+    pub(crate) anchor_connection_id: u64,
+    pub(crate) pid: u32,
+    pub(crate) start_time: u64,
+    /// The file the process executed at `Hello`.
+    pub(crate) executable: FileIdentity,
+    /// The anchor's pidfd, shared with the registry's record of it.
+    pub(crate) pidfd: Arc<OwnedFd>,
+    /// The daemon end of the Window's continuation channel.
+    pub(crate) continuation: OwnedFd,
+}
+
+/// The Windows one attempt carries, with its mark on the registry.
 ///
-/// Dropping it, on any cancel or when the attempt otherwise ends, closes
-/// every daemon end, so each Window reads end of file without an outcome and
-/// knows the attempt ended. Manifest records and the exec carry come with
-/// Plan 0061 M3.13b2.
+/// Dropping it, on any cancel, when the exec boundary returns, or when the
+/// attempt otherwise ends, closes every daemon end, so each Window reads end
+/// of file without an outcome and knows the attempt ended. A successful exec
+/// instead carries each Window's pidfd and continuation end to the adopting
+/// daemon, which sends the outcome.
 pub(crate) struct HandoffWindowParticipation {
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Plan 0061 M3.13b2 carries these across exec")
-    )]
-    pub(crate) windows: Vec<ParticipatingWindow>,
+    pub(crate) windows: Vec<CarriedWindow>,
     _attempt: WindowAttempt,
 }
 
 impl HandoffWindowParticipation {
-    pub(crate) fn new(windows: Vec<ParticipatingWindow>, attempt: WindowAttempt) -> Self {
+    /// Numbers the participating Windows densely from 0 in prompt order.
+    /// A participant always passed its pin check, so it has a pidfd and a
+    /// start time; one without either could not be carried and is dropped,
+    /// which closes its continuation channel.
+    pub(crate) fn new(mut windows: Vec<ParticipatingWindow>, attempt: WindowAttempt) -> Self {
+        windows.sort_by_key(|window| window.prompt_index);
+        let mut carried = Vec::with_capacity(windows.len());
+        for window in windows {
+            let ParticipatingWindow {
+                prompt_index,
+                anchor_connection_id,
+                process,
+                continuation,
+            } = window;
+            let (Some(pidfd), Some(start_time)) = (process.pidfd, process.start_time) else {
+                warn!(
+                    prompt_index,
+                    pid = process.pid,
+                    "a participating Window is not pinned and cannot be carried"
+                );
+                continue;
+            };
+            // At most `MAX_HANDOFF_WINDOWS` anchors take part.
+            let Ok(slot) = u8::try_from(carried.len()) else {
+                continue;
+            };
+            carried.push(CarriedWindow {
+                slot,
+                prompt_index,
+                anchor_connection_id,
+                pid: process.pid,
+                start_time,
+                executable: process.executable,
+                pidfd,
+                continuation,
+            });
+        }
         Self {
-            windows,
+            windows: carried,
             _attempt: attempt,
         }
     }

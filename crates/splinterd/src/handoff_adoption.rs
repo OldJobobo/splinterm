@@ -76,6 +76,7 @@ use rustix::{
 };
 use splinterm_core::{DojoId, LairId, LayoutNode, SplintId, SplintState, Topology};
 use splinterm_policy::policy::{self, PolicyGeneration, PolicyStore};
+use splinterm_protocol::handoff_outcome::{HandoffOutcome, HandoffOutcomeKind};
 use splinterm_pty::AdoptableLinuxPtySession;
 use splinterm_terminal::Terminal;
 use thiserror::Error;
@@ -89,7 +90,7 @@ use crate::{
     ProcessPlacement, StagedLiveSplint,
     candidate_bootstrap::{
         CandidateRuntimeStage, CandidateSplintStage, CandidateStagedAuthorities,
-        require_unix_stream_listener,
+        CandidateWindowStage, require_unix_stream_listener,
     },
     cgroup::{
         ActiveWorkloadScope, DojoSliceReclaim, RetainedWorkloadScope, WorkloadUnitError,
@@ -101,6 +102,9 @@ use crate::{
         ExitDisposition, HandoffManifestV1, ManifestExcludedSplint, ManifestKind, ManifestSplint,
     },
     handoff_prepare::ListenerDescriptors,
+    handoff_window_carry::{
+        HANDOFF_WINDOW_RESUME_HOLD, HandoffWindowHold, WindowAnnouncement, announce_and_hold,
+    },
     install_prefix::{CLIENT_EXECUTABLE, DAEMON_EXECUTABLE, InstallPrefix, InstallPrefixError},
 };
 
@@ -439,6 +443,14 @@ pub struct CommittedAdoption {
     /// slice empties.
     pub unreclaimed_slices: Vec<DojoId>,
     pub closed_unexpected: usize,
+    /// The carried Windows this daemon sent its outcome and holds for their
+    /// resume claims, with the controllers their old connections held at
+    /// the fence, until [`HANDOFF_WINDOW_RESUME_HOLD`] passes (Plan 0061
+    /// M3.13c). No controller is granted from them before a valid claim
+    /// (M3.16).
+    pub windows: HandoffWindowHold,
+    /// What commit did with each carried Window.
+    pub window_announcement: WindowAnnouncement,
     /// The Splints the previous generation excluded from capture; see
     /// [`Self::finalize_excluded_splints`].
     excluded_splints: Vec<ManifestExcludedSplint>,
@@ -750,6 +762,8 @@ struct AdoptionShell {
     lifecycle: HandoffLifecycle,
     manifest: HandoffManifestV1,
     counterpart_manifest: HandoffManifestV1,
+    /// Every carried Window, live or exited, held until commit.
+    windows: Vec<CandidateWindowStage>,
     listener: OwnedFd,
     image_listener: OwnedFd,
     current_manifest_descriptor: OwnedFd,
@@ -768,6 +782,7 @@ impl AdoptionShell {
             manifest,
             counterpart_manifest,
             splints,
+            windows,
             listener,
             image_listener,
             current_manifest_descriptor,
@@ -782,6 +797,7 @@ impl AdoptionShell {
                 lifecycle,
                 manifest,
                 counterpart_manifest,
+                windows,
                 listener,
                 image_listener,
                 current_manifest_descriptor,
@@ -813,6 +829,7 @@ impl AdoptionShell {
                     manifest: self.manifest,
                     counterpart_manifest: self.counterpart_manifest,
                     splints,
+                    windows: self.windows,
                     listener: self.listener,
                     image_listener: self.image_listener,
                     current_manifest_descriptor: self.current_manifest_descriptor,
@@ -1482,11 +1499,18 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
     }
 
     /// Commits the adoption: starts every staged actor, which opens its read
-    /// gate, and releases the rollback-only descriptors.
+    /// gate, and releases the rollback-only descriptors. Then, and only then,
+    /// each carried Window staging found live is sent one outcome on its
+    /// continuation channel (`Adopted` from a forward daemon, `RolledBack`
+    /// from the rollback daemon, with the generation this daemon serves) and
+    /// held for its resume claim; an exited one, kept only so a rollback
+    /// would find every recorded owner, is closed
+    /// ([`crate::handoff_window_carry`]).
     ///
     /// Nothing here can fail or panic: each actor starts on the runtime that
-    /// staged it, entered explicitly, and the lifecycle edge from the staged
-    /// phase to committed is always valid. This is the last step before the
+    /// staged it, entered explicitly, the lifecycle edge from the staged
+    /// phase to committed is always valid, and a Window that cannot be
+    /// announced is dropped rather than failing the commit. This is the last step before the
     /// first post-checkpoint PTY read; after it, no cooperative rollback is
     /// permitted.
     #[must_use]
@@ -1502,6 +1526,7 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             mut lifecycle,
             manifest,
             counterpart_manifest,
+            windows,
             listener,
             image_listener,
             current_manifest_descriptor,
@@ -1548,6 +1573,22 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             inode: image.source_inode,
             sha256: image.source_sha256,
         };
+        // After commit only: every live carried Window learns the outcome,
+        // and staging's exited ones close now that no rollback can need
+        // their owners.
+        let outcome = HandoffOutcome {
+            kind: match manifest.kind {
+                ManifestKind::Forward => HandoffOutcomeKind::Adopted,
+                ManifestKind::Rollback => HandoffOutcomeKind::RolledBack,
+            },
+            daemon_generation: manifest.target_daemon_generation,
+        };
+        let (windows, window_announcement) = announce_and_hold(
+            windows,
+            &manifest.splints,
+            outcome,
+            HANDOFF_WINDOW_RESUME_HOLD,
+        );
         CommittedAdoption {
             handoff_id: manifest.handoff_id.bytes(),
             rollback: manifest.kind == ManifestKind::Rollback,
@@ -1568,6 +1609,8 @@ impl<S: ProcessPlacement> StagedAdoption<S> {
             reclaimed_slices: prepared.reclaimed_slices,
             unreclaimed_slices: prepared.unreclaimed_slices,
             closed_unexpected,
+            windows,
+            window_announcement,
             excluded_splints: manifest.excluded_splints,
             lifecycle,
         }
@@ -1616,6 +1659,8 @@ mod tests {
     use tokio::time;
 
     use super::*;
+    use crate::handoff_manifest::ControllerDisposition;
+    use crate::handoff_window_carry::assert_end_of_file;
     use crate::{
         HandedOffSplint, LiveSplintHandle,
         candidate_bootstrap::{CandidateBootstrapError, RuntimeStageForTest},
@@ -1744,6 +1789,38 @@ mod tests {
         listener.into()
     }
 
+    /// Records each Window in `manifest` with its two slots at its owners'
+    /// numbers, and returns the owners in manifest order.
+    fn add_windows(
+        manifest: &mut HandoffManifestV1,
+        windows: Vec<WindowFixture>,
+    ) -> Vec<(OwnedFd, OwnedFd)> {
+        let mut owners = Vec::with_capacity(windows.len());
+        for window in windows {
+            for (slot, owner) in [
+                (
+                    HandoffDescriptorSlot::ClientProcess(window.record.index),
+                    &window.process,
+                ),
+                (
+                    HandoffDescriptorSlot::Continuation(window.record.index),
+                    &window.continuation,
+                ),
+            ] {
+                manifest
+                    .descriptors
+                    .push(crate::handoff_manifest::ManifestDescriptor {
+                        slot,
+                        inherited_fd: u32::try_from(owner.as_raw_fd()).unwrap(),
+                    });
+            }
+            manifest.windows.push(window.record);
+            owners.push((window.process, window.continuation));
+        }
+        manifest.descriptors.sort_by_key(|entry| entry.slot);
+        owners
+    }
+
     /// Removes and returns the entry for `slot`.
     fn take_slot<T>(entries: &mut Vec<(u16, T)>, slot: u16) -> T {
         let index = entries.iter().position(|(s, _)| *s == slot).unwrap();
@@ -1757,7 +1834,7 @@ mod tests {
             scripts: &[&str],
             before_staging: impl FnOnce(&[(u16, HandedOffSplint)], &mut HandoffManifestV1),
         ) -> Self {
-            match Self::try_new(scripts, before_staging).await {
+            match Self::try_new(scripts, Vec::new(), before_staging).await {
                 Ok(harness) => harness,
                 Err((error, _)) => panic!("staging refused the harness candidate: {error}"),
             }
@@ -1767,6 +1844,7 @@ mod tests {
         /// (whose children the refusal hung up) instead of panicking.
         async fn try_new(
             scripts: &[&str],
+            windows: Vec<WindowFixture>,
             before_staging: impl FnOnce(&[(u16, HandedOffSplint)], &mut HandoffManifestV1),
         ) -> Result<Self, (CandidateBootstrapError, HandoffManifestV1)> {
             static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -1787,6 +1865,7 @@ mod tests {
             )
             .await;
             let mut manifest = old.forward.clone();
+            let window_owners = add_windows(&mut manifest, windows);
             let mut handed_off = Vec::new();
             let mut checkpoints = Vec::new();
             for (slot, splint, checkpoint) in std::mem::take(&mut old.handed_off) {
@@ -1817,6 +1896,7 @@ mod tests {
                     manifest: manifest.clone(),
                     counterpart_manifest: old.rollback.clone(),
                     splints,
+                    windows: window_owners,
                     listener: listener_fd,
                     image_listener: image_listener_fd,
                     current_manifest_descriptor: duplicate(&old.forward_storage),
@@ -1903,6 +1983,296 @@ mod tests {
     }
 
     fn no_change(_: &[(u16, HandedOffSplint)], _: &mut HandoffManifestV1) {}
+
+    /// One carried Window as the harness candidate inherits it: its manifest
+    /// record, its pidfd, and the daemon end of its continuation channel.
+    struct WindowFixture {
+        record: crate::handoff_manifest::ManifestWindow,
+        process: OwnedFd,
+        continuation: OwnedFd,
+    }
+
+    /// A stand-in Window process and the client end of its continuation
+    /// channel. Dropping it kills and reaps the process.
+    struct TestWindow {
+        child: std::process::Child,
+        client: OwnedFd,
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    impl TestWindow {
+        /// What the client end reads now: `Some(packet)`, an empty packet
+        /// for end of file, or `None` while the channel is open and empty.
+        fn read(&self) -> Option<Vec<u8>> {
+            read_continuation(&self.client)
+        }
+    }
+
+    fn read_continuation(client: &OwnedFd) -> Option<Vec<u8>> {
+        let mut buffer = [0_u8; 64];
+        match rustix::net::recv(client, &mut buffer, rustix::net::RecvFlags::DONTWAIT) {
+            Ok((read, _)) => Some(buffer[..read].to_vec()),
+            Err(rustix::io::Errno::AGAIN) => None,
+            Err(error) => panic!("continuation read failed: {error}"),
+        }
+    }
+
+    /// A live stand-in Window `index` with `connections`, as the old
+    /// generation would carry it.
+    fn test_window(index: u8, connections: &[u64]) -> (TestWindow, WindowFixture) {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let process = rustix::process::pidfd_open(
+            Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let (continuation, client) = rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::SEQPACKET,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        rustix::net::sockopt::set_socket_passcred(&continuation, true).unwrap();
+        let record = crate::handoff_manifest::ManifestWindow {
+            index,
+            pid,
+            start_time: crate::handoff_window_carry::process_start_time(pid).unwrap(),
+            client_device: 1,
+            client_inode: 2,
+            old_connections: connections.to_vec(),
+        };
+        (
+            TestWindow { child, client },
+            WindowFixture {
+                record,
+                process,
+                continuation,
+            },
+        )
+    }
+
+    /// A stand-in Window whose process exited, and was reaped, after the old
+    /// generation recorded it.
+    fn exited_window(index: u8, connections: &[u64]) -> (TestWindow, WindowFixture) {
+        let (mut window, fixture) = test_window(index, connections);
+        window.child.kill().unwrap();
+        window.child.wait().unwrap();
+        (window, fixture)
+    }
+
+    /// After commit, every live carried Window reads exactly one `Adopted`
+    /// outcome naming the new generation and is held with the controller
+    /// its connection held; a Window whose process exited before staging
+    /// is dropped without rollback, its owners kept until commit and closed
+    /// by it, and sent nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commit_announces_adopted_to_live_windows_and_closes_exited_ones() {
+        let (live, live_fixture) = test_window(0, &[7, 8]);
+        let (exited, exited_fixture) = exited_window(1, &[9]);
+        let mut harness = Harness::try_new(
+            &[CAT, CAT],
+            vec![live_fixture, exited_fixture],
+            |_, manifest| {
+                manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                    window: 0,
+                    connection: 8,
+                };
+                // A dropped Window's controller is never restored.
+                manifest.splints[1].controller = ControllerDisposition::HeldBy {
+                    window: 1,
+                    connection: 9,
+                };
+            },
+        )
+        .await
+        .map_err(|(error, _)| error)
+        .unwrap();
+        let staged = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap();
+        // Nothing is sent before commit, and the exited Window's owners are
+        // still held for a rollback.
+        assert_eq!(live.read(), None);
+        assert_eq!(exited.read(), None);
+        let committed = staged.commit();
+        assert_eq!(
+            committed.window_announcement,
+            WindowAnnouncement {
+                announced: 1,
+                exited: 1,
+                unsent: 0,
+                placeholders: 1,
+            }
+        );
+        let packet = live.read().unwrap();
+        assert_eq!(
+            HandoffOutcome::decode(&packet),
+            Ok(HandoffOutcome {
+                kind: HandoffOutcomeKind::Adopted,
+                daemon_generation: 2,
+            })
+        );
+        assert_eq!(live.read(), None, "exactly one outcome");
+        // Closed at commit, unannounced.
+        assert_end_of_file(&exited.client);
+        assert!(committed.windows.is_held());
+        assert_eq!(committed.windows.window_count(), 1);
+        assert_eq!(
+            committed.windows.placeholders(),
+            [crate::handoff_window_carry::ControllerPlaceholder {
+                splint_id: harness.manifest.splints[0].splint_id,
+                incarnation: harness.manifest.splints[0].incarnation,
+                window: 0,
+                connection: 8,
+            }]
+        );
+        committed.windows.release();
+        assert_end_of_file(&live.client);
+        shut_down(committed).await;
+    }
+
+    /// The rollback generation sends `RolledBack` instead, after its own
+    /// commit, with the generation it serves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rollback_commit_announces_rolled_back() {
+        let (window, fixture) = test_window(0, &[3]);
+        let mut harness = Harness::try_new(&[CAT], vec![fixture], |_, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+        })
+        .await
+        .map_err(|(error, _)| error)
+        .unwrap();
+        let committed = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap()
+            .commit();
+        assert!(committed.rollback);
+        assert_eq!(
+            HandoffOutcome::decode(&window.read().unwrap()),
+            Ok(HandoffOutcome {
+                kind: HandoffOutcomeKind::RolledBack,
+                daemon_generation: harness.manifest.target_daemon_generation,
+            })
+        );
+        assert_eq!(committed.window_announcement.announced, 1);
+        assert!(committed.windows.placeholders().is_empty());
+        committed.windows.release();
+        shut_down(committed).await;
+    }
+
+    /// A Window a forward candidate refuses (here a live process that is
+    /// not the recorded one) fails its staging, so it rolls back. The
+    /// rollback generation refuses the same Window the same way, but drops
+    /// it instead: it adopts every Splint, and the Window gets no outcome
+    /// and its channel closes at commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rollback_generation_drops_a_window_it_refuses_and_carries_every_splint() {
+        let mismatched = |index| {
+            let (window, mut fixture) = test_window(index, &[6]);
+            fixture.record.start_time += 1;
+            (window, fixture)
+        };
+        let (_forward_window, fixture) = mismatched(0);
+        let refused = Harness::try_new(&[CAT], vec![fixture], no_change).await;
+        let Err((error, manifest)) = refused else {
+            panic!("a forward candidate must refuse a mismatched Window");
+        };
+        assert!(
+            matches!(
+                error,
+                CandidateBootstrapError::WindowIdentity(HandoffDescriptorSlot::ClientProcess(0))
+            ),
+            "{error}"
+        );
+        // The refusal dropped the staged PTYs; reap the hung-up children.
+        reap_hung_up(&manifest);
+
+        let (window, fixture) = mismatched(0);
+        let mut harness = Harness::try_new(&[CAT, CAT], vec![fixture], |_, manifest| {
+            manifest.kind = ManifestKind::Rollback;
+            manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                window: 0,
+                connection: 6,
+            };
+        })
+        .await
+        .map_err(|(error, _)| error)
+        .unwrap();
+        let staged = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap();
+        assert_eq!(window.read(), None, "owners are held until commit");
+        let committed = staged.commit();
+        assert!(committed.rollback);
+        assert_eq!(committed.splints.len(), 2);
+        assert_eq!(
+            committed.window_announcement,
+            WindowAnnouncement {
+                exited: 1,
+                ..WindowAnnouncement::default()
+            }
+        );
+        assert!(!committed.windows.is_held());
+        assert_end_of_file(&window.client);
+        for adopted in &committed.splints {
+            assert_echoes(&adopted.runtime.handle(), "after-dropped-window").await;
+        }
+        shut_down(committed).await;
+    }
+
+    /// A pre-commit failure returns every Window's owners, an exited one's
+    /// included, and the rollback enumeration binds each at its recorded
+    /// slot and number; no Window was sent anything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_aborted_adoption_keeps_every_window_owner_for_rollback() {
+        let (exited, exited_fixture) = exited_window(0, &[4]);
+        let (live, live_fixture) = test_window(1, &[5]);
+        let mut harness = Harness::try_new(&[CAT], vec![exited_fixture, live_fixture], no_change)
+            .await
+            .map_err(|(error, _)| error)
+            .unwrap();
+        let staged = harness
+            .adopt(harness.inputs(Some(FakeAdopter::default())))
+            .await
+            .unwrap();
+        let recovery = staged.abort();
+        assert_eq!(recovery.lifecycle.phase(), HandoffPhase::RollingBack);
+        assert_eq!(recovery.authorities.windows.len(), 2);
+        let owners = crate::handoff_rollback::staged_owners(&recovery.authorities).unwrap();
+        for index in [0, 1] {
+            for slot in [
+                HandoffDescriptorSlot::ClientProcess(index),
+                HandoffDescriptorSlot::Continuation(index),
+            ] {
+                let recorded = harness
+                    .manifest
+                    .descriptors
+                    .iter()
+                    .find(|entry| entry.slot == slot)
+                    .unwrap()
+                    .inherited_fd;
+                let owner = owners.iter().find(|owner| owner.slot() == slot).unwrap();
+                assert_eq!(u32::try_from(owner.raw_fd()).unwrap(), recorded, "{slot:?}");
+            }
+        }
+        assert_eq!(exited.read(), None);
+        assert_eq!(live.read(), None);
+        harness.assert_recovered(recovery);
+    }
 
     fn child_is_running(pid: u32) -> bool {
         let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
@@ -2290,7 +2660,7 @@ mod tests {
                     .map(|group| group.wrapping_add(100_000));
             }
         };
-        let refused = Harness::try_new(&[CAT], |_, manifest| moved(manifest)).await;
+        let refused = Harness::try_new(&[CAT], Vec::new(), |_, manifest| moved(manifest)).await;
         let Err((error, manifest)) = refused else {
             panic!("a forward candidate staged a changed foreground group");
         };
@@ -2337,7 +2707,8 @@ mod tests {
         }
 
         let mut kept = Vec::new();
-        let refused = Harness::try_new(&[CAT], |splints, _| grow(splints, &mut kept)).await;
+        let refused =
+            Harness::try_new(&[CAT], Vec::new(), |splints, _| grow(splints, &mut kept)).await;
         let Err((error, manifest)) = refused else {
             panic!("a forward candidate staged a changed window size");
         };

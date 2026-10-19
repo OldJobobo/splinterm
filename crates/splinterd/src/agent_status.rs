@@ -543,7 +543,10 @@ struct ProcStat {
 }
 
 /// Parses `/proc/<pid>/stat`. The command name may hold any bytes, including
-/// `)` and invalid UTF-8, so the fields are read after its final `)`.
+/// `)` and invalid UTF-8, so the fields are read after its final `)`. The
+/// start time comes from the library's one start-time parser
+/// ([`splinterd::handoff_window_carry::stat_start_time`]), which a handoff
+/// candidate also checks carried Windows with.
 fn parse_proc_stat(contents: &[u8]) -> Option<ProcStat> {
     let close = contents.iter().rposition(|&byte| byte == b')')?;
     let rest = std::str::from_utf8(&contents[close + 1..]).ok()?;
@@ -552,8 +555,7 @@ fn parse_proc_stat(contents: &[u8]) -> Option<ProcStat> {
     let parent = fields.next()?.parse().ok()?;
     let _process_group = fields.next()?;
     let session = fields.next()?.parse().ok()?;
-    // Skip tty_nr through itrealvalue to reach starttime, field 22.
-    let start_time = fields.nth(15)?.parse().ok()?;
+    let start_time = splinterd::handoff_window_carry::stat_start_time(contents)?;
     Some(ProcStat {
         parent,
         session,
@@ -565,9 +567,10 @@ fn read_proc_stat(pid: u32) -> Option<ProcStat> {
     parse_proc_stat(&fs::read(format!("/proc/{pid}/stat")).ok()?)
 }
 
-/// The start time of `pid`, recorded when a connection is verified.
+/// The start time of `pid`, recorded when a connection is verified and when
+/// a Window's pin is checked; the same reader a handoff candidate uses.
 pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
-    read_proc_stat(pid).map(|stat| stat.start_time)
+    splinterd::handoff_window_carry::process_start_time(pid)
 }
 
 /// Locates the peer inside the Splint whose live session leader is

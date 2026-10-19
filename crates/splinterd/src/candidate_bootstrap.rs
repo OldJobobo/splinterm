@@ -17,7 +17,7 @@
 //! while inherited authority is unverified.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::CString,
     fs::File,
     io,
@@ -41,6 +41,7 @@ use splinterm_terminal::{
     SnapshotRequest, Terminal,
 };
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{
     executable_snapshot::{MAX_EXECUTABLE_SNAPSHOT_BYTES, REQUIRED_EXECUTABLE_SEALS},
@@ -54,9 +55,13 @@ use crate::{
     handoff_manifest::{
         BodyDisposition, HandoffManifestV1, MAX_HANDOFF_MANIFEST_BYTES, ManifestBuildVersion,
         ManifestError, ManifestExecutableImage, ManifestKind, ManifestPtySize, ManifestSplint,
-        decode_manifest, validate_manifest_pair,
+        ManifestWindow, decode_manifest, validate_manifest_pair,
     },
     handoff_preflight::{PreflightError, compiled_handoff_generation},
+    handoff_window_carry::{
+        ContinuationRefusal, WindowProcessRefusal, WindowProcessState, inspect_window_process,
+        require_continuation_endpoint,
+    },
 };
 
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
@@ -103,6 +108,9 @@ pub(crate) struct CandidateStagedAuthorities {
     pub(crate) manifest: HandoffManifestV1,
     pub(crate) counterpart_manifest: HandoffManifestV1,
     pub(crate) splints: Vec<CandidateSplintStage>,
+    /// Every carried Window, in manifest index order, live or exited; see
+    /// [`CandidateWindowStage`].
+    pub(crate) windows: Vec<CandidateWindowStage>,
     pub(crate) listener: OwnedFd,
     pub(crate) image_listener: OwnedFd,
     pub(crate) current_manifest_descriptor: OwnedFd,
@@ -137,6 +145,24 @@ pub(crate) struct CandidateSplintStage {
     pub(crate) terminal: Terminal,
     pub(crate) pty: AdoptableLinuxPtySession,
     pub(crate) checkpoint_descriptor: OwnedFd,
+}
+
+/// One carried Window: its manifest record and its two inherited owners, the
+/// pidfd (`ClientProcess(index)`) and the daemon end of its continuation
+/// channel (`Continuation(index)`).
+///
+/// A Window whose process had exited at staging, or that a rollback
+/// generation refused ([`window_verdict`]), is not `live`: it is dropped
+/// logically (no outcome, no controller placeholder) and never causes a
+/// rollback, but its owners stay held until commit, because the
+/// rollback manifest still records them and rollback requires every
+/// recorded owner at its original number. Commit closes them.
+#[derive(Debug)]
+pub(crate) struct CandidateWindowStage {
+    pub(crate) record: ManifestWindow,
+    pub(crate) process: OwnedFd,
+    pub(crate) continuation: OwnedFd,
+    pub(crate) live: bool,
 }
 
 impl CandidatePreRuntimeStage {
@@ -259,6 +285,8 @@ pub(crate) struct RuntimeStageForTest {
     pub(crate) counterpart_manifest: HandoffManifestV1,
     /// Each Splint's PTY master and checkpoint body, in manifest order.
     pub(crate) splints: Vec<(OwnedFd, OwnedFd)>,
+    /// Each Window's pidfd and continuation end, in manifest order.
+    pub(crate) windows: Vec<(OwnedFd, OwnedFd)>,
     pub(crate) listener: OwnedFd,
     pub(crate) image_listener: OwnedFd,
     pub(crate) current_manifest_descriptor: OwnedFd,
@@ -295,6 +323,41 @@ impl CandidateRuntimeStage {
                 checkpoint_descriptor: checkpoint,
             });
         }
+        let mut windows = Vec::with_capacity(parts.windows.len());
+        for (record, (process, continuation)) in
+            parts.manifest.windows.iter().cloned().zip(parts.windows)
+        {
+            let kind = parts.manifest.kind;
+            let process_live = window_verdict(
+                kind,
+                &record,
+                HandoffDescriptorSlot::ClientProcess(record.index),
+                verify_window_process(
+                    &record,
+                    process.as_fd(),
+                    HandoffDescriptorSlot::ClientProcess(record.index),
+                ),
+            )?;
+            let stat = fstat(&continuation).map_err(errno_descriptor)?;
+            let channel_live = window_verdict(
+                kind,
+                &record,
+                HandoffDescriptorSlot::Continuation(record.index),
+                verify_continuation(
+                    continuation.as_fd(),
+                    &stat,
+                    HandoffDescriptorSlot::Continuation(record.index),
+                )
+                .map(|()| true),
+            )?;
+            let live = process_live && channel_live;
+            windows.push(CandidateWindowStage {
+                record,
+                process,
+                continuation,
+                live,
+            });
+        }
         let mut lifecycle = HandoffLifecycle::candidate_claimed(parts.manifest.kind);
         lifecycle.transition(HandoffPhase::AdoptionStaged)?;
         Ok(Self {
@@ -303,6 +366,7 @@ impl CandidateRuntimeStage {
                 manifest: parts.manifest,
                 counterpart_manifest: parts.counterpart_manifest,
                 splints,
+                windows,
                 listener: parts.listener,
                 image_listener: parts.image_listener,
                 current_manifest_descriptor: parts.current_manifest_descriptor,
@@ -362,6 +426,8 @@ impl CandidateStageFailure {
 struct VerifiedCandidate {
     counterpart_manifest: HandoffManifestV1,
     terminals: Vec<(Terminal, LinuxPtyIdentity, HandoffDescriptorSlot)>,
+    /// Whether each carried Window's process is live, by index.
+    windows: BTreeMap<u8, bool>,
 }
 
 #[derive(Debug, Error)]
@@ -388,6 +454,8 @@ pub(crate) enum CandidateBootstrapError {
     DescriptorRole(HandoffDescriptorSlot),
     #[error("candidate descriptor role {0:?} is not supported by staging")]
     UnsupportedRole(HandoffDescriptorSlot),
+    #[error("candidate descriptor for {0:?} pins a live process other than the recorded Window")]
+    WindowIdentity(HandoffDescriptorSlot),
     #[error("candidate descriptor for {0:?} aliases another role")]
     DescriptorAlias(HandoffDescriptorSlot),
     #[error("candidate immutable descriptor does not match manifest authority")]
@@ -549,7 +617,7 @@ impl CandidateBootstrap {
         listener_path: &Path,
         image_listener_path: &Path,
     ) -> Result<VerifiedCandidate, CandidateBootstrapError> {
-        self.verify_descriptor_roles()?;
+        let windows = self.verify_descriptor_roles()?;
         let counterpart_manifest = self.verify_manifests()?;
         verify_listener_path(
             self.required(HandoffDescriptorSlot::Listener)?,
@@ -565,6 +633,7 @@ impl CandidateBootstrap {
         Ok(VerifiedCandidate {
             counterpart_manifest,
             terminals,
+            windows,
         })
     }
 
@@ -572,12 +641,21 @@ impl CandidateBootstrap {
     /// names, and no two roles to share one object.
     ///
     /// The match is exhaustive so a new role cannot be staged without a type
-    /// check. Roles with no staging consumer fail closed.
-    fn verify_descriptor_roles(&self) -> Result<(), CandidateBootstrapError> {
+    /// check. Roles with no staging consumer fail closed, and so do Window
+    /// roles without a Window record.
+    ///
+    /// Returns, for each carried Window by index, whether its process is
+    /// still the recorded live one (`true`) or has exited (`false`). An
+    /// exited Window passes; a wrong descriptor type, or a live process
+    /// that is not the recorded one, fails a forward candidate's staging
+    /// and is dropped (`false`) by a rollback generation
+    /// ([`window_verdict`]).
+    fn verify_descriptor_roles(&self) -> Result<BTreeMap<u8, bool>, CandidateBootstrapError> {
         #[derive(Eq, Ord, PartialEq, PartialOrd)]
         enum ObjectKey {
             Inode(u64, u64),
             Pty(CString),
+            Window(u8),
         }
 
         if self.claims.len() != self.manifest.descriptors.len() {
@@ -586,6 +664,7 @@ impl CandidateBootstrap {
             ));
         }
         let mut objects = BTreeSet::new();
+        let mut windows = BTreeMap::new();
         for entry in &self.manifest.descriptors {
             let slot = entry.slot;
             let descriptor = self.required(slot)?;
@@ -623,13 +702,46 @@ impl CandidateBootstrap {
                 HandoffDescriptorSlot::PtyMaster(_) => {
                     ObjectKey::Pty(require_pty_master(descriptor, &stat, slot)?)
                 }
-                // Schema-v2 checkpoints embed image state. A manifest may
-                // carry Window records, but no candidate adopts a Window's
-                // pidfd or continuation endpoint until M3.13c, so a
-                // manifest with Windows refuses adoption here.
-                HandoffDescriptorSlot::ImageState(_)
-                | HandoffDescriptorSlot::ClientProcess(_)
-                | HandoffDescriptorSlot::Continuation(_) => {
+                // A Window's pidfd, only for a Window the manifest records.
+                // Its identity is the Window: manifest validation already
+                // requires distinct processes, and the pidfd's PID is bound
+                // to its own record, so no two slots can name one live
+                // process. Pidfds share one anonymous inode on older
+                // kernels, so the inode cannot serve.
+                // A rollback generation drops a Window it refuses instead of
+                // failing ([`window_verdict`]).
+                HandoffDescriptorSlot::ClientProcess(index) => {
+                    let record = self
+                        .window_record(index)
+                        .ok_or(CandidateBootstrapError::UnsupportedRole(slot))?;
+                    let live = window_verdict(
+                        self.manifest.kind,
+                        record,
+                        slot,
+                        verify_window_process(record, descriptor, slot),
+                    )?;
+                    windows.insert(index, live);
+                    ObjectKey::Window(index)
+                }
+                // Every `ClientProcess` slot sorts before every
+                // `Continuation` slot, so the process verdict is already in.
+                HandoffDescriptorSlot::Continuation(index) => {
+                    let record = self
+                        .window_record(index)
+                        .ok_or(CandidateBootstrapError::UnsupportedRole(slot))?;
+                    let usable = window_verdict(
+                        self.manifest.kind,
+                        record,
+                        slot,
+                        verify_continuation(descriptor, &stat, slot).map(|()| true),
+                    )?;
+                    if !usable {
+                        windows.insert(index, false);
+                    }
+                    ObjectKey::Inode(stat.st_dev, stat.st_ino)
+                }
+                // Schema-v2 checkpoints embed image state.
+                HandoffDescriptorSlot::ImageState(_) => {
                     return Err(CandidateBootstrapError::UnsupportedRole(slot));
                 }
             };
@@ -637,7 +749,15 @@ impl CandidateBootstrap {
                 return Err(CandidateBootstrapError::DescriptorAlias(slot));
             }
         }
-        Ok(())
+        Ok(windows)
+    }
+
+    /// The manifest's record for the Window at `index`.
+    fn window_record(&self, index: u8) -> Option<&ManifestWindow> {
+        self.manifest
+            .windows
+            .iter()
+            .find(|window| window.index == index)
     }
 
     /// Rereads the current manifest from its claimed owner and pairs it with
@@ -767,10 +887,22 @@ impl CandidateBootstrap {
                 checkpoint_descriptor,
             });
         }
+        let records = self.manifest.windows.clone();
+        let mut windows = Vec::with_capacity(records.len());
+        for record in records {
+            let index = record.index;
+            windows.push(CandidateWindowStage {
+                live: verified.windows.get(&index).copied().unwrap_or(false),
+                process: self.take_verified(HandoffDescriptorSlot::ClientProcess(index)),
+                continuation: self.take_verified(HandoffDescriptorSlot::Continuation(index)),
+                record,
+            });
+        }
         let authorities = CandidateStagedAuthorities {
             manifest: self.manifest.clone(),
             counterpart_manifest: verified.counterpart_manifest,
             splints,
+            windows,
             listener: self.take_verified(HandoffDescriptorSlot::Listener),
             image_listener: self.take_verified(HandoffDescriptorSlot::ImageListener),
             current_manifest_descriptor: self.take_verified(current_manifest_slot),
@@ -915,6 +1047,73 @@ pub(crate) fn require_unix_stream_listener(
         return Err(CandidateBootstrapError::DescriptorRole(slot));
     }
     Ok(())
+}
+
+/// What staging does with one Window check's result for a manifest of
+/// `kind`.
+///
+/// A forward candidate refuses a Window descriptor of the wrong type, a live
+/// process that is not the recorded one, or one it cannot inspect: staging
+/// fails and the candidate rolls back, the contract for every invalid
+/// descriptor. These checks are deterministic, so the rollback generation
+/// would refuse the same descriptors, and it has no rollback edge: failing
+/// would end it and hang up every carried Splint over one Window. So a
+/// rollback generation logs the refusal and drops the Window instead
+/// (`Ok(false)`): its owners stay held, commit closes them, and it gets no
+/// outcome and no controller placeholder.
+fn window_verdict(
+    kind: ManifestKind,
+    record: &ManifestWindow,
+    slot: HandoffDescriptorSlot,
+    checked: Result<bool, CandidateBootstrapError>,
+) -> Result<bool, CandidateBootstrapError> {
+    match (checked, kind) {
+        (Ok(live), _) => Ok(live),
+        (Err(error), ManifestKind::Forward) => Err(error),
+        (Err(error), ManifestKind::Rollback) => {
+            warn!(
+                ?slot,
+                index = record.index,
+                pid = record.pid,
+                %error,
+                "daemon handoff rollback: dropping a carried Window it cannot accept"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Checks one Window's inherited pidfd against its record
+/// ([`inspect_window_process`]): `Ok(true)` for the recorded live process,
+/// `Ok(false)` for one that has exited, which staging accepts and drops.
+fn verify_window_process(
+    record: &ManifestWindow,
+    descriptor: BorrowedFd<'_>,
+    slot: HandoffDescriptorSlot,
+) -> Result<bool, CandidateBootstrapError> {
+    match inspect_window_process(descriptor, record) {
+        Ok(WindowProcessState::Live) => Ok(true),
+        Ok(WindowProcessState::Exited) => Ok(false),
+        Err(WindowProcessRefusal::NotPidfd) => Err(CandidateBootstrapError::DescriptorRole(slot)),
+        Err(WindowProcessRefusal::Identity) => Err(CandidateBootstrapError::WindowIdentity(slot)),
+        Err(WindowProcessRefusal::Inspect(error)) => {
+            Err(CandidateBootstrapError::Descriptor(error))
+        }
+    }
+}
+
+/// Requires one Window's inherited continuation end to be a credentialed
+/// Unix `SOCK_SEQPACKET` socket ([`require_continuation_endpoint`]).
+fn verify_continuation(
+    descriptor: BorrowedFd<'_>,
+    stat: &Stat,
+    slot: HandoffDescriptorSlot,
+) -> Result<(), CandidateBootstrapError> {
+    match require_continuation_endpoint(descriptor, stat) {
+        Ok(()) => Ok(()),
+        Err(ContinuationRefusal::Role) => Err(CandidateBootstrapError::DescriptorRole(slot)),
+        Err(ContinuationRefusal::Inspect(error)) => Err(CandidateBootstrapError::Descriptor(error)),
+    }
 }
 
 /// Returns the PTY's slave name, which identifies it uniquely, only for a
@@ -1555,30 +1754,228 @@ mod tests {
                 Err(CandidateBootstrapError::UnsupportedRole(role)) if role == slot
             ));
         }
+    }
 
-        // A valid manifest with a Window record still refuses adoption until
-        // the candidate can adopt Windows (M3.13c).
-        let mut idle = idle_owners();
-        let mut owners = std::mem::take(&mut idle.owners);
-        owners.push((HandoffDescriptorSlot::ClientProcess(0), body()));
-        owners.push((HandoffDescriptorSlot::Continuation(0), body()));
-        let bootstrap = bootstrap_with_windows(
-            owners,
-            vec![ManifestWindow {
+    /// A stand-in Window process with the descriptors an old generation
+    /// carries for it. Dropping it kills and reaps the process.
+    struct TestWindow {
+        child: std::process::Child,
+        record: ManifestWindow,
+        pidfd: OwnedFd,
+        continuation: OwnedFd,
+        _client: OwnedFd,
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn seqpacket(passcred: bool) -> (OwnedFd, OwnedFd) {
+        let (daemon, client) = rustix::net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::SEQPACKET,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        sockopt::set_socket_passcred(&daemon, passcred).unwrap();
+        (daemon, client)
+    }
+
+    fn test_window() -> TestWindow {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let pidfd = rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let (continuation, client) = seqpacket(true);
+        TestWindow {
+            record: ManifestWindow {
                 index: 0,
-                pid: 4242,
-                start_time: 99,
+                pid,
+                start_time: crate::handoff_window_carry::process_start_time(pid).unwrap(),
                 client_device: 1,
                 client_inode: 2,
                 old_connections: vec![7],
-            }],
+            },
+            child,
+            pidfd,
+            continuation,
+            _client: client,
+        }
+    }
+
+    /// A bootstrap whose manifest carries `record` with `process` and
+    /// `continuation` at its two slots.
+    fn windowed_bootstrap(
+        record: ManifestWindow,
+        process: OwnedFd,
+        continuation: OwnedFd,
+    ) -> (IdleOwners, CandidateBootstrap) {
+        let mut idle = idle_owners();
+        let mut owners = std::mem::take(&mut idle.owners);
+        owners.push((HandoffDescriptorSlot::ClientProcess(0), process));
+        owners.push((HandoffDescriptorSlot::Continuation(0), continuation));
+        let bootstrap = bootstrap_with_windows(owners, vec![record]);
+        (idle, bootstrap)
+    }
+
+    #[test]
+    fn window_roles_accept_a_recorded_pidfd_and_a_credentialed_seqpacket_socket() {
+        let window = test_window();
+        let (_idle, bootstrap) = windowed_bootstrap(
+            window.record.clone(),
+            window.pidfd.try_clone().unwrap(),
+            window.continuation.try_clone().unwrap(),
         );
+        assert_eq!(
+            bootstrap.verify_descriptor_roles().unwrap(),
+            BTreeMap::from([(0, true)])
+        );
+    }
+
+    #[test]
+    fn an_exited_window_passes_staging_as_dropped() {
+        let mut window = test_window();
+        window.child.kill().unwrap();
+        window.child.wait().unwrap();
+        let (_idle, bootstrap) = windowed_bootstrap(
+            window.record.clone(),
+            window.pidfd.try_clone().unwrap(),
+            window.continuation.try_clone().unwrap(),
+        );
+        assert_eq!(
+            bootstrap.verify_descriptor_roles().unwrap(),
+            BTreeMap::from([(0, false)])
+        );
+    }
+
+    #[test]
+    fn window_roles_refuse_wrong_objects_and_another_live_process() {
+        let window = test_window();
+        let process = HandoffDescriptorSlot::ClientProcess(0);
+        let continuation = HandoffDescriptorSlot::Continuation(0);
+        let refused = |record: ManifestWindow, pidfd: OwnedFd, channel: OwnedFd| {
+            windowed_bootstrap(record, pidfd, channel)
+                .1
+                .verify_descriptor_roles()
+                .unwrap_err()
+        };
+        let pidfd = || window.pidfd.try_clone().unwrap();
+        let channel = || window.continuation.try_clone().unwrap();
+
+        // Not a pidfd.
+        let result = refused(window.record.clone(), body(), channel());
+        assert!(
+            matches!(result, CandidateBootstrapError::DescriptorRole(slot) if slot == process),
+            "{result:?}"
+        );
+        // Not a credentialed Unix SEQPACKET socket.
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (uncredentialed, _client) = seqpacket(false);
+        for wrong in [OwnedFd::from(stream), uncredentialed, body()] {
+            let result = refused(window.record.clone(), pidfd(), wrong);
+            assert!(
+                matches!(result, CandidateBootstrapError::DescriptorRole(slot) if slot == continuation),
+                "{result:?}"
+            );
+        }
+        // A live process other than the recorded one: another PID, or the
+        // recorded PID with another start time.
+        let mut other_pid = window.record.clone();
+        other_pid.pid = std::process::id();
+        let mut other_start = window.record.clone();
+        other_start.start_time += 1;
+        for record in [other_pid, other_start] {
+            let result = refused(record, pidfd(), channel());
+            assert!(
+                matches!(result, CandidateBootstrapError::WindowIdentity(slot) if slot == process),
+                "{result:?}"
+            );
+        }
+    }
+
+    /// A rollback generation has no rollback edge, so it drops a Window it
+    /// would refuse instead of failing: every refusal a forward candidate
+    /// makes reads as a dropped Window there.
+    #[test]
+    fn a_rollback_generation_drops_every_window_a_forward_candidate_refuses() {
+        let window = test_window();
+        let pidfd = || window.pidfd.try_clone().unwrap();
+        let channel = || window.continuation.try_clone().unwrap();
+        let mut other_start = window.record.clone();
+        other_start.start_time += 1;
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (uncredentialed, _client) = seqpacket(false);
+        let cases: [(ManifestWindow, OwnedFd, OwnedFd); 4] = [
+            (other_start, pidfd(), channel()),
+            (window.record.clone(), body(), channel()),
+            (window.record.clone(), pidfd(), OwnedFd::from(stream)),
+            (window.record.clone(), pidfd(), uncredentialed),
+        ];
+        for (record, process, continuation) in cases {
+            let (idle, mut bootstrap) = windowed_bootstrap(record, process, continuation);
+            let forward = bootstrap.verify_descriptor_roles();
+            assert!(forward.is_err(), "{forward:?}");
+            bootstrap.manifest.kind = ManifestKind::Rollback;
+            assert_eq!(
+                bootstrap.verify_descriptor_roles().unwrap(),
+                BTreeMap::from([(0, false)])
+            );
+            drop(idle);
+        }
+        // An accepted Window stays live on the rollback side too.
+        let (_idle, mut bootstrap) = windowed_bootstrap(window.record.clone(), pidfd(), channel());
+        bootstrap.manifest.kind = ManifestKind::Rollback;
+        assert_eq!(
+            bootstrap.verify_descriptor_roles().unwrap(),
+            BTreeMap::from([(0, true)])
+        );
+    }
+
+    /// A Window that fails its check fails staging like any other invalid
+    /// descriptor: the complete owner table, the Window's owners included,
+    /// returns for the rollback executor.
+    #[test]
+    fn a_window_mismatch_fails_staging_and_recovers_every_owner_for_rollback() {
+        let _serial = crate::handoff_coordinator::PROCESS_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = test_window();
+        let mut record = window.record.clone();
+        record.start_time += 1;
+        let (idle, mut acquired) = windowed_bootstrap(
+            record,
+            window.pidfd.try_clone().unwrap(),
+            window.continuation.try_clone().unwrap(),
+        );
+        acquired.process_guard = Some(HandoffProcessGuard::acquire_with(|| Ok(1)).unwrap());
+        let failure = stage_for_test(acquired, &idle.directory).unwrap_err();
         assert!(matches!(
-            bootstrap.verify_descriptor_roles(),
-            Err(CandidateBootstrapError::UnsupportedRole(
-                HandoffDescriptorSlot::ClientProcess(0)
-            ))
+            failure.error,
+            CandidateBootstrapError::WindowIdentity(HandoffDescriptorSlot::ClientProcess(0))
         ));
+        let recovered = failure.into_recovery();
+        assert_eq!(recovered.lifecycle.phase(), HandoffPhase::RollingBack);
+        assert_eq!(recovered.claims.len(), recovered.manifest.descriptors.len());
+        assert!(
+            recovered
+                .claims
+                .contains(HandoffDescriptorSlot::ClientProcess(0))
+        );
+        assert!(
+            recovered
+                .claims
+                .contains(HandoffDescriptorSlot::Continuation(0))
+        );
     }
 
     #[test]
