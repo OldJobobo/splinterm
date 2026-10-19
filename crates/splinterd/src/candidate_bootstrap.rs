@@ -623,8 +623,10 @@ impl CandidateBootstrap {
                 HandoffDescriptorSlot::PtyMaster(_) => {
                     ObjectKey::Pty(require_pty_master(descriptor, &stat, slot)?)
                 }
-                // Schema-v2 checkpoints embed image state, and client
-                // continuation records are not defined by manifest schema v1.
+                // Schema-v2 checkpoints embed image state. A manifest may
+                // carry Window records, but no candidate adopts a Window's
+                // pidfd or continuation endpoint until M3.13c, so a
+                // manifest with Windows refuses adoption here.
                 HandoffDescriptorSlot::ImageState(_)
                 | HandoffDescriptorSlot::ClientProcess(_)
                 | HandoffDescriptorSlot::Continuation(_) => {
@@ -1128,7 +1130,7 @@ mod tests {
     use super::*;
     use crate::handoff_manifest::{
         ExecutablePairSetEvidence, GenerationEvidence, HandoffId, ManifestDescriptor,
-        ManifestExecutablePair, validate_manifest,
+        ManifestExecutablePair, ManifestWindow, validate_manifest,
     };
 
     #[test]
@@ -1306,6 +1308,14 @@ mod tests {
 
     /// Binds `owners` to a valid manifest naming exactly their numbers.
     fn bootstrap(owners: Vec<(HandoffDescriptorSlot, OwnedFd)>) -> CandidateBootstrap {
+        bootstrap_with_windows(owners, Vec::new())
+    }
+
+    /// As [`bootstrap`], for a manifest that also carries `windows`.
+    fn bootstrap_with_windows(
+        owners: Vec<(HandoffDescriptorSlot, OwnedFd)>,
+        windows: Vec<ManifestWindow>,
+    ) -> CandidateBootstrap {
         let mut manifest = HandoffManifestV1 {
             schema: 1,
             kind: ManifestKind::Forward,
@@ -1336,6 +1346,7 @@ mod tests {
             counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
             splints: Vec::new(),
             excluded_splints: Vec::new(),
+            windows,
             descriptors: owners
                 .iter()
                 .map(|(slot, owner)| ManifestDescriptor {
@@ -1523,8 +1534,9 @@ mod tests {
 
     #[test]
     fn roles_without_a_staging_consumer_fail_closed() {
-        // Manifest validation already rejects these roles. The table is
-        // extended directly so staging is proven not to rely on that alone.
+        // Manifest validation rejects these roles without a Window record. The
+        // table is extended directly so staging is proven not to rely on that
+        // alone.
         for slot in [
             HandoffDescriptorSlot::ImageState(0),
             HandoffDescriptorSlot::ClientProcess(0),
@@ -1543,6 +1555,30 @@ mod tests {
                 Err(CandidateBootstrapError::UnsupportedRole(role)) if role == slot
             ));
         }
+
+        // A valid manifest with a Window record still refuses adoption until
+        // the candidate can adopt Windows (M3.13c).
+        let mut idle = idle_owners();
+        let mut owners = std::mem::take(&mut idle.owners);
+        owners.push((HandoffDescriptorSlot::ClientProcess(0), body()));
+        owners.push((HandoffDescriptorSlot::Continuation(0), body()));
+        let bootstrap = bootstrap_with_windows(
+            owners,
+            vec![ManifestWindow {
+                index: 0,
+                pid: 4242,
+                start_time: 99,
+                client_device: 1,
+                client_inode: 2,
+                old_connections: vec![7],
+            }],
+        );
+        assert!(matches!(
+            bootstrap.verify_descriptor_roles(),
+            Err(CandidateBootstrapError::UnsupportedRole(
+                HandoffDescriptorSlot::ClientProcess(0)
+            ))
+        ));
     }
 
     #[test]
