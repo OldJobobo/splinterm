@@ -4268,6 +4268,7 @@ async fn serve_authenticated(
     let mut policy_reloads = state.policy_reloads.subscribe();
     let mut connection_revocations = state.connection_revocations.subscribe();
     let mut last_request_id = 0_u64;
+    let mut finished_handoff: Option<Arc<InitiatorAnswers>> = None;
     loop {
         let frame = tokio::select! {
             biased;
@@ -4308,9 +4309,15 @@ async fn serve_authenticated(
                 .await?;
                 break;
             }
-            // A decision answers a prompt sent while an Execute is in flight,
-            // and this daemon never sends one, so an answer here is as
-            // unexpected as a second hello.
+            // A decision answers a prompt sent while an Execute is in flight.
+            // Once that request has ended, only the one late answer to a
+            // prompt it queued is dropped, since the prompt may have been
+            // written just before the attempt stopped waiting; any other is
+            // as unexpected as a second hello.
+            ClientFrame::HandoffDecision { request_id, .. }
+                if finished_handoff
+                    .as_ref()
+                    .is_some_and(|answers| answers.take_late_answer(request_id)) => {}
             ClientFrame::HandoffDecision { .. } => {
                 send_control(
                     control,
@@ -4492,7 +4499,10 @@ async fn serve_authenticated(
                 } else {
                     Some(handled.await)
                 };
-                drop(initiator);
+                // Kept for one late answer to a prompt this request queued.
+                if let Some(initiator) = initiator {
+                    finished_handoff = Some(Arc::clone(&initiator.answers));
+                }
                 let Some(handled) = handled else {
                     break;
                 };
@@ -11013,6 +11023,7 @@ impl HandoffInitiator {
                 request_id,
                 cancelled: tokio_util::sync::CancellationToken::new(),
                 awaiting_decision: std::sync::atomic::AtomicBool::new(false),
+                unanswered_prompt: std::sync::atomic::AtomicBool::new(false),
                 decision,
             }),
             decisions,
@@ -11027,15 +11038,23 @@ struct InitiatorAnswers {
     cancelled: tokio_util::sync::CancellationToken,
     /// Set only while a decision prompt waits for its one answer.
     awaiting_decision: std::sync::atomic::AtomicBool,
+    /// Set once a prompt was queued and cleared by its one answer. A prompt
+    /// written just before the attempt stopped waiting (a timeout, a
+    /// `Cancel`, or the end of the request) can still be answered by a
+    /// conforming client; that one late answer is dropped, keeping the
+    /// connection ([`Self::take_late_answer`]).
+    unanswered_prompt: std::sync::atomic::AtomicBool,
     decision: mpsc::Sender<Vec<u8>>,
 }
 
 impl InitiatorAnswers {
     /// Takes one frame that arrived while the `Execute` is in flight: a
-    /// `Cancel` for it, or the one answer to a pending decision prompt.
+    /// `Cancel` for it, the one answer to a pending decision prompt, or the
+    /// one late answer to a prompt the attempt no longer waits for, which is
+    /// dropped.
     ///
     /// # Errors
-    /// Any other frame, an answer when no prompt is pending, and a second
+    /// Any other frame, an answer when no prompt was queued, and a second
     /// answer; the connection then ends with `InvalidFrame`, which cancels
     /// the attempt as `Requested`.
     fn accept(&self, frame: ClientFrame) -> Result<(), &'static str> {
@@ -11048,9 +11067,14 @@ impl InitiatorAnswers {
                 request_id,
                 proceed_without,
             } if request_id == self.request_id => {
-                if self.awaiting_decision.swap(false, Ordering::SeqCst)
-                    && self.decision.try_send(proceed_without).is_ok()
-                {
+                if self.awaiting_decision.swap(false, Ordering::SeqCst) {
+                    self.unanswered_prompt.store(false, Ordering::SeqCst);
+                    return self
+                        .decision
+                        .try_send(proceed_without)
+                        .map_err(|_| "no handoff decision is pending");
+                }
+                if self.take_late_answer(request_id) {
                     Ok(())
                 } else {
                     Err("no handoff decision is pending")
@@ -11058,6 +11082,15 @@ impl InitiatorAnswers {
             }
             _ => Err("another frame arrived while a daemon handoff was in flight"),
         }
+    }
+
+    /// Whether a `HandoffDecision` for `request_id` is the one late answer
+    /// to a prompt queued for this request that no attempt waits for any
+    /// more. It is dropped, and the connection kept; a second fails.
+    fn take_late_answer(&self, request_id: u64) -> bool {
+        request_id == self.request_id
+            && !self.awaiting_decision.load(Ordering::SeqCst)
+            && self.unanswered_prompt.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -11310,6 +11343,10 @@ enum AttemptWindowState {
     Unpinned,
     /// A trusted-UI process with attachments and no anchor.
     Undeclared,
+    /// An anchor that owes
+    /// [`handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS`] late answers; it was
+    /// sent nothing and is named as unacknowledged.
+    Owing,
     /// The process exited; it is dropped without asking.
     Exited,
 }
@@ -11357,7 +11394,9 @@ impl AttemptWindow {
                 acknowledged, sent, ..
             } => matches!(sent, Some(false)) || (acknowledged && matches!(sent, Some(true))),
             AttemptWindowState::Exited => true,
-            AttemptWindowState::Unpinned | AttemptWindowState::Undeclared => false,
+            AttemptWindowState::Unpinned
+            | AttemptWindowState::Undeclared
+            | AttemptWindowState::Owing => false,
         }
     }
 
@@ -11371,7 +11410,7 @@ impl AttemptWindow {
                 ..
             }
             | AttemptWindowState::Exited => None,
-            AttemptWindowState::Prepared { .. } => {
+            AttemptWindowState::Prepared { .. } | AttemptWindowState::Owing => {
                 Some(splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)
             }
             AttemptWindowState::Unpinned => Some(splinterm_protocol::HandoffWindowIssue::Unpinned),
@@ -11395,8 +11434,10 @@ impl AttemptWindow {
 /// 2. Each anchor whose process is still pinned and runs a client image a
 ///    Window may run ([`window_client_identities`]) is sent its prepare frame
 ///    ([`send_window_prepare`]). One not pinned, or running another image,
-///    is sent nothing and is named as unpinned; one whose process exited is
-///    dropped.
+///    is sent nothing and is named as unpinned; one that owes
+///    [`handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS`] late answers to earlier
+///    frames is sent nothing and is named as unacknowledged; one whose
+///    process exited is dropped.
 /// 3. It waits up to [`HANDOFF_WINDOW_ACKNOWLEDGEMENT_TIMEOUT`] for every
 ///    acknowledgement that counts: the anchor answered and its writer
 ///    reported the whole frame written. A Window whose process exits
@@ -11496,6 +11537,7 @@ async fn prepare_and_await_windows<F: ForwardPreparation>(
             handoff_windows::ProcessPin::Live if !eligible.contains(&anchor.process.executable) => {
                 AttemptWindowState::Unpinned
             }
+            handoff_windows::ProcessPin::Live if anchor.owes_too_many => AttemptWindowState::Owing,
             handoff_windows::ProcessPin::Live => {
                 let process = anchor.process.clone();
                 let anchor_connection_id = anchor.connection_id;
@@ -11742,6 +11784,7 @@ struct AwaitingDecision(Arc<InitiatorAnswers>);
 
 impl AwaitingDecision {
     fn arm(answers: Arc<InitiatorAnswers>) -> Self {
+        answers.unanswered_prompt.store(true, Ordering::SeqCst);
         answers.awaiting_decision.store(true, Ordering::SeqCst);
         Self(answers)
     }
@@ -13318,6 +13361,10 @@ async fn write_frames(
                 match frame {
                     None => break,
                     Some(ControlFrame::Frame(frame)) => (frame, None, None),
+                    // A frame nothing waits for any more, such as a decision
+                    // prompt whose attempt cancelled while it was queued, is
+                    // not written.
+                    Some(ControlFrame::Confirmed { written, .. }) if written.is_closed() => continue,
                     Some(ControlFrame::Confirmed { frame, written }) => (frame, None, Some(written)),
                     Some(ControlFrame::HandoffPrepare(prepare)) => {
                         if write_handoff_prepare(&mut writer, prepare).await {
@@ -22017,15 +22064,14 @@ mod tests {
         // Every prepared Window reads end of file, and nothing is pending.
         assert!(continuation_closed(first_descriptors.continuation()));
         assert!(continuation_closed(second_descriptors.continuation()));
-        // The prompt closed with the attempt: a late answer is refused.
-        assert!(
-            answers
-                .accept(ClientFrame::HandoffDecision {
-                    request_id: 9,
-                    proceed_without: vec![1, 2, 3],
-                })
-                .is_err()
-        );
+        // The prompt closed with the attempt: one late answer to it is
+        // dropped, keeping the connection, and a second is refused.
+        let late_answer = || ClientFrame::HandoffDecision {
+            request_id: 9,
+            proceed_without: vec![1, 2, 3],
+        };
+        answers.accept(late_answer()).unwrap();
+        assert!(answers.accept(late_answer()).is_err());
         assert_eq!(
             acknowledge(&state, 12, generation).await,
             Err(ErrorCode::NotFound)
@@ -22285,30 +22331,43 @@ mod tests {
         let generation = state.daemon_generation;
         let process = TestWindowProcess::spawn();
         let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
-        // Attempt N: the Window does not answer in time, and N is cancelled.
-        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
-        let initiator = HandoffInitiator::new(9, control);
-        let answers = Arc::clone(&initiator.answers);
-        let execute = spawn_window_execute(&state, Some(initiator));
-        let (_, first) = window.read_prepare().await;
-        decision_prompt(&mut prompts).await;
-        answers
-            .accept(ClientFrame::Cancel { request_id: 9 })
-            .unwrap();
-        assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
-        assert!(continuation_closed(first.continuation()));
-        // Attempt N+1 names the same generation. The Window's late answer to
-        // N's frame arrives first and is refused; its answer to N+1's frame
-        // then counts.
+        // Attempts N and N+1: the Window answers neither in time, and both are
+        // cancelled.
+        for owed in 1..=2 {
+            let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+            let initiator = HandoffInitiator::new(9, control);
+            let answers = Arc::clone(&initiator.answers);
+            let execute = spawn_window_execute(&state, Some(initiator));
+            let (_, unanswered) = window.read_prepare().await;
+            decision_prompt(&mut prompts).await;
+            answers
+                .accept(ClientFrame::Cancel { request_id: 9 })
+                .unwrap();
+            assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
+            assert!(continuation_closed(unanswered.continuation()));
+            assert_eq!(
+                state
+                    .handoff_windows
+                    .lock()
+                    .unwrap()
+                    .stale_acknowledgements(11),
+                owed
+            );
+        }
+        // Attempt N+2 names the same generation. The Window's late answers to
+        // both cancelled frames arrive first and are refused; only its answer
+        // to N+2's frame then counts.
         let (control, _prompts) = mpsc::channel(CONTROL_QUEUE);
         let execute = spawn_window_execute(&state, Some(HandoffInitiator::new(9, control)));
-        let (prepare, second) = window.read_prepare().await;
+        let (prepare, current) = window.read_prepare().await;
         assert_eq!(prepare.daemon_generation, generation);
-        assert_eq!(
-            acknowledge(&state, 11, generation).await,
-            Err(ErrorCode::NotFound),
-            "the late answer to the cancelled attempt's frame"
-        );
+        for late in ["N", "N+1"] {
+            assert_eq!(
+                acknowledge(&state, 11, generation).await,
+                Err(ErrorCode::NotFound),
+                "the late answer to attempt {late}'s frame"
+            );
+        }
         assert_eq!(
             acknowledge(&state, 11, generation).await,
             Ok(Response::Acknowledged)
@@ -22316,7 +22375,7 @@ mod tests {
         let exec = take_exec_ready(&state, execute).await;
         assert_eq!(exec.windows.windows.len(), 1);
         exec.cancel(HandoffCancelReason::Failed).await;
-        assert!(continuation_closed(second.continuation()));
+        assert!(continuation_closed(current.continuation()));
     }
 
     #[tokio::test]
@@ -22396,5 +22455,168 @@ mod tests {
                 cancelled(HandoffCancelReason::TimedOut),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn an_anchor_owing_too_many_late_answers_is_sent_nothing_and_named() {
+        let state = window_test_state();
+        let process = TestWindowProcess::spawn();
+        let mut window = declare_test_window(&state, 11, process.pinned(INSTALLED_CLIENT));
+        // Earlier attempts left that many frames unanswered.
+        {
+            let (events, _events) = mpsc::unbounded_channel();
+            let mut windows = state.handoff_windows.lock().unwrap();
+            for _ in 0..handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS {
+                assert!(windows.await_acknowledgement(
+                    11,
+                    state.daemon_generation,
+                    0,
+                    events.clone()
+                ));
+                windows.close_acknowledgements();
+            }
+        }
+        let (control, mut prompts) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let execute = spawn_window_execute(&state, Some(initiator));
+        let (_, _, windows) = decision_prompt(&mut prompts).await;
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.index, window.reason))
+                .collect::<Vec<_>>(),
+            [(0, splinterm_protocol::HandoffWindowIssue::NoAcknowledgement)]
+        );
+        answers
+            .accept(ClientFrame::Cancel { request_id: 9 })
+            .unwrap();
+        assert_eq!(execute.await.unwrap().code, ErrorCode::HandoffUnavailable);
+        // No prepare frame reached it; only its Hello is queued.
+        let (hello, descriptors) = window.read_raw_frame().await;
+        assert!(matches!(hello, ServerFrame::Hello { .. }) && descriptors.is_none());
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            rustix::net::recv(
+                window.client.as_ref().unwrap(),
+                &mut byte[..],
+                rustix::net::RecvFlags::DONTWAIT,
+            )
+            .unwrap_err(),
+            rustix::io::Errno::AGAIN
+        );
+        assert_eq!(
+            state
+                .handoff_windows
+                .lock()
+                .unwrap()
+                .stale_acknowledgements(11),
+            handoff_windows::MAX_STALE_ACKNOWLEDGEMENTS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decision_prompt_cancelled_while_queued_is_never_written() {
+        let state = test_state(false);
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server.set_nonblocking(true).unwrap();
+        let (reader, writer) = UnixStream::from_std(server).unwrap().into_split();
+        let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
+        let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
+        let writer = AbortOnDrop::new(tokio::spawn(write_frames(
+            writer,
+            outbound_rx,
+            control_rx,
+            Arc::clone(&state.terminal_transaction_memory),
+        )));
+        let mut initiator = TestWindow {
+            connection_id: 41,
+            client: Some(client),
+            greeted: true,
+            outbound,
+            _reader: reader,
+            writer,
+        };
+        // The writer is blocked inside a terminal transaction the client is
+        // not reading yet.
+        initiator
+            .outbound
+            .send(QueuedServerFrame::from(chunked_snapshot_event()))
+            .await
+            .unwrap();
+        let (start, _) = initiator.read_frame().await;
+        let ServerFrame::TerminalTransactionStart { chunks, .. } = start else {
+            panic!("a terminal transaction starts: {start:?}");
+        };
+        // The prompt is queued behind it, then its attempt cancels.
+        let (written, confirmation) = tokio::sync::oneshot::channel();
+        control
+            .send(ControlFrame::Confirmed {
+                frame: ServerFrame::HandoffDecisionRequired {
+                    request_id: 9,
+                    daemon_generation: handoff_requests::FRESH_DAEMON_GENERATION,
+                    deadline_ms: 20_000,
+                    windows: Vec::new(),
+                },
+                written,
+            })
+            .await
+            .unwrap();
+        drop(confirmation);
+        control
+            .send(ControlFrame::Frame(ServerFrame::Response {
+                request_id: 9,
+                result: Response::Pong,
+            }))
+            .await
+            .unwrap();
+        for _ in 0..chunks {
+            initiator.read_frame().await;
+        }
+        let (next, _) = initiator.read_frame().await;
+        assert!(
+            matches!(
+                next,
+                ServerFrame::Response {
+                    request_id: 9,
+                    result: Response::Pong,
+                }
+            ),
+            "the cancelled prompt was not written: {next:?}"
+        );
+    }
+
+    #[test]
+    fn one_late_answer_to_a_prompt_nothing_waits_for_is_dropped() {
+        let (control, _controls) = mpsc::channel(CONTROL_QUEUE);
+        let initiator = HandoffInitiator::new(9, control);
+        let answers = Arc::clone(&initiator.answers);
+        let decision = || ClientFrame::HandoffDecision {
+            request_id: 9,
+            proceed_without: vec![0],
+        };
+        // No prompt was ever queued: an answer is a protocol violation.
+        assert!(answers.accept(decision()).is_err());
+        assert!(!answers.take_late_answer(9));
+        // A prompt was queued, then its attempt stopped waiting (a Cancel or a
+        // timeout drops the guard) before the client's answer arrived.
+        drop(AwaitingDecision::arm(Arc::clone(&answers)));
+        answers.accept(decision()).unwrap();
+        assert!(answers.accept(decision()).is_err(), "a second late answer");
+        // After the request ended, the connection's main loop drops one late
+        // answer for that request the same way, and no other.
+        drop(AwaitingDecision::arm(Arc::clone(&answers)));
+        assert!(!answers.take_late_answer(8));
+        assert!(answers.take_late_answer(9));
+        assert!(!answers.take_late_answer(9));
+        // An answer taken while the prompt waits leaves no late answer.
+        let awaiting = AwaitingDecision::arm(Arc::clone(&answers));
+        answers.accept(decision()).unwrap();
+        drop(awaiting);
+        assert!(!answers.take_late_answer(9));
+        drop(initiator);
     }
 }

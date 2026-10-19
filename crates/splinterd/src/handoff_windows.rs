@@ -21,9 +21,9 @@
 //! acknowledge only the prepare frame sent to it, for the generation it
 //! named, exactly once, while the attempt waits, and only while its process
 //! is the one it pinned; see [`HandoffWindows::pending_acknowledgement`].
-//! Every attempt in one daemon names the same generation, so an anchor that
-//! left a frame unanswered owes that late answer, and its next
-//! acknowledgement is refused as such
+//! Every attempt in one daemon names the same generation, so an anchor owes
+//! one late answer for each frame it left unanswered, and that many of its
+//! next acknowledgements are refused as such
 //! ([`HandoffWindows::take_stale_acknowledgement`]).
 
 use std::{
@@ -156,13 +156,25 @@ struct WindowAnchor {
     /// Present only while an attempt waits for this anchor's
     /// acknowledgement.
     pending: Option<PendingPrepare>,
-    /// Set when an attempt stopped waiting while this anchor's prepare frame
-    /// was still unacknowledged. Every attempt in one daemon names the same
-    /// generation, so the Window's late answer to that frame would look like
-    /// an answer to the next one. The next acknowledgement is therefore
-    /// taken as that late answer and refused, which clears the debt; see
-    /// [`HandoffWindows::take_stale_acknowledgement`].
-    stale_acknowledgement: bool,
+    /// How many of this anchor's prepare frames an attempt stopped waiting
+    /// for, or failed to send after they may have reached the Window, while
+    /// still unacknowledged. Every attempt in one daemon names the same
+    /// generation, so the Window's late answer to such a frame would look
+    /// like an answer to a later one. Each of its next acknowledgements, as
+    /// long as any is owed, is therefore taken as one late answer and
+    /// refused; see [`HandoffWindows::take_stale_acknowledgement`]. At
+    /// [`MAX_STALE_ACKNOWLEDGEMENTS`] the anchor is sent no further frames
+    /// ([`AnchorSnapshot::owes_too_many`]), so the count never grows past it.
+    stale_acknowledgements: u8,
+}
+
+impl WindowAnchor {
+    /// Records one more owed late answer. An anchor that owes
+    /// [`MAX_STALE_ACKNOWLEDGEMENTS`] is sent no frame, so the count stops
+    /// growing there; it never undercounts.
+    fn owe_stale_acknowledgement(&mut self) {
+        self.stale_acknowledgements = self.stale_acknowledgements.saturating_add(1);
+    }
 }
 
 /// A prepare frame sent to an anchor and not yet acknowledged.
@@ -236,11 +248,19 @@ pub(crate) enum AnchorRefusal {
     WriterClosed,
 }
 
+/// Late acknowledgements an anchor may owe before it is sent no further
+/// prepare frames. A Window that answers late answers each frame it got, so
+/// its debt drains as its answers arrive.
+pub(crate) const MAX_STALE_ACKNOWLEDGEMENTS: u8 = 4;
+
 /// One declared Window as an attempt took it.
 pub(crate) struct AnchorSnapshot {
     pub(crate) connection_id: u64,
     pub(crate) process: WindowProcess,
     pub(crate) control: mpsc::Sender<ControlFrame>,
+    /// The anchor owes [`MAX_STALE_ACKNOWLEDGEMENTS`] late answers, so it is
+    /// sent no prepare frame and is named as unacknowledged.
+    pub(crate) owes_too_many: bool,
 }
 
 /// A trusted-UI process that holds attachments but declared no anchor.
@@ -314,7 +334,7 @@ impl HandoffWindows {
                 process,
                 control,
                 pending: None,
-                stale_acknowledgement: false,
+                stale_acknowledgements: 0,
             },
         );
         Ok(())
@@ -352,6 +372,7 @@ impl HandoffWindows {
                 connection_id,
                 process: anchor.process.clone(),
                 control: anchor.control.clone(),
+                owes_too_many: anchor.stale_acknowledgements >= MAX_STALE_ACKNOWLEDGEMENTS,
             })
             .collect::<Vec<_>>();
         anchors.sort_by_key(|anchor| anchor.connection_id);
@@ -443,36 +464,45 @@ impl HandoffWindows {
     }
 
     /// Ends every pending acknowledgement: the attempt stopped waiting. An
-    /// anchor whose frame was not acknowledged now owes one stale
+    /// anchor whose frame was not acknowledged now owes one more late
     /// acknowledgement.
     pub(crate) fn close_acknowledgements(&mut self) {
         for anchor in self.anchors.values_mut() {
             if anchor.pending.take().is_some() {
-                anchor.stale_acknowledgement = true;
+                anchor.owe_stale_acknowledgement();
             }
         }
     }
 
     /// Ends one anchor's pending acknowledgement because its frame could not
     /// be sent completely. The Window may still have received the start of
-    /// it, so the anchor owes one stale acknowledgement.
+    /// it, so the anchor owes one more late acknowledgement.
     pub(crate) fn abandon_acknowledgement(&mut self, connection_id: u64) {
         if let Some(anchor) = self.anchors.get_mut(&connection_id)
             && anchor.pending.take().is_some()
         {
-            anchor.stale_acknowledgement = true;
+            anchor.owe_stale_acknowledgement();
         }
     }
 
     /// Whether this acknowledgement answers an earlier abandoned prepare
-    /// frame; taking it clears the debt. A Window that never sends that late
-    /// answer loses its next real acknowledgement instead, and is named as
-    /// unacknowledged once. That fails closed: no frame is ever credited with
-    /// an answer the Window gave to another.
+    /// frame, which settles one owed late answer. A Window that never sends
+    /// a late answer loses a later real acknowledgement instead, and is named
+    /// as unacknowledged in that attempt. That fails closed: no frame is ever
+    /// credited with an answer the Window gave to another.
     pub(crate) fn take_stale_acknowledgement(&mut self, connection_id: u64) -> bool {
+        self.anchors.get_mut(&connection_id).is_some_and(|anchor| {
+            let owed = anchor.stale_acknowledgements > 0;
+            anchor.stale_acknowledgements = anchor.stale_acknowledgements.saturating_sub(1);
+            owed
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale_acknowledgements(&self, connection_id: u64) -> u8 {
         self.anchors
-            .get_mut(&connection_id)
-            .is_some_and(|anchor| std::mem::take(&mut anchor.stale_acknowledgement))
+            .get(&connection_id)
+            .map_or(0, |anchor| anchor.stale_acknowledgements)
     }
 
     /// Every Splint the process's trusted-UI connections are attached to.
