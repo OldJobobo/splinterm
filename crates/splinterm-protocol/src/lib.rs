@@ -2741,10 +2741,12 @@ pub fn validate_handoff_decision_required(
         return Err(invalid());
     }
     let mut indices = std::collections::HashSet::with_capacity(windows.len());
+    let mut pids = std::collections::HashSet::with_capacity(windows.len());
     for window in windows {
         if usize::from(window.index) >= MAX_HANDOFF_WINDOWS
             || !indices.insert(window.index)
             || !i32::try_from(window.pid).is_ok_and(|pid| pid > 0)
+            || !pids.insert(window.pid)
             || window.dojos.len() > MAX_HANDOFF_WINDOW_DOJOS
         {
             return Err(invalid());
@@ -6449,6 +6451,7 @@ mod tests {
             |windows| windows[1].index = u8::try_from(MAX_HANDOFF_WINDOWS).unwrap(),
             |windows| windows[0].pid = 0,
             |windows| windows[0].pid = u32::try_from(i32::MAX).unwrap() + 1,
+            |windows| windows[1].pid = windows[0].pid,
             |windows| {
                 let dojo = windows[0].dojos[0].clone();
                 windows[0].dojos.push(dojo);

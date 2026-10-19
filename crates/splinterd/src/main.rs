@@ -29,9 +29,9 @@ use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
-    CompactSubscription, HandoffCheckpointBudget, LiveError, LiveEvent, LiveScrollbackPage,
-    LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
-    MAX_LIVE_SPLINTS, ProcessExit, ProcessIncarnation, SubscriptionReceive,
+    CONNECTION_LIMIT, CompactSubscription, HandoffCheckpointBudget, LiveError, LiveEvent,
+    LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle,
+    LiveSplintRuntime, MAX_LIVE_SPLINTS, ProcessExit, ProcessIncarnation, SubscriptionReceive,
     TerminalPublicationMemoryLease, authorization,
     cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager},
     executable_identity,
@@ -98,10 +98,6 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-// One graphical Splint currently retains independent observation and control
-// connections. Keep enough bounded capacity for one 32-tab Window plus its
-// topology/theme channels, transient human inspection, and cleanup headroom.
-const CONNECTION_LIMIT: usize = 128;
 const IMAGE_CONTENT_CONNECTION_LIMIT: usize = 8;
 const IMAGE_CONTENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const IMAGE_CONTENT_HEADER_BYTES: usize = 53;

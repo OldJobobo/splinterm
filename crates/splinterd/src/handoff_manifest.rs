@@ -41,9 +41,9 @@ pub const MAX_MANIFEST_DOJOS: usize = MAX_MANIFEST_SPLINTS;
 // One record per trusted local Window a handoff names, each indexed by a u8.
 pub const MAX_MANIFEST_WINDOWS: usize = splinterm_protocol::MAX_HANDOFF_WINDOWS;
 const _: () = assert!(MAX_MANIFEST_WINDOWS <= u8::MAX as usize + 1);
-// No two Windows share an old connection, and the daemon admits at most 128
-// connections at once.
-pub const MAX_MANIFEST_WINDOW_CONNECTIONS: usize = 128;
+// No two Windows share an old connection, and the daemon admits at most
+// `CONNECTION_LIMIT` connections at once.
+pub const MAX_MANIFEST_WINDOW_CONNECTIONS: usize = crate::CONNECTION_LIMIT;
 const MAX_INHERITED_FD: u32 = i32::MAX as u32;
 const UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
 const UNIX_REGULAR_FILE: u32 = 0o100_000;
