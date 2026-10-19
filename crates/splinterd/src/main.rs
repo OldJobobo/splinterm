@@ -2346,8 +2346,8 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
 /// termination this round's handlers took after serve left pending again
 /// (for example `systemctl stop` while the runtime stopped). The signal then
 /// crosses a successful exec to the candidate instead of being lost
-/// ([`carry_taken_terminations`]). If one thread is not reached, the boundary
-/// is not crossed. When the boundary returns, the block is released before
+/// ([`carry_taken_terminations`]). If one thread is not reached, or a taken
+/// termination cannot be carried, the boundary is not crossed. When the boundary returns, the block is released before
 /// the resumed round builds its runtime. The pending signal then reaches
 /// this generation's handler, and the resumed round acts on it as before.
 /// Unit tests pass no `signals`, and only the block and the wait are taken.
@@ -2479,14 +2479,21 @@ fn carry_taken_terminations_with(
         // streams (capture failed before polling them) or pending under the
         // block, for the resumed round.
         let taken = captured_terminations(signals).map_err(ExecBoundaryError::SignalCarry)?;
+        // Both are replayed even when one fails, so neither taken request
+        // is skipped; each one made pending reaches the resumed round.
+        let mut failure = None;
         for (taken, signal) in [
             (taken.terminate, nix::sys::signal::Signal::SIGTERM),
             (taken.interrupt, nix::sys::signal::Signal::SIGINT),
         ] {
-            if taken {
-                splinterd::handoff_exec::replay_blocked_signal(&blocked, signal)
-                    .map_err(ExecBoundaryError::SignalCarry)?;
+            if taken
+                && let Err(error) = splinterd::handoff_exec::replay_blocked_signal(&blocked, signal)
+            {
+                failure.get_or_insert(error);
             }
+        }
+        if let Some(error) = failure {
+            return Err(ExecBoundaryError::SignalCarry(error));
         }
     }
     Ok(Some(blocked))
@@ -2557,7 +2564,7 @@ fn cross_boundary(
             // mask.
             let _carried = match carry_taken_terminations(signals) {
                 Ok(carried) => carried,
-                Err(not_single_threaded) => return not_single_threaded,
+                Err(error) => return error,
             };
             cross_exec_boundary(&plan, Instant::now() + HANDOFF_GUARD_WAIT)
         }
