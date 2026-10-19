@@ -60,6 +60,15 @@ pub const MAX_LIVE_SPLINTS: usize = 256;
 // A full persisted topology must be able to run entirely live.
 const _: () = assert!(MAX_LIVE_SPLINTS >= splinterm_core::MAX_SPLINTS);
 
+/// Client connections the daemon serves at once.
+///
+/// One graphical Splint currently retains independent observation and control
+/// connections. Keep enough bounded capacity for one 32-tab Window plus its
+/// topology/theme channels, transient human inspection, and cleanup headroom.
+/// Handoff manifests record the Windows' old connections, so they are bounded
+/// by it too.
+pub const CONNECTION_LIMIT: usize = 128;
+
 /// The candidate activation flag, spelled `CANDIDATE_ACTIVATION_ARGUMENT=<fd>`,
 /// where `<fd>` is the canonical decimal number of the inherited forward
 /// manifest. It must be the first argument; the ordinary daemon arguments

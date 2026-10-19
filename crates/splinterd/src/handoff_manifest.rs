@@ -38,6 +38,12 @@ pub const MAX_MANIFEST_SPLINTS: usize = crate::MAX_LIVE_SPLINTS;
 // capped like persistent ones, so only the Splint bound limits either count.
 pub const MAX_MANIFEST_LAIRS: usize = MAX_MANIFEST_SPLINTS;
 pub const MAX_MANIFEST_DOJOS: usize = MAX_MANIFEST_SPLINTS;
+// One record per trusted local Window a handoff names, each indexed by a u8.
+pub const MAX_MANIFEST_WINDOWS: usize = splinterm_protocol::MAX_HANDOFF_WINDOWS;
+const _: () = assert!(MAX_MANIFEST_WINDOWS <= u8::MAX as usize + 1);
+// No two Windows share an old connection, and the daemon admits at most
+// `CONNECTION_LIMIT` connections at once.
+pub const MAX_MANIFEST_WINDOW_CONNECTIONS: usize = crate::CONNECTION_LIMIT;
 const MAX_INHERITED_FD: u32 = i32::MAX as u32;
 const UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
 const UNIX_REGULAR_FILE: u32 = 0o100_000;
@@ -107,6 +113,13 @@ pub struct HandoffManifestV1 {
     /// Omitted from the canonical encoding when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_splints: Vec<ManifestExcludedSplint>,
+    /// Trusted local Windows whose continuation crosses the handoff (amended
+    /// into v1 before 0.2.0, Plan 0061 D3). Each record owns the
+    /// `ClientProcess(index)` and `Continuation(index)` descriptor slots.
+    /// Omitted from the canonical encoding when empty, so a manifest without
+    /// Windows encodes exactly as it did before the amendment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<ManifestWindow>,
     pub descriptors: Vec<ManifestDescriptor>,
 }
 
@@ -348,6 +361,27 @@ pub struct ManifestExcludedSplint {
     pub exit: Option<ManifestProcessExit>,
 }
 
+/// A trusted local Window whose continuation crosses the handoff: the
+/// process its inherited pidfd (`ClientProcess(index)`) pins, and the old
+/// connections a claim over its continuation channel (`Continuation(index)`)
+/// may stand for.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestWindow {
+    /// Dense from 0 across the manifest's Windows.
+    pub index: u8,
+    pub pid: u32,
+    /// The process start time in clock ticks after boot, which tells the
+    /// pinned process from a later one reusing its PID.
+    pub start_time: u64,
+    /// Device and inode of the executable the process ran when pinned.
+    pub client_device: u64,
+    pub client_inode: u64,
+    /// The Window's old protocol connection IDs, ascending. No two Windows
+    /// share one.
+    pub old_connections: Vec<u64>,
+}
+
 /// A process exit: exactly one of an exit code or a terminating signal.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -400,9 +434,15 @@ pub enum BodyDisposition {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControllerDisposition {
     Released,
+    /// At the fence, the Window `window`'s old connection `connection` held
+    /// the Splint's controller, which a valid resume claim may restore.
+    HeldBy {
+        window: u8,
+        connection: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -439,6 +479,8 @@ pub enum ManifestError {
     InvalidInstallPrefix,
     #[error("forward and rollback manifests do not form one exact operation pair")]
     PairMismatch,
+    #[error("handoff manifest Window records or held controllers are invalid")]
+    InvalidWindows,
 }
 
 /// Encodes one validated manifest into its unique canonical JSON byte form.
@@ -454,6 +496,7 @@ pub fn encode_manifest(manifest: &HandoffManifestV1) -> Result<Vec<u8>, Manifest
     canonical
         .excluded_splints
         .sort_by_key(excluded_splint_sort_key);
+    canonical.windows = canonical_windows(&canonical.windows);
     canonical.descriptors.sort_by_key(|entry| entry.slot);
     validate_manifest(&canonical)?;
     let bytes = serde_json::to_vec(&canonical)?;
@@ -528,10 +571,18 @@ pub fn validate_manifest(manifest: &HandoffManifestV1) -> Result<(), ManifestErr
         || manifest.excluded_splints.len() > MAX_MANIFEST_SPLINTS
         || manifest.splints.len() + manifest.excluded_splints.len() > MAX_MANIFEST_SPLINTS
         || manifest.descriptors.len() > MAX_HANDOFF_DESCRIPTORS
+        || manifest.windows.len() > MAX_MANIFEST_WINDOWS
+        || manifest
+            .windows
+            .iter()
+            .map(|window| window.old_connections.len())
+            .sum::<usize>()
+            > MAX_MANIFEST_WINDOW_CONNECTIONS
     {
         return Err(ManifestError::InvalidBounds);
     }
     validate_executable_pairs(manifest)?;
+    validate_windows(manifest)?;
     validate_descriptors(manifest)?;
     validate_splints(manifest)?;
     match (manifest.kind, manifest.counterpart_manifest_slot) {
@@ -582,6 +633,7 @@ pub fn validate_manifest_pair(
         || forward.executable_pairs != rollback.executable_pairs
         || forward_splints != rollback_splints
         || forward_excluded != rollback_excluded
+        || canonical_windows(&forward.windows) != canonical_windows(&rollback.windows)
         || forward_descriptors != rollback_descriptors
     {
         return Err(ManifestError::PairMismatch);
@@ -707,13 +759,54 @@ fn validate_executable_image(image: &ManifestExecutableImage) -> Result<(), Mani
     Ok(())
 }
 
+/// Requires Window records indexed densely from 0, one per live process,
+/// each with a start time, an executable identity, and a nonempty set of
+/// nonzero connection IDs no other Window shares; and every held controller
+/// to name one of its own Window's connections.
+fn validate_windows(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
+    let mut indices = BTreeSet::new();
+    let mut pids = HashSet::new();
+    let mut connections = HashSet::new();
+    for window in &manifest.windows {
+        // Distinct indices below the record count are exactly 0..count.
+        if usize::from(window.index) >= manifest.windows.len()
+            || !indices.insert(window.index)
+            || !is_linux_pid(window.pid)
+            || !pids.insert(window.pid)
+            || window.start_time == 0
+            || window.client_device == 0
+            || window.client_inode == 0
+            || window.old_connections.is_empty()
+            || !window
+                .old_connections
+                .iter()
+                .all(|&connection| connection != 0 && connections.insert(connection))
+        {
+            return Err(ManifestError::InvalidWindows);
+        }
+    }
+    let held = |window: u8, connection: u64| {
+        manifest
+            .windows
+            .iter()
+            .any(|record| record.index == window && record.old_connections.contains(&connection))
+    };
+    // A connection holds at most one controller lease, so no two Splints
+    // may name the same held connection.
+    let mut leases = HashSet::new();
+    if manifest.splints.iter().any(|splint| {
+        matches!(splint.controller, ControllerDisposition::HeldBy { window, connection }
+            if !held(window, connection) || !leases.insert(connection))
+    }) {
+        return Err(ManifestError::InvalidWindows);
+    }
+    Ok(())
+}
+
 /// Requires the descriptor slots to be exactly the global slots plus those the
-/// Splint records reference.
-///
-/// Client-continuation roles (`ClientProcess`, `Continuation`) stay deferred:
-/// schema v1 has no per-Window record binding a slot to its authenticated
-/// pidfd identity, old connection set, and resume-record disposition, so such a
-/// descriptor would be unreferenced and is rejected like any other.
+/// Splint and Window records reference: each Window owns exactly its
+/// `ClientProcess(index)` and `Continuation(index)` slots, so a client role
+/// without its Window record is unreferenced and rejected like any other.
 fn validate_descriptors(manifest: &HandoffManifestV1) -> Result<(), ManifestError> {
     let mut slots = BTreeSet::new();
     let mut descriptors = HashSet::new();
@@ -743,6 +836,10 @@ fn validate_descriptors(manifest: &HandoffManifestV1) -> Result<(), ManifestErro
         if let BodyDisposition::Descriptor(slot) = splint.image_state {
             expected.insert(HandoffDescriptorSlot::ImageState(slot));
         }
+    }
+    for window in &manifest.windows {
+        expected.insert(HandoffDescriptorSlot::ClientProcess(window.index));
+        expected.insert(HandoffDescriptorSlot::Continuation(window.index));
     }
     if slots != expected {
         return Err(ManifestError::InvalidDescriptors);
@@ -898,6 +995,17 @@ impl Drop for PackagedOwnerOverride {
 /// restored PTY identity can carry.
 fn is_linux_pid(raw: u32) -> bool {
     i32::try_from(raw).is_ok_and(|pid| pid > 0)
+}
+
+/// Window records in canonical order: by index, each with ascending
+/// connection IDs.
+fn canonical_windows(windows: &[ManifestWindow]) -> Vec<ManifestWindow> {
+    let mut canonical = windows.to_vec();
+    canonical.sort_by_key(|window| window.index);
+    for window in &mut canonical {
+        window.old_connections.sort_unstable();
+    }
+    canonical
 }
 
 fn excluded_splint_sort_key(splint: &ManifestExcludedSplint) -> (String, String, String) {
@@ -1145,6 +1253,7 @@ mod tests {
             },
             splints: vec![splint],
             excluded_splints: Vec::new(),
+            windows: Vec::new(),
             descriptors,
         }
     }
@@ -2063,5 +2172,460 @@ mod tests {
                 Err(ManifestError::InvalidRuntime)
             ));
         }
+    }
+
+    /// `[value; count]` as canonical JSON.
+    fn json_bytes(value: u8, count: usize) -> String {
+        format!("[{}]", vec![value.to_string(); count].join(","))
+    }
+
+    /// The canonical encoding of a fixed manifest with no Windows, written
+    /// out field by field as manifest v1 encoded it before the Window
+    /// amendment.
+    fn pre_window_golden() -> String {
+        let generation = |identity: u8, patch: u8| {
+            format!(
+                r#"{{"build_identity":{},"build_version":{{"major":0,"minor":2,"patch":{patch}}}}}"#,
+                json_bytes(identity, 32)
+            )
+        };
+        let image = |byte: u8| {
+            let sha = json_bytes(byte, 32);
+            let (source_inode, snapshot_device, snapshot_inode) = (
+                u16::from(byte) + 10,
+                u16::from(byte) + 20,
+                u16::from(byte) + 30,
+            );
+            // 0o100755, and the four required seals.
+            format!(
+                concat!(
+                    r#"{{"source_device":{byte},"source_inode":{source_inode},"#,
+                    r#""source_owner_uid":0,"source_mode":33261,"source_size":1024,"#,
+                    r#""source_sha256":{sha},"snapshot_device":{snapshot_device},"#,
+                    r#""snapshot_inode":{snapshot_inode},"snapshot_size":1024,"#,
+                    r#""snapshot_sha256":{sha},"snapshot_seals":15}}"#
+                ),
+                byte = byte,
+                source_inode = source_inode,
+                snapshot_device = snapshot_device,
+                snapshot_inode = snapshot_inode,
+                sha = sha,
+            )
+        };
+        let descriptors = [
+            r#"{"role":"pty_master","index":0}"#,
+            r#"{"role":"listener"}"#,
+            r#"{"role":"image_listener"}"#,
+            r#"{"role":"checkpoint_manifest"}"#,
+            r#"{"role":"rollback_manifest"}"#,
+            r#"{"role":"terminal_checkpoint","index":0}"#,
+            r#"{"role":"forward_client"}"#,
+            r#"{"role":"rollback_daemon"}"#,
+            r#"{"role":"rollback_client"}"#,
+        ]
+        .iter()
+        .zip(20..)
+        .map(|(slot, fd)| format!(r#"{{"slot":{slot},"inherited_fd":{fd}}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+        [
+            r#"{"schema":1,"kind":"forward","handoff_id":"#.to_owned(),
+            json_bytes(9, 16),
+            r#","source_generation":"#.to_owned(),
+            generation(1, 1),
+            r#","target_generation":"#.to_owned(),
+            generation(2, 2),
+            concat!(
+                r#","source_daemon_generation":1,"target_daemon_generation":2,"#,
+                r#""topology_revision":4,"durable_state_generation":4,"private_protocol":1,"#,
+                r#""handoff_protocol":1,"terminal_checkpoint_schema":1,"#,
+                r#""descriptor_manifest_schema":1,"install_prefix":"/usr/bin","#,
+                r#""executable_pairs":{"forward":{"daemon":"#
+            )
+            .to_owned(),
+            image(2),
+            r#","client":"#.to_owned(),
+            image(3),
+            r#","generation":"#.to_owned(),
+            generation(2, 2),
+            r#"},"rollback":{"daemon":"#.to_owned(),
+            image(4),
+            r#","client":"#.to_owned(),
+            image(5),
+            r#","generation":"#.to_owned(),
+            generation(1, 1),
+            concat!(
+                r#"}},"counterpart_manifest_slot":{"role":"rollback_manifest"},"#,
+                r#""splints":[{"lair_id":"11111111-1111-4111-8111-111111111111","#,
+                r#""dojo_id":"22222222-2222-4222-8222-222222222222","#,
+                r#""splint_id":"33333333-3333-4333-8333-333333333333","incarnation":1,"#,
+                r#""pty":{"child_pid":42,"process_group":42,"session_id":42,"master_slot":0},"#,
+                r#""size":{"columns":80,"rows":24,"pixel_width":800,"pixel_height":480},"#,
+                r#""foreground_process_group":42,"terminal_revision":7,"history_generation":3,"#,
+                r#""exit":"running","terminal_checkpoint":{"disposition":"descriptor","slot":0},"#,
+                r#""image_state":{"disposition":"not_present"},"controller":"released","#,
+                r#""subscriptions":"dropped"}],"descriptors":["#
+            )
+            .to_owned(),
+            descriptors,
+            "]}".to_owned(),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn a_manifest_without_windows_encodes_byte_for_byte_as_before_the_amendment() {
+        let golden = pre_window_golden();
+        // Decoding accepts only bytes that re-encode identically, so the
+        // amended schema still produces exactly the pre-amendment encoding.
+        let decoded = decode_manifest(golden.as_bytes()).unwrap();
+        assert!(decoded.windows.is_empty());
+        assert_eq!(
+            decoded.splints[0].controller,
+            ControllerDisposition::Released
+        );
+        assert_eq!(encode_manifest(&decoded).unwrap(), golden.as_bytes());
+        assert!(!golden.contains("windows"));
+
+        // The same manifest with a Window adds only its record, before the
+        // descriptors.
+        let mut windowed = decoded;
+        windowed.windows = vec![manifest_window(0, 700, &[5])];
+        push_window_slots(&mut windowed, 0);
+        let encoded = String::from_utf8(encode_manifest(&windowed).unwrap()).unwrap();
+        assert!(encoded.contains(concat!(
+            r#""subscriptions":"dropped"}],"windows":[{"index":0,"pid":700,"#,
+            r#""start_time":7000,"client_device":3,"client_inode":4,"#,
+            r#""old_connections":[5]}],"descriptors":["#
+        )));
+    }
+
+    fn manifest_window(index: u8, pid: u32, connections: &[u64]) -> ManifestWindow {
+        ManifestWindow {
+            index,
+            pid,
+            start_time: u64::from(pid) * 10,
+            client_device: 3,
+            client_inode: 4,
+            old_connections: connections.to_vec(),
+        }
+    }
+
+    /// Adds Window `index`'s pidfd and continuation descriptor slots.
+    fn push_window_slots(manifest: &mut HandoffManifestV1, index: u8) {
+        for (offset, slot) in [
+            HandoffDescriptorSlot::ClientProcess(index),
+            HandoffDescriptorSlot::Continuation(index),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            manifest.descriptors.push(ManifestDescriptor {
+                slot,
+                inherited_fd: 5000 + u32::from(index) * 2 + u32::try_from(offset).unwrap(),
+            });
+        }
+    }
+
+    /// A manifest pair whose two Windows own their slots, with the Splint's
+    /// controller held by the second Window.
+    fn windowed_pair() -> (HandoffManifestV1, HandoffManifestV1) {
+        let (mut forward, mut rollback) = pair();
+        for manifest in [&mut forward, &mut rollback] {
+            manifest.windows = vec![
+                manifest_window(1, 701, &[12, 11]),
+                manifest_window(0, 700, &[10]),
+            ];
+            push_window_slots(manifest, 0);
+            push_window_slots(manifest, 1);
+            manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                window: 1,
+                connection: 12,
+            };
+        }
+        (forward, rollback)
+    }
+
+    #[test]
+    fn windows_round_trip_canonically_own_their_slots_and_match_across_the_pair() {
+        let (forward, mut rollback) = windowed_pair();
+        validate_manifest_pair(&forward, &rollback).unwrap();
+        let encoded = encode_manifest(&forward).unwrap();
+        let decoded = decode_manifest(&encoded).unwrap();
+        // Canonical order: by index, each Window's connections ascending.
+        assert_eq!(
+            decoded.windows,
+            vec![
+                manifest_window(0, 700, &[10]),
+                manifest_window(1, 701, &[11, 12])
+            ]
+        );
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(text.contains(r#""controller":{"held_by":{"window":1,"connection":12}}"#));
+        assert!(
+            text.contains(r#"{"slot":{"role":"client_process","index":1},"inherited_fd":5002}"#)
+        );
+        assert!(text.contains(r#"{"slot":{"role":"continuation","index":0},"inherited_fd":5001}"#));
+
+        // Order alone never breaks the pair; a different Window set does.
+        rollback.windows.reverse();
+        rollback.windows[1].old_connections.reverse();
+        validate_manifest_pair(&forward, &rollback).unwrap();
+        for mutate in [
+            (|manifest: &mut HandoffManifestV1| manifest.windows[0].start_time += 1)
+                as fn(&mut HandoffManifestV1),
+            |manifest| manifest.windows[0].client_inode += 1,
+            |manifest| manifest.windows[0].pid += 10,
+            |manifest| manifest.windows[1].old_connections.push(13),
+            |manifest| {
+                manifest.windows.retain(|window| window.index == 0);
+                manifest.descriptors.retain(|entry| {
+                    !matches!(
+                        entry.slot,
+                        HandoffDescriptorSlot::ClientProcess(1)
+                            | HandoffDescriptorSlot::Continuation(1)
+                    )
+                });
+                manifest.splints[0].controller = ControllerDisposition::Released;
+            },
+        ] {
+            let mut mismatched = rollback.clone();
+            mutate(&mut mismatched);
+            validate_manifest(&mismatched).unwrap();
+            assert!(matches!(
+                validate_manifest_pair(&forward, &mismatched),
+                Err(ManifestError::PairMismatch)
+            ));
+        }
+        // Splint records, held controllers included, match exactly too.
+        let mut released = rollback.clone();
+        released.splints[0].controller = ControllerDisposition::Released;
+        assert!(matches!(
+            validate_manifest_pair(&forward, &released),
+            Err(ManifestError::PairMismatch)
+        ));
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every Window record and held-controller invariant is reviewed together"
+    )]
+    fn rejects_every_malformed_window_record_slot_and_held_controller() {
+        let (baseline, _) = windowed_pair();
+        validate_manifest(&baseline).unwrap();
+        let invalid_cases: [(Mutation, ManifestError); 21] = [
+            // Indices are dense from 0 and unique.
+            (
+                |manifest| manifest.windows[0].index = 2,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].index = 0,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].pid = 0,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].pid = u32::try_from(i32::MAX).unwrap() + 1,
+                ManifestError::InvalidWindows,
+            ),
+            // One record per process.
+            (
+                |manifest| manifest.windows[0].pid = manifest.windows[1].pid,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].start_time = 0,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].client_device = 0,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].client_inode = 0,
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].old_connections.clear(),
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].old_connections.push(0),
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| manifest.windows[0].old_connections.push(11),
+                ManifestError::InvalidWindows,
+            ),
+            // No two Windows share a connection.
+            (
+                |manifest| manifest.windows[0].old_connections.push(10),
+                ManifestError::InvalidWindows,
+            ),
+            // Each Window owns exactly its two slots.
+            (
+                |manifest| {
+                    manifest
+                        .descriptors
+                        .retain(|entry| entry.slot != HandoffDescriptorSlot::Continuation(1));
+                },
+                ManifestError::InvalidDescriptors,
+            ),
+            (
+                |manifest| {
+                    manifest
+                        .descriptors
+                        .retain(|entry| entry.slot != HandoffDescriptorSlot::ClientProcess(0));
+                },
+                ManifestError::InvalidDescriptors,
+            ),
+            (
+                |manifest| push_window_slots(manifest, 2),
+                ManifestError::InvalidDescriptors,
+            ),
+            // Dropping a Window leaves its slots and held controller behind.
+            (
+                |manifest| {
+                    manifest.windows.retain(|window| window.index == 0);
+                    manifest.splints[0].controller = ControllerDisposition::Released;
+                },
+                ManifestError::InvalidDescriptors,
+            ),
+            // A held controller names one of its own Window's connections.
+            (
+                |manifest| {
+                    manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                        window: 2,
+                        connection: 12,
+                    };
+                },
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| {
+                    manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                        window: 0,
+                        connection: 12,
+                    };
+                },
+                ManifestError::InvalidWindows,
+            ),
+            (
+                |manifest| {
+                    manifest.splints[0].controller = ControllerDisposition::HeldBy {
+                        window: 1,
+                        connection: 99,
+                    };
+                },
+                ManifestError::InvalidWindows,
+            ),
+            // Bounds.
+            (
+                |manifest| {
+                    manifest.windows = (0..=MAX_MANIFEST_WINDOWS)
+                        .map(|index| {
+                            manifest_window(
+                                u8::try_from(index).unwrap(),
+                                u32::try_from(index).unwrap() + 700,
+                                &[u64::try_from(index).unwrap() + 1],
+                            )
+                        })
+                        .collect();
+                },
+                ManifestError::InvalidBounds,
+            ),
+            (
+                |manifest| {
+                    manifest.windows[0].old_connections =
+                        (1..=u64::try_from(MAX_MANIFEST_WINDOW_CONNECTIONS).unwrap()).collect();
+                },
+                ManifestError::InvalidBounds,
+            ),
+        ];
+        for (mutate, expected) in invalid_cases {
+            let mut invalid = baseline.clone();
+            mutate(&mut invalid);
+            assert_eq!(
+                std::mem::discriminant(&validate_manifest(&invalid).unwrap_err()),
+                std::mem::discriminant(&expected)
+            );
+        }
+
+        // A held controller needs a Window at all.
+        let mut unheld = manifest(ManifestKind::Forward);
+        unheld.splints[0].controller = ControllerDisposition::HeldBy {
+            window: 0,
+            connection: 1,
+        };
+        assert!(matches!(
+            validate_manifest(&unheld),
+            Err(ManifestError::InvalidWindows)
+        ));
+        // Unknown fields in a held controller never decode.
+        let text = String::from_utf8(encode_manifest(&baseline).unwrap())
+            .unwrap()
+            .replacen(r#""connection":12}"#, r#""connection":12,"extra":1}"#, 1);
+        assert!(matches!(
+            decode_manifest(text.as_bytes()),
+            Err(ManifestError::Encoding(_))
+        ));
+    }
+
+    #[test]
+    fn maximum_windows_fit_beside_the_maximum_splints() {
+        let mut maximum = with_splint_count(MAX_MANIFEST_SPLINTS);
+        let per_window = MAX_MANIFEST_WINDOW_CONNECTIONS / MAX_MANIFEST_WINDOWS;
+        let mut next_connection = u64::MAX;
+        for index in 0..MAX_MANIFEST_WINDOWS {
+            let index = u8::try_from(index).unwrap();
+            // The widest values each field can hold.
+            let window = ManifestWindow {
+                index,
+                pid: u32::try_from(i32::MAX).unwrap() - u32::from(index),
+                start_time: u64::MAX,
+                client_device: u64::MAX,
+                client_inode: u64::MAX,
+                old_connections: (0..per_window)
+                    .map(|_| {
+                        next_connection -= 1;
+                        next_connection
+                    })
+                    .collect(),
+            };
+            push_window_slots(&mut maximum, index);
+            maximum.windows.push(window);
+        }
+        // Each connection holds at most one controller, so at most
+        // `MAX_MANIFEST_WINDOW_CONNECTIONS` Splints are held; the rest are
+        // released.
+        let held = maximum.windows.iter().flat_map(|window| {
+            window
+                .old_connections
+                .iter()
+                .map(|&connection| (window.index, connection))
+        });
+        for (splint, (window, connection)) in maximum.splints.iter_mut().zip(held) {
+            splint.controller = ControllerDisposition::HeldBy { window, connection };
+        }
+        let mut shared = maximum.clone();
+        shared.splints[1].controller = shared.splints[0].controller;
+        assert!(matches!(
+            encode_manifest(&shared),
+            Err(ManifestError::InvalidWindows)
+        ));
+        let bytes = encode_manifest(&maximum).unwrap();
+        println!(
+            "maximum manifest with {MAX_MANIFEST_SPLINTS} Splints and {MAX_MANIFEST_WINDOWS} \
+             Windows: {} of {MAX_HANDOFF_MANIFEST_BYTES} bytes",
+            bytes.len()
+        );
+        assert!(bytes.len() < MAX_HANDOFF_MANIFEST_BYTES);
+        let decoded = decode_manifest(&bytes).unwrap();
+        assert_eq!(decoded.windows.len(), MAX_MANIFEST_WINDOWS);
+        assert!(decoded.descriptors.len() <= MAX_HANDOFF_DESCRIPTORS);
     }
 }

@@ -15,7 +15,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 41;
+pub const PROTOCOL_VERSION: u16 = 42;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -91,6 +91,18 @@ pub const MAX_HANDOFF_CLAIMED_CONTROLLERS: usize = 256;
 pub const HANDOFF_PREPARE_DESCRIPTORS: usize = 2;
 /// Largest sealed forward client snapshot a handoff may pass.
 pub const MAX_HANDOFF_CLIENT_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum trusted local Windows one handoff names, in a
+/// [`ServerFrame::HandoffDecisionRequired`] prompt or its answer. Each Window
+/// is named by an index below this bound.
+pub const MAX_HANDOFF_WINDOWS: usize = 64;
+/// Maximum Dojos a decision prompt names for one Window: the open Dojos one
+/// Window resume record may carry.
+pub const MAX_HANDOFF_WINDOW_DOJOS: usize = 32;
+/// Maximum UTF-8 byte length of a Dojo name in a decision prompt, the
+/// topology's own name bound.
+pub const MAX_HANDOFF_DOJO_NAME_BYTES: usize = 128;
+/// Longest a daemon waits for a [`ClientFrame::HandoffDecision`] answer.
+pub const MAX_HANDOFF_DECISION_DEADLINE_MS: u32 = 60_000;
 
 #[must_use]
 pub fn image_content_socket_path(control_socket: &Path) -> PathBuf {
@@ -164,6 +176,16 @@ pub enum ClientFrame {
         minimum_version: u16,
         maximum_version: u16,
         role: ClientRole,
+        /// Declares this connection the anchor of a trusted local Window: the
+        /// one connection a handing-off daemon sends that Window's
+        /// [`ServerFrame::HandoffPrepare`] on. Omitted when false.
+        ///
+        /// A client must not set it before it can receive that frame's
+        /// descriptors (Plan 0061 M3.14). Until then any `HandoffPrepare`
+        /// ends the client's connection, so a declared Window would lose its
+        /// anchor in every handoff instead of being listed as undeclared.
+        #[serde(default, skip_serializing_if = "bool_is_false")]
+        handoff_window: bool,
     },
     Request {
         request_id: u64,
@@ -173,6 +195,18 @@ pub enum ClientFrame {
     },
     Cancel {
         request_id: u64,
+    },
+    /// Answers the [`ServerFrame::HandoffDecisionRequired`] prompt for the
+    /// in-flight request `request_id`: proceed with the handoff without the
+    /// Windows whose prompt indices `proceed_without` lists. Those Windows
+    /// keep no continuity and reconnect after the handoff. To cancel the
+    /// handoff instead, the client sends [`ClientFrame::Cancel`] for the
+    /// request. Any other use is a protocol violation; see
+    /// [`validate_handoff_decision`].
+    HandoffDecision {
+        request_id: u64,
+        #[serde(deserialize_with = "deserialize_handoff_window_indices")]
+        proceed_without: Vec<u8>,
     },
 }
 
@@ -246,6 +280,25 @@ pub enum ServerFrame {
     /// violation.
     HandoffPrepare {
         prepare: HandoffPrepare,
+    },
+    /// Sent on the initiating trusted UI's connection while its
+    /// `PrepareDaemonHandoff { Execute }` request `request_id` is in flight,
+    /// when trusted local Windows cannot take part in the handoff (operator
+    /// decision D10). The fence stays up while the daemon waits up to
+    /// `deadline_ms` for one [`ClientFrame::HandoffDecision`] naming every
+    /// listed Window, or a [`ClientFrame::Cancel`]; no answer cancels the
+    /// handoff with `TimedOut`. A client with no such request in flight
+    /// treats it as a protocol violation. See
+    /// [`validate_handoff_decision_required`].
+    HandoffDecisionRequired {
+        request_id: u64,
+        /// Generation of the daemon that is handing off.
+        daemon_generation: u64,
+        /// Milliseconds the daemon waits for the answer after sending this
+        /// frame, at most [`MAX_HANDOFF_DECISION_DEADLINE_MS`].
+        deadline_ms: u32,
+        #[serde(deserialize_with = "deserialize_unresponsive_windows")]
+        windows: Vec<HandoffUnresponsiveWindow>,
     },
 }
 
@@ -2297,6 +2350,29 @@ where
     deserialize_bounded_vec::<D, _, MAX_HANDOFF_CLAIMED_CONTROLLERS>(deserializer)
 }
 
+fn deserialize_unresponsive_windows<'de, D>(
+    deserializer: D,
+) -> Result<Vec<HandoffUnresponsiveWindow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_HANDOFF_WINDOWS>(deserializer)
+}
+
+fn deserialize_window_dojos<'de, D>(deserializer: D) -> Result<Vec<HandoffWindowDojo>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_HANDOFF_WINDOW_DOJOS>(deserializer)
+}
+
+fn deserialize_handoff_window_indices<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_HANDOFF_WINDOWS>(deserializer)
+}
+
 /// One inclusive, nonzero version range a daemon build supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffVersionRange {
@@ -2596,6 +2672,123 @@ impl HandoffPrepare {
         }
         Ok(())
     }
+}
+
+/// Why a trusted local Window cannot take part in a handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffWindowIssue {
+    /// The Window received its [`ServerFrame::HandoffPrepare`] but did not
+    /// acknowledge it before the deadline.
+    NoAcknowledgement,
+    /// The daemon could not pin the Window's process, so it sent no prepare.
+    Unpinned,
+    /// The Window's process holds trusted connections but declared no
+    /// anchor connection (`Hello.handoff_window`), so it cannot take part.
+    Undeclared,
+}
+
+/// One Dojo an unresponsive Window has open, named for the prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffWindowDojo {
+    pub lair_id: LairId,
+    pub dojo_id: DojoId,
+    /// The Dojo's name: nonempty, without surrounding whitespace, and at
+    /// most [`MAX_HANDOFF_DOJO_NAME_BYTES`].
+    pub name: String,
+}
+
+/// One Window a [`ServerFrame::HandoffDecisionRequired`] prompt names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffUnresponsiveWindow {
+    /// The Window's index in this handoff, below [`MAX_HANDOFF_WINDOWS`].
+    /// A [`ClientFrame::HandoffDecision`] names Windows by it.
+    pub index: u8,
+    /// The Window's client process.
+    pub pid: u32,
+    pub reason: HandoffWindowIssue,
+    /// The Window's open Dojos the daemon can name, at most
+    /// [`MAX_HANDOFF_WINDOW_DOJOS`].
+    #[serde(deserialize_with = "deserialize_window_dojos")]
+    pub dojos: Vec<HandoffWindowDojo>,
+}
+
+/// Validates one decision prompt: a nonzero request and generation, a
+/// bounded nonzero deadline, and one to [`MAX_HANDOFF_WINDOWS`] Windows with
+/// distinct in-range indices, positive Linux PIDs, and at most
+/// [`MAX_HANDOFF_WINDOW_DOJOS`] distinct, well-named Dojos each.
+///
+/// # Errors
+/// Returns `InvalidArgument` for a malformed or out-of-bounds prompt.
+pub fn validate_handoff_decision_required(
+    request_id: u64,
+    daemon_generation: u64,
+    deadline_ms: u32,
+    windows: &[HandoffUnresponsiveWindow],
+) -> Result<(), ProtocolError> {
+    let invalid = || {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "handoff decision prompt is invalid",
+        )
+    };
+    if request_id == 0
+        || daemon_generation == 0
+        || !(1..=MAX_HANDOFF_DECISION_DEADLINE_MS).contains(&deadline_ms)
+        || windows.is_empty()
+        || windows.len() > MAX_HANDOFF_WINDOWS
+    {
+        return Err(invalid());
+    }
+    let mut indices = std::collections::HashSet::with_capacity(windows.len());
+    let mut pids = std::collections::HashSet::with_capacity(windows.len());
+    for window in windows {
+        if usize::from(window.index) >= MAX_HANDOFF_WINDOWS
+            || !indices.insert(window.index)
+            || !i32::try_from(window.pid).is_ok_and(|pid| pid > 0)
+            || !pids.insert(window.pid)
+            || window.dojos.len() > MAX_HANDOFF_WINDOW_DOJOS
+        {
+            return Err(invalid());
+        }
+        let mut dojos = std::collections::HashSet::with_capacity(window.dojos.len());
+        for dojo in &window.dojos {
+            if !dojos.insert(dojo.dojo_id)
+                || dojo.name.is_empty()
+                || dojo.name.len() > MAX_HANDOFF_DOJO_NAME_BYTES
+                || dojo.name.trim() != dojo.name
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates one decision answer on its own: a nonzero request and one to
+/// [`MAX_HANDOFF_WINDOWS`] distinct in-range Window indices. The daemon also
+/// requires the indices to be exactly the Windows its prompt named.
+///
+/// # Errors
+/// Returns `InvalidArgument` for a malformed or out-of-bounds answer.
+pub fn validate_handoff_decision(
+    request_id: u64,
+    proceed_without: &[u8],
+) -> Result<(), ProtocolError> {
+    let mut indices = std::collections::HashSet::with_capacity(proceed_without.len());
+    if request_id == 0
+        || proceed_without.is_empty()
+        || proceed_without.len() > MAX_HANDOFF_WINDOWS
+        || !proceed_without
+            .iter()
+            .all(|&index| usize::from(index) < MAX_HANDOFF_WINDOWS && indices.insert(index))
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "handoff decision is invalid",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4032,6 +4225,7 @@ mod tests {
             minimum_version: PROTOCOL_VERSION,
             maximum_version: PROTOCOL_VERSION,
             role: ClientRole::Automation,
+            handoff_window: false,
         };
         let expected_body = serde_json::to_vec(&value).unwrap();
         let frame = encode_frame(&value).unwrap();
@@ -4049,6 +4243,7 @@ mod tests {
             minimum_version: PROTOCOL_VERSION,
             maximum_version: PROTOCOL_VERSION,
             role: ClientRole::RemoteInteractive,
+            handoff_window: false,
         })
         .unwrap();
         assert!(
@@ -4616,7 +4811,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 41);
+        assert_eq!(PROTOCOL_VERSION, 42);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -5825,7 +6020,7 @@ mod tests {
         value.as_object_mut().unwrap().remove("daemon_generation");
         assert!(
             serde_json::from_value::<ServerFrame>(value).is_err(),
-            "protocol 41 hello always names the daemon generation"
+            "protocol 42 hello always names the daemon generation"
         );
     }
 
@@ -6100,5 +6295,256 @@ mod tests {
                 .collect::<Vec<_>>(),
         });
         assert!(serde_json::from_value::<Response>(oversized).is_err());
+    }
+
+    #[test]
+    fn hello_window_anchor_is_optional_and_omitted_when_false() {
+        let hello = |handoff_window| ClientFrame::Hello {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+            role: ClientRole::TrustedUi,
+            handoff_window,
+        };
+        // An undeclared hello keeps its exact protocol 41 shape.
+        let plain = serde_json::json!({
+            "type": "hello",
+            "minimum_version": 42,
+            "maximum_version": 42,
+            "role": "trusted_ui",
+        });
+        assert_eq!(serde_json::to_value(hello(false)).unwrap(), plain);
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(plain).unwrap(),
+            hello(false)
+        );
+        let declared = serde_json::to_value(hello(true)).unwrap();
+        assert_eq!(declared["handoff_window"], true);
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(declared).unwrap(),
+            hello(true)
+        );
+    }
+
+    fn unresponsive_window(index: u8) -> HandoffUnresponsiveWindow {
+        HandoffUnresponsiveWindow {
+            index,
+            pid: 4242 + u32::from(index),
+            reason: HandoffWindowIssue::NoAcknowledgement,
+            dojos: vec![HandoffWindowDojo {
+                lair_id: LairId::new(),
+                dojo_id: DojoId::new(),
+                name: "build".into(),
+            }],
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every decision prompt shape, invariant, and decoding bound is reviewed together"
+    )]
+    fn handoff_decision_prompt_is_bounded_and_explicit() {
+        let first = unresponsive_window(0);
+        let undeclared = HandoffUnresponsiveWindow {
+            reason: HandoffWindowIssue::Undeclared,
+            dojos: Vec::new(),
+            ..unresponsive_window(1)
+        };
+        let prompt = ServerFrame::HandoffDecisionRequired {
+            request_id: 9,
+            daemon_generation: 3,
+            deadline_ms: 20_000,
+            windows: vec![first.clone(), undeclared.clone()],
+        };
+        let value = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "handoff_decision_required",
+                "request_id": 9,
+                "daemon_generation": 3,
+                "deadline_ms": 20_000,
+                "windows": [
+                    {
+                        "index": 0,
+                        "pid": 4242,
+                        "reason": "no_acknowledgement",
+                        "dojos": [{
+                            "lair_id": first.dojos[0].lair_id,
+                            "dojo_id": first.dojos[0].dojo_id,
+                            "name": "build",
+                        }],
+                    },
+                    {"index": 1, "pid": 4243, "reason": "undeclared", "dojos": []},
+                ],
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(value).unwrap(),
+            prompt
+        );
+        for (reason, name) in [
+            (HandoffWindowIssue::NoAcknowledgement, "no_acknowledgement"),
+            (HandoffWindowIssue::Unpinned, "unpinned"),
+            (HandoffWindowIssue::Undeclared, "undeclared"),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), name);
+        }
+        let windows = vec![first, undeclared];
+        validate_handoff_decision_required(9, 3, 20_000, &windows).unwrap();
+        validate_handoff_decision_required(9, 3, MAX_HANDOFF_DECISION_DEADLINE_MS, &windows)
+            .unwrap();
+
+        // The largest prompt: every Window, each with every Dojo.
+        let full = (0..MAX_HANDOFF_WINDOWS)
+            .map(|index| {
+                let mut window = unresponsive_window(u8::try_from(index).unwrap());
+                window.dojos = (0..MAX_HANDOFF_WINDOW_DOJOS)
+                    .map(|_| HandoffWindowDojo {
+                        lair_id: LairId::new(),
+                        dojo_id: DojoId::new(),
+                        name: "n".repeat(MAX_HANDOFF_DOJO_NAME_BYTES),
+                    })
+                    .collect();
+                window
+            })
+            .collect::<Vec<_>>();
+        validate_handoff_decision_required(9, 3, 20_000, &full).unwrap();
+        let frame = encode_frame(&ServerFrame::HandoffDecisionRequired {
+            request_id: 9,
+            daemon_generation: 3,
+            deadline_ms: 20_000,
+            windows: full.clone(),
+        })
+        .unwrap();
+        assert!(frame.len() < MAX_FRAME_BYTES);
+
+        for (request_id, daemon_generation, deadline_ms) in [
+            (0, 3, 20_000),
+            (9, 0, 20_000),
+            (9, 3, 0),
+            (9, 3, MAX_HANDOFF_DECISION_DEADLINE_MS + 1),
+        ] {
+            assert_eq!(
+                validate_handoff_decision_required(
+                    request_id,
+                    daemon_generation,
+                    deadline_ms,
+                    &windows
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        let invalid = |mutate: fn(&mut Vec<HandoffUnresponsiveWindow>)| {
+            let mut candidate = windows.clone();
+            mutate(&mut candidate);
+            validate_handoff_decision_required(9, 3, 20_000, &candidate)
+                .unwrap_err()
+                .code
+        };
+        for mutate in [
+            (|windows: &mut Vec<HandoffUnresponsiveWindow>| windows.clear())
+                as fn(&mut Vec<HandoffUnresponsiveWindow>),
+            |windows| windows[1].index = 0,
+            |windows| windows[1].index = u8::try_from(MAX_HANDOFF_WINDOWS).unwrap(),
+            |windows| windows[0].pid = 0,
+            |windows| windows[0].pid = u32::try_from(i32::MAX).unwrap() + 1,
+            |windows| windows[1].pid = windows[0].pid,
+            |windows| {
+                let dojo = windows[0].dojos[0].clone();
+                windows[0].dojos.push(dojo);
+            },
+            |windows| windows[0].dojos[0].name = String::new(),
+            |windows| windows[0].dojos[0].name = " build".into(),
+            |windows| windows[0].dojos[0].name = "n".repeat(MAX_HANDOFF_DOJO_NAME_BYTES + 1),
+            |windows| {
+                let template = windows[0].dojos[0].clone();
+                windows[0].dojos = (0..=MAX_HANDOFF_WINDOW_DOJOS)
+                    .map(|_| HandoffWindowDojo {
+                        dojo_id: DojoId::new(),
+                        ..template.clone()
+                    })
+                    .collect();
+            },
+        ] {
+            assert_eq!(invalid(mutate), ErrorCode::InvalidArgument);
+        }
+        let mut excess = full.clone();
+        excess.push(unresponsive_window(0));
+        assert!(validate_handoff_decision_required(9, 3, 20_000, &excess).is_err());
+
+        // Decoding rejects a list one element past either bound.
+        let mut value = serde_json::to_value(ServerFrame::HandoffDecisionRequired {
+            request_id: 9,
+            daemon_generation: 3,
+            deadline_ms: 20_000,
+            windows: full,
+        })
+        .unwrap();
+        let mut too_many_dojos = value.clone();
+        let dojos = too_many_dojos["windows"][0]["dojos"]
+            .as_array_mut()
+            .unwrap();
+        dojos.push(dojos[0].clone());
+        assert!(serde_json::from_value::<ServerFrame>(too_many_dojos).is_err());
+        let listed = value["windows"].as_array_mut().unwrap();
+        listed.push(listed[0].clone());
+        assert_eq!(listed.len(), MAX_HANDOFF_WINDOWS + 1);
+        assert!(serde_json::from_value::<ServerFrame>(value).is_err());
+    }
+
+    #[test]
+    fn handoff_decision_answer_is_bounded_and_explicit() {
+        let answer = ClientFrame::HandoffDecision {
+            request_id: 9,
+            proceed_without: vec![1, 0],
+        };
+        let value = serde_json::to_value(&answer).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "handoff_decision",
+                "request_id": 9,
+                "proceed_without": [1, 0],
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(value).unwrap(),
+            answer
+        );
+        validate_handoff_decision(9, &[1, 0]).unwrap();
+        let every = (0..MAX_HANDOFF_WINDOWS)
+            .map(|index| u8::try_from(index).unwrap())
+            .collect::<Vec<_>>();
+        validate_handoff_decision(9, &every).unwrap();
+
+        let mut excess = every.clone();
+        excess.push(0);
+        for (request_id, proceed_without) in [
+            (0, vec![0]),
+            (9, Vec::new()),
+            (9, vec![2, 2]),
+            (9, vec![u8::try_from(MAX_HANDOFF_WINDOWS).unwrap()]),
+            (9, vec![u8::MAX]),
+            (9, excess.clone()),
+        ] {
+            assert_eq!(
+                validate_handoff_decision(request_id, &proceed_without)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        // Decoding rejects a list one element past its bound.
+        assert!(
+            serde_json::from_value::<ClientFrame>(serde_json::json!({
+                "type": "handoff_decision",
+                "request_id": 9,
+                "proceed_without": excess,
+            }))
+            .is_err()
+        );
     }
 }

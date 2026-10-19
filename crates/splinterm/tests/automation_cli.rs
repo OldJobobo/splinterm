@@ -751,6 +751,7 @@ fn serve_one(result: Result<Response, ProtocolError>) -> (PathBuf, thread::JoinH
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
                 role: ClientRole::Automation,
+                handoff_window: false,
             }
         ));
         stream
@@ -1521,6 +1522,7 @@ fn output_json_ping_keeps_stdout_pristine() {
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
                 role: ClientRole::Automation,
+                handoff_window: false,
             }
         ));
         stream

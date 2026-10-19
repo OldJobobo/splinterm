@@ -51,10 +51,10 @@ use crate::{
     handoff_descriptors::{HandoffDescriptorSlot, MAX_HANDOFF_DESCRIPTORS},
     handoff_manifest::{
         ControllerDisposition, ExecutablePairSetEvidence, ExitDisposition, GenerationEvidence,
-        HANDOFF_MANIFEST_SCHEMA_V1, HandoffId, HandoffManifestV1, ManifestDescriptor,
-        ManifestError, ManifestExcludedSplint, ManifestKind, ManifestProcessExit,
-        ManifestPtyIdentity, ManifestPtySize, ManifestSplint, SubscriptionDisposition,
-        decode_manifest, encode_manifest, validate_manifest_pair,
+        HANDOFF_MANIFEST_SCHEMA_V1, HandoffId, HandoffManifestV1, MAX_MANIFEST_WINDOWS,
+        ManifestDescriptor, ManifestError, ManifestExcludedSplint, ManifestKind,
+        ManifestProcessExit, ManifestPtyIdentity, ManifestPtySize, ManifestSplint,
+        SubscriptionDisposition, decode_manifest, encode_manifest, validate_manifest_pair,
     },
     handoff_preflight::SealedPreflightReports,
     install_prefix::InstallPrefix,
@@ -129,10 +129,15 @@ pub const MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES: u64 = 256 * 1024 * 1024;
 const _: () =
     assert!(MAX_HANDOFF_CHECKPOINT_AGGREGATE_BYTES >= MAX_TERMINAL_CHECKPOINT_BYTES as u64);
 
-/// Descriptor slots every manifest names besides those of its Splints.
+/// Descriptor slots every manifest names besides those of its Splints and
+/// Windows.
 const GLOBAL_DESCRIPTOR_SLOTS: usize = 7;
-// Each captured Splint adds its PTY master and its checkpoint body.
-const _: () = assert!(GLOBAL_DESCRIPTOR_SLOTS + 2 * MAX_LIVE_SPLINTS <= MAX_HANDOFF_DESCRIPTORS);
+// Each captured Splint adds its PTY master and its checkpoint body, and each
+// Window its pidfd and continuation endpoint.
+const _: () = assert!(
+    GLOBAL_DESCRIPTOR_SLOTS + 2 * MAX_LIVE_SPLINTS + 2 * MAX_MANIFEST_WINDOWS
+        <= MAX_HANDOFF_DESCRIPTORS
+);
 
 /// Bound on the panic message a failed capture task reports.
 const MAX_TASK_FAILURE_CHARS: usize = 256;
@@ -838,6 +843,8 @@ fn build_manifests(
         counterpart_manifest_slot: HandoffDescriptorSlot::RollbackManifest,
         splints,
         excluded_splints,
+        // Window continuity is not carried until M3.13b binds Windows.
+        windows: Vec::new(),
         descriptors,
     };
     let rollback = HandoffManifestV1 {

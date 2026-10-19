@@ -1143,6 +1143,7 @@ impl Client {
                 minimum_version: PROTOCOL_VERSION,
                 maximum_version: PROTOCOL_VERSION,
                 role: ClientRole::Automation,
+                handoff_window: false,
             },
         )
         .await;

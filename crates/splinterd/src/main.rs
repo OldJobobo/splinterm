@@ -29,9 +29,9 @@ use consent::{GrantStore, PeerIdentity};
 use persistence::MetadataStore;
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use splinterd::{
-    CompactSubscription, HandoffCheckpointBudget, LiveError, LiveEvent, LiveScrollbackPage,
-    LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle, LiveSplintRuntime,
-    MAX_LIVE_SPLINTS, ProcessExit, ProcessIncarnation, SubscriptionReceive,
+    CONNECTION_LIMIT, CompactSubscription, HandoffCheckpointBudget, LiveError, LiveEvent,
+    LiveScrollbackPage, LiveSearchPage, LiveSnapshot, LiveSplintConfig, LiveSplintHandle,
+    LiveSplintRuntime, MAX_LIVE_SPLINTS, ProcessExit, ProcessIncarnation, SubscriptionReceive,
     TerminalPublicationMemoryLease, authorization,
     cgroup::{WorkloadMemoryPolicy, WorkloadUnitManager},
     executable_identity,
@@ -98,10 +98,6 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-// One graphical Splint currently retains independent observation and control
-// connections. Keep enough bounded capacity for one 32-tab Window plus its
-// topology/theme channels, transient human inspection, and cleanup headroom.
-const CONNECTION_LIMIT: usize = 128;
 const IMAGE_CONTENT_CONNECTION_LIMIT: usize = 8;
 const IMAGE_CONTENT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const IMAGE_CONTENT_HEADER_BYTES: usize = 53;
@@ -4081,10 +4077,13 @@ async fn serve_authenticated(
     let hello = time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut reader))
         .await
         .context("handshake timed out")??;
+    // No client declares a Window anchor before M3.14, and this daemon binds
+    // none until M3.13b, so the declaration is ignored.
     let ClientFrame::Hello {
         minimum_version,
         maximum_version,
         role,
+        handoff_window: _,
     } = hello
     else {
         send_control(
@@ -4197,6 +4196,21 @@ async fn serve_authenticated(
                 send_control(
                     control,
                     protocol_error(None, ErrorCode::InvalidFrame, "hello already completed"),
+                )
+                .await?;
+                break;
+            }
+            // A decision answers a prompt sent while an Execute is in flight,
+            // and this daemon never sends one, so an answer here is as
+            // unexpected as a second hello.
+            ClientFrame::HandoffDecision { .. } => {
+                send_control(
+                    control,
+                    protocol_error(
+                        None,
+                        ErrorCode::InvalidFrame,
+                        "no handoff decision is pending",
+                    ),
                 )
                 .await?;
                 break;
@@ -12770,6 +12784,7 @@ mod tests {
                         minimum_version: PROTOCOL_VERSION,
                         maximum_version: PROTOCOL_VERSION,
                         role: ClientRole::Automation,
+                        handoff_window: false,
                     })
                     .unwrap(),
                 )
@@ -12894,6 +12909,7 @@ mod tests {
                     minimum_version: PROTOCOL_VERSION,
                     maximum_version: PROTOCOL_VERSION,
                     role: ClientRole::Automation,
+                    handoff_window: false,
                 },
                 ClientFrame::Request {
                     request_id: 1,
@@ -12932,6 +12948,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unprompted_handoff_decision_ends_the_connection_as_an_invalid_frame() {
+        time::timeout(Duration::from_secs(2), async {
+            let state = test_state(false);
+            let peer = PeerIdentity::for_test();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let (reader, _writer) = server.into_split();
+            let (outbound, mut responses) = mpsc::channel(4);
+            let (control, mut controls) = mpsc::channel(4);
+            let (_closed, writer_closed) = watch::channel(false);
+            let task_state = state.clone();
+            let task = tokio::spawn(async move {
+                Box::pin(serve_authenticated(
+                    reader,
+                    &task_state,
+                    &peer,
+                    41,
+                    &outbound,
+                    &control,
+                    writer_closed,
+                ))
+                .await
+            });
+            for frame in [
+                ClientFrame::Hello {
+                    minimum_version: PROTOCOL_VERSION,
+                    maximum_version: PROTOCOL_VERSION,
+                    role: ClientRole::Automation,
+                    handoff_window: false,
+                },
+                ClientFrame::HandoffDecision {
+                    request_id: 1,
+                    proceed_without: vec![0],
+                },
+            ] {
+                client
+                    .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                controls.recv().await,
+                Some(ServerFrame::Hello { .. })
+            ));
+            assert!(matches!(
+                controls.recv().await,
+                Some(ServerFrame::Error {
+                    request_id: None,
+                    error: ProtocolError {
+                        code: ErrorCode::InvalidFrame,
+                        ..
+                    },
+                })
+            ));
+            task.await.unwrap().unwrap();
+            assert!(responses.try_recv().is_err());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn malformed_frame_runs_owner_topology_cleanup() {
         time::timeout(Duration::from_secs(2), async {
             let state = test_state(true);
@@ -12942,6 +13019,7 @@ mod tests {
                     minimum_version: PROTOCOL_VERSION,
                     maximum_version: PROTOCOL_VERSION,
                     role: ClientRole::Automation,
+                    handoff_window: false,
                 },
                 ClientFrame::Request {
                     request_id: 1,
