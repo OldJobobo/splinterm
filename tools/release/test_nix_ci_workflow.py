@@ -42,8 +42,14 @@ class NixCiWorkflowTests(unittest.TestCase):
             step,
         )
         self.assertIn("name: ${{ vars.CACHIX_CACHE }}", step)
-        self.assertIn("authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}", step)
-        self.assertIn("skipPush: ${{ github.event_name == 'pull_request' }}", step)
+        # The write token reaches only authority-branch pushes; pull requests
+        # and merge groups run unmerged code and get neither token nor push.
+        self.assertIn(
+            "authToken: ${{ github.event_name == 'push' && secrets.CACHIX_AUTH_TOKEN || '' }}",
+            step,
+        )
+        self.assertIn("skipPush: ${{ github.event_name != 'push' }}", step)
+        self.assertEqual(step.count("secrets."), 1)
         self.assertNotIn("signingKey", step)
         self.assertEqual(text.count("cachix/cachix-action@"), 1)
         # The cache is configured after Nix is installed and before any build.

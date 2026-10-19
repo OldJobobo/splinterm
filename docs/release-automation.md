@@ -169,8 +169,9 @@ inert until the operator configures it:
 3. Set the repository secret `CACHIX_AUTH_TOKEN` to a token with write
    access to that cache.
 
-Only pushes and merge groups upload to the cache. Pull requests only pull from
-it, and fork pull requests receive no secrets.
+Only pushes to `main` and `maint/0.1` receive the token and upload to the
+cache. Pull requests and merge groups run code that has not landed (possibly
+from a fork), so they get no token and only read the public cache.
 
 Branch protection for `main` keeps `check` as the only required status check
 (source: GitHub Actions) and enables **Require merge queue** with the squash

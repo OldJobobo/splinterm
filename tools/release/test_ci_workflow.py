@@ -104,7 +104,14 @@ class CiWorkflowTests(unittest.TestCase):
         # path-gated nix job and the pull-request-only checkout in changes.
         self.assertEqual(workflow.count("github.event_name != 'pull_request'"), 1)
         self.assertNotIn("github.event_name == 'merge_group'", workflow)
-        self.assertNotIn("github.event_name == 'push'", workflow)
+        # The only push-specific expressions keep the Cachix write token and
+        # upload on authority-branch pushes; no job is skipped by them.
+        self.assertEqual(workflow.count("github.event_name == 'push'"), 1)
+        self.assertEqual(workflow.count("github.event_name != 'push'"), 1)
+        self.assertIn(
+            "authToken: ${{ github.event_name == 'push' && secrets.CACHIX_AUTH_TOKEN || '' }}",
+            workflow,
+        )
 
     def test_changes_job_selects_nix_from_the_pull_request_range(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
