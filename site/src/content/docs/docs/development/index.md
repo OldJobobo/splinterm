@@ -73,4 +73,4 @@ The helper intentionally labels and isolates its development authorization bypas
 
 ## Optional Foot differential
 
-Splinterm-owned tests and adopted fixtures are release authority. Foot's pinned implementation remains an optional historical differential; do not modify the canonical checkout or silently regenerate comparison references. Ported code must retain compatible licensing, exact provenance, and required notices in `THIRD_PARTY.md`. See [ADR 0013](https://github.com/OldJobobo/splinterm/blob/main/docs/adr/0013-splinterm-owned-renderer-acceptance.md).
+Splinterm-owned tests and adopted fixtures are release authority. Foot's pinned implementation remains an optional historical differential; do not modify the canonical checkout or silently regenerate comparison references. Ported code must retain compatible licensing, exact provenance, and required notices in `THIRD_PARTY.md`. See [ADR 0013](https://github.com/ministry-of-taste/splinterm/blob/main/docs/adr/0013-splinterm-owned-renderer-acceptance.md).

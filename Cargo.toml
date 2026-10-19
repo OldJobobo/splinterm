@@ -23,7 +23,7 @@ version = "0.2.0-dev"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/oldjobobo/splinterm"
+repository = "https://github.com/ministry-of-taste/splinterm"
 
 [workspace.dependencies]
 accesskit = "0.25.0"

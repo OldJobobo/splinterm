@@ -6,7 +6,7 @@ _build_version=0.2.0-dev
 pkgrel=1
 arch=('x86_64')
 options=('!strip')
-url='https://github.com/oldjobobo/splinterm'
+url='https://github.com/ministry-of-taste/splinterm'
 license=('MIT')
 makedepends=('cargo' 'pkgconf' 'rust')
 # Match the immutable renderer fixtures in .github/workflows/ci.yml.

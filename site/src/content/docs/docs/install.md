@@ -13,7 +13,7 @@ verified AUR version is `0.1.1-1`. Check the offered version before confirming
 installation or upgrades. For stable 0.1.1 specifically,
 use its verified release assets or the packaging guide's exact-tag build:
 
-https://github.com/OldJobobo/splinterm/blob/main/docs/packaging.md
+https://github.com/ministry-of-taste/splinterm/blob/main/docs/packaging.md
 
 Install the recommended [splinterm-bin AUR package](https://aur.archlinux.org/packages/splinterm-bin). It downloads verified prebuilt x86_64 binaries and resolves the `xdg-terminal-exec` AUR dependency without compiling Splinterm locally:
 
@@ -34,14 +34,14 @@ Source-built `splinterm` and `splinterm-mcp` packages remain available. Migratin
 For the newest published versioned package, clone the public repository and run the release installer:
 
 ```bash
-git clone https://github.com/OldJobobo/splinterm.git
+git clone https://github.com/ministry-of-taste/splinterm.git
 cd splinterm
 ./install.sh
 ```
 
 The installer selects the newest published qualifying SemVer `v…` release, **including prereleases**; it is not a stable-only selector. For stable 0.1.1 specifically, use its release assets or the exact-tag build instructions in the packaging guide:
 
-https://github.com/OldJobobo/splinterm/blob/main/docs/packaging.md
+https://github.com/ministry-of-taste/splinterm/blob/main/docs/packaging.md
 
 The installer verifies the GitHub-recorded candidate-manifest digest and exact package checksums, preserves an emergency binary snapshot, warns before stopping a running daemon, installs through Pacman, and verifies the packaged client identity. The snapshot supports diagnosis and manual recovery; it is not a package-consistent rollback.
 

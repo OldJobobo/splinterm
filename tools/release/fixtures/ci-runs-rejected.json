@@ -9,8 +9,8 @@
       "conclusion": "success",
       "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head_branch": "main",
-      "html_url": "https://github.com/OldJobobo/splinterm/actions/runs/4100",
-      "repository": {"full_name": "OldJobobo/splinterm"}
+      "html_url": "https://github.com/ministry-of-taste/splinterm/actions/runs/4100",
+      "repository": {"full_name": "ministry-of-taste/splinterm"}
     },
     {
       "id": 4101,
@@ -21,8 +21,8 @@
       "conclusion": null,
       "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head_branch": "main",
-      "html_url": "https://github.com/OldJobobo/splinterm/actions/runs/4101",
-      "repository": {"full_name": "OldJobobo/splinterm"}
+      "html_url": "https://github.com/ministry-of-taste/splinterm/actions/runs/4101",
+      "repository": {"full_name": "ministry-of-taste/splinterm"}
     },
     {
       "id": 4102,
@@ -33,8 +33,8 @@
       "conclusion": "failure",
       "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head_branch": "main",
-      "html_url": "https://github.com/OldJobobo/splinterm/actions/runs/4102",
-      "repository": {"full_name": "OldJobobo/splinterm"}
+      "html_url": "https://github.com/ministry-of-taste/splinterm/actions/runs/4102",
+      "repository": {"full_name": "ministry-of-taste/splinterm"}
     },
     {
       "id": 4103,
@@ -45,8 +45,8 @@
       "conclusion": "success",
       "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "head_branch": "maint/0.1",
-      "html_url": "https://github.com/OldJobobo/splinterm/actions/runs/4103",
-      "repository": {"full_name": "OldJobobo/splinterm"}
+      "html_url": "https://github.com/ministry-of-taste/splinterm/actions/runs/4103",
+      "repository": {"full_name": "ministry-of-taste/splinterm"}
     }
   ]
 }

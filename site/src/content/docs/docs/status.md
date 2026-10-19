@@ -7,7 +7,7 @@ Splinterm **0.1.1 is the current stable release**, published on 2026-10-09 for x
 
 Stable release notes and assets:
 
-https://github.com/OldJobobo/splinterm/releases/tag/v0.1.1
+https://github.com/ministry-of-taste/splinterm/releases/tag/v0.1.1
 
 Stable 0.1.1 supersedes the RC series and includes Explorer navigation/context
 actions and activity filters, opt-in ligatures, bounded local clipboard-image
@@ -68,4 +68,4 @@ Persistent topology is also separate from graphical presentation. Creating or mu
 
 ## Before depending on it
 
-Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Stable 0.1.1 does not expand the documented compatibility scope; repository [`docs/status.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/status.md) remains authoritative.
+Review the [public roadmap](/docs/roadmap/) and the exact specialist documentation for the feature you intend to use. Stable 0.1.1 does not expand the documented compatibility scope; repository [`docs/status.md`](https://github.com/ministry-of-taste/splinterm/blob/main/docs/status.md) remains authoritative.

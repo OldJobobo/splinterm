@@ -12,7 +12,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
-REPOSITORY = "OldJobobo/splinterm"
+REPOSITORY = "ministry-of-taste/splinterm"
 COMMIT = "1" * 40
 MAIN = f"splinterm-{COMMIT}-x86_64.pkg.tar.zst"
 MCP = f"splinterm-mcp-{COMMIT}-x86_64.pkg.tar.zst"

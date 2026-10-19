@@ -107,4 +107,4 @@ splinterm --output ndjson --schema-major 2 --timeout-ms 300000 \
 
 Machine mode never prompts. It uses stable schema-major-2 envelopes, explicit timeouts, structured exit categories, resource policy, incarnation checks, and resynchronization rules. Human-readable output and private daemon frames are not compatibility contracts.
 
-For every flag and operation, the current executable's `--help` and repository [`docs/cli.md`](https://github.com/OldJobobo/splinterm/blob/main/docs/cli.md) remain authoritative.
+For every flag and operation, the current executable's `--help` and repository [`docs/cli.md`](https://github.com/ministry-of-taste/splinterm/blob/main/docs/cli.md) remain authoritative.

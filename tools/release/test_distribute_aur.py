@@ -13,7 +13,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
-REPOSITORY = "OldJobobo/splinterm"
+REPOSITORY = "ministry-of-taste/splinterm"
 COMMIT = "a" * 40
 DIGEST = "b" * 64
 
@@ -50,8 +50,8 @@ def receipt(value: dict) -> dict:
         "release_title": value["release_title"],
         "release_prerelease": value["release_prerelease"],
         "release_notes_sha256": value["release_notes_sha256"],
-        "release_url": "https://github.com/OldJobobo/splinterm/releases/tag/v1.2.3-alpha4",
-        "workflow_run": "https://github.com/OldJobobo/splinterm/actions/runs/56",
+        "release_url": "https://github.com/ministry-of-taste/splinterm/releases/tag/v1.2.3-alpha4",
+        "workflow_run": "https://github.com/ministry-of-taste/splinterm/actions/runs/56",
         "assets": [{"asset": "asset.tar.gz", "sha256": "e" * 64}],
         "promotion_run_id": 56,
         "promotion_record_sha256": "f" * 64,
@@ -66,7 +66,7 @@ def write_recipe(directory: Path, release: str, marker: str = "same") -> None:
     )
     (directory / ".SRCINFO").write_text(
         f"pkgver = {version}\n"
-        f"source = https://github.com/OldJobobo/splinterm/releases/download/v{release}/asset\n"
+        f"source = https://github.com/ministry-of-taste/splinterm/releases/download/v{release}/asset\n"
         f"# {marker}\n"
     )
     (directory / "splinterm.install").write_text(f"# {marker}\n")
@@ -103,7 +103,7 @@ class DistributeAurTests(unittest.TestCase):
                 "draft": False,
                 "prerelease": True,
                 "html_url": publication["release_url"],
-                "url": "https://api.github.com/repos/OldJobobo/splinterm/releases/1",
+                "url": "https://api.github.com/repos/ministry-of-taste/splinterm/releases/1",
                 "assets": [{"name": asset.name}],
             }
             expected["release_notes_sha256"] = MODULE.PROMOTE.sha256_text(
@@ -168,7 +168,7 @@ class DistributeAurTests(unittest.TestCase):
             write_recipe(draft, "1.2.3-alpha4", "draft")
             (current / ".SRCINFO").write_text(
                 "pkgver = 1.2.3alpha5\n"
-                "source = https://github.com/OldJobobo/splinterm/releases/download/"
+                "source = https://github.com/ministry-of-taste/splinterm/releases/download/"
                 "v1.2.3-alpha5/asset\n"
             )
             with self.assertRaisesRegex(ValueError, "pkgver identities differ"):
@@ -178,7 +178,7 @@ class DistributeAurTests(unittest.TestCase):
             write_recipe(release_mismatch, "1.2.3-alpha3", "release-mismatch")
             (release_mismatch / ".SRCINFO").write_text(
                 "pkgver = 1.2.3alpha3\n"
-                "source = https://github.com/OldJobobo/splinterm/releases/download/"
+                "source = https://github.com/ministry-of-taste/splinterm/releases/download/"
                 "v1.2.3-alpha5/asset\n"
             )
             with self.assertRaisesRegex(ValueError, "release identities differ"):

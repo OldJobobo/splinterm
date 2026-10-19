@@ -35,7 +35,7 @@ def host(root):
     return {
         "ssh_target": "wintermute",
         "state_dir": str(root / "jobs"),
-        "repo_url": "https://github.com/OldJobobo/splinterm.git",
+        "repo_url": "https://github.com/ministry-of-taste/splinterm.git",
         "pi": "/usr/bin/pi",
         "pi_version": "1.3.0",
         "provider": "openai-codex",

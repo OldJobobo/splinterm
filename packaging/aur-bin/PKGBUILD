@@ -7,12 +7,12 @@ pkgver=0.2.0dev
 pkgrel=1
 _commit=7bba5a91fd4624f2f2699dd95af01d97d6200bc2
 arch=('x86_64')
-url='https://github.com/oldjobobo/splinterm'
+url='https://github.com/ministry-of-taste/splinterm'
 license=('MIT')
 options=('!strip' '!debug')
 source=(
-  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.2.0-dev/splinterm-$_commit-$CARCH.pkg.tar.zst"
-  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/OldJobobo/splinterm/releases/download/v0.2.0-dev/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-$pkgver-$CARCH.pkg.tar.zst::https://github.com/ministry-of-taste/splinterm/releases/download/v0.2.0-dev/splinterm-$_commit-$CARCH.pkg.tar.zst"
+  "splinterm-mcp-$pkgver-$CARCH.pkg.tar.zst::https://github.com/ministry-of-taste/splinterm/releases/download/v0.2.0-dev/splinterm-mcp-$_commit-$CARCH.pkg.tar.zst"
 )
 noextract=(
   "splinterm-$pkgver-$CARCH.pkg.tar.zst"

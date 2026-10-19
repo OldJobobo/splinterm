@@ -206,7 +206,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Persistent Wayland terminal with a headless session daemon and SSH relay";
-    homepage = "https://github.com/OldJobobo/splinterm";
+    homepage = "https://github.com/ministry-of-taste/splinterm";
     license = lib.licenses.mit;
     platforms = [ "x86_64-linux" ];
     mainProgram = "splinterm";
