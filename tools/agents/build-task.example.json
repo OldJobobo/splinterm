@@ -1,0 +1,12 @@
+{
+  "id": "protocol-check-01",
+  "coordinator": "REPLACE_WITH_PARENT_AND_SESSION",
+  "role": "validator",
+  "base_commit": "REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT",
+  "authority": "main",
+  "objective": "Summarize the isolated protocol crate check using the runner's receipts and logs. Do not execute additional commands.",
+  "read_paths": ["AGENTS.md", "Cargo.toml", "crates/splinterm-protocol/Cargo.toml"],
+  "acceptance": "Report each executed command and exit code, explain failures, and distinguish skipped checks. Do not claim a workspace or graphical test passed.",
+  "commands": [["cargo", "check", "-p", "splinterm-protocol"]],
+  "timeout_seconds": 900
+}
