@@ -210,6 +210,30 @@ class InstallerSafetyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result)
         self.assertIn("needs local-committed-head provenance", result.stderr)
 
+    def test_vm_acceptance_install_is_refused_outside_the_testbed(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("SPLINTERM_TESTBED_PACKAGE_ROOT", None)
+        result = subprocess.run(
+            [
+                str(ROOT / "tools/package/upgrade-local-package.sh"),
+                "--yes",
+                "--allow-vm-acceptance-live-handoff",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1, result)
+        self.assertIn("outside the VM testbed", result.stderr)
+        self.assertEqual(result.stdout, "")
+        # The testbed's package-install sets it for the remote installer.
+        runner = (ROOT / "tools/testbed/omarchy-vm.sh").read_text(encoding="utf-8")
+        install = runner.split("  package-install)", 1)[1].split("  package-launch)", 1)[0]
+        self.assertIn('"SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf', install)
+        self.assertIn('package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT', install)
+
     def test_provenance_protocol_constants_match_all_authorities(self) -> None:
         generator = (ROOT / "tools/package/generate-package-provenance.py").read_text(
             encoding="utf-8"

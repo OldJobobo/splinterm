@@ -31,12 +31,17 @@ first, the operator approved (2026-10-19) a **test-only build that forces
 readiness**:
 
 - `splinterd`'s `vm-acceptance-live-handoff` feature makes live handoff treat
-  window continuity as ready. Nix-store builds stay refused. The daemon warns
-  at every serve start: "TEST-ONLY VM acceptance build".
+  window continuity as ready for a local package build
+  (`local-committed-head`) only. Release-candidate, Nix-store, and unpackaged
+  builds stay refused. The daemon warns at every serve start: "TEST-ONLY VM
+  acceptance build".
 - Such a daemon carries a marker. Package provenance generation and package
   validation refuse it in every release-candidate and Nix package, and in a
   local package unless explicitly requested. No PKGBUILD, Nix recipe,
-  installer, or workflow enables the feature.
+  installer, or workflow enables the feature, and `upgrade-local-package.sh
+  --allow-vm-acceptance-live-handoff` refuses to run outside the VM testbed
+  (`SPLINTERM_TESTBED_PACKAGE_ROOT` unset). `package-status` warns while a
+  TEST-ONLY build is installed.
 - `omarchy-vm.sh package-build --vm-acceptance-live-handoff` and
   `package-install --confirm-guest-install --vm-acceptance-live-handoff`
   build and install such a package in the guest. The package description
@@ -74,16 +79,20 @@ pair identity differs from the running one:
   - captures with `grim -o Virtual-1`.
   - There is no pointer input, no host input, and no QEMU-viewer input.
 - **Input guard:** every input batch first focuses the recorded address and
-  requires `hyprctl -j activewindow` to report it; the step aborts
-  otherwise.
+  waits. Then a guard runs directly before **and** directly after every
+  single `input` action, with no pause in between: it requires
+  `hyprctl -j activewindow` to report the recorded address, and the step
+  aborts otherwise. That catches input that reached another window at once.
+  After the key that answers the upgrade dialog, the check instead requires
+  the dialog to have closed.
 - **Guest-wide state changed (recorded first, restored after):**
 
   | Step | Change | Restore |
   |---|---|---|
-  | `p0-install-a`, `u3-package-b`, `r2-setup` | guest package replaced (TEST-ONLY builds); rollback copies saved under `$PKG/rollback/<ts>` | `z2-plain-package`, or reinstall from the rollback copies |
+  | `p0-install-a`, `u3-package-b`, `r2-setup` | guest package replaced (TEST-ONLY builds); rollback copies saved under `$PKG/rollback/<ts>` | `z2-plain-package` (mandatory), which checks that no TEST-ONLY package or marker remains |
   | `p0-install-mcp` (optional) | `splinterm-mcp` installed | `sudo pacman -R splinterm-mcp` if `p0-package-status` showed it absent |
-  | `r3-rollback` | `/usr/bin/splinterm` replaced by a byte-identical copy (`cp -p`, then rename): a new inode only, so `pacman -Qk` stays clean | none needed; any later reinstall replaces it |
-  | `x1-memfd-noexec` (optional) | `vm.memfd_noexec` set to 2 | the recorded value, checked |
+  | `r3-rollback` | `/usr/bin/splinterm` replaced by a byte-identical copy (`cp -p`, then rename): a new inode only, so `pacman -Qk` stays clean | the temporary `/usr/bin/.splinterm.vm-acceptance` is removed by `z1-cleanup` if a step aborted between copy and rename; `z2` reinstalls the file |
+  | `x1-memfd-noexec` (optional; guest kernel 6.6 or later only) | `vm.memfd_noexec` set to 2 | the recorded value, checked by x1 and again by `z1-cleanup` (which restores it if x1 aborted). On kernels 6.3–6.5 the sysctl can only be raised, so x1 refuses to run there: only a reboot would restore it |
   | `package-install` (any) | the guest's own `splinterd.service`, if active, is stopped and restarted by `upgrade-local-package.sh` | automatic |
 
 - **Duration:** each `package-build` runs the full package check suite (about
@@ -160,21 +169,21 @@ attempt open long enough to make that change deterministically.
 | Step | Action | Pass |
 |---|---|---|
 | `f1-exit-codes` | `exec`: collect the recorded exit statuses | c1 = c2 = 3, c3 = 0, r3 = 6; c5 and r4 exited 4 and the stale client 1. Code 7 (unconfirmed) needs a daemon that does not answer within 15 s after a commit and is not reachable deterministically; its classification is unit-tested |
-| `x1-memfd-noexec` (optional, guest-wide sysctl) | `package-stop`; `sysctl vm.memfd_noexec=2`; `package-launch`; dry run and `upgrade --now`; `package-stop`; restore the sysctl | Under `memfd_noexec=2` the kernel refuses the executable memfds (`MFD_EXEC`), so the fresh daemon keeps no rollback copy ("Rollback copy: not kept") and `upgrade --now` exits 4 with nothing changed. The sysctl returns to its recorded value |
+| `x1-memfd-noexec` (optional, guest-wide sysctl) | refuse unless the guest kernel is 6.6 or later; `package-stop`; `sysctl vm.memfd_noexec=2`; `package-launch`; dry run and `upgrade --now`; `package-stop`; restore the sysctl | Under `memfd_noexec=2` the kernel refuses the executable memfds (`MFD_EXEC`), so the fresh daemon keeps no rollback copy ("Rollback copy: not kept") and `upgrade --now` exits 4 with nothing changed. The sysctl returns to its recorded value |
 
 ### Phase 6: restore and cleanup (AGENTS.md §3.3)
 
 | Step | Action | Pass |
 |---|---|---|
-| `z1-cleanup` | resume any stopped test process; stop the probe; `package-stop` (when the session still runs); check workspace 8 and the monitors; copy the evidence to `target/vm-acceptance/` on the host; `package-config --clear` | `package-stop` stops the adopted or rollback daemon and the relaunched Window too: both run sealed memfd snapshots or replaced inodes, which it now recognises. Its guest-window restore returns workspace, focus, and cursor. Workspace 8 is empty and the monitors match `s1` |
-| `z2-plain-package` (optional, operator's choice) | `package-build`; `package-install --confirm-guest-install` | The guest leaves the TEST-ONLY build |
+| `z1-cleanup` | resume any stopped test process; stop the probe (only if its recorded PID's command line is `handoff-mcp-probe.py`); remove the r3 temporary copy; restore `vm.memfd_noexec` if it differs from the recorded value, and verify; `package-stop` (when the session still runs); check workspace 8 and the monitors; copy the evidence to `target/vm-acceptance/` on the host; `package-config --clear` | `package-stop` stops the adopted or rollback daemon and the relaunched Window too: both run sealed memfd snapshots or replaced inodes, which it now recognises. Its guest-window restore returns workspace, focus, and cursor. Workspace 8 is empty and the monitors match `s1` |
+| `z2-plain-package` (mandatory) | `package-build`; `package-install --confirm-guest-install`; `package-status` | The guest leaves the TEST-ONLY build: no TEST-ONLY description and no marker in `/usr/bin/splinterd`. Remove `splinterm-mcp` too if `p0-package-status` showed it absent |
 
 Report anything that could not be restored. The private clone, with package
 B's commit, is discarded; nothing is pushed.
 
 ### Abort rules (any step)
 
-Abort at once, run `z1-cleanup`, and report if any of these happens:
+Abort at once, run `z1-cleanup` and then `z2-plain-package`, and report if any of these happens:
 
 - input reaches any address other than the guarded one;
 - an unrelated guest Window moves;
@@ -192,11 +201,14 @@ Abort at once, run `z1-cleanup`, and report if any of these happens:
   provenance generation and package validation refuse their marker, and an
   unpackaged daemon has no rollback authority at all. These rows are proven by
   real-exec tests in `handoff_exec_adoption`, including the M3.17 cases
-  `rollback-refuses-claims`, `rollback-guard-timeout`, `hold-expiry`, and
-  `old-side-signal-carry`, and the stale-client check in `adopt`.
+  `rollback-refuses-claims` (no ticket: `NoSnapshot`), `rollback-guard-timeout`,
+  `hold-expiry`, and `old-side-signal-carry`, and the stale-client check in
+  `adopt` (the stale inode's trusted-UI `Hello` is refused).
   `r3-rollback` above is the one rollback the VM can drive naturally.
-- **The resume hold expiring** (a Window that never claims within 30 s) is not
-  driven in the VM. The `hold-expiry` real-exec case proves it.
+- **The resume hold expiring** (a Window that does not redeem its ticket
+  within 30 s) is not driven in the VM. The `hold-expiry` real-exec case
+  proves it: a real ticket, redeemed after the hold ended, is invalid, and the
+  hold ended with `windows=1 placeholders=1`.
 - **The old side's signal carry** (`systemctl stop` during the runtime stop)
   is not driven in the VM. The `old-side-signal-carry` real-exec case proves
   it in a real daemon process.

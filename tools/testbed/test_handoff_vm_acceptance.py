@@ -161,16 +161,36 @@ class HandoffVmAcceptanceHelperTests(unittest.TestCase):
         for arguments in builds:
             self.assertIn("--vm-acceptance-live-handoff", arguments)
 
-    def test_graphical_input_is_always_guarded_first(self) -> None:
+    def test_every_input_is_guarded_directly_before_and_after(self) -> None:
+        def check(action, *verbs: str) -> bool:
+            return (
+                action.kind == "vm"
+                and action.vm[0] == "desktop-exec"
+                and any(re.fullmatch(rf"{verb} [a-z0-9-]+", action.note) for verb in verbs)
+            )
+
+        inputs = 0
         for step in HELPER_MODULE.STEPS:
-            guarded = False
-            for action in step.actions:
-                if action.kind == "vm" and action.vm[0] == "desktop-exec" and "guard " in action.note:
-                    guarded = True
-                if action.kind == "vm" and action.vm[0] == "input":
-                    with self.subTest(step=step.id):
-                        self.assertTrue(step.graphical)
-                        self.assertTrue(guarded, "input before any guard")
+            actions = step.actions
+            for index, action in enumerate(actions):
+                if not HELPER_MODULE.is_input(action):
+                    continue
+                inputs += 1
+                with self.subTest(step=step.id, index=index):
+                    self.assertTrue(step.graphical)
+                    # No sleep, focus, or anything else between guard and input.
+                    self.assertGreater(index, 0)
+                    self.assertTrue(check(actions[index - 1], "guard"), actions[index - 1])
+                    self.assertLess(index + 1, len(actions))
+                    self.assertTrue(
+                        check(actions[index + 1], "guard", "closed"), actions[index + 1]
+                    )
+                    if check(actions[index + 1], "closed"):
+                        self.assertEqual(
+                            actions[index - 1].note.split()[1],
+                            actions[index + 1].note.split()[1],
+                        )
+        self.assertGreater(inputs, 10)
 
     def test_document_covers_every_step(self) -> None:
         document = DOCUMENT.read_text(encoding="utf-8")

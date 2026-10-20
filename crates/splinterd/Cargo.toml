@@ -10,8 +10,9 @@ repository.workspace = true
 [features]
 integration-test = []
 # TEST-ONLY (Plan 0061 M3.17, operator-approved 2026-10-19): live handoff
-# treats window continuity as ready, so VM acceptance can drive a real live
-# upgrade before the release enables it. Nix-store builds stay refused. A
+# treats window continuity as ready for a local-committed-head package build
+# only, so VM acceptance can drive a real live upgrade before the release
+# enables it. Every other provenance, Nix-store included, stays refused. A
 # binary built with it carries a marker that package provenance generation
 # and package validation refuse for every release and Nix package; only an
 # explicitly requested local VM acceptance package

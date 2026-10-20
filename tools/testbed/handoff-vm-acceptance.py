@@ -67,6 +67,16 @@ guard() {
   active=$(hyprctl -j activewindow | jq -r .address)
   [[ $active == "$(cat "$ev/$1")" ]] || { printf 'input guard: active window %s is not %s\n' "$active" "$1" >&2; exit 1; }
 }
+closed() {
+  local address
+  address=$(cat "$ev/$1")
+  for _ in $(seq 1 50); do
+    hyprctl -j clients | jq -e --arg a "$address" 'any(.[]; .address == $a)' >/dev/null || return 0
+    sleep 0.1
+  done
+  printf 'the window in %s is still mapped: the answer did not reach it\n' "$1" >&2
+  exit 1
+}
 capture() { grim -o Virtual-1 "$ev/$1.png"; }
 expect() { grep -Fq -- "$1" "$2" || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
 """
@@ -132,9 +142,38 @@ def line(text: str) -> tuple[Action, ...]:
     return (vm("input", "type", text), chord("enter"))
 
 
-def guarded(target: str, *actions: Action) -> tuple[Action, ...]:
-    """Focus `target` (an evidence file naming an address), guard, then act."""
-    return (desktop(f'focus {target}; sleep 0.3; guard {target}'), *actions)
+def guard(target: str) -> Action:
+    """Requires the active window to be `target` (an evidence file naming an
+    address); the step aborts otherwise."""
+    return desktop(f"guard {target}")
+
+
+def is_input(action: Action) -> bool:
+    return action.kind == "vm" and action.vm[:1] == ("input",)
+
+
+def guarded(
+    target: str, *actions: Action, settle: float = 0.3, then: str = "guard"
+) -> tuple[Action, ...]:
+    """Focuses `target`, waits `settle` seconds, then runs `actions` with a
+    guard directly before and directly after every input, never a pause in
+    between, so input that reached another window is caught at once. With
+    `then="closed"`, the check after the last input is instead that the
+    target window closed (a dialog the last key answered)."""
+    batch: list[Action] = [desktop(f"focus {target}"), pause(settle)]
+    check = guard(target)
+    for index, action in enumerate(actions):
+        if not is_input(action):
+            batch.append(action)
+            continue
+        if batch[-1] != check:
+            batch.append(check)
+        batch.append(action)
+        last = index == len(actions) - 1
+        batch.append(desktop(f"closed {target}") if last and then == "closed" else check)
+    if batch[-1] != check and not batch[-1].note.startswith("closed "):
+        batch.append(check)
+    return tuple(batch)
 
 
 def start_upgrade(case: str) -> Action:
@@ -211,7 +250,8 @@ def d10_case(case: str, answer: str, expected_exit: int) -> tuple[Action, ...]:
         record_dialog(case),
         # Typed into the paused Window while the question is open: dropped.
         *guarded("target-address", *line(f"echo dropped-{case}")),
-        *guarded("dialog-address", pause(1), chord(answer)),
+        # The dialog ignores input for about 600 ms after it gains focus.
+        *guarded("dialog-address", chord(answer), settle=1, then="closed"),
         wait_for_exit(case, expected_exit),
     )
 
@@ -550,7 +590,7 @@ stat -c '%d:%i' /usr/bin/splinterm | tee "$ev/r3-client-after"
 ! cmp -s "$ev/r3-client-before" "$ev/r3-client-after"
 pacman -Qk splinterm"""
             ),
-            *guarded("dialog-address", pause(1), chord("g")),
+            *guarded("dialog-address", chord("g"), settle=1, then="closed"),
             wait_for_exit("r3", 6),
             pause(5),
             guest(
@@ -599,8 +639,16 @@ capture r3-rolled-back"""
         "x1-memfd-noexec",
         "5 final checks",
         "vm.memfd_noexec=2 refuses live upgrade before anything changes (guest-wide sysctl, restored after)",
-        "With a fresh daemon under memfd_noexec=2: the dry run says 'Rollback copy: not kept'; upgrade --now exits 4 and nothing changes. The sysctl returns to its recorded value.",
+        "Refused on guest kernels before 6.6, where the sysctl can only be raised (only a reboot restores it). With a fresh daemon under memfd_noexec=2: the dry run says 'Rollback copy: not kept'; upgrade --now exits 4 and nothing changes. The sysctl returns to its recorded value (z1 restores it too if x1 aborted).",
         (
+            guest(
+                """IFS=. read -r major minor _ <<<"$(uname -r)"
+if (( major < 6 || (major == 6 && minor < 6) )); then
+  printf 'x1 needs guest kernel 6.6 or later: on %s vm.memfd_noexec can only be raised, so only a reboot would restore it\n' "$(uname -r)" >&2
+  exit 1
+fi
+[[ -s $ev/memfd-noexec-before ]]"""
+            ),
             vm("package-stop"),
             guest('sudo -n sysctl -w vm.memfd_noexec=2'),
             vm("package-launch"),
@@ -623,11 +671,21 @@ cat "$ev/x1-upgrade.txt"; [[ $status == 4 ]]"""
         "z1-cleanup",
         "6 cleanup",
         "Restore and clean up (AGENTS.md section 3.3)",
-        "No stopped test process remains; the probe and W2 are gone; package-stop closes W1 and stops the adopted daemon, and its guest-window restore returns workspace, focus, and cursor; workspace 8 is empty and the monitors match the s1 record; evidence is copied to the host; the policy seed is cleared.",
+        "No stopped test process remains; the probe (checked by its command line) and W2 are gone; the r3 temporary copy is removed; vm.memfd_noexec is back at its recorded value; package-stop closes W1 and stops the adopted daemon, and its guest-window restore returns workspace, focus, and cursor; workspace 8 is empty and the monitors match the s1 record; evidence is copied to the host; the policy seed is cleared.",
         (
             guest(
                 """[[ ! -s $ev/w2-pid ]] || kill -CONT "$(cat "$ev/w2-pid")" 2>/dev/null || true
-[[ ! -s $ev/mcp/probe.pid ]] || kill "$(cat "$ev/mcp/probe.pid")" 2>/dev/null || true
+if [[ -s $ev/mcp/probe.pid ]]; then
+  probe=$(cat "$ev/mcp/probe.pid")
+  if tr '\\0' ' ' <"/proc/$probe/cmdline" 2>/dev/null | grep -Fq handoff-mcp-probe.py; then
+    kill "$probe"
+  fi
+fi
+sudo -n rm -f /usr/bin/.splinterm.vm-acceptance
+if [[ -s $ev/memfd-noexec-before && $(cat /proc/sys/vm/memfd_noexec) != "$(cat "$ev/memfd-noexec-before")" ]]; then
+  sudo -n sysctl -w vm.memfd_noexec="$(cat "$ev/memfd-noexec-before")"
+fi
+[[ ! -s $ev/memfd-noexec-before || $(cat /proc/sys/vm/memfd_noexec) == "$(cat "$ev/memfd-noexec-before")" ]]
 [[ ! -d $runtime/extra-1 ]] || echo 'extra Window slot 1 is still open: run package-close-extra 1'"""
             ),
             Action("stop-if-running"),
@@ -648,10 +706,17 @@ STEPS = (
     Step(
         "z2-plain-package",
         "6 cleanup",
-        "Optionally return the guest to an ordinary (non-test) package of the candidate",
-        "A plain build installs; package-status shows no TEST-ONLY description. Remove splinterm-mcp too if p0-package-status showed it absent before.",
-        (vm("package-build"), vm("package-install", "--confirm-guest-install"), vm("package-status")),
-        optional=True,
+        "Return the guest to an ordinary (non-test) package of the candidate (mandatory)",
+        "A plain build installs; package-status reports no TEST-ONLY package or marker. Remove splinterm-mcp too if p0-package-status showed it absent before.",
+        (
+            vm("package-build"),
+            vm("package-install", "--confirm-guest-install"),
+            vm("package-status"),
+            guest(
+                """! pacman -Qi splinterm | grep -Fq TEST-ONLY
+! grep -aqF splinterm-vm-acceptance-live-handoff: /usr/bin/splinterd"""
+            ),
+        ),
     ),
 )
 

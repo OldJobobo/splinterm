@@ -27,8 +27,9 @@
 //!
 //! The one exception is a test-only build: the `vm-acceptance-live-handoff`
 //! feature (Plan 0061 M3.17, operator-approved 2026-10-19) treats window
-//! continuity as ready, so VM acceptance can drive a real live upgrade
-//! before the constant flips. Nix stays refused in that build too. It
+//! continuity as ready for a local package build (`local-committed-head`)
+//! only, so VM acceptance can drive a real live upgrade before the constant
+//! flips. Nix and every other provenance stay refused in that build. It
 //! carries `VM_ACCEPTANCE_MARKER`, which package provenance generation
 //! and package validation refuse for release and Nix packages.
 //!
@@ -74,7 +75,8 @@ pub(crate) const FRESH_DAEMON_GENERATION: u64 = 1;
 pub(crate) const WINDOW_CONTINUITY_READY: bool = false;
 
 /// Whether this is the test-only VM acceptance build (Plan 0061 M3.17): the
-/// `vm-acceptance-live-handoff` feature treats window continuity as ready.
+/// `vm-acceptance-live-handoff` feature treats window continuity as ready
+/// for a local package build ([`window_continuity_ready`]).
 pub(crate) const VM_ACCEPTANCE_BUILD: bool = cfg!(feature = "vm-acceptance-live-handoff");
 
 /// The bytes a VM acceptance build carries, which package provenance
@@ -85,10 +87,22 @@ pub(crate) const VM_ACCEPTANCE_BUILD: bool = cfg!(feature = "vm-acceptance-live-
 #[used]
 pub(crate) static VM_ACCEPTANCE_MARKER: [u8; 37] = *b"splinterm-vm-acceptance-live-handoff:";
 
-/// Whether window continuity counts as ready in this build: the shipped
-/// [`WINDOW_CONTINUITY_READY`], or the test-only VM acceptance build.
-fn window_continuity_ready() -> bool {
-    WINDOW_CONTINUITY_READY || vm_acceptance_build()
+/// Whether window continuity counts as ready for a build of `provenance`:
+/// the shipped [`WINDOW_CONTINUITY_READY`], or the test-only VM acceptance
+/// build, and that only for a local package build (`local-committed-head`),
+/// the only provenance packaging lets it carry.
+fn window_continuity_ready(provenance: HandoffBuildProvenance) -> bool {
+    continuity_ready_with(WINDOW_CONTINUITY_READY, vm_acceptance_build(), provenance)
+}
+
+/// [`window_continuity_ready`] with the shipped constant and the build kind
+/// passed in, so unit tests can cover every build.
+const fn continuity_ready_with(
+    shipped: bool,
+    vm_acceptance: bool,
+    provenance: HandoffBuildProvenance,
+) -> bool {
+    shipped || (vm_acceptance && matches!(provenance, HandoffBuildProvenance::LocalCommittedHead))
 }
 
 #[cfg(feature = "vm-acceptance-live-handoff")]
@@ -152,7 +166,7 @@ impl LiveHandoffUnsupported {
 pub(crate) fn live_handoff_support(
     provenance: HandoffBuildProvenance,
 ) -> Result<(), LiveHandoffUnsupported> {
-    live_handoff_support_with(provenance, window_continuity_ready())
+    live_handoff_support_with(provenance, window_continuity_ready(provenance))
 }
 
 /// [`live_handoff_support`] with window-continuity readiness passed in.
@@ -1025,10 +1039,18 @@ mod tests {
             VM_ACCEPTANCE_BUILD,
             cfg!(feature = "vm-acceptance-live-handoff")
         );
-        assert_eq!(window_continuity_ready(), VM_ACCEPTANCE_BUILD);
+        assert_eq!(
+            window_continuity_ready(HandoffBuildProvenance::LocalCommittedHead),
+            VM_ACCEPTANCE_BUILD
+        );
         assert_eq!(
             live_handoff_support(HandoffBuildProvenance::NixStore),
             Err(LiveHandoffUnsupported::NixStore)
+        );
+        // In either build, a release candidate waits for window continuity.
+        assert_eq!(
+            live_handoff_support(HandoffBuildProvenance::ReleaseCandidate),
+            Err(LiveHandoffUnsupported::WindowContinuityPending)
         );
         let packaged = live_handoff_support(HandoffBuildProvenance::LocalCommittedHead);
         if VM_ACCEPTANCE_BUILD {
@@ -1039,6 +1061,41 @@ mod tests {
                 Err(LiveHandoffUnsupported::WindowContinuityPending)
             );
         }
+    }
+
+    /// The VM acceptance override applies only to a local package build: a
+    /// feature build with release-candidate, Nix-store, or unpackaged
+    /// provenance still waits for window continuity (and Nix stays refused
+    /// first), while the shipped constant, once true, covers every kind.
+    #[test]
+    fn the_vm_acceptance_override_covers_only_local_package_builds() {
+        let kinds = [
+            HandoffBuildProvenance::Unpackaged,
+            HandoffBuildProvenance::LocalCommittedHead,
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::NixStore,
+        ];
+        for provenance in kinds {
+            let local = provenance == HandoffBuildProvenance::LocalCommittedHead;
+            assert_eq!(continuity_ready_with(false, true, provenance), local);
+            assert!(!continuity_ready_with(false, false, provenance));
+            assert!(continuity_ready_with(true, false, provenance));
+        }
+        for refused in [
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::NixStore,
+        ] {
+            let support =
+                live_handoff_support_with(refused, continuity_ready_with(false, true, refused));
+            assert!(support.is_err(), "{refused:?}: {support:?}");
+        }
+        assert_eq!(
+            live_handoff_support_with(
+                HandoffBuildProvenance::NixStore,
+                continuity_ready_with(false, true, HandoffBuildProvenance::NixStore),
+            ),
+            Err(LiveHandoffUnsupported::NixStore)
+        );
     }
 
     #[test]

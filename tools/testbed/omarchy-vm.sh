@@ -395,6 +395,11 @@ if [[ -e /usr/bin/splinterm || -L /usr/bin/splinterm ]]; then
   pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
   stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
   desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
+  # Plan 0061 M3.17: a VM acceptance build forces live handoff on.
+  if pacman -Qi splinterm | grep -Fq 'TEST-ONLY' \
+    || grep -aqF 'splinterm-vm-acceptance-live-handoff:' /usr/bin/splinterd; then
+    printf 'WARNING: the installed package is a TEST-ONLY VM acceptance build (live handoff forced on); reinstall a plain build\n'
+  fi
 fi
 REMOTE
     ;;

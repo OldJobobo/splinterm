@@ -137,6 +137,9 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             './tools/package/upgrade-local-package.sh --yes "${vm_acceptance_arguments[@]}"',
             install,
         )
+        status = runner.split("  package-status)", 1)[1].split("  package-install)", 1)[0]
+        self.assertIn("TEST-ONLY VM acceptance build", status)
+        self.assertIn("splinterm-vm-acceptance-live-handoff:", status)
         build = runner.split("  package-build)", 1)[1].split("  package-status)", 1)[0]
         self.assertIn("build_arguments=(--vm-acceptance-live-handoff)", build)
         self.assertIn(

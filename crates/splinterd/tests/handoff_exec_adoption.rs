@@ -60,17 +60,21 @@
 //!   `python3` image as the forward client, and the stage keeps a hard link
 //!   to its pre-upgrade inode. After the adoption, while the relaunched
 //!   Window holds its granted ticket unredeemed, a process executing that
-//!   stale inode is refused trusted UI at `Hello` and cannot present the
-//!   ticket as an automation client; the Window then redeems it. Same bytes,
-//!   stale inode: device and inode decide, never content.
+//!   stale inode is refused trusted UI at `Hello`; the Window then redeems
+//!   the ticket. Same bytes, stale inode: device and inode decide, never
+//!   content. (Presenting the ticket as an automation client is refused too,
+//!   but that refusal is the authorization table's, for any automation
+//!   client; the `Hello` refusal is the stale-inode check.)
 //! * **No second handoff (D8).** The adopted daemon and the rollback daemon
 //!   refuse another `Execute` and say a restart comes first; their dry run
 //!   reports no rollback copy.
 //! * **The rollback daemon refuses continuation claims.** It pins no client
-//!   snapshot, so a carried Window's claim gets no ticket, and a ticket
-//!   presented over trusted UI is invalid.
-//! * **The hold expires.** A relaunched Window that waits past the 30 s hold
-//!   loses its placeholders, and its claim and redemption then fail.
+//!   snapshot, so a carried Window's claim gets no ticket (`NoSnapshot`).
+//!   No ticket ever exists there, so the case only sanity-checks that a
+//!   made-up (all-zero) ticket is invalid.
+//! * **The hold expires.** A relaunched Window claims its real ticket, then
+//!   waits past the 30 s hold before redeeming it. The hold ends with the
+//!   Window's placeholder still held, and the real ticket is then invalid.
 //! * **The rollback guard timeout.** A thread that outlives the failed
 //!   candidate's runtime keeps the rollback executor from one thread; the
 //!   candidate exits loudly with no rollback exec.
@@ -208,8 +212,9 @@ const ALIAS_WINDOW_CONTINUATION: &str = "SPLINTERD_EXEC_ADOPTION_ALIAS_WINDOW_CO
 /// The relaunched Window waits for the stale-client check between its
 /// ticket grant and its redemption.
 const WINDOW_STALE_CHECK: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_STALE_CHECK";
-/// The relaunched Window waits this many seconds before it claims.
-const WINDOW_CLAIM_DELAY: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_CLAIM_DELAY";
+/// The relaunched Window waits this many seconds between its ticket grant
+/// and its redemption.
+const WINDOW_REDEEM_DELAY: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_REDEEM_DELAY";
 /// The stand-in Window also claims on its continuation after a rollback.
 const WINDOW_CLAIM_AFTER_ROLLBACK: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_CLAIM_AFTER_ROLLBACK";
 /// A hard link the stage makes to the pre-upgrade installed client before
@@ -288,10 +293,10 @@ elif len(data) == 16 and data[5] == 2:
 /// trusted UI, presents the ticket for the Splint its old connection
 /// controlled, and writes both answers atomically.
 ///
-/// Its frames may also ask it to wait `delay_seconds` before claiming and to
-/// present a zero ticket when none was granted (`claim_without_grant`, the
-/// expiry case), or to publish its granted ticket and wait for the
-/// stale-client check before redeeming (`ticket_file`, `proceed_file`).
+/// Its frames may also ask it to publish its granted ticket and wait for the
+/// stale-client check before redeeming (`ticket_file`, `proceed_file`), or to
+/// wait `redeem_delay_seconds` between the grant and the redemption (the
+/// expiry case).
 const WINDOW_CLAIM_SCRIPT: &str = r#"
 import json, os, socket, struct, sys, time
 channel = socket.socket(fileno=int(sys.argv[1]))
@@ -302,14 +307,13 @@ def finish(value):
     with open(partial, "w") as out:
         json.dump(value, out)
     os.rename(partial, frames["result"])
-time.sleep(frames.get("delay_seconds", 0))
 try:
     channel.send(bytes.fromhex(frames["claim"]))
     channel.settimeout(30)
     grant = channel.recv(128)
 except OSError:
     grant = b""
-if len(grant) != 48 and not frames.get("claim_without_grant"):
+if len(grant) != 48:
     finish({"grant_bytes": len(grant)})
     raise SystemExit(0)
 if len(grant) == 48 and "ticket_file" in frames:
@@ -322,6 +326,7 @@ if len(grant) == 48 and "ticket_file" in frames:
         if time.monotonic() > deadline:
             raise SystemExit("the stale-client check never finished")
         time.sleep(0.02)
+time.sleep(frames.get("redeem_delay_seconds", 0))
 daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 daemon.settimeout(30)
 daemon.connect(os.environ["SPLINTERM_SOCKET"])
@@ -342,7 +347,7 @@ def read():
 send(frames["hello"])
 hello = read()
 request = frames["request"]
-request["request"]["ticket"] = list(grant[16:]) if len(grant) == 48 else [0] * 32
+request["request"]["ticket"] = list(grant[16:])
 send(request)
 while True:
     frame = read()
@@ -491,7 +496,7 @@ fn main() -> ExitCode {
             window: env::var_os(WINDOW).is_some(),
             alias_window_continuation: env::var_os(ALIAS_WINDOW_CONTINUATION).is_some(),
             window_stale_check: env::var_os(WINDOW_STALE_CHECK).is_some(),
-            window_claim_delay: env::var(WINDOW_CLAIM_DELAY)
+            window_redeem_delay: env::var(WINDOW_REDEEM_DELAY)
                 .ok()
                 .map(|seconds| seconds.parse().expect("a whole number of seconds")),
             window_claim_after_rollback: env::var_os(WINDOW_CLAIM_AFTER_ROLLBACK).is_some(),
@@ -569,9 +574,9 @@ struct StageOptions {
     /// With `window`, the relaunched Window publishes its granted ticket and
     /// waits for the parent's stale-client check before redeeming it.
     window_stale_check: bool,
-    /// With `window`, the relaunched Window waits this many seconds before
-    /// it claims, and presents a zero ticket when none was granted.
-    window_claim_delay: Option<u64>,
+    /// With `window`, the relaunched Window waits this many seconds between
+    /// its ticket grant and its redemption.
+    window_redeem_delay: Option<u64>,
     /// With `window`, the stand-in Window claims on its continuation after a
     /// rollback too.
     window_claim_after_rollback: bool,
@@ -938,9 +943,8 @@ fn write_window_claim_frames(directory: &Path, stopped: &Stopped, options: &Stag
         frames["ticket_file"] = json!(directory.join(WINDOW_TICKET));
         frames["proceed_file"] = json!(directory.join(STALE_CHECKED));
     }
-    if let Some(seconds) = options.window_claim_delay {
-        frames["delay_seconds"] = json!(seconds);
-        frames["claim_without_grant"] = json!(true);
+    if let Some(seconds) = options.window_redeem_delay {
+        frames["redeem_delay_seconds"] = json!(seconds);
     }
     if options.window_claim_after_rollback {
         frames["rollback_claim"] = json!(claim_for(1));
@@ -1433,7 +1437,7 @@ impl Stage {
         command.env_remove(WINDOW);
         command.env_remove(ALIAS_WINDOW_CONTINUATION);
         command.env_remove(WINDOW_STALE_CHECK);
-        command.env_remove(WINDOW_CLAIM_DELAY);
+        command.env_remove(WINDOW_REDEEM_DELAY);
         command.env_remove(WINDOW_CLAIM_AFTER_ROLLBACK);
         command.env_remove(CANDIDATE_FAULT_ENV);
         command.env_remove(OLD_SIDE_DRILL_ENV);
@@ -1458,8 +1462,8 @@ impl Stage {
         if options.window_stale_check {
             command.env(WINDOW_STALE_CHECK, "1");
         }
-        if let Some(seconds) = options.window_claim_delay {
-            command.env(WINDOW_CLAIM_DELAY, seconds.to_string());
+        if let Some(seconds) = options.window_redeem_delay {
+            command.env(WINDOW_REDEEM_DELAY, seconds.to_string());
         }
         if options.window_claim_after_rollback {
             command.env(WINDOW_CLAIM_AFTER_ROLLBACK, "1");
@@ -2072,9 +2076,12 @@ fn hex_ticket(hex: &str) -> [u8; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES
 /// Plan 0061 M3.17, the stale client: once the relaunched Window has been
 /// granted its ticket (it waits before redeeming), a process executing the
 /// pre-upgrade client inode, with exactly the bytes of the installed client,
-/// is refused trusted UI at `Hello`, and as an automation client cannot
-/// present that very ticket. The Window then redeems it
-/// ([`assert_window_restored_its_controller`]): the refusals did not end it.
+/// is refused trusted UI at `Hello`: that is the stale-inode check. As an
+/// automation client it cannot present that very ticket either, but that
+/// refusal is the authorization table's for every automation client (a
+/// policy denial), not an executable check. The Window then redeems the
+/// ticket ([`assert_window_restored_its_controller`]): neither refusal
+/// reached or ended it.
 fn assert_stale_client_refused(stage: &mut Stage, directory: &TestDirectory) {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -2672,8 +2679,10 @@ fn rollback_dropped_window_case() {
 /// fails at startup with the forward client still installed, so the
 /// rollback daemon trusts that installed client. The carried Window reads
 /// `RolledBack` and claims anyway: the rollback daemon pins no snapshot, so
-/// it sends no ticket and closes the channel. A ticket presented over
-/// trusted UI is invalid, and `Execute` is refused until a restart.
+/// it sends no ticket (`NoSnapshot`) and closes the channel. That refusal is
+/// the proof. No ticket exists in a rollback generation, so the redemption
+/// below presents a made-up all-zero ticket and only sanity-checks that it
+/// is invalid. `Execute` is refused until a restart.
 fn rollback_refuses_claims_case() {
     let directory = TestDirectory::new();
     let mut stage = Stage::launch(
@@ -2714,6 +2723,7 @@ fn rollback_refuses_claims_case() {
     );
     let frames: Value =
         serde_json::from_slice(&fs::read(directory.0.join(WINDOW_CLAIM_FRAMES)).unwrap()).unwrap();
+    // A made-up ticket: the rollback generation issued none (sanity check).
     let presented = Request::ClaimHandoffControl {
         ticket: splinterm_protocol::HandoffResumeTicket::new(
             [0; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
@@ -2736,18 +2746,18 @@ fn rollback_refuses_claims_case() {
     shut_down(&mut stage, &record, &[launched]);
 }
 
-/// Plan 0061 M3.17: the resume hold expires. The relaunched Window waits
-/// past the 30 s hold before it claims. The hold has ended by then, with
-/// the Window's placeholder: the continuation is closed, so no ticket comes
-/// back, and a redemption over trusted UI (the Window still runs the pinned
-/// snapshot) is invalid.
+/// Plan 0061 M3.17: the resume hold expires. The relaunched Window claims
+/// its ticket at once (a real grant), then waits past the 30 s hold before
+/// redeeming it over trusted UI (it still runs the pinned snapshot). The
+/// hold ends with the Window and its placeholder still held, and the real
+/// ticket is then invalid: nothing is restored.
 fn hold_expiry_case() {
     let directory = TestDirectory::new();
     let mut stage = Stage::launch(
         &directory,
         StageOptions {
             window: true,
-            window_claim_delay: Some(RESUME_HOLD_SECONDS + 3),
+            window_redeem_delay: Some(RESUME_HOLD_SECONDS + 3),
             ..StageOptions::default()
         },
     );
@@ -2775,8 +2785,8 @@ fn hold_expiry_case() {
     let logs = stage.logs();
     assert_eq!(
         claim["grant_bytes"].as_u64(),
-        Some(0),
-        "a ticket came after the hold: {claim}\n{logs}"
+        Some(48),
+        "the Window was not granted its ticket within the hold: {claim}\n{logs}"
     );
     let hello: ServerFrame = serde_json::from_value(claim["hello"].clone()).unwrap();
     assert!(
@@ -2795,7 +2805,7 @@ fn hold_expiry_case() {
             &frame,
             ServerFrame::Error { error, .. } if error.code == ErrorCode::InvalidHandoffTicket
         ),
-        "a redemption after the hold: {frame:?}\n{logs}"
+        "the real ticket redeemed after the hold: {frame:?}\n{logs}"
     );
     let ended = log_line(
         &logs,
@@ -2807,10 +2817,12 @@ fn hold_expiry_case() {
             "missing {expected:?} in {ended:?}\n{logs}"
         );
     }
-    assert!(
-        !logs.contains("issued a carried Window its resume ticket"),
-        "{logs}"
-    );
+    for expected in [
+        "daemon handoff: issued a carried Window its resume ticket",
+        "daemon handoff: refused a handoff control claim",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
     assert!(
         !logs.contains("restored a relaunched Window's controller"),
         "{logs}"
