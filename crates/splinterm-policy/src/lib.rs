@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+pub mod durable_identity;
 pub mod executable_identity;
 pub mod policy;
 

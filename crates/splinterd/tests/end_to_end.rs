@@ -7533,3 +7533,253 @@ async fn an_unused_close_removes_an_empty_unnamed_lair() {
     .await
     .expect("unnamed Lair scenario timed out");
 }
+
+// ---- ADR 0014 remembered grants (Plan 0053 PR 2) ----
+
+const REMEMBERED_PROBE_SOCKET: &str = "SPLINTERM_REMEMBERED_PROBE_SOCKET";
+const REMEMBERED_PROBE_SPLINT: &str = "SPLINTERM_REMEMBERED_PROBE_SPLINT";
+const REMEMBERED_PROBE_REQUEST: &str = "SPLINTERM_REMEMBERED_PROBE_REQUEST";
+const REMEMBERED_PROBE_RESULT: &str = "SPLINTERM_REMEMBERED_PROBE_RESULT";
+/// The debug-build daemon seam that lets an ordinary user's tree pass the
+/// protected-install ownership rule (`agent_access::TEST_TRUSTED_OWNER_ENV`).
+const DURABLE_IDENTITY_OWNER_ENV: &str = "SPLINTERM_TEST_DURABLE_IDENTITY_OWNER_UID";
+
+/// Not a scenario of its own: the remembered-grant scenario runs a copy of
+/// this test binary, installed in a protected tree, as the agent. It makes
+/// one request on a fresh connection and records whether authorization
+/// refused it.
+#[tokio::test(flavor = "current_thread")]
+async fn remembered_grant_probe() {
+    let Some(result) = std::env::var_os(REMEMBERED_PROBE_RESULT) else {
+        return;
+    };
+    let socket = PathBuf::from(std::env::var_os(REMEMBERED_PROBE_SOCKET).unwrap());
+    let splint_id: SplintId = std::env::var(REMEMBERED_PROBE_SPLINT)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let request = match std::env::var(REMEMBERED_PROBE_REQUEST).unwrap().as_str() {
+        "inspect" => Request::InspectSplint { splint_id },
+        "rename" => Request::RenameSplint {
+            expected_topology_revision: TopologyRevision::new(0),
+            splint_id,
+            title: "renamed".into(),
+        },
+        other => panic!("unknown probe request {other}"),
+    };
+    let mut connection = Connection::connect(&socket).await;
+    let outcome = match connection.request_result(request).await {
+        Err(error) if error.code == ErrorCode::Unauthorized => "unauthorized",
+        _ => "authorized",
+    };
+    fs::write(result, outcome).unwrap();
+}
+
+/// Copies this test binary into `<target tmp>/<unique>/bin/end_to_end-agent`
+/// and returns its canonical path. Every directory on that path must be
+/// owned by root or this user and be neither group- nor world-writable, as
+/// the daemon's test owner seam requires.
+fn install_protected_agent(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let tree = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "remembered-{label}-{}-{nonce:x}",
+        std::process::id()
+    ));
+    let directory = tree.join("bin");
+    fs::create_dir_all(&directory).unwrap();
+    for created in [&tree, &directory] {
+        fs::set_permissions(created, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let agent = directory.join("end_to_end-agent");
+    fs::copy(std::env::current_exe().unwrap(), &agent).unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = fs::canonicalize(agent).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    for ancestor in agent.ancestors().skip(1) {
+        let metadata = fs::symlink_metadata(ancestor).unwrap();
+        assert!(
+            metadata.is_dir()
+                && (metadata.uid() == 0 || metadata.uid() == uid)
+                && metadata.mode() & 0o022 == 0,
+            "{} must be a directory owned by root or the test user that is not group- or \
+             world-writable for the remembered-grant scenario",
+            ancestor.display()
+        );
+    }
+    agent
+}
+
+/// Runs the installed agent copy's probe and returns its outcome.
+fn run_remembered_probe(socket: &Path, agent: &Path, splint_id: SplintId, request: &str) -> String {
+    let result = agent.with_file_name(format!("result-{request}"));
+    let _ = fs::remove_file(&result);
+    // A sibling test thread's fork can briefly inherit the descriptor that
+    // wrote the copy, so its exec may see ETXTBSY.
+    let mut status = None;
+    for _ in 0..200 {
+        match Command::new(agent)
+            .args([
+                "--exact",
+                "remembered_grant_probe",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env(REMEMBERED_PROBE_SOCKET, socket)
+            .env(REMEMBERED_PROBE_SPLINT, splint_id.to_string())
+            .env(REMEMBERED_PROBE_REQUEST, request)
+            .env(REMEMBERED_PROBE_RESULT, &result)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(exit) => {
+                status = Some(exit);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("run the agent probe: {error}"),
+        }
+    }
+    assert!(
+        status.expect("the agent copy stayed busy").success(),
+        "the agent probe failed"
+    );
+    fs::read_to_string(result).unwrap()
+}
+
+fn remembered_store(agent: &Path, lair_id: LairId, level: &str) -> Vec<u8> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "format": "splinterm.agent-access",
+        "version": 1,
+        "entries": [{
+            "id": "ra_0123456789abcdef0123456789abcdef",
+            "identity": {"kind": "protected_install", "path": agent},
+            "lair_id": lair_id,
+            "access": {"level": level},
+            "created_unix_seconds": 1,
+            "last_used_unix_seconds": null,
+            "display_name": "End-to-end agent",
+        }],
+    }))
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one private daemon proves remembered access across restarts and a rejected store"
+)]
+async fn a_remembered_grant_survives_a_daemon_restart() {
+    time::timeout(Duration::from_secs(180), async {
+        let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
+        let owner = rustix::process::geteuid().as_raw().to_string();
+        let seam = [(DURABLE_IDENTITY_OWNER_ENV, owner.as_str())];
+        let mut connection = daemon.connect().await;
+        let revision = connection.topology_revision().await;
+        let Response::LairCreated { lair, .. } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: revision,
+                name: "remembered".to_owned(),
+                launch: LaunchParameters {
+                    cwd: daemon.runtime.clone(),
+                    command: vec!["/bin/sh".into(), "-c".into(), "sleep 300".into()],
+                    shell: None,
+                    login_shell: false,
+                    scrollback_lines: 100,
+                },
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("the remembered-grant setup did not create a Lair");
+        };
+        let lair_id = lair.id;
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("the remembered-grant Lair is not one leaf");
+        };
+        let splint_id = splint.id;
+        drop(connection);
+        let agent = install_protected_agent("agent");
+        let stranger = install_protected_agent("stranger");
+
+        // The answer "Always allow Look" was committed in an earlier
+        // generation: its store entry is on disk when this daemon starts.
+        daemon.stop_preserving_state();
+        let store = daemon
+            .runtime
+            .join("state/splinterm")
+            .join("agent-access.json");
+        fs::write(&store, remembered_store(&agent, lair_id, "look")).unwrap();
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.start_again_with_environment(&seam).await;
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &agent, splint_id, "inspect"),
+            "authorized"
+        );
+        // Exactly Look: no rename.
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &agent, splint_id, "rename"),
+            "unauthorized"
+        );
+        // The same bytes at another path are a different identity.
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &stranger, splint_id, "inspect"),
+            "unauthorized"
+        );
+
+        // A daemon restart: the grant is still there, checked afresh against
+        // the new connection.
+        daemon.stop_preserving_state();
+        daemon.start_again_with_environment(&seam).await;
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &agent, splint_id, "inspect"),
+            "authorized"
+        );
+        daemon.stop_preserving_state();
+        // The daemon wrote the last-used time it saw, and kept the entry.
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store).unwrap()).unwrap();
+        assert_eq!(
+            written["entries"][0]["id"],
+            "ra_0123456789abcdef0123456789abcdef"
+        );
+        assert!(written["entries"][0]["last_used_unix_seconds"].is_u64());
+        assert_eq!(fs::metadata(&store).unwrap().mode() & 0o7777, 0o600);
+
+        // An unsafe store denies only the remembered source, and is never
+        // rewritten; policy keeps working.
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o644)).unwrap();
+        let rejected = fs::read(&store).unwrap();
+        daemon.start_again_with_environment(&seam).await;
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &agent, splint_id, "inspect"),
+            "unauthorized"
+        );
+        let mut policy_connection = daemon.connect().await;
+        policy_connection.topology_revision().await;
+        drop(policy_connection);
+        daemon.stop_preserving_state();
+        assert_eq!(fs::read(&store).unwrap(), rejected);
+        assert_eq!(fs::metadata(&store).unwrap().mode() & 0o7777, 0o644);
+
+        // Repaired by the person, the store grants again.
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o600)).unwrap();
+        daemon.start_again_with_environment(&seam).await;
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &agent, splint_id, "inspect"),
+            "authorized"
+        );
+        daemon.shutdown();
+        for installed in [&agent, &stranger] {
+            fs::remove_dir_all(installed.parent().unwrap().parent().unwrap()).unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
