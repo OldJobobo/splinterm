@@ -301,29 +301,37 @@ remembered-grant store, without asking Splinterm.
 ### Access levels
 
 The consent window names one of three levels and says in one line what it
-allows. A details control lists the exact scopes.
+allows. A details control lists the exact scopes. Levels are made of the
+consent scopes an agent requests; the last column shows the policy scopes each
+one corresponds to.
 
-| Level | Allows | Policy scopes |
-| --- | --- | --- |
-| **Look** | Read the workspace layout, visible terminals, and scrollback, including search; report agent status | `topology_metadata_read`, `topology_subscribe`, `terminal_visible_read`, `terminal_subscribe`, `scrollback_read`, `scrollback_search`, `agent_status_report` |
-| **Look and type** | Look, plus type into and resize a Splint nobody else controls | Look, plus `controller_acquire`, `input`, `resize` |
-| **Manage** | Look and type, plus start processes, change layout and names, close and terminate, and restore | Look and type, plus `process_spawn`, `topology_layout_mutate`, `topology_name_mutate`, `process_terminate`, `process_restore` |
+| Level | Allows | Consent scopes | Policy scopes |
+| --- | --- | --- | --- |
+| **Look** | Read the workspace layout, visible terminals, and scrollback, including search; report agent status | `topology_observe`, `observe`, `scrollback`, `agent_status_report` | `topology_metadata_read`, `topology_subscribe`, `terminal_visible_read`, `terminal_subscribe`, `scrollback_read`, `scrollback_search`, `agent_status_report` |
+| **Look and type** | Look, plus type and resize, including taking typing control of a pane your Window controls | Look, plus `input`, `resize`, `control_takeover` | Look, plus `controller_acquire`, `input`, `resize`, `controller_transfer` |
+| **Manage** | Look and type, plus start processes, change layout and names, close and terminate, and restore | Look and type, plus `process_spawn`, `topology_layout`, `topology_name`, `terminate`, `process_restore` | Look and type, plus `process_spawn`, `topology_layout_mutate`, `topology_name_mutate`, `process_terminate`, `process_restore` |
 
 Every level covers the whole workspace, including Dojos and Splints created
-later, and nothing outside it. No level includes clipboard access, taking
-control away from your Window (`controller_transfer`), authorization
-inspection or revocation, audit inspection, or creating a new Lair. Those stay
-available only through the policy file, and forced takeover stays with you.
+later, and nothing outside it.
+
+- No level includes clipboard access. A request that asks for a clipboard scope
+  is rejected as invalid.
+- No level includes authorization inspection or revocation, audit inspection,
+  or creating a new Lair. These are not consent scopes at all and stay available
+  only through the policy file.
+- When an agent with Look and type or Manage takes control of a pane, your
+  Window shows the change, and you can take control back.
 
 An agent that asks for anything other than exactly one level is shown as
 **Custom** access, with every requested scope listed. Splinterm grants exactly
-what was asked for and never rounds a request up to a level.
+what was asked for and never rounds a request up to a level. A Custom request
+that includes `control_takeover` can be granted just this once only.
 
 ### How long access lasts
 
 | Choice | Lasts | Keeps working after | Ends when |
 | --- | --- | --- | --- |
-| **Just this once** | Five minutes, for that one agent process | Closing every Window | It expires, the agent exits, or Splinterm restarts |
+| **Just this once** | Five minutes, for that one agent process | Closing every Window | It expires, the agent exits, the workspace is closed, you revoke it, or Splinterm restarts |
 | **While this workspace is open** | Until the workspace is closed or Splinterm restarts | The agent restarting or reconnecting; closing every Window | The workspace is closed, the daemon stops or upgrades, or you revoke it |
 | **Always for this workspace** | Until you revoke it or the workspace is removed | Splinterm restarting and upgrading; the agent restarting and upgrading | You revoke it, or the workspace is removed |
 
@@ -338,27 +346,48 @@ each remembered grant was last used.
 path and file digest, so it works for any build, including a development build.
 Rebuilding the agent makes it a different program, and it is asked again.
 
-**Always for this workspace** is offered only to an agent installed where the
-user account cannot replace it:
+**Always for this workspace** is offered only when the account cannot modify the
+agent's executable file itself:
 
 - a **protected install**, such as a distribution package under `/usr/bin`:
   every directory on the path and the file itself are owned by root and are not
   writable by anyone else; or
-- a **Nix profile** entry, such as `~/.nix-profile/bin/NAME` or
-  `/run/current-system/sw/bin/NAME`, that resolves to the running file in a
-  root-owned multi-user `/nix/store`.
+- a **Nix profile** entry, such as `/run/current-system/sw/bin/NAME` or
+  `~/.nix-profile/bin/NAME`, that resolves to the running file in a root-owned
+  multi-user `/nix/store`. System profiles are checked before user profiles.
+
+This protects the file, not how it runs. Environment such as `LD_PRELOAD`, and
+configuration, plugins, or scripts the program loads from places you can write,
+can still change what it does.
 
 Splinterm checks this again every time the agent connects, so a package upgrade
 keeps the grant without asking. Restart an agent that was running before the
 upgrade: it is still running the old, replaced file, which no longer matches.
-A Nix profile link is owned by you, so any program running as you can repoint
-it at a different program, which would then match. Development builds and other
-programs in user-writable locations are offered only the two shorter durations.
 
-A host or agent name is only shown, never trusted. Splinterm never identifies an
-agent by host name, basename, or a copied digest. The identity is whatever
-executable connects: if an agent runs as a script, the identity is its
-interpreter, and every program that interpreter runs would share the grant.
+A Nix profile link is owned by you. Any program running as you can have Nix
+build any program into the store and repoint the profile at it, and that
+program would then match. A root-owned store path means Nix built it, not that
+anyone checked it.
+
+Some agents are offered fewer choices, and the prompt shows the missing ones
+disabled with the reason:
+
+- **Scripts run by an interpreter**, such as `python`, `node`, `bash`, `sh`,
+  `perl`, or `ruby`, get just this once and while this workspace is open.
+  Remembering the interpreter would cover every script it runs. Splinterm
+  recognizes interpreters by the name of the running executable. This is a
+  convenience that prevents mistakes, not a security boundary. Compiled agents
+  and the Splinterm MCP adapter get all three choices.
+- **Development builds** and other programs in places you can write get the
+  two shorter durations.
+- **The SSH relay** `splinterm-relay` gets just this once. Remote automation
+  uses the policy file.
+- **A Custom request with `control_takeover`** gets just this once.
+
+A longer grant belongs to the program, not to one process. The prompt says so in
+one line, for example "Any program that runs `/usr/bin/splinterm-mcp` shares
+this access." A host or agent name is only shown, never trusted. Splinterm never
+identifies an agent by host name, basename, or a copied digest.
 
 ### The prompt
 
@@ -366,16 +395,22 @@ The prompt is deliberate by default:
 
 - Enter, Escape, and `D` deny. Only `G` or a click on the grant button grants.
   Today's dialog grants on Enter; this changes.
-- Input is ignored for a short moment after the prompt appears, and held-down
-  keys never answer it.
-- **Just this once** is preselected. The grant button names your exact choice,
-  for example **Always allow Manage for 'Workspace'**. That one answer is the
-  whole confirmation.
+- Input is ignored for a short moment after the prompt appears, each time it
+  regains focus, and each time you change the duration. Held-down keys never
+  answer it.
+- You choose the duration with the mouse or the arrow keys. **Just this once**
+  is preselected.
+- The grant button names your exact choice, for example **Always allow Manage
+  for 'Workspace'**. That one answer is the whole confirmation.
 
 The prompt shows the agent's reported name, its exact executable path, and the
-workspace name with its short ID. If you do not answer right away, the request
-stays pending for up to two minutes, Windows show that a request is waiting,
-and the agent can keep waiting without a new prompt.
+workspace name with its short ID.
+
+Prompts appear one at a time; further requests wait their turn, and Windows
+show that a request is waiting. If you do not answer right away, the request
+stays pending for up to two minutes, and the agent can keep waiting without a
+new prompt. After you deny a request, the same agent cannot ask again for that
+workspace for a few seconds.
 
 ### Seeing and revoking access
 
@@ -386,11 +421,14 @@ connections, control it holds, and pending requests. Policy rules that match a
 connected agent are listed too, marked as coming from the policy file.
 
 Revoke works per entry and takes effect immediately: subscriptions close and
-control is released. **Revoke all access** ends every consent grant, including
-remembered ones. Revoking a remembered grant does not remove a matching policy
-rule. When one exists, the list says that access continues under the policy
-file, names the rule, and tells you to edit `policy.json` to remove it. The
-Explorer marks workspaces an agent can reach and those it is connected to now.
+control is released. **Revoke all access** first tells you how many remembered
+grants it will remove, then ends every consent grant and pending request when
+you confirm.
+
+Revoking a remembered grant does not remove a matching policy rule. When one
+exists, the list says that access continues under the policy file, names the
+rule, and tells you to edit `policy.json` to remove it. The Explorer marks
+workspaces an agent can reach and those it is connected to now.
 
 ### Where remembered access is stored
 
@@ -398,12 +436,14 @@ Remembered grants live in `~/.local/state/splinterm/agent-access.json`
 (`$XDG_STATE_HOME/splinterm/agent-access.json` when set), separate from
 `policy.json`. Splinterm writes it, owner-only, and reports a remembered grant
 only after the file is safely written; if the write fails, nothing is granted.
-A damaged or unsafe file disables remembered access until it is repaired, and
-policy and shorter grants keep working. `splinterm reset` moves it to the same
-backup as your sessions. After a live upgrade, remembered grants are read fresh
-from this file, while every agent connection, its control, shorter grants, and
-pending requests end; agents reconnect without a new prompt if they still
-match.
+If the file is changed by something else, Splinterm refuses to overwrite it and
+reports the conflict. A damaged or unsafe file disables remembered access until
+it is repaired, and policy and shorter grants keep working. `splinterm reset`
+moves it to the same backup as your sessions.
+
+After a live upgrade, remembered grants are read fresh from this file. Every
+agent connection, its control, shorter grants, and pending requests end, and
+agents reconnect without a new prompt if they still match.
 
 Agent status reporting is part of every level and uses the ordinary automation
 connection. A remembered or workspace grant covers every connection from the

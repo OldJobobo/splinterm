@@ -82,8 +82,10 @@ bounded framing stay as decided here.
   workspace is open, always for this workspace) at one of three access levels
   or an exact Custom scope set.
 - **Prompt input.** The access dialog becomes default-deny. Enter, Escape, and
-  `D` deny; only `G` or the grant button grants, after an arming delay, with key
-  repeats ignored. Until then it grants on Enter.
+  `D` deny; only `G` or the grant button grants. An arming delay restarts on
+  every focus gain and duration change, key repeats are ignored, and the
+  duration is chosen only by pointer or arrow keys. Until then it grants on
+  Enter.
 - **Persistence and deadline.** "No third-party grant is persisted across daemon
   restart" no longer holds for an explicit Always answer, which the daemon
   stores in its remembered-grant store under the identity rules of ADR 0014. The
