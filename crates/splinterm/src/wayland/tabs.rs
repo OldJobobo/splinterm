@@ -1528,7 +1528,8 @@ mod tests {
         use crate::frontend::badged_tab_label;
         use crate::renderer::ChromeIcon;
 
-        let label = "a long Dojo label";
+        // A label starting with a digit must not run into a counted badge.
+        let labels = ["a long Dojo label", "2 long Dojo label"];
         let mut counted = ChromeSource::default();
         counted.push_icon(ChromeIcon::MessageQuestion).push_str("2");
         let mut stale = ChromeSource::default();
@@ -1536,7 +1537,10 @@ mod tests {
             .push_icon(ChromeIcon::Loader2)
             .push_icon(ChromeIcon::Clock);
         let ascii = ChromeSource::from("?2");
-        for badge in [&counted, &stale, &ascii] {
+        let cases = [&counted, &stale, &ascii]
+            .into_iter()
+            .flat_map(|badge| labels.map(|label| (badge, label)));
+        for (badge, label) in cases {
             for scale in [120, 150, 180, 240] {
                 for logical_width in [420, 140, 60] {
                     let dojo = DojoId::new();
@@ -1603,6 +1607,22 @@ mod tests {
                         width: badge_width.min(label_rect.width),
                         ..label_rect
                     };
+                    // When the label fits, two blank cells separate it from
+                    // the badge; on a narrow tab the gap goes with the label.
+                    let after_badge = &badged.text()[badge.text().len()..];
+                    let gap_cells = if after_badge.is_empty() {
+                        0
+                    } else {
+                        assert!(after_badge.starts_with("  "), "{badged:?}");
+                        assert!(!after_badge[2..].starts_with(' '), "{badged:?}");
+                        2
+                    };
+                    let gap = Rect {
+                        x: label_rect.x + badge_cells.width,
+                        width: (gap_cells * cell)
+                            .min(label_rect.width.saturating_sub(badge_cells.width)),
+                        ..label_rect
+                    };
                     let mut badge_pixels = 0;
                     for (index, ((badged_pixel, plain_pixel), badge_pixel)) in with_badge
                         .chunks_exact(4)
@@ -1624,6 +1644,10 @@ mod tests {
                         if super::rect_contains(badge_cells, position) {
                             assert_eq!(badged_pixel, badge_pixel, "badge cells at {x},{y}");
                             badge_pixels += usize::from(badge_pixel != plain_pixel);
+                        }
+                        if super::rect_contains(gap, position) {
+                            // The label paints nothing into the gap.
+                            assert_eq!(badged_pixel, badge_pixel, "badge gap at {x},{y}");
                         }
                     }
                     if label_rect.width >= badge_width {
