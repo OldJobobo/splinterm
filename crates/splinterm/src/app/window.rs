@@ -7,7 +7,7 @@ use splinterm::{
     PerfTraceCorrelation, WindowCommand, WindowOptions, WindowUpdate,
     automation::{
         Connection, DaemonChange, DaemonIdentity, MAX_RENDERER_IMAGE_RESIDENT_BYTES,
-        SharedImageContentCache, is_connection_loss, retry_until,
+        SharedImageContentCache, is_connection_loss, protocol_error, retry_until,
     },
     config::{AppConfig, FontAuthority, TopologyReloadSettings},
     endpoint::{
@@ -20,7 +20,7 @@ use splinterm::{
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{
-    ControlMode, Request, Response, ServerFrame,
+    ControlMode, ErrorCode, Request, Response, ServerFrame,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use tokio::sync::{mpsc, watch};
@@ -61,6 +61,10 @@ impl Drop for AbortOnDropTask {
 /// How often the focus reporter looks whether its Window reconnected.
 const FOCUS_RECONNECT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How many times the focus reporter reconnects after finding its connection
+/// gone with no reconnection running.
+const FOCUS_LATE_RECONNECTS: u32 = 3;
+
 /// Publishes the Window's graphical focus on one connection until the
 /// Window closes (`Ok`) or the connection fails.
 async fn publish_graphical_focus(
@@ -94,13 +98,26 @@ async fn run_graphical_focus_reporter(
     mut updates: watch::Receiver<Option<SplintId>>,
 ) -> Result<()> {
     let hub = factory.handoff_status().clone();
+    let mut late_losses = 0_u32;
     loop {
         let error = match publish_graphical_focus(&factory, &mut updates).await {
             Ok(()) => return Ok(()),
             Err(error) => error,
         };
-        if !is_connection_loss(&error) || !hub.begin_reconnect() {
+        if !is_connection_loss(&error) {
             return Err(error);
+        }
+        if !hub.begin_reconnect() {
+            // The reporter publishes only on a focus change, so it can find
+            // its connection gone after the Window already reconnected. It
+            // connects again a few times; a daemon that is gone fails the
+            // connect and ends it.
+            late_losses += 1;
+            if late_losses > FOCUS_LATE_RECONNECTS {
+                return Err(error);
+            }
+            tokio::time::sleep(FOCUS_RECONNECT_POLL).await;
+            continue;
         }
         loop {
             tokio::time::sleep(FOCUS_RECONNECT_POLL).await;
@@ -171,6 +188,17 @@ fn spawn_single_pane_controller(
     (task, resyncs, cancellation)
 }
 
+/// Drops every command still queued for a single-pane Window's controller;
+/// returns how many. Commands sent before or during a reconnection would
+/// answer a stale view or replay typed input (review S4).
+fn drain_queued_commands(commands: &mut mpsc::Receiver<WindowCommand>) -> usize {
+    let mut drained = 0;
+    while commands.try_recv().is_ok() {
+        drained += 1;
+    }
+    drained
+}
+
 async fn finish_controller(controller: SinglePaneController) -> Result<()> {
     controller.await.context("window controller task failed")?.0
 }
@@ -195,6 +223,26 @@ enum Reattach {
     Untrusted,
 }
 
+/// Whether the daemon says the Splint is gone or its process changed, as
+/// when it was removed during the upgrade (review S8).
+fn splint_gone(error: &anyhow::Error) -> bool {
+    protocol_error(error).is_some_and(|error| {
+        matches!(
+            error.code,
+            ErrorCode::NotFound | ErrorCode::StaleIncarnation
+        )
+    })
+}
+
+/// `Some` value, `None` when the Splint is gone, or the other error.
+fn unless_splint_gone<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if splint_gone(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Attaches the single-pane Window's Splint again after its daemon
 /// connection was lost during a handoff, with fresh connection-owned IDs.
 async fn reattach_single_pane(
@@ -213,28 +261,40 @@ async fn reattach_single_pane(
     if before.change_to(daemon) == DaemonChange::Restarted {
         return Ok(Reattach::Restarted);
     }
-    let Response::Splint { runtime, .. } = connection
-        .request(Request::InspectSplint { splint_id })
-        .await?
+    let Some(inspected) = unless_splint_gone(
+        connection
+            .request(Request::InspectSplint { splint_id })
+            .await,
+    )?
     else {
+        return Ok(Reattach::Ended);
+    };
+    let Response::Splint { runtime, .. } = inspected else {
         bail!("splinterd did not return the selected Splint identity");
     };
     if runtime.splint_id != splint_id || runtime.live_incarnation != Some(incarnation) {
         return Ok(Reattach::Ended);
     }
-    if !matches!(
+    let Some(granted) = unless_splint_gone(
         connection
             .request(Request::RequestAccess {
                 splint_id,
                 incarnation,
                 scopes: pane_access_scopes(),
             })
-            .await?,
-        Response::AccessGranted { .. }
-    ) {
+            .await,
+    )?
+    else {
+        return Ok(Reattach::Ended);
+    };
+    if !matches!(granted, Response::AccessGranted { .. }) {
         bail!("splinterd did not grant requested terminal access");
     }
-    let attachment = attach(&mut connection, splint_id, incarnation).await?;
+    let Some(attachment) =
+        unless_splint_gone(attach(&mut connection, splint_id, incarnation).await)?
+    else {
+        return Ok(Reattach::Ended);
+    };
     resolve_image_contents(
         image_transport,
         &mut connection,
@@ -243,7 +303,12 @@ async fn reattach_single_pane(
     )
     .await?;
     let mut control = factory.connect().await?;
-    if control.live_incarnation(splint_id).await? != incarnation {
+    let Some(Response::Splint { runtime, .. }) =
+        unless_splint_gone(control.request(Request::InspectSplint { splint_id }).await)?
+    else {
+        return Ok(Reattach::Ended);
+    };
+    if runtime.live_incarnation != Some(incarnation) {
         return Ok(Reattach::Ended);
     }
     let controller_id = optional_pane_controller(
@@ -994,6 +1059,16 @@ pub(super) async fn run_live_window(
                 connection = next_connection;
                 attachment = next_attachment;
                 daemon = serving;
+                // The epoch this reattachment answers: a loss after it, as
+                // when the new controller dies at once, keeps the Window
+                // reconnecting (review N2).
+                let epoch = factory
+                    .handoff_status()
+                    .reconnect_pending()
+                    .unwrap_or_default();
+                // Nothing queued before or during the reconnection reaches
+                // the new controller (review S4).
+                drain_queued_commands(&mut commands);
                 (controller, resyncs, controller_cancellation) = spawn_single_pane_controller(
                     &factory,
                     control,
@@ -1021,12 +1096,23 @@ pub(super) async fn run_live_window(
                 last_revision = attachment.snapshot.revision;
                 last_sequence = 0;
                 // The resnapshot is queued before the pause ends, so input
-                // never opens on the screen from before the loss.
-                factory.handoff_status().reconnected(daemon.generation);
+                // never opens on the screen from before the loss. Another
+                // piece that lost its connection meanwhile (the focus
+                // reporter, say) does not hold up a Window whose controller
+                // still runs; a controller that died reconnects again.
+                let hub = factory.handoff_status();
+                if !hub.reconnected(daemon.generation, epoch) && !controller.is_finished() {
+                    let _ = hub
+                        .reconnected(daemon.generation, hub.reconnect_pending().unwrap_or(epoch));
+                }
             }
             SinglePaneReconnect::Ended => {
                 // The Splint ended meanwhile, which ends a single-pane Window.
-                factory.handoff_status().reconnected(daemon.generation);
+                let hub = factory.handoff_status();
+                let _ = hub.reconnected(
+                    daemon.generation,
+                    hub.reconnect_pending().unwrap_or_default(),
+                );
                 let _ = updates.send(WindowUpdate::Shutdown).await;
                 return window.await.context("Wayland window task failed")?;
             }
@@ -1071,5 +1157,135 @@ mod tests {
         drop(watcher);
 
         assert!(receiver.await.is_err());
+    }
+
+    /// Review S4: commands queued for a single-pane Window before or during
+    /// a reconnection never reach the controller that takes over: the
+    /// daemon sees only the new control subscription, no control claim or
+    /// input.
+    #[tokio::test]
+    async fn a_resumed_controller_never_sends_commands_queued_before_it() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use splinterm::{WindowCommand, endpoint::ConnectionFactory};
+        use splinterm_protocol::{
+            ClientFrame, ControlStatus, PROTOCOL_VERSION, Request, Response, ServerFrame,
+            ServerLimits, encode_frame,
+        };
+
+        use super::{WINDOW_COMMAND_QUEUE, drain_queued_commands, spawn_single_pane_controller};
+
+        async fn read_client(reader: &mut (impl AsyncReadExt + Unpin)) -> ClientFrame {
+            let mut length = [0_u8; 4];
+            reader.read_exact(&mut length).await.unwrap();
+            let mut body = vec![0_u8; u32::from_be_bytes(length) as usize];
+            reader.read_exact(&mut body).await.unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        let splint_id = splinterm_core::SplintId::new();
+        let (client, server) = tokio::io::duplex(65_536);
+        let daemon = tokio::spawn(async move {
+            let (mut reader, mut writer) = tokio::io::split(server);
+            read_client(&mut reader).await;
+            let hello = ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: 2,
+            };
+            writer
+                .write_all(&encode_frame(&hello).unwrap())
+                .await
+                .unwrap();
+            let ClientFrame::Request {
+                request_id,
+                request: Request::SubscribeControl { .. },
+                ..
+            } = read_client(&mut reader).await
+            else {
+                panic!("expected only the control subscription");
+            };
+            let subscribed = ServerFrame::Response {
+                request_id,
+                result: Response::ControlSubscribed {
+                    subscription_id: 3,
+                    status: ControlStatus {
+                        splint_id,
+                        incarnation: 7,
+                        controlled: false,
+                        locally_owned: false,
+                    },
+                },
+            };
+            writer
+                .write_all(&encode_frame(&subscribed).unwrap())
+                .await
+                .unwrap();
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).await.unwrap();
+            assert!(
+                rest.is_empty(),
+                "a command queued before the reconnection was sent"
+            );
+        });
+        let (reader, writer) = tokio::io::split(client);
+        let control =
+            splinterm::automation::Connection::connect_remote_interactive_transport(reader, writer)
+                .await
+                .unwrap();
+        let (sender, mut commands) = tokio::sync::mpsc::channel(WINDOW_COMMAND_QUEUE);
+        sender
+            .try_send(WindowCommand::Input(b"rm -rf build\n".to_vec()))
+            .unwrap();
+        sender
+            .try_send(WindowCommand::RequestControlTransfer)
+            .unwrap();
+        assert_eq!(drain_queued_commands(&mut commands), 2);
+        let (updates, _update_receiver) = tokio::sync::mpsc::channel(8);
+        let (task, _resyncs, _cancellation) = spawn_single_pane_controller(
+            &ConnectionFactory::local(),
+            control,
+            commands,
+            updates,
+            None,
+            splint_id,
+            7,
+            0,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The frontend closes; the controller ends without a request.
+        drop(sender);
+        let (result, _) = task.await.unwrap();
+        result.unwrap();
+        daemon.await.unwrap();
+    }
+
+    /// Review S8: a Splint removed, or whose process changed, during the
+    /// upgrade ends a single-pane Window instead of leaving it to time out.
+    #[test]
+    fn a_removed_or_replaced_splint_ends_the_single_pane_window() {
+        use splinterm::automation::response_protocol_error;
+        use splinterm_protocol::{ErrorCode, ProtocolError};
+
+        use super::unless_splint_gone;
+
+        for code in [ErrorCode::NotFound, ErrorCode::StaleIncarnation] {
+            let gone = response_protocol_error(ProtocolError::new(code, "gone"));
+            assert!(
+                unless_splint_gone::<()>(Err(gone)).unwrap().is_none(),
+                "{code:?}"
+            );
+        }
+        let refused = response_protocol_error(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "not this client",
+        ));
+        assert!(
+            unless_splint_gone::<()>(Err(refused)).is_err(),
+            "retried, not ended"
+        );
+        assert_eq!(unless_splint_gone(Ok(3)).unwrap(), Some(3));
     }
 }

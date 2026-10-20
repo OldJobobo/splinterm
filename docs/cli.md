@@ -266,13 +266,17 @@ mutation, because whether it took effect is unknown:
   handshake runs, never a request.
 - `ping`, `list`, `topology`, `inspect`, and `focus` only read and are safe to
   repeat, so after a lost connection they are sent once more on that fresh
-  connection. Reads that carry continuation state (`snapshot`, `scrollback`,
-  `search`) and `subscribe` streams are not repeated; they fail with the same
-  kind of error, ending "the read was not retried, so run it again".
+  connection. If that is interrupted too, the error ends "the read was retried
+  once and was interrupted again, so run it again". Reads that carry
+  continuation state (`snapshot`, `scrollback`, `search`) and `subscribe`
+  streams are not repeated; they fail with the same kind of error, ending "the
+  read was not retried, so run it again".
 
 In machine mode a refused command reports `resource_limit`, retryable, and exits
 5. A lost connection reports `internal`, retryable only for a read, and exits 4.
-The reconnection fits within `--timeout-ms`.
+The reconnection fits within what is left of `--timeout-ms`; with nothing left,
+the command does not reconnect and says its deadline left no time to look for
+the daemon.
 
 ## Terminal observation and input
 

@@ -6501,6 +6501,18 @@ impl App {
             || (self.tab_state.topology_commands.is_none()
                 && self.handoff.holds_window_on_disconnect())
         {
+            // Visual tab switching needs no daemon and keeps working
+            // (operator decision 1): it happens here at once, and the
+            // topology manager's tab order follows once it listens again.
+            if let Some(dojo_id) = handoff::tab_switch_while_disconnected(&command) {
+                if self.activate_tab(dojo_id)? && self.surface.configured {
+                    self.scheduling.redraw_pending = true;
+                }
+                if let Some(commands) = &self.tab_state.topology_commands {
+                    let _ = commands.try_send(command);
+                }
+                return Ok(());
+            }
             self.drop_topology_command_for_handoff(&command);
             return Ok(());
         }
@@ -9293,6 +9305,7 @@ impl App {
                     .request_exit(ExitClass::CleanFinalTabRemoved),
                 WindowTopologyUpdate::Reconnected {
                     daemon_generation,
+                    reconnect_epoch,
                     exited,
                 } => {
                     // Every tab was resnapshotted ahead of this update. Splints
@@ -9310,7 +9323,7 @@ impl App {
                             view.pending_exited_splints.insert(splint_id);
                         }
                     }
-                    self.handoff.reconnected(daemon_generation);
+                    self.handoff.reconnected(daemon_generation, reconnect_epoch);
                     changed = true;
                 }
                 WindowTopologyUpdate::Shutdown(_) if self.handoff.holds_window_on_disconnect() => {

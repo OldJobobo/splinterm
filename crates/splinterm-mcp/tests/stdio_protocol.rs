@@ -5671,3 +5671,153 @@ fn inspect_tools_add_agent_status_only_when_reported() {
     fake.join().unwrap();
     fs::remove_dir_all(directory).unwrap();
 }
+
+/// Reads `uri` until its document reaches `sequence`, bounded.
+fn read_until_sequence(server: &mut Harness, next_id: &mut i64, uri: &str, sequence: u64) -> Value {
+    let started = Instant::now();
+    loop {
+        *next_id += 1;
+        server.send(&request(*next_id, "resources/read", json!({"uri": uri})));
+        let response = server.receive_id(*next_id);
+        let body: Value =
+            serde_json::from_str(response["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
+        if body["sequence"].as_u64() == Some(sequence) {
+            return body;
+        }
+        assert!(
+            body["sequence"].as_u64() < Some(sequence),
+            "skipped past sequence {sequence}: {body}"
+        );
+        assert!(
+            started.elapsed() < TIMEOUT,
+            "sequence {sequence} never came"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Plan 0061 M3.12b review S7: a topology subscription whose daemon
+/// connection ends, as when splinterd is upgraded, reads stale under the
+/// next public sequence, then resubscribes on its own from a fresh snapshot
+/// and keeps following updates.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered fake daemon serves the lost subscription and its replacement"
+)]
+fn a_lost_resource_subscription_reads_stale_then_resubscribes_from_a_fresh_snapshot() {
+    let (directory, socket) = isolated_socket("resubscribe");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (resume, resumed) = mpsc::channel::<()>();
+    let fake = thread::spawn(move || {
+        let mut old = accept_automation(&listener);
+        let ClientFrame::Request {
+            request_id,
+            request: Request::SubscribeTopology,
+            ..
+        } = read_private_frame(&mut old)
+        else {
+            panic!("expected topology subscription")
+        };
+        write_private_frame(
+            &mut old,
+            &ServerFrame::Response {
+                request_id,
+                result: Response::TopologySubscribed {
+                    subscription_id: 41,
+                    snapshot: reviewed_topology(),
+                },
+            },
+        );
+        // The daemon execs: the subscription's connection ends. The next
+        // daemon answers only once the test has seen the stale document.
+        drop(old);
+        resumed.recv().unwrap();
+        let mut new = accept_automation(&listener);
+        let ClientFrame::Request {
+            request_id,
+            request: Request::SubscribeTopology,
+            ..
+        } = read_private_frame(&mut new)
+        else {
+            panic!("expected the resubscription")
+        };
+        write_private_frame(
+            &mut new,
+            &ServerFrame::Response {
+                request_id,
+                result: Response::TopologySubscribed {
+                    subscription_id: 42,
+                    snapshot: reviewed_topology(),
+                },
+            },
+        );
+        resumed.recv().unwrap();
+        let mut changed = reviewed_topology();
+        let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+        changed.revision = changed
+            .topology
+            .rename_lair_at(changed.revision, lair_id, "after upgrade")
+            .unwrap();
+        write_private_frame(
+            &mut new,
+            &ServerFrame::Event {
+                subscription_id: 42,
+                sequence: 1,
+                event: SubscriptionEvent::TopologyChanged {
+                    change: TopologyChange {
+                        revision: changed.revision,
+                        kind: TopologyChangeKind::RuntimeChanged,
+                        snapshot: changed,
+                    },
+                },
+            },
+        );
+        let ClientFrame::Request {
+            request_id,
+            request: Request::Detach {
+                subscription_id: 42,
+            },
+            ..
+        } = read_private_frame(&mut new)
+        else {
+            panic!("expected the resubscription's detach")
+        };
+        write_private_frame(
+            &mut new,
+            &ServerFrame::Response {
+                request_id,
+                result: Response::Acknowledged,
+            },
+        );
+    });
+    let mut server = Harness::spawn_with_socket(&socket, None);
+    server.initialize();
+    server.initialized();
+    let uri = "splinterm://topology";
+    server.send(&request(2, "resources/subscribe", json!({"uri": uri})));
+    assert_eq!(server.receive_id(2)["result"], json!({}));
+    let mut next_id = 2;
+    let stale = read_until_sequence(&mut server, &mut next_id, uri, 2);
+    assert_eq!(stale["resync_required"], true, "{stale}");
+    // While it resubscribes, subscribing again is a no-op: it is active.
+    next_id += 1;
+    server.send(&request(
+        next_id,
+        "resources/subscribe",
+        json!({"uri": uri}),
+    ));
+    assert_eq!(server.receive_id(next_id)["result"], json!({}));
+    resume.send(()).unwrap();
+    let fresh = read_until_sequence(&mut server, &mut next_id, uri, 3);
+    assert_eq!(fresh["resync_required"], false, "{fresh}");
+    resume.send(()).unwrap();
+    let followed = read_until_sequence(&mut server, &mut next_id, uri, 4);
+    assert_eq!(followed["resync_required"], false, "{followed}");
+    assert!(followed.to_string().contains("after upgrade"), "{followed}");
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}

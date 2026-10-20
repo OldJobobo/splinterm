@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use splinterm::{
-    WindowTopologyUpdate,
+    WindowTopologyCommand, WindowTopologyUpdate,
     automation::{
         Connection, DaemonChange, DaemonIdentity, ReconnectBackoff, SharedImageContentCache,
     },
@@ -32,17 +32,22 @@ use splinterm_protocol::TopologySnapshot;
 use tokio::{sync::mpsc, time::Instant};
 
 use super::{
-    PaneTask, TopologyManagerState, cancel_pane_tasks, inspect_managed_topology, layout_splint_ids,
-    prepare_live_pane_at_incarnation, remove_frontend_tab, retire_pane_tasks, window_dojo_identity,
+    PaneTask, TopologyManagerState, abandon_queued_commands, cancel_pane_tasks,
+    inspect_managed_topology, layout_splint_ids, prepare_live_pane_at_incarnation,
+    remove_frontend_tab, retire_pane_tasks, send_topology_updates, window_dojo_identity,
 };
 use crate::app::pane_bridge::{UNTRUSTED_AFTER_UPGRADE, refused_as_untrusted};
 
 /// How a managed Window's reconnection ended.
 pub(super) enum ManagedReconnect {
-    /// Every tab was resnapshotted from the daemon behind `connection`.
+    /// Every tab was resnapshotted from the daemon behind `connection`, for
+    /// the reconnection `epoch`.
     Resumed {
         connection: Box<Connection>,
         daemon: DaemonIdentity,
+        epoch: u64,
+        /// The Window's close notice arrived while it reconnected.
+        close_window: bool,
     },
     /// Reconnection failed or found a restarted daemon. The Window stays
     /// open, paused, with its last screen.
@@ -56,11 +61,46 @@ enum Attempt {
     Resumed {
         connection: Box<Connection>,
         daemon: DaemonIdentity,
+        epoch: u64,
+        close_window: bool,
     },
     Restarted,
     /// The daemon refused this client build as no longer the installed one.
     Untrusted,
     WindowGone,
+}
+
+/// What a reconnection's handshake found.
+#[derive(Debug)]
+pub(super) enum Reached {
+    /// A daemon to resnapshot from: the same one, or its upgrade.
+    Proceed(Box<Connection>, DaemonIdentity),
+    /// A different daemon: not a continuation.
+    Restarted,
+    /// The daemon refused this client build as no longer the installed one.
+    Untrusted,
+}
+
+/// Classifies one reconnection handshake against `before`, the daemon the
+/// Window was connected to. Any other failure is retried.
+///
+/// # Errors
+///
+/// The handshake's own failure when it is worth retrying.
+pub(super) fn classify_connect(
+    before: DaemonIdentity,
+    connected: Result<Connection>,
+) -> Result<Reached> {
+    let connection = match connected {
+        Ok(connection) => connection,
+        Err(error) if refused_as_untrusted(&error) => return Ok(Reached::Untrusted),
+        Err(error) => return Err(error),
+    };
+    let daemon = DaemonIdentity::of(&connection);
+    if before.change_to(daemon) == DaemonChange::Restarted {
+        return Ok(Reached::Restarted);
+    }
+    Ok(Reached::Proceed(Box::new(connection), daemon))
 }
 
 /// What every reconnection attempt of one managed Window works with.
@@ -70,6 +110,7 @@ struct AttemptContext<'a> {
     image_cache: &'a SharedImageContentCache,
     state: &'a mut TopologyManagerState,
     updates: &'a mpsc::Sender<WindowTopologyUpdate>,
+    commands: &'a mut mpsc::Receiver<WindowTopologyCommand>,
     before: DaemonIdentity,
     deadline: Instant,
 }
@@ -82,6 +123,7 @@ pub(super) async fn reconnect_managed_window(
     image_cache: &SharedImageContentCache,
     state: &mut TopologyManagerState,
     updates: &mpsc::Sender<WindowTopologyUpdate>,
+    commands: &mut mpsc::Receiver<WindowTopologyCommand>,
     before: DaemonIdentity,
 ) -> ManagedReconnect {
     let hub = factory.handoff_status();
@@ -92,29 +134,32 @@ pub(super) async fn reconnect_managed_window(
         image_cache,
         state,
         updates,
+        commands,
         before,
         deadline,
     };
     let outcome = retry_reconnection(deadline, updates.closed(), &mut context, |context| {
-        Box::pin(attempt(
-            context.factory,
-            context.config,
-            context.image_cache,
-            context.state,
-            context.updates,
-            context.before,
-            context.deadline,
-        ))
+        Box::pin(attempt(context))
     })
     .await;
     match outcome {
-        Retry::Reached(Attempt::Resumed { connection, daemon }) => {
+        Retry::Reached(Attempt::Resumed {
+            connection,
+            daemon,
+            epoch,
+            close_window,
+        }) => {
             if let DaemonChange::Upgraded { from, to } = before.change_to(daemon) {
                 eprintln!(
                     "splinterm: reconnected to upgraded splinterd (generation {from} → {to})"
                 );
             }
-            ManagedReconnect::Resumed { connection, daemon }
+            ManagedReconnect::Resumed {
+                connection,
+                daemon,
+                epoch,
+                close_window,
+            }
         }
         Retry::Reached(Attempt::Restarted) => {
             eprintln!(
@@ -186,45 +231,52 @@ pub(super) async fn retry_reconnection<C, T>(
 }
 
 /// Connects, checks the daemon, and resnapshots every tab. Each daemon wait
-/// is bounded by `deadline`; panes prepared before a failure are cancelled.
-async fn attempt(
-    factory: &ConnectionFactory,
-    config: &AppConfig,
-    image_cache: &SharedImageContentCache,
-    state: &mut TopologyManagerState,
-    updates: &mpsc::Sender<WindowTopologyUpdate>,
-    before: DaemonIdentity,
-    deadline: Instant,
-) -> Result<Attempt> {
-    let mut connection = match tokio::time::timeout_at(deadline, factory.connect()).await {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(error)) if refused_as_untrusted(&error) => return Ok(Attempt::Untrusted),
-        Ok(Err(error)) => return Err(error),
-        Err(_) => anyhow::bail!("splinterd did not answer before the reconnection deadline"),
-    };
-    let daemon = DaemonIdentity::of(&connection);
-    if before.change_to(daemon) == DaemonChange::Restarted {
-        return Ok(Attempt::Restarted);
-    }
-    let snapshot = tokio::time::timeout_at(deadline, inspect_managed_topology(&mut connection))
+/// is bounded by the deadline; panes prepared before a failure are
+/// cancelled.
+async fn attempt(context: &mut AttemptContext<'_>) -> Result<Attempt> {
+    let hub = context.factory.handoff_status();
+    let epoch = hub.reconnect_pending().unwrap_or_default();
+    let connected = tokio::time::timeout_at(context.deadline, context.factory.connect())
         .await
-        .context("splinterd did not return topology before the reconnection deadline")??;
+        .context("splinterd did not answer before the reconnection deadline")?;
+    let (mut connection, daemon) = match classify_connect(context.before, connected)? {
+        Reached::Proceed(connection, daemon) => (connection, daemon),
+        Reached::Restarted => return Ok(Attempt::Restarted),
+        Reached::Untrusted => return Ok(Attempt::Untrusted),
+    };
+    let snapshot =
+        tokio::time::timeout_at(context.deadline, inspect_managed_topology(&mut connection))
+            .await
+            .context("splinterd did not return topology before the reconnection deadline")??;
     let Some(exited) = resnapshot_managed_tabs(
-        factory,
-        config,
-        image_cache,
-        state,
+        context.factory,
+        context.config,
+        context.image_cache,
+        context.state,
         &snapshot,
-        updates,
-        deadline,
+        context.updates,
+        context.deadline,
     )
     .await?
     else {
         return Ok(Attempt::WindowGone);
     };
-    if updates
+    // Commands that arrived meanwhile (only a close notice or a tab switch
+    // while disconnected) are settled before the resume, so none sent after
+    // it is mistaken for one from before (review N5).
+    let (pending, close_window) = abandon_queued_commands(None, context.commands, context.state);
+    send_topology_updates(pending, context.updates).await;
+    // A connection lost again meanwhile, as when a pane just attached dies
+    // too, needs another pass before the resume (review N2).
+    anyhow::ensure!(
+        hub.reconnect_pending() == Some(epoch),
+        "a connection was lost again while the Window resnapshotted"
+    );
+    if context
+        .updates
         .send(WindowTopologyUpdate::Reconnected {
             daemon_generation: daemon.generation,
+            reconnect_epoch: epoch,
             exited,
         })
         .await
@@ -233,8 +285,10 @@ async fn attempt(
         return Ok(Attempt::WindowGone);
     }
     Ok(Attempt::Resumed {
-        connection: Box::new(connection),
+        connection,
         daemon,
+        epoch,
+        close_window,
     })
 }
 
@@ -470,41 +524,100 @@ mod tests {
         assert_eq!(started.elapsed(), std::time::Duration::from_millis(300));
         // Still paused until the frontend applied the resnapshot.
         assert_eq!(hub.view().phase, WindowHandoffPhase::Reconnecting);
-        hub.reconnected(generation);
+        assert!(hub.reconnected(generation, hub.reconnect_pending().unwrap()));
         assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
         assert!(!hub.input_paused());
     }
 
-    #[tokio::test(start_paused = true)]
+    /// A connection whose daemon handshake reports `generation`, over a
+    /// relayed transport (no process identity), as a fake daemon serves it.
+    async fn connection_at(generation: u64) -> Result<Connection> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (client, server) = tokio::io::duplex(65_536);
+        tokio::spawn(async move {
+            let (mut reader, mut writer) = tokio::io::split(server);
+            let mut length = [0_u8; 4];
+            reader.read_exact(&mut length).await.unwrap();
+            let mut hello = vec![0_u8; u32::from_be_bytes(length) as usize];
+            reader.read_exact(&mut hello).await.unwrap();
+            let frame = if generation == 0 {
+                splinterm_protocol::ServerFrame::Error {
+                    request_id: None,
+                    error: splinterm_protocol::ProtocolError::new(
+                        splinterm_protocol::ErrorCode::Unauthorized,
+                        "trusted UI role requires the installed graphical client",
+                    ),
+                }
+            } else {
+                splinterm_protocol::ServerFrame::Hello {
+                    version: splinterm_protocol::PROTOCOL_VERSION,
+                    limits: splinterm_protocol::ServerLimits::default(),
+                    development_terminal_access: false,
+                    daemon_hostname: None,
+                    daemon_generation: generation,
+                }
+            };
+            writer
+                .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                .await
+                .unwrap();
+            // Hold the transport open while the client classifies it.
+            let mut rest = Vec::new();
+            let _ = reader.read_to_end(&mut rest).await;
+        });
+        let (reader, writer) = tokio::io::split(client);
+        Connection::connect_remote_interactive_transport(reader, writer).await
+    }
+
+    /// Review S5: the exec race through the real handshake classification.
+    /// The loss came after only Preparing; the same daemon generation
+    /// answers, so the Window resnapshots from it and simply resumes.
+    #[tokio::test]
     async fn the_exec_race_reconnects_and_a_same_generation_daemon_simply_resumes() {
         use splinterm::handoff_status::WindowHandoffPhase;
-        // Only Preparing was heard before the loss.
         let hub = reconnecting_window(splinterm_protocol::HandoffStatusPhase::Preparing);
         let before = DaemonIdentity {
             generation: 4,
-            pid: Some(40),
+            pid: None,
         };
-        let outcome = retry_reconnection(
-            Instant::now() + RECONNECT_WINDOW,
-            std::future::pending(),
-            &mut (),
-            |()| {
-                Box::pin(async {
-                    Ok(DaemonIdentity {
-                        generation: 4,
-                        pid: Some(40),
-                    })
-                })
-            },
-        )
-        .await;
-        let Retry::Reached(daemon) = outcome else {
-            panic!("the daemon answers at once: {outcome:?}");
+        let Reached::Proceed(_, daemon) = classify_connect(before, connection_at(4).await).unwrap()
+        else {
+            panic!("the same daemon is a continuation");
         };
         assert_eq!(before.change_to(daemon), DaemonChange::Same);
-        hub.reconnected(daemon.generation);
+        assert!(hub.reconnected(daemon.generation, hub.reconnect_pending().unwrap()));
         assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
         assert!(hub.view().notice.is_none());
+    }
+
+    /// Review S5: an upgraded daemon is resnapshotted from; an older
+    /// generation (a restart) and a refused client build are not, and a
+    /// connection that fails otherwise is retried.
+    #[tokio::test]
+    async fn the_handshake_tells_an_upgrade_from_a_restart_and_an_untrusted_client() {
+        let before = DaemonIdentity {
+            generation: 4,
+            pid: None,
+        };
+        let Reached::Proceed(_, daemon) = classify_connect(before, connection_at(5).await).unwrap()
+        else {
+            panic!("an upgrade is a continuation");
+        };
+        assert_eq!(
+            before.change_to(daemon),
+            DaemonChange::Upgraded { from: 4, to: 5 }
+        );
+        assert!(matches!(
+            classify_connect(before, connection_at(1).await).unwrap(),
+            Reached::Restarted
+        ));
+        assert!(matches!(
+            classify_connect(before, connection_at(0).await).unwrap(),
+            Reached::Untrusted
+        ));
+        let refused =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(classify_connect(before, Err(refused)).is_err(), "retried");
     }
 
     #[test]

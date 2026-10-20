@@ -1096,7 +1096,7 @@ async fn controller_actor(
                     {
                         Err(error) if is_connection_loss(&error) => {
                             lost = true;
-                            Err(expired_handle())
+                            Err(expired_during_call())
                         }
                         result => result.map_err(|error| dispatch::map_client_error(&error)),
                     };
@@ -1405,6 +1405,17 @@ fn expired_handle() -> dispatch::DispatchFailure {
     )
 }
 
+/// A handle whose daemon connection ended while one of its calls was in
+/// flight: whether that call took effect is unknown, so an agent must look
+/// before acquiring control and sending it again (Plan 0061 M3.12b).
+fn expired_during_call() -> dispatch::DispatchFailure {
+    dispatch::DispatchFailure::new(
+        "controller_unavailable",
+        "the handle expired because its splinterd connection ended during this call; it was not retried and may or may not have taken effect, so check the terminal before acquiring control again",
+        false,
+    )
+}
+
 fn stale_handle() -> dispatch::DispatchFailure {
     dispatch::DispatchFailure::new(
         "controller_unavailable",
@@ -1492,6 +1503,25 @@ mod tests {
         tokio::task::spawn_blocking(move || thread.join().unwrap())
             .await
             .unwrap();
+    }
+
+    /// Waits, bounded, until the registry recorded `handle` as expired.
+    async fn wait_until_expired(registry: &ControlRegistry, handle: &str) {
+        for _ in 0..200 {
+            if registry
+                .0
+                .state
+                .lock()
+                .await
+                .expired
+                .iter()
+                .any(|expired| expired == handle)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the handle never expired");
     }
 
     /// Plan 0061 M3.12b: a committed upgrade ends the controller's daemon
@@ -1597,8 +1627,10 @@ mod tests {
             "text": "ls\n",
             "controller_handle": old_handle,
         });
-        // Whether the controller's actor sees the end first or this call
-        // does, the handle has expired; asking again gives the same answer.
+        // The controller's actor sees the connection end on its own.
+        wait_until_expired(&registry, &old_handle).await;
+        // Used afterwards, the handle has expired; asking again gives the
+        // same answer.
         for _ in 0..2 {
             let failure = registry
                 .dispatch("splinterm.input", &input, &CancellationToken::new())
@@ -1625,6 +1657,95 @@ mod tests {
         let new_handle = second["data"]["controller_handle"].as_str().unwrap();
         assert_ne!(new_handle, old_handle);
         assert_eq!(second["resource"]["splint_id"], splint_id.to_string());
+        registry.shutdown().await;
+        resources.shutdown().await;
+        join(daemon).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Plan 0061 M3.12b review S1: a call whose connection ends while it is
+    /// in flight may have taken effect, so it says so rather than inviting a
+    /// plain re-acquisition that could type the same input twice. Used
+    /// again, the handle reports the plain expiry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_in_flight_when_the_connection_ends_may_have_taken_effect() {
+        let (directory, socket) = socket("in-flight-loss");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (lair_id, dojo_id, splint_id) = ids();
+        let daemon = thread::spawn(move || {
+            let mut stream = accept(&listener);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::AcquireControl { .. },
+                ..
+            } = read_frame(&mut stream)
+            else {
+                panic!("expected the acquisition")
+            };
+            write_frame(
+                &mut stream,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 5,
+                        lair_id,
+                        dojo_id,
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request: Request::Input {
+                    controller_id: 5, ..
+                },
+                ..
+            } = read_frame(&mut stream)
+            else {
+                panic!("expected the input request")
+            };
+            // The daemon execs with the input read but unanswered.
+            drop(stream);
+        });
+        let resources = Arc::new(ResourceRegistry::default());
+        let registry = ControlRegistry::new_at(Arc::clone(&resources), &socket);
+        let acquired = registry
+            .dispatch(
+                "splinterm.acquire_control",
+                &json!({
+                    "splint_id": splint_id.to_string(),
+                    "incarnation": 2,
+                    "modes": ["input"]
+                }),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let handle = acquired["data"]["controller_handle"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let input = json!({
+            "splint_id": splint_id.to_string(),
+            "incarnation": 2,
+            "text": "make deploy\n",
+            "controller_handle": handle,
+        });
+        let failure = registry
+            .dispatch("splinterm.input", &input, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "controller_unavailable");
+        assert!(!failure.retryable);
+        assert_eq!(failure.message, expired_during_call().message);
+        assert!(
+            failure.message.contains("may or may not have taken effect"),
+            "{}",
+            failure.message
+        );
+        let failure = registry
+            .dispatch("splinterm.input", &input, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(failure.message, expired_handle().message);
         registry.shutdown().await;
         resources.shutdown().await;
         join(daemon).await;

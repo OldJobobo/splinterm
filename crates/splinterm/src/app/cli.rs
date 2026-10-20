@@ -46,7 +46,8 @@ use super::{
     consent::run_consent_client,
     human_output::{print_lairs, print_response},
     interrupted::{
-        Interruption, PROBE_WINDOW, explain_interruption, interruption_kind, probe_daemon,
+        InterruptedCommand, Interruption, PROBE_WINDOW, Probe, explain_interruption,
+        interruption_kind, probe_daemon, retried_once,
     },
     keymap_cli::{run_config_command, run_keymap_command},
     local_service::{
@@ -512,22 +513,37 @@ async fn run_headless(
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    if let (Some(command), Some(Interruption::Lost { .. })) = (retry, interruption_kind(&error))
-        && let Some((connection, _)) =
-            probe_daemon(before, PROBE_WINDOW, || factory.connect()).await
-    {
-        let before = DaemonIdentity::of(&connection);
-        return match run_headless_on(command, config, factory, connection).await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                Err(
-                    explain_interruption(error, before, true, PROBE_WINDOW, || factory.connect())
-                        .await,
-                )
-            }
-        };
+    let (Some(command), Some(Interruption::Lost { .. })) = (retry, interruption_kind(&error))
+    else {
+        return Err(
+            explain_interruption(error, before, read_only, Some(PROBE_WINDOW), || {
+                factory.connect()
+            })
+            .await,
+        );
+    };
+    let Some((connection, _)) = probe_daemon(before, PROBE_WINDOW, || factory.connect()).await
+    else {
+        return Err(anyhow::Error::new(InterruptedCommand {
+            interruption: Interruption::Lost {
+                after: Probe::Unanswered {
+                    window: PROBE_WINDOW,
+                },
+            },
+            read_only: true,
+            retried: false,
+        }));
+    };
+    let before = DaemonIdentity::of(&connection);
+    match run_headless_on(command, config, factory, connection).await {
+        Ok(()) => Ok(()),
+        Err(error) => Err(retried_once(
+            explain_interruption(error, before, true, Some(PROBE_WINDOW), || {
+                factory.connect()
+            })
+            .await,
+        )),
     }
-    Err(explain_interruption(error, before, read_only, PROBE_WINDOW, || factory.connect()).await)
 }
 
 #[allow(

@@ -351,6 +351,8 @@ pub enum WindowTopologyUpdate {
     /// meanwhile, by tab. The frontend ends the handoff pause on this update.
     Reconnected {
         daemon_generation: u64,
+        /// The reconnection epoch this resnapshot answers.
+        reconnect_epoch: u64,
         exited: Vec<(DojoId, SplintId)>,
     },
     Closed,

@@ -22,5 +22,8 @@ splinterm-protocol = { path = "../splinterm-protocol" }
 tokio = { workspace = true, features = ["io-std"] }
 tokio-util.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-std", "test-util"] }
+
 [lints]
 workspace = true

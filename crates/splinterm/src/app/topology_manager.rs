@@ -10,7 +10,9 @@ use splinterm::{
     LairPromptTarget, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
     SessionPickerItem, SessionPickerTarget, WindowDojoIdentity, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate,
-    automation::{Connection, DaemonIdentity, SharedImageContentCache, protocol_error},
+    automation::{
+        Connection, DaemonIdentity, SharedImageContentCache, is_connection_loss, protocol_error,
+    },
     config::{AppConfig, TopologyReloadSettings},
     endpoint::{ConnectionFactory, LaunchSemantics},
     navigation_projection::{
@@ -3361,6 +3363,8 @@ enum ReconnectOutcome {
     Resumed {
         connection: Box<Connection>,
         daemon: DaemonIdentity,
+        /// The reconnection epoch the resnapshot answered.
+        epoch: u64,
         /// The Window's close notice was queued behind the abandoned commands.
         close_window: bool,
     },
@@ -3417,12 +3421,14 @@ fn abandoned_command_updates(
     updates
 }
 
-/// Abandons `command` and every command queued now: returns what the frontend
-/// hears, and whether the Window's close notice was among them.
+/// Settles `command` and every command queued now without the daemon:
+/// returns what the frontend hears, and whether the Window's close notice
+/// was among them. A plain tab switch needs no daemon and is applied (the
+/// frontend already switched); every other command is abandoned.
 fn abandon_queued_commands(
     command: Option<WindowTopologyCommand>,
     commands: &mut mpsc::Receiver<WindowTopologyCommand>,
-    state: &TopologyManagerState,
+    state: &mut TopologyManagerState,
 ) -> (Vec<WindowTopologyUpdate>, bool) {
     let mut close_window = false;
     let mut pending = Vec::new();
@@ -3430,13 +3436,30 @@ fn abandon_queued_commands(
         .into_iter()
         .chain(std::iter::from_fn(|| commands.try_recv().ok()))
     {
-        if matches!(command, WindowTopologyCommand::CloseWindow) {
-            close_window = true;
-        } else {
-            pending.extend(abandoned_command_updates(command, state));
+        match command {
+            WindowTopologyCommand::CloseWindow => close_window = true,
+            WindowTopologyCommand::ActivateTab { dojo_id } => {
+                pending.extend(tab_switch_update(state, dojo_id));
+            }
+            command => pending.extend(abandoned_command_updates(command, state)),
         }
     }
     (pending, close_window)
+}
+
+/// Applies a plain tab switch to the manager's tab order; the update the
+/// frontend hears, if the tab changed.
+fn tab_switch_update(
+    state: &mut TopologyManagerState,
+    dojo_id: DojoId,
+) -> Option<WindowTopologyUpdate> {
+    state
+        .tabs
+        .activate(dojo_id)
+        .then_some(WindowTopologyUpdate::ActivateTab {
+            dojo_id,
+            explorer_target: None,
+        })
 }
 
 async fn send_topology_updates(
@@ -3450,9 +3473,9 @@ async fn send_topology_updates(
 
 /// Reconnects the Window, abandoning `command` and every command queued
 /// before or during the reconnection: all were sent before the connection
-/// was lost (the frontend sends none while disconnected) and none is
-/// replayed. Placeholders are rolled back before the resnapshot lands. Only
-/// the close notice is kept.
+/// was lost, and none is replayed. While disconnected the frontend sends
+/// only tab switches, which are applied, and the close notice, which is
+/// kept. Placeholders are rolled back before the resnapshot lands.
 #[allow(
     clippy::too_many_arguments,
     reason = "the manager's loop state is lent to one reconnection"
@@ -3467,22 +3490,34 @@ async fn reconnect_and_abandon(
     command: Option<WindowTopologyCommand>,
     daemon: DaemonIdentity,
 ) -> ReconnectOutcome {
-    let (pending, mut close_window) = abandon_queued_commands(command, commands, state);
+    let (pending, closing_before) = abandon_queued_commands(command, commands, state);
     send_topology_updates(pending, updates).await;
-    let outcome =
-        reconnect_managed_window(factory, config, image_cache, state, updates, daemon).await;
-    let (connection, daemon) = match outcome {
-        ManagedReconnect::Resumed { connection, daemon } => (connection, daemon),
-        ManagedReconnect::Lost => return ReconnectOutcome::Lost,
-        ManagedReconnect::WindowGone => return ReconnectOutcome::WindowGone,
-    };
-    let (pending, closing) = abandon_queued_commands(None, commands, state);
-    send_topology_updates(pending, updates).await;
-    close_window |= closing;
-    ReconnectOutcome::Resumed {
-        connection,
+    // Commands that arrive while it reconnects are settled inside the
+    // attempt, before the resume.
+    let outcome = reconnect_managed_window(
+        factory,
+        config,
+        image_cache,
+        state,
+        updates,
+        commands,
         daemon,
-        close_window,
+    )
+    .await;
+    match outcome {
+        ManagedReconnect::Resumed {
+            connection,
+            daemon,
+            epoch,
+            close_window,
+        } => ReconnectOutcome::Resumed {
+            connection,
+            daemon,
+            epoch,
+            close_window: closing_before || close_window,
+        },
+        ManagedReconnect::Lost => ReconnectOutcome::Lost,
+        ManagedReconnect::WindowGone => ReconnectOutcome::WindowGone,
     }
 }
 
@@ -3557,7 +3592,7 @@ pub(in crate::app) async fn run_topology_manager(
             .handoff_status()
             .reconnect_pending()
             .filter(|epoch| answered_reconnect != Some(*epoch));
-        if let Some(epoch) = pending_reconnect {
+        if pending_reconnect.is_some() {
             let outcome = reconnect_and_abandon(
                 &factory,
                 &config,
@@ -3573,6 +3608,7 @@ pub(in crate::app) async fn run_topology_manager(
                 ReconnectOutcome::Resumed {
                     connection: next,
                     daemon: serving,
+                    epoch,
                     close_window,
                 } => {
                     connection = *next;
@@ -3616,8 +3652,9 @@ pub(in crate::app) async fn run_topology_manager(
             Ok(snapshot) => snapshot,
             // This manager's own connection was lost while a handoff was
             // preparing or fenced: it reconnects the Window.
-            Err(_) if factory.handoff_status().begin_reconnect() => {
-                let epoch = factory.handoff_status().reconnect_pending();
+            Err(error)
+                if is_connection_loss(&error) && factory.handoff_status().begin_reconnect() =>
+            {
                 let outcome = reconnect_and_abandon(
                     &factory,
                     &config,
@@ -3633,11 +3670,12 @@ pub(in crate::app) async fn run_topology_manager(
                     ReconnectOutcome::Resumed {
                         connection: next,
                         daemon: serving,
+                        epoch,
                         close_window,
                     } => {
                         connection = *next;
                         daemon = serving;
-                        answered_reconnect = epoch;
+                        answered_reconnect = Some(epoch);
                         explorer_observation = ExplorerObservation::default();
                         agent_status_observation = AgentStatusObservation::default();
                         if close_window {
@@ -3790,8 +3828,17 @@ pub(in crate::app) async fn run_topology_manager(
         // closed. Nothing here talks to the daemon again; its terminals may
         // still be running there.
         while let Some(command) = commands.recv().await {
-            if matches!(command, WindowTopologyCommand::CloseWindow) {
-                break;
+            match command {
+                WindowTopologyCommand::CloseWindow => break,
+                // Visual tab switching keeps working (operator decision 1).
+                WindowTopologyCommand::ActivateTab { dojo_id } => {
+                    if let Some(update) = tab_switch_update(&mut state, dojo_id)
+                        && updates.send(update).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
         window_closing = false;
@@ -4800,3 +4847,148 @@ mod close_unused_tests;
 #[cfg(test)]
 #[path = "creation_directory_tests.rs"]
 mod creation_directory_tests;
+
+/// Plan 0061 M3.12b review S5 and S6: commands queued before or during a
+/// reconnection are settled without the daemon.
+#[cfg(test)]
+mod reconnect_abandon_tests {
+    use std::path::PathBuf;
+
+    use splinterm::navigation_projection::NavigationAction;
+    use splinterm_core::{LairRetention, Splint};
+
+    use super::*;
+
+    fn managed(lair_id: LairId, dojo_id: DojoId, root: LayoutNode) -> DojoTab<ManagedDojo> {
+        DojoTab::new(
+            lair_id,
+            dojo_id,
+            ManagedDojo {
+                identity: WindowDojoIdentity {
+                    topology_revision: TopologyRevision::new(9),
+                    lair_id,
+                    dojo_id,
+                    lair_name: "main".to_owned(),
+                    lair_retention: LairRetention::default(),
+                    dojo_name: "terminal".to_owned(),
+                },
+                root,
+                pending_focus: None,
+                pane_tasks: HashMap::new(),
+            },
+        )
+    }
+
+    fn leaf(id: SplintId) -> LayoutNode {
+        let mut splint = Splint::shell(PathBuf::from("/tmp"));
+        splint.id = id;
+        LayoutNode::Leaf(splint)
+    }
+
+    /// Two tabs; the first, active, shows `target`.
+    fn two_tabs(target: SplintId) -> (TopologyManagerState, DojoId, DojoId) {
+        let lair_id = LairId::new();
+        let (first, second) = (DojoId::new(), DojoId::new());
+        let mut tabs = WindowTabSet::new(managed(lair_id, first, leaf(target)));
+        tabs.open_or_activate(managed(lair_id, second, leaf(SplintId::new())))
+            .unwrap();
+        assert!(tabs.activate(first));
+        let state = TopologyManagerState {
+            tabs,
+            transient_owners: HashMap::new(),
+            agent_status_republish: false,
+        };
+        (state, first, second)
+    }
+
+    #[test]
+    fn queued_commands_are_abandoned_and_the_close_notice_kept() {
+        let target = SplintId::new();
+        let placeholder = SplintId::new();
+        let (mut state, first, _) = two_tabs(target);
+        let root_before = state.tabs.get(first).unwrap().value.root.clone();
+        let (sender, mut commands) = mpsc::channel(8);
+        sender
+            .try_send(WindowTopologyCommand::RequestSessionPicker)
+            .unwrap();
+        sender
+            .try_send(WindowTopologyCommand::OpenDojo {
+                target: SessionPickerTarget {
+                    topology_revision: TopologyRevision::new(9),
+                    lair_id: LairId::new(),
+                    dojo_id: DojoId::new(),
+                    action: NavigationAction::ActivateDojo,
+                },
+                explorer_target: None,
+            })
+            .unwrap();
+        sender.try_send(WindowTopologyCommand::CloseWindow).unwrap();
+        let split = WindowTopologyCommand::Split {
+            dojo_id: first,
+            target,
+            axis: Axis::Horizontal,
+            pending: Some(placeholder),
+        };
+        let (updates, close_window) =
+            abandon_queued_commands(Some(split), &mut commands, &mut state);
+        assert!(close_window, "the close notice is kept");
+        assert!(commands.try_recv().is_err(), "the queue was drained");
+        // The split's placeholder is rolled back to the layout before it.
+        let WindowTopologyUpdate::Apply {
+            dojo_id,
+            layout,
+            added,
+            removed,
+            focused,
+            ..
+        } = &updates[0]
+        else {
+            panic!("the placeholder rollback comes first");
+        };
+        assert_eq!(*dojo_id, first);
+        assert_eq!(*layout, root_before);
+        assert!(added.is_empty());
+        assert_eq!(removed, &vec![placeholder]);
+        assert_eq!(*focused, Some(target));
+        // Each abandoned command yields exactly one failure; none ran.
+        let failures = updates
+            .iter()
+            .filter(|update| {
+                matches!(update, WindowTopologyUpdate::TabFailed { message, .. }
+                    if message == ABANDONED_FOR_RECONNECT)
+            })
+            .count();
+        assert_eq!(failures, 3, "split, picker request, and Dojo opening");
+        assert_eq!(updates.len(), 4);
+        assert_eq!(state.tabs.get(first).unwrap().value.root, root_before);
+    }
+
+    #[test]
+    fn a_tab_switch_needs_no_daemon_and_is_applied() {
+        let (mut state, first, second) = two_tabs(SplintId::new());
+        let (sender, mut commands) = mpsc::channel(8);
+        sender
+            .try_send(WindowTopologyCommand::ActivateTab { dojo_id: second })
+            .unwrap();
+        // A tab that is gone is not switched to.
+        sender
+            .try_send(WindowTopologyCommand::ActivateTab {
+                dojo_id: DojoId::new(),
+            })
+            .unwrap();
+        let (updates, close_window) = abandon_queued_commands(None, &mut commands, &mut state);
+        assert!(!close_window);
+        assert_eq!(state.tabs.active().map(|tab| tab.dojo_id), Some(second));
+        assert!(matches!(
+            updates.as_slice(),
+            [WindowTopologyUpdate::ActivateTab { dojo_id, explorer_target: None }] if *dojo_id == second
+        ));
+        // The lost Window's loop applies switches the same way.
+        assert!(matches!(
+            tab_switch_update(&mut state, first),
+            Some(WindowTopologyUpdate::ActivateTab { dojo_id, .. }) if dojo_id == first
+        ));
+        assert!(tab_switch_update(&mut state, DojoId::new()).is_none());
+        assert_eq!(state.tabs.active().map(|tab| tab.dojo_id), Some(first));
+    }
+}

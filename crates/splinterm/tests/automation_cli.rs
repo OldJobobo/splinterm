@@ -2540,7 +2540,7 @@ fn a_machine_read_lost_twice_fails_clearly_without_a_third_try() {
     assert_eq!(document["error"]["retryable"], true);
     let message = document["error"]["message"].as_str().unwrap();
     assert!(
-        message.contains("the read was not retried, so run it again"),
+        message.contains("the read was retried once and was interrupted again, so run it again"),
         "{message}"
     );
 }

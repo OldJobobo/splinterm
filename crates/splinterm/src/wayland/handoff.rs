@@ -24,6 +24,8 @@ use crate::{
     renderer::SessionPickerTextCache,
 };
 
+use splinterm_core::DojoId;
+
 use super::{
     App, DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, PaneView,
     WindowTopologyCommand, diagnostics, terminal_input_pending_for,
@@ -137,12 +139,17 @@ impl HandoffFrontend {
     }
 
     /// The coordinator resnapshotted every pane from the daemon serving
-    /// `daemon_generation`: the held failure is gone and the pause ends.
-    pub(super) fn reconnected(&mut self, daemon_generation: u64) {
-        self.held_failure = None;
-        self.lost_reported = false;
-        if let Some(hub) = &self.hub {
-            hub.reconnected(daemon_generation);
+    /// `daemon_generation` for reconnection `epoch`: the held failure is
+    /// gone and the pause ends, unless another connection was lost since
+    /// that epoch began, which keeps the Window reconnecting.
+    pub(super) fn reconnected(&mut self, daemon_generation: u64, epoch: u64) {
+        if self
+            .hub
+            .as_ref()
+            .is_none_or(|hub| hub.reconnected(daemon_generation, epoch))
+        {
+            self.held_failure = None;
+            self.lost_reported = false;
         }
     }
 
@@ -165,6 +172,19 @@ impl HandoffFrontend {
         self.presentation
             .deadline()
             .map(|deadline| deadline.saturating_duration_since(now))
+    }
+}
+
+/// The tab a topology command switches to when the Window is disconnected
+/// (reconnecting or lost), if it is a plain tab switch: the one topology
+/// command that touches no daemon state, so it still happens then. Every
+/// other command is dropped until the Window is connected again.
+pub(super) const fn tab_switch_while_disconnected(
+    command: &WindowTopologyCommand,
+) -> Option<DojoId> {
+    match command {
+        WindowTopologyCommand::ActivateTab { dojo_id } => Some(*dojo_id),
+        _ => None,
     }
 }
 
@@ -373,7 +393,8 @@ mod tests {
         assert!(!frontend.fold(Instant::now()).pause_changed);
         assert!(frontend.input_paused());
         // The resnapshot lands: the held failure is cleared and input resumes.
-        frontend.reconnected(1);
+        let epoch = hub.reconnect_pending().unwrap();
+        frontend.reconnected(1, epoch);
         let transition = frontend.fold(Instant::now());
         assert!(transition.pause_changed && !frontend.input_paused());
         assert_eq!(frontend.held_failure, None);
@@ -408,6 +429,24 @@ mod tests {
         let frontend = frontend(&hub);
         assert!(!frontend.holds_window_on_disconnect());
         assert!(!frontend.disconnected());
+    }
+
+    #[test]
+    fn only_a_plain_tab_switch_happens_while_disconnected() {
+        let dojo_id = splinterm_core::DojoId::new();
+        assert_eq!(
+            tab_switch_while_disconnected(&WindowTopologyCommand::ActivateTab { dojo_id }),
+            Some(dojo_id)
+        );
+        for command in [
+            WindowTopologyCommand::CloseTab { dojo_id },
+            WindowTopologyCommand::RequestSessionPicker,
+            WindowTopologyCommand::RequestLairExplorer {
+                focused_splint: None,
+            },
+        ] {
+            assert_eq!(tab_switch_while_disconnected(&command), None, "{command:?}");
+        }
     }
 
     #[test]

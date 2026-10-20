@@ -30,8 +30,8 @@ use splinterm_protocol::{
 use super::{
     commands::{AuthorizationCommand, Command, SubscribeCommand},
     interrupted::{
-        InterruptedCommand, Interruption, explain_result, interrupted, interruption_kind,
-        machine_probe_window, probe_daemon,
+        InterruptedCommand, Interruption, Probe, explain_result, interrupted, interruption_kind,
+        machine_probe_window, probe_daemon, retried_once,
     },
     session_catalog::launch_parameters,
 };
@@ -125,19 +125,28 @@ async fn safe_machine_read(
     if !matches!(interruption_kind(&error), Some(Interruption::Lost { .. })) {
         return explain_machine_result(Err(error), before, true, deadline, started).await;
     }
-    let window = machine_probe_window(deadline.saturating_sub(started.elapsed()));
+    let lost = |after| {
+        anyhow::Error::new(InterruptedCommand {
+            interruption: Interruption::Lost { after },
+            read_only: true,
+            retried: false,
+        })
+    };
+    // The reconnection fits what is left of the deadline (review S3).
+    let Some(window) = machine_probe_window(deadline.saturating_sub(started.elapsed())) else {
+        return Err(lost(Probe::Skipped));
+    };
     let Some((mut retry, _)) = probe_daemon(before, window, Connection::connect_automation).await
     else {
-        return Err(anyhow::Error::new(InterruptedCommand {
-            interruption: Interruption::Lost { after: None },
-            read_only: true,
-        }));
+        return Err(lost(Probe::Unanswered { window }));
     };
     let retry_before = DaemonIdentity::of(&retry);
     let result = retry
         .request_with_deadline(request(), deadline.saturating_sub(started.elapsed()))
         .await;
-    explain_machine_result(result, retry_before, true, deadline, started).await
+    explain_machine_result(result, retry_before, true, deadline, started)
+        .await
+        .map_err(retried_once)
 }
 
 pub(in crate::app) use agent_status::run_machine_agent_status;
