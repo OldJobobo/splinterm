@@ -78,6 +78,13 @@ impl Daemon {
             .append(true)
             .open(runtime.join("daemon.stderr"))
             .unwrap();
+        // The daemon's log stream: `tracing` writes to stdout, which the
+        // journal captures under systemd.
+        let stdout = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(runtime.join("daemon.stdout"))
+            .unwrap();
         let mut command = Command::new(DAEMON);
         command
             .env("SPLINTERM_SOCKET", socket)
@@ -100,7 +107,7 @@ impl Daemon {
             .env_remove("WAYLAND_DISPLAY")
             .envs(environment.iter().copied())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(stderr);
         if development_terminal_access {
             command.env("SPLINTERM_ENABLE_DEV_ATTACH", "1");
@@ -143,6 +150,27 @@ impl Daemon {
         fs::create_dir(&runtime).unwrap();
         let socket = runtime.join("splinterd.sock");
         let child = Self::spawn_child(&runtime, &socket);
+        Self::wait_until_ready(&socket).await;
+        Self {
+            child,
+            runtime,
+            socket,
+            policy: None,
+            development_terminal_access: true,
+        }
+    }
+
+    /// [`Self::start`] with `environment` added to the daemon's own.
+    async fn start_with_environment(environment: &[(&str, &str)]) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let runtime = std::env::temp_dir().join(format!("spenv-{}-{nonce:x}", std::process::id()));
+        fs::create_dir(&runtime).unwrap();
+        let socket = runtime.join("splinterd.sock");
+        let child =
+            Self::spawn_configured_with_environment(&runtime, &socket, None, true, environment);
         Self::wait_until_ready(&socket).await;
         Self {
             child,
@@ -220,11 +248,16 @@ impl Daemon {
     }
 
     async fn start_again(&mut self) {
-        self.child = Self::spawn_configured(
+        self.start_again_with_environment(&[]).await;
+    }
+
+    async fn start_again_with_environment(&mut self, environment: &[(&str, &str)]) {
+        self.child = Self::spawn_configured_with_environment(
             &self.runtime,
             &self.socket,
             self.policy.as_deref(),
             self.development_terminal_access,
+            environment,
         );
         Self::wait_until_ready(&self.socket).await;
     }
@@ -3493,6 +3526,611 @@ async fn explicit_restore_scopes_report_per_leaf_results() {
     })
     .await
     .expect("explicit restore scope scenario timed out");
+}
+
+// ---------------------------------------------------------------------------
+// Plan 0037 Milestone 5: recipe-only restoration and terminal-body privacy
+// ---------------------------------------------------------------------------
+
+/// Every regular file under `root`, recursively, with its contents. Sockets,
+/// symbolic links, and other special files are skipped.
+fn regular_files_under(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() {
+                let bytes = fs::read(&path).unwrap();
+                files.push((path, bytes));
+            }
+        }
+    }
+    files
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// No file under `root` holds any of `sentinels`.
+fn assert_no_file_contains(root: &Path, sentinels: &[&str]) {
+    let files = regular_files_under(root);
+    assert!(
+        !files.is_empty(),
+        "nothing to scan under {}",
+        root.display()
+    );
+    for (path, bytes) in files {
+        for sentinel in sentinels {
+            assert!(
+                !contains_bytes(&bytes, sentinel.as_bytes()),
+                "{} holds terminal-body sentinel {sentinel:?}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// No serialized response holds any of `sentinels`.
+fn assert_responses_body_free(responses: &[Response], sentinels: &[&str]) {
+    for response in responses {
+        let encoded = serde_json::to_string(response).unwrap();
+        for sentinel in sentinels {
+            assert!(
+                !encoded.contains(sentinel),
+                "an observation holds terminal-body sentinel {sentinel:?}: {encoded}"
+            );
+        }
+    }
+}
+
+/// Every retained audit page, oldest first, up to the first partial page.
+/// (Each `AuditInspect` is itself audited, so the log always grows by one.)
+async fn audit_pages(connection: &mut Connection) -> Vec<Response> {
+    const PAGE_RECORDS: usize = 64;
+    let mut pages = Vec::new();
+    let mut after_audit_id = None;
+    loop {
+        let response = connection
+            .request(Request::AuditInspect {
+                after_audit_id,
+                max_records: PAGE_RECORDS,
+            })
+            .await;
+        let Response::AuditPage { page } = &response else {
+            panic!("audit page was not returned: {response:?}");
+        };
+        let next = page.next_after_audit_id;
+        let partial = page.records.len() < PAGE_RECORDS;
+        pages.push(response);
+        if partial || next.is_none() {
+            return pages;
+        }
+        after_audit_id = next;
+    }
+}
+
+/// The metadata observations a client can make without reading terminal
+/// content, and every audit page.
+async fn metadata_observations(connection: &mut Connection, splint_id: SplintId) -> Vec<Response> {
+    let mut observations = vec![
+        connection.request(Request::ListLairs).await,
+        connection.request(Request::InspectTopology).await,
+        connection
+            .request(Request::InspectSplint { splint_id })
+            .await,
+    ];
+    observations.extend(audit_pages(connection).await);
+    observations
+}
+
+/// The processes whose parent is `parent`, zombies included.
+fn child_pids(parent: u32) -> Vec<u32> {
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| {
+            let pid = entry.ok()?.file_name().to_str()?.parse::<u32>().ok()?;
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let parent_pid = stat[stat.rfind(')')? + 1..]
+                .split_whitespace()
+                .nth(1)?
+                .parse::<u32>()
+                .ok()?;
+            (parent_pid == parent).then_some(pid)
+        })
+        .collect()
+}
+
+async fn wait_for_file_contents(path: &Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fs::read_to_string(path).unwrap_or_default() != expected {
+        assert!(
+            Instant::now() < deadline,
+            "{} never held {expected:?}: {:?}",
+            path.display(),
+            fs::read_to_string(path)
+        );
+        time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Plan 0037 M5: a unique sentinel in a live Splint's output (on screen and
+/// in scrollback) and in its input never reaches the durable Topology (the
+/// primary file, its previous-generation backup, or a quarantined copy),
+/// the daemon's log stream at its most verbose level, its audit records, or
+/// its metadata observations, before or after a restart.
+///
+/// The launch recipe assembles the output sentinel at run time from pieces,
+/// so the durable recipe (argv) never contains it; the input sentinel only
+/// ever travels as `Input` bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario follows one terminal body through every durable and observation sink"
+)]
+async fn terminal_body_sentinel_stays_out_of_durable_state_audit_and_observation() {
+    // Every daemon target at trace and the rest at debug, so a body that
+    // reached any log statement would land in the captured stderr.
+    const ENVIRONMENT: &[(&str, &str)] = &[(
+        "RUST_LOG",
+        "debug,splinterd=trace,splinterm_pty=trace,splinterm_terminal=trace",
+    )];
+    time::timeout(Duration::from_secs(60), async {
+        let nonce = format!(
+            "{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let output_sentinel = format!("m5-output-{nonce}-sentinel");
+        let input_sentinel = format!("m5-input-{nonce}-sentinel");
+        let sentinels = [output_sentinel.as_str(), input_sentinel.as_str()];
+        let mut daemon = Daemon::start_with_environment(ENVIRONMENT).await;
+        let mut connection = daemon.connect().await;
+        let launch = LaunchParameters {
+            cwd: daemon.runtime.clone(),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "s=$(printf '%s-%s-%s' m5-output {nonce} sentinel); i=0; \
+                     while [ \"$i\" -lt 200 ]; do printf '%s %03d\\n' \"$s\" \"$i\"; \
+                     i=$((i+1)); done; exec cat"
+                ),
+            ],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 1000,
+        };
+        let Response::LairCreated {
+            lair, incarnation, ..
+        } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "privacy".into(),
+                launch,
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("Lair was not created");
+        };
+        let lair_id = lair.id;
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("created Lair was not a leaf");
+        };
+        let splint_id = splint.id;
+
+        // The body is really there: on screen, in scrollback, and echoed input.
+        snapshot_until(
+            &mut connection,
+            splint_id,
+            incarnation,
+            &format!("{output_sentinel} 199"),
+        )
+        .await;
+        let (subscription_id, snapshot) = connection
+            .attach_with_scrollback(splint_id, incarnation, 64)
+            .await;
+        assert_eq!(
+            connection
+                .request(Request::Detach { subscription_id })
+                .await,
+            Response::Acknowledged
+        );
+        let scrollback = snapshot
+            .scrollback_rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .map(|cell| cell.content.as_str())
+            .collect::<String>();
+        assert!(
+            scrollback.contains(&output_sentinel),
+            "the sentinel never reached scrollback: {scrollback:?}"
+        );
+        connection
+            .input(
+                splint_id,
+                incarnation,
+                format!("{input_sentinel}\n").as_bytes(),
+            )
+            .await;
+        snapshot_until(&mut connection, splint_id, incarnation, &input_sentinel).await;
+        connection.release_control().await;
+
+        // A second durable save, so the previous generation is backed up.
+        let expected_topology_revision = connection.topology_revision().await;
+        assert!(matches!(
+            connection
+                .request(Request::RenameLair {
+                    expected_topology_revision,
+                    lair_id,
+                    name: "privacy-renamed".into(),
+                })
+                .await,
+            Response::TopologyCommitted { .. }
+        ));
+
+        let observations = metadata_observations(&mut connection, splint_id).await;
+        assert_responses_body_free(&observations, &sentinels);
+        // The body-bearing operations were audited, without their bodies.
+        let audited = observations
+            .iter()
+            .filter_map(|response| match response {
+                Response::AuditPage { page } => Some(page.records.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|record| record.operation)
+            .collect::<Vec<_>>();
+        for operation in [
+            splinterm_protocol::AuditOperation::CreateLair,
+            splinterm_protocol::AuditOperation::Attach,
+            splinterm_protocol::AuditOperation::Input,
+        ] {
+            assert!(
+                audited.contains(&operation),
+                "{operation:?} was not audited: {audited:?}"
+            );
+        }
+        drop(connection);
+        daemon.stop_preserving_state();
+
+        // Make the primary file unsafe (group/world-readable), so the next
+        // start quarantines it whole and restores from the backup.
+        let state = daemon.runtime.join("state/splinterm");
+        let primary = state.join("topology.json");
+        let backup = state.join("topology.json.previous");
+        assert!(
+            backup.is_file(),
+            "no previous-generation backup was written"
+        );
+        fs::set_permissions(&primary, fs::Permissions::from_mode(0o644)).unwrap();
+        daemon.start_again_with_environment(ENVIRONMENT).await;
+        let mut connection = daemon.connect().await;
+        let restored = connection.topology().await;
+        assert!(matches!(
+            restored.find_splint(splint_id).map(|splint| &splint.state),
+            Some(splinterm_core::SplintState::Exited(_))
+        ));
+        let observations = metadata_observations(&mut connection, splint_id).await;
+        assert_responses_body_free(&observations, &sentinels);
+        drop(connection);
+        daemon.stop_preserving_state();
+
+        let quarantined = fs::read_dir(&state)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("topology.invalid-")
+            })
+            .collect::<Vec<_>>();
+        let [quarantined] = quarantined.as_slice() else {
+            panic!("expected exactly one quarantined primary: {quarantined:?}");
+        };
+        // Each durable file holds the real Topology, just never the body.
+        for durable in [&primary, &backup, quarantined] {
+            let contents = fs::read_to_string(durable).unwrap();
+            assert!(
+                contents.contains(&splint_id.to_string()),
+                "{} does not hold the saved Splint",
+                durable.display()
+            );
+        }
+        // The log stream really is verbose, and saw both generations.
+        let logs = fs::read_to_string(daemon.runtime.join("daemon.stdout")).unwrap();
+        assert_eq!(logs.matches("splinterd ready").count(), 2, "{logs}");
+        for expected in ["DEBUG", "quarantined invalid primary metadata"] {
+            assert!(logs.contains(expected), "no {expected:?} in the log stream");
+        }
+        assert_no_file_contains(&daemon.runtime, &sentinels);
+    })
+    .await
+    .expect("terminal-body privacy scenario timed out");
+}
+
+/// Plan 0037 M5: startup with a saved Topology runs no saved launch recipe,
+/// and neither do the requests the Dojo pickers and every restore preview
+/// send. The client test
+/// `explorer_context_tests::picker_and_restore_previews_send_only_reads`
+/// pins that set to `ListLairs` and `InspectTopology`; a standalone picker
+/// that is cancelled has already disconnected after its `ListLairs`. Only
+/// the explicit restore at the end runs the recipe again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario covers startup, every preview request, and the explicit restore"
+)]
+async fn startup_picker_and_restore_previews_execute_no_saved_recipe() {
+    time::timeout(TEST_TIMEOUT, async {
+        let mut daemon = Daemon::start().await;
+        let marker = daemon.runtime.join("recipe-ran");
+        let launch = LaunchParameters {
+            cwd: std::env::current_dir().unwrap(),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("printf 'run\\n' >> {}; exec sleep 30", marker.display()),
+            ],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut connection = daemon.connect().await;
+        let Response::LairCreated { lair, .. } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "saved-recipes".into(),
+                launch: launch.clone(),
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("Lair was not created");
+        };
+        let lair_id = lair.id;
+        let LayoutNode::Leaf(first) = &lair.dojos[0].root else {
+            panic!("created Lair was not a leaf");
+        };
+        let expected_topology_revision = connection.topology_revision().await;
+        let Response::SplintStarted { .. } = connection
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: first.id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch,
+            })
+            .await
+        else {
+            panic!("second Splint was not created");
+        };
+        wait_for_file_contents(&marker, "run\nrun\n").await;
+        drop(connection);
+        daemon.stop_preserving_state();
+
+        daemon.start_again().await;
+        // A standalone Recent Dojos picker: one `ListLairs`, then it
+        // disconnects before showing anything; cancelling ends there.
+        {
+            let mut picker = daemon.connect().await;
+            assert!(matches!(
+                picker.request(Request::ListLairs).await,
+                Response::Lairs { .. }
+            ));
+        }
+        // The in-Window picker, Lair Explorer, selectors, and every restore
+        // preview, each more than once.
+        let mut window = daemon.connect().await;
+        for _ in 0..3 {
+            let Response::Topology { snapshot } = window.request(Request::InspectTopology).await
+            else {
+                panic!("Topology was not returned");
+            };
+            snapshot.validate().unwrap();
+            assert_eq!(snapshot.runtimes.len(), 2);
+            for runtime in &snapshot.runtimes {
+                assert_eq!(runtime.live_incarnation, None);
+                assert!(runtime.restorable, "{runtime:?}");
+            }
+            assert!(matches!(
+                window.request(Request::ListLairs).await,
+                Response::Lairs { .. }
+            ));
+        }
+        time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            "run\nrun\n",
+            "startup or a preview ran a saved recipe"
+        );
+        assert_eq!(
+            child_pids(daemon.child.id()),
+            Vec::<u32>::new(),
+            "startup or a preview started a process"
+        );
+
+        // The explicit restore runs each saved recipe exactly once more.
+        let expected_topology_revision = window.topology_revision().await;
+        let Response::RestoreCompleted { results, .. } = window
+            .request(Request::RestoreLair {
+                expected_topology_revision,
+                lair_id,
+            })
+            .await
+        else {
+            panic!("restore result was not returned");
+        };
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.error.is_none()));
+        wait_for_file_contents(&marker, "run\nrun\nrun\nrun\n").await;
+        drop(window);
+        daemon.shutdown();
+    })
+    .await
+    .expect("startup and preview scenario timed out");
+}
+
+/// Plan 0037 M5: after a daemon restart, every explicit restore allocates
+/// an incarnation above every incarnation the saved Topology records, even
+/// for the Splint whose own saved incarnation is the lowest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one scenario raises, persists, restarts, and restores incarnations"
+)]
+async fn explicit_restore_after_restart_allocates_incarnations_above_every_saved_one() {
+    time::timeout(TEST_TIMEOUT, async {
+        let mut daemon = Daemon::start().await;
+        let launch = LaunchParameters {
+            cwd: std::env::current_dir().unwrap(),
+            command: vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+            shell: None,
+            login_shell: false,
+            scrollback_lines: 100,
+        };
+        let mut connection = daemon.connect().await;
+        let Response::LairCreated {
+            lair,
+            incarnation: first_incarnation,
+            ..
+        } = connection
+            .request(Request::CreateLair {
+                expected_topology_revision: TopologyRevision::default(),
+                name: "incarnations".into(),
+                launch: launch.clone(),
+                generated_name: false,
+            })
+            .await
+        else {
+            panic!("Lair was not created");
+        };
+        let LayoutNode::Leaf(first) = &lair.dojos[0].root else {
+            panic!("created Lair was not a leaf");
+        };
+        let first_id = first.id;
+        let expected_topology_revision = connection.topology_revision().await;
+        let Response::SplintStarted {
+            splint_id: second_id,
+            incarnation: mut second_incarnation,
+            ..
+        } = connection
+            .request(Request::SplitSplint {
+                expected_topology_revision,
+                target_splint_id: first_id,
+                axis: Axis::Horizontal,
+                side: SplitSide::Second,
+                ratio: SplitRatio::new(500).unwrap(),
+                launch,
+            })
+            .await
+        else {
+            panic!("second Splint was not created");
+        };
+        // Raise the second Splint's incarnation well above the first's.
+        for _ in 0..4 {
+            assert!(matches!(
+                connection
+                    .request(Request::KillSplint {
+                        splint_id: second_id,
+                        incarnation: second_incarnation,
+                    })
+                    .await,
+                Response::SplintKilled { .. }
+            ));
+            let expected_topology_revision = connection.topology_revision().await;
+            let Response::RestoreCompleted { results, .. } = connection
+                .request(Request::RestoreSplint {
+                    expected_topology_revision,
+                    splint_id: second_id,
+                })
+                .await
+            else {
+                panic!("restore result was not returned");
+            };
+            let restored = results[0].incarnation.expect("restore allocated nothing");
+            assert!(restored > second_incarnation);
+            second_incarnation = restored;
+        }
+        drop(connection);
+        daemon.stop_preserving_state();
+
+        // Exactly what the daemon persisted.
+        let saved = splinterm_core::TopologyDocument::decode(
+            &fs::read(daemon.runtime.join("state/splinterm/topology.json")).unwrap(),
+        )
+        .unwrap()
+        .into_topology()
+        .unwrap();
+        let saved_incarnation = |splint_id| {
+            saved
+                .find_splint(splint_id)
+                .and_then(|splint| splint.last_incarnation)
+                .expect("saved Splint records its last incarnation")
+        };
+        assert_eq!(saved_incarnation(first_id), first_incarnation);
+        assert_eq!(saved_incarnation(second_id), second_incarnation);
+        assert!(first_incarnation < second_incarnation);
+        let mut highest = second_incarnation;
+
+        daemon.start_again().await;
+        let mut connection = daemon.connect().await;
+        // The first Splint first: a fresh allocator would reissue its own
+        // saved incarnation, or another saved one.
+        for splint_id in [first_id, second_id, first_id] {
+            let live = match connection
+                .request(Request::InspectSplint { splint_id })
+                .await
+            {
+                Response::Splint { runtime, .. } => runtime.live_incarnation,
+                response => panic!("unexpected Splint response: {response:?}"),
+            };
+            if let Some(incarnation) = live {
+                assert!(matches!(
+                    connection
+                        .request(Request::KillSplint {
+                            splint_id,
+                            incarnation,
+                        })
+                        .await,
+                    Response::SplintKilled { .. }
+                ));
+            }
+            let expected_topology_revision = connection.topology_revision().await;
+            let Response::RestoreCompleted { results, .. } = connection
+                .request(Request::RestoreSplint {
+                    expected_topology_revision,
+                    splint_id,
+                })
+                .await
+            else {
+                panic!("restore result was not returned");
+            };
+            assert_eq!(results.len(), 1);
+            assert!(results[0].error.is_none(), "{results:?}");
+            let restored = results[0].incarnation.expect("restore allocated nothing");
+            assert!(
+                restored > highest,
+                "restore of {splint_id} reissued incarnation {restored} (highest {highest})"
+            );
+            highest = restored;
+        }
+        drop(connection);
+        daemon.shutdown();
+    })
+    .await
+    .expect("incarnation restart scenario timed out");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

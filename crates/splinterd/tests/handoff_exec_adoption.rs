@@ -86,6 +86,20 @@
 //!   captured, carried across the boundary, and reaches the resumed round,
 //!   which shuts down in order.
 //!
+//! # Terminal-body privacy (Plan 0037 M5)
+//!
+//! Each carried Splint fills its screen and scrollback with a sentinel the
+//! shell assembles at run time, so every capture seals it into a checkpoint.
+//! The stage checks that each checkpoint is an anonymous memfd; each serving
+//! generation shows the sentinel in the carried screen and scrollback (the
+//! body really crossed), holds no checkpoint descriptor or mapping after its
+//! commit, and keeps the sentinel out of its observations and audit records.
+//! After every Splint-carrying case, however the candidate ended (adopted,
+//! rolled back, crashed, hung, stopped, or killed while hung holding every
+//! checkpoint), no name under the test's private directory mentions a
+//! checkpoint and no file there holds the sentinel; `/dev/shm` is only
+//! listed. A filter argument runs only the cases whose names contain it.
+//!
 //! # Why the boundary is driven at the function level
 //!
 //! The real request path (a trusted-UI `PrepareDaemonHandoff { Execute }`
@@ -405,20 +419,23 @@ const FAULT_POINTS: [CandidateFaultPoint; 6] = [
     CandidateFaultPoint::ScopeAdoption,
     CandidateFaultPoint::ActorStaging,
 ];
-const CASES: [&str; 13] = [
-    "adopt",
-    "rollback",
-    "rollback-dropped-window",
-    "rollback-refuses-claims",
-    "rollback-of-rollback",
-    "hold-expiry",
-    "pending-sigterm",
-    "tampered-rollback-image",
-    "stray-descriptor",
-    "terminate-during-teardown",
-    "rollback-guard-timeout",
-    "old-side-signal-carry",
-    "fault-matrix",
+/// Every case, in run order. A filter argument (as libtest takes one) runs
+/// only the cases whose names contain it.
+const CASES: [(&str, fn()); 14] = [
+    ("adopt", adopt_case),
+    ("rollback", rollback_case),
+    ("rollback-dropped-window", rollback_dropped_window_case),
+    ("rollback-refuses-claims", rollback_refuses_claims_case),
+    ("rollback-of-rollback", rollback_of_rollback_case),
+    ("hold-expiry", hold_expiry_case),
+    ("pending-sigterm", pending_sigterm_cases),
+    ("tampered-rollback-image", tampered_rollback_image_case),
+    ("stray-descriptor", stray_descriptor_case),
+    ("terminate-during-teardown", terminate_during_teardown_case),
+    ("rollback-guard-timeout", rollback_guard_timeout_case),
+    ("killed-hung-candidate", killed_hung_candidate_case),
+    ("old-side-signal-carry", old_side_signal_carry_case),
+    ("fault-matrix", fault_matrix_case),
 ];
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 /// The salt the forward image carries: any nonzero value makes its pair
@@ -441,7 +458,17 @@ fn forward_client() -> Vec<u8> {
         .expect("python3 is on PATH");
     fs::read(python).unwrap()
 }
-const CAT: &str = "printf ready; exec cat";
+/// Each carried Splint first fills its screen and scrollback with the
+/// terminal-body sentinel (Plan 0037 M5), so every capture seals it into a
+/// checkpoint. The shell joins [`SENTINEL_PIECES`] at run time: neither
+/// this source, an argv, nor any record holds the joined form, so finding
+/// it in a file proves that a terminal body leaked there.
+const CAT: &str = "s=$(printf '%s-%s-%s' m5-checkpoint 4b1d93e7 body); i=0; \
+                   while [ \"$i\" -lt 40 ]; do printf '%s %02d\\n' \"$s\" \"$i\"; \
+                   i=$((i+1)); done; printf ready; exec cat";
+const SENTINEL_PIECES: [&str; 3] = ["m5-checkpoint", "4b1d93e7", "body"];
+/// The name every sealed terminal checkpoint memfd carries.
+const CHECKPOINT_MEMFD: &str = "splinterd-terminal-checkpoint";
 const EXCLUDED_EXIT: i32 = 3;
 const GUARD_WAIT: Duration = Duration::from_secs(2);
 const WAIT: Duration = Duration::from_secs(10);
@@ -483,7 +510,7 @@ raise SystemExit(subprocess.run(sys.argv[1:], close_fds=True, preexec_fn=lambda:
 
 fn main() -> ExitCode {
     if env::args().skip(1).any(|argument| argument == "--list") {
-        for case in CASES {
+        for (case, _) in CASES {
             println!("handoff_exec_adoption::{case}: test");
         }
         return ExitCode::SUCCESS;
@@ -510,38 +537,14 @@ fn main() -> ExitCode {
             let stray = fs::File::open("/dev/null").unwrap();
             let flags = rustix::io::fcntl_getfd(&stray).unwrap();
             rustix::io::fcntl_setfd(&stray, flags - rustix::io::FdFlags::CLOEXEC).unwrap();
-            adopt_case();
-            println!("handoff_exec_adoption: adopt passed");
-            rollback_case();
-            println!("handoff_exec_adoption: rollback passed");
-            rollback_dropped_window_case();
-            println!("handoff_exec_adoption: rollback-dropped-window passed");
-            rollback_refuses_claims_case();
-            println!("handoff_exec_adoption: rollback-refuses-claims passed");
-            rollback_of_rollback_case();
-            println!("handoff_exec_adoption: rollback-of-rollback passed");
-            hold_expiry_case();
-            println!("handoff_exec_adoption: hold-expiry passed");
-            pending_sigterm_case(false);
-            println!("handoff_exec_adoption: pending-sigterm (adopt) passed");
-            pending_sigterm_case(true);
-            println!("handoff_exec_adoption: pending-sigterm (rollback) passed");
-            tampered_rollback_image_case();
-            println!("handoff_exec_adoption: tampered-rollback-image passed");
-            stray_descriptor_case();
-            println!("handoff_exec_adoption: stray-descriptor passed");
-            terminate_during_teardown_case();
-            println!("handoff_exec_adoption: terminate-during-teardown passed");
-            rollback_guard_timeout_case();
-            println!("handoff_exec_adoption: rollback-guard-timeout passed");
-            old_side_signal_carry_case();
-            println!("handoff_exec_adoption: old-side-signal-carry passed");
-            for point in FAULT_POINTS {
-                fault_case(point);
-                println!(
-                    "handoff_exec_adoption: fault-matrix {} passed",
-                    point.name()
-                );
+            let filter = env::args()
+                .skip(1)
+                .find(|argument| !argument.starts_with('-'));
+            for (case, run) in CASES {
+                if filter.as_deref().is_none_or(|filter| case.contains(filter)) {
+                    run();
+                    println!("handoff_exec_adoption: {case} passed");
+                }
             }
             drop(stray);
             println!("handoff_exec_adoption: ok");
@@ -683,6 +686,19 @@ fn old_generation_stage(options: &StageOptions) -> ! {
     let image = bound_listener(&image_content_socket_path(&socket));
 
     let stopped = hand_off_and_stop();
+    // Plan 0037 M5: each captured terminal body exists only as an anonymous
+    // sealed memfd, never as a named file.
+    for capture in &stopped.handed_off {
+        let descriptor = capture.checkpoint.handoff_descriptor();
+        let target = fs::read_link(format!("/proc/self/fd/{}", descriptor.raw_fd())).unwrap();
+        assert!(
+            target
+                .to_string_lossy()
+                .starts_with(&format!("/memfd:{CHECKPOINT_MEMFD} ")),
+            "a checkpoint is not an anonymous memfd: {}",
+            target.display()
+        );
+    }
     let window = options
         .window
         .then(|| spawn_window(&directory, snapshots.forward().client().descriptor()));
@@ -1481,6 +1497,10 @@ impl Stage {
             .env("SPLINTERM_SOCKET", directory.socket())
             .env("XDG_STATE_HOME", directory.0.join("state"))
             .env("XDG_CONFIG_HOME", directory.0.join("config"))
+            // The private directory that holds the socket is the stage's
+            // runtime directory too, so anything a generation wrote there is
+            // in what `assert_no_checkpoint_artifact` scans.
+            .env("XDG_RUNTIME_DIR", &directory.0)
             .env(
                 "DBUS_SESSION_BUS_ADDRESS",
                 "unix:path=/nonexistent/splinterd-exec-adoption-bus",
@@ -1537,6 +1557,25 @@ impl Stage {
                 self.logs()
             );
             thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Waits until the stage's logs contain `marker`.
+    fn wait_for_log(&mut self, marker: &str) {
+        let deadline = Instant::now() + STAGE_WAIT;
+        while !self.logs().contains(marker) {
+            if let Some(status) = self.exited() {
+                panic!(
+                    "stage exited with {status} before {marker:?}\n{}",
+                    self.logs()
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stage never logged {marker:?}\n{}",
+                self.logs()
+            );
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1681,6 +1720,109 @@ fn persisted_topology(directory: &TestDirectory) -> Topology {
         .unwrap()
 }
 
+/// The terminal-body sentinel every carried Splint printed before capture.
+fn sentinel() -> String {
+    SENTINEL_PIECES.join("-")
+}
+
+/// How many descriptors of `pid` are sealed terminal checkpoints.
+fn checkpoint_descriptors(pid: u32) -> usize {
+    fs::read_dir(format!("/proc/{pid}/fd"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    fs::read_link(entry.path())
+                        .is_ok_and(|target| target.to_string_lossy().contains(CHECKPOINT_MEMFD))
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Plan 0037 M5: once a generation committed its adoption, it holds no
+/// checkpoint: no descriptor and no mapping.
+fn assert_checkpoints_released(pid: u32) {
+    assert_eq!(
+        checkpoint_descriptors(pid),
+        0,
+        "the serving daemon still holds a checkpoint descriptor"
+    );
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
+    assert!(
+        !maps.contains(CHECKPOINT_MEMFD),
+        "the serving daemon still maps a checkpoint"
+    );
+}
+
+/// Plan 0037 M5: after a case, however its candidate ended (adopted, rolled
+/// back, crashed, hung, killed, or stopped), nothing under the test's private
+/// directory, which is the stage's socket and runtime directory, state and
+/// configuration homes, and working directory, is named for a checkpoint,
+/// and no file there holds a terminal body: not the durable Topology or its
+/// backup, the logs (the journal's stand-in), or any record. `/dev/shm` is
+/// only listed, for a checkpoint's name or this directory's unique one.
+///
+/// The install prefix and the stale client link hold only executables the
+/// stage installed before any Splint ran, so their large images are checked
+/// by name, not scanned.
+fn assert_no_checkpoint_artifact(directory: &TestDirectory) {
+    let sentinel = sentinel();
+    let prefix = directory.0.join("prefix");
+    let stale_client = directory.0.join(STALE_CLIENT);
+    let mut pending = vec![directory.0.clone()];
+    let mut scanned = 0_usize;
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains("checkpoint"),
+                "a checkpoint-named artifact exists: {}",
+                path.display()
+            );
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() && !path.starts_with(&prefix) && path != stale_client {
+                let bytes = fs::read(&path).unwrap();
+                assert!(
+                    !bytes
+                        .windows(sentinel.len())
+                        .any(|window| window == sentinel.as_bytes()),
+                    "{} holds a terminal body",
+                    path.display()
+                );
+                scanned += 1;
+            }
+        }
+    }
+    assert!(
+        directory.0.join("state/splinterm/topology.json").is_file(),
+        "the durable Topology was not scanned"
+    );
+    assert!(scanned > 0, "nothing was scanned");
+    let unique = directory
+        .0
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    if let Ok(entries) = fs::read_dir("/dev/shm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.contains(CHECKPOINT_MEMFD) && !name.contains(&unique),
+                "/dev/shm/{name} is a named checkpoint artifact"
+            );
+        }
+    }
+}
+
 /// A protocol client of the adopted daemon.
 struct Client {
     stream: UnixStream,
@@ -1784,6 +1926,84 @@ impl Client {
             Response::Acknowledged
         );
         snapshot
+    }
+
+    /// Plan 0037 M5: the carried screen and scrollback still hold the
+    /// sentinel, so the checkpoint really carried the terminal body.
+    async fn assert_body_carried(&mut self, splint_id: SplintId, incarnation: u64) {
+        let Response::Attached {
+            subscription_id,
+            snapshot,
+            ..
+        } = self
+            .request(Request::Attach {
+                splint_id,
+                incarnation: Some(incarnation),
+                scrollback_rows: 64,
+            })
+            .await
+        else {
+            panic!("attach was not granted");
+        };
+        assert_eq!(
+            self.request(Request::Detach { subscription_id }).await,
+            Response::Acknowledged
+        );
+        let sentinel = sentinel();
+        for (part, rows) in [
+            ("scrollback", &snapshot.scrollback_rows),
+            ("screen", &snapshot.visible_rows),
+        ] {
+            let text = rows
+                .iter()
+                .flat_map(|row| row.cells.iter())
+                .map(|cell| cell.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.contains(&sentinel),
+                "{splint_id}'s carried {part} lost the terminal body: {text:?}"
+            );
+        }
+    }
+
+    /// Plan 0037 M5: the serving generation's metadata observations and
+    /// audit records, its adoption's record included, hold no terminal body.
+    async fn assert_observations_body_free(&mut self, record: &StageRecord) {
+        let mut observations = vec![
+            self.request(Request::ListLairs).await,
+            self.request(Request::InspectTopology).await,
+        ];
+        for splint in record.carried.iter().chain([&record.excluded]) {
+            observations.push(
+                self.request(Request::InspectSplint {
+                    splint_id: splint.splint_id,
+                })
+                .await,
+            );
+        }
+        let audit = self
+            .request(Request::AuditInspect {
+                after_audit_id: None,
+                max_records: 128,
+            })
+            .await;
+        let Response::AuditPage { page } = &audit else {
+            panic!("no audit page: {audit:?}");
+        };
+        assert!(
+            page.records.iter().any(|record| record.operation
+                == splinterm_protocol::AuditOperation::PrepareDaemonHandoff),
+            "the adoption was not audited: {page:?}"
+        );
+        observations.push(audit);
+        let sentinel = sentinel();
+        for observation in &observations {
+            let encoded = serde_json::to_string(observation).unwrap();
+            assert!(
+                !encoded.contains(&sentinel),
+                "an observation holds a terminal body: {encoded}"
+            );
+        }
     }
 
     async fn wait_for_text(&mut self, splint_id: SplintId, incarnation: u64, text: &str) {
@@ -1948,9 +2168,14 @@ fn adopt_case() {
                 .wait_for_text(splint.splint_id, splint.incarnation, "ready")
                 .await;
             client
+                .assert_body_carried(splint.splint_id, splint.incarnation)
+                .await;
+            client
                 .echo(splint.splint_id, splint.incarnation, "echo-after-exec")
                 .await;
         }
+        assert_checkpoints_released(pid);
+        client.assert_observations_body_free(&record).await;
 
         assert_exits_recorded(&mut client, &directory, &record).await;
         assert_listeners_accept(&directory, daemon_generation).await;
@@ -1995,6 +2220,7 @@ fn adopt_case() {
 
     // An ordered shutdown of the adopted daemon ends it and its Splints.
     shut_down(&mut stage, &record, &[launched]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// The `PYTHONHOME` a copy of `python3` needs when it runs from another
@@ -2509,9 +2735,14 @@ fn assert_rolled_back(
                 .wait_for_text(splint.splint_id, splint.incarnation, "ready")
                 .await;
             client
+                .assert_body_carried(splint.splint_id, splint.incarnation)
+                .await;
+            client
                 .echo(splint.splint_id, splint.incarnation, "echo-after-rollback")
                 .await;
         }
+        assert_checkpoints_released(pid);
+        client.assert_observations_body_free(record).await;
         assert_exits_recorded(&mut client, directory, record).await;
         assert_listeners_accept(directory, daemon_generation).await;
         assert_daemon_threads_unblocked(pid);
@@ -2627,6 +2858,7 @@ fn rollback_case() {
     }
     assert!(!logs.contains("rollback failed"), "{logs}");
     shut_down(&mut stage, &record, &[launched]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// The old generation recorded a duplicate of its listener, at a distinct
@@ -2672,6 +2904,7 @@ fn rollback_dropped_window_case() {
     assert!(!logs.contains("aliases another role"), "{logs}");
     assert!(!logs.contains("rollback failed"), "{logs}");
     shut_down(&mut stage, &record, &[launched]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// Plan 0061 M3.17: the rollback daemon refuses continuation claims and,
@@ -2744,6 +2977,7 @@ fn rollback_refuses_claims_case() {
     );
     assert_same_pid_serves(&mut stage, &directory, record.pid);
     shut_down(&mut stage, &record, &[launched]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// Plan 0061 M3.17: the resume hold expires. The relaunched Window claims
@@ -2828,6 +3062,7 @@ fn hold_expiry_case() {
         "{logs}"
     );
     shut_down(&mut stage, &record, &[]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// The rollback daemon's own adoption fails too. A rollback generation has
@@ -2873,6 +3108,7 @@ fn rollback_of_rollback_case() {
         fs::read(directory.0.join("state/splinterm/topology.json")).unwrap(),
         fs::read(directory.0.join(STAGED_TOPOLOGY)).unwrap()
     );
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// A SIGTERM pending across the handoff exec (as `systemctl stop` in the
@@ -2925,6 +3161,24 @@ fn pending_sigterm_case(rollback: bool) {
     for splint in &record.carried {
         wait_until_exited(splint.child_pid, "carried Splint after an ordered shutdown");
     }
+    assert_no_checkpoint_artifact(&directory);
+}
+
+fn pending_sigterm_cases() {
+    pending_sigterm_case(false);
+    println!("handoff_exec_adoption: pending-sigterm (adopt) passed");
+    pending_sigterm_case(true);
+    println!("handoff_exec_adoption: pending-sigterm (rollback) passed");
+}
+
+fn fault_matrix_case() {
+    for point in FAULT_POINTS {
+        fault_case(point);
+        println!(
+            "handoff_exec_adoption: fault-matrix {} passed",
+            point.name()
+        );
+    }
 }
 
 /// The forward candidate fails at one pre-commit step and rolls back with
@@ -2965,6 +3219,7 @@ fn fault_case(point: CandidateFaultPoint) {
         assert!(logs.contains(&expected), "missing {expected:?}\n{logs}");
     }
     shut_down(&mut stage, &record, &[launched]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// The manifests record a wrong digest for the rollback daemon snapshot.
@@ -3003,6 +3258,7 @@ fn tampered_rollback_image_case() {
         fs::read(directory.0.join("state/splinterm/topology.json")).unwrap(),
         fs::read(directory.0.join(STAGED_TOPOLOGY)).unwrap()
     );
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// The failed forward candidate holds an inheritable descriptor no manifest
@@ -3030,6 +3286,7 @@ fn stray_descriptor_case() {
         "{logs}"
     );
     shut_down(&mut stage, &record, &[launched]);
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// A SIGTERM arrives during rollback teardown: after the forward
@@ -3077,6 +3334,7 @@ fn terminate_during_teardown_case() {
     for splint in &record.carried {
         wait_until_exited(splint.child_pid, "carried Splint after an ordered shutdown");
     }
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// Plan 0061 M3.17, the rollback guard timeout: the failed forward candidate
@@ -3124,6 +3382,56 @@ fn rollback_guard_timeout_case() {
         fs::read(directory.0.join("state/splinterm/topology.json")).unwrap(),
         fs::read(directory.0.join(STAGED_TOPOLOGY)).unwrap()
     );
+    assert_no_checkpoint_artifact(&directory);
+}
+
+/// Plan 0037 M5: a forward candidate is killed (`SIGKILL`, as systemd's
+/// final stop escalation) while it hangs holding every carried checkpoint.
+/// It failed at startup and waits for a thread that outlives its runtime
+/// (the guard-timeout seam), with each carried terminal body still in an
+/// inherited sealed memfd. The kill leaves no checkpoint-named artifact and
+/// no file holding a terminal body anywhere the test owns: the anonymous
+/// checkpoint memory goes with the process. Nothing committed, so the
+/// durable Topology is the old generation's.
+fn killed_hung_candidate_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            fault: Some(format!(
+                "{}@forward",
+                CandidateFaultPoint::GuardTimeout.name()
+            )),
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    stage.wait_for_log("test seam: started a thread that outlives the runtime");
+    // Hung, and holding exactly the carried checkpoints as anonymous memfds.
+    assert_eq!(
+        checkpoint_descriptors(record.pid),
+        record.carried.len(),
+        "the hung candidate does not hold every carried checkpoint\n{}",
+        stage.logs()
+    );
+    signal(record.pid, Signal::KILL);
+    let status = stage.wait(WAIT);
+    let logs = stage.logs();
+    assert!(!status.success(), "the killed candidate exited 0\n{logs}");
+    assert!(!logs.contains("adoption committed"), "{logs}");
+    assert!(
+        !logs.contains("executing the sealed rollback daemon"),
+        "{logs}"
+    );
+    // The kill closed the carried masters, which hung up each carried shell.
+    for splint in &record.carried {
+        wait_until_exited(splint.child_pid, "carried Splint after a killed candidate");
+    }
+    assert_eq!(
+        fs::read(directory.0.join("state/splinterm/topology.json")).unwrap(),
+        fs::read(directory.0.join(STAGED_TOPOLOGY)).unwrap()
+    );
+    assert_no_checkpoint_artifact(&directory);
 }
 
 /// Plan 0061 M3.17, the old side's full signal carry in a real daemon
