@@ -346,6 +346,19 @@ Troubleshooting checklist:
    to retry blindly or broaden policy.
 5. Keep stdout reserved for MCP frames; bounded diagnostics appear on stderr.
 
+To check a whole binary set without touching your daemon, policy, or desktop,
+run the headless preflight from a source checkout:
+
+```bash
+python3 tools/mcp/run-demo.py preflight --installed
+python3 tools/mcp/run-demo.py preflight --staged-bin-dir target/debug
+```
+
+It starts a private, deny-all daemon with its own socket and directories,
+checks binary identity, the MCP handshake and required tools, and denial, then
+removes everything it created. It installs no policy and grants nothing. See
+[`tools/mcp/README.md`](../tools/mcp/README.md).
+
 The optional adapter is available from the AUR as `splinterm-mcp` and retains an
 exact-version dependency on `splinterm`. Nix/Home Manager, non-SSH gateways,
 broader editor plugins, durable terminal bodies, HTTP/OAuth transport, and
