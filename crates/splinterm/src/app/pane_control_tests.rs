@@ -962,3 +962,152 @@ async fn a_connection_lost_after_only_preparing_reconnects_the_window() {
         splinterm::handoff_status::WindowHandoffPhase::Reconnecting
     );
 }
+
+/// A scripted daemon for one connection: each expected request gets its
+/// reply. Returns how many requests it answered.
+async fn scripted_control(
+    steps: Vec<(Request, Reply)>,
+) -> (Connection, tokio::task::JoinHandle<usize>) {
+    let (client, server) = tokio::io::duplex(65536);
+    let server = tokio::spawn(async move {
+        let (mut reader, mut writer) = tokio::io::split(server);
+        let _hello = read_client(&mut reader).await;
+        send_frame(&mut writer, server_hello(ServerLimits::default())).await;
+        let mut answered = 0;
+        for (expected, reply) in steps {
+            let ClientFrame::Request {
+                request_id,
+                request,
+                ..
+            } = read_client(&mut reader).await
+            else {
+                panic!("expected a request");
+            };
+            assert_eq!(request, expected);
+            let frame = match reply {
+                Ok(result) => ServerFrame::Response { request_id, result },
+                Err(code) => ServerFrame::Error {
+                    request_id: Some(request_id),
+                    error: ProtocolError::new(code, "scripted rejection"),
+                },
+            };
+            send_frame(&mut writer, frame).await;
+            answered += 1;
+        }
+        // Nothing else may be sent: the client end closing ends the read.
+        let mut rest = Vec::new();
+        let _ = reader.read_to_end(&mut rest).await;
+        assert!(rest.is_empty(), "an unexpected request followed the script");
+        answered
+    });
+    let (reader, writer) = tokio::io::split(client);
+    let connection = Connection::connect_remote_interactive_transport(reader, writer)
+        .await
+        .unwrap();
+    (connection, server)
+}
+
+fn handoff_claim_request(
+    ticket: splinterm_protocol::HandoffResumeTicket,
+    splint_id: SplintId,
+) -> Request {
+    Request::ClaimHandoffControl {
+        ticket,
+        splint: Some(splinterm_protocol::HandoffClaimTarget {
+            splint_id,
+            incarnation: 7,
+        }),
+    }
+}
+
+/// A relaunched Window's pane presents its ticket once for its own Splint
+/// and keeps the controller the daemon restores (Plan 0061 M3.16).
+#[tokio::test]
+async fn a_pane_restores_its_controller_with_the_window_ticket_once() {
+    let ticket = splinterm_protocol::HandoffResumeTicket::new(
+        [9; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+    );
+    let id = SplintId::new();
+    let restore = splinterm::handoff_control::HandoffControlRestore::default();
+    restore.arm(
+        ticket,
+        [id],
+        splinterm::handoff_control::CONTROL_RESTORE_WINDOW,
+    );
+    let (mut control, server) = scripted_control(vec![(
+        handoff_claim_request(ticket, id),
+        Ok(Response::HandoffControlClaimed {
+            controllers: vec![splinterm_protocol::HandoffClaimedController {
+                splint_id: id,
+                incarnation: 7,
+                controller_id: 31,
+                modes: vec![ControlMode::Input, ControlMode::Resize],
+            }],
+        }),
+    )])
+    .await;
+    assert_eq!(
+        restore_handoff_control(&restore, &mut control, id, 7)
+            .await
+            .unwrap(),
+        Some(31)
+    );
+    // Taken once: a later pane of the same Splint sends nothing.
+    assert_eq!(
+        restore_handoff_control(&restore, &mut control, id, 7)
+            .await
+            .unwrap(),
+        None
+    );
+    drop(control);
+    assert_eq!(server.await.unwrap(), 1);
+}
+
+/// Without a ticket nothing is sent; a refused or empty claim falls back to
+/// the ordinary path instead of failing the pane.
+#[tokio::test]
+async fn a_pane_without_a_ticket_or_with_a_refused_claim_falls_back() {
+    let ticket = splinterm_protocol::HandoffResumeTicket::new(
+        [4; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+    );
+    let (unarmed, refused, empty) = (SplintId::new(), SplintId::new(), SplintId::new());
+    let restore = splinterm::handoff_control::HandoffControlRestore::default();
+    let (mut control, server) = scripted_control(Vec::new()).await;
+    assert_eq!(
+        restore_handoff_control(&restore, &mut control, unarmed, 7)
+            .await
+            .unwrap(),
+        None
+    );
+    drop(control);
+    assert_eq!(server.await.unwrap(), 0);
+
+    restore.arm(
+        ticket,
+        [refused, empty],
+        splinterm::handoff_control::CONTROL_RESTORE_WINDOW,
+    );
+    let (mut control, server) = scripted_control(vec![
+        (
+            handoff_claim_request(ticket, refused),
+            Err(ErrorCode::InvalidHandoffTicket),
+        ),
+        (
+            handoff_claim_request(ticket, empty),
+            Ok(Response::HandoffControlClaimed {
+                controllers: Vec::new(),
+            }),
+        ),
+    ])
+    .await;
+    for splint_id in [refused, empty] {
+        assert_eq!(
+            restore_handoff_control(&restore, &mut control, splint_id, 7)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+    drop(control);
+    assert_eq!(server.await.unwrap(), 2);
+}

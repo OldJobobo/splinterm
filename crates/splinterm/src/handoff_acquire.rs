@@ -45,9 +45,10 @@ use splinterm_protocol::window_resume::{
 /// Everything a relaunched Window claimed and validated before Tokio.
 pub(crate) struct AcquiredWindowResume {
     pub(crate) record: WindowResumeRecord,
-    /// The client end of the continuation socket, close-on-exec. It stays
-    /// open for the Window's life, so the adopted daemon's hold sees the
-    /// Window alive; M3.16's `ClaimHandoffControl` takes it from here.
+    /// The client end of the continuation socket, close-on-exec. After an
+    /// adoption it carries the Window's one resume-ticket claim (Plan 0061
+    /// M3.16, `splinterm::handoff_control`) and then closes; after a rollback
+    /// it closes unused.
     pub(crate) continuation: OwnedFd,
     /// Inheritable descriptors other than the two the claim closed.
     pub(crate) closed_unexpected: usize,

@@ -509,10 +509,6 @@ pub(super) struct WindowResume {
     pub(super) tabs: Vec<(splinterm_core::DojoId, Option<SplintId>)>,
     /// The tab to activate once every tab is open.
     pub(super) active: splinterm_core::DojoId,
-    /// The client end of the continuation socket. Held open for the Window's
-    /// life so the adopted daemon's hold sees the Window alive; M3.16's
-    /// `ClaimHandoffControl` is the seam that will take it from here.
-    pub(super) continuation: std::os::fd::OwnedFd,
 }
 
 /// Runs a Window relaunched across a daemon upgrade: `dojo_model` is its
@@ -591,14 +587,9 @@ async fn run_live_multipane_window_inner(
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
     }
-    let (restore, _continuation) = resume.map_or((None, None), |resume| {
-        (
-            Some(TopologyRestore {
-                tabs: resume.tabs,
-                active: resume.active,
-            }),
-            Some(resume.continuation),
-        )
+    let restore = resume.map(|resume| TopologyRestore {
+        tabs: resume.tabs,
+        active: resume.active,
     });
     let (initial_identity, remote_display_identity) =
         initial_window_dojo_identity(&factory, dojo_model.id).await?;

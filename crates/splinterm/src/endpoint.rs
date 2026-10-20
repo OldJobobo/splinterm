@@ -6,8 +6,8 @@ use anyhow::Result;
 use splinterm_automation_client::Connection;
 
 use crate::{
-    handoff_status::HandoffStatusHub, remote::RemoteProfile, remote_askpass::NativePrompt,
-    remote_session::RemoteSession,
+    handoff_control::HandoffControlRestore, handoff_status::HandoffStatusHub,
+    remote::RemoteProfile, remote_askpass::NativePrompt, remote_session::RemoteSession,
 };
 
 /// Informational connection-time identity, not a security or authority signal.
@@ -87,6 +87,10 @@ pub struct ConnectionFactory {
     /// reports to: one per Window, shared by its panes and its frontend
     /// (Plan 0061 M3.12a).
     handoff_status: HandoffStatusHub,
+    /// A relaunched Window's resume ticket for its panes' controller claims
+    /// (Plan 0061 M3.16); never armed for any other Window or a remote
+    /// endpoint.
+    handoff_control: HandoffControlRestore,
 }
 
 impl ConnectionFactory {
@@ -103,6 +107,7 @@ impl ConnectionFactory {
                 recency_namespace: "local".to_owned(),
             }),
             handoff_status: HandoffStatusHub::default(),
+            handoff_control: HandoffControlRestore::default(),
         }
     }
 
@@ -143,6 +148,7 @@ impl ConnectionFactory {
                 recency_namespace: format!("remote-{profile_name}"),
             }),
             handoff_status: HandoffStatusHub::default(),
+            handoff_control: HandoffControlRestore::default(),
         }
     }
 
@@ -179,6 +185,12 @@ impl ConnectionFactory {
     #[must_use]
     pub fn handoff_status(&self) -> &HandoffStatusHub {
         &self.handoff_status
+    }
+
+    /// The resume ticket this Window's panes present after a daemon upgrade.
+    #[must_use]
+    pub fn handoff_control(&self) -> &HandoffControlRestore {
+        &self.handoff_control
     }
 
     /// Returns the explicit endpoint behavior contract.

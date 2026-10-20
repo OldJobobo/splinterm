@@ -3870,6 +3870,43 @@ impl Connection {
         }
     }
 
+    /// Restores this connection's controller for one Splint from a
+    /// relaunched Window's resume ticket (Plan 0061 M3.16). `Ok(None)` means
+    /// the daemon accepted the ticket but restored nothing for this Splint;
+    /// an invalid, ended, or replayed ticket is an `InvalidHandoffTicket`
+    /// protocol error.
+    pub async fn claim_handoff_control(
+        &mut self,
+        ticket: splinterm_protocol::HandoffResumeTicket,
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Result<Option<u64>> {
+        let Response::HandoffControlClaimed { controllers } = self
+            .request(Request::ClaimHandoffControl {
+                ticket,
+                splint: Some(splinterm_protocol::HandoffClaimTarget {
+                    splint_id,
+                    incarnation,
+                }),
+            })
+            .await?
+        else {
+            bail!("splinterd did not answer the handoff control claim");
+        };
+        if splinterm_protocol::validate_handoff_claimed_controllers(&controllers).is_err() {
+            bail!("splinterd answered the handoff control claim with an invalid controller set");
+        }
+        match controllers.as_slice() {
+            [] => Ok(None),
+            [controller]
+                if controller.splint_id == splint_id && controller.incarnation == incarnation =>
+            {
+                Ok(Some(controller.controller_id))
+            }
+            _ => bail!("splinterd restored a controller this claim did not name"),
+        }
+    }
+
     /// Releases a controller lease owned by this connection.
     pub async fn release_control(&mut self, controller_id: u64) -> Result<()> {
         if matches!(
