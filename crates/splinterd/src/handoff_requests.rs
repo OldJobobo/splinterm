@@ -25,9 +25,11 @@
 //!   and the continuation, resume, and ticket work (M3.13 to M3.16), every
 //!   open Window would lose its daemon.
 //!
-//! Every resume ticket claim fails closed because this daemon issues no
-//! tickets (M3.16). No handoff prepare is ever pending, so every Window
-//! acknowledgement finds nothing to acknowledge (M3.13).
+//! While live handoff is unsupported no running daemon hands off, so no
+//! adopted daemon holds a Window and every resume ticket claim fails closed
+//! (M3.16, `splinterd::handoff_continuation`). No handoff prepare is ever
+//! pending, so every Window acknowledgement finds nothing to acknowledge
+//! (M3.13).
 
 use splinterd::{
     handoff_compatibility::{HandoffCapabilities, VersionRange},
@@ -459,8 +461,8 @@ pub(crate) fn no_pending_handoff_prepare() -> ProtocolError {
     )
 }
 
-/// This daemon issued no resume tickets, so every claim fails closed with
-/// the same error an invalid, expired, or replayed ticket gets.
+/// The one error every invalid, expired, ended, transferred, or replayed
+/// resume ticket gets, whatever refused it.
 pub(crate) fn invalid_handoff_ticket() -> ProtocolError {
     ProtocolError::new(
         ErrorCode::InvalidHandoffTicket,

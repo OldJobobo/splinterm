@@ -22,8 +22,9 @@
 //!   held, with the controllers its old connections held at the fence as
 //!   [`ControllerPlaceholder`]s, for at most [`HANDOFF_WINDOW_RESUME_HOLD`].
 //!   Expiry closes its descriptors and forgets its placeholders. Nothing
-//!   here grants a controller: a valid resume claim (Plan 0061 M3.16) is
-//!   the only way a placeholder becomes a lease.
+//!   here grants a controller: a valid resume claim (Plan 0061 M3.16,
+//!   [`crate::handoff_continuation`]) is the only way a placeholder becomes
+//!   a lease.
 //!
 //! An exited Window's descriptors stay owned until commit, because the
 //! sealed rollback manifest still names them and rollback requires every
@@ -97,7 +98,7 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
 
 /// Whether a pidfd reports its process exited: it becomes readable once
 /// the process has exited, reaped or not.
-fn pidfd_exited(pidfd: BorrowedFd<'_>) -> io::Result<bool> {
+pub(crate) fn pidfd_exited(pidfd: BorrowedFd<'_>) -> io::Result<bool> {
     let mut descriptors = [PollFd::new(&pidfd, PollFlags::IN)];
     let immediately = Timespec {
         tv_sec: 0,
@@ -231,9 +232,15 @@ pub struct ControllerPlaceholder {
 
 /// One carried Window an adopted daemon holds after its outcome was sent.
 pub struct HeldHandoffWindow {
-    record: ManifestWindow,
-    process: OwnedFd,
-    continuation: OwnedFd,
+    pub(crate) record: ManifestWindow,
+    pub(crate) process: OwnedFd,
+    /// The daemon end of the Window's continuation channel, until the
+    /// continuation server takes it to serve the Window's one claim
+    /// ([`crate::handoff_continuation`]).
+    pub(crate) continuation: Option<OwnedFd>,
+    /// The resume ticket the Window's valid continuation claim issued, once
+    /// it did; the Window's placeholders are restored only through it.
+    pub(crate) ticket: Option<crate::handoff_continuation::IssuedTicket>,
 }
 
 impl HeldHandoffWindow {
@@ -273,10 +280,17 @@ impl HeldHandoffWindow {
         self.process.as_fd()
     }
 
-    /// The daemon end of the Window's continuation channel.
+    /// The daemon end of the Window's continuation channel, while the hold
+    /// still owns it: before the continuation server took it.
     #[must_use]
-    pub fn continuation(&self) -> BorrowedFd<'_> {
-        self.continuation.as_fd()
+    pub fn continuation(&self) -> Option<BorrowedFd<'_>> {
+        self.continuation.as_ref().map(AsFd::as_fd)
+    }
+
+    /// Whether a valid continuation claim issued this Window its ticket.
+    #[must_use]
+    pub const fn ticketed(&self) -> bool {
+        self.ticket.is_some()
     }
 }
 
@@ -294,9 +308,9 @@ impl fmt::Debug for HeldHandoffWindow {
 /// controllers they may restore.
 #[derive(Debug)]
 pub struct HeldHandoffWindows {
-    windows: Vec<HeldHandoffWindow>,
-    placeholders: Vec<ControllerPlaceholder>,
-    expires_at: Instant,
+    pub(crate) windows: Vec<HeldHandoffWindow>,
+    pub(crate) placeholders: Vec<ControllerPlaceholder>,
+    pub(crate) expires_at: Instant,
 }
 
 impl HeldHandoffWindows {
@@ -318,11 +332,29 @@ impl HeldHandoffWindows {
 }
 
 /// The held Windows, shared with the task that ends the hold at
-/// [`HeldHandoffWindows::expires_at`]. Empty once it expired, or when no
-/// Window was held at all.
-#[derive(Clone, Default)]
+/// [`HeldHandoffWindows::expires_at`] and with the continuation server.
+/// Empty once it expired or was released, or when no Window was held at
+/// all.
+///
+/// Every change to the held Windows, a continuation claim, a ticket's
+/// redemption, a refusal that drops one Window, and the release, happens
+/// under the one mutex, so none of them can race another: the release takes
+/// everything at most once, and whatever it took no claim can use.
+#[derive(Clone)]
 pub struct HandoffWindowHold {
-    held: Arc<Mutex<Option<HeldHandoffWindows>>>,
+    pub(crate) held: Arc<Mutex<Option<HeldHandoffWindows>>>,
+    /// Set once the hold is released, so a continuation server still
+    /// waiting for its Window's claim drops the descriptor it took.
+    pub(crate) released: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Default for HandoffWindowHold {
+    fn default() -> Self {
+        Self {
+            held: Arc::default(),
+            released: Arc::new(tokio::sync::watch::channel(false).0),
+        }
+    }
 }
 
 impl HandoffWindowHold {
@@ -353,17 +385,23 @@ impl HandoffWindowHold {
     }
 
     /// Ends the hold now: closes every held Window's descriptors and
-    /// forgets every placeholder. Expiry calls it, and a claim (M3.16) takes
-    /// what it needs first.
-    pub fn release(&self) {
+    /// forgets every placeholder and ticket, under the hold's mutex, and
+    /// tells every continuation server still waiting to drop its
+    /// descriptor. Expiry calls it. Returns whether this call released
+    /// anything: only one call ever does.
+    pub fn release(&self) -> bool {
         let released = self.held.lock().ok().and_then(|mut held| held.take());
-        if let Some(released) = released {
-            info!(
-                windows = released.windows.len(),
-                placeholders = released.placeholders.len(),
-                "daemon handoff: the carried Windows' resume hold ended"
-            );
-        }
+        self.released.send_replace(true);
+        let Some(released) = released else {
+            return false;
+        };
+        info!(
+            windows = released.windows.len(),
+            placeholders = released.placeholders.len(),
+            "daemon handoff: the carried Windows' resume hold ended"
+        );
+        drop(released);
+        true
     }
 }
 
@@ -464,7 +502,8 @@ pub(crate) fn announce_and_hold(
         kept.push(HeldHandoffWindow {
             record,
             process,
-            continuation,
+            continuation: Some(continuation),
+            ticket: None,
         });
     }
     announcement.announced = kept.len();
@@ -874,7 +913,10 @@ mod tests {
             Ok(outcome)
         );
         assert!(hold.is_held());
-        hold.release();
+        // Exactly once: a second release, as from the expiry task, finds
+        // nothing left.
+        assert!(hold.release());
+        assert!(!hold.release());
         assert!(!hold.is_held());
         assert_end_of_file(&client);
     }

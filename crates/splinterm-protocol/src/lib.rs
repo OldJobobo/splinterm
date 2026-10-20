@@ -3,6 +3,7 @@
 //! Terminal DTOs in this crate are intentionally distinct from the borrowed
 //! `splinterm-terminal` and daemon runtime representations.
 
+pub mod handoff_continuation;
 pub mod handoff_outcome;
 pub mod handoff_prepare;
 pub mod perf_trace;
@@ -896,12 +897,30 @@ pub enum Request {
     PrepareDaemonHandoff {
         mode: DaemonHandoffMode,
     },
-    /// Trusted local graphical UI only. A relaunched Window claims its exact
-    /// pre-fence controller disposition with the single-use resume ticket the
-    /// adopted daemon issued it (ADR 0011). Every invalid, expired, replayed,
-    /// or mismatched ticket fails with [`ErrorCode::InvalidHandoffTicket`].
+    /// Trusted local graphical UI only. A relaunched Window restores one
+    /// pre-fence controller with the resume ticket the adopted daemon issued
+    /// it over its continuation channel (ADR 0011; Plan 0061 M3.16).
+    ///
+    /// A Window holds one control connection per pane and a controller lease
+    /// is bound to its connection, so each pane's control connection sends
+    /// its own claim naming its Splint in `splint`. The ticket is single-use
+    /// per held controller: each controller it carries is restored at most
+    /// once, and the ticket ends with its last one or with the daemon's hold.
+    /// A claim from any other process than the Window the ticket was issued
+    /// to, or one not executing the pinned forward client snapshot, ends it.
+    ///
+    /// An invalid, expired, ended, transferred, or replayed ticket fails with
+    /// [`ErrorCode::InvalidHandoffTicket`]; a claim without `splint` fails
+    /// with [`ErrorCode::InvalidArgument`]. A valid ticket naming a Splint it
+    /// holds no controller for, whose incarnation changed, or that has a
+    /// controller now restores nothing and answers an empty
+    /// [`Response::HandoffControlClaimed`].
     ClaimHandoffControl {
         ticket: HandoffResumeTicket,
+        /// The Splint whose controller this connection restores. Optional on
+        /// the wire only so a protocol 42 peer that omits it still decodes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        splint: Option<HandoffClaimTarget>,
     },
     /// Trusted local graphical UI only. A Window that received a
     /// [`ServerFrame::HandoffPrepare`] frame acknowledges it once it holds
@@ -922,6 +941,14 @@ pub enum Request {
         daemon_generation: u64,
         prepare_id: u64,
     },
+}
+
+/// The Splint a [`Request::ClaimHandoffControl`] restores a controller for:
+/// the live incarnation the claiming pane attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffClaimTarget {
+    pub splint_id: SplintId,
+    pub incarnation: u64,
 }
 
 /// One opaque, single-use, generation-bound handoff resume ticket (ADR 0011).
@@ -1137,8 +1164,10 @@ pub enum Response {
     HandoffReport {
         report: HandoffReport,
     },
-    /// Result of a valid [`Request::ClaimHandoffControl`]: the controllers
-    /// restored to this connection, one per pre-fence controlled Splint.
+    /// Result of a valid [`Request::ClaimHandoffControl`]: the controller
+    /// restored to this connection for the named Splint, or none when that
+    /// Splint's controller could not be restored. A controller lease is bound
+    /// to one connection, so a claim restores at most one.
     HandoffControlClaimed {
         #[serde(deserialize_with = "deserialize_claimed_controllers")]
         controllers: Vec<HandoffClaimedController>,
@@ -6004,9 +6033,29 @@ mod tests {
 
         let claim = Request::ClaimHandoffControl {
             ticket: HandoffResumeTicket::new([0xa5; HANDOFF_RESUME_TICKET_BYTES]),
+            splint: None,
         };
         let value = serde_json::to_value(&claim).unwrap();
         assert_eq!(value["type"], "claim_handoff_control");
+        // An absent target is omitted, so a protocol 42 peer decodes it.
+        assert!(value.get("splint").is_none(), "{value}");
+        let splint_id = SplintId::new();
+        let targeted = Request::ClaimHandoffControl {
+            ticket: HandoffResumeTicket::new([0xa5; HANDOFF_RESUME_TICKET_BYTES]),
+            splint: Some(HandoffClaimTarget {
+                splint_id,
+                incarnation: 9,
+            }),
+        };
+        let targeted_value = serde_json::to_value(&targeted).unwrap();
+        assert_eq!(
+            targeted_value["splint"],
+            serde_json::json!({"splint_id": splint_id, "incarnation": 9})
+        );
+        assert_eq!(
+            serde_json::from_value::<Request>(targeted_value).unwrap(),
+            targeted
+        );
         assert_eq!(
             value["ticket"],
             serde_json::json!(vec![0xa5_u8; HANDOFF_RESUME_TICKET_BYTES]),

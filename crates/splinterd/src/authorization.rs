@@ -320,6 +320,7 @@ mod tests {
                 ticket: splinterm_protocol::HandoffResumeTicket::new(
                     [1; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES]
                 ),
+                splint: None,
             }),
             RequestAuthorization::TrustedUi
         );
