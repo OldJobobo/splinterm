@@ -120,6 +120,15 @@ class HandoffVmAcceptanceHelperTests(unittest.TestCase):
         self.assertIn("private clone", result.stderr)
         self.assertFalse(log.exists())
 
+    def test_plain_package_is_built_from_the_candidate_not_package_b(self) -> None:
+        z2 = HELPER_MODULE.step_named("z2-plain-package")
+        kinds = [action.kind for action in z2.actions]
+        self.assertEqual(kinds[0], "checkout-candidate")
+        self.assertLess(
+            kinds.index("checkout-candidate"),
+            next(i for i, action in enumerate(z2.actions) if action.vm[:1] == ("package-build",)),
+        )
+
     def test_every_step_uses_runner_actions_and_valid_guest_scripts(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
         cases = set(re.findall(r"^  ([a-z-]+)\)$", runner, re.MULTILINE))

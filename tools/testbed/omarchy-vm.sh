@@ -554,6 +554,15 @@ seed="$package_root/acceptance-seed"
 if [[ -d $seed && ! -L $seed ]]; then
   cp -R -- "$seed/." "$config/"
 fi
+# The daemon reads policy only from SPLINTERM_POLICY, so point it at the
+# private config's policy.json, which package-config writes and a SIGHUP
+# reloads. An empty deny-all policy stands in until one is seeded, so the
+# daemon starts deny-all without a missing-file diagnostic.
+policy="$config/splinterm/policy.json"
+if [[ ! -e $policy ]]; then
+  mkdir -p -m 700 -- "$config/splinterm"
+  (umask 077 && printf '{"schema":"splinterm.policy.v2","rules":[]}\n' >"$policy")
+fi
 printf '%s\n' "$package_root" >"$runtime/testbed-root"
 instance=$(hyprctl instances -j | jq -er \
   'if length == 1 then .[0] else error("expected exactly one Hyprland instance") end')
@@ -567,7 +576,8 @@ export YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket"
 python "$package_root/source/tools/testbed/guest-window.py" prepare --state "$window_state"
 # Without RUST_LOG the packaged daemon logs only errors; VM acceptance reads
 # its info and warn lines (the TEST-ONLY banner, handoff phases).
-RUST_LOG=info SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
+RUST_LOG=info SPLINTERM_POLICY="$policy" \
+  SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &
 daemon_pid=$!
 for _ in $(seq 1 100); do
