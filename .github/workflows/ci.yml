@@ -232,11 +232,14 @@ jobs:
       - name: Build the staged binaries for the headless MCP preflight
         run: cargo build --frozen --bin splinterd --bin splinterm --bin splinterm-mcp
       - name: Run the headless staged MCP preflight (Plan 0031)
+        # Log and evidence live outside the checkout so the recorded source
+        # identity describes the tree itself.
         run: |
           set -o pipefail
-          mkdir -m 700 mcp-preflight-evidence
+          mkdir -m 700 "$RUNNER_TEMP/mcp-preflight-evidence"
           python tools/mcp/run-demo.py preflight --staged-bin-dir target/debug \
-            --evidence-dir mcp-preflight-evidence 2>&1 | tee mcp-preflight.log
+            --evidence-dir "$RUNNER_TEMP/mcp-preflight-evidence" \
+            2>&1 | tee "$RUNNER_TEMP/mcp-preflight.log"
       - name: Upload focused MCP failure evidence
         if: ${{ failure() }}
         uses: actions/upload-artifact@v6
@@ -244,8 +247,8 @@ jobs:
           name: mcp-protocol-failure-${{ github.run_id }}
           path: |
             mcp-protocol.log
-            mcp-preflight.log
-            mcp-preflight-evidence/
+            ${{ runner.temp }}/mcp-preflight.log
+            ${{ runner.temp }}/mcp-preflight-evidence/
           if-no-files-found: error
           retention-days: 14
 

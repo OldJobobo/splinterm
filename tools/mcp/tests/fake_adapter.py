@@ -153,7 +153,10 @@ def server(mode: str) -> None:
             respond(message, {
                 "protocolVersion": version,
                 "capabilities": {"resources": {"subscribe": True}, "tools": {}},
-                "serverInfo": {"name": "splinterm-mcp", "version": "0.2.0-dev"},
+                "serverInfo": {
+                    "name": "splinterm-mcp",
+                    "version": "0.2.0 (dev)" if mode == "server-badversion" else "0.2.0-dev",
+                },
             })
             continue
         if not initialized:
@@ -168,6 +171,8 @@ def server(mode: str) -> None:
         elif method == "tools/call":
             name = (message.get("params") or {}).get("name")
             if name == "splinterm.ping":
+                if mode == "server-slow":
+                    time.sleep(3)
                 if daemon_ping():
                     respond(message, tool_text({
                         "schema": "splinterm.mcp.v2", "tool": name, "ok": True,
@@ -180,7 +185,10 @@ def server(mode: str) -> None:
                 if mode == "server-leak":
                     respond(message, tool_text({"ok": True, "tool": name, "data": {"text": SECRET_TEXT}}, False))
                 else:
-                    code = "internal" if mode == "server-deny-internal" else "unauthorized"
+                    code = {
+                        "server-deny-internal": "internal",
+                        "server-deny-oddcode": "Daemon.Unavailable",
+                    }.get(mode, "unauthorized")
                     respond(message, tool_text(error_envelope(name, code), True))
             else:
                 respond_error(message, -32602, "unknown tool")

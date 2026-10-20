@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import threading
 from typing import Any
 
 REPORT_SCHEMA = "splinterm.mcp-demo.report.v1"
@@ -471,6 +472,7 @@ class Evidence:
         self.directory: Path | None = None
         self.events_written = 0
         self._events_stream = None
+        self._lock = threading.Lock()
         if base is None:
             return
         base = Path(base)
@@ -491,17 +493,23 @@ class Evidence:
         self.persist_state()
 
     def event(self, event: dict[str, Any]) -> None:
-        """Append one already-allowlisted host event (see mcp_host._event)."""
-        self.events_written += 1
-        if self._events_stream is None:
-            return
+        """Append one already-allowlisted host event (see mcp_host._event).
+
+        Host reader threads and the caller both emit events, so writes are
+        serialized to keep each JSONL line whole.
+        """
         allowed = {
             key: event[key]
             for key in ("t_ms", "pid", "direction", "kind", "method", "id", "outcome", "rpc_code", "tool", "tool_error_code", "bytes", "session")
             if key in event
         }
-        self._events_stream.write(json.dumps(allowed, sort_keys=True) + "\n")
-        self._events_stream.flush()
+        line = json.dumps(allowed, sort_keys=True) + "\n"
+        with self._lock:
+            self.events_written += 1
+            if self._events_stream is None:
+                return
+            self._events_stream.write(line)
+            self._events_stream.flush()
 
     def persist_state(self) -> None:
         if self.directory is not None:
@@ -523,9 +531,7 @@ class Evidence:
     def finalize(self) -> None:
         if self.directory is None:
             return
-        if self._events_stream is not None:
-            self._events_stream.close()
-            self._events_stream = None
+        self.close()
         write_private_json(self.directory / "report.json", self.report.to_json())
         write_private_json(self.directory / "identities.json", self.report.identities_json())
         write_private_json(self.directory / "cleanup.json", self.report.cleanup_json())
@@ -539,6 +545,7 @@ class Evidence:
         write_private_bytes(self.directory / "SHA256SUMS", "".join(sums).encode())
 
     def close(self) -> None:
-        if self._events_stream is not None:
-            self._events_stream.close()
-            self._events_stream = None
+        with self._lock:
+            if self._events_stream is not None:
+                self._events_stream.close()
+                self._events_stream = None

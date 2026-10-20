@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -50,67 +52,19 @@ from mcp_preflight import (  # noqa: E402
 )
 sys.path.insert(0, str(HERE))
 from fake_adapter import catalog as _fake_catalog  # noqa: E402
+from fake_support import FakeSet, fake_report  # noqa: E402
 
 
 def fake_catalog() -> list[dict]:
     return _fake_catalog(None)
 
 
-FAKE_ADAPTER = HERE / "fake_adapter.py"
-FAKE_DAEMON = HERE / "fake_daemon.py"
-ROLES = {"daemon": "splinterd", "client": "splinterm", "mcp": "splinterm-mcp"}
-
-
-def fake_report(version: tuple[int, int, int] = (0, 2, 0), identity: bytes = b"\x11" * 32) -> bytes:
-    frame = bytearray(98)
-    frame[:8] = b"SPLTPF01"
-    frame[44:76] = identity
-    for index, part in enumerate(version):
-        frame[76 + index * 2:78 + index * 2] = part.to_bytes(2, "big")
-    return bytes(frame)
+RUN_DEMO = HERE.parent / "run-demo.py"
 
 
 def short_temporary() -> tempfile.TemporaryDirectory:
     # Keep Unix socket paths short regardless of TMPDIR.
     return tempfile.TemporaryDirectory(prefix="mcp-t-", dir="/tmp" if os.path.isdir("/tmp") else None)
-
-
-class FakeSet:
-    """A staged bin dir of fake executables plus matching hooks."""
-
-    def __init__(self, base: Path, daemon_mode: str = "normal", adapter_mode: str = "server") -> None:
-        self.bin = base / "bin"
-        self.bin.mkdir()
-        self.write("splinterd", FAKE_DAEMON, daemon_mode, "daemon")
-        self.write("splinterm-mcp", FAKE_ADAPTER, adapter_mode, "mcp")
-        client = self.bin / "splinterm"
-        client.write_text("#!/bin/sh\nexit 0\n")
-        client.chmod(0o755)
-
-    def write(self, name: str, script: Path, mode: str, role: str) -> None:
-        path = self.bin / name
-        path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" --mode {mode} --role {role} "$@"\n')
-        path.chmod(0o755)
-
-    def executable(self, pid: int) -> tuple[int, int] | None:
-        """Map a fake's /proc cmdline back to the staged file it stands for."""
-        for _ in range(100):
-            try:
-                argv = [part.decode() for part in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if part]
-            except OSError:
-                return None
-            name = None
-            if "--role" in argv:
-                name = ROLES[argv[argv.index("--role") + 1]]
-            else:
-                for part in argv:
-                    if Path(part).parent == self.bin:
-                        name = Path(part).name
-            if name is not None:
-                current = os.stat(self.bin / name)
-                return (current.st_dev, current.st_ino)
-            time.sleep(0.01)
-        return None
 
 
 class RunTestCase(unittest.TestCase):
@@ -140,6 +94,8 @@ class RunTestCase(unittest.TestCase):
         after_daemon_ready=None,
         remove: tuple[str, ...] = (),
         stop_timeout: float = 10,
+        schema_root: Path | None = DEFAULT_SCHEMA_ROOT,
+        executable=None,
     ) -> tuple[Preflight, mcp_preflight.Report]:
         fakes = FakeSet(self.base, daemon_mode, adapter_mode)
         for name in remove:
@@ -148,6 +104,7 @@ class RunTestCase(unittest.TestCase):
         evidence_dir.mkdir(exist_ok=True)
         options = Options(
             evidence_base=evidence_dir if evidence else None,
+            schema_root=schema_root,
             temporary_base=self.tmp_base,
             request_timeout=10,
             daemon_ready_timeout=10,
@@ -156,7 +113,7 @@ class RunTestCase(unittest.TestCase):
             production_environment=self.production_env,
             hooks=Hooks(
                 sealed_report=sealed or (lambda path, role: fake_report()),
-                process_executable=fakes.executable,
+                process_executable=executable or fakes.executable,
                 after_daemon_ready=after_daemon_ready,
             ),
         )
@@ -186,7 +143,7 @@ class FullRunTests(RunTestCase):
         self.assertEqual(report.result, "passed", failed)
         self.assertEqual(report.state, "clean")
         self.assertEqual([t.state for t in report.transitions], ["daemon_ready", "preflight_passed", "cleaning", "clean"])
-        self.assertEqual(len(report.negative_cases), 8)
+        self.assertEqual(len(report.negative_cases), 9)
         self.assertTrue(all(case.status == "passed" for case in report.negative_cases))
         self.assertEqual(report.catalog.count, 12)
         self.assertIn("splinterm.report_agent_status", report.catalog.additional)
@@ -328,6 +285,208 @@ class FullRunTests(RunTestCase):
                 capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(completed.returncode, 64, argv)
+
+
+class ReviewFixTests(RunTestCase):
+    """Regressions for the PR #182 review findings."""
+
+    def test_unrecordable_adapter_version_still_yields_a_report(self) -> None:
+        runner, report = self.run_preflight(adapter_mode="server-badversion")
+        check = next(check for check in report.checks if check.name == "mcp_version_coherent")
+        self.assertEqual((check.status, check.code), ("failed", "version_unrecordable"))
+        self.assertNotIn("mcp_server_version", report.build)
+        self.assertIsNone(runner.evidence_error)
+        assert runner.evidence.directory is not None
+        self.assertEqual(json.loads((runner.evidence.directory / "report.json").read_text())["result"], "preflight_failed")
+        self.assert_no_residue(runner)
+
+    def test_untrusted_error_code_maps_to_other(self) -> None:
+        runner, report = self.run_preflight(adapter_mode="server-deny-oddcode")
+        check = next(check for check in report.checks if check.name == "deny_all_topology")
+        self.assertEqual((check.status, check.code), ("failed", "wrong_error_other"))
+        self.assertIsNone(runner.evidence_error)
+        self.assert_no_residue(runner)
+
+    def test_evidence_failure_keeps_the_verdict(self) -> None:
+        with mock.patch.object(mcp_preflight.Evidence, "finalize", side_effect=OSError("disk full")):
+            runner, report = self.run_preflight()
+        self.assertEqual(report.result, "passed")
+        self.assertEqual(runner.evidence_error, "OSError")
+        self.assert_no_residue(runner)
+
+    def test_unusable_schema_root_fails(self) -> None:
+        runner, report = self.run_preflight(schema_root=self.base / "no-such-schemas")
+        check = next(check for check in report.checks if check.name == "required_tool_schemas")
+        self.assertEqual((check.status, check.code), ("failed", "schema_root_unusable"))
+        self.assertEqual(report.result, "preflight_failed")
+
+    def test_adapter_identity_mismatch_aborts_before_initialize(self) -> None:
+        def executable(pid: int) -> tuple[int, int]:
+            if b"fake_daemon" in Path(f"/proc/{pid}/cmdline").read_bytes():
+                info = os.stat(self.base / "bin" / "splinterd")
+                return (info.st_dev, info.st_ino)
+            return (0, 0)  # the adapter is not the selected splinterm-mcp
+
+        runner, report = self.run_preflight(executable=executable)
+        names = {check.name: check.status for check in report.checks}
+        self.assertEqual(names["mcp_executable_identity"], "failed")
+        self.assertNotIn("initialize", names)
+        self.assertEqual(report.negative_cases, [])
+        self.assertTrue(report.cleanup_complete())
+        self.assert_no_residue(runner)
+
+    def test_interrupt_handler_is_one_shot(self) -> None:
+        previous = {signum: signal.getsignal(signum) for signum in mcp_preflight.CLEANUP_SIGNALS}
+        self.addCleanup(lambda: [signal.signal(signum, handler) for signum, handler in previous.items()])
+        with self.assertRaises(mcp_preflight.HarnessInterrupted):
+            mcp_preflight.interrupt_once(signal.SIGTERM, None)
+        for signum in mcp_preflight.CLEANUP_SIGNALS:
+            self.assertEqual(signal.getsignal(signum), signal.SIG_IGN, signum)
+
+    def test_interrupt_during_cleanup_handoff_still_cleans_up(self) -> None:
+        real = mcp_preflight._defer_signals
+        calls = []
+
+        def interrupted_once() -> dict:
+            calls.append(1)
+            if len(calls) == 1:
+                raise mcp_preflight.HarnessInterrupted(signal.SIGTERM)
+            return real()
+
+        with mock.patch.object(mcp_preflight, "_defer_signals", interrupted_once):
+            runner, report = self.run_preflight()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(report.result, "aborted")
+        self.assertTrue(report.cleanup_complete())
+        self.assertEqual(report.state, "clean")
+        self.assert_no_residue(runner)
+
+    def test_repeated_signals_cannot_skip_cleanup(self) -> None:
+        """End to end: SIGTERM or SIGINT after daemon_ready, then again: exit 3, no residue.
+
+        Back-to-back signals can coalesce; the deterministic window tests are
+        the two above. This proves the CLI wiring and the residue contract.
+        """
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                case = self.base / signum.name
+                case.mkdir()
+                tmp_base = case / "tmp"
+                tmp_base.mkdir()
+                evidence = case / "evidence"
+                evidence.mkdir()
+                fakes = FakeSet(case, adapter_mode="server-slow")
+                wrapper = case / "wrapper.py"
+                wrapper.write_text(
+                    "import runpy, sys\n"
+                    f"sys.path[:0] = [{str(HERE.parent)!r}, {str(HERE)!r}]\n"
+                    "import fake_support, mcp_preflight\n"
+                    "mcp_preflight.sealed_report = lambda path, role: fake_support.fake_report()\n"
+                    f"mcp_preflight.process_executable = fake_support.executable_for({str(fakes.bin)!r})\n"
+                    f"sys.argv = ['run-demo.py', 'preflight', '--staged-bin-dir', {str(fakes.bin)!r},"
+                    f" '--evidence-dir', {str(evidence)!r}]\n"
+                    f"runpy.run_path({str(RUN_DEMO)!r}, run_name='__main__')\n"
+                )
+                environment = {**self.production_env, "PATH": os.environ.get("PATH", ""), "TMPDIR": str(tmp_base)}
+                process = subprocess.Popen(
+                    [sys.executable, str(wrapper)], env=environment,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                try:
+                    deadline = time.monotonic() + 30
+                    state = None
+                    while time.monotonic() < deadline and state != "daemon_ready":
+                        for path in evidence.glob("mcp-demo-*/state.json"):
+                            try:
+                                state = json.loads(path.read_text())["state"]
+                            except (OSError, ValueError):
+                                pass
+                        time.sleep(0.02)
+                    self.assertEqual(state, "daemon_ready")
+                    process.send_signal(signum)
+                    time.sleep(0.05)
+                    process.send_signal(signum)
+                    stdout, stderr = process.communicate(timeout=60)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                self.assertEqual(process.returncode, 3, stderr)
+                summary = json.loads(stdout)
+                self.assertEqual(summary["result"], "aborted")
+                self.assertTrue(summary["cleanup_complete"])
+                self.assertTrue(summary["evidence_complete"])
+                (directory,) = evidence.glob("mcp-demo-*")
+                nonce = directory.name.rsplit("-", 1)[1]
+                self.assertEqual(list(tmp_base.iterdir()), [])
+                self.assertEqual(processes_referencing(tmp_base / f"splinterm-mcp-preflight-{nonce}"), [])
+                state = json.loads((directory / "state.json").read_text())
+                self.assertEqual([t["state"] for t in state["transitions"]][-2:], ["cleaning", "clean"])
+
+    def test_source_identity_ignores_untracked_files(self) -> None:
+        repo = self.base / "repo"
+        repo.mkdir()
+
+        def git(*arguments: str) -> None:
+            subprocess.run(["git", "-C", str(repo), *arguments], check=True, capture_output=True,
+                           env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+        git("init", "-q")
+        (repo / "tracked.txt").write_text("one\n")
+        git("add", "tracked.txt")
+        git("commit", "-q", "-m", "init")
+        (repo / "mcp-protocol.log").write_text("untracked CI log\n")
+        clean = mcp_preflight.source_identity(repo)
+        self.assertEqual((clean["source_identity"], clean["source_dirty"]), ("git", False))
+        self.assertNotIn("source_patch_sha256", clean)
+        (repo / "tracked.txt").write_text("two\n")
+        dirty = mcp_preflight.source_identity(repo)
+        self.assertTrue(dirty["source_dirty"])
+        self.assertRegex(dirty["source_patch_sha256"], r"^[0-9a-f]{64}$")
+
+
+class ExactCleanupPrimitiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = short_temporary()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+
+    def test_stale_socket_removed_only_through_the_verified_run_directory(self) -> None:
+        root = PrivateRoot.create(self.base, "0123456789abcdef")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(root.socket))
+        listener.close()
+        self.assertTrue(stat.S_ISSOCK(root.socket_stat().st_mode))
+        self.assertTrue(root.remove_stale_socket())
+        self.assertFalse(os.path.lexists(root.socket))
+        self.assertFalse(root.remove_stale_socket())
+        # A swapped run directory (symlink or new inode) is never trusted.
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        decoy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        decoy.bind(str(elsewhere / "splinterd.sock"))
+        decoy.close()
+        (root.path / "run").rmdir()
+        (root.path / "run").symlink_to(elsewhere)
+        self.assertIsNone(root.socket_stat())
+        self.assertFalse(root.remove_stale_socket())
+        self.assertTrue(os.path.lexists(elsewhere / "splinterd.sock"))
+        (root.path / "run").unlink()
+        (root.path / "run").mkdir()
+        self.assertFalse(root.remove_stale_socket())
+        self.assertEqual(root.remove(), "removed")
+
+    def test_kill_exact_checks_start_time_through_a_pidfd(self) -> None:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        start = mcp_preflight._proc_stat(child.pid)[2]
+        self.assertFalse(mcp_preflight.kill_exact(child.pid, start + 1))
+        self.assertIsNone(child.poll())
+        self.assertTrue(mcp_preflight.kill_exact(child.pid, start))
+        self.assertEqual(child.wait(timeout=5), -9)
+        self.assertFalse(mcp_preflight.kill_exact(child.pid, start))
 
 
 class IdentityTests(unittest.TestCase):
@@ -491,6 +650,12 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(classify_ping(ToolOutcome(False, pong, None)), "pong")
         self.assertEqual(classify_ping(ToolOutcome(True, {}, "internal")), "error_internal")
         self.assertEqual(classify_ping(ToolOutcome(False, {}, None)), "unexpected_success_shape")
+        self.assertEqual(classify_ping(ToolOutcome(True, {}, "Daemon.Unavailable")), "error_other")
+        oddly = self.envelope("Daemon.Unavailable")
+        self.assertEqual(
+            classify_deny(ToolOutcome(True, oddly, "Daemon.Unavailable"), "splinterm.inspect_topology"),
+            "wrong_error_other",
+        )
 
 
 class CatalogTests(unittest.TestCase):

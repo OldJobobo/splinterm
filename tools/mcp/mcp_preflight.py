@@ -38,7 +38,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 from mcp_host import PROTOCOL_VERSION, HostError, McpHost, ToolOutcome, tool_names
 from mcp_report import (
@@ -84,7 +84,26 @@ DAEMON_READY_TIMEOUT = 30.0
 DAEMON_STOP_TIMEOUT = 30.0
 EXIT_TIMEOUT = 10.0
 MAX_SOCKET_PATH = 100
+SOCKET_NAME = "splinterd.sock"
 CHILD_PATH = "/usr/local/bin:/usr/bin:/bin"
+_VERSION_TEXT = re.compile(r"^[0-9A-Za-z.+\-]{1,64}$")
+_CODE_SUFFIX = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+
+
+def recordable_version(value: object) -> str | None:
+    """A version string fit for evidence, or None when it is not one."""
+    if isinstance(value, str) and _VERSION_TEXT.match(value):
+        return value
+    return None
+
+
+def code_suffix(value: object, fallback: str) -> str:
+    """An identifier suffix for a check code; untrusted text maps to `other`."""
+    if value is None:
+        return fallback
+    if isinstance(value, str) and _CODE_SUFFIX.match(value):
+        return value
+    return "other"
 
 
 class PreflightAbort(Exception):
@@ -219,7 +238,9 @@ def source_identity(source_root: Path | None) -> dict[str, Any]:
             ).stdout
         try:
             commit = git("rev-parse", "HEAD").decode().strip()
-            dirty = bool(git("status", "--porcelain").strip())
+            # Tracked changes only: untracked files (build logs, evidence)
+            # are not in the patch digest, so they do not mark the tree dirty.
+            dirty = bool(git("status", "--porcelain", "--untracked-files=no").strip())
             result: dict[str, Any] = {
                 "source_identity": "git",
                 "source_commit": commit,
@@ -351,7 +372,7 @@ def classify_ping(outcome: ToolOutcome) -> str:
     ):
         return "pong"
     if outcome.is_error:
-        return "error_" + (outcome.error_code or "unstructured")
+        return "error_" + code_suffix(outcome.error_code, "unstructured")
     return "unexpected_success_shape"
 
 
@@ -365,7 +386,7 @@ def classify_deny(outcome: ToolOutcome, tool: str) -> str:
     if structured.get("ok") is not False or structured.get("tool") != tool:
         return "unstructured_error"
     if outcome.error_code != "unauthorized":
-        return "wrong_error_" + (outcome.error_code or "unknown")
+        return "wrong_error_" + code_suffix(outcome.error_code, "unknown")
     return "unauthorized"
 
 
@@ -379,6 +400,8 @@ class PrivateRoot:
     path: Path
     device: int
     inode: int
+    run_device: int = -1
+    run_inode: int = -1
 
     @classmethod
     def create(cls, base: Path, nonce: str) -> "PrivateRoot":
@@ -388,8 +411,10 @@ class PrivateRoot:
         info = os.lstat(path)
         root = cls(path, info.st_dev, info.st_ino)
         try:
-            for child in ("home", "config", "state", "cache", "data", "run", "tmp", "logs"):
+            for child in ("home", "config", "state", "cache", "data", "run", "tmp"):
                 os.mkdir(path / child, 0o700)
+            run = os.lstat(path / "run")
+            root.run_device, root.run_inode = run.st_dev, run.st_ino
         except BaseException:
             root.remove()
             raise
@@ -397,7 +422,7 @@ class PrivateRoot:
 
     @property
     def socket(self) -> Path:
-        return self.path / "run" / "splinterd.sock"
+        return self.path / "run" / SOCKET_NAME
 
     def owned(self) -> bool:
         try:
@@ -409,6 +434,48 @@ class PrivateRoot:
             and (info.st_dev, info.st_ino) == (self.device, self.inode)
             and info.st_uid == os.geteuid()
         )
+
+    def _run_directory(self) -> int | None:
+        """A descriptor for the verified `run` directory, or None."""
+        if not self.owned():
+            return None
+        try:
+            descriptor = os.open(self.path / "run", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return None
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) != (self.run_device, self.run_inode) or info.st_uid != os.geteuid():
+            os.close(descriptor)
+            return None
+        return descriptor
+
+    def socket_stat(self) -> os.stat_result | None:
+        """lstat of the socket entry inside the verified run directory."""
+        descriptor = self._run_directory()
+        if descriptor is None:
+            return None
+        try:
+            return os.stat(SOCKET_NAME, dir_fd=descriptor, follow_symlinks=False)
+        except OSError:
+            return None
+        finally:
+            os.close(descriptor)
+
+    def remove_stale_socket(self) -> bool:
+        """Unlink a leftover socket by name relative to the verified run dir."""
+        descriptor = self._run_directory()
+        if descriptor is None:
+            return False
+        try:
+            info = os.stat(SOCKET_NAME, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISSOCK(info.st_mode):
+                return False
+            os.unlink(SOCKET_NAME, dir_fd=descriptor)
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(descriptor)
 
     def remove(self) -> str:
         """`removed`, `absent`, or a refusal code. Never follows symlinks."""
@@ -460,6 +527,27 @@ def _proc_stat(pid: int) -> tuple[str, int, int] | None:
 def process_alive(pid: int, start: int) -> bool:
     facts = _proc_stat(pid)
     return facts is not None and facts[2] == start and facts[0] != "Z"
+
+
+def kill_exact(pid: int, start: int) -> bool:
+    """SIGKILL one exact (pid, starttime) without a PID-reuse race.
+
+    The pidfd pins the process; the start time is re-checked after it is
+    opened, so a recycled PID is never signalled.
+    """
+    try:
+        descriptor = os.pidfd_open(pid)
+    except OSError:
+        return False
+    try:
+        if not process_alive(pid, start):
+            return False
+        signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def descendants(root_pid: int) -> list[tuple[int, int]]:
@@ -556,8 +644,8 @@ def production_fingerprints(environment: dict[str, str]) -> dict[str, tuple[Any,
 class Hooks:
     """Seams for subprocess tests; production uses the real implementations."""
 
-    sealed_report: Callable[[Path, int], bytes] = sealed_report
-    process_executable: Callable[[int], tuple[int, int] | None] = process_executable
+    sealed_report: Callable[[Path, int], bytes] | None = None
+    process_executable: Callable[[int], tuple[int, int] | None] | None = None
     after_daemon_ready: Callable[[], None] | None = None
 
 
@@ -587,12 +675,12 @@ class Preflight:
         self.pair_version: str | None = None
         self.root: PrivateRoot | None = None
         self.daemon: subprocess.Popen[bytes] | None = None
-        self.daemon_stderr: Any = None
         self.hosts: list[McpHost] = []
         self.descendants: set[tuple[int, int]] = set()
         self.owned_pids: dict[str, int] = {}
         self.accepting = True
         self.interrupted = False
+        self.evidence_error: str | None = None
 
     # --------------------------------------------------------- driver
 
@@ -618,9 +706,23 @@ class Preflight:
         except Exception as error:  # noqa: BLE001 - cleanup must still run
             report.add_check("harness_internal", False, "unexpected_exception", type(error).__name__)
         finally:
-            with _signals_deferred():
+            # Ignore further signals before cleanup starts. An interrupt that
+            # lands while the deferral is being installed is caught and the
+            # deferral retried, so it can never skip cleanup.
+            while True:
+                try:
+                    previous = _defer_signals()
+                    break
+                except (KeyboardInterrupt, HarnessInterrupted):
+                    self.interrupted = True
+            try:
                 self._cleanup(production_before)
+            finally:
+                _restore_signals(previous)
         return report
+
+    def _process_executable(self, pid: int) -> tuple[int, int] | None:
+        return (self.options.hooks.process_executable or process_executable)(pid)
 
     def _production_environment(self) -> dict[str, str]:
         if self.options.production_environment is not None:
@@ -651,10 +753,11 @@ class Preflight:
         report.add_check("binary_adjacency", len(parents) == 1, "siblings" if len(parents) == 1 else "not_siblings")
 
         try:
-            daemon_report = self.options.hooks.sealed_report(
+            report_of = self.options.hooks.sealed_report or sealed_report
+            daemon_report = report_of(
                 Path(self.identities["splinterd"].canonical_path), SEALED_ROLES["splinterd"]
             )
-            client_report = self.options.hooks.sealed_report(
+            client_report = report_of(
                 Path(self.identities["splinterm"].canonical_path), SEALED_ROLES["splinterm"]
             )
         except Exception:  # noqa: BLE001 - any failure is a coherence failure
@@ -700,8 +803,8 @@ class Preflight:
                 and record.get("pair_build_identity") == report.build.get("pair_build_identity")
                 and str(record.get("build_version", "")).split("-", 1)[0] == self.pair_version
             )
-            version = record.get("build_version")
-            if isinstance(version, str):
+            version = recordable_version(record.get("build_version"))
+            if version is not None:
                 report.build["package_build_version"] = version
         except (OSError, ValueError, AttributeError):
             matches = False
@@ -724,19 +827,15 @@ class Preflight:
         assert self.root is not None
         identity = self.identities["splinterd"]
         environment = isolated_environment(self.root)
-        descriptor = os.open(
-            self.root.path / "logs" / "splinterd.stderr",
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-        )
-        self.daemon_stderr = os.fdopen(descriptor, "wb")
+        # Daemon output is discarded: nothing reads it, and an uncapped file
+        # could grow without bound. M2 diagnostics use Plan 0030 instead.
         self.daemon = subprocess.Popen(
             [identity.canonical_path],
             env=environment,
             cwd=self.root.path / "home",
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=self.daemon_stderr,
+            stderr=subprocess.DEVNULL,
             close_fds=True,
             start_new_session=True,
         )
@@ -755,11 +854,11 @@ class Preflight:
             self.report.add_check("daemon_ready", False, "readiness_timeout")
             raise PreflightAbort("readiness_timeout")
         self.report.add_check("daemon_ready", True, "private_socket_accepts")
-        executable = self.options.hooks.process_executable(self.daemon.pid)
+        executable = self._process_executable(self.daemon.pid)
         matches = executable == (identity.device, identity.inode)
         self.report.add_check("daemon_executable_identity", matches, "matches_selection" if matches else "identity_mismatch")
-        info = os.lstat(self.root.socket)
-        private = stat.S_ISSOCK(info.st_mode) and info.st_uid == os.geteuid()
+        info = self.root.socket_stat()
+        private = info is not None and stat.S_ISSOCK(info.st_mode) and info.st_uid == os.geteuid()
         self.report.add_check("private_socket", private, "owned_socket" if private else "foreign_socket")
         self._abort_if_failed("daemon_identity_failed")
         self._remember_descendants()
@@ -814,9 +913,10 @@ class Preflight:
         timeout = self.options.request_timeout
         host = self._spawn_adapter("main")
         identity = self.identities["splinterm-mcp"]
-        executable = self.options.hooks.process_executable(host.pid)
+        executable = self._process_executable(host.pid)
         matches = executable == (identity.device, identity.inode)
         report.add_check("mcp_executable_identity", matches, "matches_selection" if matches else "identity_mismatch")
+        self._abort_if_failed("mcp_identity_failed")
         try:
             info = host.initialize(timeout=timeout)
         except HostError as error:
@@ -833,16 +933,20 @@ class Preflight:
         )
         report.add_check("server_capabilities", caps_ok, "tools_and_subscribable_resources" if caps_ok else "unexpected_capabilities")
         server = info.get("serverInfo") if isinstance(info.get("serverInfo"), dict) else {}
-        version = server.get("version")
-        if isinstance(version, str) and len(version) <= 64:
+        version = recordable_version(server.get("version"))
+        if version is not None:
             report.build["mcp_server_version"] = version
         name_ok = server.get("name") == "splinterm-mcp"
         coherent = (
             name_ok
-            and isinstance(version, str)
+            and version is not None
             and (self.pair_version is None or version.split("-", 1)[0] == self.pair_version)
         )
-        report.add_check("mcp_version_coherent", coherent, "matches_pair_version" if coherent else "version_skew")
+        report.add_check(
+            "mcp_version_coherent",
+            coherent,
+            "matches_pair_version" if coherent else ("version_skew" if version is not None else "version_unrecordable"),
+        )
 
         try:
             listed = host.request("tools/list", {}, timeout=timeout)
@@ -871,6 +975,9 @@ class Preflight:
             report.add_check("required_tool_schemas", not evaluation.schema_mismatches,
                              "wire_schemas_match" if not evaluation.schema_mismatches else "schema_mismatch",
                              ",".join(evaluation.schema_mismatches))
+        elif self.options.schema_root is not None:
+            report.add_check("required_tool_schemas", False, "schema_root_unusable",
+                             "the schema root has no common.schema.json")
         else:
             report.skip_check("required_tool_schemas", "no_schema_root")
 
@@ -971,8 +1078,6 @@ class Preflight:
                     self.daemon.kill()  # exact unreaped child PID only
                     self.daemon.wait()
             returncode = self.daemon.returncode
-            if self.daemon_stderr is not None:
-                self.daemon_stderr.close()
             steps.append(CleanupStep("stop_daemon", "passed", f"returncode {returncode}{', forced' if forced else ''}"))
             if not any(check.name == "daemon_ready" and check.status == "failed" for check in report.checks):
                 report.add_check("daemon_clean_exit", returncode == 0 and not forced,
@@ -998,9 +1103,8 @@ class Preflight:
             if self.daemon is not None:
                 report.add_check("daemon_removed_socket", False, "socket_left_behind")
             daemon_gone = self.daemon is None or self.daemon.returncode is not None
-            if daemon_gone and not remaining and self.root.owned() and stat.S_ISSOCK(os.lstat(self.root.socket).st_mode):
-                with contextlib.suppress(OSError):
-                    os.unlink(self.root.socket)
+            if daemon_gone and not remaining:
+                self.root.remove_stale_socket()
             absent = not os.path.lexists(self.root.socket)
             steps.append(CleanupStep(
                 "socket_absent",
@@ -1049,7 +1153,11 @@ class Preflight:
         report.finished_at = utc_now()
         if report.cleanup_complete():
             report.transition("clean", report.result)
-        self.evidence.finalize()
+        try:
+            self.evidence.finalize()
+        except Exception as error:  # noqa: BLE001 - the verdict must still be reported
+            self.evidence_error = type(error).__name__
+            self.evidence.close()
 
     def _adopt_stragglers(self) -> None:
         """Own any process in this harness's tree that names the private root.
@@ -1072,10 +1180,7 @@ class Preflight:
             time.sleep(0.05)
             remaining = [entry for entry in remaining if process_alive(*entry)]
         for pid, start in remaining:
-            # Escalate only against an exact recorded (pid, starttime).
-            if process_alive(pid, start):
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
+            kill_exact(pid, start)
         deadline = time.monotonic() + 5
         while remaining and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -1090,21 +1195,29 @@ def _is_tool_name(name: str) -> bool:
     return bool(re.match(r"^splinterm\.[a-z][a-z0-9_]{0,63}$", name))
 
 
-@contextlib.contextmanager
-def _signals_deferred() -> Iterator[None]:
-    """Hold SIGINT/SIGTERM/SIGHUP during ordered cleanup (main thread only)."""
+CLEANUP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def _defer_signals() -> dict[int, Any]:
+    """Ignore SIGINT/SIGTERM/SIGHUP during ordered cleanup (main thread only)."""
     if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    names = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-    previous = {signum: signal.getsignal(signum) for signum in names}
-    for signum in names:
-        signal.signal(signum, signal.SIG_IGN)
-    try:
-        yield
-    finally:
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        return {}
+    previous: dict[int, Any] = {}
+    for signum in CLEANUP_SIGNALS:
+        previous[signum] = signal.signal(signum, signal.SIG_IGN)
+    return previous
+
+
+def _restore_signals(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+
+def interrupt_once(signum: int, _frame: object) -> None:
+    """One-shot signal handler: ignore further signals, then unwind to cleanup."""
+    for other in CLEANUP_SIGNALS:
+        signal.signal(other, signal.SIG_IGN)
+    raise HarnessInterrupted(signum)
 
 
 # ------------------------------------------------- negative case bodies
@@ -1148,6 +1261,16 @@ def _case_malformed_json(preflight: Preflight, host: McpHost) -> tuple[bool, str
 def _case_batch_after_initialize(preflight: Preflight, host: McpHost) -> tuple[bool, str, int | None]:
     host.initialize(timeout=preflight.options.request_timeout)
     host.send_bytes(b'[{"jsonrpc":"2.0","id":2,"method":"ping"}]\n')
+    returncode = preflight._terminal_exit(host)
+    host.wait_for_output(preflight.options.exit_timeout)
+    if returncode not in (None, 0) and host.stdout_messages == 1:
+        return True, "exited_after_initialize_only", None
+    return False, "did_not_fail_closed", None
+
+
+def _case_invalid_envelope_after_initialize(preflight: Preflight, host: McpHost) -> tuple[bool, str, int | None]:
+    host.initialize(timeout=preflight.options.request_timeout)
+    host.send_bytes(b"{}\n")  # valid JSON, not a JSON-RPC message
     returncode = preflight._terminal_exit(host)
     host.wait_for_output(preflight.options.exit_timeout)
     if returncode not in (None, 0) and host.stdout_messages == 1:
@@ -1217,6 +1340,7 @@ NEGATIVE_CASES: tuple[tuple[str, bool, Callable[[Preflight, McpHost], tuple[bool
     ("malformed_capabilities", True, _case_malformed_capabilities),
     ("malformed_json", True, _case_malformed_json),
     ("batch_after_initialize", True, _case_batch_after_initialize),
+    ("invalid_envelope_after_initialize", True, _case_invalid_envelope_after_initialize),
     ("oversized_line", True, _case_oversized_line),
     ("unterminated_frame", True, _case_unterminated_frame),
     ("discovery_before_initialized", False, _case_discovery_before_initialized),

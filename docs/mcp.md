@@ -350,14 +350,15 @@ To check a whole binary set without touching your daemon, policy, or desktop,
 run the headless preflight from a source checkout:
 
 ```bash
-python3 tools/mcp/run-demo.py preflight --installed
+cargo build --frozen --bin splinterd --bin splinterm --bin splinterm-mcp
 python3 tools/mcp/run-demo.py preflight --staged-bin-dir target/debug
 ```
 
 It starts a private, deny-all daemon with its own socket and directories,
 checks binary identity, the MCP handshake and required tools, and denial, then
-removes everything it created. It installs no policy and grants nothing. See
-[`tools/mcp/README.md`](../tools/mcp/README.md).
+removes everything it created. It installs no policy and grants nothing. An
+`--installed` mode exists but has not yet been validated against a real
+installed package. See [`tools/mcp/README.md`](../tools/mcp/README.md).
 
 The optional adapter is available from the AUR as `splinterm-mcp` and retains an
 exact-version dependency on `splinterm`. Nix/Home Manager, non-SSH gateways,

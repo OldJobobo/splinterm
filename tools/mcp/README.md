@@ -15,14 +15,16 @@ action happens anywhere in this directory's M1 code.
 cargo build --frozen --bin splinterd --bin splinterm --bin splinterm-mcp
 python3 tools/mcp/run-demo.py preflight --staged-bin-dir target/debug
 
-# The installed package set (default /usr/bin); nothing is installed or changed.
-python3 tools/mcp/run-demo.py preflight --installed
-
 # Retain evidence in an existing directory.
 python3 tools/mcp/run-demo.py preflight --staged-bin-dir target/debug --evidence-dir /tmp/mcp-evidence
 ```
 
-The command prints one JSON summary line. Exit status: `0` passed, `1`
+`--installed [--bin-dir /usr/bin]` selects the installed adjacent set instead.
+It is **not yet validated against a real installed package**; use the staged
+form above as the supported path until it is.
+
+The command prints one JSON summary line (including `evidence_complete`; a
+failure to write evidence never hides the verdict or changes the exit code). Exit status: `0` passed, `1`
 preflight_failed, `2` cleanup_incomplete, `3` aborted, `64` usage error.
 
 What it does, in order:
@@ -35,28 +37,37 @@ What it does, in order:
    check uses), and `splinterm-mcp`'s `serverInfo.version` must match that
    pair's version. Installed mode also rejects a `PATH` entry that shadows the
    selected set and checks the package provenance record when one exists.
-   Staged mode records the source commit and dirty state, refuses `/usr/bin`,
-   and never falls back to installed binaries.
+   Staged mode records the source commit, the dirty state of *tracked* files
+   (untracked files such as logs are not in the patch digest, so they do not
+   count), and the patch digest when dirty. It refuses `/usr/bin` and never
+   falls back to installed binaries.
 2. **Isolation.** Creates a nonce-named mode-0700 root under `$TMPDIR` with
    private HOME, XDG config/state/cache/data/runtime, TMPDIR, and socket. The
    child environment is built from scratch: no Wayland/X11/D-Bus session, no
    `SPLINTERM_POLICY` (the daemon starts deny-all), no Splint discovery hints,
    and no `SPLINTERM_ENABLE_DEV_ATTACH`.
-3. **Daemon.** Starts the selected `splinterd` in its own session, waits until
-   the private socket accepts connections, and checks the running process's
-   executable device/inode against the selection.
+3. **Daemon.** Starts the selected `splinterd` in its own session with its
+   output discarded, waits until the private socket accepts connections, and
+   checks the running process's executable device/inode against the selection.
+   The adapter's executable identity is checked the same way before
+   `initialize`. XDG isolation does not cover the system journal: the isolated
+   daemon still sends its bounded diagnostic events, including denials, to the
+   user journal (`SYSLOG_IDENTIFIER=splinterd`). The preflight neither reads
+   nor retains them.
 4. **Protocol.** Initializes MCP `2025-11-25` exactly, sends
    `notifications/initialized`, records the whole catalog (34 tools today), and
    validates only the 11 tools the demo needs: name, wire input/output schema
-   (against `dist/schemas/mcp/v2`), and annotations. Additions never fail the
-   preflight; a missing or changed required tool does.
+   (against `dist/schemas/mcp/v2`, or `--schema-root`), and annotations.
+   Additions never fail the preflight; a missing or changed required tool
+   does, and so does a schema root that cannot be read.
 5. **Deny-all.** `splinterm.ping` must succeed, and
    `splinterm.inspect_topology` must fail with the structured `unauthorized`
    envelope and no data. A generic or `internal` error is not deny proof. No
    other tool is called, including `splinterm.report_agent_status` (a mutation).
 6. **Negative cases.** Each runs in a fresh adapter: unsupported version,
-   malformed capabilities, malformed JSON, batch array, oversized line, and
-   unterminated frame must end the adapter without further messages; discovery
+   malformed capabilities, malformed JSON, batch array, valid JSON that is not
+   a JSON-RPC message, oversized line, and unterminated frame must end the
+   adapter without further messages; discovery
    before `notifications/initialized` and a duplicate `initialize` must be
    rejected with `-32600` while the session stays usable.
 7. **Cleanup.** Closes every adapter's stdin and awaits exit; stops the daemon
@@ -65,7 +76,14 @@ What it does, in order:
    socket is gone; checks that no process still names the private root;
    verifies the user's normal daemon socket, topology, and policy files are
    unchanged (equality only, never contents); and removes only the nonce root
-   after checking its device/inode. It never kills by name, title, or user.
+   after checking its device/inode. A stale socket is unlinked only through a
+   verified descriptor for the root's `run` directory, and descendants are
+   killed through a pidfd after re-checking their start time. It never kills
+   by name, title, or user.
+
+   SIGINT, SIGTERM, and SIGHUP are one-shot: the first unwinds into this
+   cleanup and later ones are ignored, so a repeated Ctrl+C cannot skip it.
+   The result is then `aborted` (exit 3).
 
 ## Evidence
 
