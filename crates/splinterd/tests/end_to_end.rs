@@ -3676,7 +3676,8 @@ async fn wait_for_file_contents(path: &Path, expected: &str) {
 )]
 async fn terminal_body_sentinel_stays_out_of_durable_state_audit_and_observation() {
     // Every daemon target at trace and the rest at debug, so a body that
-    // reached any log statement would land in the captured stderr.
+    // reached any log statement would land in the captured log stream
+    // (`daemon.stdout`).
     const ENVIRONMENT: &[(&str, &str)] = &[(
         "RUST_LOG",
         "debug,splinterd=trace,splinterm_pty=trace,splinterm_terminal=trace",

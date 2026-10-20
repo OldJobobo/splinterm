@@ -95,10 +95,11 @@
 //! body really crossed), holds no checkpoint descriptor or mapping after its
 //! commit, and keeps the sentinel out of its observations and audit records.
 //! After every Splint-carrying case, however the candidate ended (adopted,
-//! rolled back, crashed, hung, stopped, or killed while hung holding every
-//! checkpoint), no name under the test's private directory mentions a
-//! checkpoint and no file there holds the sentinel; `/dev/shm` is only
-//! listed. A filter argument runs only the cases whose names contain it.
+//! rolled back, crashed, hung, stopped, or killed after its failure while
+//! still holding every checkpoint), no name under the test's private
+//! directory mentions a checkpoint and no file there holds the sentinel;
+//! `/dev/shm` is only listed. A filter argument selects cases as libtest's
+//! would ([`CaseSelection`]); one that matches no case fails the run.
 //!
 //! # Why the boundary is driven at the function level
 //!
@@ -419,8 +420,8 @@ const FAULT_POINTS: [CandidateFaultPoint; 6] = [
     CandidateFaultPoint::ScopeAdoption,
     CandidateFaultPoint::ActorStaging,
 ];
-/// Every case, in run order. A filter argument (as libtest takes one) runs
-/// only the cases whose names contain it.
+/// Every case, in run order; [`CaseSelection`] picks the ones a run
+/// executes.
 const CASES: [(&str, fn()); 14] = [
     ("adopt", adopt_case),
     ("rollback", rollback_case),
@@ -537,20 +538,125 @@ fn main() -> ExitCode {
             let stray = fs::File::open("/dev/null").unwrap();
             let flags = rustix::io::fcntl_getfd(&stray).unwrap();
             rustix::io::fcntl_setfd(&stray, flags - rustix::io::FdFlags::CLOEXEC).unwrap();
-            let filter = env::args()
-                .skip(1)
-                .find(|argument| !argument.starts_with('-'));
-            for (case, run) in CASES {
-                if filter.as_deref().is_none_or(|filter| case.contains(filter)) {
-                    run();
-                    println!("handoff_exec_adoption: {case} passed");
-                }
+            assert_case_selection_parsing();
+            let selection = CaseSelection::parse(env::args().skip(1));
+            let selected = CASES
+                .iter()
+                .filter(|(case, _)| selection.matches(case))
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                eprintln!(
+                    "handoff_exec_adoption: no case matches the filter {:?}",
+                    selection.filter.as_deref().unwrap_or_default()
+                );
+                return ExitCode::FAILURE;
+            }
+            for (case, run) in &selected {
+                run();
+                println!("handoff_exec_adoption: {case} passed");
             }
             drop(stray);
+            println!(
+                "handoff_exec_adoption: {} of {} cases run",
+                selected.len(),
+                CASES.len()
+            );
             println!("handoff_exec_adoption: ok");
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The cases this run selects, read from the arguments the way libtest
+/// reads them: the first free argument is the filter (with this target's
+/// `handoff_exec_adoption::` prefix from `--list` stripped), the value of
+/// an option that takes one is never the filter, and `--exact` matches
+/// whole names instead of substrings.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CaseSelection {
+    filter: Option<String>,
+    exact: bool,
+}
+
+impl CaseSelection {
+    /// libtest options whose value is the next argument.
+    const VALUE_OPTIONS: [&str; 7] = [
+        "--test-threads",
+        "--skip",
+        "--logfile",
+        "--color",
+        "--format",
+        "--shuffle-seed",
+        "-Z",
+    ];
+
+    fn parse(arguments: impl IntoIterator<Item = String>) -> Self {
+        let mut selection = Self::default();
+        let mut arguments = arguments.into_iter();
+        while let Some(argument) = arguments.next() {
+            if Self::VALUE_OPTIONS.contains(&argument.as_str()) {
+                arguments.next();
+            } else if argument == "--exact" {
+                selection.exact = true;
+            } else if !argument.starts_with('-') && selection.filter.is_none() {
+                let name = argument
+                    .strip_prefix("handoff_exec_adoption::")
+                    .unwrap_or(&argument);
+                selection.filter = Some(name.to_owned());
+            }
+        }
+        selection
+    }
+
+    fn matches(&self, case: &str) -> bool {
+        self.filter.as_deref().is_none_or(|filter| {
+            if self.exact {
+                case == filter
+            } else {
+                case.contains(filter)
+            }
+        })
+    }
+}
+
+/// [`CaseSelection`]'s parsing, checked on every run of this harness
+/// (which has no libtest `#[test]` runner of its own).
+fn assert_case_selection_parsing() {
+    let parse = |arguments: &[&str]| {
+        CaseSelection::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+    };
+    let filter = |name: &str, exact| CaseSelection {
+        filter: Some(name.to_owned()),
+        exact,
+    };
+    assert_eq!(parse(&[]), CaseSelection::default());
+    assert_eq!(parse(&["--test-threads", "1"]), CaseSelection::default());
+    assert_eq!(parse(&["--test-threads=1"]), CaseSelection::default());
+    assert_eq!(
+        parse(&[
+            "--color",
+            "never",
+            "-Z",
+            "unstable-options",
+            "--format",
+            "terse"
+        ]),
+        CaseSelection::default()
+    );
+    assert_eq!(
+        parse(&["--skip", "adopt", "rollback"]),
+        filter("rollback", false)
+    );
+    assert_eq!(
+        parse(&["--test-threads", "1", "killed-hung-candidate"]),
+        filter("killed-hung-candidate", false)
+    );
+    let exact = parse(&["--exact", "handoff_exec_adoption::rollback"]);
+    assert_eq!(exact, filter("rollback", true));
+    assert!(exact.matches("rollback"));
+    assert!(!exact.matches("rollback-of-rollback"));
+    assert!(parse(&["rollback"]).matches("rollback-of-rollback"));
+    assert!(!parse(&["nosuchcase"]).matches("adopt"));
 }
 
 /// How one stage's old generation behaves, and what fails its forward
@@ -3386,10 +3492,12 @@ fn rollback_guard_timeout_case() {
 }
 
 /// Plan 0037 M5: a forward candidate is killed (`SIGKILL`, as systemd's
-/// final stop escalation) while it hangs holding every carried checkpoint.
-/// It failed at startup and waits for a thread that outlives its runtime
-/// (the guard-timeout seam), with each carried terminal body still in an
-/// inherited sealed memfd. The kill leaves no checkpoint-named artifact and
+/// final stop escalation) after its injected startup failure (the
+/// guard-timeout seam, whose thread outlives the runtime), while it still
+/// holds every carried checkpoint, which the test asserts before the kill:
+/// each carried terminal body is still in an inherited sealed memfd. The
+/// kill lands somewhere in the failed candidate's teardown, not necessarily
+/// inside its wait for one thread. It leaves no checkpoint-named artifact and
 /// no file holding a terminal body anywhere the test owns: the anonymous
 /// checkpoint memory goes with the process. Nothing committed, so the
 /// durable Topology is the old generation's.
@@ -3407,7 +3515,8 @@ fn killed_hung_candidate_case() {
     );
     let record = stage.record();
     stage.wait_for_log("test seam: started a thread that outlives the runtime");
-    // Hung, and holding exactly the carried checkpoints as anonymous memfds.
+    // Failed, and still holding exactly the carried checkpoints as
+    // anonymous memfds.
     assert_eq!(
         checkpoint_descriptors(record.pid),
         record.carried.len(),
