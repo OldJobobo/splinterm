@@ -99,8 +99,9 @@
 //!   whatever else holds. No seam overrides that decision, and the only
 //!   feature that does (`vm-acceptance-live-handoff`) is test-only and
 //!   refused by packaging;
-//! * `cargo test` builds are unpackaged (zero source commit), so the report
-//!   names `NotPackaged` too;
+//! * plain `cargo test` builds are unpackaged (zero source commit), so the
+//!   report names `NotPackaged` too; a package's `check()` builds them with
+//!   its provenance, where the D8 refusal names `RollbackUnavailable`;
 //! * the running daemon retains rollback authority, and finds the forward
 //!   pair's package record, only beside `/usr/bin` or a `/nix/store` output
 //!   (`package_provenance_path`), never at a private prefix, and a package
@@ -180,8 +181,9 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     ClientFrame, ClientRole, ControlMode, DaemonHandoffMode, ErrorCode, HandoffBlockingReason,
-    LaunchParameters, MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON, PROTOCOL_VERSION, ProtocolError,
-    Request, Response, ServerFrame, TerminalSnapshot, encode_frame,
+    HandoffBuildProvenance, LaunchParameters, MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON,
+    PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame, TerminalSnapshot,
+    encode_frame,
     handoff_outcome::{HandoffOutcome, HandoffOutcomeKind},
     image_content_socket_path,
 };
@@ -2183,13 +2185,16 @@ fn assert_refuses_another_handoff(
     };
     assert_eq!(report.daemon_generation, daemon_generation);
     assert!(!report.rollback_available, "{report:?}");
-    // A test build is unpackaged, so its rollback reason is `NotPackaged`.
-    assert!(
-        report
-            .blocking_reasons
-            .contains(&HandoffBlockingReason::NotPackaged),
-        "{report:?}"
-    );
+    // A plain `cargo test` build is unpackaged, so its rollback reason is
+    // `NotPackaged`. A package's own `check()` builds the tests with its
+    // provenance (`build-local-package.sh` sets `local-committed-head`), so
+    // there the spent authority itself is the reason.
+    let expected = if report.build.provenance == HandoffBuildProvenance::Unpackaged {
+        HandoffBlockingReason::NotPackaged
+    } else {
+        HandoffBlockingReason::RollbackUnavailable
+    };
+    assert!(report.blocking_reasons.contains(&expected), "{report:?}");
     let Some(ServerFrame::Error { error, .. }) = &answers[answers.len() - 1] else {
         panic!("Execute was not refused: {answers:?}");
     };
