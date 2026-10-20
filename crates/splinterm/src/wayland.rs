@@ -2849,6 +2849,7 @@ const fn trusted_dialog_key(keysym: Keysym) -> TrustedDialogKey {
     match keysym {
         Keysym::g | Keysym::G => TrustedDialogKey::G,
         Keysym::d | Keysym::D => TrustedDialogKey::D,
+        Keysym::r | Keysym::R => TrustedDialogKey::R,
         Keysym::Return | Keysym::KP_Enter => TrustedDialogKey::Enter,
         Keysym::Escape => TrustedDialogKey::Escape,
         _ => TrustedDialogKey::Other,
@@ -14094,10 +14095,15 @@ mod tests {
             "Splinterm — Trusted Access Request"
         );
         let upgrade = WindowOptions {
-            trusted_consent: Some(TrustedConsentUi::upgrade(decision)),
+            trusted_consent: Some(TrustedConsentUi::upgrade(decision.clone())),
             ..WindowOptions::default()
         };
         assert_eq!(initial_window_title(&upgrade), "Splinterm — Upgrade");
+        let restart = WindowOptions {
+            trusted_consent: Some(TrustedConsentUi::restart(decision)),
+            ..WindowOptions::default()
+        };
+        assert_eq!(initial_window_title(&restart), "Splinterm — Upgrade");
     }
 
     #[test]
@@ -14107,6 +14113,8 @@ mod tests {
             (Keysym::G, TrustedDialogKey::G),
             (Keysym::d, TrustedDialogKey::D),
             (Keysym::D, TrustedDialogKey::D),
+            (Keysym::r, TrustedDialogKey::R),
+            (Keysym::R, TrustedDialogKey::R),
             (Keysym::Return, TrustedDialogKey::Enter),
             (Keysym::KP_Enter, TrustedDialogKey::Enter),
             (Keysym::Escape, TrustedDialogKey::Escape),

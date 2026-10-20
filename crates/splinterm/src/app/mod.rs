@@ -10,6 +10,7 @@ mod human_output;
 mod integrations;
 mod interrupted;
 mod keymap_cli;
+mod launcher_check;
 mod local_service;
 mod machine;
 mod omarchy_hint;

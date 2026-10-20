@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use splinterm_core::{Axis, DojoId, LairId, SplintId, SplitSide};
 use splinterm_protocol::{AgentState, validate_agent_status_detail};
 
+use super::launcher_check::LauncherStage;
+
 #[derive(Debug, Parser)]
 #[command(version, about = "Splinterm terminal client")]
 pub(in crate::app) struct Cli {
@@ -387,6 +389,20 @@ pub(in crate::app) enum Command {
     /// Private trusted dialog child of `upgrade --now`.
     #[command(hide = true, name = "upgrade-dialog")]
     UpgradeDialog,
+    /// Private desktop launcher check of the running daemon's state, run by
+    /// `splinterm-xdg-terminal-exec` before it opens anything.
+    #[command(hide = true, name = "launcher-check")]
+    LauncherCheck {
+        /// What the launcher just did to splinterd.service.
+        #[arg(long, value_enum)]
+        after: Option<LauncherStage>,
+        /// Never ask: an unattended launch answers any question "Not now".
+        #[arg(long)]
+        no_ask: bool,
+    },
+    /// Private trusted dialog child of `launcher-check`.
+    #[command(hide = true, name = "restart-dialog")]
+    RestartDialog,
 }
 
 /// Closed vocabulary of explicitly reported agent display states.
@@ -677,6 +693,54 @@ mod tests {
         }
         let parsed = Cli::try_parse_from(["splinterm", "upgrade-dialog"]).unwrap();
         assert!(matches!(parsed.command, Some(Command::UpgradeDialog)));
+    }
+
+    #[test]
+    fn launcher_check_takes_only_its_stage_and_stays_hidden() {
+        use clap::CommandFactory as _;
+
+        for (arguments, after, no_ask) in [
+            (&["splinterm", "launcher-check"][..], None, false),
+            (
+                &["splinterm", "launcher-check", "--after", "start"][..],
+                Some(LauncherStage::Start),
+                false,
+            ),
+            (
+                &[
+                    "splinterm",
+                    "launcher-check",
+                    "--no-ask",
+                    "--after",
+                    "restart",
+                ][..],
+                Some(LauncherStage::Restart),
+                true,
+            ),
+            (&["splinterm", "launcher-check", "--no-ask"][..], None, true),
+        ] {
+            let parsed = Cli::try_parse_from(arguments).unwrap();
+            assert!(
+                matches!(
+                    parsed.command,
+                    Some(Command::LauncherCheck { after: parsed_after, no_ask: parsed_no_ask })
+                        if parsed_after == after && parsed_no_ask == no_ask
+                ),
+                "{arguments:?}"
+            );
+        }
+        for rejected in [
+            &["splinterm", "launcher-check", "--after", "stop"][..],
+            &["splinterm", "launcher-check", "--yes"][..],
+            &["splinterm", "launcher-check", "--", "/usr/bin/true"][..],
+        ] {
+            assert!(Cli::try_parse_from(rejected).is_err(), "{rejected:?}");
+        }
+        let parsed = Cli::try_parse_from(["splinterm", "restart-dialog"]).unwrap();
+        assert!(matches!(parsed.command, Some(Command::RestartDialog)));
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("launcher-check"), "{help}");
+        assert!(!help.contains("restart-dialog"), "{help}");
     }
 
     #[test]

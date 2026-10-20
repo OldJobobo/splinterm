@@ -135,81 +135,254 @@ def package_metadata(package: Path) -> str:
     return run(["bsdtar", "-xOf", str(package), ".PKGINFO"], capture_output=True).stdout
 
 
+# The launcher acts only on `splinterm launcher-check` (Plan 0037 Milestone 4):
+# 0 ready, 3 not now, 10 start the service, 11 restart it. The fake client
+# returns the scripted statuses in order and every action lands in one log, so
+# each case asserts the launcher's complete, ordered side effects. A status
+# ending in "c" stands for an answer given in the trusted dialog (logged, and
+# refused under --no-ask); "kill" makes the check die from SIGKILL.
+LAUNCHER_CHECK = "launcher-check"
+UNATTENDED_CHECK = "launcher-check --no-ask"
+START = "systemctl --user start splinterd.service"
+RELOAD = "systemctl --user daemon-reload"
+RESTART = "systemctl --user restart splinterd.service"
+AFTER_START = "launcher-check --after start"
+AFTER_RESTART = "launcher-check --after restart"
+UNATTENDED_AFTER_RESTART = "launcher-check --no-ask --after restart"
+CONFIRMED = "dialog: 11"
+DECLINED = "dialog: 3"
+LAUNCH = "xdg-launch"
+SCREENSAVER = ("--app-id=org.omarchy.screensaver", "--", "omarchy-screensaver")
+
+# (name, launcher arguments, scripted check statuses, expected exit, expected
+#  log, stderr fragment)
+LAUNCHER_CASES = (
+    ("matching build launches directly", (), [0], 0,
+     [LAUNCHER_CHECK, LAUNCH], ""),
+    ("no daemon: start once, then launch", (), [10, 0], 0,
+     [LAUNCHER_CHECK, START, AFTER_START, LAUNCH], ""),
+    ("idle other build: restart without asking", (), [11, 0], 0,
+     [LAUNCHER_CHECK, RELOAD, RESTART, AFTER_RESTART, LAUNCH], ""),
+    ("active other build, restart confirmed in the dialog", (), ["11c", 0], 0,
+     [LAUNCHER_CHECK, CONFIRMED, RELOAD, RESTART, AFTER_RESTART, LAUNCH], ""),
+    ("active other build, Not now: no side effects", (), ["3c"], 3,
+     [LAUNCHER_CHECK, DECLINED], ""),
+    ("unreadable 0.1 daemon, Not now: a failed ping restarts nothing", (), ["3c"], 3,
+     [LAUNCHER_CHECK, DECLINED], ""),
+    ("started daemon with an idle other build restarts once", (), [10, 11, 0], 0,
+     [LAUNCHER_CHECK, START, AFTER_START, RELOAD, RESTART, AFTER_RESTART, LAUNCH], ""),
+    ("started daemon asks, and Not now opens nothing", (), [10, "3c"], 3,
+     [LAUNCHER_CHECK, START, AFTER_START, DECLINED], ""),
+    ("started daemon never ready: no restart", (), [10, 1], 1,
+     [LAUNCHER_CHECK, START, AFTER_START], ""),
+    ("still not the installed build after a restart: no second restart", (), [11, 1], 1,
+     [LAUNCHER_CHECK, RELOAD, RESTART, AFTER_RESTART], ""),
+    ("a check status out of contract after a restart is not retried", (), [11, 11], 1,
+     [LAUNCHER_CHECK, RELOAD, RESTART, AFTER_RESTART], "after the restart; no further restart"),
+    ("an older client without the check restarts nothing", (), [2], 1,
+     [LAUNCHER_CHECK], "status 2; nothing was restarted"),
+    ("a check killed by a signal restarts nothing", (), ["kill"], 1,
+     [LAUNCHER_CHECK], "status 137; nothing was restarted"),
+    ("an untrusted or busy check fails closed", (), [1], 1,
+     [LAUNCHER_CHECK], ""),
+    ("the screensaver never asks", SCREENSAVER, [3], 3,
+     [UNATTENDED_CHECK], ""),
+    ("the screensaver still restarts an idle daemon", SCREENSAVER, [11, 0], 0,
+     [UNATTENDED_CHECK, RELOAD, RESTART, UNATTENDED_AFTER_RESTART, LAUNCH], ""),
+    ("a command launch never asks", ("--", "/usr/bin/true"), [3], 3,
+     [UNATTENDED_CHECK], ""),
+    ("an explicit app ID alone never asks", ("--app-id=org.example.tool",), [0], 0,
+     [UNATTENDED_CHECK, LAUNCH], ""),
+    ("a working directory stays interactive", ("--working-directory=/tmp",), [0], 0,
+     [LAUNCHER_CHECK, LAUNCH], ""),
+)
+
+
+def write_launcher_fakes(fake: Path) -> None:
+    (fake / "splinterm").write_text(
+        "#!/bin/sh\n"
+        "state=$SPLINTERM_TEST_STATE\n"
+        "case $1 in\n"
+        "  ping) printf 'ping\\n' >>\"$state/log\"; [ -f \"$state/ping-ok\" ]; exit ;;\n"
+        "  launcher-check)\n"
+        "    arguments=\" $* \"\n"
+        "    printf '%s\\n' \"$*\" >>\"$state/log\"\n"
+        "    set -- $(cat \"$state/statuses\")\n"
+        "    [ $# -gt 0 ] || { echo 'launcher-check called too often' >&2; exit 99; }\n"
+        "    status=$1; shift; printf '%s ' \"$@\" >\"$state/statuses\"\n"
+        "    case $status in\n"
+        "      kill) kill -KILL $$ ;;\n"
+        "      *c)\n"
+        "        case $arguments in\n"
+        "          *' --no-ask '*) echo 'asked under --no-ask' >&2; exit 98 ;;\n"
+        "        esac\n"
+        "        printf 'dialog: %s\\n' \"${status%c}\" >>\"$state/log\"\n"
+        "        exit \"${status%c}\" ;;\n"
+        "    esac\n"
+        "    exit \"$status\" ;;\n"
+        "esac\n"
+        "printf '%s\\n' \"$1\" >>\"$state/log\"\n"
+        "printf '%s\\n' \"$@\" >\"$SPLINTERM_TEST_RECORD\"\n",
+        encoding="utf-8",
+    )
+    (fake / "systemctl").write_text(
+        "#!/bin/sh\n"
+        "printf 'systemctl %s\\n' \"$*\" >>\"$SPLINTERM_TEST_STATE/log\"\n"
+        "[ ! -f \"$SPLINTERM_TEST_STATE/systemctl-fails\" ]\n",
+        encoding="utf-8",
+    )
+    for executable in (fake / "splinterm", fake / "systemctl"):
+        executable.chmod(0o755)
+
+
+def run_launcher_case(
+    launcher: Path,
+    environment: dict[str, str],
+    state: Path,
+    statuses: list[int | str],
+    ping_ok: bool = False,
+    systemctl_fails: bool = False,
+    arguments: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    for leftover in state.iterdir():
+        leftover.unlink()
+    (state / "statuses").write_text(" ".join(map(str, statuses)), encoding="utf-8")
+    (state / "log").write_text("", encoding="utf-8")
+    if ping_ok:
+        (state / "ping-ok").touch()
+    if systemctl_fails:
+        (state / "systemctl-fails").touch()
+    result = run(
+        [str(launcher), *arguments],
+        env=environment,
+        timeout=10,
+        check=False,
+        capture_output=True,
+    )
+    return result, (state / "log").read_text(encoding="utf-8").splitlines()
+
+
 def validate_launcher(root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="splinterm-launcher-") as directory:
         fake = Path(directory)
         state = fake / "state"
+        runtime = fake / "runtime"
         record = fake / "record"
-        (fake / "splinterm").write_text(
-            "#!/bin/sh\n"
-            "if [ \"$1\" = ping ]; then\n"
-            "  count=0; [ ! -f \"$SPLINTERM_TEST_STATE/count\" ] || count=$(cat \"$SPLINTERM_TEST_STATE/count\")\n"
-            "  count=$((count + 1)); printf '%s' \"$count\" >\"$SPLINTERM_TEST_STATE/count\"\n"
-            "  [ -f \"$SPLINTERM_TEST_STATE/ready\" ]; exit\n"
-            "fi\n"
-            "printf '%s\\n' \"$@\" >\"$SPLINTERM_TEST_RECORD\"\n",
-            encoding="utf-8",
-        )
-        (fake / "systemctl").write_text(
-            "#!/bin/sh\n"
-            "printf '%s\\n' \"$*\" >>\"$SPLINTERM_TEST_STATE/systemctl\"\n"
-            "[ \"$2\" != restart ] || : >\"$SPLINTERM_TEST_STATE/ready\"\n",
-            encoding="utf-8",
-        )
-        for executable in (fake / "splinterm", fake / "systemctl"):
-            executable.chmod(0o755)
+        write_launcher_fakes(fake)
         state.mkdir()
+        runtime.mkdir(mode=0o700)
         environment = os.environ.copy()
+        environment.pop("SPLINTERM_SOCKET", None)
         environment.update(
             PATH=f"{fake}:{root / 'usr/bin'}:{environment['PATH']}",
             SPLINTERM_TEST_STATE=str(state),
             SPLINTERM_TEST_RECORD=str(record),
+            XDG_RUNTIME_DIR=str(runtime),
         )
-        launcher = str(root / "usr/bin/splinterm-xdg-terminal-exec")
-        run([launcher], env=environment, timeout=10)
-        calls = (state / "systemctl").read_text(encoding="utf-8").splitlines()
-        assert calls == ["--user start splinterd.service", "--user restart splinterd.service"]
-        assert record.read_text(encoding="utf-8").splitlines() == ["xdg-launch"]
+        launcher = root / "usr/bin/splinterm-xdg-terminal-exec"
 
-        run(
-            [launcher, "--working-directory=/tmp/a b"],
-            env=environment,
-            timeout=10,
+        for name, arguments, statuses, code, expected, fragment in LAUNCHER_CASES:
+            for ping_ok in (False, True):
+                if record.exists():
+                    record.unlink()
+                result, log = run_launcher_case(
+                    launcher, environment, state, statuses, ping_ok, arguments=arguments
+                )
+                assert result.returncode == code, (name, result)
+                assert log == expected, (name, log)
+                assert fragment in result.stderr, (name, result.stderr)
+                # Nothing opens unless the check said the daemon is this build.
+                assert record.exists() == (LAUNCH in expected), (name, record.exists())
+                # The removed fallback: the launcher never pings to decide,
+                # whether a ping would succeed or fail.
+                assert "ping" not in log, (name, log)
+
+        result, log = run_launcher_case(
+            launcher, environment, state, [10], systemctl_fails=True
         )
-        assert record.read_text(encoding="utf-8").splitlines() == [
-            "xdg-launch",
-            "--working-directory=/tmp/a b",
-        ]
-
-        run(
-            [
-                launcher,
-                "--working-directory=/tmp/a b",
-                "--app-id=org.omarchy.screensaver",
-                "--",
-                "/usr/bin/printf",
-                "",
-                "$(must-not-run)",
-            ],
-            env=environment,
-            timeout=10,
+        assert result.returncode == 1, result
+        assert log == [LAUNCHER_CHECK, START], log
+        assert "could not start splinterd.service" in result.stderr, result.stderr
+        result, log = run_launcher_case(
+            launcher, environment, state, [11], systemctl_fails=True
         )
-        assert record.read_text(encoding="utf-8").splitlines() == [
-            "xdg-launch",
-            "--working-directory=/tmp/a b",
-            "--app-id=org.omarchy.screensaver",
-            "--",
-            "/usr/bin/printf",
-            "",
-            "$(must-not-run)",
-        ]
+        assert result.returncode == 1, result
+        assert log == [LAUNCHER_CHECK, RELOAD], log
+        assert "could not restart splinterd.service" in result.stderr, result.stderr
 
-        run([str(root / "usr/bin/splinterm-dojos")], env=environment, timeout=10)
-        assert record.read_text(encoding="utf-8").splitlines() == ["dojos"]
-        run([str(root / "usr/bin/splinterm-sessions")], env=environment, timeout=10)
-        assert record.read_text(encoding="utf-8").splitlines() == ["dojos"]
-        run([str(root / "usr/bin/splinterm-reopen")], env=environment, timeout=10)
-        assert record.read_text(encoding="utf-8").splitlines() == ["reopen"]
+        # Concurrent launches decide one at a time: a held launcher lock
+        # delays the check rather than letting two launches restart.
+        lock = runtime / "splinterm-launcher.lock"
+        holder = subprocess.Popen(["flock", str(lock), "sleep", "1"])
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not lock.exists():
+                time.sleep(0.01)
+            time.sleep(0.1)
+            started = time.monotonic()
+            result, log = run_launcher_case(launcher, environment, state, [0])
+            waited = time.monotonic() - started
+        finally:
+            holder.wait(timeout=10)
+        assert result.returncode == 0, result
+        assert log == [LAUNCHER_CHECK, LAUNCH], log
+        assert waited >= 0.5, waited
+
+        # A development socket is only pinged: never checked, started, or
+        # restarted.
+        development = dict(environment, SPLINTERM_SOCKET=str(fake / "dev.sock"))
+        result, log = run_launcher_case(launcher, development, state, [])
+        assert result.returncode == 1, result
+        assert log == ["ping"], log
+        assert "development socket is unavailable" in result.stderr, result.stderr
+        result, log = run_launcher_case(launcher, development, state, [], ping_ok=True)
+        assert result.returncode == 0, result
+        assert log == ["ping", LAUNCH], log
+
+        for arguments, expected in (
+            ((), ["xdg-launch"]),
+            (("--working-directory=/tmp/a b",), ["xdg-launch", "--working-directory=/tmp/a b"]),
+            (
+                (
+                    "--working-directory=/tmp/a b",
+                    "--app-id=org.omarchy.screensaver",
+                    "--",
+                    "/usr/bin/printf",
+                    "",
+                    "$(must-not-run)",
+                ),
+                [
+                    "xdg-launch",
+                    "--working-directory=/tmp/a b",
+                    "--app-id=org.omarchy.screensaver",
+                    "--",
+                    "/usr/bin/printf",
+                    "",
+                    "$(must-not-run)",
+                ],
+            ),
+        ):
+            # Arguments survive the start and restart paths unchanged.
+            for statuses in ([0], [10, 0], [11, 0]):
+                result, _ = run_launcher_case(
+                    launcher, environment, state, statuses, arguments=arguments
+                )
+                assert result.returncode == 0, result
+                assert record.read_text(encoding="utf-8").splitlines() == expected
+
+        for alias, expected in (
+            ("splinterm-dojos", ["dojos"]),
+            ("splinterm-sessions", ["dojos"]),
+            ("splinterm-reopen", ["reopen"]),
+        ):
+            result, log = run_launcher_case(root / "usr/bin" / alias, environment, state, [0])
+            assert result.returncode == 0, result
+            assert record.read_text(encoding="utf-8").splitlines() == expected
+            # Every alias passes the same daemon state boundary, and may ask.
+            assert log == [LAUNCHER_CHECK, expected[0]], log
+            result, log = run_launcher_case(root / "usr/bin" / alias, environment, state, ["3c"])
+            assert result.returncode == 3, result
+            assert log == [LAUNCHER_CHECK, DECLINED], log
 
 
 def sealed_preflight_report(binary: Path, role: int) -> bytes:

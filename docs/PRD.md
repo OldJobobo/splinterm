@@ -324,7 +324,7 @@ Priority meanings:
 | `FR-PKG-03` | P0 | Packaging must not edit user homes, default terminal preference, Omarchy-owned files, SSH policy, or service lingering without an explicit separate action. | Implemented |
 | `FR-PKG-04` | P1 | The MCP adapter must remain an optional exact-version split package and installation alone must grant no authority. | Implemented |
 | `FR-PKG-05` | P0 | Stable distribution must use immutable versioned source/artifact URLs, checksums, and a documented upgrade/support policy. | Versioned GitHub and AUR artifacts are available; stable 0.1.0 retains documented platform and upgrade boundaries without promising a support lifetime |
-| `FR-PKG-06` | P0 | A handoff-capable launcher must automatically perform only a fully negotiated compatible handoff on human launch, restart automatically only when idle after the `0.1.x` bootstrap boundary, and require exact-count confirmation for the first `0.1.x` to `0.2.0` restart and any active destructive fallback. Package scriptlets must never initiate user-service handoff or restart. | Accepted target in ADR 0011; not implemented |
+| `FR-PKG-06` | P0 | A handoff-capable launcher must automatically perform only a fully negotiated compatible handoff on human launch, restart automatically only when idle after the `0.1.x` bootstrap boundary, and require exact-count confirmation for the first `0.1.x` to `0.2.0` restart and any active destructive fallback. Package scriptlets must never initiate user-service handoff or restart. | Partial: launcher idle-only restart and confirmed destructive restart implemented (Plan 0037 M4); the `0.1.x` count is best effort (operator decision); automatic handoff on launch deferred |
 
 ## 11. Security and privacy requirements
 

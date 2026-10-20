@@ -3230,6 +3230,13 @@ impl Connection {
         Self::connect_role(ClientRole::TrustedUi).await
     }
 
+    /// Negotiates a trusted-UI connection over an already connected local
+    /// daemon socket, so the caller can inspect the listener's credentials
+    /// (`SO_PEERCRED`) before, and regardless of, the handshake.
+    pub async fn connect_trusted_ui_stream(stream: UnixStream) -> Result<Self> {
+        Self::connect_stream_at(stream, ClientRole::TrustedUi, socket_path().ok()).await
+    }
+
     /// Connects without the trusted graphical-client authorization bypass.
     pub async fn connect_automation() -> Result<Self> {
         Self::connect_role(ClientRole::Automation).await

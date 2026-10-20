@@ -26,7 +26,8 @@ use super::{
 };
 
 /// A trusted dialog Window's answer channel and kind. Build it with
-/// [`TrustedConsentUi::access_consent`] or [`TrustedConsentUi::upgrade`].
+/// [`TrustedConsentUi::access_consent`], [`TrustedConsentUi::upgrade`], or
+/// [`TrustedConsentUi::restart`].
 pub struct TrustedConsentUi {
     pub decision: StdSender<bool>,
     pub(crate) kind: TrustedDialogKind,
@@ -53,6 +54,17 @@ impl TrustedConsentUi {
         Self {
             decision,
             kind: TrustedDialogKind::Upgrade,
+            focused_at: None,
+        }
+    }
+
+    /// The launcher's restart question: only `R` or the green area restarts,
+    /// after the same arming delay; `Enter`, `Escape` and `D` answer "Not now".
+    #[must_use]
+    pub fn restart(decision: StdSender<bool>) -> Self {
+        Self {
+            decision,
+            kind: TrustedDialogKind::Restart,
             focused_at: None,
         }
     }

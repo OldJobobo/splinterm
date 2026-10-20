@@ -250,6 +250,40 @@ command has no machine output and rejects `--output`, `--schema-major`,
 | 6 | The upgrade did not complete: the same daemon process serves the same generation with the previous build, after a rollback or because it never left. Terminals were kept. |
 | 7 | The connection closed as a committed upgrade's does, but the result is unconfirmed: no daemon answered within 15 seconds, or the daemon process could not be identified (for example from another PID namespace). Run `splinterm upgrade` to check. |
 
+### Desktop launch with another daemon build
+
+The desktop launcher (`splinterm-xdg-terminal-exec` and its Dojo aliases)
+never restarts a daemon that may still run shells without asking, and never
+starts a live upgrade. Before opening a Window it reads the same report as
+`splinterm upgrade`, through a private command, and compares the running
+daemon's build identity with the installed client's:
+
+- the installed build opens the Window; no daemon starts the service;
+- another build that reports no live terminal restarts without asking;
+- another build with live terminals, or a daemon it cannot read (a 0.1.x
+  daemon, another protocol, or no answer, after one retry), opens a trusted
+  dialog titled "Splinterm — Upgrade". **Not now** is the default and opens
+  nothing: `Enter`, `Escape`, `D`, the red left area, closing the dialog, or no
+  answer within 120 seconds. Only `R` or the green right area chooses
+  **Restart now (ends N shells)**, with the daemon's exact count; for a daemon
+  it cannot read, "ends about N shells" from a best-effort count of running
+  workload units, or "all running shells". Keys count only after about 600 ms
+  of focus, and key repeats never count. When the daemon reports that nothing
+  blocks a live upgrade, the dialog says to choose **Not now** and run
+  `splinterm upgrade`;
+- a daemon it cannot read whose executable is the installed `splinterd` is
+  busy, not incompatible: the launch fails and says to try again;
+- an unattended launch, with an explicit app ID (such as the Omarchy
+  screensaver's) or a command, never shows the dialog and opens nothing
+  instead; an idle restart stays automatic.
+
+A restart happens only while the daemon that answered is
+`splinterd.service`'s main process, and concurrent launches take a lock, so
+nothing is restarted twice.
+
+See [Packaging](packaging.md#desktop-launcher-and-the-running-daemon) for the
+complete state table and the 0.1.x bootstrap boundary.
+
 ### Commands during an upgrade
 
 While an upgrade prepares, the daemon refuses requests that would change

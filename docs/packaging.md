@@ -86,8 +86,10 @@ otherwise the installer uses anonymous GitHub API and release downloads through
 
 Before Pacman installation, the script verifies package checksums and matching
 split-package versions. It rejects a shadowing user-local client, preserves an
-emergency snapshot of replaced binaries for diagnosis or manual recovery, warns
-before stopping daemon-owned shells, restores the daemon after failure, and
+emergency snapshot of replaced binaries for diagnosis or manual recovery, says
+before confirmation how many live terminals stopping the daemon ends (see
+[Installer confirmation](#installer-confirmation)), restores the daemon after
+failure, and
 checks Pacman integrity, the desktop entry, and trusted-client sibling identity
 after restart. The snapshot is not presented as a Pacman package rollback;
 reinstall a previously retained package for a package-consistent downgrade. It
@@ -215,12 +217,12 @@ not submit the local-build recipe to the AUR.
 
 The package does not modify a user's home, enable a service or lingering,
 replace their terminal preference, edit SSH policy, or edit
-`/usr/share/omarchy`. The desktop launcher starts `splinterd.service` on demand.
+`/usr/share/omarchy`. The desktop launcher starts `splinterd.service` on demand
+and never restarts a daemon that may still run shells without asking; see
+[Desktop launcher and the running daemon](#desktop-launcher-and-the-running-daemon).
 The headless unit reads an optional owner-controlled environment file, reloads
 policy with SIGHUP, and stops with SIGINT so the daemon can reap its shells and
-remove its socket cleanly. If protocol negotiation fails after an upgrade, it
-restarts the user daemon once and waits a bounded 2.5 seconds. This ends old
-daemon-owned shells because cross-version process migration is not promised.
+remove its socket cleanly.
 The local and remote packages must be version-compatible, and the relay must
 remain adjacent to the exact packaged `splinterd` executable because every
 logical graphical channel repeats executable-identity validation. See
@@ -264,18 +266,94 @@ desktop action or `splinterm-dojos` to choose an existing running Dojo, and
 **Reopen Last Dojo** or `splinterm-reopen` for the last locally remembered Dojo
 whose complete pane layout is still running. `splinterm-sessions` remains a
 compatibility alias. These aliases
-also start the user daemon on demand. They never restore exited processes. The
+also start the user daemon on demand and pass the same daemon check as the
+default launcher. They never restore exited processes. The
 **Remote Dojos** action runs `splinterm remotes`, which lists the profiles in
 `remotes.toml` and needs no local daemon. See
 `configuration.md` for the suggested Omarchy shortcut split.
+
+## Desktop launcher and the running daemon
+
+A package upgrade replaces the files under `/usr` but leaves the running
+`splinterd`, and every shell it owns, on the previous build. Package scriptlets
+never restart user services. Before it opens anything,
+`splinterm-xdg-terminal-exec` (and the `splinterm-dojos`, `splinterm-reopen`,
+and `splinterm-sessions` aliases) asks the running daemon for its own report:
+its build identity and its exact count of live terminals. It compares that
+identity with the build of the `splinterm` it runs (on packaged systems
+`/usr/bin/splinterm`, installed together with `/usr/bin/splinterd`). A failed
+`ping` is never taken as permission to restart.
+
+The launcher also identifies the process behind the socket without its
+cooperation: its process ID from the socket's peer credentials, and the device
+and inode of its executable.
+
+| Running daemon | What the launcher does |
+| --- | --- |
+| None is listening | Starts `splinterd.service`, waits up to 5 seconds for it, and opens the Window. |
+| The installed build | Opens the Window. |
+| Another build that reports no live terminal | Restarts the service without asking, then opens the Window. |
+| Another build with live terminals | Asks in a trusted dialog; restarts only on an explicit confirmation. |
+| Cannot be read (another protocol, such as a 0.1.x daemon; no answer within 5 seconds; refused as busy; an unusable answer), after one retry | Asks in the same dialog. The count comes from the running `splinterm-splint*.scope` workload units and is labelled best effort ("ends about N shells"); when none can be counted, it says it ends all running shells. |
+| Cannot be read, but its executable is the installed `splinterd` | Fails as busy ("try again shortly"); never asks, never restarts. |
+| Cannot be read, and the client is not the `splinterm` beside the daemon's executable (a development build or a copy earlier on `PATH`), or its process cannot be identified | Fails with an explanation; never asks. |
+| Refuses the client as untrusted, or the socket cannot be used | Fails with an explanation; nothing is started or restarted. |
+
+Only a plain interactive launch may ask. A launch with an explicit app ID,
+such as the Omarchy screensaver's `--app-id=org.omarchy.screensaver`, or with a
+command after `--` may be unattended, so it never shows the dialog: any
+question is answered **Not now** with a message on standard error, and nothing
+opens. An idle daemon is still restarted automatically for such a launch.
+
+The dialog is titled "Splinterm — Upgrade" and follows the rules of the
+`splinterm upgrade` dialog. It names the running and installed versions, the
+exact number of shells a restart ends, and, when the running daemon reports
+that nothing blocks a live upgrade, says to choose **Not now** and run
+`splinterm upgrade` instead. `Enter`, `Escape`, `D`, or the red left area
+answer **Not now**, the default; only `R` or the green right area chooses
+**Restart now (ends N shells)**. Keys and the restart click count only after
+the dialog has had focus for about 600 ms, and held or repeating keys never
+count. Closing the dialog or no answer within 120 seconds means **Not now**.
+Before restarting, the launcher reads the daemon again and asks again if what
+the restart would end has changed. **Not now** opens nothing and changes
+nothing; the launcher exits with status 3. Without a graphical session, it
+prints the same explanation and does not restart.
+
+A restart is bound to the daemon process that was reported idle or confirmed:
+it happens only while that process is `splinterd.service`'s main process
+(`systemctl --user show -p MainPID`). Otherwise the launcher reads the daemon
+again, and fails if the service never owns it, since restarting the service
+would not replace that daemon. Concurrent launches take a lock
+(`$XDG_RUNTIME_DIR/splinterm-launcher.lock`) around the check, the restart, and
+the check after it, so two launches cannot restart the daemon twice. A restart
+runs `systemctl --user daemon-reload` and `systemctl --user restart
+splinterd.service`. If the restarted daemon is still not the installed build,
+the launcher fails with "no further restart" rather than restarting again;
+check `command -v splinterm` and the unit's `ExecStart`. The launcher never
+starts a live upgrade itself. An explicit development socket
+(`SPLINTERM_SOCKET`) is only pinged, never started or restarted.
+
+### Bootstrap boundary from 0.1.x
+
+A 0.1.x daemon predates live upgrade and cannot report its shells to a 0.2
+client or hand them over. Moving from 0.1.x to 0.2.0 therefore needs one final
+restart, which ends every running shell and the programs in them; save work
+first. The launcher treats a 0.1.x daemon as unreadable and asks before that
+restart, even when the daemon may be idle, with a best-effort count of its
+running workload units. It asks only from the new `splinterm` beside the old
+daemon's (now replaced) executable. Later compatible 0.2.x upgrades can
+use `splinterm upgrade` where the running daemon reports live upgrade
+available. After any restart, reopen existing Splinterm Windows: a running
+client keeps the old binary, which no longer matches the installed trusted
+client.
 
 ## Live installation and rollback
 
 Building and inspecting does not require installation. The guarded local
 upgrade command validates the newest package under `packaging/`, shows the
-installed and candidate versions, warns before ending daemon-owned shells,
-installs with Pacman, reloads the user unit, and restores the daemon's previous
-running state:
+installed and candidate versions, states what installing ends (see
+[Installer confirmation](#installer-confirmation)), installs with Pacman,
+reloads the user unit, and restores the daemon's previous running state:
 
 ```bash
 tools/package/upgrade-local-package.sh
@@ -290,6 +368,45 @@ tools/package/upgrade-local-package.sh --build
 The command uses `sudo` because it is intended to run in an interactive
 terminal, matching Omarchy's privilege convention. Pass `--yes` only for an
 already-approved unattended invocation.
+
+### Installer confirmation
+
+Both `tools/package/upgrade-local-package.sh` and `./install.sh` stop a running
+daemon before Pacman replaces it, so both ask first and say what that ends:
+
+- no daemon running: installing ends nothing;
+- a daemon reporting its count (through the read-only `splinterm upgrade`
+  report): the exact number of live terminals that end, or that none do;
+- a daemon that cannot report it, such as 0.1.x: every running shell ends,
+  with a best-effort count of running `splinterm-splint*.scope` workload units
+  when there are any.
+
+The prompt also names a downgrade. Cancelling exits with status 0 before any
+stop, install, reload, or start: the daemon and its shells keep running and
+nothing changes. After confirmation, the installers authenticate `sudo` before
+stopping anything, so a refused or failed `sudo` ends no shell, and Pacman runs
+with `--noconfirm` so that it cannot ask again once the daemon is stopped.
+Installing never hands shells to the new build; a live upgrade is a separate
+`splinterm upgrade --now` against an already installed build.
+
+**Downgrade.** Installing an older package is the same confirmed stop, install,
+and start. An older daemon cannot read saved topology written in a newer
+format: it logs that metadata recovery failed, renames those files to
+`topology.invalid-*` in its state directory instead of deleting them, and
+starts with no saved sessions. Reinstall the newer package to read them again.
+
+**Downgrading to 0.1.x.** The 0.1 launcher restarts an incompatible daemon
+without asking, ending every running shell. Before downgrading to 0.1.x, stop
+`splinterd.service` yourself from a terminal Splinterm does not own, or use one
+of the guarded installers, which stop it only after your confirmation. Never
+downgrade with `pacman -U` alone while shells run.
+
+**Interrupted installation.** If the installer exits early after stopping the
+daemon, whether from an error, a failed Pacman transaction, or Ctrl-C, its exit
+handler reloads the user unit and starts the daemon again from whatever is
+installed; the shells that the stop ended do not come back. A `SIGKILL` skips
+that handler and leaves the daemon stopped; the next launch starts it. A Pacman
+transaction that did not complete is repaired by installing the package again.
 
 Trusted graphical authority requires `/usr/bin/splinterm` to match the device
 and inode of the client sibling adjacent to the running `/usr/bin/splinterd`.
@@ -313,7 +430,9 @@ systemctl --user start splinterd.service
 `splinterm upgrade` reports whether the running daemon could instead hand its
 terminals to the newly installed build without a restart. Live upgrade is not
 enabled in this release, so the restart above remains the upgrade path; see
-[Daemon upgrade](cli.md#daemon-upgrade).
+[Daemon upgrade](cli.md#daemon-upgrade). Without the manual restart, the next
+desktop launch asks before restarting; see
+[Desktop launcher and the running daemon](#desktop-launcher-and-the-running-daemon).
 
 Install the adapter only when an MCP host will be configured:
 
