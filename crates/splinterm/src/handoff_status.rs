@@ -21,7 +21,7 @@
 //! for M3.14's continuation outcome.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -127,6 +127,9 @@ struct HandoffState {
     /// reported the attempt ends it, so a slower pane still at `Preparing`
     /// cannot step the banner back.
     fenced: bool,
+    /// Panes that already ended this attempt while others still report it.
+    /// One of them hearing `Preparing` starts the next attempt, unfenced.
+    ended: HashSet<u64>,
     awaiting_reconnect: bool,
     revision: u64,
     notice: Option<(u64, HandoffNotice)>,
@@ -161,6 +164,7 @@ impl HandoffState {
         if self.sources.is_empty() {
             // The attempt ended for every pane; the next one starts unfenced.
             self.fenced = false;
+            self.ended.clear();
         }
         let changed = before != (self.phase(), self.notice);
         if changed {
@@ -186,10 +190,19 @@ impl HandoffState {
                 state.generation = generation;
                 state.sources.clear();
                 state.fenced = false;
+                state.ended.clear();
                 state.awaiting_reconnect = false;
             }
             match phase {
                 HandoffStatusPhase::Preparing => {
+                    if state.ended.contains(&source) {
+                        // A pane that ended the last attempt starts the next:
+                        // every pane that ended it is in the next one too,
+                        // and the panes still ending the last one no longer
+                        // decide the banner.
+                        state.ended.clear();
+                        state.fenced = false;
+                    }
                     let previous = state.sources.insert(source, SourcePhase::Preparing);
                     if previous == Some(SourcePhase::Fenced) {
                         // This pane went on to a next attempt, so it lost the
@@ -207,6 +220,9 @@ impl HandoffState {
                 }
                 HandoffStatusPhase::Cancelled { reason } => {
                     let reported = state.sources.remove(&source).is_some();
+                    if reported && !state.sources.is_empty() {
+                        state.ended.insert(source);
+                    }
                     // The attempt ends once every pane that reported it has
                     // cancelled. A `Cancelled` also proves the daemon is still
                     // serving, so a connection lost while fenced was not the
@@ -225,6 +241,7 @@ impl HandoffState {
     fn remove_source(&mut self, source: u64) -> bool {
         self.update(|state| {
             state.sources.remove(&source);
+            state.ended.remove(&source);
         })
     }
 
@@ -236,6 +253,7 @@ impl HandoffState {
                 state.awaiting_reconnect = true;
             }
             state.sources.remove(&source);
+            state.ended.remove(&source);
         })
     }
 
@@ -540,6 +558,26 @@ mod tests {
             view.notice,
             Some((_, HandoffNotice::Cancelled(HandoffCancelReason::Requested)))
         ));
+    }
+
+    #[test]
+    fn a_next_attempt_heard_before_a_slow_pane_ends_the_last_is_preparing() {
+        let hub = HandoffStatusHub::default();
+        let fast = hub.source();
+        let slow = hub.source();
+        assert!(fast.observe(GENERATION, HandoffStatusPhase::Fenced));
+        assert!(!slow.observe(GENERATION, HandoffStatusPhase::Fenced));
+        assert!(!fast.observe(GENERATION, cancelled(HandoffCancelReason::Failed)));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Fenced);
+        // The fast pane hears the next attempt while the slow pane has not
+        // yet ended the last one: the banner says Preparing, still paused.
+        assert!(fast.observe(GENERATION, HandoffStatusPhase::Preparing));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Preparing);
+        assert!(!slow.observe(GENERATION, cancelled(HandoffCancelReason::Failed)));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Preparing);
+        assert!(!slow.observe(GENERATION, HandoffStatusPhase::Preparing));
+        assert!(fast.observe(GENERATION, HandoffStatusPhase::Fenced));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Fenced);
     }
 
     #[test]

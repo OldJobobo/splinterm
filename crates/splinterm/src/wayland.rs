@@ -205,7 +205,7 @@ use file_drop::{
     FileDropTarget, URI_LIST_MIME, accepted_uri_list_mime, copy_action_supported,
     dropped_file_payload, file_drop_target_is_current, pane_drop_target,
 };
-use handoff::HandoffFrontend;
+use handoff::{HandoffFrontend, HeldFailure};
 use input::{
     CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, HistoryNavigation,
     ModalPointerFrame, MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile,
@@ -554,6 +554,20 @@ fn pane_stream_has_terminal_notice(updates: &[WindowUpdate]) -> bool {
     updates
         .iter()
         .any(|update| matches!(update, WindowUpdate::Exited { .. } | WindowUpdate::Shutdown))
+}
+
+/// Closes exited Splints unless the Window is paused for a daemon handoff
+/// (Plan 0061 M3.12a): a fenced daemon refuses the close, and a refused close
+/// is never retried, so the pending set waits for the resume instead. Returns
+/// false only when the topology queue closed.
+fn enqueue_exited_splints_unless_paused(
+    handoff_paused: bool,
+    dojo_id: DojoId,
+    lair_retention: LairRetention,
+    pending: &mut HashSet<SplintId>,
+    commands: &Sender<WindowTopologyCommand>,
+) -> bool {
+    handoff_paused || enqueue_pending_exited_splints(dojo_id, lair_retention, pending, commands)
 }
 
 fn enqueue_pending_exited_splints(
@@ -6368,6 +6382,18 @@ impl App {
             Some(target) => target.command(command),
             None => command,
         });
+        // Submitted during a daemon handoff: the prompt stays open with its
+        // text, to submit once the pause ends, and its title says why.
+        if self.handoff_paused()
+            && command
+                .as_ref()
+                .is_some_and(WindowTopologyCommand::paused_during_handoff)
+        {
+            self.surface
+                .window
+                .set_title("Splinterm — Paused while splinterd upgrades; submit after it finishes");
+            return;
+        }
         self.modal.dojo_prompt_explorer_target = None;
         self.close_dojo_prompt();
         if let Some(command) = command
@@ -9258,6 +9284,7 @@ impl App {
                     // was fenced: the Window stays with its banner, and its
                     // topology commands stop here until M3.12b reconnects.
                     self.tab_state.topology_commands = None;
+                    self.handoff.hold(HeldFailure::TopologyManager);
                 }
                 WindowTopologyUpdate::Shutdown(_) => {
                     if let Some(diagnostics) = diagnostics() {
@@ -9389,16 +9416,15 @@ impl App {
         }
         let theme = self.presentation.theme;
         let waker = self.platform.update_waker.clone();
-        // Exited panes close once the pause ends; a fenced daemon refuses it.
-        let topology_commands = self
-            .tab_state
-            .topology_commands
-            .clone()
-            .filter(|_| !self.handoff_paused());
+        let topology_commands = self.tab_state.topology_commands.clone();
+        let handoff_paused = self.handoff_paused();
         let hold_on_disconnect = self.handoff.holds_window_on_disconnect();
+        let mut held_hidden_pane = false;
         for tab in self.tab_state.tabs.iter_mut() {
             if let Some(view) = tab.value.as_mut() {
-                view.drain_hidden_updates(&waker, theme, hold_on_disconnect)?;
+                if view.drain_hidden_updates(&waker, theme, hold_on_disconnect)? {
+                    held_hidden_pane = true;
+                }
                 for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
                     let input_pending = terminal_input_pending_for(
                         &self.input.pending_terminal_input,
@@ -9408,7 +9434,8 @@ impl App {
                 }
                 Self::release_tab_controllers(view, &self.input.pending_terminal_input);
                 if let Some(commands) = &topology_commands {
-                    enqueue_pending_exited_splints(
+                    enqueue_exited_splints_unless_paused(
+                        handoff_paused,
                         tab.dojo_id,
                         view.identity.lair_retention,
                         &mut view.pending_exited_splints,
@@ -9416,6 +9443,9 @@ impl App {
                     );
                 }
             }
+        }
+        if held_hidden_pane {
+            self.handoff.hold(HeldFailure::PaneStream);
         }
         if self.scheduling.exit {
             return Ok(());
@@ -9464,6 +9494,7 @@ impl App {
             self.panes.pane.controller_active = false;
             self.panes.pane.commands = None;
             self.panes.pane.updates = None;
+            self.handoff.hold(HeldFailure::PaneStream);
         } else if disconnected && !pane_stream_has_terminal_notice(&pending) {
             if let Some(diagnostics) = diagnostics() {
                 diagnostics.emit(
@@ -9947,12 +9978,14 @@ impl App {
             self.emit_resize()?;
         }
         if !self.panes.pending_exited_splints.is_empty() {
+            let handoff_paused = self.handoff_paused();
             let topology_queue_open =
                 self.tab_state
                     .topology_commands
                     .as_ref()
                     .is_some_and(|commands| {
-                        enqueue_pending_exited_splints(
+                        enqueue_exited_splints_unless_paused(
+                            handoff_paused,
                             self.tab_state.active_identity.dojo_id,
                             self.tab_state.active_identity.lair_retention,
                             &mut self.panes.pending_exited_splints,
@@ -12730,6 +12763,40 @@ mod tests {
         )]));
     }
 
+    /// Plan 0061 M3.12a: an exited pane's close waits out a handoff pause,
+    /// keeping its pending entry, and goes out once the pause ends.
+    #[test]
+    fn exited_splints_wait_for_the_end_of_a_handoff_pause() {
+        let exited = SplintId::new();
+        let mut pending = HashSet::from([exited]);
+        let dojo_id = DojoId::new();
+        let (commands, mut receiver) = tokio::sync::mpsc::channel(4);
+        assert!(enqueue_exited_splints_unless_paused(
+            true,
+            dojo_id,
+            LairRetention::Disposable,
+            &mut pending,
+            &commands
+        ));
+        assert!(pending.contains(&exited), "kept for the resume");
+        assert!(receiver.try_recv().is_err(), "nothing reaches the daemon");
+        assert!(enqueue_exited_splints_unless_paused(
+            false,
+            dojo_id,
+            LairRetention::Disposable,
+            &mut pending,
+            &commands
+        ));
+        assert!(pending.is_empty());
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            WindowTopologyCommand::Close {
+                dojo_id,
+                target: exited
+            }
+        );
+    }
+
     #[test]
     fn pending_exited_splints_retry_full_and_closed_topology_queues() {
         let first = SplintId::new();
@@ -13400,7 +13467,7 @@ mod tests {
             drop(updates);
             let result = view.drain_hidden_updates(&waker, ResolvedTheme::default(), hold);
             if hold {
-                result.unwrap();
+                assert!(result.unwrap(), "the loss is reported as held");
                 assert!(view.pane.commands.is_none());
                 assert!(view.pane.updates.is_none());
                 assert!(!view.pane.controller_active);
@@ -13408,6 +13475,79 @@ mod tests {
                 assert!(result.is_err());
             }
         }
+    }
+
+    /// Plan 0061 M3.12a: the resize and focus report a controller dropped
+    /// during a handoff pause are sent again when it ends, even though the
+    /// geometry did not change.
+    #[test]
+    fn a_handoff_resume_resends_geometry_and_the_focus_report() {
+        let splint = Splint::shell(PathBuf::from("/tmp"));
+        let splint_id = splint.id;
+        let (_updates, update_receiver) = tokio::sync::mpsc::channel(1);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::channel(8);
+        let mut view = DojoTabView::from_open(
+            WindowDojoIdentity {
+                topology_revision: TopologyRevision::new(1),
+                lair_id: LairId::new(),
+                dojo_id: DojoId::new(),
+                lair_name: "lair".to_owned(),
+                lair_retention: splinterm_core::LairRetention::Disposable,
+                dojo_name: "dojo".to_owned(),
+            },
+            LayoutNode::Leaf(splint),
+            vec![WindowPaneOptions {
+                snapshot: valid_snapshot(splint_id),
+                terminal_grid_limits: TerminalGridLimits::default(),
+                updates: update_receiver,
+                commands,
+                authority: AuthorityStatus::default(),
+                controlled: true,
+                image_sources: ImageContentLeaseSet::default(),
+            }],
+            splint_id,
+            ResolvedTheme::default(),
+            SCALE_DENOMINATOR,
+            &RenderContext::new(u16::MAX),
+        )
+        .unwrap();
+        view.pane
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .input_modes
+            .focus_reporting = true;
+        let resize = |pane: &mut PaneView| {
+            App::emit_pane_resize(pane, 800, 480, SCALE_DENOMINATOR, true).unwrap();
+        };
+        resize(&mut view.pane);
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(WindowCommand::Resize { .. })
+        ));
+        // Unchanged geometry is not sent again: this is what a controller
+        // dropping the resize during the pause would otherwise leave stale.
+        resize(&mut view.pane);
+        assert!(command_receiver.try_recv().is_err());
+        App::ready_pane_for_handoff_resume(&mut view.pane, true, &VecDeque::new());
+        assert_eq!(
+            command_receiver.try_recv().unwrap(),
+            WindowCommand::FocusReport(true)
+        );
+        resize(&mut view.pane);
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(WindowCommand::Resize { .. })
+        ));
+        // A terminal that never asked for focus reports hears none.
+        view.pane
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .input_modes
+            .focus_reporting = false;
+        App::ready_pane_for_handoff_resume(&mut view.pane, true, &VecDeque::new());
+        assert!(command_receiver.try_recv().is_err());
     }
 
     #[test]

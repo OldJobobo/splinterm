@@ -234,7 +234,11 @@ enum ControlNotice {
     /// A handoff phase for every control subscription, which forwards it as
     /// `SubscriptionEvent::HandoffStatus` (Plan 0061 M3.12a): the graphical
     /// client's per-pane control subscriptions carry its upgrade banner.
-    HandoffStatus(HandoffStatusPhase),
+    /// The serial orders it against a lag replay of the latest phase.
+    HandoffStatus {
+        serial: u64,
+        phase: HandoffStatusPhase,
+    },
     Status {
         splint_id: SplintId,
         incarnation: u64,
@@ -10409,10 +10413,35 @@ enum HandoffGatePhase {
 #[derive(Default)]
 struct HandoffGate {
     phase: StdMutex<HandoffGatePhase>,
-    /// The handoff status phase broadcast last, recorded under the topology
-    /// hub lock with each broadcast. A control subscription that starts, or
-    /// lags, after a broadcast is seeded from it (Plan 0061 M3.12a).
-    last_status: StdMutex<Option<HandoffStatusPhase>>,
+    /// The handoff status phase broadcast last and its serial, recorded under
+    /// the topology hub lock with each broadcast. A control subscription that
+    /// starts, or lags, after a broadcast is seeded from it (Plan 0061
+    /// M3.12a). Lock order: this before `phase`, never the reverse.
+    last_status: StdMutex<HandoffStatusRecord>,
+}
+
+/// The last handoff status broadcast to control subscriptions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HandoffStatusRecord {
+    /// Counts broadcasts; zero before the first.
+    serial: u64,
+    phase: Option<HandoffStatusPhase>,
+}
+
+impl HandoffStatusRecord {
+    /// The record as a subscriber may hear it while the gate is in
+    /// `gate`: a pause the gate no longer holds, left by a `Cancelled` whose
+    /// broadcast was lost, is never seeded or replayed.
+    fn replayable(self, gate: HandoffGatePhase) -> Self {
+        let stale = gate == HandoffGatePhase::Idle
+            && self
+                .phase
+                .is_some_and(|phase| !matches!(phase, HandoffStatusPhase::Cancelled { .. }));
+        Self {
+            phase: self.phase.filter(|_| !stale),
+            ..self
+        }
+    }
 }
 
 impl HandoffGate {
@@ -10438,8 +10467,10 @@ impl HandoffGate {
         *self.phase.lock().unwrap() = next;
     }
 
-    fn last_status(&self) -> Option<HandoffStatusPhase> {
-        *self.last_status.lock().unwrap()
+    /// The last handoff status broadcast, as a lagged subscriber may hear it.
+    fn replayable_status(&self) -> HandoffStatusRecord {
+        let last_status = self.last_status.lock().unwrap();
+        last_status.replayable(self.phase())
     }
 
     /// Subscribes to control notices with the handoff phase broadcast last.
@@ -10449,7 +10480,7 @@ impl HandoffGate {
         let last_status = self.last_status.lock().unwrap();
         ControlStream {
             notices: events.subscribe(),
-            handoff_seed: *last_status,
+            handoff_seed: last_status.replayable(self.phase()),
         }
     }
 }
@@ -10458,7 +10489,7 @@ impl HandoffGate {
 #[derive(Debug)]
 struct ControlStream {
     notices: broadcast::Receiver<ControlNotice>,
-    handoff_seed: Option<HandoffStatusPhase>,
+    handoff_seed: HandoffStatusRecord,
 }
 
 fn handoff_in_progress() -> ProtocolError {
@@ -11031,8 +11062,12 @@ async fn publish_handoff_status(state: &DaemonState, phase: HandoffStatusPhase) 
 /// in the same order as topology subscribers.
 fn publish_control_handoff_status(state: &DaemonState, phase: HandoffStatusPhase) {
     let mut last_status = state.handoff_gate.last_status.lock().unwrap();
-    *last_status = Some(phase);
-    publish_control_notice(state, ControlNotice::HandoffStatus(phase));
+    let serial = last_status.serial.wrapping_add(1);
+    *last_status = HandoffStatusRecord {
+        serial,
+        phase: Some(phase),
+    };
+    publish_control_notice(state, ControlNotice::HandoffStatus { serial, phase });
     drop(last_status);
 }
 
@@ -12956,15 +12991,24 @@ fn spawn_control_subscription(
         // A finished attempt's `Cancelled` is no news to a new subscriber, and
         // a fenced daemon refuses new control subscriptions.
         let mut pending_handoff = handoff_seed
+            .phase
             .filter(|phase| !matches!(phase, HandoffStatusPhase::Cancelled { .. }))
             .map(handoff_status);
+        // Broadcasts at or below this serial were already heard or replaced,
+        // as when older notices retained across a lag follow its replay.
+        let mut handoff_floor = handoff_seed.serial;
         let mut sequence = 1_u64;
         loop {
             let event = if let Some(event) = pending_handoff.take() {
                 Some(event)
             } else {
                 match stream.recv().await {
-                    Ok(ControlNotice::HandoffStatus(phase)) => Some(handoff_status(phase)),
+                    Ok(ControlNotice::HandoffStatus { serial, phase })
+                        if serial > handoff_floor =>
+                    {
+                        handoff_floor = serial;
+                        Some(handoff_status(phase))
+                    }
                     Ok(ControlNotice::Status {
                         splint_id: event_splint,
                         incarnation: event_incarnation,
@@ -13024,8 +13068,13 @@ fn spawn_control_subscription(
                         );
                         // A lost handoff phase is replaced by the latest one,
                         // `Cancelled` included, so a lagged client never stays
-                        // paused after the attempt ended.
-                        pending_handoff = state.handoff_gate.last_status().map(handoff_status);
+                        // paused after the attempt ended. Older phases still
+                        // retained behind the lag are skipped by serial.
+                        let latest = state.handoff_gate.replayable_status();
+                        if latest.serial > handoff_floor {
+                            handoff_floor = latest.serial;
+                            pending_handoff = latest.phase.map(handoff_status);
+                        }
                         Some(SubscriptionEvent::ControlStatusChanged { status })
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -18507,15 +18556,16 @@ mod tests {
     }
 
     /// A control subscription that lags past a handoff phase replays the
-    /// latest one, `Cancelled` included, so its client never stays paused.
+    /// latest one, `Cancelled` included, so its client never stays paused,
+    /// and skips the older phases still retained behind the lag.
     #[tokio::test]
     async fn a_lagged_control_subscription_replays_the_latest_handoff_status() {
         let state = test_state(false);
         let stream = state.handoff_gate.subscribe_control(&state.control_events);
-        // Both phases are lost to the lag; unrelated notices fill the queue.
+        // Preparing is lost to the lag as unrelated notices fill the queue;
+        // Fenced and Cancelled stay retained behind it.
         publish_control_handoff_status(&state, HandoffStatusPhase::Preparing);
-        publish_control_handoff_status(&state, cancelled(HandoffCancelReason::TimedOut));
-        for _ in 0..=CONTROL_EVENT_QUEUE {
+        for _ in 0..CONTROL_EVENT_QUEUE {
             publish_control_notice(
                 &state,
                 ControlNotice::Status {
@@ -18526,6 +18576,8 @@ mod tests {
                 },
             );
         }
+        publish_control_handoff_status(&state, HandoffStatusPhase::Fenced);
+        publish_control_handoff_status(&state, cancelled(HandoffCancelReason::TimedOut));
         let splint_id = SplintId::new();
         let (outbound, mut frames) = mpsc::channel(8);
         let _task = AbortOnDrop::new(spawn_control_subscription(
@@ -18559,6 +18611,67 @@ mod tests {
         assert_eq!(
             next_control_handoff_status(&mut frames, 5).await,
             (2, cancelled(HandoffCancelReason::TimedOut))
+        );
+        // The retained Fenced and Cancelled behind the lag are not replayed
+        // after it, which would show a spurious pause or second notice.
+        assert!(
+            time::timeout(Duration::from_millis(100), frames.recv())
+                .await
+                .is_err(),
+            "older retained phases are skipped by serial"
+        );
+    }
+
+    /// A pause whose `Cancelled` broadcast was lost, with the gate idle, is
+    /// never seeded to a new control subscription or replayed after a lag.
+    #[tokio::test]
+    async fn a_stale_pause_is_never_seeded_or_replayed() {
+        let fenced = HandoffStatusRecord {
+            serial: 4,
+            phase: Some(HandoffStatusPhase::Fenced),
+        };
+        assert_eq!(
+            fenced.replayable(HandoffGatePhase::Idle),
+            HandoffStatusRecord {
+                serial: 4,
+                phase: None
+            }
+        );
+        assert_eq!(fenced.replayable(HandoffGatePhase::Fenced), fenced);
+        let preparing = HandoffStatusRecord {
+            serial: 2,
+            phase: Some(HandoffStatusPhase::Preparing),
+        };
+        assert_eq!(preparing.replayable(HandoffGatePhase::Preparing), preparing);
+        assert_eq!(preparing.replayable(HandoffGatePhase::Idle).phase, None);
+        let ended = HandoffStatusRecord {
+            serial: 5,
+            phase: Some(cancelled(HandoffCancelReason::Requested)),
+        };
+        assert_eq!(ended.replayable(HandoffGatePhase::Idle), ended);
+
+        let state = test_state(false);
+        publish_control_handoff_status(&state, HandoffStatusPhase::Fenced);
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert_eq!(state.handoff_gate.replayable_status().phase, None);
+        let (outbound, mut frames) = mpsc::channel(8);
+        let _task = AbortOnDrop::new(spawn_control_subscription(
+            6,
+            state.handoff_gate.subscribe_control(&state.control_events),
+            outbound,
+            ControlSubscriptionContext {
+                state: Arc::clone(&state),
+                connection_id: 41,
+                splint_id: SplintId::new(),
+                incarnation: 1,
+                maximum_returned_bytes: None,
+            },
+        ));
+        assert!(
+            time::timeout(Duration::from_millis(100), frames.recv())
+                .await
+                .is_err(),
+            "no stale pause is seeded"
         );
     }
 

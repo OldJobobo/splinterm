@@ -493,13 +493,15 @@ impl DojoTabView {
 
     /// Drains the hidden tab's pane updates. A stream lost unexpectedly ends
     /// the Window unless `hold_on_disconnect`, the daemon handoff case, where
-    /// the pane is only marked disconnected (Plan 0061 M3.12a).
+    /// the pane is only marked disconnected (Plan 0061 M3.12a). Returns
+    /// whether it held such a loss.
     pub(super) fn drain_hidden_updates(
         &mut self,
         waker: &Waker,
         theme: ResolvedTheme,
         hold_on_disconnect: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let mut held = false;
         for pane in std::iter::once(&mut self.pane).chain(self.inactive_panes.iter_mut()) {
             let mut pending = Vec::new();
             let mut disconnected = false;
@@ -517,6 +519,7 @@ impl DojoTabView {
                 pane.controller_active = false;
                 pane.commands = None;
                 pane.updates = None;
+                held = true;
             }
             for update in pending {
                 if let WindowUpdate::Exited { splint_id } = update {
@@ -543,7 +546,7 @@ impl DojoTabView {
                 }
             }
         }
-        Ok(())
+        Ok(held)
     }
 
     pub(super) fn from_open(
