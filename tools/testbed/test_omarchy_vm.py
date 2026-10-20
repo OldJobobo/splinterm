@@ -169,6 +169,12 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             package_launch.index('mkdir -m 700 "$runtime"'),
         )
 
+    def test_package_launch_daemon_logs_info_for_acceptance_checks(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        launch = runner.split("  package-launch)", 1)[1].split("  package-stop)", 1)[0]
+        daemon = launch.split('nohup /usr/bin/splinterd >"$runtime/daemon.log"', 1)[0]
+        self.assertTrue(daemon.rstrip().splitlines()[-1].startswith("RUST_LOG=info "))
+
     def test_package_runtime_is_checkout_scoped_and_stop_checks_owner(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
         install = runner.split("  package-install)", 1)[1].split("  package-launch)", 1)[0]

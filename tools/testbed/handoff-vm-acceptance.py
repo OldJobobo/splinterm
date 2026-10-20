@@ -51,7 +51,7 @@ export SPLINTERM_SOCKET=$socket
 socket_process() {
   local role=$1 process executable
   for process in /proc/[0-9]*; do
-    tr '\0' '\n' <"$process/environ" 2>/dev/null | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
+    tr '\0' '\n' 2>/dev/null <"$process/environ" | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
     executable=$(readlink "$process/exe" 2>/dev/null || true)
     case $role:$executable in
       daemon:/usr/bin/splinterd|'daemon:/usr/bin/splinterd (deleted)'|'daemon:/memfd:splinterd-daemon (deleted)') echo "${process##*/}" ;;
