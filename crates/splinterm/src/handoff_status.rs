@@ -25,8 +25,19 @@
 //! daemon; [`HandoffStatusHub::reconnected`] ends the pause, and
 //! [`HandoffStatusHub::reconnect_failed`] leaves the Window open, paused,
 //! with its last screen and a lost-connection message. Nothing typed while
-//! paused is replayed. [`HandoffStatusHub::rolled_back`] is the hook for
-//! M3.14's continuation outcome.
+//! paused is replayed.
+//!
+//! A local Window that takes part in the handoff (Plan 0061 M3.14) instead
+//! holds [`WindowHandoffPhase::Continuing`] from the moment it accepts its
+//! prepare frame until the continuation reports the outcome. Its ordinary
+//! reconnection is gated meanwhile: a connection lost then is the expected
+//! exec, and is only remembered ([`HandoffStatusHub::begin_reconnect`] still
+//! answers that the Window holds). An adoption or a rollback relaunches the
+//! Window's process, so nothing reconnects; a cancelled attempt ends the
+//! participation ([`ContinuationParticipation`]), which starts the ordinary
+//! reconnection if a connection was lost meanwhile. A relaunched Window that
+//! finds the old generation serving shows "Rolled back"
+//! ([`HandoffStatusHub::rolled_back`]).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -64,6 +75,10 @@ pub enum WindowHandoffPhase {
     /// paused, with its last screen; its terminals may still be running in
     /// the daemon.
     Lost,
+    /// The Window takes part in the handoff and waits for its continuation's
+    /// outcome (M3.14). Paused, with no daemon request sent; its ordinary
+    /// reconnection waits for the outcome.
+    Continuing,
 }
 
 impl WindowHandoffPhase {
@@ -77,7 +92,7 @@ impl WindowHandoffPhase {
     /// daemon request, reads included, waits for reconnection or never runs.
     #[must_use]
     pub const fn disconnected(self) -> bool {
-        matches!(self, Self::Reconnecting | Self::Lost)
+        matches!(self, Self::Reconnecting | Self::Lost | Self::Continuing)
     }
 }
 
@@ -163,6 +178,17 @@ struct HandoffState {
     revision: u64,
     notice: Option<(u64, HandoffNotice)>,
     notices: u64,
+    /// Set while the Window takes part in a handoff (M3.14): whether a
+    /// connection was lost since it began.
+    continuation: Option<ContinuationState>,
+}
+
+/// A Window waiting for its continuation's outcome.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ContinuationState {
+    /// A connection was lost meanwhile; ending the participation without a
+    /// relaunch starts the ordinary reconnection.
+    lost_connection: bool,
 }
 
 /// Where the Window stands with a daemon connection lost during a handoff.
@@ -178,6 +204,8 @@ impl HandoffState {
     fn phase(&self) -> WindowHandoffPhase {
         if self.reconnect == Reconnect::Lost {
             WindowHandoffPhase::Lost
+        } else if self.continuation.is_some() {
+            WindowHandoffPhase::Continuing
         } else if self.reconnect == Reconnect::Pending {
             WindowHandoffPhase::Reconnecting
         } else if self.sources.is_empty() {
@@ -211,6 +239,30 @@ impl HandoffState {
             self.revision = self.revision.wrapping_add(1);
         }
         changed
+    }
+
+    /// Starts taking part in a handoff; refused once the Window is lost or
+    /// while it already takes part.
+    fn begin_continuation(&mut self) -> bool {
+        if self.reconnect == Reconnect::Lost || self.continuation.is_some() {
+            return false;
+        }
+        self.update(|state| state.continuation = Some(ContinuationState::default()));
+        true
+    }
+
+    /// Ends the participation without a relaunch. A connection lost meanwhile
+    /// starts the ordinary reconnection now, under a new epoch.
+    fn end_continuation(&mut self) -> bool {
+        self.update(|state| {
+            if let Some(continuation) = state.continuation.take()
+                && continuation.lost_connection
+                && state.reconnect != Reconnect::Lost
+            {
+                state.reconnect = Reconnect::Pending;
+                state.reconnect_epoch = state.reconnect_epoch.wrapping_add(1);
+            }
+        })
     }
 
     fn post_notice(&mut self, notice: HandoffNotice) {
@@ -292,6 +344,13 @@ impl HandoffState {
     /// Starts reconnecting when a handoff is preparing or fenced, or joins
     /// the reconnection already running; returns whether one is running.
     fn begin_reconnect(&mut self) -> bool {
+        if let Some(continuation) = &mut self.continuation {
+            // The expected exec of a handoff this Window takes part in: the
+            // Window holds, and reconnects only if the attempt ends without
+            // relaunching it.
+            continuation.lost_connection = true;
+            return true;
+        }
         match self.phase() {
             WindowHandoffPhase::Preparing | WindowHandoffPhase::Fenced => {
                 self.reconnect = Reconnect::Pending;
@@ -306,6 +365,8 @@ impl HandoffState {
                 true
             }
             WindowHandoffPhase::Idle | WindowHandoffPhase::Lost => false,
+            // Answered above, before the phase is read.
+            WindowHandoffPhase::Continuing => true,
         }
     }
 
@@ -353,6 +414,7 @@ impl HandoffState {
     fn rolled_back(&mut self) -> bool {
         self.update(|state| {
             state.sources.clear();
+            state.continuation = None;
             state.reconnect = Reconnect::Connected;
             state.post_notice(HandoffNotice::RolledBack);
         })
@@ -449,10 +511,35 @@ impl HandoffStatusHub {
         self.update(HandoffState::reconnect_failed);
     }
 
-    /// M3.14 hook: the continuation reported a rollback. Ends the pause and
-    /// shows "Rolled back" briefly.
+    /// The forward daemon failed and the old generation resumed: ends the
+    /// pause and shows "Rolled back" briefly. A Window relaunched across the
+    /// rollback calls it once it finds the old generation serving (M3.15).
     pub fn rolled_back(&self) {
         self.update(HandoffState::rolled_back);
+    }
+
+    /// This Window takes part in a handoff (M3.14): it holds
+    /// [`WindowHandoffPhase::Continuing`] until the returned participation
+    /// ends, and its ordinary reconnection waits meanwhile. `None` when the
+    /// Window is lost or already takes part.
+    #[must_use]
+    pub fn begin_continuation(&self) -> Option<ContinuationParticipation> {
+        let mut began = false;
+        self.update(|state| {
+            let revision = state.revision;
+            began = state.begin_continuation();
+            state.revision != revision
+        });
+        began.then(|| ContinuationParticipation {
+            hub: self.clone(),
+            ended: false,
+        })
+    }
+
+    /// Whether the Window takes part in a handoff and waits for its outcome.
+    #[must_use]
+    pub fn continuing(&self) -> bool {
+        self.lock().continuation.is_some()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HandoffState> {
@@ -524,6 +611,36 @@ impl Drop for HandoffStatusSource {
     }
 }
 
+/// A Window's participation in one handoff (M3.14). Ending it, or dropping
+/// it, returns the Window to the ordinary path: when a connection was lost
+/// meanwhile the Window starts reconnecting; otherwise the attempt's own
+/// status (normally `Cancelled`) decides the pause. A Window that is
+/// relaunched never ends it: its process image is replaced.
+#[derive(Debug)]
+pub struct ContinuationParticipation {
+    hub: HandoffStatusHub,
+    ended: bool,
+}
+
+impl ContinuationParticipation {
+    /// Ends the participation without a relaunch.
+    pub fn end(mut self) {
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        if !std::mem::replace(&mut self.ended, true) {
+            self.hub.update(HandoffState::end_continuation);
+        }
+    }
+}
+
+impl Drop for ContinuationParticipation {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 /// What a hub view changed in the frontend.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HandoffTransition {
@@ -592,7 +709,9 @@ impl HandoffPresentation {
     pub fn banner(&self) -> Option<HandoffBanner> {
         match self.phase {
             WindowHandoffPhase::Preparing => Some(HandoffBanner::Preparing),
-            WindowHandoffPhase::Fenced => Some(HandoffBanner::InputPaused),
+            WindowHandoffPhase::Fenced | WindowHandoffPhase::Continuing => {
+                Some(HandoffBanner::InputPaused)
+            }
             WindowHandoffPhase::Reconnecting => Some(HandoffBanner::Reconnecting),
             WindowHandoffPhase::Lost => Some(HandoffBanner::Lost),
             WindowHandoffPhase::Idle => {
@@ -908,6 +1027,74 @@ mod tests {
         let view = hub.view();
         assert_eq!(view.phase, WindowHandoffPhase::Idle);
         assert!(matches!(view.notice, Some((_, HandoffNotice::RolledBack))));
+    }
+
+    /// M3.14: a participating Window holds through the exec without running
+    /// its ordinary reconnection; ending the participation after a loss
+    /// starts it.
+    #[test]
+    fn a_participating_window_defers_reconnection_until_it_ends() {
+        let hub = HandoffStatusHub::default();
+        let pane = hub.source();
+        assert!(pane.observe(GENERATION, HandoffStatusPhase::Fenced));
+        let participation = hub.begin_continuation().unwrap();
+        assert!(
+            hub.begin_continuation().is_none(),
+            "one participation at a time"
+        );
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Continuing);
+        assert!(hub.input_paused());
+        assert!(WindowHandoffPhase::Continuing.disconnected());
+        assert!(hub.continuing());
+
+        pane.connection_lost();
+        assert!(hub.begin_reconnect(), "the Window holds");
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Continuing);
+        assert_eq!(hub.reconnect_pending(), None, "no coordinator reconnects");
+
+        participation.end();
+        assert!(!hub.continuing());
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Reconnecting);
+        let epoch = hub.reconnect_pending().unwrap();
+        assert!(hub.reconnected(GENERATION, epoch));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+    }
+
+    #[test]
+    fn a_participation_without_a_loss_returns_to_the_attempt() {
+        let hub = HandoffStatusHub::default();
+        let pane = hub.source();
+        assert!(pane.observe(GENERATION, HandoffStatusPhase::Fenced));
+        drop(hub.begin_continuation().unwrap());
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Fenced);
+        assert_eq!(hub.reconnect_pending(), None);
+        assert!(pane.observe(GENERATION, cancelled(HandoffCancelReason::Requested)));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+
+        // The banner during participation is the input-paused one.
+        let mut presentation = HandoffPresentation::default();
+        let participation = hub.begin_continuation().unwrap();
+        presentation.apply(hub.view(), Instant::now());
+        assert_eq!(presentation.banner(), Some(HandoffBanner::InputPaused));
+        participation.end();
+    }
+
+    #[test]
+    fn a_lost_or_rolled_back_window_ends_or_refuses_participation() {
+        let hub = HandoffStatusHub::default();
+        let participation = hub.begin_continuation().unwrap();
+        hub.rolled_back();
+        assert!(!hub.continuing());
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+        participation.end();
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+
+        let pane = hub.source();
+        assert!(pane.observe(GENERATION, HandoffStatusPhase::Fenced));
+        pane.connection_lost();
+        hub.reconnect_failed();
+        assert!(hub.begin_continuation().is_none());
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Lost);
     }
 
     struct CountingWake(AtomicUsize);

@@ -1489,9 +1489,8 @@ fn run_fontconfig_sources(
     if sorted {
         command.arg("-s");
     }
-    let output = command
-        .args(["-f", FONTCONFIG_FACE_FORMAT, pattern])
-        .output()
+    command.args(["-f", FONTCONFIG_FACE_FORMAT, pattern]);
+    let output = crate::child_spawn::spawn(|| command.output())
         .with_context(|| format!("run fc-match for {label}"))?;
     if !output.status.success() {
         bail!(

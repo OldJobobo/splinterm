@@ -186,11 +186,25 @@ fn run_client(
     arguments: &[String],
     inherited: &[BorrowedFd<'_>],
 ) -> Outcome {
+    run_program(CLIENT, &[], scratch, socket, arguments, inherited)
+}
+
+/// Starts `program` with `arguments` and `environment` added, while exactly
+/// `inherited` are inheritable, and waits for it within [`CASE_DEADLINE`].
+fn run_program(
+    program: &str,
+    environment: &[(&str, String)],
+    scratch: &Scratch,
+    socket: &Path,
+    arguments: &[String],
+    inherited: &[BorrowedFd<'_>],
+) -> Outcome {
     for descriptor in inherited {
         set_inheritable(*descriptor, true);
     }
-    let child = Command::new(CLIENT)
+    let child = Command::new(program)
         .args(arguments)
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .env("SPLINTERM_SOCKET", socket)
         .env("HOME", &scratch.0)
         .env("XDG_STATE_HOME", scratch.0.join("state"))
@@ -381,11 +395,259 @@ fn fails_clearly_when_no_dojo_survives() {
     println!("test window_resume_exec::fails_clearly_when_no_dojo_survives ... ok");
 }
 
+/// Selects a stand-in Window generation of this test binary.
+const STAGE: &str = "SPLINTERM_WINDOW_CONTINUATION_STAGE";
+/// The Lair (JSON) whose Dojos the stand-in Window shows.
+const STAGE_LAIR: &str = "SPLINTERM_WINDOW_CONTINUATION_LAIR";
+const OLD_GENERATION: u64 = 4;
+
+/// A sealed memfd holding the client binary: the forward client snapshot a
+/// handing-off daemon would pass.
+fn client_snapshot() -> OwnedFd {
+    use rustix::fs::{SealFlags, fcntl_add_seals};
+    let bytes = fs::read(CLIENT).unwrap();
+    let memfd = memfd_create(
+        "splinterm-forward-client",
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::EXEC,
+    )
+    .unwrap();
+    let mut file = File::from(memfd);
+    file.write_all(&bytes).unwrap();
+    let memfd = OwnedFd::from(file);
+    fcntl_add_seals(
+        &memfd,
+        SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+    )
+    .unwrap();
+    memfd
+}
+
+/// A stand-in Window (this process, single-threaded but for its stand-in
+/// daemon thread): it declares an anchor on a socket pair, receives a prepare
+/// frame carrying the sealed client snapshot and a continuation, takes part
+/// through the library's real path, and reaches the real relaunch exec. The
+/// daemon thread answers the acknowledgement and then sends the stage's
+/// outcome, or closes the continuation.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one stand-in Window generation: its daemon, its anchor, and its relaunch"
+)]
+fn stand_in_window(stage: &str) {
+    use splinterm::{
+        handoff_status::HandoffStatusHub,
+        window_continuation::{
+            AnchorConnection, ContinuationContext, ParticipationEnd, SystemExec, WindowLayout,
+            WindowLayoutLedger, participate,
+        },
+    };
+    use splinterm_protocol::{
+        HANDOFF_PREPARE_DESCRIPTORS, HandoffClientSnapshot, HandoffPrepare,
+        handoff_outcome::{HandoffOutcome, HandoffOutcomeKind},
+        handoff_prepare::{
+            HandoffPrepareDescriptors, encode_handoff_prepare, send_handoff_prepare,
+        },
+    };
+
+    let lair: Lair = serde_json::from_str(&env::var(STAGE_LAIR).unwrap()).unwrap();
+    let snapshot = client_snapshot();
+    let stat = rustix::fs::fstat(&snapshot).unwrap();
+    let prepare = HandoffPrepare {
+        daemon_generation: OLD_GENERATION,
+        prepare_id: 23,
+        descriptors: HANDOFF_PREPARE_DESCRIPTORS,
+        client_snapshot: HandoffClientSnapshot {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+            size: u64::try_from(stat.st_size).unwrap(),
+            sha256: [5; 32],
+        },
+    };
+    let (window_end, mut daemon) = UnixStream::pair().unwrap();
+    let outcome = match stage {
+        "adopted" => Some(HandoffOutcomeKind::Adopted),
+        "rolled-back" => Some(HandoffOutcomeKind::RolledBack),
+        _ => None,
+    };
+    let _daemon = thread::spawn(move || {
+        let _ = read_client_frame(&mut daemon);
+        write_server_frame(
+            &mut daemon,
+            &ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: OLD_GENERATION,
+            },
+        );
+        let (continuation, daemon_end) = continuation_pair();
+        let encoded = encode_handoff_prepare(&prepare).unwrap();
+        let descriptors = HandoffPrepareDescriptors::new(snapshot, continuation);
+        send_handoff_prepare(daemon.as_fd(), &encoded, &descriptors).unwrap();
+        drop(descriptors);
+        let Some(ClientFrame::Request { request_id, .. }) = read_client_frame(&mut daemon) else {
+            return;
+        };
+        write_server_frame(
+            &mut daemon,
+            &ServerFrame::Response {
+                request_id,
+                result: Response::Acknowledged,
+            },
+        );
+        let Some(kind) = outcome else {
+            // A cancelled attempt: the continuation closes with no outcome.
+            return;
+        };
+        let generation = match kind {
+            HandoffOutcomeKind::Adopted => OLD_GENERATION + 1,
+            HandoffOutcomeKind::RolledBack => OLD_GENERATION,
+        };
+        let packet = HandoffOutcome {
+            kind,
+            daemon_generation: generation,
+        }
+        .encode();
+        rustix::net::send(&daemon_end, &packet, rustix::net::SendFlags::empty()).unwrap();
+        // Hold the channel until the exec replaces this process.
+        let mut wait = [0_u8; 1];
+        let _ = rustix::net::recv(&daemon_end, &mut wait, rustix::net::RecvFlags::empty());
+    });
+    let ledger = WindowLayoutLedger::default();
+    ledger.publish(WindowLayout {
+        tabs: lair
+            .dojos
+            .iter()
+            .map(|dojo| WindowResumeTab {
+                lair_id: lair.id,
+                dojo_id: dojo.id,
+                focus: Some(dojo.default_focus),
+            })
+            .collect(),
+        active: 0,
+    });
+    let context = ContinuationContext {
+        hub: HandoffStatusHub::default(),
+        ledger,
+        app_id: None,
+        installed_client: Some(PathBuf::from(CLIENT)),
+        exec: std::sync::Arc::new(SystemExec),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let end = runtime.block_on(async {
+        window_end.set_nonblocking(true).unwrap();
+        let stream = tokio::net::UnixStream::from_std(window_end).unwrap();
+        let mut anchor = AnchorConnection::handshake(stream).await.unwrap();
+        let (prepare, descriptors) = anchor.next_prepare().await.unwrap();
+        participate(&context, &mut anchor, prepare, descriptors).await
+    });
+    // Reached only when the Window keeps running this image.
+    match end {
+        ParticipationEnd::Ended(reason) if outcome.is_none() => {
+            eprintln!("stand-in Window: participation ended: {reason}");
+            assert!(
+                splinterm::child_spawn::spawn(|| Ok(())).is_ok(),
+                "spawning resumes"
+            );
+            std::process::exit(0);
+        }
+        end => {
+            eprintln!("stand-in Window: unexpected end: {end:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Runs a stand-in Window stage against a stand-in serving daemon at
+/// `generation_now`, and returns its outcome.
+fn run_stand_in_window(stage: &str, generation_now: u64) -> (Outcome, mpsc::Receiver<bool>) {
+    let scratch = Scratch::new(&format!("window-{stage}"));
+    let socket = scratch.0.join("splinterd.sock");
+    let lair = lair_with(vec![running_dojo("first"), running_dojo("second")]);
+    let trusted = stand_in_daemon(&socket, generation_now, vec![lair.clone()]);
+    let outcome = run_program(
+        &env::current_exe().unwrap().to_string_lossy(),
+        &[
+            (STAGE, stage.to_owned()),
+            (STAGE_LAIR, serde_json::to_string(&lair).unwrap()),
+        ],
+        &scratch,
+        &socket,
+        &[],
+        &[],
+    );
+    (outcome, trusted)
+}
+
+/// An adoption: the stand-in Window `execveat`s the sealed client snapshot,
+/// which claims the record and continuation and restores both tabs from the
+/// next generation.
+fn a_window_relaunches_into_the_snapshot_after_adoption() {
+    let (outcome, trusted) = run_stand_in_window("adopted", OLD_GENERATION + 1);
+    assert_eq!(trusted.recv_timeout(Duration::from_secs(1)), Ok(true));
+    assert!(
+        outcome.stderr.contains(&format!(
+            "relaunched across a daemon upgrade from generation {OLD_GENERATION} (prepare 23): 2 recorded tabs;"
+        )) && outcome
+            .stderr
+            .contains("restoring 2 of 2 tabs from daemon generation 5\n"),
+        "{}",
+        outcome.stderr
+    );
+    println!(
+        "test window_resume_exec::a_window_relaunches_into_the_snapshot_after_adoption ... ok"
+    );
+}
+
+/// A rollback: the stand-in Window discards the snapshot and execs the
+/// installed client by path, which restores from the old generation.
+fn a_window_relaunches_the_installed_client_after_rollback() {
+    let (outcome, trusted) = run_stand_in_window("rolled-back", OLD_GENERATION);
+    assert_eq!(trusted.recv_timeout(Duration::from_secs(1)), Ok(true));
+    assert!(
+        outcome.stderr.contains(&format!(
+            "restoring 2 of 2 tabs from daemon generation {OLD_GENERATION} (rolled back)"
+        )),
+        "{}",
+        outcome.stderr
+    );
+    println!(
+        "test window_resume_exec::a_window_relaunches_the_installed_client_after_rollback ... ok"
+    );
+}
+
+/// A cancelled attempt: the continuation closes with no outcome, and the
+/// stand-in Window keeps running with spawning resumed.
+fn a_window_keeps_running_when_the_attempt_closes_without_an_outcome() {
+    let (outcome, _) = run_stand_in_window("cancelled", OLD_GENERATION);
+    assert!(outcome.success, "{}", outcome.stderr);
+    assert!(
+        outcome
+            .stderr
+            .contains("participation ended: the attempt ended without an outcome"),
+        "{}",
+        outcome.stderr
+    );
+    println!(
+        "test window_resume_exec::a_window_keeps_running_when_the_attempt_closes_without_an_outcome ... ok"
+    );
+}
+
 fn main() {
+    if let Ok(stage) = env::var(STAGE) {
+        stand_in_window(&stage);
+        return;
+    }
     restores("adopted", 5, false);
     restores("rolled_back", 4, true);
     refuses_an_unsealed_record();
     refuses_a_descriptor_that_was_not_inherited();
     fails_clearly_when_no_dojo_survives();
-    println!("\ntest result: ok. 5 passed; 0 failed");
+    a_window_relaunches_into_the_snapshot_after_adoption();
+    a_window_relaunches_the_installed_client_after_rollback();
+    a_window_keeps_running_when_the_attempt_closes_without_an_outcome();
+    println!("\ntest result: ok. 8 passed; 0 failed");
 }

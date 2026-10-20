@@ -190,6 +190,10 @@ pub struct WindowOptions {
     /// subscriptions; drives the upgrade banner and input pause (Plan 0061
     /// M3.12a). `None` for Windows that hold no daemon panes.
     pub handoff_status: Option<crate::handoff_status::HandoffStatusHub>,
+    /// Where a local managed Window publishes its tabs and focus each
+    /// event-loop turn, for the resume record its handoff anchor seals
+    /// (Plan 0061 M3.14). `None` for every other Window.
+    pub layout_ledger: Option<crate::window_continuation::WindowLayoutLedger>,
 }
 
 impl Default for WindowOptions {
@@ -237,6 +241,7 @@ impl Default for WindowOptions {
             input_method: true,
             mapped: None,
             handoff_status: None,
+            layout_ledger: None,
         }
     }
 }

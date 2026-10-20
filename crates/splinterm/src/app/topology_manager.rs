@@ -3661,6 +3661,23 @@ pub(in crate::app) async fn run_topology_manager(
                 }
             };
         refresh_reloaded_settings(&mut config, &mut settings);
+        // The Window takes part in a handoff and waits for its outcome
+        // (M3.14): nothing reaches the daemon, whose connections are about to
+        // be replaced. Commands are settled as during a reconnection: tab
+        // switches apply, the rest is abandoned, never replayed. An adoption
+        // or rollback relaunches the Window; a cancelled attempt ends the
+        // wait and the loop resumes, reconnecting first if a connection was
+        // lost meanwhile.
+        if factory.handoff_status().continuing() {
+            let (pending, close_window) =
+                abandon_queued_commands(command, &mut commands, &mut state);
+            send_topology_updates(pending, &updates).await;
+            if close_window {
+                window_closing = true;
+                break;
+            }
+            continue;
+        }
         // A pane lost its daemon connection during a handoff: the whole
         // Window reconnects and resnapshots before anything else runs.
         let pending_reconnect = factory
@@ -3730,6 +3747,19 @@ pub(in crate::app) async fn run_topology_manager(
             Err(error)
                 if is_connection_loss(&error) && factory.handoff_status().begin_reconnect() =>
             {
+                if factory.handoff_status().continuing() {
+                    // The Window takes part in that handoff (M3.14): the hub
+                    // remembered the loss, and the loop waits at its top for
+                    // the outcome instead of reconnecting now.
+                    let (pending, close_window) =
+                        abandon_queued_commands(command, &mut commands, &mut state);
+                    send_topology_updates(pending, &updates).await;
+                    if close_window {
+                        window_closing = true;
+                        break;
+                    }
+                    continue;
+                }
                 let outcome = reconnect_and_abandon(
                     &factory,
                     &config,
