@@ -260,10 +260,16 @@ fn cells(text: &str) -> usize {
         .sum()
 }
 
+/// Blank cells between a Dojo tab badge and its label: two, twice a word
+/// space, so a count such as the `2` before "Dojo 2" reads as part of the
+/// badge rather than as the first word of the name.
+const TAB_BADGE_GAP: &str = "  ";
+
 /// Composes a Dojo tab label within `maximum_cells`. The badge comes first and
 /// the label text gives up width before it, so on a narrow tab the badge is
-/// the last thing dropped. Without a badge a label too long for the tab ends in
-/// an ellipsis.
+/// the last thing dropped. The gap after the badge is dropped together with
+/// the label. Without a badge a label too long for the tab ends in an
+/// ellipsis.
 pub(crate) fn badged_tab_label(
     badge: Option<&ChromeSource>,
     label: &str,
@@ -273,13 +279,14 @@ pub(crate) fn badged_tab_label(
         return ChromeSource::from(ellipsized(label, maximum_cells.max(1)));
     };
     let mut composed = badge.clone();
-    // One separating space, then at least one label cell and an ellipsis.
-    let label_budget = maximum_cells.saturating_sub(badge.cells().saturating_add(1));
+    // The separating gap, then at least one label cell and an ellipsis.
+    let label_budget =
+        maximum_cells.saturating_sub(badge.cells().saturating_add(cells(TAB_BADGE_GAP)));
     if label.is_empty() || label_budget < 2 {
         return composed;
     }
     composed
-        .push_str(" ")
+        .push_str(TAB_BADGE_GAP)
         .push_str(&ellipsized(label, label_budget));
     composed
 }
@@ -502,14 +509,17 @@ mod tests {
         assert_eq!(label(None, "editor", 6), "editor");
         assert_eq!(label(None, "editor", 3), "ed…");
         assert_eq!(label(None, "editor", 0), "…");
-        assert_eq!(label(Some("?"), "editor", 20), "? editor");
-        assert_eq!(label(Some("?2"), "editor", 9), "?2 editor");
-        assert_eq!(label(Some("?2"), "editor", 8), "?2 edit…");
-        assert_eq!(label(Some("?2"), "editor", 7), "?2 edi…");
-        assert_eq!(label(Some("?2"), "editor", 5), "?2 e…");
-        assert_eq!(label(Some("?2"), "editor", 4), "?2");
+        assert_eq!(label(Some("?"), "editor", 20), "?  editor");
+        assert_eq!(label(Some("?2"), "editor", 10), "?2  editor");
+        assert_eq!(label(Some("?2"), "editor", 9), "?2  edit…");
+        assert_eq!(label(Some("?2"), "editor", 8), "?2  edi…");
+        assert_eq!(label(Some("?2"), "editor", 6), "?2  e…");
+        // Too narrow for one label cell and an ellipsis: the gap goes with
+        // the label and the badge stays.
+        assert_eq!(label(Some("?2"), "editor", 5), "?2");
         assert_eq!(label(Some("?2"), "editor", 1), "?2");
-        assert_eq!(label(Some(">~"), "日本語", 6), ">~ 日…");
+        assert_eq!(label(Some("?2"), "", 20), "?2");
+        assert_eq!(label(Some(">~"), "日本語", 7), ">~  日…");
         let mut icon_badge = ChromeSource::default();
         icon_badge.push_icon(ChromeIcon::CircleCheck).push_str("3");
         icon_badge.push_icon(ChromeIcon::Clock);
@@ -520,10 +530,58 @@ mod tests {
             assert!(composed.cells() <= maximum.max(5));
         }
         assert_eq!(
-            badged_tab_label(Some(&icon_badge), "editor", 12).describe(),
-            "[circle-check]3[clock] editor"
+            badged_tab_label(Some(&icon_badge), "editor", 13).describe(),
+            "[circle-check]3[clock]  editor"
         );
         // A label never contributes icons, even with icon codepoints in it.
         assert!(badged_tab_label(Some(&icon_badge), "\u{ea05}x", 20).icons() == icon_badge.icons());
+    }
+
+    /// VM acceptance on 8979fa54: a counted badge before "Dojo 2" read as
+    /// "2 Dojo 2", the count one word space from the name. The badge, count
+    /// and stale marker included, is now two blank cells from the label in
+    /// both glyph styles, whether the label starts with a digit or a letter.
+    #[test]
+    fn tab_badge_count_is_separated_from_the_label() {
+        let counted = [
+            status(AgentState::NeedsInput, false),
+            status(AgentState::NeedsInput, false),
+        ];
+        let stale_counted = [
+            status(AgentState::Working, true),
+            status(AgentState::Working, true),
+        ];
+        for statuses in [&counted[..], &stale_counted[..]] {
+            for glyphs in [AgentGlyphs::Icons, AgentGlyphs::Ascii] {
+                let badge = AgentAggregate::from_statuses(statuses)
+                    .tab_badge(glyphs)
+                    .unwrap();
+                for name in ["Dojo 2", "2 builds", "editor"] {
+                    let composed = badged_tab_label(Some(&badge), name, 40);
+                    let after_badge = &composed.text()[badge.text().len()..];
+                    assert_eq!(
+                        after_badge,
+                        format!("{TAB_BADGE_GAP}{name}"),
+                        "{glyphs:?} {}",
+                        composed.describe()
+                    );
+                    assert_eq!(composed.icons(), badge.icons());
+                }
+            }
+        }
+        let ascii = AgentAggregate::from_statuses(&counted)
+            .tab_badge(AgentGlyphs::Ascii)
+            .unwrap();
+        assert_eq!(
+            badged_tab_label(Some(&ascii), "Dojo 2", 40).text(),
+            "?2  Dojo 2"
+        );
+        let icons = AgentAggregate::from_statuses(&stale_counted)
+            .tab_badge(AgentGlyphs::Icons)
+            .unwrap();
+        assert_eq!(
+            badged_tab_label(Some(&icons), "2 builds", 40).describe(),
+            "[loader-2]2[clock]  2 builds"
+        );
     }
 }
