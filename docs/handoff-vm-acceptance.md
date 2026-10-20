@@ -178,7 +178,7 @@ attempt open long enough to make that change deterministically.
 | Step | Action | Pass |
 |---|---|---|
 | `z1-cleanup` | resume any stopped test process; stop the probe (only if its recorded PID's command line is `handoff-mcp-probe.py`); remove the r3 temporary copy; restore `vm.memfd_noexec` if it differs from the recorded value, and verify; `package-stop` (when the session still runs); check workspace 8 and the monitors; copy the evidence to `target/vm-acceptance/` on the host; `package-config --clear` | `package-stop` stops the adopted or rollback daemon and the relaunched Window too: both run sealed memfd snapshots or replaced inodes, which it now recognises. Its guest-window restore returns workspace, focus, and cursor. Workspace 8 is empty and the monitors match `s1` |
-| `z2-plain-package` (mandatory) | `package-build`; `package-install --confirm-guest-install`; `package-status` | The guest leaves the TEST-ONLY build: no TEST-ONLY description and no marker in `/usr/bin/splinterd`. Remove `splinterm-mcp` too if `p0-package-status` showed it absent |
+| `z2-plain-package` (mandatory) | return the private clone to the candidate commit (u3 recorded it before package B); `package-build`; `package-install --confirm-guest-install`; `package-status` | The guest leaves the TEST-ONLY build: no TEST-ONLY description and no marker in `/usr/bin/splinterd`. Remove `splinterm-mcp` too if `p0-package-status` showed it absent |
 
 Report anything that could not be restored. The private clone, with package
 B's commit, is discarded; nothing is pushed.

@@ -709,6 +709,7 @@ STEPS = (
         "Return the guest to an ordinary (non-test) package of the candidate (mandatory)",
         "A plain build installs; package-status reports no TEST-ONLY package or marker. Remove splinterm-mcp too if p0-package-status showed it absent before.",
         (
+            Action("checkout-candidate"),
             vm("package-build"),
             vm("package-install", "--confirm-guest-install"),
             vm("package-status"),
@@ -755,6 +756,8 @@ def describe(action: Action) -> str:
             "git commit --allow-empty -m 'vm acceptance: package B (local only, never pushed)'"
             f"   # in this private clone ({PRIVATE_CLONES}/...) only"
         )
+    if action.kind == "checkout-candidate":
+        return "git checkout --detach <candidate recorded before package B>   # private clone only"
     if action.kind == "policy":
         return (
             "tools/testbed/omarchy-vm.sh package-config splinterm/policy.json"
@@ -834,11 +837,52 @@ def write_policy() -> None:
     )
 
 
-def commit_package_b() -> None:
+def candidate_record() -> Path:
+    """Where u3 records the candidate commit, inside the clone's Git directory
+    so the checkout stays clean for `package-build`."""
+    git_path = run_capture(
+        ["git", "-C", str(ROOT), "rev-parse", "--git-path", "vm-acceptance-candidate"]
+    ).strip()
+    return (ROOT / git_path).resolve()
+
+
+def require_private_clone(what: str) -> None:
     if PRIVATE_CLONES not in ROOT.parents:
+        raise SystemExit(f"{what} only in a private clone under {PRIVATE_CLONES}, not {ROOT}")
+
+
+def revision(name: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", name],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def recorded_candidate() -> str | None:
+    """The candidate u3 recorded, checked against this clone's history: HEAD
+    is the candidate (B not yet committed) or B on top of it. Anything else is
+    a record from an earlier run, refused rather than guessed at."""
+    record = candidate_record()
+    if not record.exists():
+        return None
+    candidate = record.read_text(encoding="utf-8").strip()
+    if candidate not in (revision("HEAD"), revision("HEAD^")):
         raise SystemExit(
-            f"package B is committed only in a private clone under {PRIVATE_CLONES}, not {ROOT}"
+            f"stale candidate record {candidate} in {record}: this clone was reused; "
+            "start again from a fresh private clone"
         )
+    return candidate
+
+
+def commit_package_b() -> None:
+    require_private_clone("package B is committed")
+    candidate = recorded_candidate()
+    if candidate is None:
+        candidate_record().write_text(revision("HEAD") + "\n", encoding="utf-8")
+    elif candidate != revision("HEAD"):
+        print(f"package B is already committed on the candidate {candidate}")
+        return
     subprocess.run(
         [
             "git", "-C", str(ROOT), "commit", "--allow-empty", "--quiet",
@@ -846,6 +890,20 @@ def commit_package_b() -> None:
         ],
         check=True,
     )
+
+
+def checkout_candidate() -> None:
+    """Return the private clone to the candidate commit after package B, so
+    the plain package z2 builds records the candidate, not B's commit."""
+    candidate = recorded_candidate()
+    if candidate is None:
+        print("package B was never committed; the clone is at the candidate")
+        return
+    require_private_clone("the candidate is checked out")
+    subprocess.run(
+        ["git", "-C", str(ROOT), "checkout", "--quiet", "--detach", candidate], check=True
+    )
+    print(f"clone back at the candidate {candidate}")
 
 
 def stop_if_running() -> None:
@@ -872,6 +930,7 @@ def copy_evidence() -> None:
 SPECIAL: dict[str, Callable[[], None]] = {
     "policy": write_policy,
     "commit-b": commit_package_b,
+    "checkout-candidate": checkout_candidate,
     "evidence": copy_evidence,
     "stop-if-running": stop_if_running,
 }

@@ -173,7 +173,19 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         runner = RUNNER.read_text(encoding="utf-8")
         launch = runner.split("  package-launch)", 1)[1].split("  package-stop)", 1)[0]
         daemon = launch.split('nohup /usr/bin/splinterd >"$runtime/daemon.log"', 1)[0]
-        self.assertTrue(daemon.rstrip().splitlines()[-1].startswith("RUST_LOG=info "))
+        command = daemon.rstrip().splitlines()[-2:]
+        self.assertTrue(command[0].startswith('RUST_LOG=info SPLINTERM_POLICY="$policy" \\'))
+        self.assertIn('SPLINTERM_SOCKET="$socket"', command[1])
+
+    def test_package_launch_daemon_reads_the_private_policy(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        launch = runner.split("  package-launch)", 1)[1].split("  package-stop)", 1)[0]
+        self.assertIn('policy="$config/splinterm/policy.json"', launch)
+        self.assertIn('{"schema":"splinterm.policy.v2","rules":[]}', launch)
+        self.assertLess(
+            launch.index('cp -R -- "$seed/." "$config/"'),
+            launch.index('policy="$config/splinterm/policy.json"'),
+        )
 
     def test_package_runtime_is_checkout_scoped_and_stop_checks_owner(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")

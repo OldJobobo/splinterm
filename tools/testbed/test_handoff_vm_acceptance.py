@@ -120,6 +120,58 @@ class HandoffVmAcceptanceHelperTests(unittest.TestCase):
         self.assertIn("private clone", result.stderr)
         self.assertFalse(log.exists())
 
+    def test_candidate_record_round_trip_and_stale_record_refused(self) -> None:
+        from unittest import mock
+
+        def git(*arguments: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(clone), *arguments], check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            clones = Path(directory) / "vm-acceptance"
+            clone = clones / "candidate"
+            clone.mkdir(parents=True)
+            git("init", "--quiet")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "c")
+            candidate = git("rev-parse", "HEAD")
+            environment = {
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            }
+            with mock.patch.object(HELPER_MODULE, "ROOT", clone), mock.patch.object(
+                HELPER_MODULE, "PRIVATE_CLONES", clones
+            ), mock.patch.dict(os.environ, environment):
+                # No record yet: z2 leaves the clone alone.
+                HELPER_MODULE.checkout_candidate()
+                self.assertEqual(git("rev-parse", "HEAD"), candidate)
+                # u3 records the candidate and commits B once, even if retried.
+                HELPER_MODULE.commit_package_b()
+                package_b = git("rev-parse", "HEAD")
+                self.assertNotEqual(package_b, candidate)
+                HELPER_MODULE.commit_package_b()
+                self.assertEqual(git("rev-parse", "HEAD"), package_b)
+                # z2 returns to the candidate.
+                HELPER_MODULE.checkout_candidate()
+                self.assertEqual(git("rev-parse", "HEAD"), candidate)
+                # A record from an earlier run (not HEAD or HEAD^) is refused.
+                git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "n1")
+                git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "n2")
+                with self.assertRaises(SystemExit) as refused:
+                    HELPER_MODULE.checkout_candidate()
+                self.assertIn("stale candidate record", str(refused.exception))
+                with self.assertRaises(SystemExit):
+                    HELPER_MODULE.commit_package_b()
+
+    def test_plain_package_is_built_from_the_candidate_not_package_b(self) -> None:
+        z2 = HELPER_MODULE.step_named("z2-plain-package")
+        kinds = [action.kind for action in z2.actions]
+        self.assertEqual(kinds[0], "checkout-candidate")
+        self.assertLess(
+            kinds.index("checkout-candidate"),
+            next(i for i, action in enumerate(z2.actions) if action.vm[:1] == ("package-build",)),
+        )
+
     def test_every_step_uses_runner_actions_and_valid_guest_scripts(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
         cases = set(re.findall(r"^  ([a-z-]+)\)$", runner, re.MULTILINE))
