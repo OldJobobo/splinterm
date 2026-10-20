@@ -6,6 +6,7 @@ use super::{
     scrollback_page_envelope, search_page_envelope, terminal_snapshot_envelope,
     write_json_document, write_machine_connection_failure, write_machine_read_failure,
 };
+use super::{DaemonIdentity, explain_machine_result, interrupted, safe_machine_read};
 
 pub(super) enum MachineHistory {
     Scrollback {
@@ -349,10 +350,16 @@ pub(super) async fn run_machine_history(
                 bail!("splinterd connection timed out");
             }
         };
-    match machine_history_envelope(&mut connection, &command, splint_id, deadline, started).await {
+    let before = DaemonIdentity::of(&connection);
+    let result =
+        machine_history_envelope(&mut connection, &command, splint_id, deadline, started).await;
+    // A continuation page is not repeated after a lost connection.
+    match explain_machine_result(result, before, true, deadline, started).await {
         Ok(envelope) => write_json_document(&envelope),
         Err(error) => {
-            let (code, retryable) = if error.to_string().contains("timed out") {
+            let (code, retryable) = if let Some(interrupted) = interrupted(&error) {
+                interrupted.public_code()
+            } else if error.to_string().contains("timed out") {
                 (CliErrorCodeV2::Timeout, true)
             } else if let Some(protocol) = protocol_error(&error) {
                 public_error_code(protocol.code)
@@ -480,6 +487,7 @@ pub(super) async fn run_machine_snapshot(
                 bail!("splinterd connection timed out");
             }
         };
+    let before = DaemonIdentity::of(&connection);
     let result = machine_snapshot_envelope(
         &mut connection,
         splint_id,
@@ -488,10 +496,13 @@ pub(super) async fn run_machine_snapshot(
         started,
     )
     .await;
-    match result {
+    // A snapshot attaches and detaches a subscription; it is not repeated.
+    match explain_machine_result(result, before, true, deadline, started).await {
         Ok(envelope) => write_json_document(&envelope),
         Err(error) => {
-            let (code, retryable) = if error.to_string().contains("timed out") {
+            let (code, retryable) = if let Some(interrupted) = interrupted(&error) {
+                interrupted.public_code()
+            } else if error.to_string().contains("timed out") {
                 (CliErrorCodeV2::Timeout, true)
             } else if let Some(protocol) = protocol_error(&error) {
                 public_error_code(protocol.code)
@@ -550,11 +561,8 @@ pub(super) async fn run_machine_ping(schema_major: u16, timeout_ms: u64) -> Resu
                 bail!("splinterd connection timed out");
             }
         };
-    let remaining = deadline.saturating_sub(started.elapsed());
-    match connection
-        .request_with_deadline(Request::Ping, remaining)
-        .await
-    {
+    // Plan 0061 M3.12b: a ping is trivially safe to repeat once.
+    match safe_machine_read(&mut connection, || Request::Ping, deadline, started).await {
         Ok(Response::Pong) => write_json_document(&PingEnvelopeV2::success(1)?),
         Ok(_) => {
             write_json_document(&PingEnvelopeV2::failure(
@@ -566,17 +574,18 @@ pub(super) async fn run_machine_ping(schema_major: u16, timeout_ms: u64) -> Resu
             bail!("splinterd returned an unexpected ping response")
         }
         Err(error) => {
-            let timed_out = error.to_string().contains("timed out");
-            let code = if timed_out {
-                CliErrorCodeV2::Timeout
+            let (code, retryable) = if let Some(interrupted) = interrupted(&error) {
+                interrupted.public_code()
+            } else if error.to_string().contains("timed out") {
+                (CliErrorCodeV2::Timeout, true)
             } else {
-                CliErrorCodeV2::Internal
+                (CliErrorCodeV2::Internal, true)
             };
             write_json_document(&PingEnvelopeV2::failure(
                 1,
                 code,
                 bounded_public_message(&error),
-                true,
+                retryable,
             )?)?;
             Err(error)
         }

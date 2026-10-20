@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use splinterm::{
+    automation::{Connection, DaemonIdentity},
     config::{AppConfig, ConfigLoad, StartupMode, load_default},
     diagnostics::{
         DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, global as diagnostics_global,
@@ -44,6 +45,9 @@ use super::{
     agent_status_cli::{resolve_agent_status_request, run_human_agent_status},
     consent::run_consent_client,
     human_output::{print_lairs, print_response},
+    interrupted::{
+        Interruption, PROBE_WINDOW, explain_interruption, interruption_kind, probe_daemon,
+    },
     keymap_cli::{run_config_command, run_keymap_command},
     local_service::{
         confirm_kill, run_policy_command, run_relay_command, run_reset_command, usage_error,
@@ -477,16 +481,65 @@ fn endpoint_launch_cwd(
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the closed human command catalog keeps request construction and response handling adjacent"
-)]
+/// The same command again, when it only reads and its request is trivially
+/// safe to repeat after a lost connection (Plan 0061 M3.12b).
+fn read_only_retry(command: &Command) -> Option<Command> {
+    match command {
+        Command::Ping => Some(Command::Ping),
+        Command::List { all } => Some(Command::List { all: *all }),
+        Command::Topology => Some(Command::Topology),
+        Command::Inspect { splint_id } => Some(Command::Inspect {
+            splint_id: *splint_id,
+        }),
+        _ => None,
+    }
+}
+
+/// Runs one human-mode command. A daemon handoff that refuses it or ends its
+/// connection fails it with an error naming the upgrade; a mutation is never
+/// retried, and a trivially safe read is retried once on a fresh connection
+/// (Plan 0061 M3.12b).
 async fn run_headless(
     command: Command,
     config: &AppConfig,
     factory: &ConnectionFactory,
 ) -> Result<()> {
-    let mut connection = factory.connect().await?;
+    let retry = read_only_retry(&command);
+    let read_only = retry.is_some();
+    let connection = factory.connect().await?;
+    let before = DaemonIdentity::of(&connection);
+    let error = match run_headless_on(command, config, factory, connection).await {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if let (Some(command), Some(Interruption::Lost { .. })) = (retry, interruption_kind(&error))
+        && let Some((connection, _)) =
+            probe_daemon(before, PROBE_WINDOW, || factory.connect()).await
+    {
+        let before = DaemonIdentity::of(&connection);
+        return match run_headless_on(command, config, factory, connection).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                Err(
+                    explain_interruption(error, before, true, PROBE_WINDOW, || factory.connect())
+                        .await,
+                )
+            }
+        };
+    }
+    Err(explain_interruption(error, before, read_only, PROBE_WINDOW, || factory.connect()).await)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed human command catalog keeps request construction and response handling adjacent"
+)]
+async fn run_headless_on(
+    command: Command,
+    config: &AppConfig,
+    factory: &ConnectionFactory,
+    mut connection: Connection,
+) -> Result<()> {
     match command {
         Command::Dojos
         | Command::Remotes

@@ -4,6 +4,7 @@ use super::{
     live_terminal_location, require_expected_incarnation, terminal_action_envelope,
     write_machine_read_failure,
 };
+use super::{DaemonIdentity, explain_machine_result};
 
 pub(super) enum MachineControl {
     Input(Vec<u8>),
@@ -158,6 +159,7 @@ pub(super) async fn run_machine_control(
     }
     let deadline = std::time::Duration::from_millis(timeout_ms);
     let (mut connection, started) = connect_machine(operation, deadline).await?;
+    let before = DaemonIdentity::of(&connection);
     let result = machine_control_envelope(
         &mut connection,
         &command,
@@ -167,5 +169,6 @@ pub(super) async fn run_machine_control(
         started,
     )
     .await;
+    let result = explain_machine_result(result, before, false, deadline, started).await;
     finish_machine_envelope(operation, result)
 }

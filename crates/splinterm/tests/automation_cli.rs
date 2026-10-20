@@ -2301,3 +2301,246 @@ fn upgrade_now_reports_a_rollback_on_stderr_with_exit_six() {
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("did not complete"));
 }
+
+// Plan 0061 M3.12b: one-shot commands interrupted by a daemon upgrade.
+
+const UPGRADE_LAIR_ID: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101";
+
+/// Accepts one connection of either role for a daemon serving `generation`.
+fn accept_any_client_at(listener: &UnixListener, generation: u64) -> UnixStream {
+    let (mut stream, _) = listener.accept().unwrap();
+    assert!(matches!(
+        read_client_frame(&mut stream),
+        ClientFrame::Hello { .. }
+    ));
+    stream
+        .write_all(
+            &encode_frame(&ServerFrame::Hello {
+                version: PROTOCOL_VERSION,
+                limits: ServerLimits::default(),
+                development_terminal_access: false,
+                daemon_hostname: None,
+                daemon_generation: generation,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    stream
+}
+
+fn expect_request(stream: &mut UnixStream, request_id: u64) -> splinterm_protocol::Request {
+    match read_client_frame(stream) {
+        ClientFrame::Request {
+            request_id: actual,
+            request,
+            ..
+        } => {
+            assert_eq!(actual, request_id);
+            request
+        }
+        frame => panic!("expected request {request_id}, got {frame:?}"),
+    }
+}
+
+/// The probe connection after a lost one only handshakes: no request, and
+/// above all no retried mutation, ever reaches the next daemon.
+fn expect_no_request(mut stream: UnixStream) {
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).unwrap();
+    assert!(rest.is_empty(), "the client sent a request after the loss");
+}
+
+/// Serves `rename-lair`: the topology read, then the mutation, which the
+/// daemon never answers because it execs into generation 2.
+fn serve_rename_interrupted_by_upgrade() -> (PathBuf, thread::JoinHandle<()>) {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_any_client_at(&listener, 1);
+        assert!(matches!(
+            expect_request(&mut stream, 1),
+            splinterm_protocol::Request::InspectTopology
+        ));
+        send_response(
+            &mut stream,
+            1,
+            Response::Topology {
+                snapshot: reviewed_topology(),
+            },
+        );
+        assert!(matches!(
+            expect_request(&mut stream, 2),
+            splinterm_protocol::Request::RenameLair { .. }
+        ));
+        // The committed upgrade execs: the connection ends unanswered.
+        drop(stream);
+        expect_no_request(accept_any_client_at(&listener, 2));
+    });
+    (socket, server)
+}
+
+#[test]
+fn a_human_mutation_interrupted_by_an_upgrade_is_not_retried_and_says_so() {
+    let (socket, server) = serve_rename_interrupted_by_upgrade();
+    let output = run_upgrade(&["rename-lair", UPGRADE_LAIR_ID, "renamed"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("splinterd was upgraded while this command ran (generation 1 → 2)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the command was not retried and may or may not have taken effect"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("before running it again"), "{stderr}");
+}
+
+#[test]
+fn a_machine_mutation_interrupted_by_an_upgrade_is_not_retried_and_says_so() {
+    let (socket, server) = serve_rename_interrupted_by_upgrade();
+    let output = run_json_ping(
+        &[
+            "rename-lair",
+            UPGRADE_LAIR_ID,
+            "renamed",
+            "--output",
+            "json",
+        ],
+        &socket,
+    );
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(4));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["operation"], "rename_lair");
+    assert_eq!(document["error"]["code"], "internal");
+    assert_eq!(
+        document["error"]["retryable"], false,
+        "check the state before running it again"
+    );
+    let message = document["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("splinterd was upgraded while this command ran (generation 1 → 2)"),
+        "{message}"
+    );
+    assert!(message.contains("was not retried"), "{message}");
+}
+
+#[test]
+fn a_machine_mutation_refused_during_an_upgrade_did_not_run() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_any_client_at(&listener, 1);
+        expect_request(&mut stream, 1);
+        send_response(
+            &mut stream,
+            1,
+            Response::Topology {
+                snapshot: reviewed_topology(),
+            },
+        );
+        expect_request(&mut stream, 2);
+        stream
+            .write_all(
+                &encode_frame(&ServerFrame::Error {
+                    request_id: Some(2),
+                    error: ProtocolError::new(
+                        ErrorCode::HandoffInProgress,
+                        "daemon handoff in progress",
+                    ),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        // A refusal needs no probe: nothing else connects.
+        expect_no_request(stream);
+    });
+    let output = run_json_ping(
+        &[
+            "rename-lair",
+            UPGRADE_LAIR_ID,
+            "renamed",
+            "--output",
+            "json",
+        ],
+        &socket,
+    );
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(5));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["code"], "resource_limit");
+    assert_eq!(document["error"]["retryable"], true);
+    let message = document["error"]["message"].as_str().unwrap();
+    assert!(
+        message
+            .starts_with("splinterd is upgrading, so it refused this command, which did not run"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_machine_read_interrupted_by_an_upgrade_is_retried_once_on_the_next_daemon() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_any_client_at(&listener, 1);
+        assert!(matches!(
+            expect_request(&mut stream, 1),
+            splinterm_protocol::Request::InspectTopology
+        ));
+        drop(stream);
+        let mut next = accept_any_client_at(&listener, 2);
+        assert!(matches!(
+            expect_request(&mut next, 1),
+            splinterm_protocol::Request::InspectTopology
+        ));
+        send_response(
+            &mut next,
+            1,
+            Response::Topology {
+                snapshot: reviewed_topology(),
+            },
+        );
+    });
+    let output = run_json_ping(&["list", "--output", "json"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["operation"], "list_lairs");
+}
+
+#[test]
+fn a_machine_read_lost_twice_fails_clearly_without_a_third_try() {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let mut stream = accept_any_client_at(&listener, 1);
+        expect_request(&mut stream, 1);
+        drop(stream);
+        let mut next = accept_any_client_at(&listener, 2);
+        expect_request(&mut next, 1);
+        drop(next);
+        // The explanation's probe handshakes only.
+        expect_no_request(accept_any_client_at(&listener, 2));
+    });
+    let output = run_json_ping(&["topology", "--output", "json"], &socket);
+    server.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    assert_eq!(output.status.code(), Some(4));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["code"], "internal");
+    assert_eq!(document["error"]["retryable"], true);
+    let message = document["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("the read was not retried, so run it again"),
+        "{message}"
+    );
+}

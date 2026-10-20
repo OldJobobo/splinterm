@@ -1,6 +1,7 @@
 use super::{
     CliEnvelopeV2, CliErrorCodeV2, ErrorCode, Result, protocol_error, write_json_document,
 };
+use crate::app::interrupted::interrupted;
 
 fn is_default_dojo_name_exhausted(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
@@ -12,6 +13,9 @@ fn is_default_dojo_name_exhausted(error: &anyhow::Error) -> bool {
 }
 
 pub(in crate::app) fn machine_exit_code(error: &anyhow::Error) -> i32 {
+    if let Some(interrupted) = interrupted(error) {
+        return interrupted.exit_code();
+    }
     if let Some(protocol) = protocol_error(error) {
         return match protocol.code {
             ErrorCode::ConsentUnavailable | ErrorCode::ConsentDenied | ErrorCode::Unauthorized => 3,
@@ -105,6 +109,16 @@ pub(super) fn finish_machine_envelope(
     match result {
         Ok(envelope) => write_json_document(&envelope),
         Err(error) => {
+            if let Some(interrupted) = interrupted(&error) {
+                let (code, retryable) = interrupted.public_code();
+                write_machine_read_failure(
+                    operation,
+                    code,
+                    bounded_public_message(&error),
+                    retryable,
+                )?;
+                return Err(error);
+            }
             if let Some(protocol) = protocol_error(&error) {
                 write_json_document(&CliEnvelopeV2::protocol_failure(
                     operation,

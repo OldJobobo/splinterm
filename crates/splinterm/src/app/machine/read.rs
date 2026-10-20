@@ -4,6 +4,7 @@ use super::{
     list_lairs_envelope, protocol_error, public_error_code, write_json_document,
     write_machine_connection_failure, write_machine_read_failure,
 };
+use super::{interrupted, safe_machine_read};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum MachineRead {
@@ -72,16 +73,21 @@ pub(super) async fn run_machine_read(
                 bail!("splinterd connection timed out");
             }
         };
-    let remaining = deadline.saturating_sub(started.elapsed());
-    let request = if matches!(command, MachineRead::Focus) {
-        Request::ReadGraphicalFocus
-    } else {
-        Request::InspectTopology
+    let request = || {
+        if matches!(command, MachineRead::Focus) {
+            Request::ReadGraphicalFocus
+        } else {
+            Request::InspectTopology
+        }
     };
-    let response = match connection.request_with_deadline(request, remaining).await {
+    // Plan 0061 M3.12b: these reads are trivially safe to repeat once after a
+    // lost connection.
+    let response = match safe_machine_read(&mut connection, request, deadline, started).await {
         Ok(response) => response,
         Err(error) => {
-            let (code, retryable) = if error.to_string().contains("timed out") {
+            let (code, retryable) = if let Some(interrupted) = interrupted(&error) {
+                interrupted.public_code()
+            } else if error.to_string().contains("timed out") {
                 (CliErrorCodeV2::Timeout, true)
             } else if let Some(protocol) = protocol_error(&error) {
                 public_error_code(protocol.code)

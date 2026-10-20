@@ -8,15 +8,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use splinterm::automation::{
-    CliEnvelopeV2, CliErrorCodeV2, CliEventV2, Connection, MutationIdentityV2, PingEnvelopeV2,
-    ReadResyncReasonV2, ResyncReasonV2, TerminalContinuationV2, TerminalReadProvenanceV2,
-    audit_page_envelope, authorization_status_envelope, committed_mutation_envelope,
-    created_mutation_envelope, decode_terminal_cursor, graphical_focus_envelope,
-    inspect_splint_envelope, inspect_topology_envelope, kill_envelope, list_lairs_envelope,
-    process_started_envelope, protocol_error, public_error_code, read_resync_envelope,
-    response_protocol_error, restore_many_envelope, revoke_envelope, scrollback_page_envelope,
-    search_page_envelope, terminal_action_envelope, terminal_snapshot_envelope,
-    write_json_document,
+    CliEnvelopeV2, CliErrorCodeV2, CliEventV2, Connection, DaemonIdentity, MutationIdentityV2,
+    PingEnvelopeV2, ReadResyncReasonV2, ResyncReasonV2, TerminalContinuationV2,
+    TerminalReadProvenanceV2, audit_page_envelope, authorization_status_envelope,
+    committed_mutation_envelope, created_mutation_envelope, decode_terminal_cursor,
+    graphical_focus_envelope, inspect_splint_envelope, inspect_topology_envelope, kill_envelope,
+    list_lairs_envelope, process_started_envelope, protocol_error, public_error_code,
+    read_resync_envelope, response_protocol_error, restore_many_envelope, revoke_envelope,
+    scrollback_page_envelope, search_page_envelope, terminal_action_envelope,
+    terminal_snapshot_envelope, write_json_document,
 };
 use splinterm::config::load_default;
 use splinterm_core::{
@@ -29,6 +29,10 @@ use splinterm_protocol::{
 
 use super::{
     commands::{AuthorizationCommand, Command, SubscribeCommand},
+    interrupted::{
+        InterruptedCommand, Interruption, explain_result, interrupted, interruption_kind,
+        machine_probe_window, probe_daemon,
+    },
     session_catalog::launch_parameters,
 };
 
@@ -77,6 +81,63 @@ async fn connect_machine(
             bail!("splinterd connection timed out")
         }
     }
+}
+
+/// Plan 0061 M3.12b: a machine command's handoff refusal or lost connection
+/// becomes an error naming the upgrade, after looking for the daemon within
+/// what is left of the command's deadline. Nothing is retried.
+async fn explain_machine_result<T>(
+    result: Result<T>,
+    before: DaemonIdentity,
+    read_only: bool,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<T> {
+    let window = machine_probe_window(deadline.saturating_sub(started.elapsed()));
+    explain_result(
+        result,
+        before,
+        read_only,
+        window,
+        Connection::connect_automation,
+    )
+    .await
+}
+
+/// Plan 0061 M3.12b: sends a trivially safe read request and, when its
+/// connection is lost, sends it once more on a fresh connection within what
+/// is left of the deadline. A refusal, or a second loss, becomes an error
+/// naming the upgrade.
+async fn safe_machine_read(
+    connection: &mut Connection,
+    request: impl Fn() -> Request,
+    deadline: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<Response> {
+    let before = DaemonIdentity::of(connection);
+    let error = match connection
+        .request_with_deadline(request(), deadline.saturating_sub(started.elapsed()))
+        .await
+    {
+        Ok(response) => return Ok(response),
+        Err(error) => error,
+    };
+    if !matches!(interruption_kind(&error), Some(Interruption::Lost { .. })) {
+        return explain_machine_result(Err(error), before, true, deadline, started).await;
+    }
+    let window = machine_probe_window(deadline.saturating_sub(started.elapsed()));
+    let Some((mut retry, _)) = probe_daemon(before, window, Connection::connect_automation).await
+    else {
+        return Err(anyhow::Error::new(InterruptedCommand {
+            interruption: Interruption::Lost { after: None },
+            read_only: true,
+        }));
+    };
+    let retry_before = DaemonIdentity::of(&retry);
+    let result = retry
+        .request_with_deadline(request(), deadline.saturating_sub(started.elapsed()))
+        .await;
+    explain_machine_result(result, retry_before, true, deadline, started).await
 }
 
 pub(in crate::app) use agent_status::run_machine_agent_status;

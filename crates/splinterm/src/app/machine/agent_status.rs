@@ -1,8 +1,9 @@
 //! Machine projection of `splinterm agent-status`.
 
 use super::{
-    CliErrorCodeV2, Request, Response, Result, bail, bounded_public_message, connect_machine,
-    finish_machine_envelope, write_json_document, write_machine_read_failure,
+    CliErrorCodeV2, DaemonIdentity, Request, Response, Result, bail, bounded_public_message,
+    connect_machine, explain_machine_result, finish_machine_envelope, write_json_document,
+    write_machine_read_failure,
 };
 use crate::app::agent_status_cli::AgentStatusRequest;
 use splinterm::automation::{agent_status_get_envelope, agent_status_report_envelope};
@@ -27,6 +28,7 @@ pub(in crate::app) async fn run_machine_agent_status(
     }
     let deadline = std::time::Duration::from_millis(timeout_ms);
     let (mut connection, started) = connect_machine(operation, deadline).await?;
+    let before = DaemonIdentity::of(&connection);
     let remaining = deadline.saturating_sub(started.elapsed());
     match request {
         AgentStatusRequest::Report {
@@ -61,6 +63,7 @@ pub(in crate::app) async fn run_machine_agent_status(
                 )),
                 Err(error) => Err(error),
             };
+            let result = explain_machine_result(result, before, false, deadline, started).await;
             finish_machine_envelope(operation, result)
         }
         AgentStatusRequest::Get { splint_id } => {
@@ -77,7 +80,11 @@ pub(in crate::app) async fn run_machine_agent_status(
                         )),
                     );
                 }
-                Err(error) => return finish_machine_envelope(operation, Err(error)),
+                Err(error) => {
+                    let result =
+                        explain_machine_result(Err(error), before, true, deadline, started).await;
+                    return finish_machine_envelope(operation, result);
+                }
             };
             if snapshot.topology.find_splint(splint_id).is_none() {
                 write_machine_read_failure(

@@ -7,6 +7,7 @@ use super::{
     live_terminal_location, load_default, process_started_envelope, response_protocol_error,
     restore_many_envelope, revoke_envelope, write_machine_read_failure,
 };
+use super::{DaemonIdentity, explain_machine_result};
 
 pub(super) enum MachineMutation {
     Create {
@@ -882,7 +883,9 @@ pub(super) async fn run_machine_mutation(
     }
     let deadline = std::time::Duration::from_millis(timeout_ms);
     let (mut connection, started) = connect_machine(operation, deadline).await?;
+    let before = DaemonIdentity::of(&connection);
     let result = machine_mutation_envelope(&mut connection, &mutation, deadline, started).await;
+    let result = explain_machine_result(result, before, false, deadline, started).await;
     finish_machine_envelope(operation, result)
 }
 
@@ -903,6 +906,7 @@ pub(super) async fn run_machine_authorization_status(
     }
     let deadline = std::time::Duration::from_millis(timeout_ms);
     let (mut connection, started) = connect_machine(OPERATION, deadline).await?;
+    let before = DaemonIdentity::of(&connection);
     let result = async {
         let response = connection
             .request_with_deadline(
@@ -936,6 +940,7 @@ pub(super) async fn run_machine_authorization_status(
         )
     }
     .await;
+    let result = explain_machine_result(result, before, true, deadline, started).await;
     finish_machine_envelope(OPERATION, result)
 }
 
@@ -957,6 +962,7 @@ pub(super) async fn run_machine_audit(
     }
     let deadline = std::time::Duration::from_millis(timeout_ms);
     let (mut connection, started) = connect_machine(OPERATION, deadline).await?;
+    let before = DaemonIdentity::of(&connection);
     let result = async {
         let response = connection
             .request_with_deadline(
@@ -973,6 +979,7 @@ pub(super) async fn run_machine_audit(
         audit_page_envelope(&page)
     }
     .await;
+    let result = explain_machine_result(result, before, true, deadline, started).await;
     finish_machine_envelope(OPERATION, result)
 }
 
