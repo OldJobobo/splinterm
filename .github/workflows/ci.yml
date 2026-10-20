@@ -229,12 +229,26 @@ jobs:
           cargo test --frozen -p splinterm-mcp \
             --test schema_inventory --test stdio_protocol -- --test-threads=1 \
             2>&1 | tee mcp-protocol.log
+      - name: Build the staged binaries for the headless MCP preflight
+        run: cargo build --frozen --bin splinterd --bin splinterm --bin splinterm-mcp
+      - name: Run the headless staged MCP preflight (Plan 0031)
+        # Log and evidence live outside the checkout so the recorded source
+        # identity describes the tree itself.
+        run: |
+          set -o pipefail
+          mkdir -m 700 "$RUNNER_TEMP/mcp-preflight-evidence"
+          python tools/mcp/run-demo.py preflight --staged-bin-dir target/debug \
+            --evidence-dir "$RUNNER_TEMP/mcp-preflight-evidence" \
+            2>&1 | tee "$RUNNER_TEMP/mcp-preflight.log"
       - name: Upload focused MCP failure evidence
         if: ${{ failure() }}
         uses: actions/upload-artifact@v6
         with:
           name: mcp-protocol-failure-${{ github.run_id }}
-          path: mcp-protocol.log
+          path: |
+            mcp-protocol.log
+            ${{ runner.temp }}/mcp-preflight.log
+            ${{ runner.temp }}/mcp-preflight-evidence/
           if-no-files-found: error
           retention-days: 14
 
@@ -284,6 +298,13 @@ jobs:
           set -o pipefail
           python -m unittest discover -s tools/agents -p 'test_*.py' -v \
             2>&1 | tee remote-agent-tests.log
+      - name: Run MCP demo harness driver and preflight tests
+        run: |
+          set -o pipefail
+          python -m py_compile tools/mcp/run-demo.py tools/mcp/mcp_host.py \
+            tools/mcp/mcp_report.py tools/mcp/mcp_preflight.py
+          python -m unittest discover -s tools/mcp/tests -p 'test_*.py' -v \
+            2>&1 | tee mcp-demo-harness-tests.log
       - name: Upload focused package/release failure evidence
         if: ${{ failure() }}
         uses: actions/upload-artifact@v6
@@ -292,6 +313,7 @@ jobs:
           path: |
             package-release-tests.log
             remote-agent-tests.log
+            mcp-demo-harness-tests.log
           if-no-files-found: error
           retention-days: 14
 
