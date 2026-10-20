@@ -38,6 +38,59 @@ pub const GRANT_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const CONSENT_DEADLINE: Duration = Duration::from_secs(20);
 const MAX_AUDIT_RECORDS: usize = 256;
 
+/// The sealed forward client snapshot a daemon adopted from a handoff
+/// verified against its package record, held open and pinned for the
+/// daemon's lifetime (AGENTS.md §4.4, the operator exception of 2026-10-18;
+/// Plan 0061 M3.14).
+///
+/// A Window relaunched across the adoption executes exactly this file, so
+/// its process's executable is this snapshot's device and inode. Holding the
+/// descriptor keeps the inode alive, so no other file can take its identity
+/// while the daemon runs. Matching is by device and inode only, never by
+/// content hash: a different file with the same bytes is not this snapshot.
+/// A fresh daemon and a rollback daemon pin nothing.
+#[derive(Debug)]
+pub struct PinnedClientSnapshot {
+    _snapshot: OwnedFd,
+    device: u64,
+    inode: u64,
+}
+
+impl PinnedClientSnapshot {
+    /// Pins `snapshot`, which must be a regular file.
+    ///
+    /// # Errors
+    /// A descriptor that cannot be examined or is not a regular file.
+    pub fn pin(snapshot: OwnedFd) -> std::io::Result<Self> {
+        let status = rustix::fs::fstat(&snapshot)?;
+        if rustix::fs::FileType::from_raw_mode(status.st_mode) != rustix::fs::FileType::RegularFile
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the forward client snapshot is not a regular file",
+            ));
+        }
+        Ok(Self {
+            _snapshot: snapshot,
+            device: status.st_dev,
+            inode: status.st_ino,
+        })
+    }
+
+    /// The pinned file's device and inode.
+    pub const fn identity(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+}
+
+impl PartialEq for PinnedClientSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+
+impl Eq for PinnedClientSnapshot {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerIdentity {
     pub uid: u32,
@@ -53,6 +106,9 @@ pub struct PeerIdentity {
     /// The daemon's installed-prefix authority, attached at verification.
     /// It is not a property of the peer: adjacency is matched against it.
     install_prefix: Arc<InstallPrefix>,
+    /// The forward client snapshot an adopted daemon pinned, attached at
+    /// verification; `None` in every other daemon.
+    pinned_client: Option<Arc<PinnedClientSnapshot>>,
     persistent_executable: Option<ExecutableIdentity>,
     /// The peer's start time in clock ticks since boot, recorded when the
     /// connection is verified, so a reused PID is never mistaken for it.
@@ -60,7 +116,11 @@ pub struct PeerIdentity {
 }
 
 impl PeerIdentity {
-    pub fn from_stream(stream: &UnixStream, install_prefix: Arc<InstallPrefix>) -> Result<Self> {
+    pub fn from_stream(
+        stream: &UnixStream,
+        install_prefix: Arc<InstallPrefix>,
+        pinned_client: Option<Arc<PinnedClientSnapshot>>,
+    ) -> Result<Self> {
         let credentials = stream.peer_cred().context("cannot read peer credentials")?;
         let pid = credentials.pid().context("peer credentials omit pid")?;
         let pid = u32::try_from(pid).context("peer pid is negative")?;
@@ -74,6 +134,7 @@ impl PeerIdentity {
             executable_device,
             executable_inode,
             install_prefix,
+            pinned_client,
             persistent_executable: None,
             start_time: None,
         })
@@ -94,6 +155,7 @@ impl PeerIdentity {
             executable_device: metadata.dev(),
             executable_inode: metadata.ino(),
             install_prefix: Arc::new(test_install_prefix()),
+            pinned_client: None,
             persistent_executable: None,
             start_time: None,
         }
@@ -150,12 +212,27 @@ impl PeerIdentity {
         })
     }
 
-    /// Whether the peer executes exactly the file now installed as
-    /// `<prefix>/splinterm` (same device and inode), the trusted-UI rule of
-    /// AGENTS.md §4.4. A client still running a replaced or unlinked image
-    /// keeps its old inode and never matches.
+    /// Whether the peer is a trusted graphical client under AGENTS.md §4.4:
+    /// it executes exactly the file now installed as `<prefix>/splinterm`
+    /// (same device and inode), or, in a daemon adopted through a verified
+    /// handoff, exactly the sealed forward client snapshot that daemon
+    /// verified against its package record and pinned for its lifetime
+    /// (same device and inode; the operator exception of 2026-10-18).
+    ///
+    /// Matching is never by content hash. A fresh or rollback daemon pins no
+    /// snapshot, so only the installed rule applies there. A client still
+    /// running a replaced or unlinked image, a stale pre-upgrade inode among
+    /// them, keeps its old inode and matches neither.
     pub fn is_matching_splinterm(&self) -> bool {
         self.matches_installed_executable(&self.install_prefix.client())
+            || self.matches_pinned_client()
+    }
+
+    /// Whether the peer executes the pinned forward client snapshot.
+    fn matches_pinned_client(&self) -> bool {
+        self.pinned_client.as_ref().is_some_and(|pinned| {
+            pinned.identity() == (self.executable_device, self.executable_inode)
+        })
     }
 
     pub fn is_matching_graphical_relay(&self) -> bool {
@@ -180,12 +257,10 @@ impl PeerIdentity {
         executable_matches && graphical_mode
     }
 
-    // An adopted daemon (M3.10) trusts exactly this too: no peer executing
-    // the sealed forward client snapshot is trusted UI. M3.14, which first
-    // relaunches a Window from that snapshot, reintroduces matching its
-    // pinned device and inode, and only after the operator approves the
-    // matching AGENTS.md §4.4 amendment. Stale-inode clients never regain
-    // authority either way.
+    // The file installed at `expected` now, by device and inode. The pinned
+    // forward client snapshot is matched separately and only for the
+    // graphical client ([`Self::matches_pinned_client`]); it never widens
+    // the graphical relay's rule.
     fn matches_installed_executable(&self, expected: &Path) -> bool {
         fs::metadata(expected).is_ok_and(|metadata| {
             metadata.dev() == self.executable_device && metadata.ino() == self.executable_inode
@@ -1136,6 +1211,88 @@ mod tests {
             }
         }
         panic!("spawn sleeping child: executable stayed busy");
+    }
+
+    /// A sealed memfd holding a copy of `program`, as a handoff seals the
+    /// forward client snapshot.
+    fn sealed_copy(program: &Path) -> OwnedFd {
+        let memfd = rustix::fs::memfd_create(
+            "splinterm",
+            rustix::fs::MemfdFlags::CLOEXEC
+                | rustix::fs::MemfdFlags::ALLOW_SEALING
+                | rustix::fs::MemfdFlags::EXEC,
+        )
+        .unwrap();
+        let mut image = fs::File::from(memfd);
+        image.write_all(&fs::read(program).unwrap()).unwrap();
+        let memfd = OwnedFd::from(image);
+        rustix::fs::fcntl_add_seals(
+            &memfd,
+            rustix::fs::SealFlags::WRITE
+                | rustix::fs::SealFlags::GROW
+                | rustix::fs::SealFlags::SHRINK
+                | rustix::fs::SealFlags::SEAL,
+        )
+        .unwrap();
+        memfd
+    }
+
+    /// AGENTS.md §4.4, the 2026-10-18 exception: an adopted daemon trusts a
+    /// client executing exactly the snapshot it pinned, by device and inode;
+    /// a daemon that pinned nothing does not, and neither does a different
+    /// file with the same bytes or a stale installed inode.
+    #[test]
+    fn only_the_exact_pinned_snapshot_inode_is_trusted() {
+        let snapshot = sealed_copy(system_sleep());
+        let child = spawn_sleep(Path::new(&format!(
+            "/proc/self/fd/{}",
+            snapshot.as_raw_fd()
+        )));
+        let pinned = Arc::new(PinnedClientSnapshot::pin(snapshot.try_clone().unwrap()).unwrap());
+        let stat = rustix::fs::fstat(&snapshot).unwrap();
+        assert_eq!(pinned.identity(), (stat.st_dev, stat.st_ino));
+
+        let prefix = test_install_prefix();
+        // A fresh or rollback daemon pins nothing: the relaunched client is
+        // not trusted there.
+        let fresh = peer_for(child.pid(), &prefix);
+        assert!(!fresh.is_matching_splinterm());
+        // The adopted daemon that pinned this snapshot trusts it.
+        let adopted = PeerIdentity {
+            pinned_client: Some(Arc::clone(&pinned)),
+            ..fresh.clone()
+        };
+        assert!(adopted.is_matching_splinterm());
+        // The pin never widens the graphical relay's rule.
+        assert!(!adopted.is_matching_graphical_relay());
+        // Same bytes, another file: never matched by content.
+        let twin = Arc::new(PinnedClientSnapshot::pin(sealed_copy(system_sleep())).unwrap());
+        assert_ne!(twin.identity(), pinned.identity());
+        let other = PeerIdentity {
+            pinned_client: Some(twin),
+            ..fresh.clone()
+        };
+        assert!(!other.is_matching_splinterm());
+
+        // A client still running a stale installed inode matches neither
+        // rule, even in a daemon that pinned a snapshot.
+        let scratch = scratch_prefix();
+        let client = scratch.client();
+        install_copy(system_sleep(), &client);
+        let stale_child = spawn_sleep(&client);
+        install_copy(system_sleep(), &client);
+        let stale = PeerIdentity {
+            pinned_client: Some(Arc::clone(&pinned)),
+            ..peer_for(stale_child.pid(), &scratch)
+        };
+        assert!(!stale.is_matching_splinterm());
+        drop(stale_child);
+        fs::remove_dir_all(scratch.directory()).unwrap();
+
+        // Only a regular file can be pinned.
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(PinnedClientSnapshot::pin(OwnedFd::from(socket)).is_err());
+        drop(child);
     }
 
     fn system_sleep() -> &'static Path {

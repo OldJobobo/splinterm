@@ -1111,6 +1111,12 @@ struct DaemonState {
     /// clients, the rollback pair) derives from it, never from the running
     /// image, which after a memfd exec has no installed path.
     install_prefix: Arc<InstallPrefix>,
+    /// The sealed forward client snapshot this daemon verified and pinned
+    /// when it was adopted through a handoff (AGENTS.md §4.4, the
+    /// 2026-10-18 exception): a client executing exactly it, by device and
+    /// inode, is trusted UI too. `None` in a fresh, resumed-fresh, or
+    /// rollback daemon.
+    pinned_client_snapshot: Option<Arc<consent::PinnedClientSnapshot>>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
     /// Whether the daemon runs with `--require-workload-cgroups`. Without a
@@ -1396,6 +1402,7 @@ struct DaemonStateInputs {
     shared_image_budget: SharedImageBudget,
     shared_kitty_upload_budget: SharedKittyUploadBudget,
     install_prefix: Arc<InstallPrefix>,
+    pinned_client_snapshot: Option<Arc<consent::PinnedClientSnapshot>>,
     pty_backend: LinuxPtyBackend,
     workload_units: Option<WorkloadUnitManager>,
     workload_cgroups_required: bool,
@@ -2125,15 +2132,16 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         image_listener,
         handoff_listeners,
         windows,
+        forward_client,
         ..
     } = committed;
-    // The forward client snapshot closes here: nothing relaunches from it
-    // before M3.14, so for now the adopted daemon trusts exactly
-    // `<prefix>/splinterm`, as a fresh daemon does. AGENTS.md §4.4 already
-    // carries the 2026-10-18 exception for a handoff-adopted daemon:
-    // M3.14/M3.16 will keep this snapshot, pin it for the daemon's
-    // lifetime, and also trust a client executing exactly it, by device and
-    // inode, never by content hash.
+    // AGENTS.md §4.4, the 2026-10-18 exception: a forward adoption keeps the
+    // sealed forward client snapshot its candidate verified against the
+    // package record, pins it for this daemon's lifetime, and also trusts a
+    // client executing exactly it, by device and inode, never by content
+    // hash. Its carried Windows relaunch into it (M3.14). A rollback
+    // adoption pins nothing: its Windows relaunch the installed client.
+    let pinned_client_snapshot = pin_forward_client(rollback, forward_client);
     let install_prefix = Arc::new(install_prefix);
     let daemon_audit_peer = adopted_daemon_audit_peer(&install_prefix, daemon_image);
     let state = build_daemon_state(DaemonStateInputs {
@@ -2151,6 +2159,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
                 .join(splinterm_pty::HELPER_EXECUTABLE),
         ),
         install_prefix,
+        pinned_client_snapshot,
         workload_units,
         workload_cgroups_required: require_workload_cgroups,
         rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::Unavailable),
@@ -2198,6 +2207,39 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         signals,
         agent_status_timer,
     })
+}
+
+/// The forward client snapshot an adopted daemon pins for its lifetime
+/// (AGENTS.md §4.4, the 2026-10-18 exception; Plan 0061 M3.14): only after a
+/// forward adoption, whose candidate verified the snapshot against its
+/// package record before commit. A rollback adoption closes it and pins
+/// nothing. A snapshot that cannot be pinned after commit is logged and not
+/// pinned, which leaves only the installed-client rule: nothing after commit
+/// may fail the round.
+fn pin_forward_client(
+    rollback: bool,
+    forward_client: std::os::fd::OwnedFd,
+) -> Option<Arc<consent::PinnedClientSnapshot>> {
+    if rollback {
+        return None;
+    }
+    match consent::PinnedClientSnapshot::pin(forward_client) {
+        Ok(pinned) => {
+            let (device, inode) = pinned.identity();
+            info!(
+                device,
+                inode, "daemon handoff: pinned the forward client snapshot for relaunched Windows"
+            );
+            Some(Arc::new(pinned))
+        }
+        Err(error) => {
+            warn!(
+                %error,
+                "daemon handoff: cannot pin the forward client snapshot; relaunched Windows are not trusted"
+            );
+            None
+        }
+    }
 }
 
 /// Saves the adopted Topology through the daemon's normal save path, under
@@ -2788,6 +2830,7 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         shared_image_budget: previous.shared_image_budget.clone(),
         shared_kitty_upload_budget: previous.shared_kitty_upload_budget.clone(),
         install_prefix: Arc::clone(&previous.install_prefix),
+        pinned_client_snapshot: previous.pinned_client_snapshot.clone(),
         pty_backend: previous.pty_backend.clone(),
         workload_units: workload_units.clone(),
         workload_cgroups_required,
@@ -3076,6 +3119,8 @@ async fn start_fresh(
         shared_kitty_upload_budget,
         pty_backend: LinuxPtyBackend::installed_in(install_prefix.directory())?,
         install_prefix,
+        // A fresh daemon pins no client snapshot (AGENTS.md §4.4).
+        pinned_client_snapshot: None,
         workload_units,
         workload_cgroups_required: require_workload_cgroups,
         rollback_handoff: Arc::new(rollback_handoff),
@@ -3213,6 +3258,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         shared_image_budget,
         shared_kitty_upload_budget,
         install_prefix,
+        pinned_client_snapshot,
         pty_backend,
         workload_units,
         workload_cgroups_required,
@@ -3264,6 +3310,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         shared_image_budget,
         shared_kitty_upload_budget,
         install_prefix,
+        pinned_client_snapshot,
         pty_backend,
         workload_units,
         workload_cgroups_required,
@@ -3661,7 +3708,12 @@ async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> R
 }
 
 async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let (peer, peer_monitor) = verify_peer(&stream, &state.install_prefix).await?;
+    let (peer, peer_monitor) = verify_peer(
+        &stream,
+        &state.install_prefix,
+        state.pinned_client_snapshot.as_ref(),
+    )
+    .await?;
     let transfer_peer = peer
         .transfer_peer()
         .context("persistent image content peer identity is unavailable")?;
@@ -3833,7 +3885,12 @@ async fn send_image_content_chunks(
 }
 
 async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()> {
-    let (peer, peer_monitor) = verify_peer(&stream, &state.install_prefix).await?;
+    let (peer, peer_monitor) = verify_peer(
+        &stream,
+        &state.install_prefix,
+        state.pinned_client_snapshot.as_ref(),
+    )
+    .await?;
     let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (reader, writer) = stream.into_split();
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE);
@@ -14368,8 +14425,10 @@ fn wire_color_source(source: TerminalColorSource) -> ColorSource {
 async fn verify_peer(
     stream: &UnixStream,
     install_prefix: &Arc<InstallPrefix>,
+    pinned_client: Option<&Arc<consent::PinnedClientSnapshot>>,
 ) -> Result<(PeerIdentity, Option<consent::PeerMonitor>)> {
-    let mut identity = PeerIdentity::from_stream(stream, Arc::clone(install_prefix))?;
+    let mut identity =
+        PeerIdentity::from_stream(stream, Arc::clone(install_prefix), pinned_client.cloned())?;
     if identity.uid != rustix::process::geteuid().as_raw() {
         bail!("peer uid mismatch");
     }
@@ -15652,6 +15711,7 @@ mod tests {
                 DEFAULT_KITTY_UPLOAD_BYTES_PER_DAEMON,
             ),
             install_prefix: Arc::new(consent::test_install_prefix()),
+            pinned_client_snapshot: None,
             pty_backend,
             workload_units: None,
             workload_cgroups_required: false,
@@ -21844,6 +21904,40 @@ mod tests {
             sha256: [0x5c; 32],
         };
         (snapshot, identity)
+    }
+
+    /// AGENTS.md §4.4, the 2026-10-18 exception: only a forward adoption pins
+    /// the forward client snapshot, by its exact device and inode; a rollback
+    /// adoption closes it and pins nothing; a fresh daemon starts with none.
+    #[test]
+    fn only_a_forward_adoption_pins_the_forward_client_snapshot() {
+        let (snapshot, identity) = sealed_test_client_snapshot();
+        let pinned = pin_forward_client(false, snapshot).expect("a forward adoption pins");
+        assert_eq!(pinned.identity(), (identity.device, identity.inode));
+
+        let (snapshot, identity) = sealed_test_client_snapshot();
+        let probe = snapshot.try_clone().unwrap();
+        assert!(pin_forward_client(true, snapshot).is_none());
+        // The rollback daemon's copy is closed: only the probe holds it now.
+        let held = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                std::fs::metadata(entry.path()).is_ok_and(|metadata| {
+                    use std::os::unix::fs::MetadataExt as _;
+                    (metadata.dev(), metadata.ino()) == (identity.device, identity.inode)
+                })
+            })
+            .count();
+        assert_eq!(held, 1);
+        drop(probe);
+
+        // A socket is not a snapshot: the round goes on, unpinned.
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(pin_forward_client(false, socket.into()).is_none());
+
+        let state = test_state(false);
+        assert!(state.pinned_client_snapshot.is_none());
     }
 
     /// A forward preparation for Window tests: a sealed stand-in client
