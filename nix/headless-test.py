@@ -166,6 +166,46 @@ with subtest("configured default shell gets a PTY and the requested working dire
     user(automatic, "systemctl --user start splinterd.service")
     daemon_pid = wait_for_daemon(automatic)
 
+with subtest("a Nix-store daemon refuses live upgrade and keeps the restart path"):
+    # Plan 0061 (operator decision 2026-10-18): live upgrade ships for Arch
+    # and AUR packages only in 0.2.0. A Nix-provenance daemon reports Nix as
+    # unsupported, refuses `upgrade --now` before anything changes (exit 4),
+    # and upgrades by restarting.
+    pid, cgroup = create_workload(automatic, "nix-upgrade-workload")
+    report = user(automatic, "splinterm upgrade")
+    for expected in (
+        "Nix store build",
+        "Rollback copy: kept",
+        "Live upgrade: not available now.",
+        "Live upgrade is not supported for Nix installations in Splinterm 0.2.0.",
+        "systemctl --user stop splinterd.service",
+    ):
+        assert expected in report, (expected, report)
+    status, output = automatic.execute(
+        as_user("splinterm upgrade --now") + " 2>&1", timeout=60
+    )
+    assert status == 4, (status, output)
+    for expected in (
+        "Live upgrade is not available now.",
+        "Live upgrade is not supported for Nix installations in Splinterm 0.2.0.",
+        "splinterd: daemon handoff is unavailable: live handoff is not supported "
+        "for Nix-store installations in Splinterm 0.2.0",
+        "Nothing changed; every terminal keeps running.",
+        "systemctl --user start splinterd.service",
+    ):
+        assert expected in output, (expected, output)
+    # Nothing restarted: the same daemon still serves the same workload.
+    assert property_value(automatic, "splinterd.service", "MainPID") == daemon_pid
+    automatic.succeed(f"kill -0 {pid}")
+    assert "nix-upgrade-workload" in user(automatic, "splinterm list")
+    # The restart path still works and serves a new daemon process.
+    user(automatic, "systemctl --user restart splinterd.service")
+    wait_for_cleanup(automatic, pid, cgroup)
+    restarted = wait_for_daemon(automatic)
+    assert restarted != daemon_pid, (restarted, daemon_pid)
+    daemon_pid = restarted
+    assert "Nix store build" in user(automatic, "splinterm upgrade")
+
 with subtest("SSH logout and native remote reconnect do not kill lingering workloads"):
     automatic.wait_for_unit("sshd.service", timeout=60)
     host_key = automatic.succeed("cat /etc/ssh/ssh_host_ed25519_key.pub").strip()
