@@ -1052,3 +1052,327 @@ fn explorer_observation_ignores_agent_status_age_and_sequence_but_not_state() {
     snapshot.runtimes[0].agent_status = None;
     assert!(observer.observe(&snapshot));
 }
+
+/// Routes `command` against a read-only peer that answers `ListLairs` and
+/// `InspectTopology` from `snapshot` and refuses every other request, until
+/// the manager drops its connection. Returns every request it was sent.
+async fn read_only_routed(
+    command: WindowTopologyCommand,
+    snapshot: &splinterm_protocol::TopologySnapshot,
+) -> (Vec<Request>, Vec<WindowTopologyUpdate>) {
+    let snapshot = snapshot.clone();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (client, server) = tokio::io::duplex(65536);
+        let peer = tokio::spawn(async move {
+            let (mut reader, mut writer) = tokio::io::split(server);
+            let size = reader.read_u32().await.unwrap() as usize;
+            let mut bytes = vec![0; size];
+            reader.read_exact(&mut bytes).await.unwrap();
+            assert!(matches!(
+                serde_json::from_slice::<ClientFrame>(&bytes).unwrap(),
+                ClientFrame::Hello { .. }
+            ));
+            writer
+                .write_all(
+                    &splinterm_protocol::encode_frame(&ServerFrame::Hello {
+                        version: PROTOCOL_VERSION,
+                        limits: ServerLimits::default(),
+                        development_terminal_access: false,
+                        daemon_hostname: None,
+                        daemon_generation: 1,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut requests = Vec::new();
+            // Until the manager's connection closes.
+            while let Ok(size) = reader.read_u32().await {
+                let mut bytes = vec![0; size as usize];
+                reader.read_exact(&mut bytes).await.unwrap();
+                let ClientFrame::Request {
+                    request_id,
+                    request,
+                    ..
+                } = serde_json::from_slice(&bytes).unwrap()
+                else {
+                    panic!("expected request")
+                };
+                let frame = match &request {
+                    Request::ListLairs => ServerFrame::Response {
+                        request_id,
+                        result: Response::Lairs {
+                            lairs: snapshot.topology.lairs().cloned().collect(),
+                            topology_revision: snapshot.revision,
+                        },
+                    },
+                    Request::InspectTopology => ServerFrame::Response {
+                        request_id,
+                        result: Response::Topology {
+                            snapshot: snapshot.clone(),
+                        },
+                    },
+                    _ => ServerFrame::Error {
+                        request_id: Some(request_id),
+                        error: splinterm_protocol::ProtocolError::new(
+                            ErrorCode::Unauthorized,
+                            "this peer answers reads only",
+                        ),
+                    },
+                };
+                requests.push(request);
+                writer
+                    .write_all(&splinterm_protocol::encode_frame(&frame).unwrap())
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        let (reader, writer) = tokio::io::split(client);
+        let mut connection = Connection::connect_remote_interactive_transport(reader, writer)
+            .await
+            .unwrap();
+        let (mut state, _) = unrelated_state();
+        let (updates, mut receiver) = mpsc::channel(16);
+        let outcome = handle_session_manager_command(
+            &ConnectionFactory::local(),
+            command,
+            &mut connection,
+            &AppConfig::default(),
+            &SharedImageContentCache::default(),
+            &updates,
+            &mut state,
+        )
+        .await;
+        assert!(matches!(outcome, TopologyManagerCommandOutcome::Continue));
+        // No Window was opened or changed.
+        assert_eq!(state.tabs.len(), 1);
+        drop(connection);
+        let requests = peer.await.unwrap();
+        let mut output = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            output.push(update);
+        }
+        (requests, output)
+    })
+    .await
+    .expect("bounded read-only manager routing")
+}
+
+/// Whether an update is the view a command should show.
+type Shown = Box<dyn Fn(&WindowTopologyUpdate) -> bool>;
+
+/// Plan 0037 M5: opening the Dojo picker, a selector, or the Lair Explorer,
+/// and every restore preview (the Lair and Dojo restore prompts, the saved
+/// Lair preview, and the Explorer's Dojo and Splint previews), reads the
+/// catalog and shows its view without one request that could run a saved
+/// launch recipe: only `ListLairs` and `InspectTopology` ever reach the
+/// daemon. Cancelling a picker or prompt is local to the Window and sends
+/// nothing. The daemon test
+/// `startup_picker_and_restore_previews_execute_no_saved_recipe` replays
+/// these reads against saved recipes that write a marker file.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one table covers every picker and restore preview entry point"
+)]
+async fn picker_and_restore_previews_send_only_reads() {
+    use splinterm_protocol::{SplintLifecycle, SplintRuntimeSummary, TopologySnapshot};
+
+    let mut lair = Lair::new("saved recipe", "/tmp".into());
+    lair.retention = LairRetention::Saved;
+    let lair_id = lair.id;
+    let dojo_id = lair.dojos[0].id;
+    let splint_id = lair.dojos[0].default_focus;
+    let pane = lair.dojos[0].root.find_splint_mut(splint_id).unwrap();
+    pane.state = SplintState::Exited(0);
+    pane.last_incarnation = Some(7);
+    let mut topology = splinterm_core::Topology::new();
+    topology.insert_lair_at(topology.revision(), lair).unwrap();
+    let revision = topology.revision();
+    let snapshot = TopologySnapshot {
+        revision,
+        topology,
+        runtimes: vec![SplintRuntimeSummary {
+            splint_id,
+            live_incarnation: None,
+            last_incarnation: Some(7),
+            restorable: true,
+            lifecycle: SplintLifecycle::Exited,
+            exit_status: None,
+            agent_status: None,
+        }],
+    };
+    snapshot.validate().unwrap();
+    let lair_guard = ExplorerContextTarget {
+        topology_revision: revision,
+        node: NavigationNodeId::Lair(lair_id),
+        live_incarnation: None,
+    };
+    let dojo_guard = ExplorerContextTarget {
+        topology_revision: revision,
+        node: NavigationNodeId::Dojo { lair_id, dojo_id },
+        live_incarnation: None,
+    };
+    let restore_prompt = move |update: &WindowTopologyUpdate| {
+        matches!(
+            update,
+            WindowTopologyUpdate::ShowLairPrompt {
+                kind: LairPromptKind::Restore,
+                target,
+            } if target.targets.len() == 1 && target.targets[0].splint_id == splint_id
+        )
+    };
+    let explorer_prompt = |expected: LairPromptKind| {
+        move |update: &WindowTopologyUpdate| {
+            matches!(
+                update,
+                WindowTopologyUpdate::ShowExplorerPrompt { kind, .. } if *kind == expected
+            )
+        }
+    };
+    let cases: Vec<(&str, WindowTopologyCommand, Shown)> = vec![
+        (
+            "Dojo picker",
+            WindowTopologyCommand::RequestSessionPicker,
+            Box::new(|update| matches!(update, WindowTopologyUpdate::ShowSessionPicker { .. })),
+        ),
+        (
+            "Lair selector",
+            WindowTopologyCommand::RequestSelector {
+                kind: SelectorKind::Lair,
+                lair_id,
+            },
+            Box::new(|update| matches!(update, WindowTopologyUpdate::ShowSelector { .. })),
+        ),
+        (
+            "Dojo selector",
+            WindowTopologyCommand::RequestSelector {
+                kind: SelectorKind::Dojo,
+                lair_id,
+            },
+            Box::new(|update| matches!(update, WindowTopologyUpdate::ShowSelector { .. })),
+        ),
+        (
+            "Lair Explorer",
+            WindowTopologyCommand::RequestLairExplorer {
+                focused_splint: None,
+            },
+            Box::new(|update| matches!(update, WindowTopologyUpdate::ShowLairExplorer { .. })),
+        ),
+        (
+            "saved Lair preview",
+            WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Preview,
+                expected_retention: Some(LairRetention::Saved),
+            },
+            Box::new(|update| {
+                matches!(
+                    update,
+                    WindowTopologyUpdate::ShowLairPrompt {
+                        kind: LairPromptKind::Preview,
+                        ..
+                    }
+                )
+            }),
+        ),
+        (
+            "Lair restore prompt",
+            WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Restore,
+                expected_retention: Some(LairRetention::Saved),
+            },
+            Box::new(restore_prompt),
+        ),
+        (
+            "Dojo restore prompt",
+            WindowTopologyCommand::RequestDojoRestorePrompt { dojo_id },
+            Box::new(restore_prompt),
+        ),
+        (
+            "Explorer Lair preview",
+            lair_guard.command(WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Preview,
+                expected_retention: Some(LairRetention::Saved),
+            }),
+            Box::new(explorer_prompt(LairPromptKind::Preview)),
+        ),
+        (
+            "Explorer Lair restore prompt",
+            lair_guard.command(WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Restore,
+                expected_retention: Some(LairRetention::Saved),
+            }),
+            Box::new(explorer_prompt(LairPromptKind::Restore)),
+        ),
+        (
+            "Explorer Dojo restore prompt",
+            dojo_guard.command(WindowTopologyCommand::RequestDojoPrompt {
+                dojo_id,
+                kind: LairPromptKind::Restore,
+            }),
+            Box::new(explorer_prompt(LairPromptKind::Restore)),
+        ),
+        (
+            "Explorer Dojo restore preview",
+            WindowTopologyCommand::OpenDojo {
+                target: SessionPickerTarget {
+                    topology_revision: revision,
+                    lair_id,
+                    dojo_id,
+                    action: NavigationAction::PreviewRestoreDojo,
+                },
+                explorer_target: None,
+            },
+            Box::new(restore_prompt),
+        ),
+        (
+            "Explorer Splint restore preview",
+            WindowTopologyCommand::FocusSplint {
+                target: NavigationExplorerSplintTarget {
+                    topology_revision: revision,
+                    lair_id,
+                    dojo_id,
+                    splint_id,
+                    live_incarnation: None,
+                    last_incarnation: Some(7),
+                    capability: splinterm::navigation_projection::NavigationCapability {
+                        action: NavigationAction::PreviewRestoreSplint,
+                        availability: NavigationAvailability::Enabled,
+                    },
+                },
+            },
+            Box::new(restore_prompt),
+        ),
+    ];
+    let mut every_request = Vec::new();
+    for (name, command, shown) in cases {
+        let (requests, updates) = read_only_routed(command, &snapshot).await;
+        assert!(!requests.is_empty(), "{name} read nothing");
+        assert!(
+            requests
+                .iter()
+                .all(|request| matches!(request, Request::ListLairs | Request::InspectTopology)),
+            "{name} sent more than reads: {requests:?}"
+        );
+        for update in &updates {
+            let failure = match update {
+                WindowTopologyUpdate::TabFailed { message, .. }
+                | WindowTopologyUpdate::SessionPickerFailed(message)
+                | WindowTopologyUpdate::LairExplorerFailed(message) => Some(message),
+                _ => None,
+            };
+            assert!(failure.is_none(), "{name} failed: {failure:?}");
+        }
+        assert_eq!(updates.len(), 1, "{name} produced other updates");
+        assert!(shown(&updates[0]), "{name} did not show its view");
+        every_request.extend(requests);
+    }
+    // Both reads are exercised, so the daemon test replays each of them.
+    assert!(every_request.contains(&Request::ListLairs));
+    assert!(every_request.contains(&Request::InspectTopology));
+}

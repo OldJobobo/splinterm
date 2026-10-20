@@ -268,3 +268,21 @@ remains recipe-only and stores no terminal grids, scrollback bodies, image
 bodies, parser state, replies, or input. See
 [ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md) and
 [ADR 0012](adr/0012-defer-durable-terminal-archives.md).
+
+"Memory-backed" means that a checkpoint is an anonymous, sealed `memfd`, passed
+between daemon generations only as an open descriptor. It has no path: no file
+in the runtime, state, or configuration directories and no `/dev/shm` entry is
+named for it, and it ends with the last process holding it, including a
+candidate killed mid-handoff. The generation that commits the adoption or
+rollback releases every checkpoint. Terminal bodies stay out of the durable
+Topology (primary, backup, and quarantined copies), the daemon's log stream,
+its audit records, and its metadata responses. The `end_to_end` and
+`handoff_exec_adoption` integration tests check these points with a sentinel
+terminal body.
+
+It does not mean that the bytes never reach a disk. Like the live terminal
+state that `splinterd` always keeps in memory, checkpoint pages can be written
+to swap or a hibernation image, and they appear in a core dump or crash report
+of a daemon process that holds one. Splinterm does not lock that memory or
+turn off core dumps. Swap encryption and the system's core-dump and crash
+collection settings control those paths.
