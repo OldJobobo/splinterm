@@ -1237,9 +1237,12 @@ fn exchange(
     hint: AskpassHint,
     output: &mut impl Write,
 ) -> Result<HelperReply> {
-    let server = rustix::net::sockopt::socket_peercred(&*stream)
+    // nix decodes the peer credentials as plain integers: a broker outside
+    // this PID namespace is reported with PID 0, which rustix's non-zero PID
+    // type cannot hold. Only the UID is compared.
+    let server = nix::sys::socket::getsockopt(&*stream, nix::sys::socket::sockopt::PeerCredentials)
         .map_err(|_| anyhow::anyhow!("cannot identify the Splinterm prompt"))?;
-    if server.uid != rustix::process::geteuid() {
+    if server.uid() != rustix::process::geteuid().as_raw() {
         bail!("the Splinterm prompt belongs to another user");
     }
     stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT))?;
