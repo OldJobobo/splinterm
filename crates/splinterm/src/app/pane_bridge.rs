@@ -1286,6 +1286,68 @@ pub(in crate::app) fn optional_pane_controller(result: Result<u64>) -> Result<Op
     }
 }
 
+/// Presents a relaunched Window's resume ticket once for this pane's Splint
+/// on its control connection (Plan 0061 M3.16), when the Window holds one.
+///
+/// Returns the restored controller, or `None` when the Window holds no
+/// ticket for the Splint or the daemon restored nothing: the pane then takes
+/// control the ordinary way. Any daemon refusal is a fallback with a short
+/// notice, never a failure; only a broken connection fails the pane, as it
+/// would at `AcquireControl`.
+pub(in crate::app) async fn restore_handoff_control(
+    restore: &splinterm::handoff_control::HandoffControlRestore,
+    control: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+) -> Result<Option<u64>> {
+    let Some(ticket) = restore.take(splint_id) else {
+        return Ok(None);
+    };
+    match control
+        .claim_handoff_control(ticket, splint_id, incarnation)
+        .await
+    {
+        Ok(restored) => Ok(restored),
+        Err(error) => match protocol_error(&error) {
+            Some(refusal) => {
+                eprintln!(
+                    "splinterm: this pane's control was not restored after the upgrade ({:?}); it takes control the ordinary way",
+                    refusal.code
+                );
+                Ok(None)
+            }
+            None => Err(error),
+        },
+    }
+}
+
+/// A new pane's controller: in a Window relaunched across a daemon upgrade,
+/// the pane's pre-upgrade controller restored with the Window's ticket
+/// first; otherwise, when the pane claims control at start, an ordinary
+/// `AcquireControl`.
+async fn initial_pane_controller(
+    factory: &ConnectionFactory,
+    control: &mut Connection,
+    splint_id: SplintId,
+    incarnation: u64,
+    claim_control: bool,
+) -> Result<Option<u64>> {
+    let restored =
+        restore_handoff_control(factory.handoff_control(), control, splint_id, incarnation).await?;
+    if restored.is_some() || !claim_control {
+        return Ok(restored);
+    }
+    optional_pane_controller(
+        control
+            .acquire_control(
+                splint_id,
+                incarnation,
+                vec![ControlMode::Input, ControlMode::Resize],
+            )
+            .await,
+    )
+}
+
 pub(in crate::app) fn pane_access_scopes() -> Vec<AccessScope> {
     vec![AccessScope::Observe, AccessScope::Scrollback]
 }
@@ -1353,19 +1415,10 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
     if control.live_incarnation(splint_id).await? != incarnation {
         bail!("control connection observed a different process incarnation");
     }
-    let controller_id = if claim_control {
-        optional_pane_controller(
-            control
-                .acquire_control(
-                    splint_id,
-                    incarnation,
-                    vec![ControlMode::Input, ControlMode::Resize],
-                )
-                .await,
-        )?
-    } else {
-        None
-    };
+    // After the pane's own resnapshot above.
+    let controller_id =
+        initial_pane_controller(factory, &mut control, splint_id, incarnation, claim_control)
+            .await?;
     let (updates, receiver) = mpsc::channel(WINDOW_UPDATE_QUEUE);
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
     let (resync_sender, resyncs) = mpsc::channel(1);

@@ -177,11 +177,24 @@ const WINDOW: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW";
 const ALIAS_WINDOW_CONTINUATION: &str = "SPLINTERD_EXEC_ADOPTION_ALIAS_WINDOW_CONTINUATION";
 /// Where the stand-in Window writes the first continuation packet it reads.
 const WINDOW_OUTCOME: &str = "window-outcome.bin";
+/// What the relaunched stand-in Window sends to claim its controller: the
+/// continuation claim packet, its trusted-UI hello, and its
+/// `ClaimHandoffControl` frame (Plan 0061 M3.16).
+const WINDOW_CLAIM_FRAMES: &str = "window-claim-frames.json";
+/// Where the relaunched stand-in Window writes what the adopted daemon
+/// answered its hello and its claim.
+const WINDOW_CLAIM: &str = "window-claim.json";
 /// The stand-in Window's one old connection, which held a controller.
 const WINDOW_CONNECTION: u64 = 41;
 /// The stand-in Window: reads one packet from the inherited continuation
 /// end named by its first argument (end of file reads as empty, and it
 /// gives up after two minutes) and writes it atomically to its second.
+///
+/// On an `Adopted` outcome it then relaunches as a real Window does: it
+/// executes the sealed forward client snapshot it was handed (its third
+/// argument, a copy of the `python3` image, so the new image can run
+/// [`WINDOW_CLAIM_SCRIPT`]), in the same process, keeping only the
+/// continuation inheritable.
 const FAKE_WINDOW: &str = r#"
 import os, select, socket, sys
 channel = socket.socket(fileno=int(sys.argv[1]))
@@ -191,6 +204,62 @@ partial = sys.argv[2] + ".partial"
 with open(partial, "wb") as out:
     out.write(data)
 os.rename(partial, sys.argv[2])
+if len(data) == 16 and data[5] == 1:
+    os.set_inheritable(channel.fileno(), True)
+    home = sys.prefix if sys.prefix == sys.exec_prefix else sys.prefix + ":" + sys.exec_prefix
+    os.execve(
+        int(sys.argv[3]),
+        ["python3", "-c", sys.argv[5], str(channel.fileno()), sys.argv[4]],
+        dict(os.environ, PYTHONHOME=home),
+    )
+"#;
+/// The relaunched stand-in Window, executing the pinned snapshot: claims its
+/// resume ticket on the continuation, connects to the adopted daemon as
+/// trusted UI, presents the ticket for the Splint its old connection
+/// controlled, and writes both answers atomically.
+const WINDOW_CLAIM_SCRIPT: &str = r#"
+import json, os, socket, struct, sys
+channel = socket.socket(fileno=int(sys.argv[1]))
+with open(sys.argv[2]) as source:
+    frames = json.load(source)
+def finish(value):
+    partial = frames["result"] + ".partial"
+    with open(partial, "w") as out:
+        json.dump(value, out)
+    os.rename(partial, frames["result"])
+channel.send(bytes.fromhex(frames["claim"]))
+channel.settimeout(30)
+grant = channel.recv(128)
+if len(grant) != 48:
+    finish({"grant_bytes": len(grant)})
+    raise SystemExit(0)
+daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+daemon.settimeout(30)
+daemon.connect(os.environ["SPLINTERM_SOCKET"])
+def send(frame):
+    body = json.dumps(frame).encode()
+    daemon.sendall(struct.pack(">I", len(body)) + body)
+def exactly(count):
+    data = b""
+    while len(data) < count:
+        chunk = daemon.recv(count - len(data))
+        if not chunk:
+            raise SystemExit("splinterd closed the connection")
+        data += chunk
+    return data
+def read():
+    (length,) = struct.unpack(">I", exactly(4))
+    return json.loads(exactly(length))
+send(frames["hello"])
+hello = read()
+request = frames["request"]
+request["request"]["ticket"] = list(grant[16:])
+send(request)
+while True:
+    frame = read()
+    if frame.get("request_id") == request["request_id"]:
+        break
+finish({"hello": hello, "claim": frame})
 "#;
 /// Every pre-commit step the fault matrix fails the forward candidate at.
 const FAULT_POINTS: [CandidateFaultPoint; 6] = [
@@ -217,7 +286,21 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 /// identity differ from the rollback image's.
 const SALT: [u8; BUILD_SALT_BYTES] = *b"m3.10b-exec-salt";
 const ROLLBACK_CLIENT: &[u8] = b"#!/bin/sh\n# rollback client fixture\nexit 0\n";
-const FORWARD_CLIENT: &[u8] = b"#!/bin/sh\n# forward client fixture\nexit 0\n";
+
+/// The forward client the upgrade installs: a copy of the `python3` ELF
+/// image, so the stand-in Window can execute the sealed snapshot of it and
+/// still run a script (an interpreter script would execute as its
+/// interpreter, not as the snapshot).
+fn forward_client() -> Vec<u8> {
+    let python = env::var_os("PATH")
+        .and_then(|path| {
+            env::split_paths(&path)
+                .map(|directory| directory.join("python3"))
+                .find(|candidate| candidate.is_file())
+        })
+        .expect("python3 is on PATH");
+    fs::read(python).unwrap()
+}
 const CAT: &str = "printf ready; exec cat";
 const EXCLUDED_EXIT: i32 = 3;
 const GUARD_WAIT: Duration = Duration::from_secs(2);
@@ -427,7 +510,7 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         .expect("the integration-test daemon carries exactly one patchable salt slot");
     forward_daemon[slot..slot + BUILD_SALT_BYTES].copy_from_slice(&SALT);
     install(&daemon_path, &forward_daemon);
-    install(&client_path, FORWARD_CLIENT);
+    install(&client_path, &forward_client());
     let snapshots = HandoffExecutableSnapshots::materialize(&pair, &rollback, policy).unwrap();
     drop(rollback);
 
@@ -436,7 +519,12 @@ fn old_generation_stage(options: &StageOptions) -> ! {
     let image = bound_listener(&image_content_socket_path(&socket));
 
     let stopped = hand_off_and_stop();
-    let window = options.window.then(|| spawn_window(&directory));
+    let window = options
+        .window
+        .then(|| spawn_window(&directory, snapshots.forward().client().descriptor()));
+    if window.is_some() {
+        write_window_claim_frames(&directory, &stopped);
+    }
     // The listener's object at a distinct close-on-exec number.
     let listener_duplicate = options
         .alias_window_continuation
@@ -584,10 +672,12 @@ struct StandInWindow {
 }
 
 /// Spawns the stand-in Window with the client end of a fresh credentialed
-/// `SOCK_SEQPACKET` pair. Only the client end is ever inheritable, and only
-/// until the child has it: the stage closes its copy at once, so nothing
-/// inheritable reaches the exec boundary's audit.
-fn spawn_window(directory: &Path) -> StandInWindow {
+/// `SOCK_SEQPACKET` pair and a duplicate of the sealed forward client
+/// `snapshot`, as a real Window receives both with its prepare frame. Only
+/// those two are ever inheritable, and only until the child has them: the
+/// stage closes its copies at once, so nothing inheritable reaches the exec
+/// boundary's audit.
+fn spawn_window(directory: &Path, snapshot: std::os::fd::BorrowedFd<'_>) -> StandInWindow {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::MetadataExt as _;
 
@@ -600,15 +690,21 @@ fn spawn_window(directory: &Path) -> StandInWindow {
     .unwrap();
     rustix::net::sockopt::set_socket_passcred(&continuation, true).unwrap();
     rustix::io::fcntl_setfd(&client, rustix::io::FdFlags::empty()).unwrap();
+    let snapshot = rustix::io::fcntl_dupfd_cloexec(snapshot, 3).unwrap();
+    rustix::io::fcntl_setfd(&snapshot, rustix::io::FdFlags::empty()).unwrap();
     let child = Command::new("python3")
         .arg("-c")
         .arg(FAKE_WINDOW)
         .arg(client.as_raw_fd().to_string())
         .arg(directory.join(WINDOW_OUTCOME))
+        .arg(snapshot.as_raw_fd().to_string())
+        .arg(directory.join(WINDOW_CLAIM_FRAMES))
+        .arg(WINDOW_CLAIM_SCRIPT)
         .stdin(Stdio::null())
         .spawn()
         .expect("spawn the stand-in Window");
     drop(client);
+    drop(snapshot);
     let pid = child.id();
     // Never waited for here: the adopting daemon inherits it as a child.
     drop(child);
@@ -632,6 +728,54 @@ fn spawn_window(directory: &Path) -> StandInWindow {
         pidfd,
         continuation,
     }
+}
+
+/// Writes what the relaunched stand-in Window sends after an adoption: the
+/// continuation claim naming generation 2, a trusted-UI hello, and a
+/// `ClaimHandoffControl` frame for the first carried Splint, whose
+/// controller the manifest records as held by the Window's old connection.
+/// The Window fills in the ticket it is granted.
+fn write_window_claim_frames(directory: &Path, stopped: &Stopped) {
+    let evidence = stopped.handed_off[0].handed_off.evidence;
+    let claim = splinterm_protocol::handoff_continuation::HandoffTicketClaim {
+        daemon_generation: 2,
+    }
+    .encode()
+    .iter()
+    .fold(String::new(), |mut hex, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    });
+    let frames = json!({
+        "claim": claim,
+        "hello": ClientFrame::Hello {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+            role: ClientRole::TrustedUi,
+            handoff_window: false,
+        },
+        "request": ClientFrame::Request {
+            request_id: 1,
+            diagnostic_correlation: None,
+            request: Request::ClaimHandoffControl {
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [0; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ),
+                splint: Some(splinterm_protocol::HandoffClaimTarget {
+                    splint_id: evidence.splint_id,
+                    incarnation: evidence.incarnation.value(),
+                }),
+            },
+        },
+        "result": directory.join(WINDOW_CLAIM),
+        "splint_id": evidence.splint_id,
+        "incarnation": evidence.incarnation.value(),
+    });
+    write_atomically(
+        &directory.join(WINDOW_CLAIM_FRAMES),
+        &serde_json::to_vec(&frames).unwrap(),
+    );
 }
 
 /// Installs `bytes` at `path` the way a package upgrade does: a new inode
@@ -1209,6 +1353,23 @@ impl Stage {
         }
     }
 
+    /// Waits for what the relaunched stand-in Window recorded of its claim.
+    fn window_claim(&mut self) -> Value {
+        let path = self.directory.join(WINDOW_CLAIM);
+        let deadline = Instant::now() + STAGE_WAIT;
+        loop {
+            if let Ok(bytes) = fs::read(&path) {
+                return serde_json::from_slice(&bytes).unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the relaunched Window never recorded its claim\n{}",
+                self.logs()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Waits for the launcher, and so the stage, to exit.
     fn wait(&mut self, timeout: Duration) -> std::process::ExitStatus {
         let deadline = Instant::now() + timeout;
@@ -1612,9 +1773,64 @@ fn adopt_case() {
             daemon_generation: record.source_daemon_generation + 1,
         }
     );
+    assert_window_restored_its_controller(&mut stage, &directory);
 
     // An ordered shutdown of the adopted daemon ends it and its Splints.
     shut_down(&mut stage, &record, &[launched]);
+}
+
+/// The stand-in Window relaunched into the pinned forward client snapshot
+/// in its own process, claimed its resume ticket on the continuation (the
+/// daemon checked its kernel credentials, pidfd, and executable), connected
+/// as trusted UI because it runs the pinned snapshot, and restored exactly
+/// the controller its old connection held at the fence (Plan 0061 M3.16).
+fn assert_window_restored_its_controller(stage: &mut Stage, directory: &TestDirectory) {
+    let frames: Value =
+        serde_json::from_slice(&fs::read(directory.0.join(WINDOW_CLAIM_FRAMES)).unwrap()).unwrap();
+    let claim = stage.window_claim();
+    let logs = stage.logs();
+    assert!(
+        claim.get("grant_bytes").is_none(),
+        "no ticket was granted: {claim}\n{logs}"
+    );
+    let hello: ServerFrame = serde_json::from_value(claim["hello"].clone())
+        .unwrap_or_else(|error| panic!("{error}: {claim}\n{logs}"));
+    assert!(
+        matches!(
+            hello,
+            ServerFrame::Hello {
+                daemon_generation: 2,
+                ..
+            }
+        ),
+        "the snapshot connects as trusted UI: {hello:?}\n{logs}"
+    );
+    let frame: ServerFrame = serde_json::from_value(claim["claim"].clone())
+        .unwrap_or_else(|error| panic!("{error}: {claim}\n{logs}"));
+    let ServerFrame::Response {
+        result: Response::HandoffControlClaimed { controllers },
+        ..
+    } = frame
+    else {
+        panic!("the claim was refused: {frame:?}\n{logs}");
+    };
+    let splint_id: SplintId = serde_json::from_value(frames["splint_id"].clone()).unwrap();
+    let incarnation = frames["incarnation"].as_u64().unwrap();
+    let [controller] = controllers.as_slice() else {
+        panic!("exactly one controller: {controllers:?}\n{logs}");
+    };
+    assert_eq!(
+        (controller.splint_id, controller.incarnation),
+        (splint_id, incarnation)
+    );
+    assert_eq!(controller.modes, [ControlMode::Input, ControlMode::Resize]);
+    for expected in [
+        "daemon handoff: serving the carried Windows' continuation claims",
+        "daemon handoff: issued a carried Window its resume ticket",
+        "daemon handoff: restored a relaunched Window's controller",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
 }
 
 /// Bits of SIGHUP (1), SIGINT (2), and SIGTERM (15) in a `/proc` signal mask:

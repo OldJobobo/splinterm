@@ -2167,7 +2167,26 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         handoff_listeners: Some(handoff_listeners),
     });
     // The carried Windows were sent their outcome at commit; the daemon
-    // holds them until their resume claims (M3.16) or the hold expires.
+    // holds them until their resume claims (M3.16) or the hold expires, and
+    // serves each continuation channel for its one ticket claim. A rollback
+    // daemon pins no snapshot, so it refuses every claim at once.
+    let served = splinterd::handoff_continuation::serve_continuations(
+        &windows,
+        splinterd::handoff_continuation::ContinuationBinding {
+            daemon_generation,
+            client_snapshot: state
+                .pinned_client_snapshot
+                .as_ref()
+                .map(|pinned| pinned.identity()),
+            uid: rustix::process::geteuid().as_raw(),
+        },
+    );
+    if served > 0 {
+        info!(
+            served,
+            "daemon handoff: serving the carried Windows' continuation claims"
+        );
+    }
     *state.handoff_window_hold.lock().unwrap() = windows;
     record_policy_reload(&state, &policy_generation).await;
     record_handoff_adoption_audit(&state, rollback).await;
@@ -10178,9 +10197,9 @@ async fn handle_authorized_request(
                 }
             }
         }
-        Request::ClaimHandoffControl { .. } => {
+        Request::ClaimHandoffControl { ticket, splint } => {
             require_trusted_local_ui(trusted_ui_client, peer)?;
-            return Err(handoff_requests::invalid_handoff_ticket());
+            claim_handoff_control(state, peer, connection_id, ticket, splint).await?
         }
         Request::AcknowledgeHandoffPrepare { .. } => {
             require_trusted_local_ui(trusted_ui_client, peer)?;
@@ -10206,6 +10225,117 @@ fn require_trusted_local_ui(
             ErrorCode::Unauthorized,
             "request requires the installed trusted graphical client",
         ))
+    }
+}
+
+/// Restores one pre-fence controller to this connection from a relaunched
+/// Window's resume ticket (Plan 0061 M3.16; the claim model is in
+/// `splinterd::handoff_continuation`).
+///
+/// The caller has already required a trusted-UI connection running a
+/// matching client, so an automation or relay connection never reaches the
+/// ticket and cannot end it. The ticket must have been issued to this
+/// connection's own process (PID, start time, live pidfd) running the
+/// pinned snapshot, by this generation, before the hold ended. Only the
+/// named Splint is restored, and only when the Window held its controller
+/// at the fence, at the named and live incarnation, and no controller holds
+/// it now; the lease is connection-bound like any `AcquireControl`, one per
+/// connection, and never grant-bound. Consent rules are unchanged.
+async fn claim_handoff_control(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    connection_id: u64,
+    ticket: splinterm_protocol::HandoffResumeTicket,
+    splint: Option<splinterm_protocol::HandoffClaimTarget>,
+) -> Result<Response, ProtocolError> {
+    use splinterd::handoff_continuation::{Redemption, TicketPresentation};
+
+    let Some(splinterm_protocol::HandoffClaimTarget {
+        splint_id,
+        incarnation,
+    }) = splint
+    else {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "a handoff control claim names the Splint it restores",
+        ));
+    };
+    if incarnation == 0 {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "a handoff control claim names a live incarnation",
+        ));
+    }
+    let hold = state.handoff_window_hold.lock().unwrap().clone();
+    let redemption = {
+        // The registry is held until the lease exists, so the live
+        // incarnation read here cannot change before it (a relaunch replaces
+        // the runtime under this lock). Nothing takes the controller lock and
+        // then the registry's, so this order cannot deadlock. The controller
+        // state is then read and changed under the hold's mutex, inside
+        // `redeem`, so the expiry cannot interleave either.
+        let runtimes = state.runtimes.lock().await;
+        let mut controllers = state.controller.lock().await;
+        let presentation = TicketPresentation {
+            ticket: *ticket.as_bytes(),
+            claimant_pid: peer.pid,
+            claimant_start_time: peer.start_time(),
+            splint_id,
+            incarnation,
+            live_incarnation: runtimes
+                .handle(splint_id)
+                .map(|handle| handle.incarnation.value()),
+            daemon_generation: state.daemon_generation,
+        };
+        hold.redeem(&presentation, Instant::now(), |placeholder| {
+            controllers
+                .acquire(
+                    connection_id,
+                    placeholder.splint_id,
+                    placeholder.incarnation,
+                    None,
+                )
+                .ok()
+        })
+    };
+    match redemption {
+        Ok(Redemption::Restored(lease)) => {
+            publish_control_status(state, lease.splint_id, lease.incarnation).await;
+            info!(
+                splint_id = %lease.splint_id,
+                connection_id,
+                "daemon handoff: restored a relaunched Window's controller"
+            );
+            Ok(Response::HandoffControlClaimed {
+                controllers: vec![splinterm_protocol::HandoffClaimedController {
+                    splint_id: lease.splint_id,
+                    incarnation: lease.incarnation,
+                    controller_id: lease.id,
+                    modes: vec![
+                        splinterm_protocol::ControlMode::Input,
+                        splinterm_protocol::ControlMode::Resize,
+                    ],
+                }],
+            })
+        }
+        Ok(Redemption::Skipped(reason)) => {
+            info!(
+                ?reason,
+                %splint_id,
+                connection_id,
+                "daemon handoff: a handoff control claim restored nothing"
+            );
+            Ok(Response::HandoffControlClaimed {
+                controllers: Vec::new(),
+            })
+        }
+        Err(refusal) => {
+            warn!(
+                ?refusal,
+                connection_id, "daemon handoff: refused a handoff control claim"
+            );
+            Err(handoff_requests::invalid_handoff_ticket())
+        }
     }
 }
 
@@ -10651,18 +10781,19 @@ impl<'a> HandoffAdmission<'a> {
 /// - **Fenced:** every change to Topology or the live registry (creates,
 ///   splits, relaunches, restores, presets, renames, retention, focus
 ///   defaults, closes, kills, terminations, and the unused-Dojo close);
-///   terminal input and resize; acquiring, transferring, deciding, or forcing
-///   control; consent and new grants; and every new subscription or
-///   attachment (topology, terminal, control), which would need
-///   resnapshot authority on the next generation and changes attachment
-///   counts an unused close reads.
+///   terminal input and resize; acquiring (a handoff control claim
+///   included), transferring, deciding, or forcing control; consent and new
+///   grants; and every new subscription or attachment (topology, terminal,
+///   control), which would need resnapshot authority on the next generation
+///   and changes attachment counts an unused close reads.
 /// - **Admitted:** read-only queries (including the mutation preflight and
 ///   image content for an existing attachment); advisory, connection-owned
 ///   state no handoff captures (the published graphical focus and agent
 ///   status, which Plan 0061 D6 drops across a handoff); requests that only
 ///   reduce authority (detach, release control, revoke a grant); and the
-///   handoff requests themselves, so a dry run still reports, a Window can
-///   acknowledge, and the gate answers a second `Execute` itself.
+///   handoff preparation and acknowledgement themselves, so a dry run still
+///   reports, a Window can acknowledge, and the gate answers a second
+///   `Execute` itself.
 ///
 /// Admitted requests that take the topology permit (topology inspection,
 /// the mutation preflight, grant revocation) wait for the fence to lift.
@@ -10695,9 +10826,9 @@ const fn handoff_fenced(request: &Request) -> bool {
         | Request::ReleaseControl { .. }
         | Request::RevokeAccess { .. }
         | Request::PrepareDaemonHandoff { .. }
-        | Request::ClaimHandoffControl { .. }
         | Request::AcknowledgeHandoffPrepare { .. } => false,
         Request::CreateLair { .. }
+        | Request::ClaimHandoffControl { .. }
         | Request::CreateLairAutomation { .. }
         | Request::CreateTransientLair { .. }
         | Request::SplitSplint { .. }
@@ -17315,6 +17446,7 @@ mod tests {
                 ticket: splinterm_protocol::HandoffResumeTicket::new(
                     [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
                 ),
+                splint: None,
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
@@ -17410,6 +17542,7 @@ mod tests {
             ticket: splinterm_protocol::HandoffResumeTicket::new(
                 [0xa7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
             ),
+            splint: None,
         };
         // The trusted UI passed authorization; the claim itself failed.
         let authorization = RequestAuthorizationContext {
@@ -17444,6 +17577,304 @@ mod tests {
         let encoded = serde_json::to_string(record).unwrap();
         assert!(!encoded.contains("167,167"), "{encoded}");
         assert!(!encoded.contains("ticket"), "{encoded}");
+    }
+
+    /// Installs a hold of one relaunched Window, this test process, already
+    /// issued `ticket` and holding the controllers of `controlled` (Plan 0061
+    /// M3.16).
+    fn ticketed_window_hold(
+        state: &DaemonState,
+        pinned: &consent::PinnedClientSnapshot,
+        ticket: [u8; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+        controlled: &[&LiveSplintHandle],
+    ) -> splinterd::handoff_window_carry::HandoffWindowHold {
+        let pid = std::process::id();
+        let hold = splinterd::handoff_window_carry::HandoffWindowHold::ticketed_for_test(
+            pid,
+            splinterd::handoff_window_carry::process_start_time(pid).unwrap(),
+            rustix::process::pidfd_open(
+                rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
+                rustix::process::PidfdFlags::empty(),
+            )
+            .unwrap(),
+            pinned.identity(),
+            state.daemon_generation,
+            ticket,
+            controlled
+                .iter()
+                .zip(41..)
+                .map(|(handle, connection)| {
+                    splinterd::handoff_window_carry::ControllerPlaceholder {
+                        splint_id: handle.splint_id,
+                        incarnation: handle.incarnation.value(),
+                        window: 0,
+                        connection,
+                    }
+                })
+                .collect(),
+            Instant::now() + Duration::from_secs(30),
+        );
+        *state.handoff_window_hold.lock().unwrap() = hold.clone();
+        hold
+    }
+
+    fn handoff_claim(
+        ticket: [u8; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+        splint_id: SplintId,
+        incarnation: u64,
+    ) -> Request {
+        Request::ClaimHandoffControl {
+            ticket: splinterm_protocol::HandoffResumeTicket::new(ticket),
+            splint: Some(splinterm_protocol::HandoffClaimTarget {
+                splint_id,
+                incarnation,
+            }),
+        }
+    }
+
+    fn claimed_controllers(
+        handled: Result<Handled, ProtocolError>,
+    ) -> Vec<splinterm_protocol::HandoffClaimedController> {
+        match handled.unwrap().response {
+            Response::HandoffControlClaimed { controllers } => controllers,
+            response => panic!("not a claim result: {response:?}"),
+        }
+    }
+
+    fn pinned_window_peer(pinned: &Arc<consent::PinnedClientSnapshot>) -> PeerIdentity {
+        let mut peer = PeerIdentity::for_test_pinned(Arc::clone(pinned));
+        peer.install_persistent_executable(
+            executable_identity::ExecutableIdentity::from_pid(std::process::id())
+                .expect("snapshot test executable"),
+        );
+        assert!(peer.is_matching_splinterm());
+        peer
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one claim walk: restored, replayed, live-held, stale, and ended"
+    )]
+    async fn a_resume_ticket_restores_exactly_the_named_live_unheld_controllers() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let handles = live_cat_splints(&state, 3).await;
+        let [first, second, third] = [&handles[0], &handles[1], &handles[2]];
+        let pinned = Arc::new(consent::PinnedClientSnapshot::own_executable_for_test());
+        let peer = pinned_window_peer(&pinned);
+        let ticket = [0x9b; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES];
+        let hold = ticketed_window_hold(&state, &pinned, ticket, &[first, second, third]);
+        // Another connection took the second Splint's controller after the
+        // adoption.
+        let live_owner = state
+            .controller
+            .lock()
+            .await
+            .acquire(77, second.splint_id, second.incarnation.value(), None)
+            .unwrap()
+            .id;
+
+        // The first pane's new control connection restores its controller.
+        let restored = claimed_controllers(
+            handle_request(
+                handoff_claim(ticket, first.splint_id, first.incarnation.value()),
+                &state,
+                &peer,
+                501,
+                0,
+                true,
+                false,
+            )
+            .await,
+        );
+        let [restored] = restored.as_slice() else {
+            panic!("exactly one controller: {restored:?}");
+        };
+        assert_eq!(
+            (restored.splint_id, restored.incarnation),
+            (first.splint_id, first.incarnation.value())
+        );
+        assert_eq!(
+            restored.modes,
+            [
+                splinterm_protocol::ControlMode::Input,
+                splinterm_protocol::ControlMode::Resize
+            ]
+        );
+        {
+            let controllers = state.controller.lock().await;
+            controllers
+                .authorize(
+                    501,
+                    restored.controller_id,
+                    first.splint_id,
+                    first.incarnation.value(),
+                )
+                .unwrap();
+            assert!(
+                controllers
+                    .by_id
+                    .get(&restored.controller_id)
+                    .is_some_and(|lease| lease.grant_id.is_none())
+            );
+        }
+        // A replay, on any connection, restores nothing.
+        assert_eq!(
+            handle_request(
+                handoff_claim(ticket, first.splint_id, first.incarnation.value()),
+                &state,
+                &peer,
+                502,
+                0,
+                true,
+                false,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidHandoffTicket
+        );
+        // A Splint with a live controller now is skipped, never forced.
+        assert!(
+            claimed_controllers(
+                handle_request(
+                    handoff_claim(ticket, second.splint_id, second.incarnation.value()),
+                    &state,
+                    &peer,
+                    503,
+                    0,
+                    true,
+                    false,
+                )
+                .await
+            )
+            .is_empty()
+        );
+        state
+            .controller
+            .lock()
+            .await
+            .authorize(77, live_owner, second.splint_id, second.incarnation.value())
+            .unwrap();
+        // A claim naming another incarnation than the held one is skipped.
+        assert!(
+            claimed_controllers(
+                handle_request(
+                    handoff_claim(ticket, third.splint_id, third.incarnation.value() + 1),
+                    &state,
+                    &peer,
+                    504,
+                    0,
+                    true,
+                    false,
+                )
+                .await
+            )
+            .is_empty()
+        );
+        assert!(
+            !state
+                .controller
+                .lock()
+                .await
+                .by_splint
+                .contains_key(&third.splint_id)
+        );
+        // Every placeholder is spent: the ticket and the hold ended.
+        assert!(!hold.is_held());
+        assert_eq!(
+            handle_request(
+                handoff_claim(ticket, third.splint_id, third.incarnation.value()),
+                &state,
+                &peer,
+                505,
+                0,
+                true,
+                false,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidHandoffTicket
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handoff_claim_from_another_role_or_without_a_splint_never_spends_the_ticket() {
+        let state = test_state_with_backend(false, test_pty_backend());
+        let handles = live_cat_splints(&state, 1).await;
+        let splint = &handles[0];
+        let pinned = Arc::new(consent::PinnedClientSnapshot::own_executable_for_test());
+        let peer = pinned_window_peer(&pinned);
+        let ticket = [0x2d; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES];
+        let claim = || handoff_claim(ticket, splint.splint_id, splint.incarnation.value());
+        // Nothing is held yet: no ticket is valid.
+        assert_eq!(
+            handle_request(claim(), &state, &peer, 501, 0, true, false)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidHandoffTicket
+        );
+        let hold = ticketed_window_hold(&state, &pinned, ticket, &[splint]);
+        // An automation or relay connection, or a trusted-UI role on any
+        // client but the installed or pinned one, is refused before the
+        // ticket is looked at.
+        for (trusted_ui, remote_interactive) in [(false, false), (false, true)] {
+            assert_eq!(
+                handle_request(
+                    claim(),
+                    &state,
+                    &peer,
+                    502,
+                    0,
+                    trusted_ui,
+                    remote_interactive
+                )
+                .await
+                .unwrap_err()
+                .code,
+                ErrorCode::Unauthorized
+            );
+        }
+        assert_eq!(
+            handle_request(
+                claim(),
+                &state,
+                &PeerIdentity::for_test(),
+                503,
+                0,
+                true,
+                false
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::Unauthorized
+        );
+        // A claim that names no Splint, or incarnation zero.
+        for request in [
+            Request::ClaimHandoffControl {
+                ticket: splinterm_protocol::HandoffResumeTicket::new(ticket),
+                splint: None,
+            },
+            handoff_claim(ticket, splint.splint_id, 0),
+        ] {
+            assert_eq!(
+                handle_request(request, &state, &peer, 504, 0, true, false)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        assert_eq!(hold.placeholders().len(), 1);
+        // The ticket still restores for its Window.
+        assert_eq!(
+            claimed_controllers(handle_request(claim(), &state, &peer, 505, 0, true, false).await)
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -17688,17 +18119,21 @@ mod tests {
             Request::PrepareDaemonHandoff {
                 mode: splinterm_protocol::DaemonHandoffMode::Execute,
             },
-            Request::ClaimHandoffControl {
-                ticket: splinterm_protocol::HandoffResumeTicket::new(
-                    [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
-                ),
-            },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
                 prepare_id: 1,
             },
         ];
         let fenced = [
+            Request::ClaimHandoffControl {
+                ticket: splinterm_protocol::HandoffResumeTicket::new(
+                    [7; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+                ),
+                splint: Some(splinterm_protocol::HandoffClaimTarget {
+                    splint_id,
+                    incarnation: 1,
+                }),
+            },
             Request::CreateLair {
                 expected_topology_revision: revision,
                 name: "lair".into(),

@@ -9,6 +9,7 @@ pub mod executable_snapshot;
 pub mod handoff_adoption;
 pub mod handoff_checkpoint;
 pub mod handoff_compatibility;
+pub mod handoff_continuation;
 pub mod handoff_coordinator;
 pub mod handoff_descriptors;
 pub mod handoff_exec;

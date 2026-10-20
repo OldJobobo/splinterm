@@ -12,10 +12,14 @@
 //! the upgrade is replayed. The Window then declares its handoff anchor and
 //! runs as any other managed Window.
 //!
-//! The continuation socket stays open for the Window's life, so the adopted
-//! daemon's hold sees it alive. M3.16 claims the Window's controllers through
-//! it with `ClaimHandoffControl`; this slice restores no controller, so the
-//! Window takes control the ordinary way as its panes attach.
+//! After an adoption, with its trusted identity established and the
+//! authoritative topology read, the Window claims its resume ticket over the
+//! continuation socket, which then closes, and arms it for the Splints of
+//! the tabs it restores (Plan 0061 M3.16, `splinterm::handoff_control`).
+//! Each pane presents it once on its own control connection after its own
+//! resnapshot, and keeps the controller it held before the upgrade. A
+//! rollback daemon issues no ticket, so after a rollback the socket simply
+//! closes. Without a ticket, the panes take control the ordinary way.
 //!
 //! A recorded Dojo that no longer runs is skipped. When none runs, the
 //! Window fails with a clear message instead of opening something unasked.
@@ -29,6 +33,7 @@ use splinterm::{
         initialize_graphical, install_termination_signal_task,
     },
     endpoint::ConnectionFactory,
+    handoff_control::{CONTROL_RESTORE_WINDOW, TICKET_CLAIM_DEADLINE, claim_resume_ticket},
     handoff_status::RECONNECT_WINDOW,
     session_picker::dojo_has_fully_running_pane_layout,
 };
@@ -36,7 +41,7 @@ use splinterm_core::{DojoId, SplintId};
 use splinterm_protocol::{Request, Response, window_resume::WindowResumeRecord};
 
 use super::{
-    pane_bridge::{UNTRUSTED_AFTER_UPGRADE, refused_as_untrusted},
+    pane_bridge::{UNTRUSTED_AFTER_UPGRADE, layout_splint_ids, refused_as_untrusted},
     window::{WindowResume, run_resumed_multipane_window},
 };
 use crate::handoff_acquire::AcquiredWindowResume;
@@ -56,6 +61,23 @@ pub(super) struct WindowRestorePlan {
 impl WindowRestorePlan {
     fn tabs(&self) -> usize {
         1 + self.rest.len()
+    }
+
+    /// Every Splint of the tabs this plan restores, from the daemon's Lairs:
+    /// the panes that may present the resume ticket.
+    fn splints(&self, lairs: &[splinterm_core::Lair]) -> Vec<SplintId> {
+        let mut splints = Vec::new();
+        layout_splint_ids(&self.first.root, &mut splints);
+        for (dojo_id, _) in &self.rest {
+            if let Some(dojo) = lairs
+                .iter()
+                .flat_map(|lair| lair.dojos.iter())
+                .find(|dojo| dojo.id == *dojo_id)
+            {
+                layout_splint_ids(&dojo.root, &mut splints);
+            }
+        }
+        splints
     }
 }
 
@@ -166,6 +188,19 @@ pub(crate) async fn run_resumed(resume: AcquiredWindowResume) -> Result<()> {
             "none of this Window's Dojos is still running in splinterd; reopen them from the launcher"
         );
     };
+    if rolled_back {
+        // A rollback daemon issues no ticket (ADR 0011): the channel closes
+        // and the panes take control the ordinary way.
+        drop(continuation);
+    } else {
+        claim_controllers(
+            &factory,
+            continuation,
+            daemon_generation,
+            plan.splints(&lairs),
+        )
+        .await;
+    }
 
     initialize_graphical()
         .map_err(|_| anyhow::anyhow!("graphical diagnostics initialization failed"))?
@@ -200,13 +235,35 @@ pub(crate) async fn run_resumed(resume: AcquiredWindowResume) -> Result<()> {
         first,
         factory,
         record.app_id,
-        WindowResume {
-            tabs: rest,
-            active,
-            continuation,
-        },
+        WindowResume { tabs: rest, active },
     ))
     .await
+}
+
+/// Claims this Window's resume ticket on its continuation socket, which
+/// closes on return, and arms it for `splints`, the panes it restores. Any
+/// refusal or timeout only costs the restore: a short notice, and the panes
+/// take control the ordinary way.
+async fn claim_controllers(
+    factory: &ConnectionFactory,
+    continuation: std::os::fd::OwnedFd,
+    daemon_generation: u64,
+    splints: Vec<SplintId>,
+) {
+    match claim_resume_ticket(continuation, daemon_generation, TICKET_CLAIM_DEADLINE).await {
+        Ok(ticket) => {
+            eprintln!(
+                "splinterm: claimed this Window's resume ticket for {} panes",
+                splints.len()
+            );
+            factory
+                .handoff_control()
+                .arm(ticket, splints, CONTROL_RESTORE_WINDOW);
+        }
+        Err(error) => eprintln!(
+            "splinterm: this Window's controllers are not restored ({error}); its panes take control the ordinary way"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +369,29 @@ mod tests {
         assert!(
             plan_window_restore(&record(vec![tab(&lair, &dojos[2], None)], 0), &[unrelated])
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn the_resume_ticket_covers_every_pane_of_the_restored_tabs_only() {
+        let dojos = (0..3)
+            .map(|index| running_dojo(&format!("d{index}")))
+            .collect::<Vec<_>>();
+        let lair = lair_of(dojos.clone());
+        let plan = plan_window_restore(
+            &record(
+                vec![tab(&lair, &dojos[0], None), tab(&lair, &dojos[2], None)],
+                0,
+            ),
+            std::slice::from_ref(&lair),
+        )
+        .unwrap();
+        let splints = plan.splints(std::slice::from_ref(&lair));
+        // Each test Dojo holds one pane; the unrecorded middle tab is not
+        // restored, so its pane never presents the ticket.
+        assert_eq!(
+            splints,
+            vec![dojos[0].default_focus, dojos[2].default_focus]
         );
     }
 }

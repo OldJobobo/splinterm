@@ -1466,6 +1466,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "splinterd",
  "splinterm-automation-client",
  "splinterm-core",
  "splinterm-filemap",

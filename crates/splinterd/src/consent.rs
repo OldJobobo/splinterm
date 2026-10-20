@@ -95,6 +95,19 @@ impl PinnedClientSnapshot {
     pub const fn identity(&self) -> (u64, u64) {
         (self.device, self.inode)
     }
+
+    /// This test process's own executable, held open as if it were the
+    /// pinned snapshot, so a peer that is this process matches it.
+    #[cfg(test)]
+    pub fn own_executable_for_test() -> Self {
+        let executable = fs::File::open("/proc/self/exe").expect("open the test executable");
+        let status = rustix::fs::fstat(&executable).expect("identify the test executable");
+        Self {
+            _snapshot: OwnedFd::from(executable),
+            device: status.st_dev,
+            inode: status.st_ino,
+        }
+    }
 }
 
 impl PartialEq for PinnedClientSnapshot {
@@ -173,6 +186,16 @@ impl PeerIdentity {
             persistent_executable: None,
             start_time: None,
         }
+    }
+
+    /// This test process as a peer in a daemon that pinned `pinned`, with
+    /// its start time recorded as connection verification records it.
+    #[cfg(test)]
+    pub fn for_test_pinned(pinned: Arc<PinnedClientSnapshot>) -> Self {
+        let mut peer = Self::for_test();
+        peer.pinned_client = Some(pinned);
+        peer.start_time = splinterd::handoff_window_carry::process_start_time(std::process::id());
+        peer
     }
 
     pub fn install_persistent_executable(&mut self, executable: ExecutableIdentity) {

@@ -9,6 +9,11 @@ repository.workspace = true
 
 [features]
 integration-test = []
+# Exposes the resume-hold constructor the daemon binary's own unit tests use
+# (Plan 0061 M3.16). Enabled only through the dev-dependency on this package
+# below: Cargo unifies it only when building test targets, never in `cargo
+# build` or a packaged release.
+test-support = []
 
 [dependencies]
 anyhow.workspace = true
@@ -34,6 +39,8 @@ tracing-subscriber.workspace = true
 zbus = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
+# The daemon binary's unit tests need the library's `test-support` seam.
+splinterd = { path = ".", features = ["test-support"] }
 proc-macro2 = "1.0"
 splinterm-automation-client = { path = "../splinterm-automation-client" }
 splinterm-inherited-fd = { path = "../splinterm-inherited-fd", features = ["test-support"] }

@@ -211,3 +211,47 @@ minimum, retained evidence must prove:
   fail closed; and
 - package, launcher, rollback, downgrade, and interrupted-upgrade paths never
   silently terminate active Splints or continue an unsupported mixed generation.
+
+## Implementation note: the control claim (Plan 0061 M3.16, 2026-10-20)
+
+The resume-ticket claim is implemented in two steps, because a Window holds
+one control connection per pane and a controller lease is bound to exactly
+one connection:
+
+1. **One continuation claim per Window.** After an adoption, the relaunched
+   Window, executing the sealed forward client snapshot, sends one fixed-size
+   claim on its continuation channel naming the generation it reached. The
+   adopted daemon requires kernel `SCM_CREDENTIALS` (a sender without
+   `CAP_SYS_ADMIN` cannot name another PID; the kernel refuses it with
+   `EPERM`) from the daemon's UID and the held Window's PID, the pinned
+   pidfd still alive with the recorded start time, and `/proc/<pid>/exe` at
+   the pinned snapshot's device and inode. That executable check is by
+   device and inode only, never by content hash (AGENTS.md §4.4, the
+   2026-10-18 exception), where the decision above speaks of
+   "device/inode and digest identity": the pinned inode is the sealed
+   snapshot the candidate verified against its package record, and its
+   bytes cannot change, so a copy with the same digest is refused. Kernel
+   credentials naming PID 0 (a sender outside the daemon's PID namespace)
+   are refused. It answers with one grant carrying
+   a 256-bit ticket from `getrandom` and closes the channel. Any refusal
+   closes the channel with nothing sent and drops that Window and its
+   placeholders. A rollback daemon pins no snapshot and issues no ticket.
+2. **One redemption per pane.** Each pane's new control connection sends
+   `ClaimHandoffControl { ticket, splint }`, naming its Splint and the
+   incarnation it attached to (an optional field within protocol 42). The
+   daemon repeats the process checks against that connection's peer, then
+   restores the named Splint's controller only when the Window held it at
+   the fence, the named, recorded, and live incarnations agree, and no
+   controller holds it now. The lease is connection-bound and never
+   grant-bound; consent rules are unchanged. Anything else is skipped and
+   answered with no controller, never forced.
+
+The ticket is held only in the daemon's memory, compared in full, bound to
+its Window's process, the snapshot identity, and the generation, and ends with
+the 30 s hold. It is single-use per held controller: each placeholder is
+restored at most once, a second presentation for the same Splint is a replay,
+and a presentation from any other process ends the ticket. Every step, the
+continuation claim, each redemption, every refusal, and the release at
+expiry, runs under the hold's one mutex, so a claim either completes before
+the release or finds nothing. A Window that never claims loses its
+placeholders at expiry, and its panes acquire control the ordinary way.

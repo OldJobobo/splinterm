@@ -36,7 +36,9 @@ use rustix::{
 };
 use splinterm_core::{Dojo, Lair, LayoutNode, SplintState, TopologyRevision};
 use splinterm_protocol::{
-    ClientFrame, PROTOCOL_VERSION, Request, Response, ServerFrame, ServerLimits, encode_frame,
+    ClientFrame, HandoffResumeTicket, PROTOCOL_VERSION, Request, Response, ServerFrame,
+    ServerLimits, encode_frame,
+    handoff_continuation::{HandoffTicketClaim, HandoffTicketGrant},
     window_resume::{
         WindowResumeRecord, WindowResumeTab, seal_window_resume_record, window_resume_arguments,
     },
@@ -176,6 +178,7 @@ fn set_inheritable(descriptor: BorrowedFd<'_>, inheritable: bool) {
 struct Outcome {
     success: bool,
     stderr: String,
+    pid: u32,
 }
 
 /// Starts the client with `arguments` while exactly `inherited` are
@@ -220,6 +223,7 @@ fn run_program(
         set_inheritable(*descriptor, false);
     }
     let mut child = child.unwrap();
+    let pid = child.id();
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -242,6 +246,7 @@ fn run_program(
     Outcome {
         success: status.success(),
         stderr,
+        pid,
     }
 }
 
@@ -255,6 +260,71 @@ fn continuation_pair() -> (OwnedFd, OwnedFd) {
     .unwrap()
 }
 
+/// What the adopted daemon's continuation server saw (Plan 0061 M3.16).
+struct ObservedClaim {
+    claim: HandoffTicketClaim,
+    /// The sender PID the kernel attached.
+    sender: i32,
+}
+
+/// Serves the daemon end of a continuation channel the way an adopted
+/// daemon does: waits for one packet, reads it with its kernel credentials,
+/// answers with a ticket grant naming `generation`, and hands its end back.
+/// `None` when no packet arrived before the Window closed its end.
+fn stand_in_continuation_server(
+    daemon_end: OwnedFd,
+    generation: u64,
+) -> thread::JoinHandle<(Option<ObservedClaim>, OwnedFd)> {
+    use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
+    thread::spawn(move || {
+        let mut descriptors = [rustix::event::PollFd::new(
+            &daemon_end,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: i64::try_from(CASE_DEADLINE.as_secs()).unwrap(),
+            tv_nsec: 0,
+        };
+        if rustix::event::poll(&mut descriptors, Some(&timeout)).unwrap() == 0 {
+            return (None, daemon_end);
+        }
+        let mut buffer = [0_u8; 64];
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmCredentials(1))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let received = rustix::net::recvmsg(
+            &daemon_end,
+            &mut [std::io::IoSliceMut::new(&mut buffer)],
+            &mut control,
+            RecvFlags::DONTWAIT,
+        )
+        .unwrap();
+        if received.bytes == 0 {
+            return (None, daemon_end);
+        }
+        let sender = control
+            .drain()
+            .find_map(|message| match message {
+                RecvAncillaryMessage::ScmCredentials(sender) => {
+                    Some(sender.pid.as_raw_nonzero().get())
+                }
+                _ => None,
+            })
+            .expect("the kernel attaches the sender's credentials");
+        let claim = HandoffTicketClaim::decode(&buffer[..received.bytes]).unwrap();
+        let grant = HandoffTicketGrant {
+            daemon_generation: generation,
+            ticket: HandoffResumeTicket::new([0x6b; 32]),
+        };
+        rustix::net::send(
+            &daemon_end,
+            &grant.encode(),
+            rustix::net::SendFlags::empty(),
+        )
+        .unwrap();
+        (Some(ObservedClaim { claim, sender }), daemon_end)
+    })
+}
+
 fn restores(scratch_name: &str, generation_now: u64, expect_rolled_back: bool) {
     let scratch = Scratch::new(scratch_name);
     let socket = scratch.0.join("splinterd.sock");
@@ -263,6 +333,9 @@ fn restores(scratch_name: &str, generation_now: u64, expect_rolled_back: bool) {
     let trusted = stand_in_daemon(&socket, generation_now, vec![lair]);
     let sealed = seal_window_resume_record(&record).unwrap();
     let (continuation, daemon_end) = continuation_pair();
+    // The daemon end receives credentials, as an adopted daemon's does.
+    rustix::net::sockopt::set_socket_passcred(&daemon_end, true).unwrap();
+    let server = stand_in_continuation_server(daemon_end, generation_now);
     let stray = File::open("/dev/null").unwrap();
     let arguments = window_resume_arguments(sealed.as_raw_fd(), continuation.as_raw_fd());
     let outcome = run_client(
@@ -306,9 +379,29 @@ fn restores(scratch_name: &str, generation_now: u64, expect_rolled_back: bool) {
     assert!(outcome.stderr.contains(&expected), "{}", outcome.stderr);
     // Without a display the Window cannot open; the client exits.
     assert!(!outcome.success);
-    // The client held the continuation until it exited; with this process's
-    // copy closed too, the daemon end reads end of file.
+    // With this process's copy of the client end closed too, the server
+    // sees either the claim or end of file.
     drop(continuation);
+    let (observed, daemon_end) = server.join().unwrap();
+    if expect_rolled_back {
+        // A rollback daemon issues no ticket: the client never claims.
+        assert!(observed.is_none(), "{}", outcome.stderr);
+    } else {
+        // After an adoption, the relaunched client claims once, from its own
+        // process (kernel credentials), naming the generation it reached,
+        // and arms the ticket for both restored panes.
+        let observed = observed.unwrap_or_else(|| panic!("no claim: {}", outcome.stderr));
+        assert_eq!(observed.claim.daemon_generation, generation_now);
+        assert_eq!(observed.sender, i32::try_from(outcome.pid).unwrap());
+        assert!(
+            outcome
+                .stderr
+                .contains("claimed this Window's resume ticket for 2 panes"),
+            "{}",
+            outcome.stderr
+        );
+    }
+    // The client closed its end; nothing more arrives.
     let mut buffer = [0_u8; 32];
     assert_eq!(
         rustix::net::recv(&daemon_end, &mut buffer, rustix::net::RecvFlags::DONTWAIT)

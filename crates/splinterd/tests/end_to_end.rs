@@ -1079,6 +1079,7 @@ async fn daemon_handoff_vocabulary_is_trusted_ui_only_and_refusals_are_audited()
                 ticket: splinterm_protocol::HandoffResumeTicket::new(
                     [0x5a; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
                 ),
+                splint: None,
             },
             Request::AcknowledgeHandoffPrepare {
                 daemon_generation: 1,
