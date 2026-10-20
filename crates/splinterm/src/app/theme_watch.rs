@@ -371,7 +371,9 @@ fn prepare_startup_theme_with_loader(
 pub(in crate::app) struct StartupTheme {
     pub(in crate::app) theme: ResolvedTheme,
     shell_reported: Vec<String>,
-    observed: Option<ThemeSourceFingerprint>,
+    // Only the validated absence decision crosses the async startup boundary;
+    // the watcher revalidates it and builds its own fingerprint at each poll.
+    optional_absence: bool,
 }
 
 fn load_startup_theme_with_reporter(
@@ -390,7 +392,7 @@ impl From<StartupThemeLoad> for StartupTheme {
         Self {
             theme: loaded.theme,
             shell_reported: loaded.shell_diagnostics,
-            observed: loaded.observed,
+            optional_absence: loaded.observed.is_some(),
         }
     }
 }
@@ -521,8 +523,8 @@ async fn watch_theme_with_reporter(
 ) {
     let mut current = startup.theme;
     let mut diagnostics = ThemeReloadDiagnostics::after_startup(&startup);
-    let mut optional_absence = startup.observed.is_some();
-    let mut observed = startup.observed;
+    let mut optional_absence = startup.optional_absence;
+    let mut observed = None;
     let mut selection = OmarchyThemeSelection::default();
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -815,12 +817,12 @@ mod tests {
         theme_poll().await;
         theme_poll().await;
         watcher.abort();
+        let _ = watcher.await;
         assert!(
             received.try_recv().is_err(),
             "a rejected load keeps its palette"
         );
-        let messages = reported.lock().unwrap().clone();
-        messages
+        reported.lock().unwrap().clone()
     }
 
     #[tokio::test(start_paused = true)]
@@ -829,7 +831,7 @@ mod tests {
         let theme = root.0.join("theme");
         let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme));
         let startup = StartupTheme::from(prepare_startup_theme(&source, NO_OVERRIDES));
-        assert!(startup.observed.is_some());
+        assert!(startup.optional_absence);
         write_theme(&root.0.join("next-theme"), 0x12_34_56);
         let messages = bounded_live_rejections(source, startup).await;
         assert_eq!(messages.len(), 1, "staging must not remain quietly absent");
@@ -842,7 +844,7 @@ mod tests {
         let theme = root.0.join("theme");
         let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
         let startup = StartupTheme::from(prepare_startup_theme(&source, NO_OVERRIDES));
-        assert!(startup.observed.is_some());
+        assert!(startup.optional_absence);
         std::os::unix::fs::symlink(root.0.join("missing"), &theme).unwrap();
         let messages = bounded_live_rejections(source, startup).await;
         assert_eq!(
