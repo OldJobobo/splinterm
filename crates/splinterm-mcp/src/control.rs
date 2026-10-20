@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::RandomState},
+    collections::{HashMap, VecDeque, hash_map::RandomState},
     hash::BuildHasher,
     path::PathBuf,
     sync::{Arc, Weak},
@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use splinterm_automation_client::Connection;
+use splinterm_automation_client::{Connection, is_connection_loss};
 use splinterm_core::{DojoId, LairId, SplintId};
 use splinterm_protocol::{
     ControlMode, ControlTransferDecision, ControlTransferOutcome, Request, Response, ServerFrame,
@@ -26,6 +26,9 @@ use crate::{dispatch, resources::ResourceRegistry};
 const SCHEMA: &str = "splinterm.mcp.v2";
 const MAXIMUM_CONTROL_HANDLES: usize = 8;
 const TRANSFER_LIFETIME: Duration = Duration::from_secs(16);
+/// How many handles that expired with their daemon connection are remembered,
+/// so using one says why it no longer works (Plan 0061 M3.12b).
+const MAXIMUM_EXPIRED_HANDLES: usize = 32;
 
 #[derive(Debug, Clone)]
 struct Metadata {
@@ -80,6 +83,9 @@ struct TransferEntry {
 struct State {
     controllers: HashMap<String, ControllerEntry>,
     transfers: HashMap<String, TransferEntry>,
+    /// Handles whose daemon connection ended, as when splinterd is upgraded:
+    /// the daemon released their authority, so they stay invalid. Newest last.
+    expired: VecDeque<String>,
     next_token: u64,
     next_revision: u64,
     hashers: [RandomState; 2],
@@ -90,6 +96,7 @@ impl Default for State {
         Self {
             controllers: HashMap::new(),
             transfers: HashMap::new(),
+            expired: VecDeque::new(),
             next_token: 1,
             next_revision: 1,
             hashers: [RandomState::new(), RandomState::new()],
@@ -111,6 +118,24 @@ impl State {
         let first = self.hashers[0].hash_one(("splinterm-mcp-control-v1", prefix, counter));
         let second = self.hashers[1].hash_one(("splinterm-mcp-control-v1", prefix, counter));
         Ok(format!("{prefix}_{counter:016x}{first:016x}{second:016x}"))
+    }
+
+    /// Remembers that `token` expired with its daemon connection.
+    fn expire(&mut self, token: &str) {
+        if self.expired.len() == MAXIMUM_EXPIRED_HANDLES {
+            self.expired.pop_front();
+        }
+        self.expired.push_back(token.to_owned());
+    }
+
+    /// The failure for a handle this registry does not hold: expired with its
+    /// daemon connection, or never valid.
+    fn missing_handle(&self, handle: &str) -> dispatch::DispatchFailure {
+        if self.expired.iter().any(|expired| expired == handle) {
+            expired_handle()
+        } else {
+            invalid_handle()
+        }
     }
 
     fn revision(&mut self) -> Result<u64, dispatch::DispatchFailure> {
@@ -512,7 +537,7 @@ impl ControlRegistry {
             let entry = state
                 .transfers
                 .get(transfer_handle)
-                .ok_or_else(invalid_handle)?;
+                .ok_or_else(|| state.missing_handle(transfer_handle))?;
             (
                 entry.metadata.clone(),
                 entry.private_id,
@@ -523,11 +548,11 @@ impl ControlRegistry {
         let requester = take_transfer(sender).await.ok_or_else(stale_handle)?;
         let owner = {
             let state = self.0.state.lock().await;
-            state
-                .controllers
-                .get(&owner_handle)
-                .map(|entry| entry.sender.clone())
-                .ok_or_else(stale_handle)?
+            match state.controllers.get(&owner_handle) {
+                Some(entry) => entry.sender.clone(),
+                None if state.expired.contains(&owner_handle) => return Err(expired_handle()),
+                None => return Err(stale_handle()),
+            }
         };
         let terminate_owner = decision == ControlTransferDecision::Accept;
         let response = actor_request(
@@ -604,10 +629,9 @@ impl ControlRegistry {
         require_handle(handle, "ctl")?;
         let (metadata, private_id, sender) = {
             let mut state = self.0.state.lock().await;
-            let entry = state
-                .controllers
-                .remove(handle)
-                .ok_or_else(invalid_handle)?;
+            let Some(entry) = state.controllers.remove(handle) else {
+                return Err(state.missing_handle(handle));
+            };
             (entry.metadata, entry.private_id, entry.sender)
         };
         let mut mode_cleanup = ModeCleanupGuard::new(&self.0, metadata.clone());
@@ -624,7 +648,11 @@ impl ControlRegistry {
         // actor lookup still closes the connection and clears public authority.
         self.clear_modes_if_unowned(&metadata).await;
         mode_cleanup.disarm();
-        match response? {
+        let response = match response {
+            Ok(response) => response,
+            Err(failure) => return Err(self.expired_or(handle, failure).await),
+        };
+        match response {
             Response::Acknowledged => {}
             _ => return Err(dispatch::DispatchFailure::internal()),
         }
@@ -699,7 +727,10 @@ impl ControlRegistry {
             require_handle(handle, "ctl")?;
             let (metadata, sender, private_id) = {
                 let state = self.0.state.lock().await;
-                let entry = state.controllers.get(handle).ok_or_else(invalid_handle)?;
+                let entry = state
+                    .controllers
+                    .get(handle)
+                    .ok_or_else(|| state.missing_handle(handle))?;
                 if entry.metadata.splint_id != splint_id
                     || entry.metadata.incarnation != incarnation
                     || !entry.metadata.modes.contains(&needed)
@@ -718,7 +749,10 @@ impl ControlRegistry {
                 RegisteredKind::Controller,
             ));
             let request = action_request(private_id, &metadata, input.clone(), resize)?;
-            let response = actor_request(&sender, request, cancellation, false).await?;
+            let response = match actor_request(&sender, request, cancellation, false).await {
+                Ok(response) => response,
+                Err(failure) => return Err(self.expired_or(handle, failure).await),
+            };
             self.observe_post_commit_cancellation(cancellation).await?;
             (metadata, response)
         } else {
@@ -887,6 +921,31 @@ impl ControlRegistry {
         self.0.state.lock().await.revision()
     }
 
+    /// A controller actor that ended between a handle's lookup and its
+    /// request leaves only the generic unavailable failure; when it ended
+    /// because its daemon connection did, the handle expired instead. The
+    /// actor records the expiry before its queue closes.
+    async fn expired_or(
+        &self,
+        handle: &str,
+        failure: dispatch::DispatchFailure,
+    ) -> dispatch::DispatchFailure {
+        if failure.message == stale_handle().message
+            && self
+                .0
+                .state
+                .lock()
+                .await
+                .expired
+                .iter()
+                .any(|expired| expired == handle)
+        {
+            expired_handle()
+        } else {
+            failure
+        }
+    }
+
     async fn insert_controller(
         &self,
         connection: Connection,
@@ -1023,15 +1082,24 @@ async fn controller_actor(
     inner: Weak<Inner>,
     token: String,
 ) {
+    // Set when the daemon connection itself ended, as when splinterd is
+    // upgraded: the daemon released this controller, and the handle expires.
+    let mut lost = false;
     loop {
         tokio::select! {
             biased;
             command = commands.recv() => match command {
                 Some(ControllerCommand::Request { request, cancellation, terminate, reply }) => {
-                    let result = connection
+                    let result = match connection
                         .request_with_cancellation(request, dispatch::deadline().unwrap_or(Duration::from_secs(5)), &cancellation)
                         .await
-                        .map_err(|error| dispatch::map_client_error(&error));
+                    {
+                        Err(error) if is_connection_loss(&error) => {
+                            lost = true;
+                            Err(expired_handle())
+                        }
+                        result => result.map_err(|error| dispatch::map_client_error(&error)),
+                    };
                     let failed = result.is_err();
                     let delivered = reply.send(result).is_ok();
                     if failed || terminate || !delivered { break; }
@@ -1044,12 +1112,12 @@ async fn controller_actor(
                 None => break,
             },
             frame = connection.next_server_frame() => {
-                let _ = frame;
+                lost = frame.as_ref().is_err_and(is_connection_loss);
                 break;
             }
         }
     }
-    cleanup_controller(inner, &token).await;
+    cleanup_controller(inner, &token, lost).await;
 }
 
 async fn transfer_actor(
@@ -1066,22 +1134,29 @@ async fn transfer_actor(
             None => {}
         },
         () = tokio::time::sleep(TRANSFER_LIFETIME) => {},
-        _ = connection.next_server_frame() => {},
+        frame = connection.next_server_frame() => {
+            // A transfer whose connection ended with the daemon expires.
+            if frame.as_ref().is_err_and(is_connection_loss) {
+                return cleanup_transfer(inner, &token, true).await;
+            }
+        },
     }
-    cleanup_transfer(inner, &token).await;
+    cleanup_transfer(inner, &token, false).await;
 }
 
-async fn cleanup_controller(inner: Weak<Inner>, token: &str) {
+/// Drops an ended controller actor's handle; `expired` records that its
+/// daemon connection ended, so a later use of the handle says why.
+async fn cleanup_controller(inner: Weak<Inner>, token: &str, expired: bool) {
     let Some(inner) = inner.upgrade() else {
         return;
     };
-    let metadata = inner
-        .state
-        .lock()
-        .await
-        .controllers
-        .remove(token)
-        .map(|entry| entry.metadata);
+    let metadata = {
+        let mut state = inner.state.lock().await;
+        if expired {
+            state.expire(token);
+        }
+        state.controllers.remove(token).map(|entry| entry.metadata)
+    };
     let Some(metadata) = metadata else {
         return;
     };
@@ -1097,9 +1172,13 @@ async fn cleanup_controller(inner: Weak<Inner>, token: &str) {
     }
 }
 
-async fn cleanup_transfer(inner: Weak<Inner>, token: &str) {
+async fn cleanup_transfer(inner: Weak<Inner>, token: &str, expired: bool) {
     if let Some(inner) = inner.upgrade() {
-        inner.state.lock().await.transfers.remove(token);
+        let mut state = inner.state.lock().await;
+        if expired {
+            state.expire(token);
+        }
+        state.transfers.remove(token);
     }
 }
 
@@ -1314,6 +1393,18 @@ fn invalid_handle() -> dispatch::DispatchFailure {
     )
 }
 
+/// A handle whose daemon connection ended, as when splinterd is upgraded:
+/// the daemon released its authority with the connection (Plan 0061 M3.12b).
+/// Stable Splint, Dojo, and Lair IDs stay valid; control is acquired again
+/// the normal way, with consent unchanged.
+fn expired_handle() -> dispatch::DispatchFailure {
+    dispatch::DispatchFailure::new(
+        "controller_unavailable",
+        "the handle expired because its splinterd connection ended, as when splinterd is upgraded or restarted; acquire control again (consent rules are unchanged)",
+        false,
+    )
+}
+
 fn stale_handle() -> dispatch::DispatchFailure {
     dispatch::DispatchFailure::new(
         "controller_unavailable",
@@ -1363,6 +1454,11 @@ mod tests {
     }
 
     fn accept(listener: &UnixListener) -> UnixStream {
+        accept_at(listener, 1)
+    }
+
+    /// Accepts one automation connection for a daemon serving `generation`.
+    fn accept_at(listener: &UnixListener, generation: u64) -> UnixStream {
         let (mut stream, _) = listener.accept().unwrap();
         assert!(matches!(
             read_frame::<ClientFrame>(&mut stream),
@@ -1378,7 +1474,7 @@ mod tests {
                 limits: ServerLimits::default(),
                 development_terminal_access: false,
                 daemon_hostname: None,
-                daemon_generation: 1,
+                daemon_generation: generation,
             },
         );
         stream
@@ -1396,6 +1492,167 @@ mod tests {
         tokio::task::spawn_blocking(move || thread.join().unwrap())
             .await
             .unwrap();
+    }
+
+    /// Plan 0061 M3.12b: a committed upgrade ends the controller's daemon
+    /// connection, so its handle expires with a clear error, and control is
+    /// acquired again the normal way from the daemon serving the next
+    /// generation. The Splint's stable ID is unchanged throughout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered fake daemon serves both generations and the shutdown release"
+    )]
+    async fn handles_expire_across_an_upgrade_and_control_is_acquired_again() {
+        let (directory, socket) = socket("upgrade-expiry");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (lair_id, dojo_id, splint_id) = ids();
+        let daemon = thread::spawn(move || {
+            let mut old = accept_at(&listener, 1);
+            let ClientFrame::Request {
+                request_id,
+                request: Request::AcquireControl { .. },
+                ..
+            } = read_frame(&mut old)
+            else {
+                panic!("expected the first acquisition")
+            };
+            write_frame(
+                &mut old,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 5,
+                        lair_id,
+                        dojo_id,
+                    },
+                },
+            );
+            // The daemon execs into the next generation: the connection ends.
+            drop(old);
+            let mut new = accept_at(&listener, 2);
+            let ClientFrame::Request {
+                request_id,
+                request:
+                    Request::AcquireControl {
+                        splint_id: acquired,
+                        ..
+                    },
+                ..
+            } = read_frame(&mut new)
+            else {
+                panic!("expected the acquisition from the upgraded daemon")
+            };
+            assert_eq!(acquired, splint_id, "stable IDs stay valid");
+            write_frame(
+                &mut new,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::ControlGranted {
+                        controller_id: 6,
+                        lair_id,
+                        dojo_id,
+                    },
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request: Request::ReleaseControl { controller_id: 6 },
+                ..
+            } = read_frame(&mut new)
+            else {
+                panic!("expected the new controller's release at shutdown")
+            };
+            write_frame(
+                &mut new,
+                &ServerFrame::Response {
+                    request_id,
+                    result: Response::Acknowledged,
+                },
+            );
+        });
+
+        let resources = Arc::new(ResourceRegistry::default());
+        let registry = ControlRegistry::new_at(Arc::clone(&resources), &socket);
+        let acquire = json!({
+            "splint_id": splint_id.to_string(),
+            "incarnation": 2,
+            "modes": ["input"]
+        });
+        let first = registry
+            .dispatch(
+                "splinterm.acquire_control",
+                &acquire,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let old_handle = first["data"]["controller_handle"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let input = json!({
+            "splint_id": splint_id.to_string(),
+            "incarnation": 2,
+            "text": "ls\n",
+            "controller_handle": old_handle,
+        });
+        // Whether the controller's actor sees the end first or this call
+        // does, the handle has expired; asking again gives the same answer.
+        for _ in 0..2 {
+            let failure = registry
+                .dispatch("splinterm.input", &input, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(failure.code, "controller_unavailable");
+            assert!(!failure.retryable, "the same handle never works again");
+            assert!(failure.message.contains("expired"), "{}", failure.message);
+            assert!(failure.message.contains("upgraded"), "{}", failure.message);
+            assert!(
+                failure.message.contains("acquire control again"),
+                "{}",
+                failure.message
+            );
+        }
+        let second = registry
+            .dispatch(
+                "splinterm.acquire_control",
+                &acquire,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let new_handle = second["data"]["controller_handle"].as_str().unwrap();
+        assert_ne!(new_handle, old_handle);
+        assert_eq!(second["resource"]["splint_id"], splint_id.to_string());
+        registry.shutdown().await;
+        resources.shutdown().await;
+        join(daemon).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn only_a_handle_lost_with_its_connection_is_called_expired() {
+        let mut state = State::default();
+        let unknown = "ctl_00000000000000010000000000000000ffffffffffffffff";
+        assert_eq!(
+            state.missing_handle(unknown).message,
+            invalid_handle().message
+        );
+        state.expire(unknown);
+        assert_eq!(
+            state.missing_handle(unknown).message,
+            expired_handle().message
+        );
+        // The memory is bounded; the oldest expiry is forgotten first.
+        for index in 0..MAXIMUM_EXPIRED_HANDLES {
+            state.expire(&format!("ctl_{index:048x}"));
+        }
+        assert_eq!(state.expired.len(), MAXIMUM_EXPIRED_HANDLES);
+        assert_eq!(
+            state.missing_handle(unknown).message,
+            invalid_handle().message
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

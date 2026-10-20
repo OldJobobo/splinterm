@@ -6,7 +6,9 @@ use rmcp::{
     service::Peer,
 };
 use serde_json::{Value, json};
-use splinterm_automation_client::{Connection, apply_terminal_update, project_terminal_rows};
+use splinterm_automation_client::{
+    Connection, ReconnectBackoff, apply_terminal_update, is_connection_loss, project_terminal_rows,
+};
 use splinterm_core::{DojoId, LairId, SplintId, TopologyRevision};
 use splinterm_protocol::{
     ControlStatus, Request, Response, ServerFrame, SubscriptionEvent, TerminalProvenance,
@@ -707,25 +709,37 @@ async fn publish_retained(
         .map_err(|_| ())
 }
 
-async fn subscription_task(
+/// How a resource subscription's stream ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamEnd {
+    Cancelled,
+    Failed,
+    /// The daemon connection itself ended, as when splinterd is upgraded.
+    ConnectionLost,
+}
+
+/// How long a resource subscription resubscribes after its daemon
+/// connection ended before it is left stale (Plan 0061 M3.12b).
+const RESUBSCRIBE_WINDOW: Duration = Duration::from_secs(30);
+
+/// Follows one subscription stream, publishing each update, until it ends.
+async fn follow_subscription(
     uri: ResourceUri,
-    mut started: Started,
-    state: Arc<Mutex<PublishedState>>,
-    cancellation: CancellationToken,
-    control_modes: ControlModes,
-    peer: Peer<RoleServer>,
-) {
+    started: &mut Started,
+    state: &Arc<Mutex<PublishedState>>,
+    cancellation: &CancellationToken,
+    control_modes: &ControlModes,
+    peer: &Peer<RoleServer>,
+) -> StreamEnd {
     let mut private_sequence = 1_u64;
-    let mut failed = false;
     loop {
         let frame = tokio::select! {
             biased;
-            () = cancellation.cancelled() => break,
-            frame = started.connection.next_server_frame() => if let Ok(frame) = frame {
-                frame
-            } else {
-                failed = true;
-                break;
+            () = cancellation.cancelled() => return StreamEnd::Cancelled,
+            frame = started.connection.next_server_frame() => match frame {
+                Ok(frame) => frame,
+                Err(error) if is_connection_loss(&error) => return StreamEnd::ConnectionLost,
+                Err(_) => return StreamEnd::Failed,
             }
         };
         let ServerFrame::Event {
@@ -734,17 +748,14 @@ async fn subscription_task(
             event,
         } = frame
         else {
-            failed = true;
-            break;
+            return StreamEnd::Failed;
         };
         if subscription_id != started.subscription_id {
-            failed = true;
-            break;
+            return StreamEnd::Failed;
         }
         if sequence != private_sequence {
             let _ = apply_explicit_resync(&mut started.retained, &event, uri);
-            failed = true;
-            break;
+            return StreamEnd::Failed;
         }
         private_sequence = private_sequence.saturating_add(1);
         // Agent status rides the topology subscription without a revision;
@@ -756,38 +767,114 @@ async fn subscription_task(
         {
             continue;
         }
-        if apply_explicit_resync(&mut started.retained, &event, uri) {
-            failed = true;
-            break;
-        }
-        if update_retained(&mut started.retained, uri, event).is_err() {
-            failed = true;
-            break;
-        }
-        if publish_retained(&state, &peer, uri, &started.retained, &control_modes)
-            .await
-            .is_err()
+        if apply_explicit_resync(&mut started.retained, &event, uri)
+            || update_retained(&mut started.retained, uri, event).is_err()
+            || publish_retained(state, peer, uri, &started.retained, control_modes)
+                .await
+                .is_err()
         {
-            failed = true;
-            break;
+            return StreamEnd::Failed;
         }
     }
-    let mut notify_final = false;
+}
+
+/// Publishes the retained document marked stale, keeping the public sequence
+/// increasing, and notifies the peer; `active` says whether the subscription
+/// is still trying.
+async fn publish_stale(
+    state: &Arc<Mutex<PublishedState>>,
+    peer: &Peer<RoleServer>,
+    uri: ResourceUri,
+    retained: &Retained,
+    active: bool,
+) {
+    let mut notify = false;
     {
         let mut published = state.lock().await;
-        if failed
-            && let Ok(sequence) = next_public_sequence(&published)
-            && let Ok(value) = started.retained.document(uri, &[], sequence, true)
+        if let Ok(sequence) = next_public_sequence(&published)
+            && let Ok(value) = retained.document(uri, &[], sequence, true)
         {
             published.value = value;
-            notify_final = true;
+            notify = true;
         }
-        published.active = false;
+        published.active = active;
     }
-    if notify_final {
+    if notify {
         let _ = peer
             .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri.as_string()))
             .await;
+    }
+}
+
+/// Subscribes to `uri` again on a fresh connection, with backoff, for up to
+/// [`RESUBSCRIBE_WINDOW`]; `None` once time is up or the subscription is
+/// cancelled.
+async fn resubscribe(uri: ResourceUri, cancellation: &CancellationToken) -> Option<Started> {
+    let deadline = tokio::time::Instant::now() + RESUBSCRIBE_WINDOW;
+    let mut backoff = ReconnectBackoff::default();
+    loop {
+        if let Ok(Ok(started)) = tokio::time::timeout_at(deadline, start(uri, cancellation)).await {
+            return Some(started);
+        }
+        let resume = tokio::time::Instant::now() + backoff.next_delay();
+        if resume >= deadline || cancellation.is_cancelled() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return None,
+            () = tokio::time::sleep_until(resume) => {}
+        }
+    }
+}
+
+async fn subscription_task(
+    uri: ResourceUri,
+    mut started: Started,
+    state: Arc<Mutex<PublishedState>>,
+    cancellation: CancellationToken,
+    control_modes: ControlModes,
+    peer: Peer<RoleServer>,
+) {
+    loop {
+        match follow_subscription(
+            uri,
+            &mut started,
+            &state,
+            &cancellation,
+            &control_modes,
+            &peer,
+        )
+        .await
+        {
+            StreamEnd::Cancelled => {
+                state.lock().await.active = false;
+                break;
+            }
+            StreamEnd::Failed => {
+                publish_stale(&state, &peer, uri, &started.retained, false).await;
+                break;
+            }
+            StreamEnd::ConnectionLost => {
+                // Plan 0061 M3.12b: the subscription reconnects transparently
+                // from a fresh snapshot; readers see it stale meanwhile. The
+                // public sequence keeps increasing; the private one restarts
+                // with the new subscription.
+                publish_stale(&state, &peer, uri, &started.retained, true).await;
+                let Some(next) = resubscribe(uri, &cancellation).await else {
+                    state.lock().await.active = false;
+                    return;
+                };
+                started = next;
+                if publish_retained(&state, &peer, uri, &started.retained, &control_modes)
+                    .await
+                    .is_err()
+                {
+                    publish_stale(&state, &peer, uri, &started.retained, false).await;
+                    break;
+                }
+            }
+        }
     }
     let _ = started
         .connection
