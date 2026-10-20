@@ -32,7 +32,10 @@ use splinterm_protocol::{
 };
 use tokio::{io::unix::AsyncFd, net::UnixStream};
 
-use crate::executable_identity::ExecutableIdentity;
+use crate::{
+    agent_access::{DurableEvidence, GrantIds, IdentityContext},
+    executable_identity::ExecutableIdentity,
+};
 
 pub const GRANT_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const CONSENT_DEADLINE: Duration = Duration::from_secs(20);
@@ -140,6 +143,9 @@ pub struct PeerIdentity {
     /// The peer's start time in clock ticks since boot, recorded when the
     /// connection is verified, so a reused PID is never mistaken for it.
     start_time: Option<u64>,
+    /// What this connection established about durable identity (ADR 0014),
+    /// read while its pidfd pinned it; `None` without a pinned executable.
+    durable: Option<DurableEvidence>,
 }
 
 impl PeerIdentity {
@@ -164,6 +170,7 @@ impl PeerIdentity {
             pinned_client,
             persistent_executable: None,
             start_time: None,
+            durable: None,
         })
     }
 
@@ -185,7 +192,21 @@ impl PeerIdentity {
             pinned_client: None,
             persistent_executable: None,
             start_time: None,
+            durable: None,
         }
+    }
+
+    /// This test process as a peer executing `executable` (its file by
+    /// device and inode) with `durable` evidence, as a pinned connection
+    /// verification records it.
+    #[cfg(test)]
+    pub fn for_test_executing(executable: ExecutableIdentity, durable: DurableEvidence) -> Self {
+        let mut peer = Self::for_test();
+        peer.executable_device = executable.device;
+        peer.executable_inode = executable.inode;
+        peer.persistent_executable = Some(executable);
+        peer.durable = Some(durable);
+        peer
     }
 
     /// This test process as a peer in a daemon that pinned `pinned`, with
@@ -204,6 +225,36 @@ impl PeerIdentity {
 
     pub fn persistent_executable(&self) -> Option<&ExecutableIdentity> {
         self.persistent_executable.as_ref()
+    }
+
+    /// Records the durable-identity evidence its pinned verification read,
+    /// marking whether the peer executes the installed relay. The relay is
+    /// recognized by either executable snapshot this connection took (the
+    /// file the stream's peer executed, or the one the pinned identity
+    /// hashed), so a file replaced between the two cannot hide it.
+    pub fn install_durable_evidence(&mut self, mut durable: DurableEvidence) {
+        let pinned_is_relay = self
+            .persistent_executable
+            .as_ref()
+            .is_some_and(|executable| {
+                fs::metadata(self.install_prefix.graphical_relay()).is_ok_and(|metadata| {
+                    metadata.dev() == executable.device && metadata.ino() == executable.inode
+                })
+            });
+        durable.installed_relay = self.is_installed_relay() || pinned_is_relay;
+        self.durable = Some(durable);
+    }
+
+    /// The durable-identity evidence of this connection; `None` without a
+    /// pidfd-pinned executable.
+    pub fn durable_evidence(&self) -> Option<&DurableEvidence> {
+        self.durable.as_ref()
+    }
+
+    /// Whether the peer executes the installed `splinterm-relay`, by device
+    /// and inode, in any mode. Never eligible for the longer durations.
+    pub fn is_installed_relay(&self) -> bool {
+        self.matches_installed_executable(&self.install_prefix.graphical_relay())
     }
 
     pub fn install_start_time(&mut self, start_time: u64) {
@@ -399,6 +450,9 @@ pub enum PeerPinning {
     Pinned {
         monitor: PeerMonitor,
         executable: Result<ExecutableIdentity>,
+        /// Durable-identity evidence for the executable, read under the same
+        /// pin; `None` when the executable has no bindable path.
+        durable: Option<DurableEvidence>,
     },
 }
 
@@ -415,21 +469,35 @@ impl PeerMonitor {
     /// names a different process than `SO_PEERCRED`, cannot be inspected, or
     /// shows the peer has exited (its PID may already be reused), and when
     /// `SO_PEERPIDFD` fails for any reason but being unsupported.
-    pub async fn initialize(stream: &UnixStream, pid: u32) -> Result<PeerPinning> {
+    pub async fn initialize(
+        stream: &UnixStream,
+        pid: u32,
+        identity_context: Arc<IdentityContext>,
+    ) -> Result<PeerPinning> {
         let Some(pidfd) = supported_peer_pidfd(getsockopt(stream, PeerPidfd))? else {
             return Ok(PeerPinning::Unsupported);
         };
         verify_pidfd_pid(&pidfd, pid)?;
         require_live_pidfd(&pidfd)?;
-        let executable = tokio::task::spawn_blocking(move || ExecutableIdentity::from_pid(pid))
-            .await
-            .context("peer executable snapshot task failed")?;
+        // Durable identity is evaluated afresh for every connection, inside
+        // the pin, and never cached for another (ADR 0014).
+        let (executable, durable) = tokio::task::spawn_blocking(move || {
+            let executable = ExecutableIdentity::from_pid(pid);
+            let durable = executable
+                .as_ref()
+                .ok()
+                .map(|executable| identity_context.evaluate(executable));
+            (executable, durable)
+        })
+        .await
+        .context("peer executable snapshot task failed")?;
         require_live_pidfd(&pidfd)?;
         Ok(PeerPinning::Pinned {
             monitor: Self {
                 pidfd: AsyncFd::new(pidfd).context("cannot monitor peer pidfd")?,
             },
             executable,
+            durable,
         })
     }
 
@@ -598,7 +666,7 @@ pub enum RevokedAuthorization {
 
 #[derive(Debug, Default)]
 pub struct GrantStore {
-    next_id: u64,
+    ids: Arc<GrantIds>,
     next_audit_order: u64,
     authorization_revision: u64,
     grants: Vec<Grant>,
@@ -607,6 +675,15 @@ pub struct GrantStore {
 }
 
 impl GrantStore {
+    /// A store allocating runtime grant IDs from the space every authority
+    /// source shares.
+    pub fn with_ids(ids: Arc<GrantIds>) -> Self {
+        Self {
+            ids,
+            ..Self::default()
+        }
+    }
+
     #[must_use]
     pub const fn authorization_revision(&self) -> u64 {
         self.authorization_revision
@@ -702,9 +779,8 @@ impl GrantStore {
                 authorization_revision: self.authorization_revision,
             };
         }
-        self.next_id = self.next_id.saturating_add(1).max(1);
         let grant = Grant {
-            id: self.next_id,
+            id: self.ids.next(),
             peer: peer.clone(),
             splint_id,
             incarnation,
@@ -762,9 +838,8 @@ impl GrantStore {
                 authorization_revision: self.authorization_revision,
             };
         }
-        self.next_id = self.next_id.saturating_add(1).max(1);
         let grant = LairGrant {
-            id: self.next_id,
+            id: self.ids.next(),
             peer: peer.clone(),
             lair_id,
             scopes: scopes.clone(),
@@ -1208,7 +1283,10 @@ mod tests {
         let PeerPinning::Pinned {
             monitor: _monitor,
             executable,
-        } = PeerMonitor::initialize(&first, pid).await.unwrap()
+            durable,
+        } = PeerMonitor::initialize(&first, pid, Arc::new(IdentityContext::for_daemon()))
+            .await
+            .unwrap()
         else {
             panic!("this kernel supports SO_PEERPIDFD");
         };
@@ -1217,6 +1295,12 @@ mod tests {
         assert_eq!(pid, std::process::id());
         assert!(executable.path.is_absolute());
         assert_eq!(executable.sha256.len(), 64);
+        // Durable evidence is read under the same pin. The test binary is a
+        // build output, never root-owned, so it has no durable identity.
+        let durable = durable.expect("evidence for a bindable executable");
+        if rustix::process::geteuid().as_raw() != 0 {
+            assert_eq!(durable.preferred(), None);
+        }
     }
 
     /// A child process the test started and owns, killed and reaped on drop.
@@ -1395,6 +1479,44 @@ mod tests {
             install_prefix: Arc::new(install_prefix.clone()),
             ..PeerIdentity::for_test()
         }
+    }
+
+    /// The installed relay is never eligible for the longer durations: it is
+    /// recognized by the stream's executable or by the pinned snapshot's.
+    #[test]
+    fn durable_evidence_marks_the_installed_relay_by_either_snapshot() {
+        let prefix = scratch_prefix();
+        let relay = prefix.graphical_relay();
+        install_copy(system_sleep(), &relay);
+        let relay_child = spawn_sleep(&relay);
+        let mut running_relay = peer_for(relay_child.pid(), &prefix);
+        running_relay.install_durable_evidence(DurableEvidence::default());
+        assert!(running_relay.durable_evidence().unwrap().installed_relay);
+
+        // The stream's peer ran another file, but the pinned snapshot hashed
+        // the relay: still the relay.
+        let other_child = spawn_sleep(system_sleep());
+        let mut snapshot_relay = peer_for(other_child.pid(), &prefix);
+        let relay_file = fs::metadata(&relay).unwrap();
+        snapshot_relay.install_persistent_executable(ExecutableIdentity {
+            path: relay.clone(),
+            device: relay_file.dev(),
+            inode: relay_file.ino(),
+            owner_uid: relay_file.uid(),
+            mode: relay_file.mode(),
+            size: relay_file.len(),
+            sha256: "a".repeat(64),
+        });
+        snapshot_relay.install_durable_evidence(DurableEvidence::default());
+        assert!(snapshot_relay.durable_evidence().unwrap().installed_relay);
+
+        // Neither snapshot is the relay.
+        let mut not_relay = peer_for(other_child.pid(), &prefix);
+        not_relay.install_durable_evidence(DurableEvidence::default());
+        assert!(!not_relay.durable_evidence().unwrap().installed_relay);
+        drop(relay_child);
+        drop(other_child);
+        fs::remove_dir_all(prefix.directory()).unwrap();
     }
 
     #[test]

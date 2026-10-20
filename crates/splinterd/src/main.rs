@@ -1,3 +1,4 @@
+mod agent_access;
 mod agent_status;
 mod audit;
 mod candidate_acquire;
@@ -1101,6 +1102,12 @@ struct DaemonState {
     control_events: broadcast::Sender<ControlNotice>,
     connection_revocations: broadcast::Sender<u64>,
     grants: Mutex<GrantStore>,
+    /// "While this workspace is open" and remembered grant definitions and
+    /// the remembered-grant store (ADR 0014). Runtime grant IDs share
+    /// [`Self::grants`]'s space.
+    agent_access: Arc<agent_access::AgentAccess>,
+    /// The root and account durable identities are checked against.
+    identity_context: Arc<agent_access::IdentityContext>,
     revocations: broadcast::Sender<Revocation>,
     image_transfers: Mutex<TransferAdmission>,
     image_transfer_expiry_changed: Notify,
@@ -1409,6 +1416,9 @@ struct DaemonStateInputs {
     rollback_handoff: Arc<handoff_requests::RollbackAuthority>,
     daemon_generation: u64,
     handoff_listeners: Option<ListenerDescriptors>,
+    /// Remembered entries a previous round of this same process revoked
+    /// whose durable removal is still owed; they stay revoked.
+    carried_remembered_removals: std::collections::BTreeSet<agent_access::EntryId>,
 }
 
 /// The daemon's runtime, for tests; panics when it cannot be built.
@@ -2182,6 +2192,8 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::SpentByHandoff),
         daemon_generation,
         handoff_listeners: Some(handoff_listeners),
+        // A new process: nothing carries; the store is read fresh.
+        carried_remembered_removals: std::collections::BTreeSet::new(),
     });
     // The carried Windows were sent their outcome at commit; the daemon
     // holds them until their resume claims (M3.16) or the hold expires, and
@@ -2359,6 +2371,13 @@ async fn record_handoff_adoption_audit(state: &DaemonState, rollback: bool) {
 /// resumes.
 const HANDOFF_ACTOR_END_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long the fenced old generation waits for its owed remembered-grant
+/// writes (removals a failed write left revoked only in memory, and last-used
+/// times) before it crosses the exec boundary. Best effort: the adopted
+/// generation reloads the store from disk, so an owed removal that is not
+/// written here would come back there.
+const HANDOFF_AGENT_ACCESS_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Bound on stopping the runtime: every task is dropped and the workers and
 /// idle blocking threads are joined at once, but a blocking task that is
 /// still running (a metadata save, an abandoned scope request) is waited for
@@ -2412,6 +2431,33 @@ struct StoppedForHandoff {
     excluded: Vec<splinterd::handoff_prepare::ExcludedSplint>,
     /// Whether every captured actor confirmed its handoff end in time.
     actors_handed_off: bool,
+}
+
+/// Writes owed remembered-grant changes under the handoff fence, within
+/// [`HANDOFF_AGENT_ACCESS_FLUSH_TIMEOUT`], so a removal a failed write left
+/// revoked only in memory does not come back in the adopted generation. A
+/// failure is logged (and recorded in the store's audit ring by the flush);
+/// it never blocks or fails the handoff. A write still running at the
+/// timeout is atomic: the store is the old or the new file, and the next
+/// load removes its temporary.
+async fn flush_agent_access_at_fence(state: &DaemonState) {
+    let access = Arc::clone(&state.agent_access);
+    if !access.flush_needed() {
+        return;
+    }
+    let flush = tokio::task::spawn_blocking(move || access.flush());
+    match time::timeout(HANDOFF_AGENT_ACCESS_FLUSH_TIMEOUT, flush).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            error!(%error, "owed remembered agent access writes failed at the handoff fence; revoked entries may return after the upgrade");
+        }
+        Ok(Err(error)) => error!(%error, "remembered agent access fence write task failed"),
+        Err(_) => {
+            error!(
+                "owed remembered agent access writes did not finish before the handoff boundary"
+            );
+        }
+    }
 }
 
 /// Turns every capture into a handed-off Splint and waits, within
@@ -2474,6 +2520,7 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
             "not every captured actor confirmed its handoff end; the old generation will resume"
         );
     }
+    flush_agent_access_at_fence(&state).await;
     info!(
         handed_off = handed_off.len(),
         excluded = excluded.len(),
@@ -2840,6 +2887,25 @@ struct ResumedRound {
     agent_status_timer: AbortOnDrop,
 }
 
+/// The remembered entries the previous round of this process revoked whose
+/// durable removal is still owed. The resumed round reads the store fresh
+/// like any round; each owed removal is tried once more first and, if it
+/// fails again, stays revoked in the new round. The previous round's handle
+/// is retired under its writer lock, so it never writes again.
+async fn owed_remembered_removals(
+    previous: &DaemonState,
+) -> std::collections::BTreeSet<agent_access::EntryId> {
+    let previous_access = Arc::clone(&previous.agent_access);
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = previous_access.flush() {
+            warn!(%error, "remembered agent access write owed by the previous round failed");
+        }
+        previous_access.retire()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Builds a fresh state for the same generation from the stopped round's
 /// parts and serves every handed-off Splint again (Plan 0061 D5).
 ///
@@ -2875,6 +2941,7 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
     let topology = previous.topology.read().await.clone();
     let policy = std::mem::take(&mut *previous.policy.lock().await);
     let audit = std::mem::take(&mut *previous.audit.lock().await);
+    let carried_remembered_removals = owed_remembered_removals(&previous).await;
     let state = build_daemon_state(DaemonStateInputs {
         topology: topology.clone(),
         metadata: previous.metadata.clone(),
@@ -2890,6 +2957,7 @@ async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
         rollback_handoff: Arc::clone(&previous.rollback_handoff),
         daemon_generation: previous.daemon_generation,
         handoff_listeners: previous.handoff_listeners,
+        carried_remembered_removals,
     });
     *state.audit.lock().await = audit;
     carry_unused_provenance(&previous, &state, &topology);
@@ -3184,6 +3252,7 @@ async fn start_fresh(
             listener: listeners.listener.as_raw_fd(),
             image_listener: listeners.image_listener.as_raw_fd(),
         }),
+        carried_remembered_removals: std::collections::BTreeSet::new(),
     });
     let agent_status_timer = AbortOnDrop::new(agent_status::spawn_timer(&state));
     record_policy_reload(&state, &policy_generation).await;
@@ -3318,7 +3387,22 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         rollback_handoff,
         daemon_generation,
         handoff_listeners,
+        carried_remembered_removals,
     } = inputs;
+    // Every generation reads the remembered-grant store fresh, with the
+    // ordinary checks, before admission opens (ADR 0011 and 0014). Workspace
+    // session and once grants never carry into it.
+    let identity_context = Arc::new(agent_access::IdentityContext::for_daemon());
+    let grant_ids = Arc::new(agent_access::GrantIds::default());
+    let agent_access = Arc::new(agent_access::AgentAccess::load(
+        Arc::clone(&grant_ids),
+        metadata
+            .as_ref()
+            .map(|metadata| agent_access::StoreLocation::new(metadata.state_base().to_path_buf())),
+        &identity_context,
+        &topology,
+        &carried_remembered_removals,
+    ));
     let (revocations, _) = broadcast::channel(32);
     let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
     let (connection_revocations, _) = broadcast::channel(CONNECTION_LIMIT);
@@ -3356,7 +3440,9 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         controller: Mutex::new(ControllerState::default()),
         control_events,
         connection_revocations,
-        grants: Mutex::new(GrantStore::default()),
+        grants: Mutex::new(GrantStore::with_ids(grant_ids)),
+        agent_access,
+        identity_context,
         revocations,
         image_transfers: Mutex::new(TransferAdmission::default()),
         image_transfer_expiry_changed: Notify::new(),
@@ -3755,6 +3841,17 @@ async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> R
             .map_err(|_| anyhow::anyhow!("failed to persist final Topology metadata"))
     }
     .await;
+    // Clean shutdown writes owed remembered-grant changes: last-used times
+    // and removals a failed write left revoked only in memory. A failure is
+    // reported, never a reason to fail the shutdown.
+    let access = Arc::clone(&state.agent_access);
+    match tokio::task::spawn_blocking(move || access.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            error!(%error, "remembered agent access could not be written at shutdown");
+        }
+        Err(error) => error!(%error, "remembered agent access shutdown write task failed"),
+    }
     let socket_removal = fs::remove_file(&listeners.socket).await;
     let image_socket_removal = fs::remove_file(&listeners.image_socket).await;
     // Close both listeners only once their paths are gone.
@@ -3770,6 +3867,7 @@ async fn serve_image_content_client(mut stream: UnixStream, state: Arc<DaemonSta
         &stream,
         &state.install_prefix,
         state.pinned_client_snapshot.as_ref(),
+        &state.identity_context,
     )
     .await?;
     let transfer_peer = peer
@@ -3947,6 +4045,7 @@ async fn serve_client(stream: UnixStream, state: Arc<DaemonState>) -> Result<()>
         &stream,
         &state.install_prefix,
         state.pinned_client_snapshot.as_ref(),
+        &state.identity_context,
     )
     .await?;
     let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
@@ -6055,6 +6154,8 @@ async fn retire_transient_lair_under_transaction(
     };
     state.transient_leases.lock().unwrap().remove_lair(lair_id);
     revoke_retired_identities(state, &splint_ids, &identities, "transient Lair retired").await;
+    // The Lair left topology: the workspace ended (ADR 0014).
+    end_lair_grants(state, lair_id, "transient Lair retired").await;
     // Shutdown may wait through the full grace; it must not hold the transaction.
     for runtime in runtimes {
         drop(state.retiring.spawn(runtime));
@@ -6284,6 +6385,9 @@ struct RequestAuthorizationContext {
     /// any; a request that names an incarnation must still name this one.
     policy_splint_incarnation: Option<u64>,
     ephemeral_grant_id: Option<u64>,
+    /// The ADR 0014 source behind `ephemeral_grant_id`, when it is a
+    /// workspace-session or remembered grant rather than a once grant.
+    agent_grant: Option<agent_access::GrantDuration>,
     interactive_bypass: bool,
 }
 
@@ -7250,6 +7354,219 @@ fn ephemeral_access_scopes(required: &[authorization::OperationScope]) -> Option
     Some(scopes)
 }
 
+fn unix_seconds_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Writes owed remembered-grant changes (removals, last-used times) on a
+/// blocking thread, without waiting for the result.
+fn schedule_agent_access_flush(state: &DaemonState) {
+    let access = Arc::clone(&state.agent_access);
+    drop(tokio::task::spawn_blocking(move || {
+        if let Err(error) = access.flush() {
+            warn!(%error, "remembered agent access write failed; removals stay revoked and are retried");
+        }
+    }));
+}
+
+/// A workspace ended (terminated, retired, or closed unused): every grant
+/// for it of every duration is revoked, its controllers released, and its
+/// subscriptions cancelled; its remembered entries are removed durably.
+async fn end_lair_grants(state: &DaemonState, lair_id: LairId, reason: &'static str) {
+    let mut grant_ids = state.grants.lock().await.revoke_lair(lair_id, reason);
+    let ended = state.agent_access.end_lair(lair_id, reason);
+    grant_ids.extend(ended.grant_ids);
+    for grant_id in grant_ids {
+        revoke_grant_controllers(state, grant_id).await;
+        let _ = state.revocations.send(Revocation { grant_id });
+    }
+    if ended.flush_needed {
+        schedule_agent_access_flush(state);
+    }
+}
+
+/// One answer to commit as a grant (ADR 0014).
+#[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
+struct AgentGrantRequest {
+    lair_id: LairId,
+    access: agent_access::AccessSet,
+    duration: agent_access::GrantDuration,
+    /// The host-reported agent name: display data only.
+    display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
+struct AgentGrantCommitted {
+    grant_id: u64,
+    duration: agent_access::GrantDuration,
+    entry_id: Option<agent_access::EntryId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
+enum AgentGrantError {
+    /// An upgrade fence is up.
+    Fenced,
+    /// The workspace no longer exists.
+    WorkspaceMissing,
+    /// The durable identity no longer names the requester's executing file.
+    IdentityChanged,
+    /// The scope set cannot be granted (empty, clipboard, or too many).
+    InvalidAccess(agent_access::InvalidAccess),
+    Commit(agent_access::CommitError),
+}
+
+/// The crate-internal entry point that commits a grant of any duration.
+/// PR 3's consent flow calls it after the person answers; tests call it now.
+/// No public request reaches it yet.
+///
+/// It validates again before committing: no fence is up, the workspace
+/// exists, the duration is offered to this requester for this access, and,
+/// for "Always", the durable identity still qualifies and the durable write
+/// succeeds. A failed write grants nothing, not even a shorter grant. A
+/// replaced definition's controllers and subscriptions end.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "PR 3's consent flow commits through this")
+)]
+async fn commit_agent_grant(
+    state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
+    request: AgentGrantRequest,
+) -> Result<AgentGrantCommitted, AgentGrantError> {
+    use agent_access::{CommitError, Committed, GrantDuration};
+
+    let AgentGrantRequest {
+        lair_id,
+        access,
+        duration,
+        display_name,
+    } = request;
+    // The set is classified again here, whatever the caller built: an exact
+    // bundle is that level, anything else Custom, and clipboard or empty
+    // sets are refused.
+    let access = agent_access::AccessSet::from_scopes(access.scopes())
+        .map_err(AgentGrantError::InvalidAccess)?;
+    if state.handoff_gate.is_fenced() {
+        return Err(AgentGrantError::Fenced);
+    }
+    if state.topology.read().await.find_lair(lair_id).is_none() {
+        return Err(AgentGrantError::WorkspaceMissing);
+    }
+    let offer =
+        agent_access::offered_durations(peer, &access, state.agent_access.store_available());
+    offer
+        .allows(duration)
+        .map_err(|why| AgentGrantError::Commit(CommitError::NotOffered(why)))?;
+    let committed = match duration {
+        GrantDuration::Once => {
+            let mutation = state.grants.lock().await.grant_lair(
+                peer,
+                lair_id,
+                access.scopes().into_iter().collect(),
+            );
+            schedule_lair_grant_expiry(state, mutation.grant.grant_id);
+            Committed {
+                grant_id: mutation.grant.grant_id,
+                replaced: None,
+                entry_id: None,
+            }
+        }
+        GrantDuration::WorkspaceSession => state
+            .agent_access
+            .commit_session(peer, lair_id, access, display_name)
+            .map_err(AgentGrantError::Commit)?,
+        GrantDuration::Remembered => {
+            let identity = offer
+                .remembered
+                .map_err(|why| AgentGrantError::Commit(CommitError::NotOffered(why)))?;
+            let store = Arc::clone(&state.agent_access);
+            let context = Arc::clone(&state.identity_context);
+            let executing = peer.executable_file();
+            tokio::task::spawn_blocking(move || {
+                if !context.still_qualifies(&identity, executing) {
+                    return Err(AgentGrantError::IdentityChanged);
+                }
+                store
+                    .commit_remembered(identity, lair_id, access, display_name)
+                    .map_err(AgentGrantError::Commit)
+            })
+            .await
+            .map_err(|error| {
+                AgentGrantError::Commit(CommitError::Store(agent_access::StoreWriteError::Io {
+                    stage: "commit task",
+                    error: error.to_string(),
+                }))
+            })??
+        }
+    };
+    if let Some(replaced) = committed.replaced {
+        revoke_grant_controllers(state, replaced).await;
+        let _ = state.revocations.send(Revocation { grant_id: replaced });
+    }
+    Ok(AgentGrantCommitted {
+        grant_id: committed.grant_id,
+        duration,
+        entry_id: committed.entry_id,
+    })
+}
+
+/// Revokes one "while this workspace is open" definition: new requests stop
+/// at once, its subscriptions are cancelled, and its controllers released.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "PR 4's inventory revokes through this")
+)]
+async fn revoke_session_grant(state: &DaemonState, grant_id: u64) -> bool {
+    if !state.agent_access.revoke_session(grant_id) {
+        return false;
+    }
+    revoke_grant_controllers(state, grant_id).await;
+    let _ = state.revocations.send(Revocation { grant_id });
+    true
+}
+
+/// What revoking a remembered definition did.
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
+struct RememberedRevocation {
+    grant_id: u64,
+    /// The durable removal. On failure the grant stays revoked in memory and
+    /// the removal is retried by the next write and at shutdown; until one
+    /// succeeds it would return after a restart.
+    durable: Result<(), agent_access::StoreWriteError>,
+}
+
+/// Revokes one remembered definition: in memory at once, with its
+/// subscriptions and controllers, then durably.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "PR 4's inventory revokes through this")
+)]
+async fn revoke_remembered_grant(
+    state: &DaemonState,
+    entry_id: &agent_access::EntryId,
+) -> Option<RememberedRevocation> {
+    let grant_id = state.agent_access.revoke_remembered(entry_id)?;
+    revoke_grant_controllers(state, grant_id).await;
+    let _ = state.revocations.send(Revocation { grant_id });
+    let access = Arc::clone(&state.agent_access);
+    let durable = tokio::task::spawn_blocking(move || access.flush())
+        .await
+        .unwrap_or_else(|error| {
+            Err(agent_access::StoreWriteError::Io {
+                stage: "removal task",
+                error: error.to_string(),
+            })
+        });
+    Some(RememberedRevocation { grant_id, durable })
+}
+
 fn common_lair_resource(resources: &[policy::PolicyResource]) -> Option<LairId> {
     let mut selected = None;
     for resource in resources {
@@ -7392,16 +7709,36 @@ async fn authorize_request(
     if let (Some(lair_id), Some(scopes)) = (
         common_lair_resource(&resources),
         ephemeral_access_scopes(&required_scopes),
-    ) && let Some(grant_id) = state
-        .grants
-        .lock()
-        .await
-        .authorize_lair(peer, lair_id, &scopes)
-    {
-        return Ok(RequestAuthorizationContext {
-            ephemeral_grant_id: Some(grant_id),
-            ..RequestAuthorizationContext::default()
-        });
+    ) {
+        if let Some(grant_id) = state
+            .grants
+            .lock()
+            .await
+            .authorize_lair(peer, lair_id, &scopes)
+        {
+            return Ok(RequestAuthorizationContext {
+                ephemeral_grant_id: Some(grant_id),
+                ..RequestAuthorizationContext::default()
+            });
+        }
+        // ADR 0014: "while this workspace is open" and remembered grants are
+        // further independent sources; one of them alone must cover every
+        // scope. The resources came from the live topology, so a grant for
+        // an absent Lair never matches.
+        if let Some(authorized) =
+            state
+                .agent_access
+                .authorize(peer, lair_id, &scopes, unix_seconds_now())
+        {
+            if authorized.flush_due {
+                schedule_agent_access_flush(state);
+            }
+            return Ok(RequestAuthorizationContext {
+                ephemeral_grant_id: Some(authorized.grant_id),
+                agent_grant: Some(authorized.duration),
+                ..RequestAuthorizationContext::default()
+            });
+        }
     }
     if consent_capable_request(request) {
         Ok(RequestAuthorizationContext::default())
@@ -7576,6 +7913,10 @@ async fn append_request_result_audit(
         "grant_revoked"
     } else if authorization.policy_authorized() {
         "policy_match"
+    } else if authorization.agent_grant == Some(agent_access::GrantDuration::WorkspaceSession) {
+        "workspace_session_grant"
+    } else if authorization.agent_grant == Some(agent_access::GrantDuration::Remembered) {
+        "remembered_grant"
     } else {
         "trusted_or_owned_authority"
     };
@@ -8638,15 +8979,7 @@ async fn handle_authorized_request(
             };
             install_topology(state, candidate).await;
             if let Some(retired_lair_id) = retired_lair_id {
-                let revoked = state
-                    .grants
-                    .lock()
-                    .await
-                    .revoke_lair(retired_lair_id, "inactive Lair history compacted");
-                for grant_id in revoked {
-                    revoke_grant_controllers(state, grant_id).await;
-                    let _ = state.revocations.send(Revocation { grant_id });
-                }
+                end_lair_grants(state, retired_lair_id, "inactive Lair history compacted").await;
             }
             record_plain_dojo(
                 state,
@@ -9289,15 +9622,7 @@ async fn handle_authorized_request(
                     )
                     .await;
                     let change = if let Some(lair_id) = emptied_lair {
-                        let lair_grants = state
-                            .grants
-                            .lock()
-                            .await
-                            .revoke_lair(lair_id, "unused Lair closed");
-                        for grant_id in lair_grants {
-                            revoke_grant_controllers(state, grant_id).await;
-                            let _ = state.revocations.send(Revocation { grant_id });
-                        }
+                        end_lair_grants(state, lair_id, "unused Lair closed").await;
                         TopologyChangeKind::LairTerminated
                     } else {
                         TopologyChangeKind::DojoClosed
@@ -9415,15 +9740,7 @@ async fn handle_authorized_request(
                     let _ = state.revocations.send(Revocation { grant_id });
                 }
             }
-            let lair_grants = state
-                .grants
-                .lock()
-                .await
-                .revoke_lair(lair_id, "Lair terminated");
-            for grant_id in lair_grants {
-                revoke_grant_controllers(state, grant_id).await;
-                let _ = state.revocations.send(Revocation { grant_id });
-            }
+            end_lair_grants(state, lair_id, "Lair terminated").await;
             publish_topology(state, topology_revision, TopologyChangeKind::LairTerminated).await;
             drop(transaction);
             // Committed: the closed Splints left the registry, so capture
@@ -14614,6 +14931,7 @@ async fn verify_peer(
     stream: &UnixStream,
     install_prefix: &Arc<InstallPrefix>,
     pinned_client: Option<&Arc<consent::PinnedClientSnapshot>>,
+    identity_context: &Arc<agent_access::IdentityContext>,
 ) -> Result<(PeerIdentity, Option<consent::PeerMonitor>)> {
     let mut identity =
         PeerIdentity::from_stream(stream, Arc::clone(install_prefix), pinned_client.cloned())?;
@@ -14628,13 +14946,18 @@ async fn verify_peer(
     // A pidfd that proves the peer exited or names another process rejects
     // the connection: the identity read above may describe a process that
     // reused the PID. Only a kernel without SO_PEERPIDFD proceeds unpinned.
-    let monitor = match consent::PeerMonitor::initialize(stream, identity.pid)
-        .await
-        .context("socket peer identity could not be pinned")?
+    let monitor = match consent::PeerMonitor::initialize(
+        stream,
+        identity.pid,
+        Arc::clone(identity_context),
+    )
+    .await
+    .context("socket peer identity could not be pinned")?
     {
         consent::PeerPinning::Pinned {
             monitor,
             executable,
+            durable,
         } => {
             match executable {
                 Ok(executable) => identity.install_persistent_executable(executable),
@@ -14642,6 +14965,9 @@ async fn verify_peer(
                     %error,
                     "persistent peer identity unavailable; policy authorization disabled"
                 ),
+            }
+            if let Some(durable) = durable {
+                identity.install_durable_evidence(durable);
             }
             Some(monitor)
         }
@@ -15852,6 +16178,7 @@ mod tests {
         let (revocations, _) = broadcast::channel(32);
         let retiring = RetiringRuntimes::default();
         let (control_events, _) = broadcast::channel(CONTROL_EVENT_QUEUE);
+        let grant_ids = Arc::new(agent_access::GrantIds::default());
         Arc::new(DaemonState {
             topology: RwLock::new(Topology::new()),
             runtimes: Mutex::new(RuntimeRegistry::new(retiring.clone())),
@@ -15890,7 +16217,9 @@ mod tests {
             controller: Mutex::new(ControllerState::default()),
             control_events,
             connection_revocations: broadcast::channel(CONNECTION_LIMIT).0,
-            grants: Mutex::new(GrantStore::default()),
+            grants: Mutex::new(GrantStore::with_ids(Arc::clone(&grant_ids))),
+            agent_access: Arc::new(agent_access::AgentAccess::unconfigured(grant_ids)),
+            identity_context: Arc::new(agent_access::IdentityContext::for_daemon()),
             revocations,
             image_transfers: Mutex::new(TransferAdmission::default()),
             image_transfer_expiry_changed: Notify::new(),
@@ -17238,6 +17567,34 @@ mod tests {
         };
         assert_eq!(lair.lifetime, LairLifetime::Transient);
         let splint_id = lair.dojos[0].default_focus;
+        // Grants on the transient workspace, once and while open.
+        let lair_id = lair.id;
+        state.grants.lock().await.grant_lair(
+            &PeerIdentity::for_test(),
+            lair_id,
+            vec![AccessScope::Observe],
+        );
+        let agent = PeerIdentity::for_test_executing(
+            executable_identity::ExecutableIdentity {
+                path: PathBuf::from("/home/u/target/debug/agent"),
+                device: 1,
+                inode: 2,
+                owner_uid: 1000,
+                mode: 0o100_755,
+                size: 1,
+                sha256: "a".repeat(64),
+            },
+            agent_access::DurableEvidence::for_test(None, &[], false),
+        );
+        state
+            .agent_access
+            .commit_session(
+                &agent,
+                lair_id,
+                agent_access::AccessSet::Level(agent_access::AccessLevel::Look),
+                None,
+            )
+            .unwrap();
         let child_pid = state
             .runtimes
             .lock()
@@ -17250,6 +17607,9 @@ mod tests {
         assert!(Path::new(&format!("/proc/{child_pid}")).exists());
         cleanup_connection(&state, connection_id).await;
         assert!(state.topology.read().await.lairs().next().is_none());
+        // The workspace ended: its grants of every duration ended with it.
+        assert!(state.grants.lock().await.lair_status(lair_id).is_empty());
+        assert_eq!(state.agent_access.session_count_for_test(), 0);
         assert!(state.runtimes.lock().await.handle(splint_id).is_none());
         assert!(
             state
@@ -24058,5 +24418,672 @@ mod tests {
         assert_eq!((participant.prompt_index, participant.slot), (1, 0));
         exec.cancel(HandoffCancelReason::Failed).await;
         assert!(continuation_closed(descriptors.continuation()));
+    }
+
+    // ---- ADR 0014 grant engine (Plan 0053 PR 2) ----
+
+    /// A daemon state with a remembered-grant store, a private tree holding
+    /// a protected agent executable, a pinned peer executing it, and one
+    /// Lair.
+    struct AgentFixture {
+        root: PathBuf,
+        state: Arc<DaemonState>,
+        peer: PeerIdentity,
+        lair_id: LairId,
+        dojo_id: DojoId,
+        splint_id: SplintId,
+    }
+
+    impl Drop for AgentFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn agent_fixture_state(
+        base: &Path,
+        context: agent_access::IdentityContext,
+        topology: &Topology,
+    ) -> Arc<DaemonState> {
+        let mut state = test_state(false);
+        let ids = Arc::new(agent_access::GrantIds::default());
+        let inner = Arc::get_mut(&mut state).unwrap();
+        // As `build_daemon_state` does: the store loads against the topology
+        // the generation starts with.
+        inner.topology = RwLock::new(topology.clone());
+        inner.grants = Mutex::new(GrantStore::with_ids(Arc::clone(&ids)));
+        inner.agent_access = Arc::new(agent_access::AgentAccess::load(
+            ids,
+            Some(agent_access::StoreLocation::new(base.to_path_buf())),
+            &context,
+            topology,
+            &std::collections::BTreeSet::new(),
+        ));
+        inner.identity_context = Arc::new(context);
+        state
+    }
+
+    async fn agent_fixture() -> AgentFixture {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = temp_dir();
+        let tree = root.join("tree");
+        std::fs::create_dir_all(tree.join("usr/bin")).unwrap();
+        for directory in [&root, &tree, &tree.join("usr"), &tree.join("usr/bin")] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let file = tree.join("usr/bin/agent");
+        std::fs::write(&file, b"#!/bin/false agent\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata = std::fs::metadata(&file).unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        let context = agent_access::IdentityContext::at(
+            splinterm_policy::durable_identity::IdentityRoot::at(tree, vec![uid]),
+            None,
+        );
+        let executable = executable_identity::ExecutableIdentity {
+            path: PathBuf::from("/usr/bin/agent"),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owner_uid: uid,
+            mode: metadata.mode(),
+            size: metadata.len(),
+            sha256: "a".repeat(64),
+        };
+        let evidence = context.evaluate(&executable);
+        assert!(
+            evidence.preferred().is_some(),
+            "the fixture is a protected install"
+        );
+        let peer = PeerIdentity::for_test_executing(executable, evidence);
+        let base = root.join("state");
+        std::fs::create_dir_all(base.join("splinterm")).unwrap();
+        std::fs::set_permissions(
+            base.join("splinterm"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let state = agent_fixture_state(&base, context, &Topology::new());
+        let lair = Lair::new("agents", PathBuf::from("/tmp"));
+        let lair_id = lair.id;
+        let dojo_id = lair.dojos[0].id;
+        let LayoutNode::Leaf(splint) = &lair.dojos[0].root else {
+            panic!("a new Lair has one leaf");
+        };
+        let splint_id = splint.id;
+        {
+            let mut topology = state.topology.write().await;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, lair).unwrap();
+        }
+        AgentFixture {
+            root,
+            state,
+            peer,
+            lair_id,
+            dojo_id,
+            splint_id,
+        }
+    }
+
+    impl AgentFixture {
+        fn base(&self) -> PathBuf {
+            self.root.join("state")
+        }
+
+        async fn commit(
+            &self,
+            peer: &PeerIdentity,
+            access: agent_access::AccessSet,
+            duration: agent_access::GrantDuration,
+        ) -> Result<AgentGrantCommitted, AgentGrantError> {
+            commit_agent_grant(
+                &self.state,
+                peer,
+                AgentGrantRequest {
+                    lair_id: self.lair_id,
+                    access,
+                    duration,
+                    display_name: Some("Test agent".into()),
+                },
+            )
+            .await
+        }
+
+        async fn inspect(
+            &self,
+            peer: &PeerIdentity,
+        ) -> Result<RequestAuthorizationContext, ProtocolError> {
+            authorize_request(
+                &Request::InspectSplint {
+                    splint_id: self.splint_id,
+                },
+                &self.state,
+                peer,
+                0,
+                false,
+                false,
+            )
+            .await
+        }
+
+        async fn rename(
+            &self,
+            peer: &PeerIdentity,
+        ) -> Result<RequestAuthorizationContext, ProtocolError> {
+            let revision = self.state.topology.read().await.revision();
+            authorize_request(
+                &Request::RenameDojo {
+                    expected_topology_revision: revision,
+                    dojo_id: self.dojo_id,
+                    name: "renamed".to_owned(),
+                    promote_transient_lair: false,
+                },
+                &self.state,
+                peer,
+                0,
+                false,
+                false,
+            )
+            .await
+        }
+    }
+
+    fn level(level: agent_access::AccessLevel) -> agent_access::AccessSet {
+        agent_access::AccessSet::Level(level)
+    }
+
+    #[tokio::test]
+    async fn committed_agent_grants_authorize_exactly_their_bundle() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let peer = &fixture.peer;
+        assert_eq!(
+            fixture.inspect(peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        let look = fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Remembered)
+            .await
+            .unwrap();
+        assert!(look.entry_id.is_some());
+        let allowed = fixture.inspect(peer).await.unwrap();
+        assert_eq!(allowed.authorized_grant_id(), Some(look.grant_id));
+        assert_eq!(allowed.agent_grant, Some(GrantDuration::Remembered));
+        assert!(!allowed.policy_authorized());
+        // Look does not rename.
+        assert_eq!(
+            fixture.rename(peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        // A workspace-session Manage grant does, as its own source.
+        let manage = fixture
+            .commit(
+                peer,
+                level(AccessLevel::Manage),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        let renamed = fixture.rename(peer).await.unwrap();
+        assert_eq!(renamed.authorized_grant_id(), Some(manage.grant_id));
+        assert_eq!(renamed.agent_grant, Some(GrantDuration::WorkspaceSession));
+        // No source reaches another workspace or a daemon-level request.
+        assert_eq!(
+            authorize_request(&Request::ListLairs, &fixture.state, peer, 0, false, false)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+        // A Custom set grants exactly its scopes.
+        let custom = agent_access::AccessSet::from_scopes([AccessScope::TopologyName]).unwrap();
+        let other = PeerIdentity::for_test_executing(
+            executable_identity::ExecutableIdentity {
+                sha256: "b".repeat(64),
+                ..fixture.peer.persistent_executable().unwrap().clone()
+            },
+            fixture.peer.durable_evidence().unwrap().clone(),
+        );
+        fixture
+            .commit(&other, custom, GrantDuration::WorkspaceSession)
+            .await
+            .unwrap();
+        assert!(fixture.rename(&other).await.is_ok());
+        // The remembered Look grant covers the read; the Custom one would not.
+        assert_eq!(
+            fixture.inspect(&other).await.unwrap().agent_grant,
+            Some(GrantDuration::Remembered)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_takeover_grant_is_never_durable() {
+        use agent_access::{CommitError, GrantDuration, Withheld};
+
+        let fixture = agent_fixture().await;
+        let takeover = agent_access::AccessSet::from_scopes([
+            AccessScope::Observe,
+            AccessScope::ControlTakeover,
+        ])
+        .unwrap();
+        for duration in [GrantDuration::WorkspaceSession, GrantDuration::Remembered] {
+            assert_eq!(
+                fixture
+                    .commit(&fixture.peer, takeover.clone(), duration)
+                    .await,
+                Err(AgentGrantError::Commit(CommitError::NotOffered(
+                    Withheld::CustomTakeover
+                )))
+            );
+        }
+        let once = fixture
+            .commit(&fixture.peer, takeover, GrantDuration::Once)
+            .await
+            .unwrap();
+        assert_eq!(once.duration, GrantDuration::Once);
+        assert!(fixture.state.agent_access.remembered_for_test().is_empty());
+        assert_eq!(fixture.state.agent_access.session_count_for_test(), 0);
+        // Takeover inside a level stays durable.
+        assert!(
+            fixture
+                .commit(
+                    &fixture.peer,
+                    level(agent_access::AccessLevel::LookAndType),
+                    GrantDuration::Remembered
+                )
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_session_grant_survives_reconnect_and_ends_with_the_workspace() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let committed = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        // The agent restarts and reconnects: a new process of the same build.
+        let mut restarted = fixture.peer.clone();
+        restarted.pid = restarted.pid.saturating_add(11);
+        assert_eq!(
+            fixture
+                .inspect(&restarted)
+                .await
+                .unwrap()
+                .authorized_grant_id(),
+            Some(committed.grant_id)
+        );
+        // The workspace ends: the grant is revoked, with its subscriptions.
+        let mut revocations = fixture.state.revocations.subscribe();
+        end_lair_grants(&fixture.state, fixture.lair_id, "Lair terminated").await;
+        assert_eq!(
+            revocations.recv().await.unwrap().grant_id,
+            committed.grant_id
+        );
+        assert_eq!(
+            fixture.inspect(&restarted).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(fixture.state.agent_access.session_count_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_new_generation_keeps_remembered_grants_and_ends_session_grants() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Manage),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        let remembered = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        // The next generation (restart, adoption, or rollback) builds its
+        // state with the same fresh load.
+        let topology = fixture.state.topology.read().await.clone();
+        let next = agent_fixture_state(
+            &fixture.base(),
+            (*fixture.state.identity_context).clone(),
+            &topology,
+        );
+        let reloaded = next.agent_access.remembered_for_test();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(Some(&reloaded[0].1.id), remembered.entry_id.as_ref());
+        assert_eq!(next.agent_access.session_count_for_test(), 0);
+        let read = authorize_request(
+            &Request::InspectSplint {
+                splint_id: fixture.splint_id,
+            },
+            &next,
+            &fixture.peer,
+            0,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read.agent_grant, Some(GrantDuration::Remembered));
+        let revision = next.topology.read().await.revision();
+        assert_eq!(
+            authorize_request(
+                &Request::RenameDojo {
+                    expected_topology_revision: revision,
+                    dojo_id: fixture.dojo_id,
+                    name: "renamed".to_owned(),
+                    promote_transient_lair: false,
+                },
+                &next,
+                &fixture.peer,
+                0,
+                false,
+                false,
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_durable_write_grants_nothing_not_even_once() {
+        use agent_access::{AccessLevel, CommitError, GrantDuration, StoreWriteError};
+
+        let fixture = agent_fixture().await;
+        fixture.state.agent_access.inject_write_failures(1);
+        let failed = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await;
+        assert!(matches!(
+            failed,
+            Err(AgentGrantError::Commit(CommitError::Store(
+                StoreWriteError::Io { .. }
+            )))
+        ));
+        assert_eq!(
+            fixture.inspect(&fixture.peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        assert!(
+            fixture
+                .state
+                .grants
+                .lock()
+                .await
+                .lair_status(fixture.lair_id)
+                .is_empty()
+        );
+        assert!(fixture.state.agent_access.remembered_for_test().is_empty());
+    }
+
+    #[tokio::test]
+    async fn always_requires_the_durable_identity_to_still_qualify_at_commit() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        // An upgrade replaced the file after this agent started: it still
+        // runs the old inode, which the path no longer names.
+        let file = fixture.root.join("tree/usr/bin/agent");
+        let staged = fixture.root.join("tree/usr/bin/agent.new");
+        std::fs::write(&staged, b"#!/bin/false upgraded\n").unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&staged, &file).unwrap();
+        assert_eq!(
+            fixture
+                .commit(
+                    &fixture.peer,
+                    level(AccessLevel::Look),
+                    GrantDuration::Remembered
+                )
+                .await,
+            Err(AgentGrantError::IdentityChanged)
+        );
+        assert!(fixture.state.agent_access.remembered_for_test().is_empty());
+        // A workspace-missing request grants nothing either.
+        let gone = AgentGrantRequest {
+            lair_id: LairId::new(),
+            access: level(AccessLevel::Look),
+            duration: GrantDuration::WorkspaceSession,
+            display_name: None,
+        };
+        assert_eq!(
+            commit_agent_grant(&fixture.state, &fixture.peer, gone).await,
+            Err(AgentGrantError::WorkspaceMissing)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replaced_or_revoked_agent_grant_ends_its_controllers_and_subscriptions() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let mut revocations = fixture.state.revocations.subscribe();
+        let manage = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Manage),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        let look = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(revocations.recv().await.unwrap().grant_id, manage.grant_id);
+        // A controller the remembered grant authorized is released on revoke.
+        let connection_id = 42;
+        state_controller_acquire(&fixture.state, connection_id, look.grant_id).await;
+        let mut connection_revocations = fixture.state.connection_revocations.subscribe();
+        let revoked = revoke_remembered_grant(&fixture.state, look.entry_id.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(revoked.grant_id, look.grant_id);
+        assert_eq!(revoked.durable, Ok(()));
+        assert_eq!(revocations.recv().await.unwrap().grant_id, look.grant_id);
+        assert_eq!(connection_revocations.recv().await.unwrap(), connection_id);
+        assert!(
+            fixture
+                .state
+                .controller
+                .lock()
+                .await
+                .release_grant(look.grant_id)
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.inspect(&fixture.peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        // A session grant revokes the same way.
+        let session = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        assert!(revoke_session_grant(&fixture.state, session.grant_id).await);
+        assert_eq!(revocations.recv().await.unwrap().grant_id, session.grant_id);
+        assert!(!revoke_session_grant(&fixture.state, session.grant_id).await);
+    }
+
+    /// Records a controller lease bound to `grant_id`, as an authorized
+    /// acquisition does.
+    async fn state_controller_acquire(state: &DaemonState, connection_id: u64, grant_id: u64) {
+        state
+            .controller
+            .lock()
+            .await
+            .acquire(connection_id, SplintId::new(), 1, Some(grant_id))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoking_a_remembered_grant_leaves_a_matching_policy_rule_in_force() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let executable = fixture.peer.persistent_executable().unwrap().clone();
+        let policy_path = fixture.root.join("policy.json");
+        let policy = serde_json::json!({
+            "schema": "splinterm.policy.v2",
+            "rules": [{
+                "id": "agent-reader",
+                "executable": {"path": executable.path, "sha256": executable.sha256},
+                "scopes": ["topology_metadata_read"],
+                "resources": [{"kind": "lair", "lair_id": fixture.lair_id}],
+                "limits": {"deadline_ms": 1000},
+            }],
+        });
+        std::fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let topology = fixture.state.topology.read().await.clone();
+        let generation = fixture
+            .state
+            .policy
+            .lock()
+            .await
+            .reload(Some(policy_path.as_path()), &topology);
+        assert_eq!(generation.diagnostic, None);
+        let remembered = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        // Policy is consulted first and keeps its own semantics.
+        assert!(
+            fixture
+                .inspect(&fixture.peer)
+                .await
+                .unwrap()
+                .policy_authorized()
+        );
+        revoke_remembered_grant(&fixture.state, remembered.entry_id.as_ref().unwrap())
+            .await
+            .unwrap();
+        let after = fixture.inspect(&fixture.peer).await.unwrap();
+        assert!(after.policy_authorized());
+        assert_eq!(after.agent_grant, None);
+        // And the remembered source no longer covers what policy does not.
+        assert_eq!(
+            fixture.rename(&fixture.peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+    }
+
+    /// Review F2: the fenced old generation writes owed removals before the
+    /// boundary, so the adopted generation's fresh load does not bring them
+    /// back.
+    #[tokio::test]
+    async fn the_handoff_fence_writes_owed_remembered_removals() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let committed = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        fixture.state.agent_access.inject_write_failures(1);
+        let revoked = revoke_remembered_grant(&fixture.state, committed.entry_id.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert!(revoked.durable.is_err());
+        // Without the fence write, the next generation would load it again.
+        let store = fixture.base().join("splinterm/agent-access.json");
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
+        assert_eq!(before["entries"].as_array().unwrap().len(), 1);
+        flush_agent_access_at_fence(&fixture.state).await;
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
+        assert_eq!(after["entries"], serde_json::json!([]));
+        let next = agent_fixture_state(
+            &fixture.base(),
+            (*fixture.state.identity_context).clone(),
+            &Topology::new(),
+        );
+        assert!(next.agent_access.remembered_for_test().is_empty());
+        // Nothing owed: the fence does not write.
+        flush_agent_access_at_fence(&fixture.state).await;
+    }
+
+    /// Review F6: the commit entry point classifies the scope set itself.
+    #[tokio::test]
+    async fn committing_reclassifies_the_scope_set() {
+        use agent_access::{AccessLevel, AccessSet, GrantDuration, InvalidAccess};
+
+        let fixture = agent_fixture().await;
+        let clipboard: std::collections::BTreeSet<_> =
+            [AccessScope::Observe, AccessScope::ClipboardRead].into();
+        assert_eq!(
+            fixture
+                .commit(
+                    &fixture.peer,
+                    AccessSet::Custom(clipboard),
+                    GrantDuration::Once
+                )
+                .await,
+            Err(AgentGrantError::InvalidAccess(InvalidAccess::Clipboard))
+        );
+        assert_eq!(
+            fixture
+                .commit(
+                    &fixture.peer,
+                    AccessSet::Custom(std::collections::BTreeSet::new()),
+                    GrantDuration::WorkspaceSession
+                )
+                .await,
+            Err(AgentGrantError::InvalidAccess(InvalidAccess::Empty))
+        );
+        // A Custom set equal to a level is stored as that level.
+        let look_scopes = AccessLevel::Look.scopes().iter().copied().collect();
+        fixture
+            .commit(
+                &fixture.peer,
+                AccessSet::Custom(look_scopes),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.state.agent_access.remembered_for_test()[0].1.access,
+            AccessSet::Level(AccessLevel::Look)
+        );
     }
 }

@@ -22,6 +22,7 @@ static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 /// Owner-only durable metadata storage with an atomic previous-generation backup.
 #[derive(Clone)]
 pub struct MetadataStore {
+    base: PathBuf,
     directory: PathBuf,
     primary: PathBuf,
     backup: PathBuf,
@@ -53,8 +54,15 @@ impl MetadataStore {
             backup: directory.join(BACKUP_FILE),
             legacy_primary: directory.join(LEGACY_PRIMARY_FILE),
             legacy_backup: directory.join(LEGACY_BACKUP_FILE),
+            base: base.to_path_buf(),
             directory,
         }
+    }
+
+    /// The state base (`$XDG_STATE_HOME` or `~/.local/state`), used as
+    /// given; the session-state directory sits below it.
+    pub fn state_base(&self) -> &Path {
+        &self.base
     }
 
     pub fn load(&self) -> Result<Option<TopologyDocument>> {
