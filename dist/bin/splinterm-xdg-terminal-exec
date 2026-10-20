@@ -1,39 +1,54 @@
 #!/bin/sh
 # Stable xdg-terminal-exec target. Arguments remain distinct argv entries.
+#
+# `splinterm launcher-check` reads the running daemon's own report and decides;
+# this script only acts on its exit status (Plan 0037 Milestone 4):
+#   0   the running daemon is this build: open the Window
+#   3   not now: nothing opens and nothing changed
+#   10  no daemon is listening: start splinterd.service
+#   11  restart splinterd.service: the daemon reported no live shell, or the
+#       person confirmed the exact restart in the trusted dialog
+# Any other status is a failure the check has already explained. A failed
+# `ping` never restarts anything, and nothing restarts twice.
 set -eu
 
-ping() {
-  splinterm ping >/dev/null 2>&1
+fail() {
+  printf 'splinterm: %s\n' "$1" >&2
+  exit 1
 }
 
-wait_for_daemon() {
-  attempt=0
-  while ! ping; do
-    attempt=$((attempt + 1))
-    [ "$attempt" -ge 50 ] && return 1
-    sleep 0.05
-  done
+check() {
+  status=0
+  splinterm launcher-check "$@" || status=$?
 }
 
-if ! ping; then
-  if [ -n "${SPLINTERM_SOCKET:-}" ]; then
-    printf 'splinterm: development socket is unavailable or incompatible\n' >&2
-    exit 1
+if [ -n "${SPLINTERM_SOCKET:-}" ]; then
+  # A development daemon is never started or restarted from here.
+  splinterm ping >/dev/null 2>&1 \
+    || fail 'development socket is unavailable or incompatible'
+else
+  check
+  if [ "$status" -eq 10 ]; then
+    if ! command -v systemctl >/dev/null 2>&1 \
+      || ! systemctl --user start splinterd.service; then
+      fail 'could not start splinterd.service'
+    fi
+    check --after start
   fi
-  if ! command -v systemctl >/dev/null 2>&1 \
-    || ! systemctl --user start splinterd.service; then
-    printf 'splinterm: could not start splinterd.service\n' >&2
-    exit 1
+  if [ "$status" -eq 11 ]; then
+    if ! command -v systemctl >/dev/null 2>&1 \
+      || ! systemctl --user daemon-reload \
+      || ! systemctl --user restart splinterd.service; then
+      fail 'could not restart splinterd.service'
+    fi
+    check --after restart
   fi
-  if ! wait_for_daemon; then
-    # An older active daemon may use an incompatible protocol. A package
-    # upgrade cannot preserve that process, so restart it explicitly.
-    systemctl --user restart splinterd.service
-    wait_for_daemon || {
-      printf 'splinterm: daemon did not become ready\n' >&2
-      exit 1
-    }
-  fi
+  case $status in
+    0) ;;
+    3) exit 3 ;;
+    1) exit 1 ;;
+    *) fail "the daemon check failed with status $status; nothing was restarted" ;;
+  esac
 fi
 
 case ${0##*/} in

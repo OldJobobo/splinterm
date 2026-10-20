@@ -13,9 +13,12 @@ post_install() {
 }
 
 post_upgrade() {
-  echo 'Beta 3 removes terminal workload TasksMax overrides; existing daemon and workload units keep their old policy until recreated.'
-  echo 'From an external terminal, stop splinterd.service, run systemctl --user daemon-reload, then start splinterd.service; stopping ends active Dojos.'
-  echo 'This package does not restart user services automatically.'
+  echo 'This package never restarts user services: a running splinterd keeps the previous build, and its shells, until it restarts or upgrades.'
+  echo 'Upgrading from 0.1.x: a 0.1 daemon cannot hand its shells to 0.2, so the move to 0.2 needs one restart, which ends every running shell. Save work first.'
+  echo '  The next Splinterm launch asks before restarting a daemon that may still run shells; choosing Not now changes nothing.'
+  echo '  To restart it yourself, from a terminal Splinterm does not own: systemctl --user daemon-reload && systemctl --user restart splinterd.service'
+  echo 'Within 0.2: run splinterm upgrade to see whether a live upgrade can move the running shells to this build without ending them.'
+  echo 'After a restart, reopen your Splinterm Windows: a client that is already running keeps the old binary and is refused.'
   echo 'On Omarchy, check the integration with: splinterm integration omarchy status'
   echo '  If it is not yet enabled, run splinterm integration omarchy enable; without it, Super+C sends Ctrl+C (interrupt) to Splinterm.'
   echo '  On Omarchy 4, if splinterm integration omarchy-screensaver status reports a shadowed legacy launcher, re-run splinterm integration omarchy enable, then run omarchy-restart-shell or log in again.'

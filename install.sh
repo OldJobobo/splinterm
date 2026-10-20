@@ -213,6 +213,42 @@ release_has_provenance() {
   ((10#$major > 0 || 10#$minor >= 2))
 }
 
+# Says what installing does to the running daemon, from the daemon's own report
+# when it can give one (Plan 0037 Milestone 4). Read-only: `splinterm upgrade`
+# without --now only reports. A 0.1.x daemon, or a client that predates the
+# report, cannot count its shells, so every running shell is assumed to end.
+describe_running_daemon() {
+  local client=${SPLINTERM_INSTALL_CLIENT:-/usr/bin/splinterm} report count
+  report=$(timeout 5 "$client" upgrade 2>/dev/null) || report=
+  count=$(sed -n 's/^Sessions: .* \([0-9][0-9]*\) live terminal(s)$/\1/p' <<<"$report" | head -n 1)
+  case $count in
+    '')
+      printf '%s\n' \
+        'splinterd is running and cannot report its live terminals (a 0.1.x daemon cannot).' \
+        'Installing stops it, which ends every running shell; a package install never hands them to the new build.'
+      ;;
+    0) printf 'splinterd is running with no live terminals; installing restarts it and ends nothing.\n' ;;
+    1) printf 'splinterd is running with 1 live terminal; installing stops it and ends that shell.\n' ;;
+    *) printf 'splinterd is running with %s live terminals; installing stops it and ends all of them.\n' "$count" ;;
+  esac
+  printf '%s\n' \
+    'Open Splinterm Windows must be reopened after the install.' \
+    'Cancel to leave the daemon and its shells untouched; nothing has changed yet.'
+}
+
+# Names a downgrade before confirmation. An older daemon cannot read saved
+# topology written in a newer format; it renames those files to
+# topology.invalid-* in its state directory and starts without them.
+describe_version_change() {
+  local installed=$1 candidate=$2
+  [[ -n $installed && -n $candidate ]] && command -v vercmp >/dev/null 2>&1 || return 0
+  if (($(vercmp "$candidate" "$installed") < 0)); then
+    printf '%s\n' \
+      "This is a downgrade from $installed to $candidate." \
+      'Saved topology written in a newer format is set aside (renamed to topology.invalid-*), not read.'
+  fi
+}
+
 prebuilt_install() {
   install_dependencies curl desktop-file-utils fontconfig freetype2 gcc-libs glibc \
     hicolor-icon-theme libarchive libxkbcommon noto-fonts-cjk noto-fonts-emoji \
@@ -331,8 +367,9 @@ prebuilt_install() {
     packages+=("$download_dir/$mcp_asset")
   fi
 
-  local was_active=false
+  local was_active=false installed
   systemctl --user is-active --quiet splinterd.service && was_active=true
+  installed=$(pacman -Q splinterm 2>/dev/null | awk '{print $2}' || true)
   printf '%s\n' \
     'Splinterm versioned release install' \
     "  Release: $release ($version)" \
@@ -341,11 +378,17 @@ prebuilt_install() {
     "  MCP:     $mcp_candidate" \
     '  Build:   prebuilt and validated by GitHub Actions' \
     '  Leave:   default terminal and Omarchy configuration unchanged'
+  describe_version_change "$installed" "$candidate"
   if [[ $was_active == true ]]; then
-    printf 'splinterd is running; installation will end its daemon-owned shells.\n'
+    describe_running_daemon
     /usr/bin/splinterm list 2>/dev/null || true
+  else
+    printf 'splinterd is not running; installing ends nothing.\n'
   fi
-  confirm 'Install this prebuilt Splinterm versioned release?' || exit 0
+  if ! confirm 'Install this prebuilt Splinterm versioned release?'; then
+    printf 'Cancelled; nothing was installed, stopped, or restarted.\n'
+    exit 0
+  fi
 
   local snapshot
   snapshot="$HOME/.local/state/splinterm/rollback/$(date +%Y%m%d-%H%M%S)-pre-release-${commit:0:12}"
