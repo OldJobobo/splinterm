@@ -1813,12 +1813,32 @@ enum MissingOmarchyTheme {
     Reject,
 }
 
+/// A palette and the startup read decision that produced it. The fallback
+/// flag records the actual loader branch, not a separate filesystem probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ThemeSourceLoad {
+    pub theme: ResolvedTheme,
+    /// The native loader used its no-source fallback. Callers must still
+    /// validate that optional paths are genuinely absent before staying quiet.
+    pub used_omarchy_fallback: bool,
+}
+
 fn load_omarchy_theme_with(
     theme_dir: &Path,
     missing: MissingOmarchyTheme,
     after_identity: impl FnOnce(),
     between_reads: impl FnOnce(),
 ) -> Result<ResolvedTheme> {
+    load_omarchy_theme_with_status(theme_dir, missing, after_identity, between_reads)
+        .map(|loaded| loaded.theme)
+}
+
+fn load_omarchy_theme_with_status(
+    theme_dir: &Path,
+    missing: MissingOmarchyTheme,
+    after_identity: impl FnOnce(),
+    between_reads: impl FnOnce(),
+) -> Result<ThemeSourceLoad> {
     let colors_path = theme_dir.join("colors.toml");
     let foot_path = theme_dir.join("foot.ini");
     let before = omarchy_theme_identity(theme_dir);
@@ -1827,7 +1847,10 @@ fn load_omarchy_theme_with(
         && before.1.is_none()
         && before.2.is_none()
     {
-        return Ok(ResolvedTheme::default());
+        return Ok(ThemeSourceLoad {
+            theme: ResolvedTheme::default(),
+            used_omarchy_fallback: true,
+        });
     }
     after_identity();
     let colors = fs::read_to_string(&colors_path)
@@ -1839,7 +1862,10 @@ fn load_omarchy_theme_with(
         omarchy_theme_identity(theme_dir) == before,
         "active Omarchy theme changed while its palette was loading"
     );
-    resolve_omarchy_theme(&colors, &foot)
+    resolve_omarchy_theme(&colors, &foot).map(|theme| ThemeSourceLoad {
+        theme,
+        used_omarchy_fallback: false,
+    })
 }
 
 /// Loads the effective active Omarchy terminal palette directly.
@@ -1880,9 +1906,26 @@ pub fn load_theme(path: &Path) -> Result<ResolvedTheme> {
 /// # Errors
 /// Returns an error when the selected source exists but is malformed.
 pub fn load_theme_source(source: &ThemeSource) -> Result<ResolvedTheme> {
+    load_theme_source_for_startup(source).map(|loaded| loaded.theme)
+}
+
+/// Resolves a startup palette while retaining whether the native loader
+/// actually chose its absent-source fallback. Explicit JSON never sets it.
+///
+/// # Errors
+/// Returns an error when the selected source exists but is malformed.
+pub fn load_theme_source_for_startup(source: &ThemeSource) -> Result<ThemeSourceLoad> {
     match source {
-        ThemeSource::Omarchy(roots) => load_omarchy_theme(roots.select()),
-        ThemeSource::Json { path, .. } => load_theme(path),
+        ThemeSource::Omarchy(roots) => load_omarchy_theme_with_status(
+            roots.select(),
+            MissingOmarchyTheme::UseFallback,
+            || {},
+            || {},
+        ),
+        ThemeSource::Json { path, .. } => load_theme(path).map(|theme| ThemeSourceLoad {
+            theme,
+            used_omarchy_fallback: false,
+        }),
     }
 }
 
@@ -2813,6 +2856,47 @@ mod tests {
         assert_eq!(legacy.selection, 0xf0_e0_d0);
         assert_eq!(legacy.active_tab_background, legacy.ansi[8]);
         assert_ne!(legacy.active_tab_background, legacy.selection);
+    }
+
+    #[test]
+    fn startup_theme_load_records_the_actual_native_fallback_decision() {
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-startup-theme-decision-{}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+        let theme = root.join("theme");
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+        let missing = load_theme_source_for_startup(&source).unwrap();
+        assert!(missing.used_omarchy_fallback);
+        assert_eq!(missing.theme, ResolvedTheme::default());
+        let json = ThemeSource::Json {
+            path: root.join("theme.json"),
+            shell: None,
+        };
+        let explicit = load_theme_source_for_startup(&json).unwrap();
+        assert!(!explicit.used_omarchy_fallback);
+        assert_eq!(
+            explicit.theme, missing.theme,
+            "palette equality is not provenance"
+        );
+
+        std::fs::create_dir_all(&theme).unwrap();
+        std::fs::write(
+            theme.join("colors.toml"),
+            include_str!("../tests/fixtures/omarchy4/tokyo-night/colors.toml"),
+        )
+        .unwrap();
+        std::fs::write(
+            theme.join("foot.ini"),
+            include_str!("../tests/fixtures/omarchy4/tokyo-night/foot.ini"),
+        )
+        .unwrap();
+        let loaded = load_theme_source_for_startup(&source).unwrap();
+        assert!(!loaded.used_omarchy_fallback);
+        assert_eq!(loaded.theme, load_theme_source(&source).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(load_live_omarchy_theme(&theme).is_err());
     }
 
     #[test]

@@ -9,8 +9,8 @@ use splinterm::{
     ThemeUpdate, WindowTopologyUpdate, WindowUpdate,
     config::{
         AppConfig, OmarchyShellConcern, OmarchyShellSettings, OmarchyTextSizeFallback,
-        OmarchyThemeRoots, OmarchyThemeSelection, ResolvedTheme, ThemeSource,
-        load_live_omarchy_theme, load_omarchy_shell, load_theme, load_theme_source,
+        OmarchyThemeRoots, OmarchyThemeSelection, ResolvedTheme, ThemeSource, ThemeSourceLoad,
+        load_live_omarchy_theme, load_omarchy_shell, load_theme, load_theme_source_for_startup,
     },
 };
 use tokio::sync::mpsc;
@@ -226,6 +226,45 @@ fn theme_source_fingerprint(source: ActiveThemeSource<'_>) -> ThemeSourceFingerp
     }
 }
 
+/// Treats completely absent optional Omarchy state as already observed at
+/// startup. The first live poll then stays quiet unless a source appears.
+/// Existing directories, staging paths, dangling links and metadata errors
+/// still take the strict live-read path; losing a previously loaded theme
+/// must not be converted into the startup fallback.
+fn absent_startup_observation(source: &ThemeSource) -> Option<ThemeSourceFingerprint> {
+    let ThemeSource::Omarchy(roots) = source else {
+        return None;
+    };
+    let absent = roots.candidates().iter().all(|theme_dir| {
+        [theme_dir.clone(), theme_dir.with_file_name("next-theme")]
+            .iter()
+            .all(|path| {
+                matches!(
+                    std::fs::symlink_metadata(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                )
+            })
+    });
+    if !absent {
+        return None;
+    }
+    let observed = theme_source_fingerprint(active_theme_source(
+        source,
+        &mut OmarchyThemeSelection::default(),
+    ));
+    // A source may have appeared between the absence check and fingerprint.
+    matches!(
+        &observed.palette,
+        PaletteFingerprint::Omarchy {
+            directory: None,
+            colors: None,
+            foot: None,
+            ..
+        }
+    )
+    .then_some(observed)
+}
+
 /// Layers the Omarchy shell settings onto a resolved palette. The bar height,
 /// which sizes the tab strip, is not a palette setting, so every palette
 /// follows it. A JSON palette also takes the text size but keeps Omarchy's
@@ -269,14 +308,33 @@ struct StartupThemeLoad {
     diagnostics: Vec<String>,
     /// The raw shell diagnostics among them, which seed the live watcher.
     shell_diagnostics: Vec<String>,
+    observed: Option<ThemeSourceFingerprint>,
 }
 
 fn prepare_startup_theme(source: &ThemeSource, overrides: ThemeOverrides) -> StartupThemeLoad {
+    prepare_startup_theme_with_loader(source, overrides, load_theme_source_for_startup)
+}
+
+fn prepare_startup_theme_with_loader(
+    source: &ThemeSource,
+    overrides: ThemeOverrides,
+    load: impl FnOnce(&ThemeSource) -> Result<ThemeSourceLoad>,
+) -> StartupThemeLoad {
     let mut diagnostics = Vec::new();
-    let theme = load_theme_source(source).unwrap_or_else(|error| {
-        diagnostics.push(format!("{error:#}; using safe fallback palette"));
-        ResolvedTheme::default()
-    });
+    let (theme, observed) = match load(source) {
+        Ok(loaded) => {
+            let observed = if loaded.used_omarchy_fallback {
+                absent_startup_observation(source)
+            } else {
+                None
+            };
+            (loaded.theme, observed)
+        }
+        Err(error) => {
+            diagnostics.push(format!("{error:#}; using safe fallback palette"));
+            (ResolvedTheme::default(), None)
+        }
+    };
     let layers = match source {
         ThemeSource::Omarchy(roots) => Some(ShellLayers {
             theme_dir: roots.select(),
@@ -304,15 +362,18 @@ fn prepare_startup_theme(source: &ThemeSource, overrides: ThemeOverrides) -> Sta
             .map(|diagnostic| format!("splinterm theme: {diagnostic}"))
             .collect(),
         shell_diagnostics,
+        observed,
     }
 }
 
 /// The startup theme a live watcher continues from, with the shell
-/// diagnostics startup already printed so the watcher's first poll does not
-/// print them again.
+/// diagnostics startup already printed and optional absence already observed.
 pub(in crate::app) struct StartupTheme {
     pub(in crate::app) theme: ResolvedTheme,
     shell_reported: Vec<String>,
+    // Only the validated absence decision crosses the async startup boundary;
+    // the watcher revalidates it and builds its own fingerprint at each poll.
+    optional_absence: bool,
 }
 
 fn load_startup_theme_with_reporter(
@@ -331,6 +392,7 @@ impl From<StartupThemeLoad> for StartupTheme {
         Self {
             theme: loaded.theme,
             shell_reported: loaded.shell_diagnostics,
+            optional_absence: loaded.observed.is_some(),
         }
     }
 }
@@ -446,17 +508,40 @@ pub(in crate::app) async fn watch_theme(
     startup: StartupTheme,
     sink: ThemeUpdateSink,
 ) {
+    watch_theme_with_reporter(source, overrides, startup, sink, |diagnostic| {
+        eprintln!("{diagnostic}");
+    })
+    .await;
+}
+
+async fn watch_theme_with_reporter(
+    source: ThemeSource,
+    overrides: ThemeOverrides,
+    startup: StartupTheme,
+    sink: ThemeUpdateSink,
+    mut report: impl FnMut(&str) + Send,
+) {
     let mut current = startup.theme;
+    let mut diagnostics = ThemeReloadDiagnostics::after_startup(&startup);
+    let mut optional_absence = startup.optional_absence;
     let mut observed = None;
     let mut selection = OmarchyThemeSelection::default();
-    let mut diagnostics = ThemeReloadDiagnostics::after_startup(&startup);
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         poll.tick().await;
         let active = active_theme_source(&source, &mut selection);
         let next_fingerprint = theme_source_fingerprint(active);
-        if observed.as_ref() == Some(&next_fingerprint) {
+        if optional_absence {
+            // The regular fingerprint follows symlinks and omits staging.
+            // Recheck actual absence, so a newly dangling/staged/unreadable
+            // source cannot be silently skipped with the same fingerprint.
+            if absent_startup_observation(&source).as_ref() == Some(&next_fingerprint) {
+                observed = Some(next_fingerprint);
+                continue;
+            }
+            optional_absence = false;
+        } else if observed.as_ref() == Some(&next_fingerprint) {
             continue;
         }
         observed = Some(next_fingerprint);
@@ -470,7 +555,7 @@ pub(in crate::app) async fn watch_theme(
         );
         if resolved.is_ok() {
             for diagnostic in diagnostics.shell(shell_diagnostics) {
-                eprintln!("{diagnostic}");
+                report(&diagnostic);
             }
         }
         match resolved {
@@ -501,7 +586,7 @@ pub(in crate::app) async fn watch_theme(
             Ok(None) => diagnostics.accepted(),
             Err(error) => {
                 if let Some(diagnostic) = diagnostics.rejected(&error) {
-                    eprintln!("{diagnostic}");
+                    report(&diagnostic);
                 }
             }
         }
@@ -511,13 +596,290 @@ pub(in crate::app) async fn watch_theme(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splinterm::config::OMARCHY_ROOT_DEMOTION_GRACE_POLLS;
+    use splinterm::config::{OMARCHY_ROOT_DEMOTION_GRACE_POLLS, load_theme_source};
 
     const NO_OVERRIDES: ThemeOverrides = ThemeOverrides {
         alpha: None,
         blur: None,
         follow_text_size: true,
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn absent_optional_omarchy_does_not_emit_a_live_reload_rejection() {
+        use std::sync::{Arc, Mutex};
+
+        let root = std::env::temp_dir().join(format!(
+            "splinterm-absent-optional-theme-{}",
+            std::process::id()
+        ));
+        assert!(!root.exists());
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(root.join("theme")));
+        let loaded = prepare_startup_theme(&source, NO_OVERRIDES);
+        assert!(loaded.diagnostics.is_empty());
+        let startup = StartupTheme::from(loaded);
+        let (updates, mut received) = mpsc::channel(1);
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let live_reported = Arc::clone(&reported);
+        let watcher = tokio::spawn(watch_theme_with_reporter(
+            source,
+            NO_OVERRIDES,
+            startup,
+            ThemeUpdateSink::Panes(vec![updates]),
+            move |diagnostic| live_reported.lock().unwrap().push(diagnostic.to_owned()),
+        ));
+        tokio::task::yield_now().await;
+        for _ in 0..3 {
+            tokio::time::advance(std::time::Duration::from_millis(500)).await;
+            tokio::task::yield_now().await;
+        }
+        watcher.abort();
+        assert!(received.try_recv().is_err());
+        let reported = reported.lock().unwrap();
+        assert!(
+            reported.is_empty(),
+            "optional absence must stay quiet: {reported:?}"
+        );
+        assert!(
+            !root.exists(),
+            "the watcher must not create integration state"
+        );
+    }
+
+    struct OptionalThemeRoot(PathBuf);
+
+    impl OptionalThemeRoot {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "splinterm-optional-theme-{label}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for OptionalThemeRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn theme_poll() {
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_optional_theme_can_appear_live_and_later_loss_is_still_rejected() {
+        use std::sync::{Arc, Mutex};
+
+        let root = OptionalThemeRoot::new("discovery");
+        let first = root.0.join("xdg/theme");
+        let later = root.0.join("legacy/theme");
+        let source =
+            ThemeSource::Omarchy(OmarchyThemeRoots::ordered(vec![first, later.clone()]).unwrap());
+        let startup = StartupTheme::from(prepare_startup_theme(&source, NO_OVERRIDES));
+        let (updates, mut received) = mpsc::channel(8);
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let live_reported = Arc::clone(&reported);
+        let watcher = tokio::spawn(watch_theme_with_reporter(
+            source,
+            NO_OVERRIDES,
+            startup,
+            ThemeUpdateSink::Panes(vec![updates]),
+            move |diagnostic| live_reported.lock().unwrap().push(diagnostic.to_owned()),
+        ));
+        theme_poll().await;
+        assert!(reported.lock().unwrap().is_empty());
+        assert!(received.try_recv().is_err());
+
+        write_theme(&later, 0x12_34_56);
+        theme_poll().await;
+        let WindowUpdate::Theme(update) = received.try_recv().unwrap() else {
+            panic!("a newly discovered theme must publish its palette");
+        };
+        assert_eq!(update.theme.background, 0x12_34_56);
+        std::fs::remove_dir_all(&later).unwrap();
+        theme_poll().await;
+        theme_poll().await;
+        assert!(received.try_recv().is_err(), "loss keeps the last palette");
+        assert_eq!(reported.lock().unwrap().len(), 1, "bounded rejection");
+        assert!(reported.lock().unwrap()[0].contains("theme reload rejected"));
+
+        write_theme(&later, 0x65_43_21);
+        theme_poll().await;
+        let WindowUpdate::Theme(update) = received.try_recv().unwrap() else {
+            panic!("a restored theme must be followed live");
+        };
+        assert_eq!(update.theme.background, 0x65_43_21);
+        watcher.abort();
+    }
+
+    #[test]
+    fn claimed_or_broken_optional_roots_are_not_treated_as_absent() {
+        use std::os::unix::fs::symlink;
+
+        let root = OptionalThemeRoot::new("claimed");
+        for label in ["incomplete", "staging", "dangling", "not-a-directory"] {
+            let base = root.0.join(label);
+            std::fs::create_dir(&base).unwrap();
+            let theme = base.join("theme");
+            match label {
+                "incomplete" => std::fs::create_dir(&theme).unwrap(),
+                "staging" => write_theme(&base.join("next-theme"), 0x12_34_56),
+                "dangling" => symlink(base.join("missing"), &theme).unwrap(),
+                "not-a-directory" => std::fs::write(&theme, "not a theme directory").unwrap(),
+                _ => unreachable!(),
+            }
+            let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme));
+            let startup = prepare_startup_theme(&source, NO_OVERRIDES);
+            assert!(startup.observed.is_none(), "{label}");
+            let mut selection = OmarchyThemeSelection::default();
+            let active = active_theme_source(&source, &mut selection);
+            assert!(
+                resolve_live_theme_update(
+                    active,
+                    &mut selection,
+                    NO_OVERRIDES,
+                    startup.theme,
+                    &mut Vec::new(),
+                )
+                .is_err(),
+                "{label} must still reject a live read"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_theme_lost_between_startup_and_the_first_poll_is_still_rejected() {
+        use std::sync::{Arc, Mutex};
+
+        let root = OptionalThemeRoot::new("startup-loss");
+        let theme = root.0.join("theme");
+        write_theme(&theme, 0x12_34_56);
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+        let loaded = prepare_startup_theme(&source, NO_OVERRIDES);
+        assert!(loaded.observed.is_none());
+        assert_eq!(loaded.theme.background, 0x12_34_56);
+        let startup = StartupTheme::from(loaded);
+        std::fs::remove_dir_all(&theme).unwrap();
+        let (updates, mut received) = mpsc::channel(1);
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let live_reported = Arc::clone(&reported);
+        let watcher = tokio::spawn(watch_theme_with_reporter(
+            source,
+            NO_OVERRIDES,
+            startup,
+            ThemeUpdateSink::Panes(vec![updates]),
+            move |diagnostic| live_reported.lock().unwrap().push(diagnostic.to_owned()),
+        ));
+        theme_poll().await;
+        watcher.abort();
+        assert!(received.try_recv().is_err());
+        assert_eq!(reported.lock().unwrap().len(), 1);
+        assert!(reported.lock().unwrap()[0].contains("theme reload rejected"));
+    }
+
+    #[test]
+    fn explicit_json_does_not_use_the_optional_omarchy_startup_observation() {
+        let root = OptionalThemeRoot::new("explicit-json");
+        let path = root.0.join("theme.json");
+        let source = ThemeSource::Json {
+            path: path.clone(),
+            shell: None,
+        };
+        assert!(
+            prepare_startup_theme(&source, NO_OVERRIDES)
+                .observed
+                .is_none()
+        );
+        std::fs::write(path, "invalid JSON").unwrap();
+        let startup = prepare_startup_theme(&source, NO_OVERRIDES);
+        assert!(startup.observed.is_none());
+        assert_eq!(startup.diagnostics.len(), 1);
+        assert!(live_update(&source, None, None, startup.theme).is_err());
+    }
+
+    async fn bounded_live_rejections(source: ThemeSource, startup: StartupTheme) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        let (updates, mut received) = mpsc::channel(1);
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let live_reported = Arc::clone(&reported);
+        let watcher = tokio::spawn(watch_theme_with_reporter(
+            source,
+            NO_OVERRIDES,
+            startup,
+            ThemeUpdateSink::Panes(vec![updates]),
+            move |diagnostic| live_reported.lock().unwrap().push(diagnostic.to_owned()),
+        ));
+        theme_poll().await;
+        theme_poll().await;
+        watcher.abort();
+        let _ = watcher.await;
+        assert!(
+            received.try_recv().is_err(),
+            "a rejected load keeps its palette"
+        );
+        reported.lock().unwrap().clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_staging_after_absent_startup_still_rejects_the_live_load() {
+        let root = OptionalThemeRoot::new("delayed-staging");
+        let theme = root.0.join("theme");
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme));
+        let startup = StartupTheme::from(prepare_startup_theme(&source, NO_OVERRIDES));
+        assert!(startup.optional_absence);
+        write_theme(&root.0.join("next-theme"), 0x12_34_56);
+        let messages = bounded_live_rejections(source, startup).await;
+        assert_eq!(messages.len(), 1, "staging must not remain quietly absent");
+        assert!(messages[0].contains("theme reload rejected"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_dangling_link_after_absent_startup_still_rejects_the_live_load() {
+        let root = OptionalThemeRoot::new("delayed-dangling");
+        let theme = root.0.join("theme");
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+        let startup = StartupTheme::from(prepare_startup_theme(&source, NO_OVERRIDES));
+        assert!(startup.optional_absence);
+        std::os::unix::fs::symlink(root.0.join("missing"), &theme).unwrap();
+        let messages = bounded_live_rejections(source, startup).await;
+        assert_eq!(
+            messages.len(),
+            1,
+            "a dangling link must not remain quietly absent"
+        );
+        assert!(messages[0].contains("theme reload rejected"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_successful_startup_read_cannot_retain_an_earlier_absence_seed() {
+        let root = OptionalThemeRoot::new("startup-interleaving");
+        let theme = root.0.join("theme");
+        let source = ThemeSource::Omarchy(OmarchyThemeRoots::fixed(theme.clone()));
+        let loaded = prepare_startup_theme_with_loader(&source, NO_OVERRIDES, |source| {
+            write_theme(&theme, 0x12_34_56);
+            let loaded = load_theme_source_for_startup(source);
+            std::fs::remove_dir_all(&theme).unwrap();
+            loaded
+        });
+        assert_eq!(loaded.theme.background, 0x12_34_56);
+        assert!(loaded.diagnostics.is_empty());
+        assert!(
+            loaded.observed.is_none(),
+            "a real palette load invalidates absence"
+        );
+        let messages = bounded_live_rejections(source, StartupTheme::from(loaded)).await;
+        assert_eq!(
+            messages.len(),
+            1,
+            "the loss of the loaded theme must be reported"
+        );
+        assert!(messages[0].contains("theme reload rejected"));
+    }
 
     fn fingerprint(source: &ThemeSource) -> ThemeSourceFingerprint {
         theme_source_fingerprint(active_theme_source(

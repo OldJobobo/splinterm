@@ -779,7 +779,12 @@ valid palette through the existing live theme channel without restarting the
 daemon, shell, or Wayland window. A transiently incomplete replacement or
 malformed live theme retains the last valid palette and reports one bounded
 diagnostic. If Omarchy state is absent at startup, Splinterm uses its bundled
-safe fallback.
+safe fallback and stays quiet while that optional state remains absent. This
+includes non-Omarchy desktops such as NixOS with Noctalia Shell; Omarchy is not
+a required dependency. The watcher still discovers an Omarchy theme that appears
+later. A present but incomplete or malformed theme, a staged theme switch, or the
+loss of a previously loaded theme still takes the strict live-reload path and
+retains the last valid palette.
 
 ### Glassy Windows
 
