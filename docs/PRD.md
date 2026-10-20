@@ -156,6 +156,7 @@ The following table summarizes the current repository state. “Validated” mea
 | SSH stdio relay | Implemented and validated; no daemon network listener. |
 | Native remote graphical transport | Implemented and validated: strict profiles, one-authentication multiplexer, endpoint-bound human-interactive workflow, remote-safe launches, namespaced recency, remote no-image/focus enforcement, lifecycle, authentication, failure handling, persistence, and reviewed real-host graphical evidence. |
 | MCP adapter | Implemented and validated as an optional separately identified package. |
+| Easy agent access: access levels, remembered grants, and the access list | Accepted for `0.2.0` in [ADR 0014](adr/0014-easy-agent-access.md); not implemented. |
 | Arch/Omarchy package and release installer | Immutable versioned GitHub/AUR packages and installation paths implemented and validated. |
 | Public source and documentation | Available. |
 | AUR packages | Prebuilt `splinterm-bin` and source-built `splinterm` available; stable 0.1.0 does not promise broader compatibility or a support lifetime. |
@@ -302,6 +303,10 @@ Priority meanings:
 | `FR-AUTO-03` | P0 | Machine mode must never prompt; destructive actions must require explicit confirmation flags or remain outside the machine contract. | Implemented |
 | `FR-AUTO-04` | P0 | Automation topology mutation must not imply native Window mapping, compositor focus, movement, resize, or workspace control. | Implemented and documented |
 | `FR-AUTO-05` | P1 | Provide a separately executable and independently policy-identifiable MCP adapter with the documented operation coverage. | Implemented and validated |
+| `FR-AUTO-06` | P1 | For `0.2.0`, interactive consent must offer three workspace access levels with fixed consent-scope bundles: Look, Look and type (including control takeover), and Manage, each including agent-status reporting and none including clipboard, authorization administration, audit, or handoff authority. Any other requested scope set must be shown as Custom with every scope listed and granted exactly, never rounded up; clipboard scopes remain invalid, and a Custom request containing control takeover may be granted just this once only. | Accepted target in ADR 0014; not implemented |
+| `FR-AUTO-07` | P1 | For `0.2.0`, the person must be able to choose just this once, while this workspace is open, or always for this workspace. Each duration must bind the identity ADR 0014 assigns to it. "Always" must be offered only to protected installs and qualifying Nix profile entries, revalidated on every connection, and must never use a host name, basename, or copied digest as an identity. Known interpreters, recognized by a fixed basename list as a user-experience rule rather than a security boundary, must be offered only the two shorter durations; peers without a pidfd-pinned identity and the installed relay must be offered only just this once. | Accepted target in ADR 0014; not implemented |
+| `FR-AUTO-08` | P1 | For `0.2.0`, the consent prompt must be default-deny (Enter and Escape deny), grant only on an explicit key or button after an arming delay, ignore key repeats, and name the exact choice on its grant button. A request awaiting an answer must be a bounded, cancellable pending request that works within ordinary MCP call deadlines and is never carried across a daemon upgrade. | Accepted target in ADR 0014; not implemented |
+| `FR-AUTO-09` | P1 | For `0.2.0`, an Agent access list in the command palette and a human CLI command must show every grant of every duration, its last use and active use, and matching policy rules, and must revoke per entry. Revoking a remembered grant must leave matching policy rules in place and say so. | Accepted target in ADR 0014; not implemented |
 | `FR-REMOTE-01` | P0 | Remote operation must use SSH relays; `splinterd` must expose no network listener by default. Raw automation relay access remains exact-policy scoped. | Implemented and validated |
 | `FR-REMOTE-02` | P0 | A machine client must receive only what policy or explicit consent grants it; SSH login, socket access, or running inside a Splint grant nothing by themselves. This bounds cooperating clients. It is not a boundary against a hostile process running as the account, which can start the graphical relay or the graphical client itself. | Implemented; limit documented |
 | `FR-REMOTE-03` | P0 | A native remote client must use one authenticated OpenSSH process carrying bounded independent daemon channels rather than one login per pane or a daemon network listener. | Implemented and validated |
@@ -325,8 +330,8 @@ Priority meanings:
 
 | ID | Priority | Requirement |
 |---|---:|---|
-| `SEC-01` | P0 | Default third-party authority must fail closed. No policy file means no persistent third-party grant. |
-| `SEC-02` | P0 | Grants must bind explicit scopes, peer and executable identity, exact Splint/incarnation, and bounded lifetime semantics. |
+| `SEC-01` | P0 | Default third-party authority must fail closed. No policy file and no remembered grant means no persistent third-party grant. From `0.2.0`, a remembered grant exists only through an explicit "always" answer in the trusted consent window ([ADR 0014](adr/0014-easy-agent-access.md)). |
+| `SEC-02` | P0 | Grants must bind explicit scopes, the peer or executable identity their duration requires, an exact Lair, Splint, or incarnation, and explicit lifetime or revocation semantics. |
 | `SEC-03` | P0 | Revocation must release related controllers and subscriptions. |
 | `SEC-04` | P0 | Consent UI must be trusted application chrome and must not render requester-controlled terminal content. |
 | `SEC-05` | P0 | Terminal, scrollback, clipboard, search, and input bodies must not appear in audit metadata. |
@@ -336,8 +341,10 @@ Priority meanings:
 | `SEC-09` | P0 | Stale identities, revisions, cursors, tokens, and incarnations must fail explicitly without fallback selection. |
 | `SEC-10` | P0 | Public claims must say “security-conscious” and describe concrete controls; they must not claim absolute security. |
 | `SEC-11` | P0 | Daemon handoff must fence stale clients and expire old connection authority. Any smooth local controller resumption must bind the same surviving client process, exact old connection set, immutable sealed executable snapshot, bounded Window-local resume record, full resnapshot, and single-use generation claim through monitored pidfd identity and kernel-supplied message credentials; transfer, replay, mismatch, or conflict fails closed. |
+| `SEC-12` | P0 | From `0.2.0` ([ADR 0014](adr/0014-easy-agent-access.md); not implemented): remembered grants must live in a daemon-owned store separate from user policy, opened with strict ownership, mode, link, and size checks and written atomically. A missing or invalid store must deny only remembered authority, and no remembered grant may be reported before its durable write succeeds. Documentation must state that the store, like policy, is editable by any process running as the account. |
+| `SEC-13` | P0 | From `0.2.0` ([ADR 0014](adr/0014-easy-agent-access.md); not implemented): a daemon upgrade must reload remembered grant definitions fresh from the store and must end old connections, agent controllers, shorter grants, and pending consent requests. |
 
-Detailed scope and policy behavior remain authoritative in [automation.md](automation.md), [ADR 0005](adr/0005-trusted-consent-broker.md), and [ADR 0007](adr/0007-supported-automation-policy.md).
+Detailed scope and policy behavior remain authoritative in [automation.md](automation.md), [ADR 0005](adr/0005-trusted-consent-broker.md), [ADR 0007](adr/0007-supported-automation-policy.md), and, for access levels and remembered grants, [ADR 0014](adr/0014-easy-agent-access.md).
 
 ## 12. Non-functional requirements
 
@@ -509,6 +516,7 @@ This draft synthesizes the current implementation and, principally:
 - [ADRs](adr/)
 - [ADR 0011: guarded in-place daemon re-exec](adr/0011-guarded-in-place-daemon-reexec.md)
 - [ADR 0012: defer durable terminal-body archives](adr/0012-defer-durable-terminal-archives.md)
+- [ADR 0014: easy agent access](adr/0014-easy-agent-access.md)
 - [Supported automation contracts](automation.md)
 - [Configuration and Foot migration](configuration.md)
 - [Arch packaging](packaging.md)

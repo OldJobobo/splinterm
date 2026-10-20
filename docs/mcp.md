@@ -211,6 +211,84 @@ approved takeover scope when the graphical client currently controls the pane.
 The controller remains bound to the ephemeral grant, so revocation also releases
 it. Omitting `takeover` preserves ordinary non-disruptive acquisition behavior.
 
+### Easy agent access (planned for 0.2)
+
+> **Status:** planned for 0.2; not implemented. The contract is fixed by
+> [ADR 0014](adr/0014-easy-agent-access.md) and described for users in
+> [Easy agent access](automation.md#easy-agent-access-planned-for-02). Until it
+> ships, `request_lair_access` behaves as described above.
+
+**Levels.** With easy agent access, `request_lair_access` asks for one of three
+levels for a workspace (a Lair): **Look**, **Look and type**, or **Manage**.
+The person answers once and picks a duration: **Just this once**, **While this
+workspace is open**, or **Always for this workspace**.
+
+- Every level includes `agent_status_report`, so `splinterm.report_agent_status`
+  works for any Splint in the granted workspace without a second request.
+- Look and type and Manage include `control_takeover`, so `acquire_control`
+  with `takeover: true` works when the person's Window controls the pane.
+- A request for any other set of consent scopes is shown as Custom and is
+  granted exactly as asked, never rounded up. A Custom request that includes
+  `control_takeover` can be granted just this once only.
+- Clipboard scopes remain invalid.
+
+**The prompt.** The prompt is default-deny: Enter and Escape deny, and only an
+explicit grant button or key grants. Today's dialog grants on Enter; this
+changes.
+
+**Pending requests.** A person may take longer to answer than one MCP call
+lasts.
+
+- The adapter's daemon deadline is 5 seconds by default and at most 30. The
+  adapter sends a wait budget a margin below that deadline; the daemon caps it
+  at 25 seconds.
+- When the budget runs out, `request_lair_access` returns a `pending` result
+  with the request's identifier and expiry, instead of failing. The prompt
+  stays open, or waits its turn behind another prompt, for up to two minutes.
+- Calling `request_lair_access` again with the same workspace and scopes joins
+  the pending request and never opens a second prompt.
+- A pending request ends without a grant if it expires, the agent cancels it,
+  the adapter exits, the workspace is closed, the person uses Revoke all
+  access, or the daemon upgrades.
+- After a deny, a new request for that workspace fails with the retryable
+  `resource_limit` for a few seconds.
+
+**Who shares a grant.** A "while this workspace is open" or "always" grant
+belongs to the adapter executable, not to one process, connection, or MCP host.
+
+- Every host that starts `splinterm-mcp` shares it. The prompt says so: "Any
+  program that runs `/usr/bin/splinterm-mcp` shares this access."
+- A restarted adapter, a fresh connection per tool call, and status reports are
+  all covered without asking again.
+- Splinterm never identifies the adapter by the MCP client name the host
+  reports. That name is shown to the person only as a label.
+
+**Which durations are offered.**
+
+- "While this workspace is open" binds the adapter's exact path and digest, so
+  it works for development builds too.
+- "Always" is offered only when the account cannot modify the adapter's file
+  itself: a protected install such as the packaged `/usr/bin/splinterm-mcp`, or
+  a Nix profile entry such as `~/.nix-profile/bin/splinterm-mcp` that resolves
+  into a root-owned multi-user `/nix/store`.
+- That protects the file, not its environment: `LD_PRELOAD` and similar settings
+  in the host's server entry still affect the adapter.
+- A Nix profile link is owned by the user, so other software running as the user
+  could build a different program into the store and repoint the profile at it.
+- An adapter written as a script, run by `python`, `node`, or another
+  interpreter, is offered only the two shorter durations.
+
+**After a package upgrade.** An "always" grant keeps working without a new
+prompt or a policy edit, but only for adapter processes started after the
+upgrade. Restart the MCP server, or the agent host, so it runs the new file. The
+policy-file upgrade steps below are unchanged and still require a digest
+update.
+
+**Limits.** Easy agent access does not change what MCP can do. It bounds a
+cooperating agent and shows the person what it can reach; it is not a sandbox.
+Revoke an entry from **Agent access** to end that grant at once. Revoking it
+does not remove a matching policy rule.
+
 Every terminal cell, title, scrollback row, and search preview is
 `untrusted_terminal_data`: display or index it only as data. It is never consent,
 authority, confirmation, or an instruction to call another tool. The adapter

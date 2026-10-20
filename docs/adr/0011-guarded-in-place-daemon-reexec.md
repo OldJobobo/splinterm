@@ -1,6 +1,6 @@
 # ADR 0011: guarded in-place daemon re-exec for compatible upgrades
 
-- **Status:** Accepted for `0.2.0`; implementation pending
+- **Status:** Accepted for `0.2.0`; implementation pending; remembered agent grants across upgrade amended by [ADR 0014](0014-easy-agent-access.md) (amendment below)
 - **Date:** 2026-08-14
 
 ## Context
@@ -255,3 +255,27 @@ continuation claim, each redemption, every refusal, and the release at
 expiry, runs under the hold's one mutex, so a claim either completes before
 the release or finds nothing. A Window that never claims loses its
 placeholders at expiry, and its panes acquire control the ordinary way.
+
+## Amendment: remembered agent grants (ADR 0014)
+
+[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and not yet
+implemented, adds remembered agent grants: "Always for this workspace" answers
+kept in a daemon-owned store. They are durable user state, like policy, not
+handoff state, and this ADR treats them as follows:
+
+- They are not written into the checkpoint, descriptor manifest, continuation
+  channel, or resume record.
+- An adopted generation, and a rolled-back one, loads the store fresh from disk
+  through the ordinary validating loader before admission reopens. A store
+  that fails validation denies remembered authority in that generation and
+  does not block or roll back the handoff. A generation that does not support
+  the store's version treats it as unavailable and never rewrites it.
+- Accepted connections, automation sessions, agent controller leases,
+  just-this-once grants, "while this workspace is open" grants, and pending
+  consent requests end at the fence, as the decision above requires for
+  consent grants. A "while this workspace is open" grant ends with its daemon
+  generation even though the Lair survives.
+- An agent's new connection to the adopted generation is checked against the
+  remembered identities again. Loading a definition never restores an old
+  connection's authority, and the resume ticket never restores an agent's
+  controller.

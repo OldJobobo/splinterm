@@ -1,6 +1,6 @@
 # ADR 0007: supported automation policy and audit boundary
 
-- **Status:** Accepted; hierarchy, selectors, and public schema amended by [ADR 0009](0009-topology-lair-dojo-migration.md); agent status reporting added by the protocol 38 amendment below
+- **Status:** Accepted; hierarchy, selectors, and public schema amended by [ADR 0009](0009-topology-lair-dojo-migration.md); agent status reporting added by the protocol 38 amendment below; remembered consent grants added beside policy by [ADR 0014](0014-easy-agent-access.md) (amendment below)
 - **Date:** 2026-07-23
 - **Supersedes:** the persistent-policy deferral in [ADR 0005](0005-trusted-consent-broker.md)
 
@@ -282,6 +282,72 @@ coalesced to at most one event per Splint every 250 ms. `working` and
 `needs_input` expire after their TTL (default 120 s, bounds 10 to 900 s) and are
 then marked stale; a stale status is dropped after 15 more minutes. Reading the
 status needs no new scope: it follows `topology_metadata_read`.
+
+### Amendment: remembered consent grants (ADR 0014)
+
+[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and not yet
+implemented, adds a second persistent authority source beside the policy file:
+grants the person answers with "Always for this workspace" in the trusted
+consent window, kept in a daemon-owned store separate from `policy.json`. It
+also adds a daemon-lifetime "While this workspace is open" grant keyed by the
+canonical path and digest identity defined above.
+
+The policy file is unchanged. Rules still require path and digest. Package
+replacement still inherits no policy authority. Policy selectors keep their
+snapshot semantics, and policy reload neither reads nor changes remembered
+grants. The exclusion of "current file at this path" matching above applies to
+policy rules and stays in force for them.
+
+Remembered grants are the one, narrowly scoped exception. They may name a
+durable identity instead of a digest, so that they survive agent upgrades, and
+they accept exactly two kinds:
+
+- a **protected install**: every path component root-owned, not group- or
+  world-writable, without symbolic links or write ACLs, with the file at the
+  path having the executing file's device and inode; and
+- a **Nix profile entry** from a closed list, resolved one link at a time on
+  every connection to a root-owned, unwritable regular file in `/nix/store`
+  with the executing file's device and inode.
+
+Both are checked again on every new connection. Some executables cannot be
+remembered and are offered only the shorter durations:
+
+- development builds and other user-writable executables;
+- known interpreters, decided by a fixed basename list as a user-experience
+  rule, not a security boundary; and
+- the installed relay.
+
+These checks protect the executable file, not how it runs: environment such as
+`LD_PRELOAD` and user-writable configuration the program loads still affect it.
+
+**Residual risk.** A Nix profile link is user-controlled. Any software running
+as the user can ask the multi-user Nix daemon to build any program into
+`/nix/store`, then repoint the profile at it, and the next process started from
+that path matches the remembered grant. Root ownership of a store path means
+the Nix daemon wrote it, not that anyone vetted it.
+
+The remembered-grant store is also a file the account can edit, like the policy
+file. Both risks belong to the compromised-account limit stated above.
+Remembered grants bound cooperating agents and make their access visible; they
+do not contain a hostile process running as the account. Documentation must
+state both.
+
+**Takeover.** "Forced controller takeover is trusted-UI-only in policy v1 and
+cannot be granted persistently" in the closed-scope section above now applies
+only to policy rules.
+
+- Interactive Lair consent can already grant `control_takeover` for five
+  minutes.
+- Under ADR 0014, the Look and type and Manage levels include it, so a
+  remembered or workspace grant at those levels can take control of a Splint the
+  person's Window controls.
+- A Custom request that contains `control_takeover` is offered just this once
+  only.
+- The trusted UI's own forced takeover with confirmation is unchanged.
+
+**Consent.** "Graphical grant-once consent remains available and
+daemon-lifetime-only" in the consent section above is amended accordingly.
+Just-this-once grants keep that behavior. The longer durations follow ADR 0014.
 
 ## Threat-model conclusions
 
