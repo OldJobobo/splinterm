@@ -609,11 +609,51 @@ pub(super) struct TabsState {
     pub(super) session_switch_pending: bool,
     pub(super) deferred_topology_updates: Vec<WindowTopologyUpdate>,
     pub(super) agent: super::agent_status::TabAgentStatus,
+    /// Where this Window publishes its tabs and focus for its handoff
+    /// anchor (Plan 0061 M3.14); `None` unless it is a local managed Window.
+    pub(super) layout_ledger: Option<crate::window_continuation::WindowLayoutLedger>,
 }
 
 impl TabsState {
     pub(super) const fn active_dojo_id(&self) -> DojoId {
         self.active_identity.dojo_id
+    }
+
+    /// The tabs in order with each one's focus, and the active tab, as this
+    /// Window shows them now (Plan 0061 M3.14): the active tab's focus is
+    /// `active_focus`, each other tab's is its saved view's. `None` for a
+    /// Window without managed tabs, or before its active tab is listed.
+    pub(super) fn window_layout(
+        &self,
+        active_focus: Option<SplintId>,
+    ) -> Option<crate::window_continuation::WindowLayout> {
+        if !self.managed_tabs {
+            return None;
+        }
+        let active_dojo = self.active_dojo_id();
+        let mut active = None;
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let focus = if tab.dojo_id == active_dojo {
+                    active = Some(index);
+                    active_focus
+                } else {
+                    tab.value.as_ref().and_then(DojoTabView::focused_splint)
+                };
+                splinterm_protocol::window_resume::WindowResumeTab {
+                    lair_id: tab.lair_id,
+                    dojo_id: tab.dojo_id,
+                    focus,
+                }
+            })
+            .collect();
+        Some(crate::window_continuation::WindowLayout {
+            tabs,
+            active: active?,
+        })
     }
 
     pub(super) fn tab_identity(&self, dojo_id: DojoId) -> Option<&WindowDojoIdentity> {

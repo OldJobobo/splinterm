@@ -171,7 +171,8 @@ jobs:
             cargo test --frozen -p splinterm \
               --test automation_cli --test diagnostics_subprocess --test keymap_cli \
               --test policy_cli --test preset_schema --test remote_askpass --test remote_cli \
-              --test remote_session --test shell_cli -- --test-threads=1
+              --test remote_session --test shell_cli --test window_resume_exec \
+              -- --test-threads=1
           } 2>&1 | tee -a workspace-tests.log
       - name: Upload focused workspace failure evidence
         if: ${{ failure() }}

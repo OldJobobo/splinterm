@@ -3521,6 +3521,68 @@ async fn reconnect_and_abandon(
     }
 }
 
+/// The tabs a Window relaunched across a daemon upgrade reopens after its
+/// first one, and the tab it activates (Plan 0061 M3.15).
+pub(in crate::app) struct TopologyRestore {
+    pub(in crate::app) tabs: Vec<(DojoId, Option<SplintId>)>,
+    pub(in crate::app) active: DojoId,
+}
+
+/// Reopens a relaunched Window's other tabs, in their recorded order and each
+/// with its recorded focus, from the daemon's topology as it is now, then
+/// activates the recorded tab. Every tab is a fresh attachment: nothing from
+/// before the relaunch is replayed. A Dojo that ended meanwhile, or that fails
+/// to open, is skipped with the frontend's ordinary tab failure.
+async fn restore_window_tabs(
+    factory: &ConnectionFactory,
+    connection: &mut Connection,
+    config: &AppConfig,
+    image_cache: &SharedImageContentCache,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+    state: &mut TopologyManagerState,
+    restore: TopologyRestore,
+) {
+    let Ok(Response::Lairs {
+        lairs,
+        topology_revision,
+    }) = connection.request(Request::ListLairs).await
+    else {
+        eprintln!("splinterm: cannot read the topology to restore this Window's other tabs");
+        return;
+    };
+    for (dojo_id, focus) in restore.tabs {
+        let Some((lair, dojo)) = lairs.iter().find_map(|lair| {
+            lair.dojos
+                .iter()
+                .find(|dojo| dojo.id == dojo_id)
+                .map(|dojo| (lair, dojo))
+        }) else {
+            continue;
+        };
+        let requested_focus = focus
+            .filter(|focus| dojo.root.find_splint(*focus).is_some())
+            .map(|focus| (focus, None));
+        let target = Ok(ManagedWindowOpen {
+            identity: window_dojo_identity(topology_revision, lair, dojo),
+            dojo: dojo.clone(),
+            transient_owner: None,
+            // The Window shows these again; the recent list is unchanged.
+            remember: false,
+            requested_focus,
+        });
+        finish_managed_window_open(factory, target, state, config, image_cache, updates, None)
+            .await;
+    }
+    if state.tabs.activate(restore.active) {
+        let _ = updates
+            .send(WindowTopologyUpdate::ActivateTab {
+                dojo_id: restore.active,
+                explorer_target: None,
+            })
+            .await;
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -3537,6 +3599,7 @@ pub(in crate::app) async fn run_topology_manager(
     updates: mpsc::Sender<WindowTopologyUpdate>,
     pane_tasks: HashMap<SplintId, PaneTask>,
     initial_transient_owner: Option<Connection>,
+    restore: Option<TopologyRestore>,
 ) -> Result<()> {
     let mut connection = factory.connect().await?;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -3564,6 +3627,18 @@ pub(in crate::app) async fn run_topology_manager(
         transient_owners,
         agent_status_republish: false,
     };
+    if let Some(restore) = restore {
+        Box::pin(restore_window_tabs(
+            &factory,
+            &mut connection,
+            &config,
+            &image_cache,
+            &updates,
+            &mut state,
+            restore,
+        ))
+        .await;
+    }
     let mut window_closing = false;
     // Plan 0061 M3.12b: the daemon this manager is connected to, the
     // reconnection it last answered, and whether the Window gave up.
@@ -3586,6 +3661,23 @@ pub(in crate::app) async fn run_topology_manager(
                 }
             };
         refresh_reloaded_settings(&mut config, &mut settings);
+        // The Window takes part in a handoff and waits for its outcome
+        // (M3.14): nothing reaches the daemon, whose connections are about to
+        // be replaced. Commands are settled as during a reconnection: tab
+        // switches apply, the rest is abandoned, never replayed. An adoption
+        // or rollback relaunches the Window; a cancelled attempt ends the
+        // wait and the loop resumes, reconnecting first if a connection was
+        // lost meanwhile.
+        if factory.handoff_status().continuing() {
+            let (pending, close_window) =
+                abandon_queued_commands(command, &mut commands, &mut state);
+            send_topology_updates(pending, &updates).await;
+            if close_window {
+                window_closing = true;
+                break;
+            }
+            continue;
+        }
         // A pane lost its daemon connection during a handoff: the whole
         // Window reconnects and resnapshots before anything else runs.
         let pending_reconnect = factory
@@ -3655,6 +3747,19 @@ pub(in crate::app) async fn run_topology_manager(
             Err(error)
                 if is_connection_loss(&error) && factory.handoff_status().begin_reconnect() =>
             {
+                if factory.handoff_status().continuing() {
+                    // The Window takes part in that handoff (M3.14): the hub
+                    // remembered the loss, and the loop waits at its top for
+                    // the outcome instead of reconnecting now.
+                    let (pending, close_window) =
+                        abandon_queued_commands(command, &mut commands, &mut state);
+                    send_topology_updates(pending, &updates).await;
+                    if close_window {
+                        window_closing = true;
+                        break;
+                    }
+                    continue;
+                }
                 let outcome = reconnect_and_abandon(
                     &factory,
                     &config,

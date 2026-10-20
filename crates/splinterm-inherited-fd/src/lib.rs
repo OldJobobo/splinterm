@@ -1,14 +1,18 @@
-//! Audited ownership boundary for descriptors inherited across daemon exec.
+//! Audited ownership boundary for descriptors inherited across a handoff exec.
 //!
-//! Rust cannot safely construct `OwnedFd` from manifest-provided raw numbers:
-//! the compiler cannot prove that no pre-exec Rust owner survived. This crate is
-//! the only inherited-FD ownership boundary permitted to perform that
-//! conversion. Its unsafe entrypoint is intentionally narrow and valid only in
-//! the new daemon image, before threads or ordinary runtime objects are
-//! created, so its caller must prove the temporal ownership contract. Both
-//! entrypoints, the pre-claim sealed manifest read and the claim itself,
-//! independently reject a multi-threaded process before they observe or mutate
-//! any descriptor.
+//! Rust cannot safely construct `OwnedFd` from manifest- or argv-provided raw
+//! numbers: the compiler cannot prove that no pre-exec Rust owner survived.
+//! This crate is the only inherited-FD ownership boundary permitted to perform
+//! that conversion. Its unsafe entrypoints are intentionally narrow and valid
+//! only in a freshly exec'd image, before threads or ordinary runtime objects
+//! are created, so each caller must prove the temporal ownership contract. Two
+//! callers exist: the daemon candidate's bootstrap (`splinterd`
+//! `candidate_acquire`) and a graphical Window relaunched across a daemon
+//! handoff (`splinterm` `handoff_acquire`, Plan 0061 M3.15, D12), which claims
+//! its sealed resume record and continuation socket by the numbers its argv
+//! names. Both entrypoints, the pre-claim sealed manifest read and the claim
+//! itself, independently reject a multi-threaded process before they observe
+//! or mutate any descriptor.
 
 #![deny(unsafe_code)]
 
@@ -262,8 +266,9 @@ fn read_sealed_body(
 ///
 /// # Safety
 ///
-/// The caller must be the single-threaded daemon bootstrap immediately after
-/// exec. Every non-standard descriptor with `FD_CLOEXEC` clear must have crossed
+/// The caller must be the single-threaded daemon bootstrap, or a relaunched
+/// graphical Window's first operation, immediately after exec. Every
+/// non-standard descriptor with `FD_CLOEXEC` clear must have crossed
 /// that exec boundary and must have no live Rust owner or borrower; this covers
 /// both expected descriptors and unexpected inherited descriptors closed during
 /// the ownership commit. An absent expected number is permitted and returns

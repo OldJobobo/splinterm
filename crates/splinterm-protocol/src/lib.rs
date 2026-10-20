@@ -6,6 +6,7 @@
 pub mod handoff_outcome;
 pub mod handoff_prepare;
 pub mod perf_trace;
+pub mod window_resume;
 
 use std::path::{Path, PathBuf};
 

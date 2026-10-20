@@ -1,4 +1,5 @@
-//! Source audit of the `splinterd` package's two audited unsafe exceptions.
+//! Source audit of the audited unsafe exceptions in the `splinterd` and
+//! `splinterm` packages.
 //!
 //! The workspace forbids `unsafe_code`, which no package can relax locally,
 //! so this package copies the workspace lint table with `deny`. This audit
@@ -10,6 +11,11 @@
 //! which keeps descriptors made inheritable by other daemon threads out of the
 //! sealed image while forward preflight runs beside a serving daemon (Plan
 //! 0061 D2).
+//!
+//! The graphical client package copies the same table, and its only unsafe
+//! construct and only waiver is the relaunched Window's post-exec claim of its
+//! resume record and continuation socket in `src/handoff_acquire.rs` (Plan 0061
+//! M3.15, D12). Its library keeps `#![forbid(unsafe_code)]`.
 
 use std::{fs, path::Path};
 
@@ -409,6 +415,226 @@ fn assert_main_opens_with(path: &Path, expected: &[&str]) {
     }
 }
 
+/// The graphical client package carries exactly one unsafe construct and one
+/// waiver: the relaunched Window's post-exec claim in
+/// `src/handoff_acquire.rs` (Plan 0061 M3.15, D12). Its library and every
+/// test, example, and other module stay free of both.
+#[test]
+fn splinterm_keeps_one_exact_unsafe_post_exec_invocation_and_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../splinterm");
+    let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(has_exact_lint_policy(&cargo));
+    let library = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(
+        library.contains("#![forbid(unsafe_code)]"),
+        "the client library must keep forbidding unsafe code"
+    );
+
+    let mut audit = UnsafeAudit::default();
+    for directory in ["src", "tests", "examples"] {
+        audit_sources(&root, &root.join(directory), &mut audit);
+    }
+    let finding = |kind| Finding {
+        file: "src/handoff_acquire.rs".to_owned(),
+        function: Some("acquire_before_tokio".to_owned()),
+        kind,
+    };
+    assert_eq!(audit.constructs, [finding("unsafe block")]);
+    assert_eq!(audit.waivers, [finding("allow unsafe_code")]);
+}
+
+/// One process-image replacement found in the client package.
+#[derive(Debug, Eq, PartialEq)]
+struct ExecSite {
+    file: String,
+    /// The `impl` block's type, for a method.
+    impl_type: Option<String>,
+    function: Option<String>,
+    /// The exec function called, or `exec` for `CommandExt::exec`.
+    call: String,
+}
+
+/// Every `execve`-family call and every zero-argument `.exec()` method call
+/// (`std::os::unix::process::CommandExt::exec`), by file, impl type, and
+/// enclosing function.
+#[derive(Default)]
+struct ExecAudit {
+    file: String,
+    impl_type: Option<String>,
+    function: Option<String>,
+    sites: Vec<ExecSite>,
+}
+
+impl ExecAudit {
+    fn record(&mut self, call: String) {
+        self.sites.push(ExecSite {
+            file: self.file.clone(),
+            impl_type: self.impl_type.clone(),
+            function: self.function.clone(),
+            call,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for ExecAudit {
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        let name = match node.self_ty.as_ref() {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            _ => Some("<unnamed>".to_owned()),
+        };
+        let previous = std::mem::replace(&mut self.impl_type, name);
+        visit::visit_item_impl(self, node);
+        self.impl_type = previous;
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        // A free function is never inside an impl, even when nested in one.
+        let previous_impl = self.impl_type.take();
+        let previous = self.function.replace(node.sig.ident.to_string());
+        visit::visit_item_fn(self, node);
+        self.function = previous;
+        self.impl_type = previous_impl;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let previous = self.function.replace(node.sig.ident.to_string());
+        visit::visit_impl_item_fn(self, node);
+        self.function = previous;
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(last) = path.path.segments.last()
+            && matches!(
+                last.ident.to_string().as_str(),
+                "execve" | "execveat" | "fexecve" | "execv" | "execvp" | "execvpe"
+            )
+        {
+            self.record(last.ident.to_string());
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "exec" && node.args.is_empty() {
+            self.record("exec".to_owned());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn audit_exec_sources(root: &Path, directory: &Path, audit: &mut ExecAudit) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            audit_exec_sources(root, &path, audit);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            audit.file = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            audit.impl_type = None;
+            audit.function = None;
+            let syntax = syn::parse_file(&fs::read_to_string(&path).unwrap()).unwrap();
+            audit.visit_file(&syntax);
+        }
+    }
+}
+
+fn exec_site(file: &str, impl_type: Option<&str>, function: &str, call: &str) -> ExecSite {
+    ExecSite {
+        file: file.to_owned(),
+        impl_type: impl_type.map(str::to_owned),
+        function: Some(function.to_owned()),
+        call: call.to_owned(),
+    }
+}
+
+/// The relaunch of a Window across a daemon handoff is the client's one
+/// descriptor-inheritance exec site (Plan 0061 M3.14): only the method
+/// `SystemExec::relaunch` in `src/window_continuation.rs` calls `execveat`
+/// (the sealed forward client snapshot) or `execve` (the installed client),
+/// after clearing close-on-exec on exactly the resume record and the
+/// continuation. The one other image replacement is the pre-existing
+/// `CommandExt::exec` of the relay in `src/app/local_service.rs`, which runs
+/// as a command-line subcommand, never inside a Window. No other client
+/// module may add one.
+#[test]
+fn splinterm_keeps_one_window_relaunch_exec_site() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../splinterm");
+    let mut audit = ExecAudit::default();
+    audit_exec_sources(&root, &root.join("src"), &mut audit);
+    assert_eq!(
+        audit.sites,
+        [
+            exec_site(
+                "src/app/local_service.rs",
+                None,
+                "run_relay_command",
+                "exec"
+            ),
+            exec_site(
+                "src/window_continuation.rs",
+                Some("SystemExec"),
+                "relaunch",
+                "execveat"
+            ),
+            exec_site(
+                "src/window_continuation.rs",
+                Some("SystemExec"),
+                "relaunch",
+                "execve"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_exec_audit_sees_free_functions_methods_and_every_spelling() {
+    let syntax = syn::parse_file(
+        r"
+            fn relaunch() {
+                nix::unistd::execveat(fd, c, a, e, f);
+                libc::execvpe(p, a, e);
+                std::process::Command::new(p).exec();
+            }
+            struct Other;
+            impl Other {
+                fn relaunch(&self) {
+                    execve(p, a, e);
+                    fn inner() { fexecve(fd, a, e); }
+                }
+            }
+        ",
+    )
+    .unwrap();
+    let mut audit = ExecAudit {
+        file: "synthetic.rs".to_owned(),
+        ..ExecAudit::default()
+    };
+    audit.visit_file(&syntax);
+    assert_eq!(
+        audit.sites,
+        [
+            exec_site("synthetic.rs", None, "relaunch", "execveat"),
+            exec_site("synthetic.rs", None, "relaunch", "execvpe"),
+            exec_site("synthetic.rs", None, "relaunch", "exec"),
+            exec_site("synthetic.rs", Some("Other"), "relaunch", "execve"),
+            exec_site("synthetic.rs", None, "inner", "fexecve"),
+        ]
+    );
+}
+
 /// `close_inherited_descriptors` in `src/handoff_preflight.rs` is sound only
 /// because `dispatch_internal_preflight`, a safe public function, runs before
 /// anything in either binary can own a descriptor. Pin the opening of both
@@ -416,6 +642,12 @@ fn assert_main_opens_with(path: &Path, expected: &[&str]) {
 /// acquisition in `splinterd` and the askpass helper in `splinterm` come first;
 /// each either finds no activation, owning nothing, or never reaches the
 /// preflight dispatch.
+///
+/// The relaunched Window's claim (`handoff_acquire::acquire_before_tokio`) is
+/// sound only because it is the third statement of the client's `main`: the
+/// two dispatches before it, without their own activation, read only argv
+/// and the environment, so no thread and no descriptor owner exists yet. It
+/// is pinned too.
 #[test]
 fn both_mains_dispatch_sealed_preflight_before_any_descriptor_owner() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -448,6 +680,13 @@ fn both_mains_dispatch_sealed_preflight_before_any_descriptor_owner() {
                     std::process::exit(1);
                 }
             }"#,
+            r#"let window_resume = match handoff_acquire::acquire_before_tokio() {
+                Ok(window_resume) => window_resume,
+                Err(error) => {
+                    eprintln!("splinterm: {error:#}");
+                    std::process::exit(1);
+                }
+            };"#,
         ],
     );
 }

@@ -17,6 +17,10 @@ use splinterm::{
     handoff_status::{RECONNECT_WINDOW, WindowHandoffPhase},
     renderer::{self, RendererOptions},
     run_window,
+    window_continuation::{
+        ContinuationContext, SystemExec, WindowLayoutLedger, installed_client_path,
+        run_window_anchor,
+    },
 };
 use splinterm_core::SplintId;
 use splinterm_protocol::{
@@ -37,7 +41,9 @@ use super::{
         update_advances_from, validate_attached_snapshot,
     },
     theme_watch::{ThemeOverrides, ThemeUpdateSink, load_startup_theme_for_watch, watch_theme},
-    topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
+    topology_manager::{
+        TopologyRestore, initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke,
+    },
 };
 
 struct AbortOnDropTask(tokio::task::JoinHandle<()>);
@@ -125,7 +131,9 @@ async fn run_graphical_focus_reporter(
                 return Ok(());
             }
             match hub.view().phase {
-                WindowHandoffPhase::Reconnecting => {}
+                // A participating Window waits for its outcome: it is either
+                // relaunched, or reconnects once the attempt ends (M3.14).
+                WindowHandoffPhase::Reconnecting | WindowHandoffPhase::Continuing => {}
                 WindowHandoffPhase::Lost => return Err(error),
                 WindowHandoffPhase::Idle
                 | WindowHandoffPhase::Preparing
@@ -435,6 +443,34 @@ fn endpoint_graphical_focus(
     }
 }
 
+/// Starts a local managed Window's handoff anchor (Plan 0061 M3.14): its one
+/// dedicated connection that declares `Hello.handoff_window`, receives the
+/// daemon's prepare frame, and relaunches the Window across the upgrade.
+/// Returns the ledger its frontend publishes tabs and focus to, and the
+/// anchor task, which ends with the Window. A remote Window has neither: its
+/// daemon's handoff does not concern this machine's client.
+fn spawn_window_anchor(
+    factory: &ConnectionFactory,
+    app_id: Option<String>,
+) -> (Option<WindowLayoutLedger>, Option<AbortOnDropTask>) {
+    if !factory.is_local() {
+        return (None, None);
+    }
+    let Ok(socket) = splinterm::automation::socket_path() else {
+        return (None, None);
+    };
+    let ledger = WindowLayoutLedger::default();
+    let context = ContinuationContext {
+        hub: factory.handoff_status().clone(),
+        ledger: ledger.clone(),
+        app_id,
+        installed_client: installed_client_path(),
+        exec: Arc::new(SystemExec),
+    };
+    let anchor = AbortOnDropTask::new(tokio::spawn(run_window_anchor(context, socket)));
+    (Some(ledger), Some(anchor))
+}
+
 fn pane_chrome_capture() -> Result<Option<PathBuf>> {
     let Some(path) = env::var_os("SPLINTERM_PANE_CHROME_CAPTURE") else {
         return Ok(None);
@@ -463,7 +499,41 @@ pub(super) async fn run_live_multipane_window(
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
-    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true).await
+    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true, None).await
+}
+
+/// What a Window relaunched across a daemon upgrade restores after its first
+/// tab (Plan 0061 M3.15).
+pub(super) struct WindowResume {
+    /// The other tabs, in order, with their recorded focus.
+    pub(super) tabs: Vec<(splinterm_core::DojoId, Option<SplintId>)>,
+    /// The tab to activate once every tab is open.
+    pub(super) active: splinterm_core::DojoId,
+    /// The client end of the continuation socket. Held open for the Window's
+    /// life so the adopted daemon's hold sees the Window alive; M3.16's
+    /// `ClaimHandoffControl` is the seam that will take it from here.
+    pub(super) continuation: std::os::fd::OwnedFd,
+}
+
+/// Runs a Window relaunched across a daemon upgrade: `dojo_model` is its
+/// first surviving tab, and `resume` reopens the rest.
+pub(super) async fn run_resumed_multipane_window(
+    config: AppConfig,
+    dojo_model: splinterm_core::Dojo,
+    factory: ConnectionFactory,
+    app_id: Option<String>,
+    resume: WindowResume,
+) -> Result<()> {
+    run_live_multipane_window_inner(
+        config,
+        dojo_model,
+        factory,
+        None,
+        app_id,
+        true,
+        Some(resume),
+    )
+    .await
 }
 
 pub(super) async fn run_live_multipane_window_with_app_id(
@@ -480,6 +550,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         None,
         app_id,
         initial_tab_strip_visible,
+        None,
     )
     .await
 }
@@ -499,6 +570,7 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
         Some(owner),
         app_id,
         initial_tab_strip_visible,
+        None,
     )
     .await
 }
@@ -514,10 +586,20 @@ async fn run_live_multipane_window_inner(
     initial_transient_owner: Option<Connection>,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
+    resume: Option<WindowResume>,
 ) -> Result<()> {
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
     }
+    let (restore, _continuation) = resume.map_or((None, None), |resume| {
+        (
+            Some(TopologyRestore {
+                tabs: resume.tabs,
+                active: resume.active,
+            }),
+            Some(resume.continuation),
+        )
+    });
     let (initial_identity, remote_display_identity) =
         initial_window_dojo_identity(&factory, dojo_model.id).await?;
     let startup_theme = load_startup_theme_for_watch(&config);
@@ -558,6 +640,7 @@ async fn run_live_multipane_window_inner(
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
     let local_endpoint = factory.is_local();
     let handoff_status = factory.handoff_status().clone();
+    let (layout_ledger, _window_anchor) = spawn_window_anchor(&factory, app_id.clone());
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let optimistic_remote_splits =
@@ -602,6 +685,7 @@ async fn run_live_multipane_window_inner(
         topology_update_sender,
         tasks,
         initial_transient_owner,
+        restore,
     ));
     let result = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {
@@ -633,6 +717,7 @@ async fn run_live_multipane_window_inner(
             keymap: window_config.keymap,
             prefix_timeout_ms: window_config.prefix_timeout_ms,
             handoff_status: Some(handoff_status),
+            layout_ledger,
             ..WindowOptions::default()
         })
     })

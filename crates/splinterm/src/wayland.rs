@@ -318,8 +318,7 @@ fn session_picker_handoff_command(executable: &Path) -> Command {
 
 fn spawn_session_picker_handoff() -> Result<()> {
     let executable = std::env::current_exe().context("locate the running Splinterm client")?;
-    session_picker_handoff_command(&executable)
-        .spawn()
+    crate::child_spawn::spawn(|| session_picker_handoff_command(&executable).spawn())
         .context("launch the Recent Dojos picker after final-tab removal")?;
     Ok(())
 }
@@ -998,6 +997,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
             session_switch_pending: false,
             deferred_topology_updates: Vec::new(),
             agent: agent_status::TabAgentStatus::new(options.agent_status_presentation),
+            layout_ledger: options.layout_ledger.take(),
         },
         modal: ModalState {
             trusted_consent,
@@ -5357,7 +5357,7 @@ impl App {
         let Some((_, _, url)) = &self.panes.pane.hovered_url else {
             return;
         };
-        let _ = Command::new("xdg-open").arg(url).spawn();
+        let _ = crate::child_spawn::spawn(|| Command::new("xdg-open").arg(url).spawn());
     }
 
     fn settle_terminal_presses_for_picker(&mut self) {
@@ -9460,6 +9460,12 @@ impl App {
         let (topology_changed, topology_theme) = self.apply_topology_updates(queue_handle)?;
         if topology_changed {
             self.cancel_copy_mode_for_topology();
+        }
+        // The resume record a handoff seals names exactly what this turn shows.
+        if let Some(ledger) = &self.tab_state.layout_ledger
+            && let Some(layout) = self.tab_state.window_layout(self.panes.focused_splint())
+        {
+            ledger.publish(layout);
         }
         let theme = self.presentation.theme;
         let waker = self.platform.update_waker.clone();

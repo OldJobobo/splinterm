@@ -18,6 +18,7 @@ clap.workspace = true
 flate2.workspace = true
 fontdb = { workspace = true, optional = true }
 libc.workspace = true
+nix = { workspace = true, features = ["fs", "process"] }
 png.workspace = true
 rustix.workspace = true
 serde.workspace = true
@@ -28,6 +29,7 @@ splinterm-core = { path = "../splinterm-core" }
 splinterm-filemap = { path = "../splinterm-filemap" }
 splinterm-freetype = { path = "../splinterm-freetype" }
 splinterm-graphical-relay = { path = "../splinterm-graphical-relay" }
+splinterm-inherited-fd = { path = "../splinterm-inherited-fd" }
 splinterm-policy = { path = "../splinterm-policy" }
 splinterm-protocol = { path = "../splinterm-protocol" }
 smithay-client-toolkit.workspace = true
@@ -47,9 +49,25 @@ sha2.workspace = true
 splinterd = { path = "../splinterd", features = ["integration-test"] }
 tokio = { workspace = true, features = ["test-util"] }
 
+# A relaunched Window's descriptor claim requires the descriptors it inherits
+# to be made inheritable only while one thread spawns it, which the libtest
+# harness cannot promise: it runs each test on a spawned thread.
+[[test]]
+name = "window_resume_exec"
+harness = false
+
 [[example]]
 name = "font-stack-spike"
 required-features = ["font-stack-spike"]
 
-[lints]
-workspace = true
+# The workspace forbids `unsafe_code`, which a package cannot relax locally.
+# This copy of the workspace table only relaxes it to `deny`, so the binary's
+# one audited post-exec descriptor claim (`src/handoff_acquire.rs`, Plan 0061
+# D12) can carry its explicit waiver; the library keeps `#![forbid(unsafe_code)]`.
+# `splinterd/tests/unsafe_boundary_audit.rs` pins both.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

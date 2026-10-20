@@ -11,6 +11,7 @@ pub mod accessibility;
 pub mod automation;
 pub mod background_effect;
 mod box_drawing;
+pub mod child_spawn;
 pub mod clipboard_image;
 pub mod config;
 pub mod diagnostics;
@@ -35,6 +36,7 @@ pub mod session_picker;
 pub mod tab;
 pub mod viewport;
 pub mod wayland;
+pub mod window_continuation;
 
 pub use frontend::{
     AuthorityStatus, ExplorerContextTarget, FontUpdate, LairDirection,
