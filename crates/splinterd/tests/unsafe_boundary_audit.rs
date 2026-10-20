@@ -1,4 +1,5 @@
-//! Source audit of the `splinterd` package's two audited unsafe exceptions.
+//! Source audit of the audited unsafe exceptions in the `splinterd` and
+//! `splinterm` packages.
 //!
 //! The workspace forbids `unsafe_code`, which no package can relax locally,
 //! so this package copies the workspace lint table with `deny`. This audit
@@ -10,6 +11,11 @@
 //! which keeps descriptors made inheritable by other daemon threads out of the
 //! sealed image while forward preflight runs beside a serving daemon (Plan
 //! 0061 D2).
+//!
+//! The graphical client package copies the same table, and its only unsafe
+//! construct and only waiver is the relaunched Window's post-exec claim of its
+//! resume record and continuation socket in `src/handoff_acquire.rs` (Plan 0061
+//! M3.15, D12). Its library keeps `#![forbid(unsafe_code)]`.
 
 use std::{fs, path::Path};
 
@@ -409,6 +415,34 @@ fn assert_main_opens_with(path: &Path, expected: &[&str]) {
     }
 }
 
+/// The graphical client package carries exactly one unsafe construct and one
+/// waiver: the relaunched Window's post-exec claim in
+/// `src/handoff_acquire.rs` (Plan 0061 M3.15, D12). Its library and every
+/// test, example, and other module stay free of both.
+#[test]
+fn splinterm_keeps_one_exact_unsafe_post_exec_invocation_and_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../splinterm");
+    let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(has_exact_lint_policy(&cargo));
+    let library = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert!(
+        library.contains("#![forbid(unsafe_code)]"),
+        "the client library must keep forbidding unsafe code"
+    );
+
+    let mut audit = UnsafeAudit::default();
+    for directory in ["src", "tests", "examples"] {
+        audit_sources(&root, &root.join(directory), &mut audit);
+    }
+    let finding = |kind| Finding {
+        file: "src/handoff_acquire.rs".to_owned(),
+        function: Some("acquire_before_tokio".to_owned()),
+        kind,
+    };
+    assert_eq!(audit.constructs, [finding("unsafe block")]);
+    assert_eq!(audit.waivers, [finding("allow unsafe_code")]);
+}
+
 /// `close_inherited_descriptors` in `src/handoff_preflight.rs` is sound only
 /// because `dispatch_internal_preflight`, a safe public function, runs before
 /// anything in either binary can own a descriptor. Pin the opening of both
@@ -416,6 +450,12 @@ fn assert_main_opens_with(path: &Path, expected: &[&str]) {
 /// acquisition in `splinterd` and the askpass helper in `splinterm` come first;
 /// each either finds no activation, owning nothing, or never reaches the
 /// preflight dispatch.
+///
+/// The relaunched Window's claim (`handoff_acquire::acquire_before_tokio`) is
+/// sound only because it is the third statement of the client's `main`: the
+/// two dispatches before it, without their own activation, read only argv
+/// and the environment, so no thread and no descriptor owner exists yet. It
+/// is pinned too.
 #[test]
 fn both_mains_dispatch_sealed_preflight_before_any_descriptor_owner() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -448,6 +488,13 @@ fn both_mains_dispatch_sealed_preflight_before_any_descriptor_owner() {
                     std::process::exit(1);
                 }
             }"#,
+            r#"let window_resume = match handoff_acquire::acquire_before_tokio() {
+                Ok(window_resume) => window_resume,
+                Err(error) => {
+                    eprintln!("splinterm: {error:#}");
+                    std::process::exit(1);
+                }
+            };"#,
         ],
     );
 }

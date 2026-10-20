@@ -1,4 +1,5 @@
 mod app;
+mod handoff_acquire;
 
 use splinterm::diagnostics::{
     DiagnosticErrorCode, ExitClass, finish_global, global as graphical_diagnostics,
@@ -21,12 +22,26 @@ fn main() {
             std::process::exit(1);
         }
     }
-    run_client();
+    // A Window relaunched across a daemon upgrade claims its two inherited
+    // descriptors here, before Tokio or any other thread exists (Plan 0061
+    // M3.15). Without its activation flags this reads only argv.
+    let window_resume = match handoff_acquire::acquire_before_tokio() {
+        Ok(window_resume) => window_resume,
+        Err(error) => {
+            eprintln!("splinterm: {error:#}");
+            std::process::exit(1);
+        }
+    };
+    run_client(window_resume);
 }
 
 #[tokio::main(worker_threads = 2)]
-async fn run_client() {
-    match app::run().await {
+async fn run_client(window_resume: Option<handoff_acquire::AcquiredWindowResume>) {
+    let result = match window_resume {
+        Some(window_resume) => app::run_resumed(window_resume).await,
+        None => app::run().await,
+    };
+    match result {
         Ok(()) => {
             if let Some(diagnostics) = graphical_diagnostics() {
                 diagnostics.finish(ExitClass::Unknown, None);

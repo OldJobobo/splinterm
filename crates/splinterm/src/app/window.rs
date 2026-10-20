@@ -37,7 +37,9 @@ use super::{
         update_advances_from, validate_attached_snapshot,
     },
     theme_watch::{ThemeOverrides, ThemeUpdateSink, load_startup_theme_for_watch, watch_theme},
-    topology_manager::{initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke},
+    topology_manager::{
+        TopologyRestore, initial_window_dojo_identity, run_topology_manager, spawn_topology_smoke,
+    },
 };
 
 struct AbortOnDropTask(tokio::task::JoinHandle<()>);
@@ -463,7 +465,41 @@ pub(super) async fn run_live_multipane_window(
     dojo_model: splinterm_core::Dojo,
     factory: ConnectionFactory,
 ) -> Result<()> {
-    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true).await
+    run_live_multipane_window_inner(config, dojo_model, factory, None, None, true, None).await
+}
+
+/// What a Window relaunched across a daemon upgrade restores after its first
+/// tab (Plan 0061 M3.15).
+pub(super) struct WindowResume {
+    /// The other tabs, in order, with their recorded focus.
+    pub(super) tabs: Vec<(splinterm_core::DojoId, Option<SplintId>)>,
+    /// The tab to activate once every tab is open.
+    pub(super) active: splinterm_core::DojoId,
+    /// The client end of the continuation socket. Held open for the Window's
+    /// life so the adopted daemon's hold sees the Window alive; M3.16's
+    /// `ClaimHandoffControl` is the seam that will take it from here.
+    pub(super) continuation: std::os::fd::OwnedFd,
+}
+
+/// Runs a Window relaunched across a daemon upgrade: `dojo_model` is its
+/// first surviving tab, and `resume` reopens the rest.
+pub(super) async fn run_resumed_multipane_window(
+    config: AppConfig,
+    dojo_model: splinterm_core::Dojo,
+    factory: ConnectionFactory,
+    app_id: Option<String>,
+    resume: WindowResume,
+) -> Result<()> {
+    run_live_multipane_window_inner(
+        config,
+        dojo_model,
+        factory,
+        None,
+        app_id,
+        true,
+        Some(resume),
+    )
+    .await
 }
 
 pub(super) async fn run_live_multipane_window_with_app_id(
@@ -480,6 +516,7 @@ pub(super) async fn run_live_multipane_window_with_app_id(
         None,
         app_id,
         initial_tab_strip_visible,
+        None,
     )
     .await
 }
@@ -499,6 +536,7 @@ pub(super) async fn run_owned_live_multipane_window_with_app_id(
         Some(owner),
         app_id,
         initial_tab_strip_visible,
+        None,
     )
     .await
 }
@@ -514,10 +552,20 @@ async fn run_live_multipane_window_inner(
     initial_transient_owner: Option<Connection>,
     app_id: Option<String>,
     initial_tab_strip_visible: bool,
+    resume: Option<WindowResume>,
 ) -> Result<()> {
     if let Some(diagnostics) = splinterm::diagnostics::global() {
         diagnostics.ensure_window(Some(dojo_model.id), Some(dojo_model.default_focus));
     }
+    let (restore, _continuation) = resume.map_or((None, None), |resume| {
+        (
+            Some(TopologyRestore {
+                tabs: resume.tabs,
+                active: resume.active,
+            }),
+            Some(resume.continuation),
+        )
+    });
     let (initial_identity, remote_display_identity) =
         initial_window_dojo_identity(&factory, dojo_model.id).await?;
     let startup_theme = load_startup_theme_for_watch(&config);
@@ -602,6 +650,7 @@ async fn run_live_multipane_window_inner(
         topology_update_sender,
         tasks,
         initial_transient_owner,
+        restore,
     ));
     let result = tokio::task::spawn_blocking(move || {
         run_window(WindowOptions {

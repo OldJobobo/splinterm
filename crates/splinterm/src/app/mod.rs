@@ -27,6 +27,8 @@ mod topology_manager;
 mod upgrade;
 mod upgrade_dialog;
 mod window;
+mod window_resume;
 
 pub(crate) use cli::run;
 pub(crate) use remote_status::RemoteNotConnected;
+pub(crate) use window_resume::run_resumed;
