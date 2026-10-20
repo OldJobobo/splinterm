@@ -14,17 +14,21 @@
 //!
 //! **Receiving.** The anchor reads each frame with exact-length reads: its
 //! four-byte header, then exactly its body ([`AnchorConnection`]). The
-//! daemon writes a `HandoffPrepare` frame with one `sendmsg` whose
-//! descriptors ride its first byte, and a Unix stream never merges data
-//! across a descriptor-carrying segment into an earlier read, so the
-//! descriptors arrive with that frame's header read and with no other. A
-//! buffered reader cannot say which frame descriptors belong to once a read
-//! spans frames, so it is not used here. The cost, two receive calls per
-//! frame, falls only on this idle connection, which carries a handshake, at
-//! most one prepare frame per attempt, and its acknowledgement's answer; the
-//! busy pane streams keep their buffered reader. Descriptors that arrive
-//! with a body read, a frame without exactly two, or two beside any other
-//! frame are refused, and refusal closes them.
+//! daemon writes each `HandoffPrepare` frame with its own `sendmsg`, whose
+//! descriptors ride the frame's first byte. A Linux stream read may run on
+//! from a plain segment into a descriptor-carrying one, so the guarantee
+//! rests on the reads, not the kernel: no read here asks for more than the
+//! rest of the current header or body, so every read ends at or before a
+//! frame boundary, and the descriptors can only be delivered by a read that
+//! includes their frame's first byte, which is a header read of that frame.
+//! A buffered reader may consume the end of one frame and the start of the
+//! next in one read and could not say which frame descriptors belong to, so
+//! it is not used here. The cost, two receive calls per frame, falls only on
+//! this idle connection, which carries a handshake, at most one prepare frame
+//! per attempt, and its acknowledgement's answer; the busy pane streams keep
+//! their buffered reader. Descriptors that arrive with a body read, a frame
+//! without exactly two, or two beside any other frame are refused, and
+//! refusal closes them.
 //!
 //! **Taking part.** On a valid prepare frame from its own daemon
 //! generation, the Window builds its resume record from the frontend's
@@ -128,8 +132,12 @@ pub const HANDOFF_OUTCOME_DEADLINE: Duration = Duration::from_secs(120);
 /// How long the relaunch waits for child spawns admitted before the pause to
 /// return before it clears close-on-exec; it refuses to relaunch after that.
 pub const SPAWN_IDLE_DEADLINE: Duration = Duration::from_secs(2);
-/// Pause between anchor connection attempts.
-pub const ANCHOR_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// First pause before the anchor connects again.
+pub const ANCHOR_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(2);
+/// Longest pause between anchor connection attempts. Each attempt costs the
+/// daemon a peer verification, which hashes the client executable, so a
+/// Window that keeps failing backs off to this.
+pub const ANCHOR_RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 /// The outcome receive buffer: larger than the record, so a longer packet is
 /// seen whole and refused rather than truncated to look valid.
 const OUTCOME_BUFFER_BYTES: usize = 64;
@@ -238,6 +246,11 @@ pub struct AnchorConnection {
     stream: UnixStream,
     daemon_generation: u64,
     next_request: u64,
+    /// Set while an acknowledgement's answer is being read and left set if
+    /// that read did not finish (it timed out and was dropped, or failed):
+    /// the stream may then stop mid-frame, so it is never read again and the
+    /// Window declares a new anchor instead.
+    desynchronized: bool,
 }
 
 impl AnchorConnection {
@@ -258,6 +271,7 @@ impl AnchorConnection {
             stream,
             daemon_generation: 0,
             next_request: 1,
+            desynchronized: false,
         };
         anchor
             .write(&ClientFrame::Hello {
@@ -308,6 +322,11 @@ impl AnchorConnection {
         ),
         AnchorError,
     > {
+        if self.desynchronized {
+            return Err(AnchorError::Protocol(
+                "an unfinished acknowledgement answer may have left the stream mid-frame",
+            ));
+        }
         loop {
             let (frame, descriptors) = self.read_frame().await?;
             match accept_handoff_prepare(&frame, descriptors).map_err(AnchorError::Descriptors)? {
@@ -350,10 +369,26 @@ impl AnchorConnection {
 
     /// Reads the daemon's answer to the acknowledgement `request_id`.
     ///
+    /// Only an answer read to completion leaves the connection usable: a
+    /// failed read, or one dropped before it finished (as on a timeout),
+    /// marks it desynchronized, and [`Self::next_prepare`] then refuses it.
+    ///
     /// # Errors
     /// End of stream or a framing violation before the answer.
     pub async fn acknowledgement_answer(
         &mut self,
+        request_id: u64,
+    ) -> Result<AcknowledgementAnswer, AnchorError> {
+        self.desynchronized = true;
+        let answer = self.read_acknowledgement_answer(request_id).await;
+        if answer.is_ok() {
+            self.desynchronized = false;
+        }
+        answer
+    }
+
+    async fn read_acknowledgement_answer(
+        &self,
         request_id: u64,
     ) -> Result<AcknowledgementAnswer, AnchorError> {
         loop {
@@ -832,25 +867,77 @@ fn relaunch(
     )
 }
 
+/// Whether a failed anchor declaration is final for this Window. The daemon
+/// refuses for good a client it does not trust (`Unauthorized`, as after an
+/// upgrade replaced it), a full anchor table (`ResourceLimit`, more than
+/// [`splinterm_protocol::MAX_HANDOFF_WINDOWS`] Windows), and a second anchor
+/// for one Window process (`InvalidArgument`); retrying any of them only
+/// costs the daemon another peer verification. Everything else, a daemon
+/// that is restarting or an attempt in progress among them, is retried.
+#[must_use]
+pub fn anchor_refusal_is_final(error: &AnchorError) -> bool {
+    matches!(
+        error,
+        AnchorError::Refused(refusal) if matches!(
+            refusal.code,
+            ErrorCode::Unauthorized | ErrorCode::ResourceLimit | ErrorCode::InvalidArgument
+        )
+    )
+}
+
+/// Capped exponential backoff between anchor connection attempts: from
+/// [`ANCHOR_RETRY_INITIAL_DELAY`], doubling up to [`ANCHOR_RETRY_MAX_DELAY`].
+/// A declared anchor resets it.
+#[derive(Clone, Debug)]
+pub struct AnchorBackoff {
+    next: Duration,
+}
+
+impl Default for AnchorBackoff {
+    fn default() -> Self {
+        Self {
+            next: ANCHOR_RETRY_INITIAL_DELAY,
+        }
+    }
+}
+
+impl AnchorBackoff {
+    /// The pause before the next attempt; each call doubles the following one.
+    pub fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(ANCHOR_RETRY_MAX_DELAY);
+        delay
+    }
+
+    /// An anchor was declared: the next failure waits the shortest pause.
+    pub fn reset(&mut self) {
+        self.next = ANCHOR_RETRY_INITIAL_DELAY;
+    }
+}
+
 /// Runs a Window's anchor for the Window's life: connects, declares, waits
 /// for prepare frames, and takes part in each handoff. It reconnects after a
-/// lost connection, and stops when the daemon refuses this client as
-/// untrusted (as after an upgrade replaced it) or the Window is lost.
+/// lost connection with [`AnchorBackoff`], and stops when the daemon refuses
+/// the declaration for good ([`anchor_refusal_is_final`]) or the Window is
+/// lost.
 pub async fn run_window_anchor(context: ContinuationContext, socket: PathBuf) {
+    let mut backoff = AnchorBackoff::default();
     loop {
         if context.hub.view().phase == crate::handoff_status::WindowHandoffPhase::Lost {
             return;
         }
         let mut anchor = match AnchorConnection::connect(&socket).await {
             Ok(anchor) => anchor,
-            Err(AnchorError::Refused(error)) if error.code == ErrorCode::Unauthorized => return,
+            Err(error) if anchor_refusal_is_final(&error) => return,
             Err(_) => {
-                tokio::time::sleep(ANCHOR_RETRY_DELAY).await;
+                tokio::time::sleep(backoff.next_delay()).await;
                 continue;
             }
         };
-        // A lost or refused anchor connection, or a refused prepare frame,
-        // ends this connection; the Window declares a new anchor.
+        backoff.reset();
+        // A lost or refused anchor connection, a refused prepare frame, or a
+        // stream left mid-frame by an unanswered acknowledgement ends this
+        // connection; the Window declares a new anchor.
         while let Ok((prepare, descriptors)) = anchor.next_prepare().await {
             match participate(&context, &mut anchor, prepare, descriptors).await {
                 ParticipationEnd::Declined(_) | ParticipationEnd::Ended(_) => {}
@@ -859,7 +946,7 @@ pub async fn run_window_anchor(context: ContinuationContext, socket: PathBuf) {
                 }
             }
         }
-        tokio::time::sleep(ANCHOR_RETRY_DELAY).await;
+        tokio::time::sleep(backoff.next_delay()).await;
     }
 }
 

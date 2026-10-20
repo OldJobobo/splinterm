@@ -57,10 +57,14 @@ pub struct PinnedClientSnapshot {
 }
 
 impl PinnedClientSnapshot {
-    /// Pins `snapshot`, which must be a regular file.
+    /// Pins `snapshot`, which must be a regular file sealed immutable
+    /// ([`splinterm_protocol::handoff_prepare::REQUIRED_CLIENT_SNAPSHOT_SEALS`]:
+    /// write, grow, shrink, and the seal set itself), so the sealed half of
+    /// the §4.4 exception holds at the pin itself.
     ///
     /// # Errors
-    /// A descriptor that cannot be examined or is not a regular file.
+    /// A descriptor that cannot be examined, is not a regular file, or lacks
+    /// a required seal.
     pub fn pin(snapshot: OwnedFd) -> std::io::Result<Self> {
         let status = rustix::fs::fstat(&snapshot)?;
         if rustix::fs::FileType::from_raw_mode(status.st_mode) != rustix::fs::FileType::RegularFile
@@ -68,6 +72,16 @@ impl PinnedClientSnapshot {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "the forward client snapshot is not a regular file",
+            ));
+        }
+        // A regular file without sealing support reports EINVAL: not sealed.
+        let sealed = rustix::fs::fcntl_get_seals(&snapshot).is_ok_and(|seals| {
+            seals.contains(splinterm_protocol::handoff_prepare::REQUIRED_CLIENT_SNAPSHOT_SEALS)
+        });
+        if !sealed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the forward client snapshot is not sealed immutable",
             ));
         }
         Ok(Self {
@@ -1289,9 +1303,28 @@ mod tests {
         drop(stale_child);
         fs::remove_dir_all(scratch.directory()).unwrap();
 
-        // Only a regular file can be pinned.
+        // Only a sealed regular file can be pinned.
         let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         assert!(PinnedClientSnapshot::pin(OwnedFd::from(socket)).is_err());
+        let unsealed = rustix::fs::memfd_create(
+            "splinterm",
+            rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        rustix::io::write(&unsealed, b"\x7fELF").unwrap();
+        assert!(PinnedClientSnapshot::pin(unsealed).is_err());
+        // Sealed against writes only: the extent and seal set may change.
+        let partial = rustix::fs::memfd_create(
+            "splinterm",
+            rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap();
+        rustix::io::write(&partial, b"\x7fELF").unwrap();
+        rustix::fs::fcntl_add_seals(&partial, rustix::fs::SealFlags::WRITE).unwrap();
+        assert!(PinnedClientSnapshot::pin(partial).is_err());
+        // An ordinary file cannot carry seals at all.
+        let file = fs::File::open(system_sleep()).unwrap();
+        assert!(PinnedClientSnapshot::pin(OwnedFd::from(file)).is_err());
         drop(child);
     }
 

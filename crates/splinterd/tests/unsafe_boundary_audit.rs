@@ -443,20 +443,61 @@ fn splinterm_keeps_one_exact_unsafe_post_exec_invocation_and_policy() {
     assert_eq!(audit.waivers, [finding("allow unsafe_code")]);
 }
 
-/// Every `execve`/`execveat` call in the client package, by file and
+/// One process-image replacement found in the client package.
+#[derive(Debug, Eq, PartialEq)]
+struct ExecSite {
+    file: String,
+    /// The `impl` block's type, for a method.
+    impl_type: Option<String>,
+    function: Option<String>,
+    /// The exec function called, or `exec` for `CommandExt::exec`.
+    call: String,
+}
+
+/// Every `execve`-family call and every zero-argument `.exec()` method call
+/// (`std::os::unix::process::CommandExt::exec`), by file, impl type, and
 /// enclosing function.
 #[derive(Default)]
 struct ExecAudit {
     file: String,
+    impl_type: Option<String>,
     function: Option<String>,
-    calls: Vec<(String, Option<String>, String)>,
+    sites: Vec<ExecSite>,
+}
+
+impl ExecAudit {
+    fn record(&mut self, call: String) {
+        self.sites.push(ExecSite {
+            file: self.file.clone(),
+            impl_type: self.impl_type.clone(),
+            function: self.function.clone(),
+            call,
+        });
+    }
 }
 
 impl<'ast> Visit<'ast> for ExecAudit {
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        let name = match node.self_ty.as_ref() {
+            syn::Type::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            _ => Some("<unnamed>".to_owned()),
+        };
+        let previous = std::mem::replace(&mut self.impl_type, name);
+        visit::visit_item_impl(self, node);
+        self.impl_type = previous;
+    }
+
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        // A free function is never inside an impl, even when nested in one.
+        let previous_impl = self.impl_type.take();
         let previous = self.function.replace(node.sig.ident.to_string());
         visit::visit_item_fn(self, node);
         self.function = previous;
+        self.impl_type = previous_impl;
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
@@ -470,60 +511,128 @@ impl<'ast> Visit<'ast> for ExecAudit {
             && let Some(last) = path.path.segments.last()
             && matches!(
                 last.ident.to_string().as_str(),
-                "execve" | "execveat" | "fexecve" | "execv" | "execvp"
+                "execve" | "execveat" | "fexecve" | "execv" | "execvp" | "execvpe"
             )
         {
-            self.calls.push((
-                self.file.clone(),
-                self.function.clone(),
-                last.ident.to_string(),
-            ));
+            self.record(last.ident.to_string());
         }
         visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "exec" && node.args.is_empty() {
+            self.record("exec".to_owned());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn audit_exec_sources(root: &Path, directory: &Path, audit: &mut ExecAudit) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            audit_exec_sources(root, &path, audit);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            audit.file = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            audit.impl_type = None;
+            audit.function = None;
+            let syntax = syn::parse_file(&fs::read_to_string(&path).unwrap()).unwrap();
+            audit.visit_file(&syntax);
+        }
+    }
+}
+
+fn exec_site(file: &str, impl_type: Option<&str>, function: &str, call: &str) -> ExecSite {
+    ExecSite {
+        file: file.to_owned(),
+        impl_type: impl_type.map(str::to_owned),
+        function: Some(function.to_owned()),
+        call: call.to_owned(),
     }
 }
 
 /// The relaunch of a Window across a daemon handoff is the client's one
-/// descriptor-inheritance exec site (Plan 0061 M3.14): only
+/// descriptor-inheritance exec site (Plan 0061 M3.14): only the method
 /// `SystemExec::relaunch` in `src/window_continuation.rs` calls `execveat`
 /// (the sealed forward client snapshot) or `execve` (the installed client),
 /// after clearing close-on-exec on exactly the resume record and the
-/// continuation. No other client module may add one.
+/// continuation. The one other image replacement is the pre-existing
+/// `CommandExt::exec` of the relay in `src/app/local_service.rs`, which runs
+/// as a command-line subcommand, never inside a Window. No other client
+/// module may add one.
 #[test]
 fn splinterm_keeps_one_window_relaunch_exec_site() {
-    fn walk(root: &Path, directory: &Path, audit: &mut ExecAudit) {
-        let mut entries = fs::read_dir(directory)
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        entries.sort_by_key(std::fs::DirEntry::path);
-        for entry in entries {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(root, &path, audit);
-            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
-                audit.file = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                audit.function = None;
-                let syntax = syn::parse_file(&fs::read_to_string(&path).unwrap()).unwrap();
-                audit.visit_file(&syntax);
-            }
-        }
-    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../splinterm");
     let mut audit = ExecAudit::default();
-    walk(&root, &root.join("src"), &mut audit);
-    let site = |call: &str| {
-        (
-            "src/window_continuation.rs".to_owned(),
-            Some("relaunch".to_owned()),
-            call.to_owned(),
-        )
+    audit_exec_sources(&root, &root.join("src"), &mut audit);
+    assert_eq!(
+        audit.sites,
+        [
+            exec_site(
+                "src/app/local_service.rs",
+                None,
+                "run_relay_command",
+                "exec"
+            ),
+            exec_site(
+                "src/window_continuation.rs",
+                Some("SystemExec"),
+                "relaunch",
+                "execveat"
+            ),
+            exec_site(
+                "src/window_continuation.rs",
+                Some("SystemExec"),
+                "relaunch",
+                "execve"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_exec_audit_sees_free_functions_methods_and_every_spelling() {
+    let syntax = syn::parse_file(
+        r"
+            fn relaunch() {
+                nix::unistd::execveat(fd, c, a, e, f);
+                libc::execvpe(p, a, e);
+                std::process::Command::new(p).exec();
+            }
+            struct Other;
+            impl Other {
+                fn relaunch(&self) {
+                    execve(p, a, e);
+                    fn inner() { fexecve(fd, a, e); }
+                }
+            }
+        ",
+    )
+    .unwrap();
+    let mut audit = ExecAudit {
+        file: "synthetic.rs".to_owned(),
+        ..ExecAudit::default()
     };
-    assert_eq!(audit.calls, [site("execveat"), site("execve")]);
+    audit.visit_file(&syntax);
+    assert_eq!(
+        audit.sites,
+        [
+            exec_site("synthetic.rs", None, "relaunch", "execveat"),
+            exec_site("synthetic.rs", None, "relaunch", "execvpe"),
+            exec_site("synthetic.rs", None, "relaunch", "exec"),
+            exec_site("synthetic.rs", Some("Other"), "relaunch", "execve"),
+            exec_site("synthetic.rs", None, "inner", "fexecve"),
+        ]
+    );
 }
 
 /// `close_inherited_descriptors` in `src/handoff_preflight.rs` is sound only

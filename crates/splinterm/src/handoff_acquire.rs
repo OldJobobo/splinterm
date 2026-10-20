@@ -211,14 +211,18 @@ pub(crate) fn acquire_before_tokio() -> Result<Option<AcquiredWindowResume>> {
         // argv and the environment and owns no descriptor. So the process is
         // single-threaded (no Tokio runtime, no Wayland or font thread yet)
         // and holds no Rust owner of any inherited descriptor; the argument
-        // parsing above only reads memory. The Window that exec'd this image
-        // cleared FD_CLOEXEC on exactly the record and continuation and marked
-        // every other descriptor close-on-exec, so every non-standard
-        // inheritable descriptor crossed exec ownerless, including any
-        // unexpected entry the claim closes. Nothing between the parse and the
-        // claim opens, closes, or replaces a descriptor; the leaf's procfs
-        // reads are close-on-exec and closed before its scan. The leaf also
-        // rejects a second thread before it observes anything.
+        // parsing above only reads memory. Whoever exec'd this image (a
+        // relaunching Window, its launcher, or anyone running the binary with
+        // these flags), every non-standard descriptor that is inheritable now
+        // crossed exec and has no Rust owner in this image: this image has
+        // created no owner of any descriptor yet, and descriptors it opens are
+        // close-on-exec. The claim takes ownership of exactly the two named
+        // numbers, which are then validated below as a sealed resume record
+        // and a continuation socket, and closes every other inheritable one,
+        // whatever its origin. Nothing between the parse and the claim opens,
+        // closes, or replaces a descriptor; the leaf's procfs reads are
+        // close-on-exec and closed before its scan. The leaf also rejects a
+        // second thread before it observes anything.
         let claimed = unsafe {
             splinterm_inherited_fd::claim_post_exec_inherited(&[resume_fd, continuation_fd])
         }

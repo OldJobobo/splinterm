@@ -678,3 +678,138 @@ fn relaunch_argv_is_rebuilt_and_the_environment_is_kept() {
     let environment = relaunch_environment();
     assert_eq!(environment.len(), std::env::vars_os().count());
 }
+
+#[test]
+fn anchor_refusals_that_cannot_change_are_final() {
+    let refused = |code| AnchorError::Refused(ProtocolError::new(code, "refused"));
+    for code in [
+        ErrorCode::Unauthorized,
+        ErrorCode::ResourceLimit,
+        ErrorCode::InvalidArgument,
+    ] {
+        assert!(anchor_refusal_is_final(&refused(code)), "{code:?}");
+    }
+    for error in [
+        refused(ErrorCode::HandoffInProgress),
+        refused(ErrorCode::Internal),
+        AnchorError::Closed,
+        AnchorError::Protocol("invalid handshake"),
+        AnchorError::Io(io::Error::from(io::ErrorKind::ConnectionRefused)),
+    ] {
+        assert!(!anchor_refusal_is_final(&error), "{error}");
+    }
+}
+
+#[test]
+fn the_anchor_backs_off_exponentially_to_a_cap() {
+    let mut backoff = AnchorBackoff::default();
+    let delays = (0..8)
+        .map(|_| backoff.next_delay().as_secs())
+        .collect::<Vec<_>>();
+    assert_eq!(delays, [2, 4, 8, 16, 32, 60, 60, 60]);
+    backoff.reset();
+    assert_eq!(backoff.next_delay(), ANCHOR_RETRY_INITIAL_DELAY);
+}
+
+/// A Window past the daemon's anchor limit is refused for good: its anchor
+/// ends after one attempt instead of costing the daemon a peer verification
+/// every few seconds.
+#[tokio::test]
+async fn a_final_refusal_ends_the_anchor_after_one_attempt() {
+    for code in [ErrorCode::ResourceLimit, ErrorCode::InvalidArgument] {
+        let directory = std::env::temp_dir().join(format!(
+            "splinterm-anchor-refusal-{}-{code:?}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("splinterd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let accepting = listener.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            let (mut daemon, _) = accepting.accept().unwrap();
+            let _ = read_client(&mut daemon);
+            write_frame(
+                &mut daemon,
+                &ServerFrame::Error {
+                    request_id: None,
+                    error: ProtocolError::new(code, "Window anchor limit reached"),
+                },
+            );
+        });
+        let context = ContinuationContext {
+            hub: HandoffStatusHub::default(),
+            ledger: WindowLayoutLedger::default(),
+            app_id: None,
+            installed_client: None,
+            exec: Arc::new(SystemExec),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            run_window_anchor(context, socket.clone()),
+        )
+        .await
+        .expect("a final refusal ends the anchor");
+        server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "no second attempt"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+}
+
+/// An acknowledgement whose answer does not arrive in time may leave the
+/// stream mid-frame; the anchor is then never read again.
+#[tokio::test]
+async fn an_unanswered_acknowledgement_leaves_the_anchor_unusable() {
+    let (client, mut daemon) = stream_pair();
+    let snapshot = sealed_snapshot();
+    let prepare = prepare_for(&snapshot, GENERATION);
+    let (finish, finished) = std::sync::mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        accept_anchor(&mut daemon, GENERATION);
+        let (continuation, daemon_end) = continuation_pair();
+        let encoded = encode_handoff_prepare(&prepare).unwrap();
+        let descriptors = HandoffPrepareDescriptors::new(snapshot, continuation);
+        send_handoff_prepare(daemon.as_fd(), &encoded, &descriptors).unwrap();
+        drop(descriptors);
+        assert!(matches!(
+            read_client(&mut daemon),
+            Some(ClientFrame::Request { .. })
+        ));
+        // Half a frame header, and no answer within the deadline.
+        daemon.write_all(&[0, 0]).unwrap();
+        thread::sleep(ACKNOWLEDGEMENT_RESPONSE_DEADLINE + Duration::from_millis(500));
+        // The attempt then ends without an outcome.
+        drop(daemon_end);
+        finished.recv().unwrap();
+        daemon
+    });
+    let context = ContinuationContext {
+        hub: HandoffStatusHub::default(),
+        ledger: WindowLayoutLedger::default(),
+        app_id: None,
+        installed_client: None,
+        exec: Arc::new(SystemExec),
+    };
+    context.ledger.publish(layout());
+    let mut anchor = AnchorConnection::handshake(client).await.unwrap();
+    let (prepare, descriptors) = anchor.next_prepare().await.unwrap();
+    let end = participate(&context, &mut anchor, prepare, descriptors).await;
+    assert!(
+        matches!(
+            end,
+            ParticipationEnd::Ended("the attempt ended without an outcome")
+        ),
+        "{end:?}"
+    );
+    assert!(matches!(
+        anchor.next_prepare().await,
+        Err(AnchorError::Protocol(_))
+    ));
+    finish.send(()).unwrap();
+    drop(server.join().unwrap());
+}
