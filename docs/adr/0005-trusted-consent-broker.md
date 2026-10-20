@@ -1,6 +1,6 @@
 # ADR 0005: daemon-launched trusted consent client
 
-- **Status:** Accepted
+- **Status:** Accepted; persistent policy added by [ADR 0007](0007-supported-automation-policy.md); outcomes, prompt input, and remembered grants amended by [ADR 0014](0014-easy-agent-access.md)
 - **Date:** 2026-07-18
 
 ## Context
@@ -69,3 +69,22 @@ supported automation. No third-party grant is persisted across daemon restart.
   relationship.
 - Persistent allow rules remain deliberately out of scope until separately
   approved.
+
+## Amendment: easy agent access (ADR 0014)
+
+[ADR 0014](0014-easy-agent-access.md), accepted for `0.2.0` and not yet
+implemented, changes three parts of this decision. The daemon-launched trusted
+client, the private inherited descriptor, the one-use capability, and the
+bounded framing stay as decided here.
+
+- **Outcomes.** The exchange returns a typed decision instead of grant-once or
+  deny: deny, or a grant for one of three durations (just this once, while this
+  workspace is open, always for this workspace) at one of three access levels
+  or an exact Custom scope set.
+- **Prompt input.** The access dialog becomes default-deny. Enter, Escape, and
+  `D` deny; only `G` or the grant button grants, after an arming delay, with key
+  repeats ignored. Until then it grants on Enter.
+- **Persistence and deadline.** "No third-party grant is persisted across daemon
+  restart" no longer holds for an explicit Always answer, which the daemon
+  stores in its remembered-grant store under the identity rules of ADR 0014. The
+  20-second deadline is replaced by a bounded, cancellable pending request.

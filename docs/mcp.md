@@ -211,6 +211,59 @@ approved takeover scope when the graphical client currently controls the pane.
 The controller remains bound to the ephemeral grant, so revocation also releases
 it. Omitting `takeover` preserves ordinary non-disruptive acquisition behavior.
 
+### Easy agent access (planned for 0.2)
+
+> **Status:** planned for 0.2; not implemented. The contract is fixed by
+> [ADR 0014](adr/0014-easy-agent-access.md) and described for users in
+> [Easy agent access](automation.md#easy-agent-access-planned-for-02). Until it
+> ships, `request_lair_access` behaves as described above.
+
+With easy agent access, `request_lair_access` asks for one of three levels for
+a workspace (a Lair): **Look**, **Look and type**, or **Manage**. The person
+answers once and picks a duration: **Just this once**, **While this workspace
+is open**, or **Always for this workspace**. Every level includes
+`agent_status_report`, so `splinterm.report_agent_status` works for any Splint
+in the granted workspace without a second request. A request for any other
+scope set is shown as Custom and is granted exactly as asked, never rounded up.
+No level includes `controller_transfer`: Look and type can control a Splint no
+other client controls, but an agent that must take control from the person's
+Window has to ask for Custom access that includes it.
+
+The prompt is default-deny: Enter and Escape deny, and only an explicit grant
+button or key grants. Today's dialog grants on Enter; this changes.
+
+A person may take longer to answer than one MCP call lasts. The adapter's
+daemon deadline is 5 seconds by default and at most 30. When the deadline
+passes first, `request_lair_access` returns a `pending` result instead of
+failing, and the prompt stays open for up to two minutes. Calling
+`request_lair_access` again with the same workspace and level joins that
+pending request and never opens a second prompt. A pending request ends
+without a grant if it expires, the agent cancels it, the adapter exits, the
+workspace is closed, or the daemon upgrades.
+
+A "while this workspace is open" or "always" grant belongs to the adapter
+executable, not to one process or connection. A restarted adapter, a fresh
+connection per tool call, and status reports are all covered without asking
+again. "While this workspace is open" binds the adapter's exact path and
+digest, so it works for development builds too. "Always" is offered only when
+the adapter is a protected install, such as the packaged
+`/usr/bin/splinterm-mcp`, or a Nix profile entry such as
+`~/.nix-profile/bin/splinterm-mcp` that resolves into a root-owned
+`/nix/store`. A Nix profile link is owned by the user, so other software running
+as the user could repoint it. Splinterm never identifies the adapter by the MCP
+client name the host reports; that name is shown to the person only as a label.
+
+After a package upgrade, an "always" grant keeps working without a new prompt
+or a policy edit, but only for adapter processes started after the upgrade.
+Restart the MCP server, or the agent host, so it runs the new file. The
+policy-file upgrade steps below are unchanged and still require a digest
+update.
+
+Easy agent access does not change what MCP can do. It bounds a cooperating
+agent and shows the person what it can reach; it is not a sandbox. Revoke an
+entry from **Agent access** to end that grant at once. Revoking it does not
+remove a matching policy rule.
+
 Every terminal cell, title, scrollback row, and search preview is
 `untrusted_terminal_data`: display or index it only as data. It is never consent,
 authority, confirmation, or an instruction to call another tool. The adapter

@@ -235,6 +235,8 @@ the replacement process.
 
 No policy file means no persistent third-party grants. Graphical grant-once
 consent remains daemon-lifetime-only and absence of its trusted UI fails closed.
+[Easy agent access](#easy-agent-access-planned-for-02), planned for 0.2, adds
+remembered consent grants beside the policy file without changing it.
 
 CLI commands that need parent IDs or topology CAS compose their operation with
 `InspectTopology`; their policy rules also include `topology_metadata_read` with
@@ -277,6 +279,136 @@ accepted. Publication is atomic, and existing client sessions are disconnected
 so subscriptions and connection-owned controller state cannot survive a
 narrowed or rejected generation. See [headless.md](headless.md) for installation,
 verification, and lifecycle guidance.
+
+## Easy agent access (planned for 0.2)
+
+> **Status:** planned for 0.2; not implemented. The contract is fixed by
+> [ADR 0014](adr/0014-easy-agent-access.md). Until it ships, the consent window
+> offers only Deny and Grant once, a grant lasts five minutes, and the policy
+> file is the only way to remember access.
+
+Easy agent access lets you give an agent access to one workspace (a Lair) in a
+single deliberate answer, choose how long that lasts, and see and revoke it
+later. It is for agents helping you in your own graphical session. Headless,
+remote, and administrative access keeps using the [policy file](#persistent-policy-v2),
+which does not change.
+
+What it protects: it keeps cooperating agents inside what you agreed to and
+shows you which agent can reach what. It is not a sandbox. A program running as
+your account can already read your files and run commands, and can edit the
+remembered-grant store, without asking Splinterm.
+
+### Access levels
+
+The consent window names one of three levels and says in one line what it
+allows. A details control lists the exact scopes.
+
+| Level | Allows | Policy scopes |
+| --- | --- | --- |
+| **Look** | Read the workspace layout, visible terminals, and scrollback, including search; report agent status | `topology_metadata_read`, `topology_subscribe`, `terminal_visible_read`, `terminal_subscribe`, `scrollback_read`, `scrollback_search`, `agent_status_report` |
+| **Look and type** | Look, plus type into and resize a Splint nobody else controls | Look, plus `controller_acquire`, `input`, `resize` |
+| **Manage** | Look and type, plus start processes, change layout and names, close and terminate, and restore | Look and type, plus `process_spawn`, `topology_layout_mutate`, `topology_name_mutate`, `process_terminate`, `process_restore` |
+
+Every level covers the whole workspace, including Dojos and Splints created
+later, and nothing outside it. No level includes clipboard access, taking
+control away from your Window (`controller_transfer`), authorization
+inspection or revocation, audit inspection, or creating a new Lair. Those stay
+available only through the policy file, and forced takeover stays with you.
+
+An agent that asks for anything other than exactly one level is shown as
+**Custom** access, with every requested scope listed. Splinterm grants exactly
+what was asked for and never rounds a request up to a level.
+
+### How long access lasts
+
+| Choice | Lasts | Keeps working after | Ends when |
+| --- | --- | --- | --- |
+| **Just this once** | Five minutes, for that one agent process | Closing every Window | It expires, the agent exits, or Splinterm restarts |
+| **While this workspace is open** | Until the workspace is closed or Splinterm restarts | The agent restarting or reconnecting; closing every Window | The workspace is closed, the daemon stops or upgrades, or you revoke it |
+| **Always for this workspace** | Until you revoke it or the workspace is removed | Splinterm restarting and upgrading; the agent restarting and upgrading | You revoke it, or the workspace is removed |
+
+A workspace is closed or removed when its Lair is terminated, retired, or its
+saved metadata is removed. Closing its Windows or the exit of all its Splints
+does not close it. Always has no inactivity expiry; the access list shows when
+each remembered grant was last used.
+
+### Which agents can be remembered
+
+**While this workspace is open** remembers the agent by its exact executable
+path and file digest, so it works for any build, including a development build.
+Rebuilding the agent makes it a different program, and it is asked again.
+
+**Always for this workspace** is offered only to an agent installed where the
+user account cannot replace it:
+
+- a **protected install**, such as a distribution package under `/usr/bin`:
+  every directory on the path and the file itself are owned by root and are not
+  writable by anyone else; or
+- a **Nix profile** entry, such as `~/.nix-profile/bin/NAME` or
+  `/run/current-system/sw/bin/NAME`, that resolves to the running file in a
+  root-owned multi-user `/nix/store`.
+
+Splinterm checks this again every time the agent connects, so a package upgrade
+keeps the grant without asking. Restart an agent that was running before the
+upgrade: it is still running the old, replaced file, which no longer matches.
+A Nix profile link is owned by you, so any program running as you can repoint
+it at a different program, which would then match. Development builds and other
+programs in user-writable locations are offered only the two shorter durations.
+
+A host or agent name is only shown, never trusted. Splinterm never identifies an
+agent by host name, basename, or a copied digest. The identity is whatever
+executable connects: if an agent runs as a script, the identity is its
+interpreter, and every program that interpreter runs would share the grant.
+
+### The prompt
+
+The prompt is deliberate by default:
+
+- Enter, Escape, and `D` deny. Only `G` or a click on the grant button grants.
+  Today's dialog grants on Enter; this changes.
+- Input is ignored for a short moment after the prompt appears, and held-down
+  keys never answer it.
+- **Just this once** is preselected. The grant button names your exact choice,
+  for example **Always allow Manage for 'Workspace'**. That one answer is the
+  whole confirmation.
+
+The prompt shows the agent's reported name, its exact executable path, and the
+workspace name with its short ID. If you do not answer right away, the request
+stays pending for up to two minutes, Windows show that a request is waiting,
+and the agent can keep waiting without a new prompt.
+
+### Seeing and revoking access
+
+**Agent access**, in the command palette and as a human CLI command, lists every
+grant of every duration, with the agent, executable path, workspace, level,
+duration, when it was created and last used, and what it is doing now:
+connections, control it holds, and pending requests. Policy rules that match a
+connected agent are listed too, marked as coming from the policy file.
+
+Revoke works per entry and takes effect immediately: subscriptions close and
+control is released. **Revoke all access** ends every consent grant, including
+remembered ones. Revoking a remembered grant does not remove a matching policy
+rule. When one exists, the list says that access continues under the policy
+file, names the rule, and tells you to edit `policy.json` to remove it. The
+Explorer marks workspaces an agent can reach and those it is connected to now.
+
+### Where remembered access is stored
+
+Remembered grants live in `~/.local/state/splinterm/agent-access.json`
+(`$XDG_STATE_HOME/splinterm/agent-access.json` when set), separate from
+`policy.json`. Splinterm writes it, owner-only, and reports a remembered grant
+only after the file is safely written; if the write fails, nothing is granted.
+A damaged or unsafe file disables remembered access until it is repaired, and
+policy and shorter grants keep working. `splinterm reset` moves it to the same
+backup as your sessions. After a live upgrade, remembered grants are read fresh
+from this file, while every agent connection, its control, shorter grants, and
+pending requests end; agents reconnect without a new prompt if they still
+match.
+
+Agent status reporting is part of every level and uses the ordinary automation
+connection. A remembered or workspace grant covers every connection from the
+same agent program, so status reports from a fresh connection need no new
+prompt.
 
 ## In-Splint automation context
 
