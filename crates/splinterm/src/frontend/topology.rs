@@ -228,6 +228,53 @@ pub enum WindowTopologyCommand {
     },
 }
 
+impl WindowTopologyCommand {
+    /// Whether this command waits while the Window is paused for a daemon
+    /// handoff (Plan 0061 M3.12a): it changes the session, opens a prompt
+    /// that only leads to such a change, or attaches panes, which a fenced
+    /// daemon refuses. Browsing pickers, previews, switching between this
+    /// Window's tabs, and closing the Window keep working.
+    #[must_use]
+    pub fn paused_during_handoff(&self) -> bool {
+        match self {
+            Self::CloseWindow
+            | Self::RequestSessionPicker
+            | Self::RequestLairExplorer { .. }
+            | Self::RequestSelector { .. }
+            | Self::ActivateTab { .. } => false,
+            Self::ExplorerContext { command, .. } => command.paused_during_handoff(),
+            Self::OpenDojo { target, .. } => target.action != NavigationAction::ActivateDojo,
+            Self::FocusSplint { target } => {
+                target.capability.action != NavigationAction::FocusSplint
+            }
+            Self::RequestLairPrompt { kind, .. } | Self::RequestDojoPrompt { kind, .. } => {
+                *kind != LairPromptKind::Preview
+            }
+            Self::Split { .. }
+            | Self::Close { .. }
+            | Self::AdjustRatio { .. }
+            | Self::SetRatio { .. }
+            | Self::NewLair { .. }
+            | Self::PickerNewLair { .. }
+            | Self::NewDojo { .. }
+            | Self::PickerNewDojo { .. }
+            | Self::MaterializePreset { .. }
+            | Self::NavigateLair { .. }
+            | Self::RequestDojoRestorePrompt { .. }
+            | Self::RenameLair { .. }
+            | Self::TerminateLair { .. }
+            | Self::SetLairRetention { .. }
+            | Self::RestoreLair { .. }
+            | Self::RestoreDojo { .. }
+            | Self::RenameDojo { .. }
+            | Self::TerminateDojo { .. }
+            | Self::CloseTab { .. }
+            | Self::CloseTabs { .. }
+            | Self::ClearAgentStatus { .. } => true,
+        }
+    }
+}
+
 pub enum WindowTopologyUpdate {
     ShowExplorerPrompt {
         guard: ExplorerContextTarget,
@@ -300,4 +347,98 @@ pub enum WindowTopologyUpdate {
     Font(FontUpdate),
     Closed,
     Shutdown(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picker_target(action: NavigationAction) -> SessionPickerTarget {
+        SessionPickerTarget {
+            topology_revision: TopologyRevision::new(3),
+            lair_id: LairId::new(),
+            dojo_id: DojoId::new(),
+            action,
+        }
+    }
+
+    #[test]
+    fn handoff_pause_holds_session_changes_and_lets_local_ui_through() {
+        let lair_id = LairId::new();
+        let dojo_id = DojoId::new();
+        for command in [
+            WindowTopologyCommand::CloseWindow,
+            WindowTopologyCommand::RequestSessionPicker,
+            WindowTopologyCommand::RequestLairExplorer {
+                focused_splint: None,
+            },
+            WindowTopologyCommand::RequestSelector {
+                kind: SelectorKind::Dojo,
+                lair_id,
+            },
+            WindowTopologyCommand::ActivateTab { dojo_id },
+            WindowTopologyCommand::OpenDojo {
+                target: picker_target(NavigationAction::ActivateDojo),
+                explorer_target: None,
+            },
+            WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Preview,
+                expected_retention: None,
+            },
+        ] {
+            assert!(!command.paused_during_handoff(), "{command:?}");
+        }
+        for command in [
+            WindowTopologyCommand::OpenDojo {
+                target: picker_target(NavigationAction::AttachDojo),
+                explorer_target: None,
+            },
+            WindowTopologyCommand::RequestLairPrompt {
+                lair_id,
+                kind: LairPromptKind::Rename,
+                expected_retention: None,
+            },
+            WindowTopologyCommand::RequestDojoPrompt {
+                dojo_id,
+                kind: LairPromptKind::Terminate,
+            },
+            WindowTopologyCommand::NewDojo {
+                lair_id,
+                source_splint_id: SplintId::new(),
+            },
+            WindowTopologyCommand::CloseTab { dojo_id },
+            WindowTopologyCommand::NavigateLair {
+                current_lair_id: lair_id,
+                direction: LairDirection::Next,
+            },
+            WindowTopologyCommand::AdjustRatio {
+                dojo_id,
+                target: SplintId::new(),
+                delta: 50,
+            },
+        ] {
+            assert!(command.paused_during_handoff(), "{command:?}");
+        }
+        // An Explorer menu's guarded command is classified by what it wraps.
+        let target = ExplorerContextTarget {
+            topology_revision: TopologyRevision::new(3),
+            node: NavigationNodeId::Lair(lair_id),
+            live_incarnation: None,
+        };
+        assert!(
+            target
+                .command(WindowTopologyCommand::CloseTab { dojo_id })
+                .paused_during_handoff()
+        );
+        assert!(
+            !target
+                .command(WindowTopologyCommand::RequestLairPrompt {
+                    lair_id,
+                    kind: LairPromptKind::Preview,
+                    expected_retention: None,
+                })
+                .paused_during_handoff()
+        );
+    }
 }

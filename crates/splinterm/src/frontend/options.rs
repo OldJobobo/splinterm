@@ -186,6 +186,10 @@ pub struct WindowOptions {
     /// Fired once, after the first buffer commit maps the Window. Dropped unfired
     /// when the Window ends without mapping.
     pub mapped: Option<oneshot::Sender<()>>,
+    /// The Window's daemon handoff status, fed by its panes' control
+    /// subscriptions; drives the upgrade banner and input pause (Plan 0061
+    /// M3.12a). `None` for Windows that hold no daemon panes.
+    pub handoff_status: Option<crate::handoff_status::HandoffStatusHub>,
 }
 
 impl Default for WindowOptions {
@@ -232,6 +236,7 @@ impl Default for WindowOptions {
             agent_status_presentation: true,
             input_method: true,
             mapped: None,
+            handoff_status: None,
         }
     }
 }
