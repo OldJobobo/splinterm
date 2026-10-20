@@ -515,6 +515,17 @@ starts that live upgrade. Live upgrade is not enabled in this release, so today
 it reports live upgrade as unavailable and restarting the daemon remains the
 upgrade path. See [Daemon upgrade](cli.md#daemon-upgrade).
 
+During a live upgrade every Window shows "Preparing upgrade…" and then
+"Upgrading — input paused". Typed keys, pastes, and session-changing actions
+are dropped, not queued; scrolling, search, help, and tab switching still work.
+When the daemon starts the installed build, each Window shows "Reconnecting…",
+reattaches every pane from the serving daemon within about 30 seconds, and
+resumes input. If it cannot, it keeps its last screen, stays paused, and says
+"Lost connection to splinterd — reopen from the launcher"; its terminals may
+still be running and reopen from the Recent Dojos picker. A local Window whose
+client was replaced by the package upgrade gives up at once: the daemon trusts
+only the installed `splinterm`, which a Window reopened from the launcher runs.
+
 ## Remote human use
 
 Remote profiles are strict local TOML records. Inspect and probe one without

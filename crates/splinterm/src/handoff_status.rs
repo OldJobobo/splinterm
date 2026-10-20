@@ -1,5 +1,5 @@
 //! Window-wide daemon handoff (upgrade) status for the graphical client
-//! (Plan 0061 M3.12a).
+//! (Plan 0061 M3.12a, reconnection M3.12b).
 //!
 //! The daemon broadcasts `SubscriptionEvent::HandoffStatus` on every control
 //! subscription, and each pane of a Window holds one. Every pane's controller
@@ -14,11 +14,19 @@
 //! early or replay an attempt that already ended.
 //!
 //! While paused, only the local UI works: terminal input is dropped, not
-//! queued, and daemon-mutating actions are disabled. A connection lost while
-//! fenced is how a committed handoff looks from here (the daemon execs), so
-//! the pause then stays until reconnection; [`HandoffStatusHub::reconnected`]
-//! is that hook for M3.12b, and [`HandoffStatusHub::rolled_back`] is the hook
-//! for M3.14's continuation outcome.
+//! queued, and daemon-mutating actions are disabled.
+//!
+//! A connection lost while a handoff is preparing or fenced is how a
+//! committed handoff looks from here: the daemon execs, and `Fenced` is
+//! queued per subscription, so a pane may see only `Preparing` before the
+//! loss. The Window then shows "Reconnecting…" and stays paused while its
+//! coordinator (the topology manager, or the single-pane loop) reconnects
+//! for up to [`RECONNECT_WINDOW`] and resnapshots every pane from the serving
+//! daemon; [`HandoffStatusHub::reconnected`] ends the pause, and
+//! [`HandoffStatusHub::reconnect_failed`] leaves the Window open, paused,
+//! with its last screen and a lost-connection message. Nothing typed while
+//! paused is replayed. [`HandoffStatusHub::rolled_back`] is the hook for
+//! M3.14's continuation outcome.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,6 +43,10 @@ use splinterm_protocol::{HandoffCancelReason, HandoffStatusPhase};
 /// How long an outcome notice, "Upgrade cancelled" or "Rolled back", stays.
 pub const HANDOFF_NOTICE_DURATION: Duration = Duration::from_secs(3);
 
+/// How long a Window keeps reconnecting after its daemon connection was lost
+/// during a handoff before it gives up and shows the lost connection.
+pub const RECONNECT_WINDOW: Duration = Duration::from_secs(30);
+
 /// The Window-wide handoff phase.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WindowHandoffPhase {
@@ -45,9 +57,13 @@ pub enum WindowHandoffPhase {
     Preparing,
     /// A pane heard `Fenced`. Input and daemon mutations are paused.
     Fenced,
-    /// A connection was lost while fenced, as when a committed handoff execs.
-    /// Paused until M3.12b reconnects.
-    AwaitingReconnect,
+    /// A connection was lost while preparing or fenced, as when a committed
+    /// handoff execs. Paused while the Window reconnects and resnapshots.
+    Reconnecting,
+    /// Reconnection failed for [`RECONNECT_WINDOW`]. The Window stays open,
+    /// paused, with its last screen; its terminals may still be running in
+    /// the daemon.
+    Lost,
 }
 
 impl WindowHandoffPhase {
@@ -55,6 +71,13 @@ impl WindowHandoffPhase {
     #[must_use]
     pub const fn input_paused(self) -> bool {
         !matches!(self, Self::Idle)
+    }
+
+    /// Whether the Window has no usable daemon connection right now: every
+    /// daemon request, reads included, waits for reconnection or never runs.
+    #[must_use]
+    pub const fn disconnected(self) -> bool {
+        matches!(self, Self::Reconnecting | Self::Lost)
     }
 }
 
@@ -72,6 +95,8 @@ pub enum HandoffNotice {
 pub enum HandoffBanner {
     Preparing,
     InputPaused,
+    Reconnecting,
+    Lost,
     Notice(HandoffNotice),
 }
 
@@ -82,6 +107,8 @@ impl HandoffBanner {
         match self {
             Self::Preparing => "Preparing upgrade…".to_owned(),
             Self::InputPaused => "Upgrading — input paused".to_owned(),
+            Self::Reconnecting => "Reconnecting…".to_owned(),
+            Self::Lost => "Lost connection to splinterd — reopen from the launcher".to_owned(),
             Self::Notice(HandoffNotice::Cancelled(reason)) => {
                 format!("Upgrade cancelled — {}", cancel_reason_words(reason))
             }
@@ -89,7 +116,6 @@ impl HandoffBanner {
         }
     }
 }
-
 /// Why an upgrade was cancelled, in plain words.
 #[must_use]
 pub const fn cancel_reason_words(reason: HandoffCancelReason) -> &'static str {
@@ -130,16 +156,30 @@ struct HandoffState {
     /// Panes that already ended this attempt while others still report it.
     /// One of them hearing `Preparing` starts the next attempt, unfenced.
     ended: HashSet<u64>,
-    awaiting_reconnect: bool,
+    reconnect: Reconnect,
+    /// Bumped each time reconnection starts, so a coordinator that already
+    /// answered one loss can tell a later one from it.
+    reconnect_epoch: u64,
     revision: u64,
     notice: Option<(u64, HandoffNotice)>,
     notices: u64,
 }
 
+/// Where the Window stands with a daemon connection lost during a handoff.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Reconnect {
+    #[default]
+    Connected,
+    Pending,
+    Lost,
+}
+
 impl HandoffState {
     fn phase(&self) -> WindowHandoffPhase {
-        if self.awaiting_reconnect {
-            WindowHandoffPhase::AwaitingReconnect
+        if self.reconnect == Reconnect::Lost {
+            WindowHandoffPhase::Lost
+        } else if self.reconnect == Reconnect::Pending {
+            WindowHandoffPhase::Reconnecting
         } else if self.sources.is_empty() {
             WindowHandoffPhase::Idle
         } else if self.fenced {
@@ -180,18 +220,20 @@ impl HandoffState {
 
     fn observe(&mut self, source: u64, generation: u64, phase: HandoffStatusPhase) -> bool {
         // Generation zero is never valid, and an older daemon's report is
-        // stale once a newer one was heard.
-        if generation == 0 || generation < self.generation {
+        // stale once a newer one was heard. A lost Window has no connection
+        // left that could report anything current.
+        if generation == 0 || generation < self.generation || self.reconnect == Reconnect::Lost {
             return false;
         }
         self.update(|state| {
             if generation > state.generation {
                 // A newer daemon: whatever older generations reported is void.
+                // A reconnection in progress still ends only when its
+                // coordinator has resnapshotted every pane.
                 state.generation = generation;
                 state.sources.clear();
                 state.fenced = false;
                 state.ended.clear();
-                state.awaiting_reconnect = false;
             }
             match phase {
                 HandoffStatusPhase::Preparing => {
@@ -224,12 +266,14 @@ impl HandoffState {
                         state.ended.insert(source);
                     }
                     // The attempt ends once every pane that reported it has
-                    // cancelled. A `Cancelled` also proves the daemon is still
-                    // serving, so a connection lost while fenced was not the
-                    // exec. A `Cancelled` for an attempt nobody reported, as
-                    // replayed after a lag, changes nothing.
-                    if state.sources.is_empty() && (reported || state.awaiting_reconnect) {
-                        state.awaiting_reconnect = false;
+                    // cancelled. A `Cancelled` for an attempt nobody reported,
+                    // as replayed after a lag, changes nothing. While some
+                    // pane's connection is being replaced, the pause lasts
+                    // until that pane is back, so no notice is shown.
+                    if state.sources.is_empty()
+                        && reported
+                        && state.reconnect == Reconnect::Connected
+                    {
                         state.post_notice(HandoffNotice::Cancelled(reason));
                     }
                 }
@@ -245,29 +289,58 @@ impl HandoffState {
         })
     }
 
-    /// A pane's connection failed. While fenced that is the committed
-    /// handoff's exec, so the pause stays until reconnection.
+    /// Starts reconnecting when a handoff is preparing or fenced, or joins
+    /// the reconnection already running; returns whether one is running.
+    fn begin_reconnect(&mut self) -> bool {
+        match self.phase() {
+            WindowHandoffPhase::Preparing | WindowHandoffPhase::Fenced => {
+                self.reconnect = Reconnect::Pending;
+                self.reconnect_epoch = self.reconnect_epoch.wrapping_add(1);
+                true
+            }
+            WindowHandoffPhase::Reconnecting => true,
+            WindowHandoffPhase::Idle | WindowHandoffPhase::Lost => false,
+        }
+    }
+
+    /// A pane's connection failed. While a handoff is preparing or fenced
+    /// that is most likely the committed handoff's exec, even when the pane
+    /// never read `Fenced`, so the Window reconnects.
     fn source_lost(&mut self, source: u64) -> bool {
         self.update(|state| {
-            if state.phase() == WindowHandoffPhase::Fenced {
-                state.awaiting_reconnect = true;
-            }
+            state.begin_reconnect();
             state.sources.remove(&source);
             state.ended.remove(&source);
         })
     }
 
-    fn reconnected(&mut self) -> bool {
+    /// Every pane was resnapshotted from the daemon at `generation`. A newer
+    /// generation voids the older one's reports; at the same generation the
+    /// live panes' reports stand, so an attempt still under way keeps the
+    /// Window paused.
+    fn reconnected(&mut self, generation: u64) -> bool {
         self.update(|state| {
+            state.reconnect = Reconnect::Connected;
+            if generation > state.generation {
+                state.generation = generation;
+                state.sources.clear();
+                state.fenced = false;
+                state.ended.clear();
+            }
+        })
+    }
+
+    fn reconnect_failed(&mut self) -> bool {
+        self.update(|state| {
+            state.reconnect = Reconnect::Lost;
             state.sources.clear();
-            state.awaiting_reconnect = false;
         })
     }
 
     fn rolled_back(&mut self) -> bool {
         self.update(|state| {
             state.sources.clear();
-            state.awaiting_reconnect = false;
+            state.reconnect = Reconnect::Connected;
             state.post_notice(HandoffNotice::RolledBack);
         })
     }
@@ -318,10 +391,37 @@ impl HandoffStatusHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(waker);
     }
 
-    /// M3.12b hook: every connection was replaced by one to the serving
-    /// daemon, so the pause held across the lost connection ends.
-    pub fn reconnected(&self) {
-        self.update(HandoffState::reconnected);
+    /// A Window piece lost its daemon connection: starts reconnecting when a
+    /// handoff is preparing or fenced (the exec may come before a pane reads
+    /// `Fenced`), or joins the reconnection already running. Returns whether
+    /// the Window is reconnecting; otherwise the loss is an ordinary failure.
+    #[must_use]
+    pub fn begin_reconnect(&self) -> bool {
+        let mut running = false;
+        self.update(|state| state.update(|state| running = state.begin_reconnect()));
+        running
+    }
+
+    /// The reconnection a coordinator should run now, by epoch, if any. An
+    /// epoch already answered, whose resnapshot the frontend has not applied
+    /// yet, needs no second run.
+    #[must_use]
+    pub fn reconnect_pending(&self) -> Option<u64> {
+        let state = self.lock();
+        (state.reconnect == Reconnect::Pending).then_some(state.reconnect_epoch)
+    }
+
+    /// Every connection was replaced by one to the daemon serving
+    /// `daemon_generation` and every pane resnapshotted, so the pause held
+    /// across the lost connection ends.
+    pub fn reconnected(&self, daemon_generation: u64) {
+        self.update(|state| state.reconnected(daemon_generation));
+    }
+
+    /// Reconnection failed: the Window stays paused with its last screen and
+    /// says its connection to splinterd is lost.
+    pub fn reconnect_failed(&self) {
+        self.update(HandoffState::reconnect_failed);
     }
 
     /// M3.14 hook: the continuation reported a rollback. Ends the pause and
@@ -354,8 +454,8 @@ impl HandoffStatusHub {
 }
 
 /// One pane subscription's report channel into its Window's hub. Dropping it
-/// withdraws the pane's report; [`Self::connection_lost`] instead keeps a
-/// fenced Window paused.
+/// withdraws the pane's report; [`Self::connection_lost`] instead starts
+/// reconnection when a handoff is preparing or fenced.
 #[derive(Debug)]
 pub struct HandoffStatusSource {
     hub: HandoffStatusHub,
@@ -467,9 +567,9 @@ impl HandoffPresentation {
     pub fn banner(&self) -> Option<HandoffBanner> {
         match self.phase {
             WindowHandoffPhase::Preparing => Some(HandoffBanner::Preparing),
-            WindowHandoffPhase::Fenced | WindowHandoffPhase::AwaitingReconnect => {
-                Some(HandoffBanner::InputPaused)
-            }
+            WindowHandoffPhase::Fenced => Some(HandoffBanner::InputPaused),
+            WindowHandoffPhase::Reconnecting => Some(HandoffBanner::Reconnecting),
+            WindowHandoffPhase::Lost => Some(HandoffBanner::Lost),
             WindowHandoffPhase::Idle => {
                 self.notice.map(|(notice, _)| HandoffBanner::Notice(notice))
             }
@@ -631,47 +731,139 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_lost_while_fenced_stays_paused_until_reconnected() {
+    fn a_connection_lost_while_fenced_reconnects_until_reconnected() {
         let hub = HandoffStatusHub::default();
         let first = hub.source();
         let second = hub.source();
         assert!(first.observe(GENERATION, HandoffStatusPhase::Fenced));
         assert!(!second.observe(GENERATION, HandoffStatusPhase::Fenced));
+        assert_eq!(hub.reconnect_pending(), None);
         first.connection_lost();
-        assert_eq!(hub.view().phase, WindowHandoffPhase::AwaitingReconnect);
-        drop(second);
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Reconnecting);
+        let epoch = hub.reconnect_pending().expect("a coordinator reconnects");
+        second.connection_lost();
         assert_eq!(
             hub.view().phase,
-            WindowHandoffPhase::AwaitingReconnect,
+            WindowHandoffPhase::Reconnecting,
             "the committed handoff's exec closes every connection"
         );
+        assert_eq!(hub.reconnect_pending(), Some(epoch), "one reconnection");
         assert!(hub.input_paused());
-        hub.reconnected();
+        hub.reconnected(GENERATION + 1);
         assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
         assert!(!hub.input_paused());
+        assert_eq!(hub.reconnect_pending(), None);
+        assert!(hub.view().notice.is_none(), "a reconnection is no cancel");
     }
 
     #[test]
-    fn a_connection_lost_while_preparing_or_idle_does_not_stick() {
+    fn the_exec_race_a_loss_after_only_preparing_reconnects() {
+        // `Fenced` is queued per subscription, so the daemon can exec before
+        // a pane reads it: the pane sees `Preparing` and then the loss.
         let hub = HandoffStatusHub::default();
         let pane = hub.source();
         assert!(pane.observe(GENERATION, HandoffStatusPhase::Preparing));
         pane.connection_lost();
-        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Reconnecting);
+        assert!(hub.input_paused());
+        assert!(hub.reconnect_pending().is_some());
+    }
+
+    #[test]
+    fn a_loss_with_no_handoff_heard_is_an_ordinary_failure() {
+        let hub = HandoffStatusHub::default();
         hub.source().connection_lost();
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+        assert!(!hub.begin_reconnect());
+        assert_eq!(hub.reconnect_pending(), None);
+    }
+
+    #[test]
+    fn a_coordinator_loss_during_preparing_starts_reconnection_once() {
+        let hub = HandoffStatusHub::default();
+        let pane = hub.source();
+        pane.observe(GENERATION, HandoffStatusPhase::Preparing);
+        assert!(hub.begin_reconnect());
+        let epoch = hub.reconnect_pending().unwrap();
+        // Later losses join the reconnection already running.
+        assert!(hub.begin_reconnect());
+        pane.connection_lost();
+        assert_eq!(hub.reconnect_pending(), Some(epoch));
+        hub.reconnected(GENERATION);
+        // The next attempt's loss is a new reconnection.
+        let pane = hub.source();
+        pane.observe(GENERATION, HandoffStatusPhase::Fenced);
+        assert!(hub.begin_reconnect());
+        assert_ne!(hub.reconnect_pending(), Some(epoch));
+    }
+
+    #[test]
+    fn reconnecting_at_the_same_generation_keeps_a_live_attempt_paused() {
+        let hub = HandoffStatusHub::default();
+        let lost = hub.source();
+        let live = hub.source();
+        lost.observe(GENERATION, HandoffStatusPhase::Preparing);
+        live.observe(GENERATION, HandoffStatusPhase::Preparing);
+        lost.connection_lost();
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Reconnecting);
+        // The same daemon answers and the attempt is still preparing: the
+        // live pane's report stands.
+        hub.reconnected(GENERATION);
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Preparing);
+        // At the same generation with no attempt left, it simply resumes.
+        assert!(live.observe(GENERATION, cancelled(HandoffCancelReason::Failed)));
         assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
     }
 
     #[test]
-    fn a_cancel_from_a_live_pane_ends_a_lost_connection_pause() {
+    fn a_newer_generation_after_reconnection_voids_the_old_attempt() {
+        let hub = HandoffStatusHub::default();
+        let retired = hub.source();
+        let lost = hub.source();
+        retired.observe(GENERATION, HandoffStatusPhase::Fenced);
+        lost.observe(GENERATION, HandoffStatusPhase::Fenced);
+        lost.connection_lost();
+        hub.reconnected(GENERATION + 1);
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+        // A pane not yet retired cannot report the old daemon's attempt.
+        assert!(!retired.observe(GENERATION, HandoffStatusPhase::Fenced));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+    }
+
+    #[test]
+    fn a_cancel_while_reconnecting_waits_for_the_resnapshot() {
         let hub = HandoffStatusHub::default();
         let lost = hub.source();
         let live = hub.source();
         assert!(lost.observe(GENERATION, HandoffStatusPhase::Fenced));
         assert!(!live.observe(GENERATION, HandoffStatusPhase::Fenced));
         lost.connection_lost();
-        assert!(live.observe(GENERATION, cancelled(HandoffCancelReason::Failed)));
+        // The daemon kept serving, but the lost pane has no stream until the
+        // coordinator replaces it, so the Window stays paused.
+        live.observe(GENERATION, cancelled(HandoffCancelReason::Failed));
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Reconnecting);
+        assert!(hub.input_paused());
+        hub.reconnected(GENERATION);
         assert_eq!(hub.view().phase, WindowHandoffPhase::Idle);
+    }
+
+    #[test]
+    fn a_failed_reconnection_stays_lost_and_paused() {
+        let hub = HandoffStatusHub::default();
+        let pane = hub.source();
+        pane.observe(GENERATION, HandoffStatusPhase::Fenced);
+        pane.connection_lost();
+        hub.reconnect_failed();
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Lost);
+        assert!(hub.input_paused());
+        assert_eq!(hub.reconnect_pending(), None);
+        assert!(!hub.begin_reconnect(), "nothing reconnects a lost Window");
+        // No report can revive it: nothing current is connected.
+        let late = hub.source();
+        assert!(!late.observe(GENERATION + 1, cancelled(HandoffCancelReason::Failed)));
+        late.connection_lost();
+        assert_eq!(hub.view().phase, WindowHandoffPhase::Lost);
+        assert!(hub.input_paused());
     }
 
     #[test]
@@ -737,6 +929,11 @@ mod tests {
             HandoffBanner::Notice(HandoffNotice::RolledBack).text(),
             "Rolled back"
         );
+        assert_eq!(HandoffBanner::Reconnecting.text(), "Reconnecting…");
+        assert_eq!(
+            HandoffBanner::Lost.text(),
+            "Lost connection to splinterd — reopen from the launcher"
+        );
     }
 
     #[test]
@@ -795,11 +992,11 @@ mod tests {
     }
 
     #[test]
-    fn presentation_keeps_the_paused_banner_after_a_lost_connection() {
+    fn presentation_shows_reconnecting_then_lost_after_a_lost_connection() {
         let hub = HandoffStatusHub::default();
         let pane = hub.source();
         let mut presentation = HandoffPresentation::default();
-        pane.observe(GENERATION, HandoffStatusPhase::Fenced);
+        pane.observe(GENERATION, HandoffStatusPhase::Preparing);
         presentation.apply(hub.view(), Instant::now());
         pane.connection_lost();
         assert_eq!(
@@ -809,8 +1006,19 @@ mod tests {
                 pause_changed: false,
             }
         );
-        assert_eq!(presentation.phase(), WindowHandoffPhase::AwaitingReconnect);
-        assert_eq!(presentation.banner(), Some(HandoffBanner::InputPaused));
+        assert_eq!(presentation.phase(), WindowHandoffPhase::Reconnecting);
+        assert_eq!(presentation.banner(), Some(HandoffBanner::Reconnecting));
+        hub.reconnect_failed();
+        assert_eq!(
+            presentation.apply(hub.view(), Instant::now()),
+            HandoffTransition {
+                changed: true,
+                pause_changed: false,
+            }
+        );
+        assert!(presentation.input_paused());
+        assert_eq!(presentation.banner(), Some(HandoffBanner::Lost));
+        assert_eq!(presentation.deadline(), None, "the lost message stays");
     }
 
     #[test]

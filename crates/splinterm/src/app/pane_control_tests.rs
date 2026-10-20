@@ -881,9 +881,12 @@ async fn a_handoff_refusal_drops_input_without_failing_the_controller() {
     result.unwrap();
 }
 
-/// A connection lost while fenced keeps the Window paused for reconnection.
-#[tokio::test]
-async fn a_connection_lost_while_fenced_keeps_the_window_paused() {
+/// Runs a controller whose daemon reports `phase` and then closes the
+/// connection, as a committed handoff's exec does; returns the Window's
+/// handoff phase afterwards.
+async fn handoff_phase_after_connection_loss(
+    phase: HandoffStatusPhase,
+) -> splinterm::handoff_status::WindowHandoffPhase {
     let id = SplintId::new();
     let hub = HandoffStatusHub::default();
     let (client, server) = tokio::io::duplex(65536);
@@ -902,7 +905,7 @@ async fn a_connection_lost_while_fenced_keeps_the_window_paused() {
             },
         )
         .await;
-        send_frame(&mut writer, handoff_event(1, HandoffStatusPhase::Fenced)).await;
+        send_frame(&mut writer, handoff_event(1, phase)).await;
         // The daemon execs: the connection closes.
     });
     let (reader, writer) = tokio::io::split(client);
@@ -934,8 +937,28 @@ async fn a_connection_lost_while_fenced_keeps_the_window_paused() {
     .expect("a lost connection ends the controller");
     server.await.unwrap();
     assert!(result.is_err());
+    assert!(
+        hub.input_paused(),
+        "nothing typed meanwhile reaches the daemon"
+    );
+    hub.view().phase
+}
+
+/// A connection lost while fenced starts the Window's reconnection.
+#[tokio::test]
+async fn a_connection_lost_while_fenced_reconnects_the_window() {
     assert_eq!(
-        hub.view().phase,
-        splinterm::handoff_status::WindowHandoffPhase::AwaitingReconnect
+        handoff_phase_after_connection_loss(HandoffStatusPhase::Fenced).await,
+        splinterm::handoff_status::WindowHandoffPhase::Reconnecting
+    );
+}
+
+/// The exec race: the daemon can exec before this subscription delivers
+/// `Fenced`, so a loss after only `Preparing` reconnects too.
+#[tokio::test]
+async fn a_connection_lost_after_only_preparing_reconnects_the_window() {
+    assert_eq!(
+        handoff_phase_after_connection_loss(HandoffStatusPhase::Preparing).await,
+        splinterm::handoff_status::WindowHandoffPhase::Reconnecting
     );
 }

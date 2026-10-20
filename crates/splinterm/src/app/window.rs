@@ -4,12 +4,17 @@ use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use splinterm::{
-    PerfTraceCorrelation, WindowOptions, WindowUpdate,
-    automation::{Connection, MAX_RENDERER_IMAGE_RESIDENT_BYTES, SharedImageContentCache},
+    PerfTraceCorrelation, WindowCommand, WindowOptions, WindowUpdate,
+    automation::{
+        Connection, DaemonChange, DaemonIdentity, MAX_RENDERER_IMAGE_RESIDENT_BYTES,
+        SharedImageContentCache, is_connection_loss, retry_until,
+    },
     config::{AppConfig, FontAuthority, TopologyReloadSettings},
     endpoint::{
-        ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, LaunchSemantics,
+        ConnectionFactory, ForcedControlTransfer, GraphicalFocusPublication, ImageTransport,
+        LaunchSemantics,
     },
+    handoff_status::{RECONNECT_WINDOW, WindowHandoffPhase},
     renderer::{self, RendererOptions},
     run_window,
 };
@@ -23,11 +28,12 @@ use tokio::sync::{mpsc, watch};
 use super::{
     font_watch::{FontUpdateSink, watch_font},
     pane_bridge::{
-        ControllerOutputs, EventAction, WINDOW_COMMAND_QUEUE, WINDOW_UPDATE_QUEUE, attach,
-        classify_subscription_event, layout_splint_ids, lease_snapshot_images, lease_update_images,
+        Attachment, ControllerOutputs, EventAction, UNTRUSTED_AFTER_UPGRADE, WINDOW_COMMAND_QUEUE,
+        WINDOW_UPDATE_QUEUE, attach, classify_subscription_event, drive_controller,
+        handoff_refused, layout_splint_ids, lease_snapshot_images, lease_update_images,
         load_authority_status, optional_pane_controller, pane_access_scopes,
-        pane_claims_initial_control, prepare_live_pane, resolve_image_contents,
-        resolve_update_images, resynchronize, run_controller, terminal_grid_limits,
+        pane_claims_initial_control, prepare_live_pane, refused_as_untrusted,
+        resolve_image_contents, resolve_update_images, resynchronize, terminal_grid_limits,
         update_advances_from, validate_attached_snapshot,
     },
     theme_watch::{ThemeOverrides, ThemeUpdateSink, load_startup_theme_for_watch, watch_theme},
@@ -52,22 +58,283 @@ impl Drop for AbortOnDropTask {
     }
 }
 
-async fn run_graphical_focus_reporter(
-    factory: ConnectionFactory,
-    mut updates: watch::Receiver<Option<SplintId>>,
+/// How often the focus reporter looks whether its Window reconnected.
+const FOCUS_RECONNECT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Publishes the Window's graphical focus on one connection until the
+/// Window closes (`Ok`) or the connection fails.
+async fn publish_graphical_focus(
+    factory: &ConnectionFactory,
+    updates: &mut watch::Receiver<Option<SplintId>>,
 ) -> Result<()> {
     let mut connection = factory.connect().await?;
     loop {
         let focused_splint_id = *updates.borrow_and_update();
-        let response = connection
+        match connection
             .request(Request::PublishGraphicalFocus { focused_splint_id })
-            .await?;
-        anyhow::ensure!(
-            matches!(response, Response::Acknowledged),
-            "splinterd rejected graphical focus publication"
-        );
+            .await
+        {
+            Ok(Response::Acknowledged) => {}
+            Ok(_) => bail!("splinterd rejected graphical focus publication"),
+            // Fenced by a handoff: this focus is dropped, the next is sent.
+            Err(error) if handoff_refused(&error) => {}
+            Err(error) => return Err(error),
+        }
         if updates.changed().await.is_err() {
             return Ok(());
+        }
+    }
+}
+
+/// Publishes graphical focus for the Window's lifetime. A connection lost
+/// during a handoff comes back once the Window has reconnected, and the
+/// current focus is published again (Plan 0061 M3.12b).
+async fn run_graphical_focus_reporter(
+    factory: ConnectionFactory,
+    mut updates: watch::Receiver<Option<SplintId>>,
+) -> Result<()> {
+    let hub = factory.handoff_status().clone();
+    loop {
+        let error = match publish_graphical_focus(&factory, &mut updates).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !is_connection_loss(&error) || !hub.begin_reconnect() {
+            return Err(error);
+        }
+        loop {
+            tokio::time::sleep(FOCUS_RECONNECT_POLL).await;
+            if updates.has_changed().is_err() {
+                return Ok(());
+            }
+            match hub.view().phase {
+                WindowHandoffPhase::Reconnecting => {}
+                WindowHandoffPhase::Lost => return Err(error),
+                WindowHandoffPhase::Idle
+                | WindowHandoffPhase::Preparing
+                | WindowHandoffPhase::Fenced => break,
+            }
+        }
+    }
+}
+
+/// A single-pane Window's controller task. It hands its command queue back
+/// when it ends, so a reconnection can give the queue the frontend sends to
+/// to the next controller.
+type SinglePaneController = tokio::task::JoinHandle<(Result<()>, mpsc::Receiver<WindowCommand>)>;
+
+/// Starts a single-pane Window's controller; returns it with its resync
+/// requests and its cancellation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the controller's identity, authority, and queues are passed through"
+)]
+fn spawn_single_pane_controller(
+    factory: &ConnectionFactory,
+    control: Connection,
+    commands: mpsc::Receiver<WindowCommand>,
+    updates: mpsc::Sender<WindowUpdate>,
+    controller_id: Option<u64>,
+    splint_id: SplintId,
+    incarnation: u64,
+    resize_delay_ms: u64,
+) -> (
+    SinglePaneController,
+    mpsc::Receiver<()>,
+    tokio_util::sync::CancellationToken,
+) {
+    let (resync_sender, resyncs) = mpsc::channel(1);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let outputs = ControllerOutputs {
+        updates,
+        resyncs: resync_sender,
+        handoff: factory.handoff_status().source(),
+    };
+    let forced_control_transfer = factory.capabilities().forced_control_transfer;
+    let token = cancellation.clone();
+    let task = tokio::spawn(async move {
+        let mut commands = commands;
+        let result = drive_controller(
+            control,
+            &mut commands,
+            outputs,
+            controller_id,
+            splint_id,
+            incarnation,
+            forced_control_transfer,
+            resize_delay_ms,
+            token,
+        )
+        .await;
+        (result, commands)
+    });
+    (task, resyncs, cancellation)
+}
+
+async fn finish_controller(controller: SinglePaneController) -> Result<()> {
+    controller.await.context("window controller task failed")?.0
+}
+
+/// A single-pane Window's Splint reattached on a fresh connection.
+struct SinglePaneAttachment {
+    connection: Connection,
+    attachment: Attachment,
+    control: Connection,
+    controller_id: Option<u64>,
+    daemon: DaemonIdentity,
+}
+
+/// What one reattachment attempt found.
+enum Reattach {
+    Attached(Box<SinglePaneAttachment>),
+    /// The Splint's process ended, or another took its place, meanwhile.
+    Ended,
+    /// A different daemon answers: not a continuation.
+    Restarted,
+    /// The daemon refused this client build as no longer the installed one.
+    Untrusted,
+}
+
+/// Attaches the single-pane Window's Splint again after its daemon
+/// connection was lost during a handoff, with fresh connection-owned IDs.
+async fn reattach_single_pane(
+    factory: &ConnectionFactory,
+    splint_id: SplintId,
+    incarnation: u64,
+    image_transport: ImageTransport,
+    image_cache: &SharedImageContentCache,
+    before: DaemonIdentity,
+) -> Result<Reattach> {
+    let mut connection = match factory.connect().await {
+        Err(error) if refused_as_untrusted(&error) => return Ok(Reattach::Untrusted),
+        connection => connection?,
+    };
+    let daemon = DaemonIdentity::of(&connection);
+    if before.change_to(daemon) == DaemonChange::Restarted {
+        return Ok(Reattach::Restarted);
+    }
+    let Response::Splint { runtime, .. } = connection
+        .request(Request::InspectSplint { splint_id })
+        .await?
+    else {
+        bail!("splinterd did not return the selected Splint identity");
+    };
+    if runtime.splint_id != splint_id || runtime.live_incarnation != Some(incarnation) {
+        return Ok(Reattach::Ended);
+    }
+    if !matches!(
+        connection
+            .request(Request::RequestAccess {
+                splint_id,
+                incarnation,
+                scopes: pane_access_scopes(),
+            })
+            .await?,
+        Response::AccessGranted { .. }
+    ) {
+        bail!("splinterd did not grant requested terminal access");
+    }
+    let attachment = attach(&mut connection, splint_id, incarnation).await?;
+    resolve_image_contents(
+        image_transport,
+        &mut connection,
+        &attachment.snapshot,
+        image_cache,
+    )
+    .await?;
+    let mut control = factory.connect().await?;
+    if control.live_incarnation(splint_id).await? != incarnation {
+        return Ok(Reattach::Ended);
+    }
+    let controller_id = optional_pane_controller(
+        control
+            .acquire_control(
+                splint_id,
+                incarnation,
+                vec![ControlMode::Input, ControlMode::Resize],
+            )
+            .await,
+    )?;
+    Ok(Reattach::Attached(Box::new(SinglePaneAttachment {
+        connection,
+        attachment,
+        control,
+        controller_id,
+        daemon,
+    })))
+}
+
+/// How a single-pane Window's reconnection ended.
+enum SinglePaneReconnect {
+    Attached(Box<SinglePaneAttachment>),
+    Ended,
+    Lost,
+    /// The Window closed meanwhile, with its result.
+    WindowClosed(Result<()>),
+}
+
+/// Plan 0061 M3.12b: reattaches a single-pane Window for up to
+/// [`RECONNECT_WINDOW`], with backoff. Commands the frontend sends meanwhile
+/// (scrollback reads, say) are dropped: they would answer a stale view, and
+/// a full queue would end the Window.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the Window, its queue, and the Splint's identity are lent to one reconnection"
+)]
+async fn reconnect_single_pane(
+    factory: &ConnectionFactory,
+    window: &mut tokio::task::JoinHandle<Result<()>>,
+    commands: &mut mpsc::Receiver<WindowCommand>,
+    splint_id: SplintId,
+    incarnation: u64,
+    image_transport: ImageTransport,
+    image_cache: &SharedImageContentCache,
+    before: DaemonIdentity,
+) -> Result<SinglePaneReconnect> {
+    let deadline = tokio::time::Instant::now() + RECONNECT_WINDOW;
+    let reattach = retry_until(deadline, || {
+        reattach_single_pane(
+            factory,
+            splint_id,
+            incarnation,
+            image_transport,
+            image_cache,
+            before,
+        )
+    });
+    tokio::pin!(reattach);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut *window => {
+                return Ok(SinglePaneReconnect::WindowClosed(
+                    result.context("Wayland window task failed")?,
+                ));
+            }
+            outcome = &mut reattach => {
+                return Ok(match outcome {
+                    Ok(Reattach::Attached(attached)) => SinglePaneReconnect::Attached(attached),
+                    Ok(Reattach::Ended) => SinglePaneReconnect::Ended,
+                    Ok(Reattach::Untrusted) => {
+                        eprintln!("{UNTRUSTED_AFTER_UPGRADE}");
+                        factory.handoff_status().reconnect_failed();
+                        SinglePaneReconnect::Lost
+                    }
+                    Ok(Reattach::Restarted) => {
+                        eprintln!(
+                            "splinterm: splinterd restarted during the upgrade; this Window keeps its last screen"
+                        );
+                        factory.handoff_status().reconnect_failed();
+                        SinglePaneReconnect::Lost
+                    }
+                    Err(error) => {
+                        eprintln!("splinterm: could not reconnect to splinterd: {error:#}");
+                        factory.handoff_status().reconnect_failed();
+                        SinglePaneReconnect::Lost
+                    }
+                });
+            }
+            Some(_) = commands.recv() => {}
         }
     }
 }
@@ -406,23 +673,17 @@ pub(super) async fn run_live_window(
         )))
     });
     let (command_sender, commands) = mpsc::channel(WINDOW_COMMAND_QUEUE);
-    let (resync_sender, mut resyncs) = mpsc::channel(1);
-    let controller_cancellation = tokio_util::sync::CancellationToken::new();
-    let mut controller = tokio::spawn(run_controller(
+    let mut daemon = DaemonIdentity::of(&connection);
+    let (mut controller, mut resyncs, mut controller_cancellation) = spawn_single_pane_controller(
+        &factory,
         control,
         commands,
-        ControllerOutputs {
-            updates: updates.clone(),
-            resyncs: resync_sender,
-            handoff: factory.handoff_status().source(),
-        },
+        updates.clone(),
         controller_id,
         splint_id,
         incarnation,
-        factory.capabilities().forced_control_transfer,
         config.resize_delay_ms,
-        controller_cancellation,
-    ));
+    );
     let mut last_revision = attachment.snapshot.revision;
     let initial_snapshot = attachment.snapshot;
     let window_config = config.clone();
@@ -463,23 +724,34 @@ pub(super) async fn run_live_window(
     let mut last_sequence = 0_u64;
 
     loop {
+        // Set when a daemon connection was lost during a handoff, with the
+        // command queue the next controller takes over (Plan 0061 M3.12b).
+        let mut reconnect_with = None;
         tokio::select! {
             biased;
             result = &mut window => {
                 // Dropping the window closes its command sender. The controller task then
                 // releases the lease explicitly; connection teardown is the fallback.
                 let window_result = result.context("Wayland window task failed")?;
-                controller
-                    .await
-                    .context("window controller task failed")??;
+                finish_controller(controller).await?;
                 return window_result;
             }
             result = &mut controller => {
-                let controller_result = result.context("window controller task failed")?;
-                let _ = updates.send(WindowUpdate::Shutdown).await;
-                let window_result = window.await.context("Wayland window task failed")?;
-                controller_result?;
-                return window_result;
+                let (controller_result, commands) =
+                    result.context("window controller task failed")?;
+                if controller_result.is_err()
+                    && factory.handoff_status().reconnect_pending().is_some()
+                {
+                    // The controller's connection was lost while a handoff
+                    // was preparing or fenced; it already started the
+                    // Window's reconnection.
+                    reconnect_with = Some(commands);
+                } else {
+                    let _ = updates.send(WindowUpdate::Shutdown).await;
+                    let window_result = window.await.context("Wayland window task failed")?;
+                    controller_result?;
+                    return window_result;
+                }
             }
             Some(()) = resyncs.recv() => {
                 if std::env::var_os("SPLINTERM_SCROLL_TRACE").is_some() {
@@ -505,19 +777,32 @@ pub(super) async fn run_live_window(
                     .is_err()
                 {
                     let window_result = window.await.context("Wayland window task failed")?;
-                    controller.await.context("window controller task failed")??;
+                    finish_controller(controller).await?;
                     return window_result;
                 }
                 last_revision = attachment.snapshot.revision;
                 last_sequence = 0;
             }
             frame = connection.next_server_frame() => {
-                match frame? {
-                    ServerFrame::Event {
+                match frame {
+                    // The attachment's connection was lost while a handoff
+                    // was preparing or fenced: the Window reconnects. The
+                    // controller is stopped first to take its queue back.
+                    Err(error)
+                        if is_connection_loss(&error) && factory.handoff_status().begin_reconnect() =>
+                    {
+                        controller_cancellation.cancel();
+                        let (_, commands) = (&mut controller)
+                            .await
+                            .context("window controller task failed")?;
+                        reconnect_with = Some(commands);
+                    }
+                    Err(error) => return Err(error),
+                    Ok(ServerFrame::Event {
                         subscription_id,
                         sequence,
                         event,
-                    } => match classify_subscription_event(
+                    }) => match classify_subscription_event(
                         attachment.subscription_id,
                         last_sequence,
                         subscription_id,
@@ -539,7 +824,7 @@ pub(super) async fn run_live_window(
                                 authoritative: false,
                             }).await.is_err() {
                                 let window_result = window.await.context("Wayland window task failed")?;
-                                controller.await.context("window controller task failed")??;
+                                finish_controller(controller).await?;
                                 return window_result;
                             }
                             last_sequence = sequence;
@@ -593,7 +878,7 @@ pub(super) async fn run_live_window(
                             {
                                 let window_result =
                                     window.await.context("Wayland window task failed")?;
-                                controller.await.context("window controller task failed")??;
+                                finish_controller(controller).await?;
                                 return window_result;
                             }
                             last_sequence = sequence;
@@ -625,7 +910,7 @@ pub(super) async fn run_live_window(
                                 .is_err()
                             {
                                 let window_result = window.await.context("Wayland window task failed")?;
-                                controller.await.context("window controller task failed")??;
+                                finish_controller(controller).await?;
                                 return window_result;
                             }
                             last_revision = attachment.snapshot.revision;
@@ -657,7 +942,7 @@ pub(super) async fn run_live_window(
                                 .is_err()
                             {
                                 let window_result = window.await.context("Wayland window task failed")?;
-                                controller.await.context("window controller task failed")??;
+                                finish_controller(controller).await?;
                                 return window_result;
                             }
                             last_revision = attachment.snapshot.revision;
@@ -666,16 +951,96 @@ pub(super) async fn run_live_window(
                         EventAction::Exited | EventAction::Shutdown => {
                             let _ = updates.send(WindowUpdate::Shutdown).await;
                             let window_result = window.await.context("Wayland window task failed")?;
-                            controller
-                                .await
-                                .context("window controller task failed")??;
+                            finish_controller(controller).await?;
                             return window_result;
                         }
                     },
-                    ServerFrame::Error { error, .. } => {
+                    Ok(ServerFrame::Error { error, .. }) => {
                         bail!("splinterd: {}", error.message);
                     }
-                    _ => bail!("splinterd sent an unexpected frame while subscribed"),
+                    Ok(_) => bail!("splinterd sent an unexpected frame while subscribed"),
+                }
+            }
+        }
+        let Some(mut commands) = reconnect_with else {
+            continue;
+        };
+        let outcome = reconnect_single_pane(
+            &factory,
+            &mut window,
+            &mut commands,
+            splint_id,
+            incarnation,
+            image_transport,
+            &image_cache,
+            daemon,
+        )
+        .await?;
+        match outcome {
+            SinglePaneReconnect::WindowClosed(window_result) => return window_result,
+            SinglePaneReconnect::Attached(attached) => {
+                let SinglePaneAttachment {
+                    connection: next_connection,
+                    attachment: next_attachment,
+                    control,
+                    controller_id,
+                    daemon: serving,
+                } = *attached;
+                if let DaemonChange::Upgraded { from, to } = daemon.change_to(serving) {
+                    eprintln!(
+                        "splinterm: reconnected to upgraded splinterd (generation {from} → {to})"
+                    );
+                }
+                connection = next_connection;
+                attachment = next_attachment;
+                daemon = serving;
+                (controller, resyncs, controller_cancellation) = spawn_single_pane_controller(
+                    &factory,
+                    control,
+                    commands,
+                    updates.clone(),
+                    controller_id,
+                    splint_id,
+                    incarnation,
+                    config.resize_delay_ms,
+                );
+                let image_sources = lease_snapshot_images(&image_cache, &attachment.snapshot)?;
+                if updates
+                    .send(WindowUpdate::Snapshot {
+                        snapshot: attachment.snapshot.clone(),
+                        image_sources,
+                        authoritative: true,
+                    })
+                    .await
+                    .is_err()
+                {
+                    let window_result = window.await.context("Wayland window task failed")?;
+                    finish_controller(controller).await?;
+                    return window_result;
+                }
+                last_revision = attachment.snapshot.revision;
+                last_sequence = 0;
+                // The resnapshot is queued before the pause ends, so input
+                // never opens on the screen from before the loss.
+                factory.handoff_status().reconnected(daemon.generation);
+            }
+            SinglePaneReconnect::Ended => {
+                // The Splint ended meanwhile, which ends a single-pane Window.
+                factory.handoff_status().reconnected(daemon.generation);
+                let _ = updates.send(WindowUpdate::Shutdown).await;
+                return window.await.context("Wayland window task failed")?;
+            }
+            SinglePaneReconnect::Lost => {
+                // The Window stays open, paused, with its last screen until
+                // it is closed; its commands go nowhere.
+                loop {
+                    tokio::select! {
+                        biased;
+                        result = &mut window => {
+                            return result.context("Wayland window task failed")?;
+                        }
+                        Some(_) = commands.recv() => {}
+                    }
                 }
             }
         }

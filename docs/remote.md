@@ -399,6 +399,14 @@ connections, releasing subscriptions and controller leases. It sends no kill,
 close, restore, or other process-lifecycle request, so daemon-owned remote
 Splints continue running.
 
+When the remote daemon is upgraded live, its logical channels end while the SSH
+session and relay stay up. The Window then shows "Reconnecting…" and opens new
+logical channels on the same session for up to about 30 seconds, as a local
+Window reconnects. Splinterm never starts OpenSSH again or re-authenticates by
+itself: when the outer SSH transport or the relay is gone, reconnection fails
+and the Window keeps its last screen with "Lost connection to splinterd —
+reopen from the launcher".
+
 ## Remote window hostname tag
 
 Available in the 0.1.1 source; publication is pending.

@@ -10,7 +10,7 @@ use splinterm::{
     LairPromptTarget, SelectorKind, SessionPickerCatalog, SessionPickerCreationTarget,
     SessionPickerItem, SessionPickerTarget, WindowDojoIdentity, WindowPaneOptions,
     WindowTopologyCommand, WindowTopologyUpdate,
-    automation::{Connection, SharedImageContentCache, protocol_error},
+    automation::{Connection, DaemonIdentity, SharedImageContentCache, protocol_error},
     config::{AppConfig, TopologyReloadSettings},
     endpoint::{ConnectionFactory, LaunchSemantics},
     navigation_projection::{
@@ -32,6 +32,11 @@ use splinterm_protocol::{
     validate_preset_materialized,
 };
 use tokio::sync::{mpsc, watch};
+
+#[path = "topology_reconnect.rs"]
+mod reconnect;
+
+use reconnect::{ManagedReconnect, reconnect_managed_window};
 
 use super::{
     pane_bridge::{PaneTask, layout_splint_ids, prepare_live_pane_at_incarnation},
@@ -3351,6 +3356,136 @@ async fn next_topology_manager_wake(
     wake
 }
 
+/// How a reconnection the manager ran ended, with what it means for its loop.
+enum ReconnectOutcome {
+    Resumed {
+        connection: Box<Connection>,
+        daemon: DaemonIdentity,
+        /// The Window's close notice was queued behind the abandoned commands.
+        close_window: bool,
+    },
+    Lost,
+    WindowGone,
+}
+
+/// What the frontend hears about a topology command the manager did not run
+/// because its daemon connection was lost during a handoff.
+const ABANDONED_FOR_RECONNECT: &str = "not run: splinterd was upgrading; try again";
+
+/// Plan 0061 M3.12b: what the frontend hears about a command it sent before
+/// the Window's daemon connection was lost, which does not run. Running it
+/// against the serving daemon after reconnection would replay it; instead an
+/// optimistic split placeholder is rolled back and any picker or Explorer
+/// activation waiting for an answer is released.
+fn abandoned_command_updates(
+    command: WindowTopologyCommand,
+    state: &TopologyManagerState,
+) -> Vec<WindowTopologyUpdate> {
+    let command = match command {
+        WindowTopologyCommand::ExplorerContext { command, .. } => *command,
+        command => command,
+    };
+    let mut updates = Vec::with_capacity(2);
+    if let WindowTopologyCommand::Split {
+        dojo_id,
+        target,
+        pending: Some(pending),
+        ..
+    } = &command
+        && let Some(tab) = state.tabs.get(*dojo_id)
+    {
+        updates.push(WindowTopologyUpdate::Apply {
+            topology_revision: tab.value.identity.topology_revision,
+            dojo_id: *dojo_id,
+            layout: tab.value.root.clone(),
+            added: Vec::new(),
+            removed: vec![*pending],
+            focused: Some(*target),
+        });
+    }
+    let explorer_target = match &command {
+        WindowTopologyCommand::OpenDojo {
+            explorer_target, ..
+        } => *explorer_target,
+        _ => None,
+    };
+    updates.push(WindowTopologyUpdate::TabFailed {
+        explorer_target,
+        dojo_id: None,
+        message: ABANDONED_FOR_RECONNECT.to_owned(),
+    });
+    updates
+}
+
+/// Abandons `command` and every command queued now: returns what the frontend
+/// hears, and whether the Window's close notice was among them.
+fn abandon_queued_commands(
+    command: Option<WindowTopologyCommand>,
+    commands: &mut mpsc::Receiver<WindowTopologyCommand>,
+    state: &TopologyManagerState,
+) -> (Vec<WindowTopologyUpdate>, bool) {
+    let mut close_window = false;
+    let mut pending = Vec::new();
+    for command in command
+        .into_iter()
+        .chain(std::iter::from_fn(|| commands.try_recv().ok()))
+    {
+        if matches!(command, WindowTopologyCommand::CloseWindow) {
+            close_window = true;
+        } else {
+            pending.extend(abandoned_command_updates(command, state));
+        }
+    }
+    (pending, close_window)
+}
+
+async fn send_topology_updates(
+    pending: Vec<WindowTopologyUpdate>,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+) {
+    for update in pending {
+        let _ = updates.send(update).await;
+    }
+}
+
+/// Reconnects the Window, abandoning `command` and every command queued
+/// before or during the reconnection: all were sent before the connection
+/// was lost (the frontend sends none while disconnected) and none is
+/// replayed. Placeholders are rolled back before the resnapshot lands. Only
+/// the close notice is kept.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the manager's loop state is lent to one reconnection"
+)]
+async fn reconnect_and_abandon(
+    factory: &ConnectionFactory,
+    config: &AppConfig,
+    image_cache: &SharedImageContentCache,
+    state: &mut TopologyManagerState,
+    updates: &mpsc::Sender<WindowTopologyUpdate>,
+    commands: &mut mpsc::Receiver<WindowTopologyCommand>,
+    command: Option<WindowTopologyCommand>,
+    daemon: DaemonIdentity,
+) -> ReconnectOutcome {
+    let (pending, mut close_window) = abandon_queued_commands(command, commands, state);
+    send_topology_updates(pending, updates).await;
+    let outcome =
+        reconnect_managed_window(factory, config, image_cache, state, updates, daemon).await;
+    let (connection, daemon) = match outcome {
+        ManagedReconnect::Resumed { connection, daemon } => (connection, daemon),
+        ManagedReconnect::Lost => return ReconnectOutcome::Lost,
+        ManagedReconnect::WindowGone => return ReconnectOutcome::WindowGone,
+    };
+    let (pending, closing) = abandon_queued_commands(None, commands, state);
+    send_topology_updates(pending, updates).await;
+    close_window |= closing;
+    ReconnectOutcome::Resumed {
+        connection,
+        daemon,
+        close_window,
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -3395,6 +3530,11 @@ pub(in crate::app) async fn run_topology_manager(
         agent_status_republish: false,
     };
     let mut window_closing = false;
+    // Plan 0061 M3.12b: the daemon this manager is connected to, the
+    // reconnection it last answered, and whether the Window gave up.
+    let mut daemon = DaemonIdentity::of(&connection);
+    let mut answered_reconnect = None;
+    let mut lost = false;
     loop {
         let command =
             match next_topology_manager_wake(&mut commands, &mut poll, &mut poll_priority).await {
@@ -3411,6 +3551,48 @@ pub(in crate::app) async fn run_topology_manager(
                 }
             };
         refresh_reloaded_settings(&mut config, &mut settings);
+        // A pane lost its daemon connection during a handoff: the whole
+        // Window reconnects and resnapshots before anything else runs.
+        let pending_reconnect = factory
+            .handoff_status()
+            .reconnect_pending()
+            .filter(|epoch| answered_reconnect != Some(*epoch));
+        if let Some(epoch) = pending_reconnect {
+            let outcome = reconnect_and_abandon(
+                &factory,
+                &config,
+                &image_cache,
+                &mut state,
+                &updates,
+                &mut commands,
+                command,
+                daemon,
+            )
+            .await;
+            match outcome {
+                ReconnectOutcome::Resumed {
+                    connection: next,
+                    daemon: serving,
+                    close_window,
+                } => {
+                    connection = *next;
+                    daemon = serving;
+                    answered_reconnect = Some(epoch);
+                    explorer_observation = ExplorerObservation::default();
+                    agent_status_observation = AgentStatusObservation::default();
+                    if close_window {
+                        window_closing = true;
+                        break;
+                    }
+                    continue;
+                }
+                ReconnectOutcome::Lost => {
+                    lost = true;
+                    break;
+                }
+                ReconnectOutcome::WindowGone => break,
+            }
+        }
         let command = if let Some(command) = command {
             match handle_session_manager_command(
                 &factory,
@@ -3432,6 +3614,45 @@ pub(in crate::app) async fn run_topology_manager(
         };
         let snapshot = match inspect_managed_topology(&mut connection).await {
             Ok(snapshot) => snapshot,
+            // This manager's own connection was lost while a handoff was
+            // preparing or fenced: it reconnects the Window.
+            Err(_) if factory.handoff_status().begin_reconnect() => {
+                let epoch = factory.handoff_status().reconnect_pending();
+                let outcome = reconnect_and_abandon(
+                    &factory,
+                    &config,
+                    &image_cache,
+                    &mut state,
+                    &updates,
+                    &mut commands,
+                    command,
+                    daemon,
+                )
+                .await;
+                match outcome {
+                    ReconnectOutcome::Resumed {
+                        connection: next,
+                        daemon: serving,
+                        close_window,
+                    } => {
+                        connection = *next;
+                        daemon = serving;
+                        answered_reconnect = epoch;
+                        explorer_observation = ExplorerObservation::default();
+                        agent_status_observation = AgentStatusObservation::default();
+                        if close_window {
+                            window_closing = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    ReconnectOutcome::Lost => {
+                        lost = true;
+                        break;
+                    }
+                    ReconnectOutcome::WindowGone => break,
+                }
+            }
             Err(error) => {
                 let _ = updates
                     .send(WindowTopologyUpdate::Shutdown(format!("{error:#}")))
@@ -3563,6 +3784,17 @@ pub(in crate::app) async fn run_topology_manager(
                 eprintln!("splinterm topology edit rejected");
             }
         }
+    }
+    if lost {
+        // The Window stays open, paused, with its last screen until it is
+        // closed. Nothing here talks to the daemon again; its terminals may
+        // still be running there.
+        while let Some(command) = commands.recv().await {
+            if matches!(command, WindowTopologyCommand::CloseWindow) {
+                break;
+            }
+        }
+        window_closing = false;
     }
     if window_closing {
         refresh_reloaded_settings(&mut config, &mut settings);
