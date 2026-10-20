@@ -50,6 +50,7 @@ use super::{
         interruption_kind, probe_daemon, retried_once,
     },
     keymap_cli::{run_config_command, run_keymap_command},
+    launcher_check::run_restart_dialog_client,
     local_service::{
         confirm_kill, run_policy_command, run_relay_command, run_reset_command, usage_error,
     },
@@ -100,6 +101,8 @@ pub(crate) async fn run() -> Result<()> {
             | Command::Consent
             | Command::Upgrade { .. }
             | Command::UpgradeDialog
+            | Command::LauncherCheck { .. }
+            | Command::RestartDialog
             | Command::Diagnostics { .. }
             | Command::Config { .. }
             | Command::Keymap { .. }
@@ -176,6 +179,8 @@ pub(crate) async fn run() -> Result<()> {
             Command::Consent
                 | Command::UpgradeDialog
                 | Command::Upgrade { .. }
+                | Command::LauncherCheck { .. }
+                | Command::RestartDialog
                 | Command::Remotes
                 | Command::Diagnostics { .. }
                 | Command::Config { .. }
@@ -195,6 +200,9 @@ pub(crate) async fn run() -> Result<()> {
     }
     if let Command::Upgrade { now } = command {
         return super::upgrade::run(now).await;
+    }
+    if let Command::LauncherCheck { after } = command {
+        return super::launcher_check::run(after).await;
     }
     if let Command::Diagnostics {
         last_exit,
@@ -380,6 +388,7 @@ fn graphical_command(command: &Command) -> bool {
             | Command::XdgLaunch { .. }
             | Command::Consent
             | Command::UpgradeDialog
+            | Command::RestartDialog
     ) || matches!(
         command,
         Command::Preset {
@@ -451,6 +460,9 @@ async fn run_configured_command(
         Command::UpgradeDialog => tokio::task::spawn_blocking(run_upgrade_dialog_client)
             .await
             .context("trusted upgrade dialog task failed")?,
+        Command::RestartDialog => tokio::task::spawn_blocking(run_restart_dialog_client)
+            .await
+            .context("trusted restart dialog task failed")?,
         Command::Preset {
             command:
                 PresetCommand::Run {
@@ -566,6 +578,8 @@ async fn run_headless_on(
         | Command::Consent
         | Command::Upgrade { .. }
         | Command::UpgradeDialog
+        | Command::LauncherCheck { .. }
+        | Command::RestartDialog
         | Command::Diagnostics { .. }
         | Command::Config { .. }
         | Command::Keymap { .. }

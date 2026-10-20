@@ -18,6 +18,10 @@
 //! right area proceeds. Keys and the proceed click count only 600 ms after
 //! the Window first gains focus, and key repeats never count
 //! (`frontend::trusted_dialog`). The Window title is "Splinterm — Upgrade".
+//!
+//! The child mechanism is generic over [`DialogPrompt`], so the desktop
+//! launcher's restart question (`launcher_check`) runs through exactly the
+//! same parent checks, capability echo, deadline, and reaping.
 
 use std::{
     fmt::Write as _,
@@ -29,7 +33,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use splinterm::automation::HandoffDecisionPrompt;
 use splinterm::{TrustedConsentUi, WindowOptions, run_window};
 use splinterm_protocol::{
@@ -45,14 +49,30 @@ use super::consent::{
 pub(in crate::app) const UPGRADE_DIALOG_COMMAND: &str = "upgrade-dialog";
 
 /// Random bytes the child must echo, as the consent dialog does.
-const CAPABILITY_BYTES: usize = 32;
+pub(in crate::app) const CAPABILITY_BYTES: usize = 32;
 
 /// The largest prompt frame: 64 Windows of 32 Dojos with 128-byte names and
 /// their identifiers stay well below it.
 const MAX_UPGRADE_DIALOG_FRAME_BYTES: usize = 1024 * 1024;
 
+/// A question a trusted dialog child of this command shows. The prompt frame
+/// goes to the child's stdin and a one-bit [`DialogReply`] comes back on its
+/// stdout, echoing [`DialogPrompt::capability`].
+pub(in crate::app) trait DialogPrompt:
+    Serialize + DeserializeOwned + Send + 'static
+{
+    /// The random bytes the reply must echo.
+    fn capability(&self) -> &[u8];
+    /// The asking command, which the child checks is still its parent.
+    fn parent_pid(&self) -> u32;
+    /// Rejects a prompt the child must not show.
+    fn validate(&self) -> Result<()>;
+    /// The Window that shows the prompt and sends its answer on `decision`.
+    fn window_options(&self, decision: std_mpsc::Sender<bool>) -> WindowOptions;
+}
+
 /// The widest dialog line, matching the consent snapshot's column clamp.
-const MAX_DIALOG_COLUMNS: usize = 120;
+pub(in crate::app) const MAX_DIALOG_COLUMNS: usize = 120;
 
 /// The share of the dialog's rows above the consent chrome's action areas,
 /// which cover the bottom 22% of the Window.
@@ -67,7 +87,19 @@ struct UpgradeDialogPrompt {
     windows: Vec<HandoffUnresponsiveWindow>,
 }
 
-impl UpgradeDialogPrompt {
+impl DialogPrompt for UpgradeDialogPrompt {
+    fn capability(&self) -> &[u8] {
+        &self.capability
+    }
+
+    fn parent_pid(&self) -> u32 {
+        self.parent_pid
+    }
+
+    fn window_options(&self, decision: std_mpsc::Sender<bool>) -> WindowOptions {
+        dialog_window_options(self, decision)
+    }
+
     fn validate(&self) -> Result<()> {
         let valid = self.capability.len() == CAPABILITY_BYTES
             && self.parent_pid > 0
@@ -88,7 +120,7 @@ impl UpgradeDialogPrompt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct UpgradeDialogReply {
+struct DialogReply {
     capability: Vec<u8>,
     proceed: bool,
 }
@@ -197,7 +229,7 @@ const MAX_LISTED_WINDOWS: usize = MAX_DIALOG_ROWS * TEXT_ROWS_PERCENT / 100 - FI
 
 /// The dialog's rows: enough that its text ends above the action areas,
 /// which cover the bottom 22% of the Window.
-fn dialog_rows(lines: usize) -> usize {
+pub(in crate::app) fn dialog_rows(lines: usize) -> usize {
     (lines * 100).div_ceil(TEXT_ROWS_PERCENT).max(18)
 }
 
@@ -241,21 +273,26 @@ fn dialog_window_options(
 /// signal follows the thread that spawned the child, the runtime thread that
 /// drives the command for as long as the process lives.
 pub(in crate::app) fn run_upgrade_dialog_client() -> Result<()> {
+    run_dialog_client::<UpgradeDialogPrompt>()
+}
+
+/// The body of every trusted dialog child: see [`run_upgrade_dialog_client`].
+pub(in crate::app) fn run_dialog_client<P: DialogPrompt>() -> Result<()> {
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
-        .context("tie the upgrade dialog to its command")?;
-    let prompt: UpgradeDialogPrompt =
+        .context("tie the dialog to its command")?;
+    let prompt: P =
         read_private_frame_bounded(&mut io::stdin().lock(), MAX_UPGRADE_DIALOG_FRAME_BYTES)?;
     prompt.validate()?;
-    if !is_parent(prompt.parent_pid, rustix::process::getppid()) {
-        bail!("the upgrade command that asked has exited");
+    if !is_parent(prompt.parent_pid(), rustix::process::getppid()) {
+        bail!("the command that asked has exited");
     }
     let (decision, receiver) = std_mpsc::channel();
-    run_window(dialog_window_options(&prompt, decision))?;
+    run_window(prompt.window_options(decision))?;
     let proceed = receiver.try_recv().unwrap_or(false);
     write_private_frame_bounded(
         &mut io::stdout().lock(),
-        &UpgradeDialogReply {
-            capability: prompt.capability,
+        &DialogReply {
+            capability: prompt.capability().to_vec(),
             proceed,
         },
         MAX_UPGRADE_DIALOG_FRAME_BYTES,
@@ -308,7 +345,8 @@ impl Drop for DialogChild {
     }
 }
 
-fn capability() -> Result<Vec<u8>> {
+/// A fresh random capability for one dialog prompt.
+pub(in crate::app) fn dialog_capability() -> Result<Vec<u8>> {
     let mut capability = vec![0_u8; CAPABILITY_BYTES];
     let mut offset = 0;
     while offset < capability.len() {
@@ -330,38 +368,49 @@ pub(in crate::app) async fn ask_in_dialog(prompt: HandoffDecisionPrompt) -> Resu
             "there is no terminal to ask in and no graphical session for the dialog; run `splinterm upgrade --now` from a terminal Splinterm does not own"
         );
     }
-    let capability = capability()?;
     let request = UpgradeDialogPrompt {
-        capability: capability.clone(),
+        capability: dialog_capability()?,
         parent_pid: std::process::id(),
         respond_within_seconds: prompt.respond_within.as_secs(),
         windows: prompt.windows,
     };
+    ask_dialog_child(UPGRADE_DIALOG_COMMAND, request, prompt.respond_within).await
+}
+
+/// Starts `/proc/self/exe <command>` as a trusted dialog child, sends it
+/// `request`, and returns its answer. The answer must arrive within `budget`
+/// and echo the request's capability; anything else is an error, which every
+/// caller treats as "no". The child is killed and reaped unless it answered.
+pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
+    command: &'static str,
+    request: P,
+    budget: Duration,
+) -> Result<bool> {
     request.validate()?;
+    let capability = request.capability().to_vec();
     let (mut parent, child) = UnixStream::pair().context("create private dialog socket")?;
     let child_read = child
         .try_clone()
         .context("duplicate private dialog descriptor")?;
     let process = Command::new("/proc/self/exe")
-        .arg(UPGRADE_DIALOG_COMMAND)
+        .arg(command)
         .stdin(Stdio::from(OwnedFd::from(child_read)))
         .stdout(Stdio::from(OwnedFd::from(child)))
         .stderr(Stdio::null())
         .spawn()
-        .context("launch the upgrade dialog")?;
+        .context("launch the dialog")?;
     let guard = DialogChild(Some(process));
-    let budget = prompt.respond_within;
-    let reply = tokio::task::spawn_blocking(move || -> Result<UpgradeDialogReply> {
+    let reply = tokio::task::spawn_blocking(move || -> Result<DialogReply> {
         parent.set_write_timeout(Some(budget))?;
         parent.set_read_timeout(Some(budget))?;
         write_private_frame_bounded(&mut parent, &request, MAX_UPGRADE_DIALOG_FRAME_BYTES)?;
         read_private_frame_bounded(&mut parent, MAX_UPGRADE_DIALOG_FRAME_BYTES)
     })
     .await
-    .context("upgrade dialog task failed")?
-    .context("the upgrade dialog gave no answer")?;
+    .context("dialog task failed")?
+    .context("the dialog gave no answer")?;
     if reply.capability != capability {
-        bail!("upgrade dialog authentication failed");
+        bail!("dialog authentication failed");
     }
     guard.finish();
     Ok(reply.proceed)
