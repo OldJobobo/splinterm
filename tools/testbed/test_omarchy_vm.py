@@ -184,7 +184,7 @@ class OmarchyVmRunnerTests(unittest.TestCase):
             launch.index('mkdir -m 700 "$runtime"'),
         )
         self.assertIn('printf \'%s\\n\' "$package_root" >"$runtime/testbed-root"', launch)
-        self.assertLess(stop.index('testbed-root'), stop.index('stop_matching /usr/bin/splinterm'))
+        self.assertLess(stop.index('testbed-root'), stop.index('stop_matching client'))
         self.assertLess(stop.index('testbed-root'), stop.index('rm -rf "$runtime"'))
         result, log = self.run_runner(
             "package-stop",

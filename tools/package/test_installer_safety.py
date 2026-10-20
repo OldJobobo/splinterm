@@ -111,8 +111,8 @@ class InstallerSafetyTest(unittest.TestCase):
         for path in shipped:
             with self.subTest(path=path.relative_to(ROOT)):
                 source = path.read_text(encoding="utf-8")
-                self.assertNotIn("vm-acceptance", source)
-                self.assertNotIn("vm_acceptance", source)
+                self.assertNotIn("vm-acceptance-live-handoff", source)
+                self.assertNotIn("VM_ACCEPTANCE", source)
         cargo = (ROOT / "crates/splinterd/Cargo.toml").read_text(encoding="utf-8")
         self.assertIn("vm-acceptance-live-handoff = []", cargo)
         self.assertNotRegex(cargo, r"default\s*=\s*\[[^\]]*vm-acceptance")

@@ -490,13 +490,15 @@ socket="$runtime/splinterd.sock"
 window_state="$runtime/guest-window.json"
 state="$package_root/acceptance-state"
 config="$package_root/acceptance-config"
+# A live upgrade (Plan 0061) leaves packaged test processes executing a
+# replaced inode or a sealed memfd snapshot.
 for process in /proc/[0-9]*; do
   [[ -r $process/environ ]] || continue
   cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
     | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
-  executable=$(readlink -f "$process/exe" 2>/dev/null || true)
+  executable=$(readlink "$process/exe" 2>/dev/null || true)
   case $executable in
-    /usr/bin/splinterm|/usr/bin/splinterd)
+    /usr/bin/splinterm|/usr/bin/splinterd|'/usr/bin/splinterm (deleted)'|'/usr/bin/splinterd (deleted)'|'/memfd:splinterd-client (deleted)'|'/memfd:splinterd-daemon (deleted)')
       printf 'packaged test is already active; run package-stop first\n' >&2
       exit 1
       ;;
@@ -602,26 +604,36 @@ owner="$runtime/testbed-root"
   printf 'packaged guest runtime owner mismatch: %s\n' "$runtime" >&2
   exit 1
 }
+# A live upgrade (Plan 0061) leaves packaged test processes executing a
+# replaced inode ("/usr/bin/... (deleted)") or a sealed memfd snapshot (the
+# adopted daemon and relaunched Windows), still bound to the private socket.
+packaged_role() {
+  case $1 in
+    /usr/bin/splinterm|'/usr/bin/splinterm (deleted)'|'/memfd:splinterd-client (deleted)') printf client ;;
+    /usr/bin/splinterd|'/usr/bin/splinterd (deleted)'|'/memfd:splinterd-daemon (deleted)') printf daemon ;;
+    *) return 1 ;;
+  esac
+}
 stop_matching() {
   local expected=$1 process executable
   for process in /proc/[0-9]*; do
     [[ -r $process/environ ]] || continue
     cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
       | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
-    executable=$(readlink -f "$process/exe" 2>/dev/null || true)
-    [[ $executable == "$expected" ]] && kill "${process##*/}" 2>/dev/null || true
+    executable=$(readlink "$process/exe" 2>/dev/null || true)
+    [[ $(packaged_role "$executable") == "$expected" ]] && kill "${process##*/}" 2>/dev/null || true
   done
 }
-stop_matching /usr/bin/splinterm
-stop_matching /usr/bin/splinterd
+stop_matching client
+stop_matching daemon
 for _ in $(seq 1 100); do
   alive=false
   for process in /proc/[0-9]*; do
     [[ -r $process/environ ]] || continue
     if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
       | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
-      executable=$(readlink -f "$process/exe" 2>/dev/null || true)
-      case $executable in /usr/bin/splinterm|/usr/bin/splinterd) alive=true ;; esac
+      executable=$(readlink "$process/exe" 2>/dev/null || true)
+      packaged_role "$executable" >/dev/null && alive=true
     fi
   done
   [[ $alive == false ]] && break
