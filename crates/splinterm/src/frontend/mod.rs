@@ -34,7 +34,11 @@ pub use message::{
 pub(crate) use navigation_accessibility::{
     NavigationAccessAction, NavigationAccessContext, NavigationAccessibility,
 };
-pub use options::{TerminalGridLimits, TrustedConsentUi, WindowOptions, WindowPaneOptions};
+pub(crate) use options::TrustedInput;
+pub use options::{
+    AccessConsentRenderer, AccessConsentView, TerminalGridLimits, TrustedConsentUi, WindowOptions,
+    WindowPaneOptions,
+};
 pub(crate) use picker::{PickerHitTarget, synthetic_text_snapshot};
 pub use picker::{SessionPickerDecision, SessionPickerItem, SessionPickerUi};
 pub(crate) use text_edit::BoundedTextEditor;

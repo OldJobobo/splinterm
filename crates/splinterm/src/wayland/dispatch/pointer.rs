@@ -179,18 +179,20 @@ impl PointerHandler for App {
                         }
                         continue;
                     }
-                    if let Some(consent) = &self.modal.trusted_consent
+                    if let Some(consent) = self.modal.trusted_consent.as_mut()
                         && button == BTN_LEFT
                     {
                         let (x, y) = event.position;
-                        if y >= f64::from(self.surface.logical_height) * 0.78 {
+                        let now = std::time::Instant::now();
+                        // The bottom action areas answer; a click on a
+                        // duration's row only selects it.
+                        let input = if y >= f64::from(self.surface.logical_height) * 0.78 {
                             let proceed_area = x >= f64::from(self.surface.logical_width) / 2.0;
-                            if let Some(granted) =
-                                consent.click_decision(proceed_area, std::time::Instant::now())
-                            {
-                                self.decide_consent(granted);
-                            }
-                        }
+                            consent.action_area_input(proceed_area, now)
+                        } else {
+                            cell.and_then(|position| consent.row_input(position.row, now))
+                        };
+                        self.trusted_dialog_input(input, queue_handle);
                         continue;
                     }
                     self.panes.pane.pointer_cell = cell;

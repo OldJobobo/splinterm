@@ -269,6 +269,15 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
         Response::LairAccessRevoked { grant, .. } => {
             println!("Lair access grant {} revoked.", grant.grant_id);
         }
+        Response::LairAccessPending { request_id, .. } => {
+            println!("Lair access request {request_id} is waiting for an answer.");
+        }
+        Response::LairAccessRequestCancelled { request_id, .. } => {
+            println!("Lair access request {request_id} cancelled.");
+        }
+        Response::LairAccessRequestsCancelled { cancelled } => {
+            println!("Cancelled {cancelled} pending Lair access requests.");
+        }
         Response::AuthorizationStatus {
             grants,
             lair_grants,

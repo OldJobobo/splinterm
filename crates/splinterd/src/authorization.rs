@@ -114,7 +114,11 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
     use OperationScope as Scope;
 
     match request {
-        Request::Ping | Request::ReadGraphicalFocus => RequestAuthorization::Authenticated,
+        Request::Ping
+        | Request::ReadGraphicalFocus
+        // A requester cancels only its own pending workspace request; the
+        // handler matches the pinned process and the Lair (ADR 0014).
+        | Request::CancelLairAccessRequest { .. } => RequestAuthorization::Authenticated,
         Request::PublishGraphicalFocus { .. }
         | Request::CreateTransientLair { .. }
         | Request::MaterializePreset { .. }
@@ -122,7 +126,9 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
         // only (ADR 0011); automation and remote clients never reach them.
         | Request::PrepareDaemonHandoff { .. }
         | Request::ClaimHandoffControl { .. }
-        | Request::AcknowledgeHandoffPrepare { .. } => RequestAuthorization::TrustedUi,
+        | Request::AcknowledgeHandoffPrepare { .. }
+        // Ending every pending workspace request is **Revoke all access**.
+        | Request::CancelAllLairAccessRequests => RequestAuthorization::TrustedUi,
         Request::ListLairs | Request::InspectTopology | Request::InspectSplint { .. } => {
             RequestAuthorization::policy(&[Scope::TopologyMetadataRead])
         }

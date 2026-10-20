@@ -98,6 +98,9 @@ pub enum WindowCommand {
         before_row_id: u64,
     },
     RevokeAccess(u64),
+    /// **Revoke all access** also ends every pending workspace access
+    /// request (ADR 0014).
+    CancelPendingAccess,
     RequestControlTransfer,
     DecideControlTransfer {
         transfer_id: u64,

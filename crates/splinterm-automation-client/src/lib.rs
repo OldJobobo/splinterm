@@ -5091,6 +5091,7 @@ mod tests {
             message: "topology revision is stale".to_owned(),
             current_topology_revision: Some(TopologyRevision::new(9)),
             handoff_blocking_reasons: Vec::new(),
+            pending_request_id: None,
         };
         let document = serialized(
             &CliEnvelopeV2::protocol_failure(

@@ -10,7 +10,7 @@ use tokio::sync::{
 
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{LayoutNode, SplintId};
-use splinterm_protocol::{MAX_COLUMNS, MAX_ROWS, TerminalSnapshot};
+use splinterm_protocol::{ConsentDecision, GrantDuration, MAX_COLUMNS, MAX_ROWS, TerminalSnapshot};
 
 use crate::{
     config::{
@@ -23,28 +23,79 @@ use crate::{
 use super::{
     AuthorityStatus, SessionPickerUi, TrustedDialogKey, TrustedDialogKind, WindowCommand,
     WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
+    trusted_dialog::{AccessChoice, ConsentAction},
 };
+
+/// One rendering of the access consent dialog.
+pub struct AccessConsentView {
+    pub snapshot: TerminalSnapshot,
+    /// The snapshot row of each shown duration, in order, so a click on that
+    /// row selects it.
+    pub duration_rows: Vec<usize>,
+}
+
+/// Renders the access consent dialog with the duration at this index
+/// selected.
+pub type AccessConsentRenderer = Box<dyn Fn(usize) -> AccessConsentView + Send>;
+
+/// What a key press or click did to a trusted dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrustedInput {
+    /// The person answered: `true` grants or proceeds.
+    Answer(bool),
+    /// The selected duration changed; the dialog must be drawn again.
+    Redraw,
+}
+
+enum TrustedAnswer {
+    YesNo(StdSender<bool>),
+    Consent(StdSender<ConsentDecision>),
+}
+
+struct AccessConsentDialog {
+    choice: AccessChoice,
+    durations: Vec<GrantDuration>,
+    duration_rows: Vec<usize>,
+    render: AccessConsentRenderer,
+}
 
 /// A trusted dialog Window's answer channel and kind. Build it with
 /// [`TrustedConsentUi::access_consent`], [`TrustedConsentUi::upgrade`], or
 /// [`TrustedConsentUi::restart`].
 pub struct TrustedConsentUi {
-    pub decision: StdSender<bool>,
+    answer: TrustedAnswer,
     pub(crate) kind: TrustedDialogKind,
     /// When the Window first gained keyboard focus; the upgrade question
     /// arms itself from it.
     pub(crate) focused_at: Option<Instant>,
+    access: Option<AccessConsentDialog>,
 }
 
 impl TrustedConsentUi {
-    /// The access consent dialog, with its original keys and title.
+    /// The access consent dialog (ADR 0014): default-deny, armed after every
+    /// focus gain and duration change, with the durations the prompt shows
+    /// (`true` when offered; the first is "Just this once") and a renderer
+    /// for each selection. Returns the dialog and its first rendering.
     #[must_use]
-    pub fn access_consent(decision: StdSender<bool>) -> Self {
-        Self {
-            decision,
+    pub fn access_consent(
+        decision: StdSender<ConsentDecision>,
+        durations: Vec<(GrantDuration, bool)>,
+        render: AccessConsentRenderer,
+    ) -> (Self, TerminalSnapshot) {
+        let view = render(0);
+        let (durations, offered) = durations.into_iter().unzip();
+        let dialog = Self {
+            answer: TrustedAnswer::Consent(decision),
             kind: TrustedDialogKind::AccessConsent,
             focused_at: None,
-        }
+            access: Some(AccessConsentDialog {
+                choice: AccessChoice::new(offered),
+                durations,
+                duration_rows: view.duration_rows,
+                render,
+            }),
+        };
+        (dialog, view.snapshot)
     }
 
     /// The upgrade question: only `G` or the green area proceeds, after an
@@ -52,9 +103,10 @@ impl TrustedConsentUi {
     #[must_use]
     pub fn upgrade(decision: StdSender<bool>) -> Self {
         Self {
-            decision,
+            answer: TrustedAnswer::YesNo(decision),
             kind: TrustedDialogKind::Upgrade,
             focused_at: None,
+            access: None,
         }
     }
 
@@ -63,28 +115,105 @@ impl TrustedConsentUi {
     #[must_use]
     pub fn restart(decision: StdSender<bool>) -> Self {
         Self {
-            decision,
+            answer: TrustedAnswer::YesNo(decision),
             kind: TrustedDialogKind::Restart,
             focused_at: None,
+            access: None,
         }
     }
 
-    /// Records the first keyboard focus; later focus changes keep it.
+    /// Records keyboard focus. The yes/no questions arm from the first
+    /// focus; the access consent dialog arms again on every one.
     pub(crate) fn note_focus(&mut self, now: Instant) {
         self.focused_at.get_or_insert(now);
+        if let Some(access) = self.access.as_mut() {
+            access.choice.note_focus(now);
+        }
     }
 
-    pub(crate) fn key_decision(
-        &self,
+    fn consent_input(
+        &mut self,
+        action: Option<ConsentAction>,
+        now: Instant,
+    ) -> Option<TrustedInput> {
+        let access = self.access.as_mut()?;
+        match action? {
+            ConsentAction::Deny => Some(TrustedInput::Answer(false)),
+            ConsentAction::Grant => Some(TrustedInput::Answer(true)),
+            ConsentAction::Select(index) => access
+                .choice
+                .select(index, now)
+                .then_some(TrustedInput::Redraw),
+        }
+    }
+
+    pub(crate) fn key_input(
+        &mut self,
         key: TrustedDialogKey,
         repeat: bool,
         now: Instant,
-    ) -> Option<bool> {
-        self.kind.key_decision(key, repeat, self.focused_at, now)
+    ) -> Option<TrustedInput> {
+        if let Some(access) = &self.access {
+            let action = access.choice.key(key, repeat, now);
+            return self.consent_input(action, now);
+        }
+        self.kind
+            .key_decision(key, repeat, self.focused_at, now)
+            .map(TrustedInput::Answer)
     }
 
-    pub(crate) fn click_decision(&self, proceed_area: bool, now: Instant) -> Option<bool> {
-        self.kind.click_decision(proceed_area, self.focused_at, now)
+    /// A click in the bottom action areas: the right one grants or proceeds.
+    pub(crate) fn action_area_input(
+        &mut self,
+        proceed_area: bool,
+        now: Instant,
+    ) -> Option<TrustedInput> {
+        if let Some(access) = &self.access {
+            let action = access.choice.click_action_area(proceed_area, now);
+            return self.consent_input(action, now);
+        }
+        self.kind
+            .click_decision(proceed_area, self.focused_at, now)
+            .map(TrustedInput::Answer)
+    }
+
+    /// A click on a snapshot row: selects the duration shown there.
+    pub(crate) fn row_input(&mut self, row: usize, now: Instant) -> Option<TrustedInput> {
+        let access = self.access.as_ref()?;
+        let index = access
+            .duration_rows
+            .iter()
+            .position(|shown| *shown == row)?;
+        let action = access.choice.click_duration(index);
+        self.consent_input(action, now)
+    }
+
+    /// The access consent dialog rendered for its current selection.
+    pub(crate) fn render(&mut self) -> Option<TerminalSnapshot> {
+        let access = self.access.as_mut()?;
+        let view = (access.render)(access.choice.selected());
+        access.duration_rows = view.duration_rows;
+        Some(view.snapshot)
+    }
+
+    /// Sends the answer: for the access consent dialog, a grant of the
+    /// selected duration or a deny.
+    pub(crate) fn answer(self, proceed: bool) {
+        match self.answer {
+            TrustedAnswer::YesNo(decision) => {
+                let _ = decision.send(proceed);
+            }
+            TrustedAnswer::Consent(decision) => {
+                let duration = self
+                    .access
+                    .as_ref()
+                    .and_then(|access| access.durations.get(access.choice.selected()).copied());
+                let _ = decision.send(match (proceed, duration) {
+                    (true, Some(duration)) => ConsentDecision::Grant { duration },
+                    _ => ConsentDecision::Deny,
+                });
+            }
+        }
     }
 }
 

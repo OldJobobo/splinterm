@@ -6,10 +6,14 @@
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lair_id", "scopes"],
+      "required": ["lair_id"],
+      "$comment": "Exactly one of level, scopes, or cancel_request_id. A level asks for its exact bundle; scopes that equal no level are shown as Custom access and are granted exactly. cancel_request_id cancels this adapter's own pending request for the Lair.",
       "properties": {
         "lair_id": {
           "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/uuid"
+        },
+        "level": {
+          "enum": ["look", "look_and_type", "manage"]
         },
         "scopes": {
           "type": "array",
@@ -28,9 +32,13 @@
               "process_restore",
               "process_terminate",
               "topology_layout_mutate",
-              "topology_name_mutate"
+              "topology_name_mutate",
+              "agent_status_report"
             ]
           }
+        },
+        "cancel_request_id": {
+          "$ref": "https://splinterm.oldjobobo.com/schemas/mcp/v2/common.schema.json#/$defs/grant_id"
         }
       }
     }

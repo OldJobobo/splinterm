@@ -19,11 +19,12 @@
 //! scopes are never combined across sources. Operation preconditions,
 //! controller ownership, resource checks, and limits stay with the caller.
 //!
-//! # Dormant
+//! # Reachability
 //!
-//! Nothing public mints a grant yet: [`crate::commit_agent_grant`] is the
-//! crate-internal entry point PR 3's consent flow will call. No protocol
-//! message changes.
+//! The consent flow (`RequestLairAccess`, Plan 0053 PR 3) commits answers
+//! through [`crate::commit_agent_grant`] and answers covered requests from
+//! [`AgentAccess::authorize`]. Per-entry revocation and the inventory stay
+//! dormant until PR 4.
 //!
 //! # Locks
 //!
@@ -38,7 +39,7 @@
     not(test),
     allow(
         dead_code,
-        reason = "dormant until PR 3 (consent) and PR 4 (inventory) call the commit and revoke paths"
+        reason = "the revoke and inventory paths stay dormant until PR 4 calls them"
     )
 )]
 
@@ -98,70 +99,10 @@ pub const TEST_TRUSTED_OWNER_ENV: &str = "SPLINTERM_TEST_DURABLE_IDENTITY_OWNER_
 // Access levels
 // ---------------------------------------------------------------------------
 
-const LOOK: &[AccessScope] = &[
-    AccessScope::TopologyObserve,
-    AccessScope::Observe,
-    AccessScope::Scrollback,
-    AccessScope::AgentStatusReport,
-];
-const LOOK_AND_TYPE: &[AccessScope] = &[
-    AccessScope::TopologyObserve,
-    AccessScope::Observe,
-    AccessScope::Scrollback,
-    AccessScope::AgentStatusReport,
-    AccessScope::Input,
-    AccessScope::Resize,
-    AccessScope::ControlTakeover,
-];
-const MANAGE: &[AccessScope] = &[
-    AccessScope::TopologyObserve,
-    AccessScope::Observe,
-    AccessScope::Scrollback,
-    AccessScope::AgentStatusReport,
-    AccessScope::Input,
-    AccessScope::Resize,
-    AccessScope::ControlTakeover,
-    AccessScope::ProcessSpawn,
-    AccessScope::TopologyLayout,
-    AccessScope::TopologyName,
-    AccessScope::Terminate,
-    AccessScope::ProcessRestore,
-];
-
-/// The three fixed access levels of ADR 0014, each a bundle of consent
-/// scopes containing the smaller ones.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccessLevel {
-    Look,
-    LookAndType,
-    Manage,
-}
-
-impl AccessLevel {
-    pub const ALL: [Self; 3] = [Self::Look, Self::LookAndType, Self::Manage];
-
-    /// The exact consent scopes of this level.
-    #[must_use]
-    pub const fn scopes(self) -> &'static [AccessScope] {
-        match self {
-            Self::Look => LOOK,
-            Self::LookAndType => LOOK_AND_TYPE,
-            Self::Manage => MANAGE,
-        }
-    }
-
-    /// The one line a prompt shows for this level.
-    #[must_use]
-    #[allow(dead_code, reason = "PR 3's prompt shows it")]
-    pub const fn summary(self) -> &'static str {
-        match self {
-            Self::Look => "Read terminals and scrollback, and report agent status",
-            Self::LookAndType => "Read terminals, type commands, and take typing control",
-            Self::Manage => "Read terminals, type commands, and create or close sessions",
-        }
-    }
-}
+// The three levels (`AccessLevel`), the durations (`GrantDuration`), and why
+// a duration is withheld (`Withheld`) are protocol types: the trusted prompt
+// shows them, and the store serializes levels by the same names.
+pub use splinterm_protocol::{AccessLevel, DurationWithheld as Withheld, GrantDuration};
 
 /// What a grant allows: exactly one level, or an exact Custom scope set that
 /// equals no level. Never rounded up.
@@ -226,6 +167,15 @@ impl AccessSet {
         }
     }
 
+    /// The level this set is exactly, or `None` for Custom.
+    #[must_use]
+    pub const fn level(&self) -> Option<AccessLevel> {
+        match self {
+            Self::Level(level) => Some(*level),
+            Self::Custom(_) => None,
+        }
+    }
+
     /// A Custom set containing takeover is offered just this once only.
     #[must_use]
     pub fn is_custom_takeover(&self) -> bool {
@@ -236,53 +186,6 @@ impl AccessSet {
 // ---------------------------------------------------------------------------
 // Durations and which are offered
 // ---------------------------------------------------------------------------
-
-/// How long a grant lasts, and therefore which identity it binds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum GrantDuration {
-    /// Today's five-minute, process-bound grant.
-    Once,
-    /// While the Lair exists in this daemon generation.
-    WorkspaceSession,
-    /// Until revoked or the workspace is removed.
-    Remembered,
-}
-
-/// Why a duration is withheld; each has the prompt's one-line reason.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Withheld {
-    NoPinnedIdentity,
-    CustomTakeover,
-    Relay,
-    Interpreter,
-    NoDurableIdentity,
-    StoreUnavailable,
-}
-
-impl Withheld {
-    #[must_use]
-    #[allow(dead_code, reason = "PR 3's prompt shows it")]
-    pub const fn reason(self) -> &'static str {
-        match self {
-            Self::NoPinnedIdentity => {
-                "Splinterm cannot pin this program's identity, so it can only allow it once."
-            }
-            Self::CustomTakeover => "Taking control outside a level can only be allowed once.",
-            Self::Relay => {
-                "The SSH relay serves every remote caller; remote automation uses the policy file."
-            }
-            Self::Interpreter => {
-                "This program runs scripts; any script it runs would share this access."
-            }
-            Self::NoDurableIdentity => {
-                "This program's file can be changed by your account, so it cannot be remembered."
-            }
-            Self::StoreUnavailable => {
-                "Remembered access is unavailable until its store is repaired."
-            }
-        }
-    }
-}
 
 /// The durations the daemon offers one requester for one request.
 /// "Just this once" is always offered.
@@ -1515,6 +1418,36 @@ impl AgentAccess {
     /// Whether "Always" may be offered and committed.
     pub fn store_available(&self) -> bool {
         self.memory().available
+    }
+
+    /// The "while this workspace is open" definition a new answer from this
+    /// peer for this Lair would replace, so the prompt can say so.
+    pub fn session_definition(&self, peer: &PeerIdentity, lair_id: LairId) -> Option<AccessSet> {
+        let executable = peer.persistent_executable()?;
+        self.memory()
+            .sessions
+            .iter()
+            .find(|grant| {
+                grant.lair_id == lair_id
+                    && grant.uid == peer.uid
+                    && grant.path == executable.path
+                    && grant.sha256 == executable.sha256
+            })
+            .map(|grant| grant.access.clone())
+    }
+
+    /// The remembered definition an "Always" answer for this identity and
+    /// Lair would replace, so the prompt can say so.
+    pub fn remembered_definition(
+        &self,
+        identity: &DurableIdentity,
+        lair_id: LairId,
+    ) -> Option<AccessSet> {
+        self.memory()
+            .remembered
+            .iter()
+            .find(|grant| grant.entry.identity == *identity && grant.entry.lair_id == lair_id)
+            .map(|grant| grant.entry.access.clone())
     }
 
     /// The first session or remembered definition that alone covers every

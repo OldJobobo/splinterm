@@ -209,11 +209,11 @@ const REVIEWED_SCHEMA_FNV64: &[(&str, u64)] = &[
     ),
     (
         "tools/request_lair_access.input.schema.json",
-        0xfb70_9d8d_5c59_cbf6,
+        0x22e5_3fcb_c996_793c,
     ),
     (
         "tools/request_lair_access.output.schema.json",
-        0x11a1_9ada_4b2d_bff9,
+        0x7491_1aca_d46d_3c0a,
     ),
     (
         "tools/request_control_transfer.input.schema.json",

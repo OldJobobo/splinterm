@@ -18,7 +18,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 42;
+pub const PROTOCOL_VERSION: u16 = 43;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -55,6 +55,19 @@ pub const MAX_UPDATE_SCROLLS: usize = MAX_ROWS as usize;
 pub const MAX_CONSENT_FRAME_BYTES: usize = 16 * 1024;
 pub const CONSENT_CAPABILITY_BYTES: usize = 32;
 pub const MAX_ACCESS_SCOPES: usize = 16;
+/// The longest a `RequestLairAccess` call waits for the person before the
+/// daemon replies `pending` (ADR 0014). Larger budgets are capped to it.
+pub const MAX_CONSENT_WAIT_MILLIS: u32 = 25_000;
+/// How long a pending workspace access request lives after it opens.
+pub const PENDING_ACCESS_LIFETIME_SECONDS: u64 = 120;
+/// The longest host-reported agent name a request may carry, in characters.
+/// Display data only; never an identity.
+pub const MAX_AGENT_NAME_CHARS: usize = 128;
+/// The longest path a consent prompt shows in its shared-identity line, in
+/// characters.
+pub const MAX_CONSENT_PATH_CHARS: usize = 1024;
+/// A consent prompt offers at most the three ADR 0014 durations.
+pub const MAX_CONSENT_DURATIONS: usize = 3;
 pub const MAX_IMAGE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES_PER_SPLINT: usize = 32 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES_PER_DAEMON: usize = 64 * 1024 * 1024;
@@ -622,10 +635,38 @@ pub enum Request {
         incarnation: u64,
         scopes: Vec<AccessScope>,
     },
+    /// Asks for access to one workspace (ADR 0014): exactly one of `level`,
+    /// which the daemon expands to its exact bundle, or an explicit `scopes`
+    /// set. A request a grant already covers is answered at once. Otherwise
+    /// it becomes a bounded pending request whose prompt the daemon shows,
+    /// and this call waits at most `wait_millis` (capped at
+    /// [`MAX_CONSENT_WAIT_MILLIS`]) before replying
+    /// [`Response::LairAccessPending`]. Repeating the same request joins it.
     RequestLairAccess {
         lair_id: LairId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<AccessLevel>,
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "deserialize_access_scopes"
+        )]
         scopes: Vec<AccessScope>,
+        wait_millis: u32,
+        /// The host-reported agent name, at most [`MAX_AGENT_NAME_CHARS`]
+        /// characters: shown to the person as data, never an identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
     },
+    /// Cancels the requesting process's own pending request for this
+    /// workspace.
+    CancelLairAccessRequest {
+        lair_id: LairId,
+        request_id: u64,
+    },
+    /// Trusted UI only (**Revoke all access**): ends every pending workspace
+    /// request without a grant.
+    CancelAllLairAccessRequests,
     AuthorizationStatus {
         splint_id: SplintId,
         incarnation: Option<u64>,
@@ -1077,6 +1118,22 @@ pub enum Response {
         topology_revision: TopologyRevision,
         authorization_revision: u64,
         grant: LairAccessGrant,
+    },
+    /// The person has not answered yet. The request stays pending until
+    /// `expires_at_unix_seconds`; repeating it collects the answer.
+    LairAccessPending {
+        lair_id: LairId,
+        topology_revision: TopologyRevision,
+        request_id: u64,
+        expires_at_unix_seconds: u64,
+    },
+    LairAccessRequestCancelled {
+        lair_id: LairId,
+        topology_revision: TopologyRevision,
+        request_id: u64,
+    },
+    LairAccessRequestsCancelled {
+        cancelled: u32,
     },
     AuthorizationStatus {
         lair_id: LairId,
@@ -1959,6 +2016,10 @@ pub struct ProtocolError {
         deserialize_with = "deserialize_blocking_reasons"
     )]
     pub handoff_blocking_reasons: Vec<HandoffBlockingReason>,
+    /// The pending workspace request that refused a different request from
+    /// the same process for the same workspace (ADR 0014).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_request_id: Option<u64>,
 }
 
 impl ProtocolError {
@@ -1969,6 +2030,7 @@ impl ProtocolError {
             message: message.into(),
             current_topology_revision: None,
             handoff_blocking_reasons: Vec::new(),
+            pending_request_id: None,
         }
     }
 
@@ -2250,20 +2312,299 @@ pub enum ConsentTarget {
     },
 }
 
+const LOOK_SCOPES: &[AccessScope] = &[
+    AccessScope::TopologyObserve,
+    AccessScope::Observe,
+    AccessScope::Scrollback,
+    AccessScope::AgentStatusReport,
+];
+const LOOK_AND_TYPE_SCOPES: &[AccessScope] = &[
+    AccessScope::TopologyObserve,
+    AccessScope::Observe,
+    AccessScope::Scrollback,
+    AccessScope::AgentStatusReport,
+    AccessScope::Input,
+    AccessScope::Resize,
+    AccessScope::ControlTakeover,
+];
+const MANAGE_SCOPES: &[AccessScope] = &[
+    AccessScope::TopologyObserve,
+    AccessScope::Observe,
+    AccessScope::Scrollback,
+    AccessScope::AgentStatusReport,
+    AccessScope::Input,
+    AccessScope::Resize,
+    AccessScope::ControlTakeover,
+    AccessScope::ProcessSpawn,
+    AccessScope::TopologyLayout,
+    AccessScope::TopologyName,
+    AccessScope::Terminate,
+    AccessScope::ProcessRestore,
+];
+
+/// The three fixed access levels of ADR 0014, each an exact bundle of
+/// consent scopes containing the smaller ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessLevel {
+    Look,
+    LookAndType,
+    Manage,
+}
+
+impl AccessLevel {
+    pub const ALL: [Self; 3] = [Self::Look, Self::LookAndType, Self::Manage];
+
+    /// The exact consent scopes of this level.
+    #[must_use]
+    pub const fn scopes(self) -> &'static [AccessScope] {
+        match self {
+            Self::Look => LOOK_SCOPES,
+            Self::LookAndType => LOOK_AND_TYPE_SCOPES,
+            Self::Manage => MANAGE_SCOPES,
+        }
+    }
+
+    /// The level's name as the prompt shows it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Look => "Look",
+            Self::LookAndType => "Look and type",
+            Self::Manage => "Manage",
+        }
+    }
+
+    /// The one line a prompt shows for this level.
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::Look => "Read terminals and scrollback, and report agent status",
+            Self::LookAndType => "Read terminals, type commands, and take typing control",
+            Self::Manage => "Read terminals, type commands, and create or close sessions",
+        }
+    }
+
+    /// The level whose bundle is exactly `scopes`, if any. Never rounds up.
+    #[must_use]
+    pub fn exactly(scopes: &[AccessScope]) -> Option<Self> {
+        let mut requested = scopes.to_vec();
+        requested.sort_unstable();
+        requested.dedup();
+        Self::ALL.into_iter().find(|level| {
+            let mut bundle = level.scopes().to_vec();
+            bundle.sort_unstable();
+            bundle == requested
+        })
+    }
+}
+
+/// How long a granted answer lasts (ADR 0014), and therefore which identity
+/// it binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantDuration {
+    /// "Just this once": five minutes, bound to the requesting process.
+    Once,
+    /// "While this workspace is open": while the Lair exists in this daemon
+    /// generation, bound to the verified executable identity.
+    WorkspaceSession,
+    /// "Always for this workspace": until revoked or the workspace is
+    /// removed, bound to a durable identity.
+    Remembered,
+}
+
+impl GrantDuration {
+    pub const ALL: [Self; 3] = [Self::Once, Self::WorkspaceSession, Self::Remembered];
+}
+
+/// Why the daemon withholds a duration; each has the prompt's one-line
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurationWithheld {
+    NoPinnedIdentity,
+    CustomTakeover,
+    Relay,
+    Interpreter,
+    NoDurableIdentity,
+    StoreUnavailable,
+}
+
+impl DurationWithheld {
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NoPinnedIdentity => {
+                "Splinterm cannot pin this program's identity, so it can only allow it once."
+            }
+            Self::CustomTakeover => "Taking control outside a level can only be allowed once.",
+            Self::Relay => {
+                "The SSH relay serves every remote caller; remote automation uses the policy file."
+            }
+            Self::Interpreter => {
+                "This program runs scripts; any script it runs would share this access."
+            }
+            Self::NoDurableIdentity => {
+                "This program's file can be changed by your account, so it cannot be remembered."
+            }
+            Self::StoreUnavailable => {
+                "Remembered access is unavailable until its store is repaired."
+            }
+        }
+    }
+}
+
+/// An access definition a longer answer would replace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentReplacement {
+    /// The level it names, or `None` for Custom access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<AccessLevel>,
+    #[serde(deserialize_with = "deserialize_access_scopes")]
+    pub scopes: Vec<AccessScope>,
+}
+
+/// One duration the prompt shows, offered or withheld.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentDurationOffer {
+    pub duration: GrantDuration,
+    /// Why it is withheld; `None` when it is offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<DurationWithheld>,
+    /// For an offered longer duration, the executable path every program
+    /// sharing the grant runs (the prompt's shared-identity line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_by: Option<String>,
+    /// The existing definition of this duration, for the same identity and
+    /// workspace, that granting it would replace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<ConsentReplacement>,
+}
+
+/// The line a prompt shows when a longer duration is selected, in the same
+/// form for every executable (ADR 0014).
+#[must_use]
+pub fn shared_identity_line(path: &str) -> String {
+    format!("Any program that runs {path} shares this access.")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsentPrompt {
     pub capability: Vec<u8>,
     pub requester: String,
     pub requester_pid: u32,
     pub requester_uid: u32,
+    /// The host-reported agent name: display data only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub target: ConsentTarget,
+    #[serde(deserialize_with = "deserialize_access_scopes")]
     pub scopes: Vec<AccessScope>,
+    /// The level whose exact bundle `scopes` is, or `None` for Custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<AccessLevel>,
+    /// Every duration the prompt shows, in [`GrantDuration::ALL`] order;
+    /// "Just this once" first and always offered.
+    #[serde(deserialize_with = "deserialize_consent_durations")]
+    pub durations: Vec<ConsentDurationOffer>,
+}
+
+impl ConsentPrompt {
+    /// Checks every bound the trusted dialog relies on.
+    ///
+    /// # Errors
+    /// A missing or oversized capability, scope list, label, or path; a
+    /// level that is not exactly the scopes; or durations that are not
+    /// "Just this once" (offered) followed by distinct longer ones in order.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.capability.len() != CONSENT_CAPABILITY_BYTES {
+            return Err("consent capability has the wrong length");
+        }
+        if self.scopes.is_empty() || self.scopes.len() > MAX_ACCESS_SCOPES {
+            return Err("consent scopes are empty or exceed the limit");
+        }
+        if self.requester.chars().count() > MAX_CONSENT_PATH_CHARS {
+            return Err("consent requester label exceeds the limit");
+        }
+        if self
+            .agent_name
+            .as_ref()
+            .is_some_and(|name| name.chars().count() > MAX_AGENT_NAME_CHARS)
+        {
+            return Err("consent agent name exceeds the limit");
+        }
+        if let ConsentTarget::Lair { lair_name, .. } = &self.target
+            && lair_name.chars().count() > MAX_CONSENT_PATH_CHARS
+        {
+            return Err("consent workspace name exceeds the limit");
+        }
+        if self
+            .level
+            .is_some_and(|level| AccessLevel::exactly(&self.scopes) != Some(level))
+        {
+            return Err("consent level does not name exactly the scopes");
+        }
+        let Some((first, longer)) = self.durations.split_first() else {
+            return Err("consent prompt offers no duration");
+        };
+        if first.duration != GrantDuration::Once
+            || first.withheld.is_some()
+            || first.shared_by.is_some()
+            || first.replaces.is_some()
+        {
+            return Err("consent prompt must offer just this once first");
+        }
+        let mut previous = GrantDuration::Once;
+        for offer in longer {
+            if offer.duration <= previous {
+                return Err("consent durations are repeated or out of order");
+            }
+            previous = offer.duration;
+            if offer.withheld.is_some() && (offer.shared_by.is_some() || offer.replaces.is_some()) {
+                return Err("a withheld consent duration carries offer details");
+            }
+            if offer
+                .shared_by
+                .as_ref()
+                .is_some_and(|path| path.chars().count() > MAX_CONSENT_PATH_CHARS)
+            {
+                return Err("consent shared-identity path exceeds the limit");
+            }
+            if offer.replaces.as_ref().is_some_and(|replaced| {
+                replaced.scopes.is_empty()
+                    || replaced.scopes.len() > MAX_ACCESS_SCOPES
+                    || replaced
+                        .level
+                        .is_some_and(|level| AccessLevel::exactly(&replaced.scopes) != Some(level))
+            }) {
+                return Err("consent replacement is invalid");
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the prompt offers `duration`.
+    #[must_use]
+    pub fn offers(&self, duration: GrantDuration) -> bool {
+        self.durations
+            .iter()
+            .any(|offer| offer.duration == duration && offer.withheld.is_none())
+    }
+}
+
+/// The person's typed answer to a consent prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum ConsentDecision {
+    Deny,
+    Grant { duration: GrantDuration },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsentReply {
     pub capability: Vec<u8>,
-    pub granted: bool,
+    pub decision: ConsentDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2282,6 +2623,10 @@ pub enum AccessGrantSource {
     Ephemeral,
     PersistentPolicy,
     Development,
+    /// A "while this workspace is open" grant (ADR 0014).
+    WorkspaceSession,
+    /// An "Always for this workspace" grant (ADR 0014).
+    Remembered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2378,6 +2723,22 @@ where
     }
 
     deserializer.deserialize_seq(BoundedVec::<T, MAX>(std::marker::PhantomData))
+}
+
+fn deserialize_access_scopes<'de, D>(deserializer: D) -> Result<Vec<AccessScope>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_ACCESS_SCOPES>(deserializer)
+}
+
+fn deserialize_consent_durations<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ConsentDurationOffer>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_CONSENT_DURATIONS>(deserializer)
 }
 
 fn deserialize_blocking_reasons<'de, D>(
@@ -4619,19 +4980,126 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture covers the request, its pending and cancel messages, and the grant"
+    )]
     fn lair_access_request_and_grant_are_typed_and_bounded() {
         let lair_id = LairId::new();
         let request = Request::RequestLairAccess {
             lair_id,
+            level: None,
             scopes: vec![
                 AccessScope::Input,
                 AccessScope::ControlTakeover,
                 AccessScope::TopologyLayout,
             ],
+            wait_millis: 4_000,
+            agent_name: Some("Claude Code".to_owned()),
         };
         let encoded = serde_json::to_value(&request).unwrap();
         assert_eq!(encoded["type"], "request_lair_access");
+        assert!(encoded.get("level").is_none());
         assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+        let by_level = Request::RequestLairAccess {
+            lair_id,
+            level: Some(AccessLevel::LookAndType),
+            scopes: Vec::new(),
+            wait_millis: 0,
+            agent_name: None,
+        };
+        let encoded = serde_json::to_value(&by_level).unwrap();
+        assert_eq!(encoded["level"], "look_and_type");
+        assert!(encoded.get("scopes").is_none());
+        assert!(encoded.get("agent_name").is_none());
+        assert_eq!(
+            serde_json::from_value::<Request>(encoded).unwrap(),
+            by_level
+        );
+        // The wait budget is required, scopes are bounded, and unknown
+        // levels never decode.
+        for invalid in [
+            serde_json::json!({
+                "type": "request_lair_access",
+                "lair_id": lair_id,
+                "level": "look",
+            }),
+            serde_json::json!({
+                "type": "request_lair_access",
+                "lair_id": lair_id,
+                "level": "everything",
+                "wait_millis": 1,
+            }),
+            serde_json::json!({
+                "type": "request_lair_access",
+                "lair_id": lair_id,
+                "scopes": vec!["observe"; MAX_ACCESS_SCOPES + 1],
+                "wait_millis": 1,
+            }),
+        ] {
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+        for (request, name) in [
+            (
+                Request::CancelLairAccessRequest {
+                    lair_id,
+                    request_id: 9,
+                },
+                "cancel_lair_access_request",
+            ),
+            (
+                Request::CancelAllLairAccessRequests,
+                "cancel_all_lair_access_requests",
+            ),
+        ] {
+            let encoded = serde_json::to_value(&request).unwrap();
+            assert_eq!(encoded["type"], name);
+            assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+        }
+        for (response, name) in [
+            (
+                Response::LairAccessPending {
+                    lair_id,
+                    topology_revision: TopologyRevision::new(3),
+                    request_id: 9,
+                    expires_at_unix_seconds: 1_800_000_120,
+                },
+                "lair_access_pending",
+            ),
+            (
+                Response::LairAccessRequestCancelled {
+                    lair_id,
+                    topology_revision: TopologyRevision::new(3),
+                    request_id: 9,
+                },
+                "lair_access_request_cancelled",
+            ),
+            (
+                Response::LairAccessRequestsCancelled { cancelled: 2 },
+                "lair_access_requests_cancelled",
+            ),
+        ] {
+            let encoded = serde_json::to_value(&response).unwrap();
+            assert_eq!(encoded["type"], name);
+            assert_eq!(
+                serde_json::from_value::<Response>(encoded).unwrap(),
+                response
+            );
+        }
+        let mut refused = ProtocolError::new(ErrorCode::ResourceLimit, "pending");
+        assert!(
+            serde_json::to_value(&refused)
+                .unwrap()
+                .get("pending_request_id")
+                .is_none()
+        );
+        refused.pending_request_id = Some(9);
+        let encoded = serde_json::to_value(&refused).unwrap();
+        assert_eq!(encoded["pending_request_id"], 9);
+        assert_eq!(
+            serde_json::from_value::<ProtocolError>(encoded).unwrap(),
+            refused
+        );
 
         let grant = LairAccessGrant {
             grant_id: 7,
@@ -4647,6 +5115,191 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<LairAccessGrant>(encoded).unwrap(),
             grant
+        );
+        for (source, name) in [
+            (AccessGrantSource::WorkspaceSession, "workspace_session"),
+            (AccessGrantSource::Remembered, "remembered"),
+        ] {
+            assert_eq!(serde_json::to_value(source).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn levels_are_exact_bundles_and_never_round_up() {
+        for level in AccessLevel::ALL {
+            assert_eq!(AccessLevel::exactly(level.scopes()), Some(level));
+        }
+        assert!(
+            AccessLevel::Look
+                .scopes()
+                .iter()
+                .all(|scope| AccessLevel::LookAndType.scopes().contains(scope))
+        );
+        assert!(
+            AccessLevel::LookAndType
+                .scopes()
+                .iter()
+                .all(|scope| AccessLevel::Manage.scopes().contains(scope))
+        );
+        // One scope short of Look is Custom, never Look; one more is Custom
+        // too, never Look and type.
+        assert_eq!(AccessLevel::exactly(&AccessLevel::Look.scopes()[..3]), None);
+        let mut extra = AccessLevel::Look.scopes().to_vec();
+        extra.push(AccessScope::Input);
+        assert_eq!(AccessLevel::exactly(&extra), None);
+        assert_eq!(
+            serde_json::to_value(AccessLevel::LookAndType).unwrap(),
+            "look_and_type"
+        );
+        assert!(serde_json::from_value::<AccessLevel>(serde_json::json!("admin")).is_err());
+    }
+
+    fn consent_prompt() -> ConsentPrompt {
+        let offer = |duration, shared_by: Option<&str>| ConsentDurationOffer {
+            duration,
+            withheld: None,
+            shared_by: shared_by.map(str::to_owned),
+            replaces: None,
+        };
+        let mut remembered = offer(GrantDuration::Remembered, Some("/usr/bin/splinterm-mcp"));
+        remembered.replaces = Some(ConsentReplacement {
+            level: Some(AccessLevel::Look),
+            scopes: AccessLevel::Look.scopes().to_vec(),
+        });
+        ConsentPrompt {
+            capability: vec![7; CONSENT_CAPABILITY_BYTES],
+            requester: "/usr/bin/splinterm-mcp".to_owned(),
+            requester_pid: 10,
+            requester_uid: 1000,
+            agent_name: Some("Claude Code".to_owned()),
+            target: ConsentTarget::Lair {
+                lair_id: LairId::new(),
+                lair_name: "Workspace".to_owned(),
+            },
+            scopes: AccessLevel::Manage.scopes().to_vec(),
+            level: Some(AccessLevel::Manage),
+            durations: vec![
+                offer(GrantDuration::Once, None),
+                offer(
+                    GrantDuration::WorkspaceSession,
+                    Some("/usr/bin/splinterm-mcp"),
+                ),
+                remembered,
+            ],
+        }
+    }
+
+    #[test]
+    fn consent_prompts_carry_typed_levels_durations_and_bounds() {
+        let prompt = consent_prompt();
+        assert_eq!(prompt.validate(), Ok(()));
+        let encoded = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(encoded["level"], "manage");
+        assert_eq!(encoded["durations"][0]["duration"], "once");
+        assert!(encoded["durations"][0].get("withheld").is_none());
+        assert_eq!(encoded["durations"][2]["duration"], "remembered");
+        assert_eq!(
+            serde_json::from_value::<ConsentPrompt>(encoded.clone()).unwrap(),
+            prompt
+        );
+        assert!(prompt.offers(GrantDuration::Remembered));
+
+        // Unknown durations and withheld reasons never decode, and neither
+        // do more than three durations.
+        let mut unknown = encoded.clone();
+        unknown["durations"][1]["duration"] = "forever".into();
+        assert!(serde_json::from_value::<ConsentPrompt>(unknown).is_err());
+        let mut unknown = encoded.clone();
+        unknown["durations"][1]["withheld"] = "because".into();
+        assert!(serde_json::from_value::<ConsentPrompt>(unknown).is_err());
+        let mut oversized = encoded;
+        oversized["durations"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"duration": "once"}));
+        assert!(serde_json::from_value::<ConsentPrompt>(oversized).is_err());
+
+        let invalid = |change: fn(&mut ConsentPrompt)| {
+            let mut prompt = consent_prompt();
+            change(&mut prompt);
+            prompt.validate()
+        };
+        assert!(invalid(|prompt| prompt.capability.truncate(1)).is_err());
+        assert!(invalid(|prompt| prompt.level = Some(AccessLevel::Look)).is_err());
+        assert!(invalid(|prompt| prompt.durations.truncate(0)).is_err());
+        assert!(
+            invalid(|prompt| {
+                prompt.durations.remove(0);
+            })
+            .is_err()
+        );
+        assert!(
+            invalid(|prompt| prompt.durations[0].withheld = Some(DurationWithheld::Relay)).is_err()
+        );
+        assert!(invalid(|prompt| prompt.durations.swap(1, 2)).is_err());
+        assert!(
+            invalid(|prompt| prompt.durations[2].withheld = Some(DurationWithheld::Interpreter))
+                .is_err()
+        );
+        assert!(
+            invalid(|prompt| prompt.agent_name = Some("a".repeat(MAX_AGENT_NAME_CHARS + 1)))
+                .is_err()
+        );
+        assert!(
+            invalid(|prompt| {
+                prompt.durations[1].shared_by = Some("p".repeat(MAX_CONSENT_PATH_CHARS + 1));
+            })
+            .is_err()
+        );
+        // A withheld duration shows only its reason.
+        let mut withheld = consent_prompt();
+        withheld.durations[2] = ConsentDurationOffer {
+            duration: GrantDuration::Remembered,
+            withheld: Some(DurationWithheld::Interpreter),
+            shared_by: None,
+            replaces: None,
+        };
+        assert_eq!(withheld.validate(), Ok(()));
+        assert!(!withheld.offers(GrantDuration::Remembered));
+        assert_eq!(
+            shared_identity_line("/usr/bin/splinterm-mcp"),
+            "Any program that runs /usr/bin/splinterm-mcp shares this access."
+        );
+    }
+
+    #[test]
+    fn consent_replies_are_typed_decisions_and_unknown_ones_fail() {
+        for (decision, encoded) in [
+            (
+                ConsentDecision::Deny,
+                serde_json::json!({"decision": "deny"}),
+            ),
+            (
+                ConsentDecision::Grant {
+                    duration: GrantDuration::WorkspaceSession,
+                },
+                serde_json::json!({"decision": "grant", "duration": "workspace_session"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(decision).unwrap(), encoded);
+            assert_eq!(
+                serde_json::from_value::<ConsentDecision>(encoded).unwrap(),
+                decision
+            );
+        }
+        for invalid in [
+            serde_json::json!({"decision": "maybe"}),
+            serde_json::json!({"decision": "grant"}),
+            serde_json::json!({"decision": "grant", "duration": "forever"}),
+        ] {
+            assert!(serde_json::from_value::<ConsentDecision>(invalid).is_err());
+        }
+        // The protocol 42 boolean reply no longer decodes.
+        assert!(
+            serde_json::from_value::<ConsentReply>(
+                serde_json::json!({"capability": [1], "granted": true})
+            )
+            .is_err()
         );
     }
 
@@ -4891,7 +5544,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 42);
+        assert_eq!(PROTOCOL_VERSION, 43);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -6430,8 +7083,8 @@ mod tests {
         // An undeclared hello keeps its exact protocol 41 shape.
         let plain = serde_json::json!({
             "type": "hello",
-            "minimum_version": 42,
-            "maximum_version": 42,
+            "minimum_version": 43,
+            "maximum_version": 43,
             "role": "trusted_ui",
         });
         assert_eq!(serde_json::to_value(hello(false)).unwrap(), plain);

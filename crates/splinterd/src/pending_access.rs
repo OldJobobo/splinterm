@@ -1,0 +1,786 @@
+//! Bounded, cancellable pending workspace access requests (ADR 0014,
+//! Plan 0053 PR 3).
+//!
+//! A `RequestLairAccess` that no grant covers becomes a pending request. The
+//! daemon opens at most one per requesting process and workspace and at most
+//! [`MAX_PENDING_TOTAL`] in all, each for [`PENDING_LIFETIME`]. Only one
+//! prompt is visible at a time; the others wait in arrival order. A call
+//! waits for the answer at most its wait budget and then replies `pending`;
+//! repeating the same request from any connection of the same process joins
+//! it.
+//!
+//! A pending request ends without a grant when it expires, is cancelled, its
+//! process exits, its workspace ends, **Revoke all access** runs, or the
+//! handoff fence goes up. Its prompt then closes or leaves the queue, and a
+//! later answer grants nothing: an answer commits only while its request is
+//! still here, and a request ended while its grant is being committed has
+//! that grant revoked again by the committer.
+//!
+//! After a deny, the same executable identity is refused with `rate_limited`
+//! for that workspace for [`DENY_COOLDOWN`], so a retrying agent cannot
+//! reopen the prompt. The requesting process collects the deny itself by
+//! repeating the request.
+//!
+//! This registry is synchronous and holds no async state; the daemon drives
+//! the prompter, the expiry and exit watchers, and the commit. Nothing here
+//! survives the process: pending requests never cross a handoff or restart.
+
+use std::{
+    collections::VecDeque,
+    os::fd::OwnedFd,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use splinterm_core::LairId;
+use splinterm_protocol::{
+    AccessScope, ErrorCode, PENDING_ACCESS_LIFETIME_SECONDS, ProtocolError, Response,
+};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+use crate::consent::{PeerIdentity, PromptCancel};
+
+/// At most this many pending workspace requests at once, daemon-wide.
+pub const MAX_PENDING_TOTAL: usize = 8;
+/// A pending request expires this long after it opens.
+pub const PENDING_LIFETIME: Duration = Duration::from_secs(PENDING_ACCESS_LIFETIME_SECONDS);
+/// After a deny, new requests from the same executable identity for the same
+/// workspace are refused for this long.
+pub const DENY_COOLDOWN: Duration = Duration::from_secs(10);
+/// Uncollected denials kept for their requesters, oldest dropped first.
+const MAX_UNCOLLECTED_DENIALS: usize = 2 * MAX_PENDING_TOTAL;
+
+/// One requesting process. A later process reusing the PID has another
+/// start time, so it is never this one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessKey {
+    uid: u32,
+    pid: u32,
+    start_time: u64,
+}
+
+impl ProcessKey {
+    /// The peer's process, or `None` when its start time was not recorded,
+    /// so a reused PID could not be told apart.
+    pub fn of(peer: &PeerIdentity) -> Option<Self> {
+        Some(Self {
+            uid: peer.uid,
+            pid: peer.pid,
+            start_time: peer.start_time()?,
+        })
+    }
+
+    pub const fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub const fn start_time(&self) -> u64 {
+        self.start_time
+    }
+}
+
+/// The executable identity a deny cooldown binds: the verified identity of
+/// ADR 0007 when the connection has one, otherwise the executing file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum IdentityKey {
+    Verified {
+        uid: u32,
+        path: PathBuf,
+        sha256: String,
+    },
+    Executing {
+        uid: u32,
+        device: u64,
+        inode: u64,
+    },
+}
+
+impl IdentityKey {
+    fn of(peer: &PeerIdentity) -> Self {
+        peer.persistent_executable().map_or_else(
+            || {
+                let (device, inode) = peer.executable_file();
+                Self::Executing {
+                    uid: peer.uid,
+                    device,
+                    inode,
+                }
+            },
+            |executable| Self::Verified {
+                uid: peer.uid,
+                path: executable.path.clone(),
+                sha256: executable.sha256.clone(),
+            },
+        )
+    }
+}
+
+/// How a pending request ended, for every call waiting on it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    Granted(Box<Response>),
+    Failed(ProtocolError),
+}
+
+/// A call admitted to a pending request, new or joined.
+#[derive(Debug)]
+pub struct Admitted {
+    pub request_id: u64,
+    pub expires: Instant,
+    pub expires_at_unix_seconds: u64,
+    pub outcome: watch::Receiver<Option<Outcome>>,
+    /// Set for a newly opened request: the caller starts its watcher and
+    /// makes sure the prompter runs.
+    pub opened: Option<Opened>,
+}
+
+/// What a newly opened request's watcher needs.
+#[derive(Debug)]
+pub struct Opened {
+    /// The requester's pidfd: readable once the process exits.
+    pub pidfd: Arc<OwnedFd>,
+    /// Cancelled when the request ends for any reason.
+    pub done: CancellationToken,
+}
+
+/// The oldest queued request, now shown to the person.
+#[derive(Debug)]
+pub struct PromptJob {
+    pub request_id: u64,
+    pub peer: PeerIdentity,
+    pub lair_id: LairId,
+    pub scopes: Vec<AccessScope>,
+    pub agent_name: Option<String>,
+    pub expires: Instant,
+    pub cancel: Arc<PromptCancel>,
+}
+
+/// A pinned requester: its pidfd, and the file it executed when pinned
+/// (device and inode).
+#[derive(Debug)]
+pub struct PinnedRequester {
+    pub pidfd: OwnedFd,
+    pub executing: (u64, u64),
+}
+
+/// A request whose grant is being committed.
+#[derive(Debug)]
+pub struct CommitTicket {
+    pub peer: PeerIdentity,
+    pub process: ProcessKey,
+    pub pidfd: Arc<OwnedFd>,
+    /// The file the requester executed when its request opened.
+    pub executing: (u64, u64),
+}
+
+/// A denied request, for its audit record.
+#[derive(Debug)]
+pub struct Denied {
+    pub peer: PeerIdentity,
+    pub lair_id: LairId,
+    pub scopes: Vec<AccessScope>,
+}
+
+#[derive(Debug)]
+enum Phase {
+    Queued,
+    Prompting,
+    /// The person granted it and the daemon is committing; an end that
+    /// arrives now is recorded and the committer revokes what it commits.
+    Committing {
+        ended: Option<ProtocolError>,
+    },
+}
+
+#[derive(Debug)]
+struct Entry {
+    id: u64,
+    process: ProcessKey,
+    identity: IdentityKey,
+    peer: PeerIdentity,
+    lair_id: LairId,
+    scopes: Vec<AccessScope>,
+    agent_name: Option<String>,
+    expires: Instant,
+    expires_at_unix_seconds: u64,
+    outcome: watch::Sender<Option<Outcome>>,
+    cancel: Arc<PromptCancel>,
+    done: CancellationToken,
+    pidfd: Arc<OwnedFd>,
+    executing: (u64, u64),
+    phase: Phase,
+}
+
+impl Entry {
+    fn deliver(&self, outcome: Outcome) {
+        self.outcome.send_replace(Some(outcome));
+        self.cancel.cancel();
+        self.done.cancel();
+    }
+}
+
+#[derive(Debug)]
+struct Denial {
+    process: ProcessKey,
+    lair_id: LairId,
+    scopes: Vec<AccessScope>,
+    until: Instant,
+}
+
+#[derive(Debug)]
+struct Cooldown {
+    identity: IdentityKey,
+    lair_id: LairId,
+    until: Instant,
+}
+
+#[derive(Debug, Default)]
+struct Inner {
+    /// In arrival order: the prompt queue.
+    entries: Vec<Entry>,
+    denials: VecDeque<Denial>,
+    cooldowns: Vec<Cooldown>,
+    prompter_running: bool,
+    next_id: u64,
+}
+
+impl Inner {
+    fn prune(&mut self, now: Instant) {
+        self.denials.retain(|denial| denial.until > now);
+        self.cooldowns.retain(|cooldown| cooldown.until > now);
+    }
+
+    fn position(&self, request_id: u64) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.id == request_id)
+    }
+
+    /// Ends every matching request without a grant: queued and prompting
+    /// ones leave at once, committing ones are marked for the committer.
+    fn end_where(&mut self, error: &ProtocolError, selected: impl Fn(&Entry) -> bool) -> usize {
+        let mut count = 0;
+        let mut index = 0;
+        while index < self.entries.len() {
+            if !selected(&self.entries[index]) {
+                index += 1;
+                continue;
+            }
+            count += 1;
+            if let Phase::Committing { ended } = &mut self.entries[index].phase {
+                ended.get_or_insert_with(|| error.clone());
+                index += 1;
+                continue;
+            }
+            let entry = self.entries.remove(index);
+            entry.deliver(Outcome::Failed(error.clone()));
+        }
+        count
+    }
+}
+
+/// Every pending workspace request in this daemon process.
+#[derive(Debug, Default)]
+pub struct PendingAccess {
+    inner: Mutex<Inner>,
+}
+
+pub fn cancelled(message: &'static str) -> ProtocolError {
+    ProtocolError::new(ErrorCode::Cancelled, message)
+}
+
+fn denied() -> ProtocolError {
+    ProtocolError::new(ErrorCode::ConsentDenied, "Lair access was denied")
+}
+
+fn unix_seconds_at(expires: Instant, now: Instant) -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_add(expires.saturating_duration_since(now).as_secs())
+}
+
+impl PendingAccess {
+    fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Admits one call: it collects its own uncollected deny, joins its
+    /// process's pending request for the same workspace and scopes, or opens
+    /// a new one. `open_pidfd` pins the requester and runs only for a new
+    /// request.
+    ///
+    /// # Errors
+    /// The requester's earlier deny (`consent_denied`, once); a different
+    /// request already pending for this process and workspace
+    /// (`resource_limit`, naming it); the deny cooldown (`rate_limited`); the
+    /// daemon-wide bound (`resource_limit`); a requester that cannot be
+    /// pinned (`consent_unavailable`).
+    pub fn admit(
+        &self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        scopes: Vec<AccessScope>,
+        agent_name: Option<String>,
+        now: Instant,
+        open_pidfd: impl FnOnce(&ProcessKey) -> Result<PinnedRequester, ProtocolError>,
+    ) -> Result<Admitted, ProtocolError> {
+        let process = ProcessKey::of(peer).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::ConsentUnavailable,
+                "the requesting process cannot be pinned for a pending request",
+            )
+        })?;
+        let identity = IdentityKey::of(peer);
+        let mut inner = self.inner();
+        inner.prune(now);
+        if let Some(index) = inner.denials.iter().position(|denial| {
+            denial.process == process && denial.lair_id == lair_id && denial.scopes == scopes
+        }) {
+            inner.denials.remove(index);
+            return Err(denied());
+        }
+        if let Some(entry) = inner
+            .entries
+            .iter()
+            .find(|entry| entry.process == process && entry.lair_id == lair_id)
+        {
+            if entry.scopes != scopes {
+                let mut error = ProtocolError::new(
+                    ErrorCode::ResourceLimit,
+                    "a different access request for this workspace is already pending",
+                );
+                error.pending_request_id = Some(entry.id);
+                return Err(error);
+            }
+            return Ok(Admitted {
+                request_id: entry.id,
+                expires: entry.expires,
+                expires_at_unix_seconds: entry.expires_at_unix_seconds,
+                outcome: entry.outcome.subscribe(),
+                opened: None,
+            });
+        }
+        if inner
+            .cooldowns
+            .iter()
+            .any(|cooldown| cooldown.identity == identity && cooldown.lair_id == lair_id)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::RateLimited,
+                "access to this workspace was just denied; retry later",
+            ));
+        }
+        if inner.entries.len() >= MAX_PENDING_TOTAL {
+            return Err(ProtocolError::new(
+                ErrorCode::ResourceLimit,
+                "too many access requests are pending",
+            ));
+        }
+        let pinned = open_pidfd(&process)?;
+        let pidfd = Arc::new(pinned.pidfd);
+        inner.next_id = inner.next_id.saturating_add(1);
+        let expires = now + PENDING_LIFETIME;
+        let (outcome, receiver) = watch::channel(None);
+        let done = CancellationToken::new();
+        let entry = Entry {
+            id: inner.next_id,
+            process,
+            identity,
+            peer: peer.clone(),
+            lair_id,
+            scopes,
+            agent_name,
+            expires,
+            expires_at_unix_seconds: unix_seconds_at(expires, now),
+            outcome,
+            cancel: Arc::new(PromptCancel::default()),
+            done: done.clone(),
+            pidfd: Arc::clone(&pidfd),
+            executing: pinned.executing,
+            phase: Phase::Queued,
+        };
+        let admitted = Admitted {
+            request_id: entry.id,
+            expires,
+            expires_at_unix_seconds: entry.expires_at_unix_seconds,
+            outcome: receiver,
+            opened: Some(Opened { pidfd, done }),
+        };
+        inner.entries.push(entry);
+        Ok(admitted)
+    }
+
+    /// Claims the single prompter role; `false` while one runs.
+    pub fn claim_prompter(&self) -> bool {
+        let mut inner = self.inner();
+        !std::mem::replace(&mut inner.prompter_running, true)
+    }
+
+    /// Gives the prompter role back after the prompter failed abnormally.
+    pub fn release_prompter(&self) {
+        self.inner().prompter_running = false;
+    }
+
+    /// The oldest queued request, marked as shown. `None` releases the
+    /// prompter role: nothing waits.
+    pub fn next_prompt(&self) -> Option<PromptJob> {
+        let mut inner = self.inner();
+        let Some(entry) = inner
+            .entries
+            .iter_mut()
+            .find(|entry| matches!(entry.phase, Phase::Queued))
+        else {
+            inner.prompter_running = false;
+            return None;
+        };
+        entry.phase = Phase::Prompting;
+        Some(PromptJob {
+            request_id: entry.id,
+            peer: entry.peer.clone(),
+            lair_id: entry.lair_id,
+            scopes: entry.scopes.clone(),
+            agent_name: entry.agent_name.clone(),
+            expires: entry.expires,
+            cancel: Arc::clone(&entry.cancel),
+        })
+    }
+
+    /// Records a deny: the request ends, its requester can collect the deny
+    /// once, and its executable identity cools down for this workspace.
+    pub fn deny(&self, request_id: u64, now: Instant) -> Option<Denied> {
+        let mut inner = self.inner();
+        let index = inner.position(request_id)?;
+        if !matches!(inner.entries[index].phase, Phase::Prompting) {
+            return None;
+        }
+        let entry = inner.entries.remove(index);
+        inner.cooldowns.push(Cooldown {
+            identity: entry.identity.clone(),
+            lair_id: entry.lair_id,
+            until: now + DENY_COOLDOWN,
+        });
+        // A call waiting now learns it directly; otherwise the requester
+        // collects it by repeating the request.
+        if entry.outcome.receiver_count() == 0 {
+            if inner.denials.len() == MAX_UNCOLLECTED_DENIALS {
+                inner.denials.pop_front();
+            }
+            inner.denials.push_back(Denial {
+                process: entry.process.clone(),
+                lair_id: entry.lair_id,
+                scopes: entry.scopes.clone(),
+                until: entry.expires,
+            });
+        }
+        entry.deliver(Outcome::Failed(denied()));
+        Some(Denied {
+            peer: entry.peer,
+            lair_id: entry.lair_id,
+            scopes: entry.scopes,
+        })
+    }
+
+    /// Ends one request with `error`, whatever its phase.
+    pub fn end_request(&self, request_id: u64, error: &ProtocolError) -> bool {
+        self.inner()
+            .end_where(error, |entry| entry.id == request_id)
+            == 1
+    }
+
+    /// Ends one request when it has expired by `now`.
+    pub fn expire(&self, request_id: u64, now: Instant) -> bool {
+        self.inner().end_where(
+            &cancelled("the access request expired without an answer"),
+            |entry| entry.id == request_id && entry.expires <= now,
+        ) == 1
+    }
+
+    /// The requester cancels its own request for this workspace; another
+    /// process's request, or one for another workspace, is never found.
+    pub fn cancel(&self, process: &ProcessKey, lair_id: LairId, request_id: u64) -> bool {
+        self.inner()
+            .end_where(&cancelled("the access request was cancelled"), |entry| {
+                entry.id == request_id && entry.process == *process && entry.lair_id == lair_id
+            })
+            == 1
+    }
+
+    /// **Revoke all access**: every pending request ends.
+    pub fn cancel_all(&self) -> usize {
+        self.inner()
+            .end_where(&cancelled("access was revoked"), |_| true)
+    }
+
+    /// The workspace ended: its pending requests end.
+    pub fn end_lair(&self, lair_id: LairId) -> usize {
+        self.inner().end_where(
+            &ProtocolError::new(ErrorCode::NotFound, "the workspace no longer exists"),
+            |entry| entry.lair_id == lair_id,
+        )
+    }
+
+    /// The handoff fence went up: nothing pending survives it.
+    pub fn end_all_at_fence(&self) -> usize {
+        self.inner().end_where(
+            &ProtocolError::new(
+                ErrorCode::HandoffInProgress,
+                "the daemon is upgrading; ask again after it restarts",
+            ),
+            |_| true,
+        )
+    }
+
+    /// Moves a shown request to committing; `None` when it already ended,
+    /// so a late answer grants nothing.
+    pub fn begin_commit(&self, request_id: u64) -> Option<CommitTicket> {
+        let mut inner = self.inner();
+        let index = inner.position(request_id)?;
+        let entry = &mut inner.entries[index];
+        if !matches!(entry.phase, Phase::Prompting) {
+            return None;
+        }
+        entry.phase = Phase::Committing { ended: None };
+        Some(CommitTicket {
+            peer: entry.peer.clone(),
+            process: entry.process.clone(),
+            pidfd: Arc::clone(&entry.pidfd),
+            executing: entry.executing,
+        })
+    }
+
+    /// Finishes a commit. `false` when the request was ended while it
+    /// committed: its callers receive that end instead, and the committer
+    /// revokes the grant it committed.
+    pub fn finish_commit(&self, request_id: u64, outcome: Outcome) -> bool {
+        let mut inner = self.inner();
+        let Some(index) = inner.position(request_id) else {
+            return false;
+        };
+        let entry = inner.entries.remove(index);
+        if let Phase::Committing {
+            ended: Some(error), ..
+        } = &entry.phase
+        {
+            entry.deliver(Outcome::Failed(error.clone()));
+            return false;
+        }
+        entry.deliver(outcome);
+        true
+    }
+
+    /// How many requests are pending.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.inner().entries.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer_with_start(start_time: u64) -> PeerIdentity {
+        let mut peer = PeerIdentity::for_test();
+        peer.install_start_time(start_time);
+        peer
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "it stands in for the fallible pin `admit` takes"
+    )]
+    fn pidfd(_: &ProcessKey) -> Result<PinnedRequester, ProtocolError> {
+        Ok(PinnedRequester {
+            pidfd: OwnedFd::from(std::fs::File::open("/dev/null").unwrap()),
+            executing: (1, 1),
+        })
+    }
+
+    fn admit(
+        pending: &PendingAccess,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        scopes: &[AccessScope],
+        now: Instant,
+    ) -> Result<Admitted, ProtocolError> {
+        pending.admit(peer, lair_id, scopes.to_vec(), None, now, pidfd)
+    }
+
+    const LOOK: &[AccessScope] = &[AccessScope::Observe];
+    const TYPE: &[AccessScope] = &[AccessScope::Observe, AccessScope::Input];
+
+    #[test]
+    fn one_request_per_process_and_workspace_and_eight_in_all() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let peer = peer_with_start(1);
+        let first = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        assert!(first.opened.is_some());
+        // The same request joins; it opens nothing.
+        let joined = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        assert_eq!(joined.request_id, first.request_id);
+        assert!(joined.opened.is_none());
+        // Different access fails with the pending request's identifier.
+        let refused = admit(&pending, &peer, lair, TYPE, now).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::ResourceLimit);
+        assert_eq!(refused.pending_request_id, Some(first.request_id));
+        // Another process gets its own; the ninth request fails.
+        for start in 2..=8 {
+            admit(&pending, &peer_with_start(start), lair, LOOK, now).unwrap();
+        }
+        assert_eq!(pending.len(), MAX_PENDING_TOTAL);
+        let full = admit(&pending, &peer_with_start(9), lair, LOOK, now).unwrap_err();
+        assert_eq!(full.code, ErrorCode::ResourceLimit);
+        assert_eq!(full.pending_request_id, None);
+        // A requester without a recorded start time cannot be pinned.
+        let unpinned = admit(&pending, &PeerIdentity::for_test(), lair, LOOK, now).unwrap_err();
+        assert_eq!(unpinned.code, ErrorCode::ConsentUnavailable);
+    }
+
+    #[test]
+    fn prompts_are_shown_one_at_a_time_in_arrival_order() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let first = admit(&pending, &peer_with_start(1), lair, LOOK, now).unwrap();
+        let second = admit(&pending, &peer_with_start(2), lair, LOOK, now).unwrap();
+        assert!(pending.claim_prompter());
+        assert!(!pending.claim_prompter(), "only one prompter runs");
+        let job = pending.next_prompt().unwrap();
+        assert_eq!(job.request_id, first.request_id);
+        assert!(pending.begin_commit(job.request_id).is_some());
+        assert!(pending.finish_commit(job.request_id, Outcome::Failed(denied())));
+        let job = pending.next_prompt().unwrap();
+        assert_eq!(job.request_id, second.request_id);
+        pending.end_request(job.request_id, &cancelled("test"));
+        assert!(pending.next_prompt().is_none());
+        assert!(pending.claim_prompter(), "the role was released");
+    }
+
+    #[test]
+    fn a_deny_cools_the_identity_down_and_is_collected_once() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let other_lair = LairId::new();
+        let peer = peer_with_start(1);
+        let admitted = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        // Nobody waits on it now.
+        drop(admitted.outcome);
+        let job = pending.next_prompt().unwrap();
+        let denied = pending.deny(job.request_id, now).unwrap();
+        assert_eq!(denied.lair_id, lair);
+        // The requester collects its deny once, then the cooldown applies to
+        // every process of the same executable identity.
+        assert_eq!(
+            admit(&pending, &peer, lair, LOOK, now).unwrap_err().code,
+            ErrorCode::ConsentDenied
+        );
+        assert_eq!(
+            admit(&pending, &peer, lair, LOOK, now).unwrap_err().code,
+            ErrorCode::RateLimited
+        );
+        assert_eq!(
+            admit(&pending, &peer_with_start(2), lair, TYPE, now)
+                .unwrap_err()
+                .code,
+            ErrorCode::RateLimited
+        );
+        // Another workspace is unaffected, and the cooldown ends.
+        admit(&pending, &peer, other_lair, LOOK, now).unwrap();
+        admit(&pending, &peer, lair, LOOK, now + DENY_COOLDOWN).unwrap();
+    }
+
+    #[test]
+    fn a_waiting_call_learns_the_deny_directly() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let peer = peer_with_start(1);
+        let admitted = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        let job = pending.next_prompt().unwrap();
+        pending.deny(job.request_id, now).unwrap();
+        assert_eq!(*admitted.outcome.borrow(), Some(Outcome::Failed(denied())));
+        assert_eq!(
+            admit(&pending, &peer, lair, LOOK, now).unwrap_err().code,
+            ErrorCode::RateLimited,
+            "nothing is left to collect"
+        );
+    }
+
+    #[test]
+    fn ending_closes_the_prompt_and_a_late_answer_commits_nothing() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let peer = peer_with_start(1);
+        let process = ProcessKey::of(&peer).unwrap();
+        let admitted = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        let opened = admitted.opened.as_ref().unwrap();
+        let job = pending.next_prompt().unwrap();
+        // Another process cannot cancel it.
+        let other = ProcessKey::of(&peer_with_start(2)).unwrap();
+        assert!(!pending.cancel(&other, lair, job.request_id));
+        assert!(!pending.cancel(&process, LairId::new(), job.request_id));
+        assert!(pending.cancel(&process, lair, job.request_id));
+        assert!(job.cancel.is_cancelled(), "the prompt closes");
+        assert!(opened.done.is_cancelled(), "the watcher stops");
+        assert_eq!(
+            admitted
+                .outcome
+                .borrow()
+                .as_ref()
+                .map(|outcome| match outcome {
+                    Outcome::Failed(error) => error.code,
+                    Outcome::Granted(_) => ErrorCode::Internal,
+                }),
+            Some(ErrorCode::Cancelled)
+        );
+        assert!(pending.begin_commit(job.request_id).is_none());
+        assert!(pending.deny(job.request_id, now).is_none());
+    }
+
+    #[test]
+    fn an_end_during_commit_wins_and_the_grant_is_revoked() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let admitted = admit(&pending, &peer_with_start(1), lair, LOOK, now).unwrap();
+        let job = pending.next_prompt().unwrap();
+        assert!(pending.begin_commit(job.request_id).is_some());
+        assert_eq!(pending.cancel_all(), 1);
+        let granted = Response::LairAccessRequestsCancelled { cancelled: 0 };
+        assert!(!pending.finish_commit(job.request_id, Outcome::Granted(Box::new(granted))));
+        assert!(matches!(
+            &*admitted.outcome.borrow(),
+            Some(Outcome::Failed(error)) if error.code == ErrorCode::Cancelled
+        ));
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn expiry_workspace_end_and_the_fence_end_requests() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let other_lair = LairId::new();
+        let first = admit(&pending, &peer_with_start(1), lair, LOOK, now).unwrap();
+        assert!(!pending.expire(first.request_id, now));
+        assert!(pending.expire(first.request_id, now + PENDING_LIFETIME));
+        admit(&pending, &peer_with_start(2), lair, LOOK, now).unwrap();
+        admit(&pending, &peer_with_start(3), other_lair, LOOK, now).unwrap();
+        assert_eq!(pending.end_lair(lair), 1);
+        let last = admit(&pending, &peer_with_start(4), lair, LOOK, now).unwrap();
+        assert_eq!(pending.end_all_at_fence(), 2);
+        assert!(matches!(
+            &*last.outcome.borrow(),
+            Some(Outcome::Failed(error)) if error.code == ErrorCode::HandoffInProgress
+        ));
+        assert_eq!(pending.len(), 0);
+    }
+}

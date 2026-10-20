@@ -1,6 +1,8 @@
 # ADR 0014: easy agent access
 
-- **Status:** Accepted for `0.2.0`; implementation pending
+- **Status:** Accepted for `0.2.0`; implementation in progress (the grant
+  engine, the consent prompt, and pending requests are implemented; the access
+  list, its revoke UI, the Explorer marks, and one-step setup are pending)
 - **Date:** 2026-10-20
 - **Amends:** [ADR 0005](0005-trusted-consent-broker.md) (consent outcomes,
   prompt input, and persistence), [ADR 0007](0007-supported-automation-policy.md)

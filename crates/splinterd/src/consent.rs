@@ -26,9 +26,9 @@ use nix::{
 use splinterd::install_prefix::InstallPrefix;
 use splinterm_core::{LairId, SplintId};
 use splinterm_protocol::{
-    AccessGrant, AccessGrantSource, AccessScope, AuditPeer, CONSENT_CAPABILITY_BYTES,
-    ConsentPrompt, ConsentReply, ConsentTarget, LairAccessGrant, MAX_ACCESS_SCOPES,
-    MAX_CONSENT_FRAME_BYTES,
+    AccessGrant, AccessGrantSource, AccessLevel, AccessScope, AuditPeer, CONSENT_CAPABILITY_BYTES,
+    ConsentDecision, ConsentDurationOffer, ConsentPrompt, ConsentReply, ConsentTarget,
+    GrantDuration, LairAccessGrant, MAX_ACCESS_SCOPES, MAX_CONSENT_FRAME_BYTES,
 };
 use tokio::{io::unix::AsyncFd, net::UnixStream};
 
@@ -367,7 +367,7 @@ impl PeerIdentity {
 ///
 /// Fails closed when the link cannot be opened or examined, or the executing
 /// object is not a regular file.
-fn executable_file_identity(pid: u32) -> Result<(u64, u64)> {
+pub fn executable_file_identity(pid: u32) -> Result<(u64, u64)> {
     let link = format!("/proc/{pid}/exe");
     let executable = rustix::fs::open(
         link.as_str(),
@@ -549,7 +549,7 @@ fn verify_pidfd_pid(pidfd: &OwnedFd, expected_pid: u32) -> Result<()> {
     Ok(())
 }
 
-fn require_live_pidfd(pidfd: &OwnedFd) -> Result<()> {
+pub fn require_live_pidfd(pidfd: &OwnedFd) -> Result<()> {
     let mut descriptors = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
     let ready = poll(&mut descriptors, PollTimeout::ZERO).context("cannot poll peer pidfd")?;
     if ready != 0
@@ -1128,6 +1128,9 @@ impl GrantStore {
     }
 }
 
+/// Asks the person to confirm one Splint request or a forced control
+/// transfer: a prompt that offers "Just this once" only. `true` only for
+/// that grant.
 pub async fn prompt(
     install_prefix: &InstallPrefix,
     peer: &PeerIdentity,
@@ -1135,59 +1138,195 @@ pub async fn prompt(
     incarnation: u64,
     scopes: Vec<AccessScope>,
 ) -> Result<bool> {
-    prompt_target(
-        install_prefix,
+    let decision = prompt_target(
+        install_prefix.client(),
         peer,
         ConsentTarget::Splint {
             splint_id,
             incarnation,
         },
         scopes,
+        PromptDetails::once_only(),
+        CONSENT_DEADLINE,
+        Arc::new(PromptCancel::default()),
     )
-    .await
+    .await?;
+    Ok(decision
+        == ConsentDecision::Grant {
+            duration: GrantDuration::Once,
+        })
 }
 
+/// What a workspace prompt shows beyond the requester, target, and scopes
+/// (ADR 0014).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromptDetails {
+    /// The host-reported agent name: display data only.
+    pub agent_name: Option<String>,
+    /// The level the scopes are exactly, or `None` for Custom.
+    pub level: Option<AccessLevel>,
+    /// Every duration shown, "Just this once" first.
+    pub durations: Vec<ConsentDurationOffer>,
+}
+
+impl PromptDetails {
+    /// "Just this once" and nothing else, for Splint prompts.
+    pub fn once_only() -> Self {
+        Self {
+            agent_name: None,
+            level: None,
+            durations: vec![ConsentDurationOffer {
+                duration: GrantDuration::Once,
+                withheld: None,
+                shared_by: None,
+                replaces: None,
+            }],
+        }
+    }
+}
+
+/// Closes an open consent prompt from another task: the pending request was
+/// cancelled, expired, or ended while the person had not answered.
+///
+/// The prompt's client is this daemon's own unreaped child, so its PID
+/// cannot name another process while it is recorded here.
+#[derive(Debug, Default)]
+pub struct PromptCancel {
+    state: std::sync::Mutex<PromptCancelState>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct PromptCancelState {
+    cancelled: bool,
+    child: Option<rustix::process::Pid>,
+}
+
+impl PromptCancel {
+    fn state(&self) -> std::sync::MutexGuard<'_, PromptCancelState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Closes the prompt: its client is killed, or never starts.
+    pub fn cancel(&self) {
+        let mut state = self.state();
+        state.cancelled = true;
+        if let Some(child) = state.child {
+            let _ = rustix::process::kill_process(child, rustix::process::Signal::KILL);
+        }
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state().cancelled
+    }
+
+    /// Resolves once [`Self::cancel`] has run.
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Records the started client; `false` (the caller kills it) when the
+    /// prompt was cancelled before it started.
+    fn register(&self, child: u32) -> bool {
+        let mut state = self.state();
+        if state.cancelled {
+            return false;
+        }
+        state.child = i32::try_from(child)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw);
+        true
+    }
+
+    /// Forgets the client before it is reaped, so its PID is never signalled
+    /// after it could be reused.
+    fn unregister(&self) {
+        self.state().child = None;
+    }
+}
+
+/// Shows one workspace prompt and waits for the person's typed answer, at
+/// most `deadline`, or until `cancel` closes it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one prompt's complete, already-validated contents"
+)]
 pub async fn prompt_lair(
     install_prefix: &InstallPrefix,
     peer: &PeerIdentity,
     lair_id: LairId,
     lair_name: String,
     scopes: Vec<AccessScope>,
-) -> Result<bool> {
+    details: PromptDetails,
+    deadline: Duration,
+    cancel: Arc<PromptCancel>,
+) -> Result<ConsentDecision> {
     prompt_target(
-        install_prefix,
+        install_prefix.client(),
         peer,
         ConsentTarget::Lair { lair_id, lair_name },
         scopes,
+        details,
+        deadline,
+        cancel,
     )
     .await
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one prompt's complete, already-validated contents"
+)]
 async fn prompt_target(
-    install_prefix: &InstallPrefix,
+    client: std::path::PathBuf,
     peer: &PeerIdentity,
     target: ConsentTarget,
     scopes: Vec<AccessScope>,
-) -> Result<bool> {
+    details: PromptDetails,
+    deadline: Duration,
+    cancel: Arc<PromptCancel>,
+) -> Result<ConsentDecision> {
     if scopes.is_empty() || scopes.len() > MAX_ACCESS_SCOPES {
         bail!("invalid consent scope count");
     }
-    let peer = peer.clone();
-    let client = install_prefix.client();
-    tokio::task::spawn_blocking(move || prompt_blocking(&client, &peer, target, scopes))
+    let prompt = ConsentPrompt {
+        capability: Vec::new(),
+        requester: peer.requester_label(),
+        requester_pid: peer.pid,
+        requester_uid: peer.uid,
+        agent_name: details.agent_name,
+        target,
+        scopes,
+        level: details.level,
+        durations: details.durations,
+    };
+    tokio::task::spawn_blocking(move || prompt_blocking(&client, prompt, deadline, &cancel))
         .await
         .context("consent broker task failed")?
 }
 
 /// Launches the trusted consent client, `<prefix>/splinterm`, from the
 /// daemon's installed-prefix authority, never from a path derived from the
-/// running daemon image.
+/// running daemon image, and returns its typed answer. An answer naming a
+/// duration the prompt did not offer fails closed.
 fn prompt_blocking(
     executable: &Path,
-    peer: &PeerIdentity,
-    target: ConsentTarget,
-    scopes: Vec<AccessScope>,
-) -> Result<bool> {
+    mut prompt: ConsentPrompt,
+    deadline: Duration,
+    cancel: &PromptCancel,
+) -> Result<ConsentDecision> {
     let mut capability = vec![0_u8; CONSENT_CAPABILITY_BYTES];
     let mut offset = 0;
     while offset < capability.len() {
@@ -1197,9 +1336,17 @@ fn prompt_blocking(
         )
         .context("OS randomness unavailable")?;
     }
+    prompt.capability.clone_from(&capability);
+    if let Err(reason) = prompt.validate() {
+        bail!("invalid consent prompt: {reason}");
+    }
+    if cancel.is_cancelled() {
+        bail!("consent prompt cancelled");
+    }
+    let deadline = deadline.max(Duration::from_millis(1));
     let (mut daemon, child) = StdUnixStream::pair().context("create private consent socket")?;
-    daemon.set_read_timeout(Some(CONSENT_DEADLINE))?;
-    daemon.set_write_timeout(Some(CONSENT_DEADLINE))?;
+    daemon.set_read_timeout(Some(deadline))?;
+    daemon.set_write_timeout(Some(deadline))?;
     let child_read = child
         .try_clone()
         .context("duplicate private consent descriptor")?;
@@ -1214,16 +1361,15 @@ fn prompt_blocking(
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("launch trusted consent client {}", executable.display()))?;
-    let prompt = ConsentPrompt {
-        capability: capability.clone(),
-        requester: peer.requester_label(),
-        requester_pid: peer.pid,
-        requester_uid: peer.uid,
-        target,
-        scopes,
-    };
-    write_bounded(&mut daemon, &prompt)?;
-    let reply: ConsentReply = match read_bounded(&mut daemon) {
+    if !cancel.register(process.id()) {
+        let _ = process.kill();
+        let _ = process.wait();
+        bail!("consent prompt cancelled");
+    }
+    let exchanged = write_bounded(&mut daemon, &prompt)
+        .and_then(|()| read_bounded::<ConsentReply>(&mut daemon));
+    cancel.unregister();
+    let reply = match exchanged {
         Ok(reply) => reply,
         Err(error) => {
             let _ = process.kill();
@@ -1235,7 +1381,12 @@ fn prompt_blocking(
     if !status.success() || reply.capability != capability {
         bail!("consent client authentication failed");
     }
-    Ok(reply.granted)
+    if let ConsentDecision::Grant { duration } = reply.decision
+        && !prompt.offers(duration)
+    {
+        bail!("consent client chose a duration the prompt did not offer");
+    }
+    Ok(reply.decision)
 }
 
 pub fn read_bounded<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T> {

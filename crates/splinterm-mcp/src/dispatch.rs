@@ -304,11 +304,23 @@ impl<'a> DaemonSession<'a> {
     }
 
     async fn request(&mut self, request: Request) -> Result<Response, DispatchFailure> {
+        self.request_raw(request)
+            .await
+            .map_err(|error| map_client_error(&error))
+    }
+
+    async fn request_raw(&mut self, request: Request) -> Result<Response, Error> {
         let remaining = self.deadline.saturating_sub(self.started.elapsed());
         self.connection
             .request_with_cancellation(request, remaining, self.cancellation)
             .await
-            .map_err(|error| map_client_error(&error))
+    }
+
+    /// How long the daemon may hold a workspace request waiting for the
+    /// person (ADR 0014): what is left of this call's deadline less a margin,
+    /// so the `pending` reply always arrives before the deadline.
+    fn consent_wait_millis(&self) -> u32 {
+        consent_wait_budget(self.deadline.saturating_sub(self.started.elapsed()))
     }
 
     fn scrollback_limit(&self, requested: usize) -> usize {
@@ -469,6 +481,244 @@ fn parse_grant_id(arguments: &Value) -> Result<u64, DispatchFailure> {
         .ok_or_else(DispatchFailure::internal)
 }
 
+/// The largest margin kept between a workspace request's wait budget and the
+/// call's own deadline.
+const CONSENT_WAIT_MARGIN: Duration = Duration::from_secs(1);
+
+/// The wait budget for `remaining` time: at most a quarter of it, and at
+/// most [`CONSENT_WAIT_MARGIN`], is kept back for the reply, and the daemon's
+/// 25-second cap applies.
+pub(crate) fn consent_wait_budget(remaining: Duration) -> u32 {
+    let margin = (remaining / 4).min(CONSENT_WAIT_MARGIN);
+    let budget = remaining.saturating_sub(margin).as_millis();
+    u32::try_from(budget)
+        .unwrap_or(u32::MAX)
+        .min(splinterm_protocol::MAX_CONSENT_WAIT_MILLIS)
+}
+
+/// The host-reported MCP client name from `initialize`: shown in the consent
+/// prompt as data, never an identity.
+static CLIENT_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records the host's `clientInfo.name` once, bounded and with control
+/// characters removed.
+pub(crate) fn record_client_name(name: &str) {
+    let name: String = name
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(splinterm_protocol::MAX_AGENT_NAME_CHARS)
+        .collect();
+    let name = name.trim();
+    if !name.is_empty() {
+        let _ = CLIENT_NAME.set(name.to_owned());
+    }
+}
+
+fn level_from_name(value: &str) -> Option<splinterm_protocol::AccessLevel> {
+    match value {
+        "look" => Some(splinterm_protocol::AccessLevel::Look),
+        "look_and_type" => Some(splinterm_protocol::AccessLevel::LookAndType),
+        "manage" => Some(splinterm_protocol::AccessLevel::Manage),
+        _ => None,
+    }
+}
+
+/// `splinterm.request_lair_access`: asks for a level or scopes, or cancels
+/// this adapter's pending request. A request the person has not answered
+/// within the call's wait budget returns `pending`; calling again with the
+/// same Lair and access collects the answer.
+async fn request_lair_access(
+    tool: &str,
+    arguments: &Value,
+    cancellation: &CancellationToken,
+) -> Result<Value, DispatchFailure> {
+    let lair_id = parse_lair(arguments)?;
+    let level = arguments.get("level").and_then(Value::as_str);
+    let scopes = arguments.get("scopes").and_then(Value::as_array);
+    let cancel = arguments.get("cancel_request_id");
+    let request = match (level, scopes, cancel) {
+        (None, None, Some(_)) => {
+            let request_id = arguments["cancel_request_id"]
+                .as_str()
+                .and_then(|value| value.parse().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(DispatchFailure::internal)?;
+            return cancel_lair_access(tool, lair_id, request_id, cancellation).await;
+        }
+        (Some(level), None, None) => (
+            Some(level_from_name(level).ok_or_else(DispatchFailure::internal)?),
+            Vec::new(),
+        ),
+        (None, Some(scopes), None) => (
+            None,
+            scopes
+                .iter()
+                .map(|scope| scope.as_str().and_then(scope_from_name))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    DispatchFailure::new(
+                        "invalid_argument",
+                        "request_lair_access contains an unsupported scope",
+                        false,
+                    )
+                })?,
+        ),
+        _ => {
+            return Err(DispatchFailure::new(
+                "invalid_argument",
+                "request_lair_access takes exactly one of level, scopes, or cancel_request_id",
+                false,
+            ));
+        }
+    };
+    let (level, scopes) = request;
+    let mut session = DaemonSession::connect(cancellation).await?;
+    let wait_millis = session.consent_wait_millis();
+    let response = session
+        .request_raw(Request::RequestLairAccess {
+            lair_id,
+            level,
+            scopes,
+            wait_millis,
+            agent_name: CLIENT_NAME.get().cloned(),
+        })
+        .await
+        .map_err(|error| {
+            if protocol_error(&error).is_some_and(|error| error.pending_request_id.is_some()) {
+                DispatchFailure::new(
+                    "resource_limit",
+                    "a different access request for this Lair is already pending; repeat that request or cancel it first",
+                    true,
+                )
+            } else {
+                map_client_error(&error)
+            }
+        })?;
+    match response {
+        Response::LairAccessGranted {
+            topology_revision,
+            authorization_revision,
+            grant,
+        } if grant.lair_id == lair_id => {
+            lair_grant_output(tool, topology_revision, authorization_revision, &grant)
+        }
+        Response::LairAccessPending {
+            lair_id: pending_lair,
+            topology_revision,
+            request_id,
+            expires_at_unix_seconds,
+        } if pending_lair == lair_id && request_id != 0 => Ok(success(
+            tool,
+            json!({
+                "kind": "lair",
+                "lair_id": lair_id.to_string(),
+                "topology_revision": topology_revision.get(),
+            }),
+            json!({
+                "committed": false,
+                "status": "pending",
+                "pending_request_id": request_id.to_string(),
+                "expires_at": expires_at_unix_seconds.to_string(),
+            }),
+            false,
+            "trusted_metadata",
+        )),
+        _ => Err(DispatchFailure::internal()),
+    }
+}
+
+/// A Lair grant as the tool reports it: the runtime grant ID for consent
+/// grants, the expiry only for "just this once".
+fn lair_grant_output(
+    tool: &str,
+    topology_revision: splinterm_core::TopologyRevision,
+    authorization_revision: u64,
+    grant: &splinterm_protocol::LairAccessGrant,
+) -> Result<Value, DispatchFailure> {
+    let granted_scopes = grant
+        .scopes
+        .iter()
+        .copied()
+        .map(access_scope_name)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(DispatchFailure::internal)?;
+    let (source, grant_id, expires_at) = match grant.source {
+        AccessGrantSource::Ephemeral if grant.grant_id != 0 => (
+            "ephemeral",
+            Some(grant.grant_id.to_string()),
+            Some(grant.expires_at_unix_seconds.to_string()),
+        ),
+        // These last until revoked or the workspace ends.
+        AccessGrantSource::WorkspaceSession if grant.grant_id != 0 => {
+            ("workspace_session", Some(grant.grant_id.to_string()), None)
+        }
+        AccessGrantSource::Remembered if grant.grant_id != 0 => {
+            ("remembered", Some(grant.grant_id.to_string()), None)
+        }
+        AccessGrantSource::PersistentPolicy if grant.grant_id == 0 => {
+            ("persistent_policy", None, None)
+        }
+        AccessGrantSource::Development if grant.grant_id == 0 => ("development", None, None),
+        _ => return Err(DispatchFailure::internal()),
+    };
+    Ok(success(
+        tool,
+        json!({
+            "kind": "lair",
+            "lair_id": grant.lair_id.to_string(),
+            "topology_revision": topology_revision.get(),
+            "authorization_revision": authorization_revision,
+        }),
+        json!({
+            "committed": true,
+            "source": source,
+            "grant_id": grant_id,
+            "granted_scopes": granted_scopes,
+            "expires_at": expires_at,
+        }),
+        false,
+        "trusted_metadata",
+    ))
+}
+
+async fn cancel_lair_access(
+    tool: &str,
+    lair_id: LairId,
+    request_id: u64,
+    cancellation: &CancellationToken,
+) -> Result<Value, DispatchFailure> {
+    match daemon_request(
+        Request::CancelLairAccessRequest {
+            lair_id,
+            request_id,
+        },
+        cancellation,
+    )
+    .await?
+    {
+        Response::LairAccessRequestCancelled {
+            lair_id: cancelled_lair,
+            topology_revision,
+            request_id: cancelled,
+        } if cancelled == request_id && cancelled_lair == lair_id => Ok(success(
+            tool,
+            json!({
+                "kind": "lair",
+                "lair_id": lair_id.to_string(),
+                "topology_revision": topology_revision.get(),
+            }),
+            json!({
+                "committed": true,
+                "status": "cancelled",
+                "pending_request_id": request_id.to_string(),
+            }),
+            false,
+            "trusted_metadata",
+        )),
+        _ => Err(DispatchFailure::internal()),
+    }
+}
+
 fn scope_from_name(value: &str) -> Option<AccessScope> {
     match value {
         "terminal_visible_read" => Some(AccessScope::Observe),
@@ -482,6 +732,7 @@ fn scope_from_name(value: &str) -> Option<AccessScope> {
         "topology_name_mutate" => Some(AccessScope::TopologyName),
         "process_spawn" => Some(AccessScope::ProcessSpawn),
         "process_restore" => Some(AccessScope::ProcessRestore),
+        "agent_status_report" => Some(AccessScope::AgentStatusReport),
         _ => None,
     }
 }
@@ -2244,70 +2495,7 @@ pub(crate) async fn dispatch(
             }
         }
         "splinterm.request_lair_access" => {
-            let lair_id = parse_lair(arguments)?;
-            let scopes = arguments["scopes"]
-                .as_array()
-                .ok_or_else(DispatchFailure::internal)?
-                .iter()
-                .map(|scope| scope.as_str().and_then(scope_from_name))
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| {
-                    DispatchFailure::new(
-                        "invalid_argument",
-                        "request_lair_access contains an unsupported scope",
-                        false,
-                    )
-                })?;
-            match daemon_request(Request::RequestLairAccess { lair_id, scopes }, cancellation)
-                .await?
-            {
-                Response::LairAccessGranted {
-                    topology_revision,
-                    authorization_revision,
-                    grant,
-                } if grant.lair_id == lair_id => {
-                    let granted_scopes = grant
-                        .scopes
-                        .iter()
-                        .copied()
-                        .map(access_scope_name)
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(DispatchFailure::internal)?;
-                    let (source, grant_id, expires_at) = match grant.source {
-                        AccessGrantSource::Ephemeral if grant.grant_id != 0 => (
-                            "ephemeral",
-                            Some(grant.grant_id.to_string()),
-                            Some(grant.expires_at_unix_seconds.to_string()),
-                        ),
-                        AccessGrantSource::PersistentPolicy if grant.grant_id == 0 => {
-                            ("persistent_policy", None, None)
-                        }
-                        AccessGrantSource::Development if grant.grant_id == 0 => {
-                            ("development", None, None)
-                        }
-                        _ => return Err(DispatchFailure::internal()),
-                    };
-                    Ok(success(
-                        tool,
-                        json!({
-                            "kind": "lair",
-                            "lair_id": lair_id.to_string(),
-                            "topology_revision": topology_revision.get(),
-                            "authorization_revision": authorization_revision,
-                        }),
-                        json!({
-                            "committed": true,
-                            "source": source,
-                            "grant_id": grant_id,
-                            "granted_scopes": granted_scopes,
-                            "expires_at": expires_at,
-                        }),
-                        false,
-                        "trusted_metadata",
-                    ))
-                }
-                _ => Err(DispatchFailure::internal()),
-            }
+            Box::pin(request_lair_access(tool, arguments, cancellation)).await
         }
         "splinterm.authorization_status" => {
             let splint_id = parse_splint(arguments)?;
@@ -2475,6 +2663,21 @@ pub(crate) async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_consent_wait_budget_stays_a_margin_below_the_deadline() {
+        // The 5-second default keeps one second back.
+        assert_eq!(consent_wait_budget(Duration::from_secs(5)), 4_000);
+        // The 30-second maximum is capped by the daemon's 25 seconds.
+        assert_eq!(consent_wait_budget(Duration::from_secs(30)), 25_000);
+        // Short deadlines keep a quarter back.
+        assert_eq!(consent_wait_budget(Duration::from_millis(100)), 75);
+        assert_eq!(consent_wait_budget(Duration::ZERO), 0);
+        for millis in [1_u64, 999, 2_000, 26_000, 30_000] {
+            let remaining = Duration::from_millis(millis);
+            assert!(u128::from(consent_wait_budget(remaining)) < remaining.as_millis());
+        }
+    }
 
     #[test]
     fn process_owned_terminal_cursors_are_bound_consumed_and_tamper_resistant() {
