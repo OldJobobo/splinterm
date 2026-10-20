@@ -231,6 +231,10 @@ struct PendingControlTransfer {
 
 #[derive(Clone, Debug)]
 enum ControlNotice {
+    /// A handoff phase for every control subscription, which forwards it as
+    /// `SubscriptionEvent::HandoffStatus` (Plan 0061 M3.12a): the graphical
+    /// client's per-pane control subscriptions carry its upgrade banner.
+    HandoffStatus(HandoffStatusPhase),
     Status {
         splint_id: SplintId,
         incarnation: u64,
@@ -4680,7 +4684,7 @@ enum PendingSubscription {
     },
     Control {
         id: u64,
-        stream: broadcast::Receiver<ControlNotice>,
+        stream: ControlStream,
         connection_id: u64,
         splint_id: SplintId,
         incarnation: u64,
@@ -9739,7 +9743,7 @@ async fn handle_authorized_request(
                 },
                 subscription: Some(PendingSubscription::Control {
                     id,
-                    stream: state.control_events.subscribe(),
+                    stream: state.handoff_gate.subscribe_control(&state.control_events),
                     connection_id,
                     splint_id,
                     incarnation,
@@ -10403,11 +10407,17 @@ enum HandoffGatePhase {
 /// The old side's handoff gate. Only [`HandoffAttempt::begin`] moves it out
 /// of `Idle`, and only dropping that attempt's [`HandoffHold`] returns it.
 #[derive(Default)]
-struct HandoffGate(StdMutex<HandoffGatePhase>);
+struct HandoffGate {
+    phase: StdMutex<HandoffGatePhase>,
+    /// The handoff status phase broadcast last, recorded under the topology
+    /// hub lock with each broadcast. A control subscription that starts, or
+    /// lags, after a broadcast is seeded from it (Plan 0061 M3.12a).
+    last_status: StdMutex<Option<HandoffStatusPhase>>,
+}
 
 impl HandoffGate {
     fn phase(&self) -> HandoffGatePhase {
-        *self.0.lock().unwrap()
+        *self.phase.lock().unwrap()
     }
 
     fn is_fenced(&self) -> bool {
@@ -10416,7 +10426,7 @@ impl HandoffGate {
 
     /// Moves `Idle` to `Preparing`, or returns false while a handoff runs.
     fn try_begin(&self) -> bool {
-        let mut phase = self.0.lock().unwrap();
+        let mut phase = self.phase.lock().unwrap();
         if *phase != HandoffGatePhase::Idle {
             return false;
         }
@@ -10425,8 +10435,30 @@ impl HandoffGate {
     }
 
     fn set(&self, next: HandoffGatePhase) {
-        *self.0.lock().unwrap() = next;
+        *self.phase.lock().unwrap() = next;
     }
+
+    fn last_status(&self) -> Option<HandoffStatusPhase> {
+        *self.last_status.lock().unwrap()
+    }
+
+    /// Subscribes to control notices with the handoff phase broadcast last.
+    /// [`publish_control_handoff_status`] records and sends a phase under the
+    /// same lock, so the stream holds exactly the phases after this one.
+    fn subscribe_control(&self, events: &broadcast::Sender<ControlNotice>) -> ControlStream {
+        let last_status = self.last_status.lock().unwrap();
+        ControlStream {
+            notices: events.subscribe(),
+            handoff_seed: *last_status,
+        }
+    }
+}
+
+/// A control subscription's notices and the handoff phase it starts from.
+#[derive(Debug)]
+struct ControlStream {
+    notices: broadcast::Receiver<ControlNotice>,
+    handoff_seed: Option<HandoffStatusPhase>,
 }
 
 fn handoff_in_progress() -> ProtocolError {
@@ -10979,15 +11011,29 @@ impl Drop for HandoffAttempt {
     }
 }
 
+/// Broadcasts `phase` to topology and control subscriptions.
 async fn publish_handoff_status(state: &DaemonState, phase: HandoffStatusPhase) {
     let revision = state.topology.read().await.revision();
-    state.topology_hub.lock().await.publish_status(
+    let mut hub = state.topology_hub.lock().await;
+    hub.publish_status(
         SubscriptionEvent::HandoffStatus {
             daemon_generation: state.daemon_generation,
             phase,
         },
         revision,
     );
+    publish_control_handoff_status(state, phase);
+}
+
+/// Records `phase` as the last handoff status and sends it to every control
+/// subscription, under the lock [`HandoffGate::subscribe_control`] takes.
+/// Callers hold the topology hub lock, so control subscribers see the phases
+/// in the same order as topology subscribers.
+fn publish_control_handoff_status(state: &DaemonState, phase: HandoffStatusPhase) {
+    let mut last_status = state.handoff_gate.last_status.lock().unwrap();
+    *last_status = Some(phase);
+    publish_control_notice(state, ControlNotice::HandoffStatus(phase));
+    drop(last_status);
 }
 
 /// Lifts the fence and broadcasts `Cancelled` under the topology hub lock, so
@@ -10998,13 +11044,15 @@ async fn release_handoff(hold: HandoffHold, reason: HandoffCancelReason) {
     let revision = state.topology.read().await.revision();
     let mut hub = state.topology_hub.lock().await;
     drop(hold);
+    let phase = HandoffStatusPhase::Cancelled { reason };
     hub.publish_status(
         SubscriptionEvent::HandoffStatus {
             daemon_generation: state.daemon_generation,
-            phase: HandoffStatusPhase::Cancelled { reason },
+            phase,
         },
         revision,
     );
+    publish_control_handoff_status(&state, phase);
 }
 
 /// Reopens a task tracker when dropped, so a drain that finishes, times out,
@@ -12878,9 +12926,13 @@ struct ControlSubscriptionContext {
     maximum_returned_bytes: Option<usize>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one task filters control notices for its pane and seeds handoff status"
+)]
 fn spawn_control_subscription(
     id: u64,
-    mut stream: broadcast::Receiver<ControlNotice>,
+    stream: ControlStream,
     outbound: mpsc::Sender<QueuedServerFrame>,
     context: ControlSubscriptionContext,
 ) -> JoinHandle<()> {
@@ -12892,70 +12944,92 @@ fn spawn_control_subscription(
             incarnation,
             maximum_returned_bytes,
         } = context;
+        let ControlStream {
+            notices: mut stream,
+            handoff_seed,
+        } = stream;
+        let handoff_status = |phase| SubscriptionEvent::HandoffStatus {
+            daemon_generation: state.daemon_generation,
+            phase,
+        };
+        // A subscription that starts during an attempt hears its phase first.
+        // A finished attempt's `Cancelled` is no news to a new subscriber, and
+        // a fenced daemon refuses new control subscriptions.
+        let mut pending_handoff = handoff_seed
+            .filter(|phase| !matches!(phase, HandoffStatusPhase::Cancelled { .. }))
+            .map(handoff_status);
         let mut sequence = 1_u64;
         loop {
-            let event = match stream.recv().await {
-                Ok(ControlNotice::Status {
-                    splint_id: event_splint,
-                    incarnation: event_incarnation,
-                    owner_connection_id,
-                    excluded_connections,
-                }) if event_splint == splint_id
-                    && event_incarnation == incarnation
-                    && excluded_connections
-                        .as_ref()
-                        .is_none_or(|excluded| !excluded.contains(&connection_id)) =>
-                {
-                    Some(SubscriptionEvent::ControlStatusChanged {
-                        status: ControlStatus {
+            let event = if let Some(event) = pending_handoff.take() {
+                Some(event)
+            } else {
+                match stream.recv().await {
+                    Ok(ControlNotice::HandoffStatus(phase)) => Some(handoff_status(phase)),
+                    Ok(ControlNotice::Status {
+                        splint_id: event_splint,
+                        incarnation: event_incarnation,
+                        owner_connection_id,
+                        excluded_connections,
+                    }) if event_splint == splint_id
+                        && event_incarnation == incarnation
+                        && excluded_connections
+                            .as_ref()
+                            .is_none_or(|excluded| !excluded.contains(&connection_id)) =>
+                    {
+                        Some(SubscriptionEvent::ControlStatusChanged {
+                            status: ControlStatus {
+                                splint_id,
+                                incarnation,
+                                controlled: owner_connection_id.is_some(),
+                                locally_owned: owner_connection_id == Some(connection_id),
+                            },
+                        })
+                    }
+                    Ok(ControlNotice::TransferRequested(transfer))
+                        if transfer.splint_id == splint_id
+                            && transfer.incarnation == incarnation
+                            && transfer.owner_connection_id == connection_id =>
+                    {
+                        Some(SubscriptionEvent::ControlTransferRequested {
+                            transfer_id: transfer.id,
+                        })
+                    }
+                    Ok(ControlNotice::TransferResolved {
+                        transfer,
+                        outcome,
+                        controller_id,
+                        excluded_connections,
+                    }) if transfer.splint_id == splint_id
+                        && transfer.incarnation == incarnation
+                        && (transfer.owner_connection_id == connection_id
+                            || transfer.requester_connection_id == connection_id)
+                        && excluded_connections
+                            .as_ref()
+                            .is_none_or(|excluded| !excluded.contains(&connection_id)) =>
+                    {
+                        Some(SubscriptionEvent::ControlTransferResolved {
+                            transfer_id: transfer.id,
+                            outcome,
+                            controller_id: (transfer.requester_connection_id == connection_id)
+                                .then_some(controller_id)
+                                .flatten(),
+                        })
+                    }
+                    Ok(_) => None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let status = state.controller.lock().await.status(
+                            connection_id,
                             splint_id,
                             incarnation,
-                            controlled: owner_connection_id.is_some(),
-                            locally_owned: owner_connection_id == Some(connection_id),
-                        },
-                    })
+                        );
+                        // A lost handoff phase is replaced by the latest one,
+                        // `Cancelled` included, so a lagged client never stays
+                        // paused after the attempt ended.
+                        pending_handoff = state.handoff_gate.last_status().map(handoff_status);
+                        Some(SubscriptionEvent::ControlStatusChanged { status })
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-                Ok(ControlNotice::TransferRequested(transfer))
-                    if transfer.splint_id == splint_id
-                        && transfer.incarnation == incarnation
-                        && transfer.owner_connection_id == connection_id =>
-                {
-                    Some(SubscriptionEvent::ControlTransferRequested {
-                        transfer_id: transfer.id,
-                    })
-                }
-                Ok(ControlNotice::TransferResolved {
-                    transfer,
-                    outcome,
-                    controller_id,
-                    excluded_connections,
-                }) if transfer.splint_id == splint_id
-                    && transfer.incarnation == incarnation
-                    && (transfer.owner_connection_id == connection_id
-                        || transfer.requester_connection_id == connection_id)
-                    && excluded_connections
-                        .as_ref()
-                        .is_none_or(|excluded| !excluded.contains(&connection_id)) =>
-                {
-                    Some(SubscriptionEvent::ControlTransferResolved {
-                        transfer_id: transfer.id,
-                        outcome,
-                        controller_id: (transfer.requester_connection_id == connection_id)
-                            .then_some(controller_id)
-                            .flatten(),
-                    })
-                }
-                Ok(_) => None,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let status =
-                        state
-                            .controller
-                            .lock()
-                            .await
-                            .status(connection_id, splint_id, incarnation);
-                    Some(SubscriptionEvent::ControlStatusChanged { status })
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
             };
             let Some(event) = event else { continue };
             let frame = ServerFrame::Event {
@@ -18336,6 +18410,156 @@ mod tests {
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
         assert!(state.topology_transactions.try_acquire().is_ok());
         drop(reserve_launch_slot(&state).await.unwrap());
+    }
+
+    /// The next control-subscription frame, which must be a handoff status.
+    async fn next_control_handoff_status(
+        frames: &mut mpsc::Receiver<QueuedServerFrame>,
+        subscription: u64,
+    ) -> (u64, HandoffStatusPhase) {
+        let frame = time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .expect("a control subscription delivers the handoff status")
+            .expect("the control subscription stays open")
+            .frame;
+        let ServerFrame::Event {
+            subscription_id,
+            sequence,
+            event:
+                SubscriptionEvent::HandoffStatus {
+                    daemon_generation,
+                    phase,
+                },
+        } = frame
+        else {
+            panic!("expected a handoff status event: {frame:?}");
+        };
+        assert_eq!(subscription_id, subscription);
+        assert_eq!(daemon_generation, handoff_requests::FRESH_DAEMON_GENERATION);
+        (sequence, phase)
+    }
+
+    /// Plan 0061 M3.12a: the graphical client's per-pane control subscriptions
+    /// carry the upgrade banner, in order, seeded for a late subscriber.
+    #[tokio::test]
+    async fn control_subscriptions_carry_handoff_status_and_seed_a_late_subscriber() {
+        let state = test_state(false);
+        let report = gated_handoff_report(&state).await;
+        let context = |state: &Arc<DaemonState>| ControlSubscriptionContext {
+            state: Arc::clone(state),
+            connection_id: 41,
+            splint_id: SplintId::new(),
+            incarnation: 1,
+            maximum_returned_bytes: None,
+        };
+        let spawn = |id| {
+            let (outbound, frames) = mpsc::channel(8);
+            let task = AbortOnDrop::new(spawn_control_subscription(
+                id,
+                state.handoff_gate.subscribe_control(&state.control_events),
+                outbound,
+                context(&state),
+            ));
+            (task, frames)
+        };
+        // A pane's control subscription sees every phase in sequence, like a
+        // topology subscription, although it watches another Splint.
+        let (task, mut frames) = spawn(7);
+        let _ = execute_with_forward_prepared(&state, &report).await;
+        for (expected_sequence, expected_phase) in [
+            (1, HandoffStatusPhase::Preparing),
+            (2, HandoffStatusPhase::Fenced),
+            (3, cancelled(HandoffCancelReason::Failed)),
+        ] {
+            assert_eq!(
+                next_control_handoff_status(&mut frames, 7).await,
+                (expected_sequence, expected_phase)
+            );
+        }
+        drop(task);
+        // A subscription that starts during an attempt is seeded with its
+        // phase first, then follows the broadcasts.
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        let (late, mut late_frames) = spawn(8);
+        assert_eq!(
+            next_control_handoff_status(&mut late_frames, 8).await,
+            (1, HandoffStatusPhase::Preparing)
+        );
+        attempt.fence().await.unwrap();
+        assert_eq!(
+            next_control_handoff_status(&mut late_frames, 8).await,
+            (2, HandoffStatusPhase::Fenced)
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+        assert_eq!(
+            next_control_handoff_status(&mut late_frames, 8).await,
+            (3, cancelled(HandoffCancelReason::Requested))
+        );
+        drop(late);
+        // After the attempt ended, a new subscription hears nothing stale.
+        let (_idle, mut idle_frames) = spawn(9);
+        assert!(
+            time::timeout(Duration::from_millis(100), idle_frames.recv())
+                .await
+                .is_err(),
+            "a finished attempt's Cancelled is not replayed to a new subscriber"
+        );
+    }
+
+    /// A control subscription that lags past a handoff phase replays the
+    /// latest one, `Cancelled` included, so its client never stays paused.
+    #[tokio::test]
+    async fn a_lagged_control_subscription_replays_the_latest_handoff_status() {
+        let state = test_state(false);
+        let stream = state.handoff_gate.subscribe_control(&state.control_events);
+        // Both phases are lost to the lag; unrelated notices fill the queue.
+        publish_control_handoff_status(&state, HandoffStatusPhase::Preparing);
+        publish_control_handoff_status(&state, cancelled(HandoffCancelReason::TimedOut));
+        for _ in 0..=CONTROL_EVENT_QUEUE {
+            publish_control_notice(
+                &state,
+                ControlNotice::Status {
+                    splint_id: SplintId::new(),
+                    incarnation: 1,
+                    owner_connection_id: None,
+                    excluded_connections: None,
+                },
+            );
+        }
+        let splint_id = SplintId::new();
+        let (outbound, mut frames) = mpsc::channel(8);
+        let _task = AbortOnDrop::new(spawn_control_subscription(
+            5,
+            stream,
+            outbound,
+            ControlSubscriptionContext {
+                state: Arc::clone(&state),
+                connection_id: 41,
+                splint_id,
+                incarnation: 1,
+                maximum_returned_bytes: None,
+            },
+        ));
+        let first = time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .frame;
+        assert!(
+            matches!(
+                first,
+                ServerFrame::Event {
+                    sequence: 1,
+                    event: SubscriptionEvent::ControlStatusChanged { .. },
+                    ..
+                }
+            ),
+            "a lag first resynchronizes control status: {first:?}"
+        );
+        assert_eq!(
+            next_control_handoff_status(&mut frames, 5).await,
+            (2, cancelled(HandoffCancelReason::TimedOut))
+        );
     }
 
     #[tokio::test]

@@ -1229,8 +1229,11 @@ pub enum SubscriptionEvent {
     /// revision bump. It may arrive on any subscription, terminal, control,
     /// or topology, and every client must tolerate it anywhere: it consumes
     /// one subscription sequence number and changes no subscribed state. The
-    /// graphical "input paused" banner (Plan 0061 M3.12) decides which
-    /// subscriptions carry it. The outcome after exec reaches a participating
+    /// daemon sends it on topology and control subscriptions; the graphical
+    /// client's upgrade banner reads its per-pane control subscriptions
+    /// (Plan 0061 M3.12a). A control subscription that starts during an
+    /// attempt receives the current phase first, and one that lags receives
+    /// the latest phase again. The outcome after exec reaches a participating
     /// Window through its continuation channel, and every other client
     /// through the next connection's `ServerFrame::Hello::daemon_generation`.
     HandoffStatus {
