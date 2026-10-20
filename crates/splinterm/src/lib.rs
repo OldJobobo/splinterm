@@ -18,6 +18,7 @@ pub mod endpoint;
 pub mod font_shaping;
 pub mod frontend;
 pub mod geometry;
+pub mod handoff_status;
 pub mod keymap;
 mod native_atspi;
 pub mod navigation_projection;

@@ -14,15 +14,16 @@ use splinterm::automation::{
 };
 use splinterm::config::AppConfig;
 use splinterm::endpoint::{ConnectionFactory, ForcedControlTransfer, ImageTransport};
+use splinterm::handoff_status::HandoffStatusSource;
 use splinterm::{
     AuthorityStatus, PerfTraceCorrelation, TerminalGridLimits, WindowCommand, WindowPaneOptions,
     WindowUpdate,
 };
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{
-    AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, LairAccessGrant,
-    Request, Response, ServerFrame, ServerLimits, SubscriptionEvent, TerminalSnapshot,
-    TerminalUpdate,
+    AccessGrant, AccessScope, ControlMode, ControlTransferOutcome, ErrorCode, HandoffStatusPhase,
+    LairAccessGrant, Request, Response, ServerFrame, ServerLimits, SubscriptionEvent,
+    TerminalSnapshot, TerminalUpdate,
     perf_trace::{PerfTraceEvent, emit_perf_trace, perf_trace_enabled},
 };
 use tokio::sync::mpsc;
@@ -297,6 +298,10 @@ pub(in crate::app) async fn fetch_scrollback_pages(
 pub(in crate::app) struct ControllerOutputs {
     pub(in crate::app) updates: mpsc::Sender<WindowUpdate>,
     pub(in crate::app) resyncs: mpsc::Sender<()>,
+    /// This pane's report into its Window's handoff status (Plan 0061
+    /// M3.12a). The controller reports what its control subscription hears,
+    /// and drops paused commands whichever pane heard the pause first.
+    pub(in crate::app) handoff: HandoffStatusSource,
 }
 
 type PaneResize = (u16, u16, u16, u16);
@@ -451,6 +456,53 @@ fn recoverable_input_error(error: &anyhow::Error) -> bool {
     protocol_error(error).is_some_and(|error| error.code == ErrorCode::ResourceLimit)
 }
 
+/// A request the daemon refused because a handoff fenced it. The Window's
+/// pause may not have arrived yet; the command is dropped, never retried.
+pub(in crate::app) fn handoff_refused(error: &anyhow::Error) -> bool {
+    protocol_error(error).is_some_and(|error| error.code == ErrorCode::HandoffInProgress)
+}
+
+/// Whether the controller drops `command` while its Window's input is paused
+/// for a daemon handoff: terminal input, resize, and control transfer. Reads
+/// (scrollback, search, resynchronization) and the releases a fenced daemon
+/// still serves (control release, access revocation) pass. Dropped commands
+/// are not queued; the frontend re-sends its geometry when the pause ends.
+pub(in crate::app) const fn paused_during_handoff(command: &WindowCommand) -> bool {
+    match command {
+        WindowCommand::Input(_)
+        | WindowCommand::FocusReport(_)
+        | WindowCommand::Resize { .. }
+        | WindowCommand::PrepareResize { .. }
+        | WindowCommand::RequestControlTransfer
+        | WindowCommand::DecideControlTransfer { .. }
+        | WindowCommand::ForceControlTransfer => true,
+        WindowCommand::Resynchronize
+        | WindowCommand::FetchScrollback { .. }
+        | WindowCommand::RevokeAccess(_)
+        | WindowCommand::Search { .. }
+        | WindowCommand::ReleaseControl => false,
+    }
+}
+
+/// The handoff status a control-subscription frame carries, if any.
+pub(in crate::app) fn handoff_status_event(
+    frame: &ServerFrame,
+    subscription_id: u64,
+) -> Option<(u64, HandoffStatusPhase)> {
+    match frame {
+        ServerFrame::Event {
+            subscription_id: event_subscription,
+            event:
+                SubscriptionEvent::HandoffStatus {
+                    daemon_generation,
+                    phase,
+                },
+            ..
+        } if *event_subscription == subscription_id => Some((*daemon_generation, *phase)),
+        _ => None,
+    }
+}
+
 pub(in crate::app) fn terminal_action_matches(
     response: &Response,
     splint_id: SplintId,
@@ -478,7 +530,7 @@ pub(in crate::app) async fn apply_prepared_pane_resize(
     else {
         return Ok(());
     };
-    let response = control
+    let response = match control
         .request(Request::Resize {
             controller_id,
             splint_id,
@@ -488,7 +540,13 @@ pub(in crate::app) async fn apply_prepared_pane_resize(
             pixel_width,
             pixel_height,
         })
-        .await?;
+        .await
+    {
+        Ok(response) => response,
+        // Fenced by a handoff: dropped, and re-sent by the frontend on resume.
+        Err(error) if handoff_refused(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     if !terminal_action_matches(&response, splint_id, incarnation) {
         bail!("splinterd did not acknowledge prepared pane resize");
     }
@@ -720,13 +778,23 @@ pub(in crate::app) async fn run_controller(
                     biased;
                     () = cancellation.cancelled() => break,
                     frame = control.next_server_frame() => {
+                        let frame = frame?;
+                        if let Some((generation, phase)) =
+                            handoff_status_event(&frame, control_subscription)
+                        {
+                            outputs.handoff.observe(generation, phase);
+                            continue;
+                        }
                         let control_acquired = handle_control_event(
-                            frame?,
+                            frame,
                             control_subscription,
                             &mut active_controller,
                             &outputs.updates,
                         ).await?;
-                        if control_acquired && pending_resize.is_none() {
+                        if control_acquired
+                            && pending_resize.is_none()
+                            && !outputs.handoff.input_paused()
+                        {
                             apply_prepared_pane_resize(
                                 &mut control,
                                 active_controller,
@@ -791,6 +859,14 @@ pub(in crate::app) async fn run_controller(
             } else {
                 command
             };
+            // Plan 0061 M3.12a: while the Window is paused for a daemon
+            // handoff, terminal input, resize, and control transfer are
+            // dropped here, not queued, even when they were queued before the
+            // frontend saw the pause. The frontend re-sends its geometry once
+            // the pause ends.
+            if paused_during_handoff(&command) && outputs.handoff.input_paused() {
+                continue;
+            }
             let request = match command {
                 WindowCommand::Input(_) | WindowCommand::FocusReport(_) => {
                     let Some((bytes, focus_report)) = terminal_input(command) else {
@@ -811,7 +887,7 @@ pub(in crate::app) async fn run_controller(
                         coalescing_barrier = barrier;
                         bytes
                     };
-                    let Some(controller_id) = ensure_pane_control(
+                    let controller_id = match ensure_pane_control(
                         &mut control,
                         &mut active_controller,
                         &mut prepared_resize,
@@ -820,8 +896,14 @@ pub(in crate::app) async fn run_controller(
                         incarnation,
                         true,
                     )
-                    .await?
-                    else {
+                    .await
+                    {
+                        Ok(controller_id) => controller_id,
+                        // Fenced before this pane heard the pause: dropped.
+                        Err(error) if handoff_refused(&error) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let Some(controller_id) = controller_id else {
                         continue;
                     };
                     let maximum_input_bytes = control.limits().maximum_input_bytes;
@@ -845,6 +927,9 @@ pub(in crate::app) async fn run_controller(
                                 );
                                 break;
                             }
+                            // Fenced before this pane heard the pause: the
+                            // rest of the batch is dropped, not queued.
+                            Err(error) if handoff_refused(&error) => break,
                             Err(error) => return Err(error),
                         }
                     }
@@ -862,7 +947,7 @@ pub(in crate::app) async fn run_controller(
                     pixel_width,
                     pixel_height,
                 } => {
-                    let Some(request) = active_resize_request(
+                    let request = match active_resize_request(
                         &mut control,
                         &mut active_controller,
                         &mut prepared_resize,
@@ -870,8 +955,13 @@ pub(in crate::app) async fn run_controller(
                         (splint_id, incarnation),
                         (columns, rows, pixel_width, pixel_height),
                     )
-                    .await?
-                    else {
+                    .await
+                    {
+                        Ok(request) => request,
+                        Err(error) if handoff_refused(&error) => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let Some(request) = request else {
                         continue;
                     };
                     request
@@ -919,7 +1009,7 @@ pub(in crate::app) async fn run_controller(
                     // A released/unowned pane has nobody to consent to a
                     // transfer. Reuse ordinary acquisition, including deferred
                     // geometry, before asking an existing owner for consent.
-                    if ensure_pane_control(
+                    match ensure_pane_control(
                         &mut control,
                         &mut active_controller,
                         &mut prepared_resize,
@@ -928,10 +1018,12 @@ pub(in crate::app) async fn run_controller(
                         incarnation,
                         true,
                     )
-                    .await?
-                    .is_some()
+                    .await
                     {
-                        continue;
+                        Ok(Some(_)) => continue,
+                        Ok(None) => {}
+                        Err(error) if handoff_refused(&error) => continue,
+                        Err(error) => return Err(error),
                     }
                     match control
                         .request(Request::RequestControlTransfer {
@@ -946,7 +1038,9 @@ pub(in crate::app) async fn run_controller(
                             if protocol_error(&error).is_some_and(|error| {
                                 matches!(
                                     error.code,
-                                    ErrorCode::ControlTransferUnavailable | ErrorCode::Unauthorized
+                                    ErrorCode::ControlTransferUnavailable
+                                        | ErrorCode::Unauthorized
+                                        | ErrorCode::HandoffInProgress
                                 )
                             }) =>
                         {
@@ -974,9 +1068,11 @@ pub(in crate::app) async fn run_controller(
                     else {
                         continue;
                     };
-                    active_controller = match control.request(request).await? {
-                        Response::ControlGranted { controller_id, .. } => Some(controller_id),
-                        _ => bail!("splinterd did not grant forced control"),
+                    active_controller = match control.request(request).await {
+                        Ok(Response::ControlGranted { controller_id, .. }) => Some(controller_id),
+                        Err(error) if handoff_refused(&error) => continue,
+                        Err(error) => return Err(error),
+                        Ok(_) => bail!("splinterd did not grant forced control"),
                     };
                     let _ = outputs.updates.send(WindowUpdate::Control(true)).await;
                     apply_prepared_pane_resize(
@@ -1038,7 +1134,12 @@ pub(in crate::app) async fn run_controller(
                 matches!(&request, Request::Input { .. } | Request::Resize { .. });
             let expects_transfer_decision =
                 matches!(&request, Request::DecideControlTransfer { .. });
-            let response = control.request(request).await?;
+            let response = match control.request(request).await {
+                Ok(response) => response,
+                // Fenced before this pane heard the pause: dropped.
+                Err(error) if handoff_refused(&error) => continue,
+                Err(error) => return Err(error),
+            };
             let acknowledged = if expects_terminal_action {
                 terminal_action_matches(&response, splint_id, incarnation)
             } else if expects_transfer_decision {
@@ -1055,6 +1156,12 @@ pub(in crate::app) async fn run_controller(
     .await;
     if let Some(controller_id) = active_controller {
         let _ = control.release_control(controller_id).await;
+    }
+    // A pane closed or cancelled withdraws its handoff report when `outputs`
+    // drops. A failed connection instead keeps a fenced Window paused: that
+    // is how a committed handoff's exec looks from here (M3.12b reconnects).
+    if result.is_err() && !cancellation.is_cancelled() {
+        outputs.handoff.connection_lost();
     }
     result
 }
@@ -1226,6 +1333,7 @@ pub(in crate::app) async fn prepare_live_pane_at_incarnation(
         ControllerOutputs {
             updates: controller_updates,
             resyncs: resync_sender,
+            handoff: factory.handoff_status().source(),
         },
         controller_id,
         splint_id,

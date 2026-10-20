@@ -576,6 +576,9 @@ pub(crate) struct TabContextMenuUi {
     context: ContextMenuTarget,
     selected: usize,
     hovered: Option<TabMenuActionId>,
+    /// The Window is paused for a daemon handoff: daemon-mutating actions
+    /// are shown disabled (Plan 0061 M3.12a).
+    mutations_paused: bool,
 }
 
 impl TabContextMenuUi {
@@ -588,7 +591,32 @@ impl TabContextMenuUi {
             context: ContextMenuTarget::Tab(context),
             selected,
             hovered: None,
+            mutations_paused: false,
         }
+    }
+
+    /// Disables or re-enables daemon-mutating actions for a daemon handoff,
+    /// keeping the selection on an enabled action. Returns whether it changed.
+    pub(crate) fn set_mutations_paused(&mut self, paused: bool) -> bool {
+        if self.mutations_paused == paused {
+            return false;
+        }
+        self.mutations_paused = paused;
+        if !self.action_enabled(self.selected_action())
+            && let Some(index) = self
+                .actions()
+                .iter()
+                .position(|action| self.action_enabled(action.id))
+        {
+            self.selected = index;
+        }
+        if self
+            .hovered
+            .is_some_and(|action| !self.action_enabled(action))
+        {
+            self.hovered = None;
+        }
+        true
     }
 
     #[allow(
@@ -887,6 +915,7 @@ impl TabContextMenuUi {
             },
             selected: 0,
             hovered: None,
+            mutations_paused: false,
         })
     }
 
@@ -929,10 +958,18 @@ impl TabContextMenuUi {
 
     pub(crate) fn action_enabled(&self, action: TabMenuActionId) -> bool {
         match &self.context {
-            ContextMenuTarget::Explorer { actions, .. } => {
-                actions.iter().any(|entry| entry.id == action)
+            ContextMenuTarget::Explorer {
+                actions, commands, ..
+            } => actions
+                .iter()
+                .position(|entry| entry.id == action)
+                .is_some_and(|index| {
+                    !(self.mutations_paused && commands[index].paused_during_handoff())
+                }),
+            ContextMenuTarget::Tab(context) => {
+                tab_menu_action_enabled(action, context)
+                    && !(self.mutations_paused && tab_menu_action_paused_during_handoff(action))
             }
-            ContextMenuTarget::Tab(context) => tab_menu_action_enabled(action, context),
         }
     }
 
@@ -1885,6 +1922,79 @@ fn descriptor_matches(descriptor: BuiltInCommandDescriptor, query: &str) -> bool
             .any(|keyword| keyword.contains(&query))
 }
 
+/// Whether a palette command is disabled while the Window is paused for a
+/// daemon handoff (Plan 0061 M3.12a): it changes the session, opens a prompt
+/// that only leads to such a change, attaches another Lair's panes, takes or
+/// grants control, or sends terminal input. Browsing, previews, help, focus,
+/// zoom, history, tab switching, and releases keep working.
+pub(crate) const fn command_paused_during_handoff(id: BuiltInCommandId) -> bool {
+    match id {
+        BuiltInCommandId::NewSession
+        | BuiltInCommandId::RenameCurrentTab
+        | BuiltInCommandId::NewDojo
+        | BuiltInCommandId::CloseCurrentTab
+        | BuiltInCommandId::CloseOtherTabs
+        | BuiltInCommandId::TerminateCurrentDojo
+        | BuiltInCommandId::RestoreCurrentDojo
+        | BuiltInCommandId::RenameCurrentLair
+        | BuiltInCommandId::SaveCurrentLair
+        | BuiltInCommandId::PinCurrentLair
+        | BuiltInCommandId::UnpinCurrentLair
+        | BuiltInCommandId::RestoreCurrentLair
+        | BuiltInCommandId::PreviousLair
+        | BuiltInCommandId::NextLair
+        | BuiltInCommandId::TerminateCurrentLair
+        | BuiltInCommandId::SplitHorizontal
+        | BuiltInCommandId::SplitVertical
+        | BuiltInCommandId::CloseFocusedPane
+        | BuiltInCommandId::ClearAgentStatus
+        | BuiltInCommandId::ResizePaneSmaller
+        | BuiltInCommandId::ResizePaneLarger
+        | BuiltInCommandId::SaveClipboardImage
+        | BuiltInCommandId::RequestControl
+        | BuiltInCommandId::ForceControl
+        | BuiltInCommandId::AcceptControlTransfer
+        | BuiltInCommandId::DenyControlTransfer => true,
+        BuiltInCommandId::ShowKeybindings
+        | BuiltInCommandId::ReloadConfiguration
+        | BuiltInCommandId::RecentSessions
+        | BuiltInCommandId::OpenRemote
+        | BuiltInCommandId::ChooseDojo
+        | BuiltInCommandId::PreviousDojo
+        | BuiltInCommandId::NextDojo
+        | BuiltInCommandId::MoveDojoLeft
+        | BuiltInCommandId::MoveDojoRight
+        | BuiltInCommandId::ChooseLair
+        | BuiltInCommandId::PreviewCurrentLair
+        | BuiltInCommandId::FocusLeft
+        | BuiltInCommandId::FocusRight
+        | BuiltInCommandId::FocusUp
+        | BuiltInCommandId::FocusDown
+        | BuiltInCommandId::EnterCopyMode
+        | BuiltInCommandId::ToggleFocusedPaneZoom
+        | BuiltInCommandId::SearchScrollback
+        | BuiltInCommandId::PageUp
+        | BuiltInCommandId::PageDown
+        | BuiltInCommandId::ReturnToLive
+        | BuiltInCommandId::ToggleTabStrip
+        | BuiltInCommandId::ToggleLairExplorer
+        | BuiltInCommandId::FocusLairExplorer
+        | BuiltInCommandId::ReturnFocusToTerminal
+        | BuiltInCommandId::ZoomIn
+        | BuiltInCommandId::ZoomOut
+        | BuiltInCommandId::ResetZoom
+        | BuiltInCommandId::DetachWindow
+        | BuiltInCommandId::ReleaseControl
+        | BuiltInCommandId::RevokeAllAccess => false,
+    }
+}
+
+/// Whether a tab-strip menu action is disabled during a daemon handoff;
+/// Explorer menus classify their captured topology command instead.
+pub(crate) const fn tab_menu_action_paused_during_handoff(id: TabMenuActionId) -> bool {
+    !matches!(id, TabMenuActionId::ActivateTab)
+}
+
 pub(crate) fn command_enabled(id: BuiltInCommandId, context: &CommandPaletteContext) -> bool {
     match id {
         BuiltInCommandId::SaveClipboardImage => context.clipboard_image_available,
@@ -1959,6 +2069,9 @@ pub(crate) struct CommandPaletteUi {
     selected: usize,
     visible_start: usize,
     hovered: Option<BuiltInCommandId>,
+    /// The Window is paused for a daemon handoff: daemon-mutating commands
+    /// are shown disabled (Plan 0061 M3.12a).
+    mutations_paused: bool,
 }
 
 impl CommandPaletteUi {
@@ -1980,9 +2093,11 @@ impl CommandPaletteUi {
             selected: 0,
             visible_start: 0,
             hovered: None,
+            mutations_paused: false,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn context(&self) -> CommandPaletteContext {
         self.context.clone()
     }
@@ -2018,6 +2133,27 @@ impl CommandPaletteUi {
 
     pub(crate) fn command_enabled(&self, command: BuiltInCommandId) -> bool {
         command_enabled(command, &self.context)
+            && !(self.mutations_paused && command_paused_during_handoff(command))
+    }
+
+    /// The typed dispatch for an enabled command, under this palette's
+    /// current pause state as well as its captured context.
+    pub(crate) fn dispatch(&self, command: BuiltInCommandId) -> Option<BuiltInCommandDispatch> {
+        if !self.command_enabled(command) {
+            return None;
+        }
+        command_dispatch(command, &self.context)
+    }
+
+    /// Disables or re-enables daemon-mutating commands for a daemon handoff,
+    /// keeping the selection on an enabled command. Returns whether it changed.
+    pub(crate) fn set_mutations_paused(&mut self, paused: bool) -> bool {
+        if self.mutations_paused == paused {
+            return false;
+        }
+        self.mutations_paused = paused;
+        self.refilter();
+        true
     }
 
     pub(crate) const fn hovered(&self) -> Option<BuiltInCommandId> {
@@ -3481,5 +3617,126 @@ mod tests {
         let mut ui = palette();
         assert!(ui.append_text("ssh"));
         assert_eq!(ui.filtered(), &[id]);
+    }
+
+    #[test]
+    fn handoff_pause_disables_mutating_palette_commands_and_their_dispatch() {
+        let mut ui = palette();
+        assert!(ui.command_enabled(BuiltInCommandId::NewDojo));
+        assert!(ui.dispatch(BuiltInCommandId::SplitVertical).is_some());
+        assert!(ui.set_mutations_paused(true));
+        assert!(!ui.set_mutations_paused(true), "unchanged");
+        for id in BuiltInCommandId::ALL {
+            if command_paused_during_handoff(*id) {
+                assert!(!ui.command_enabled(*id), "{id:?}");
+                assert_eq!(ui.dispatch(*id), None, "{id:?}");
+            }
+        }
+        // Local UI keeps working: help, browsing, tab switching, focus,
+        // history, zoom, detaching, and the releases a fenced daemon serves.
+        for id in [
+            BuiltInCommandId::ShowKeybindings,
+            BuiltInCommandId::RecentSessions,
+            BuiltInCommandId::ChooseDojo,
+            BuiltInCommandId::PreviousDojo,
+            BuiltInCommandId::MoveDojoLeft,
+            BuiltInCommandId::FocusLeft,
+            BuiltInCommandId::ToggleFocusedPaneZoom,
+            BuiltInCommandId::SearchScrollback,
+            BuiltInCommandId::PageUp,
+            BuiltInCommandId::ReturnToLive,
+            BuiltInCommandId::ToggleLairExplorer,
+            BuiltInCommandId::ZoomIn,
+            BuiltInCommandId::RevokeAllAccess,
+            BuiltInCommandId::DetachWindow,
+        ] {
+            assert!(ui.command_enabled(id), "{id:?}");
+            assert!(ui.dispatch(id).is_some(), "{id:?}");
+        }
+        assert!(
+            ui.selected_enabled_command().is_some(),
+            "the selection moves to an enabled command"
+        );
+        assert!(ui.set_mutations_paused(false));
+        assert!(ui.command_enabled(BuiltInCommandId::NewDojo));
+        assert!(ui.dispatch(BuiltInCommandId::NewDojo).is_some());
+    }
+
+    #[test]
+    fn palette_pause_classification_matches_the_topology_command_gate() {
+        let ui = palette();
+        for id in BuiltInCommandId::ALL {
+            if let Some(BuiltInCommandDispatch::Topology(command)) = ui.dispatch(*id) {
+                assert_eq!(
+                    command_paused_during_handoff(*id),
+                    command.paused_during_handoff(),
+                    "{id:?} dispatches {command:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn handoff_pause_disables_tab_and_explorer_menu_mutations_but_not_activation() {
+        let context = TabMenuContext {
+            lair_id: LairId::new(),
+            source_splint_id: SplintId::new(),
+            dojo_id: DojoId::new(),
+            dojo_name: "captured".to_owned(),
+            pane_count: 1,
+            splints: vec![(SplintId::new(), 4)],
+            active: false,
+            other_dojo_ids: vec![DojoId::new()],
+        };
+        let mut menu = TabContextMenuUi::new(context);
+        assert_eq!(menu.selected_action(), TabMenuActionId::RenameTab);
+        assert!(menu.set_mutations_paused(true));
+        for id in [
+            TabMenuActionId::RenameTab,
+            TabMenuActionId::NewDojo,
+            TabMenuActionId::CloseTab,
+            TabMenuActionId::CloseOtherTabs,
+            TabMenuActionId::TerminateDojo,
+        ] {
+            assert!(!menu.action_enabled(id), "{id:?}");
+            assert_eq!(menu.dispatch(id), None, "{id:?}");
+        }
+        assert_eq!(menu.selected_action(), TabMenuActionId::ActivateTab);
+        assert!(matches!(
+            menu.dispatch(TabMenuActionId::ActivateTab),
+            Some(TabMenuDispatch::Topology(
+                WindowTopologyCommand::ActivateTab { .. }
+            ))
+        ));
+        assert!(menu.set_mutations_paused(false));
+        assert!(menu.action_enabled(TabMenuActionId::NewDojo));
+
+        let view = super::super::lair_explorer::tests::view();
+        let lair = view.lairs[0].id;
+        let mut lair_menu =
+            TabContextMenuUi::for_explorer(&view, lair, Some(SplintId::new()), false, true)
+                .unwrap();
+        assert!(lair_menu.set_mutations_paused(true));
+        let enabled = lair_menu
+            .actions()
+            .iter()
+            .map(|action| action.id)
+            .filter(|id| lair_menu.action_enabled(*id))
+            .collect::<Vec<_>>();
+        assert_eq!(enabled, vec![TabMenuActionId::PreviewLair]);
+        assert_eq!(lair_menu.selected_action(), TabMenuActionId::PreviewLair);
+        let splint = view.lairs[0].dojos[0].splints[0].id;
+        let mut pane_menu =
+            TabContextMenuUi::for_explorer(&view, splint, Some(SplintId::new()), true, true)
+                .unwrap();
+        pane_menu.set_mutations_paused(true);
+        for id in [
+            TabMenuActionId::SplitBelow,
+            TabMenuActionId::SplitRight,
+            TabMenuActionId::CloseSplint,
+        ] {
+            assert!(!pane_menu.action_enabled(id), "{id:?}");
+            assert_eq!(pane_menu.dispatch(id), None, "{id:?}");
+        }
     }
 }

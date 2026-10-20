@@ -1,5 +1,6 @@
 //! Protocol-level controller-loop regressions; no compositor or daemon required.
 use super::*;
+use splinterm::handoff_status::HandoffStatusHub;
 use splinterm_core::{DojoId, LairId};
 use splinterm_protocol::{ClientFrame, ClientRole, ControlStatus, PROTOCOL_VERSION, ProtocolError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -99,6 +100,19 @@ async fn run_case_with(
     commands: Vec<WindowCommand>,
     steps: Vec<(Request, Reply, Vec<ServerFrame>)>,
 ) -> (Result<()>, Vec<WindowUpdate>, usize) {
+    let hub = HandoffStatusHub::default();
+    run_case_in_window(splint_id, owned, limits, commands, steps, &hub).await
+}
+
+/// Like `run_case_with`, for a pane of the Window whose handoff status is `hub`.
+async fn run_case_in_window(
+    splint_id: SplintId,
+    owned: bool,
+    limits: ServerLimits,
+    commands: Vec<WindowCommand>,
+    steps: Vec<(Request, Reply, Vec<ServerFrame>)>,
+    hub: &HandoffStatusHub,
+) -> (Result<()>, Vec<WindowUpdate>, usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
         let (client, server) = tokio::io::duplex(65536);
         let (finished, finish) = tokio::sync::oneshot::channel();
@@ -161,7 +175,11 @@ async fn run_case_with(
         let result = run_controller(
             connection,
             receiver,
-            ControllerOutputs { updates, resyncs },
+            ControllerOutputs {
+                updates,
+                resyncs,
+                handoff: hub.source(),
+            },
             owned.then_some(1),
             splint_id,
             7,
@@ -652,7 +670,11 @@ async fn cancellation_stops_a_chain_of_coalescing_barriers() {
         run_controller(
             connection,
             receiver,
-            ControllerOutputs { updates, resyncs },
+            ControllerOutputs {
+                updates,
+                resyncs,
+                handoff: HandoffStatusHub::default().source(),
+            },
             Some(1),
             id,
             7,
@@ -669,5 +691,251 @@ async fn cancellation_stops_a_chain_of_coalescing_barriers() {
         server.await.unwrap(),
         1,
         "only the in-flight batch was sent"
+    );
+}
+
+fn handoff_event(sequence: u64, phase: HandoffStatusPhase) -> ServerFrame {
+    ServerFrame::Event {
+        subscription_id: 9,
+        sequence,
+        event: SubscriptionEvent::HandoffStatus {
+            daemon_generation: 1,
+            phase,
+        },
+    }
+}
+
+#[test]
+fn handoff_pause_drops_input_resize_and_transfer_but_not_reads_or_releases() {
+    let resize = WindowCommand::Resize {
+        columns: 80,
+        rows: 24,
+        pixel_width: 800,
+        pixel_height: 480,
+    };
+    let prepare = WindowCommand::PrepareResize {
+        columns: 80,
+        rows: 24,
+        pixel_width: 800,
+        pixel_height: 480,
+    };
+    for paused in [
+        WindowCommand::Input(b"x".to_vec()),
+        WindowCommand::FocusReport(true),
+        resize,
+        prepare,
+        WindowCommand::RequestControlTransfer,
+        WindowCommand::DecideControlTransfer {
+            transfer_id: 3,
+            decision: splinterm_protocol::ControlTransferDecision::Deny,
+        },
+        WindowCommand::ForceControlTransfer,
+    ] {
+        assert!(paused_during_handoff(&paused), "{paused:?}");
+    }
+    for allowed in [
+        WindowCommand::Resynchronize,
+        WindowCommand::FetchScrollback {
+            splint_id: SplintId::new(),
+            incarnation: 7,
+            terminal_revision: 1,
+            history_generation: 1,
+            before_row_id: 1,
+        },
+        WindowCommand::RevokeAccess(4),
+        WindowCommand::Search {
+            terminal_revision: 1,
+            history_generation: 1,
+            query: "needle".to_owned(),
+            case_sensitive: false,
+            cursor: None,
+        },
+        WindowCommand::ReleaseControl,
+    ] {
+        assert!(!paused_during_handoff(&allowed), "{allowed:?}");
+    }
+}
+
+#[test]
+fn handoff_status_is_read_only_from_this_control_subscription() {
+    let frame = handoff_event(1, HandoffStatusPhase::Fenced);
+    assert_eq!(
+        handoff_status_event(&frame, 9),
+        Some((1, HandoffStatusPhase::Fenced))
+    );
+    assert_eq!(handoff_status_event(&frame, 10), None);
+    let status = ServerFrame::Event {
+        subscription_id: 9,
+        sequence: 1,
+        event: SubscriptionEvent::ControlStatusChanged {
+            status: ControlStatus {
+                splint_id: SplintId::new(),
+                incarnation: 7,
+                controlled: true,
+                locally_owned: true,
+            },
+        },
+    };
+    assert_eq!(handoff_status_event(&status, 9), None);
+}
+
+/// Another pane of the Window heard the pause first: this pane's queued
+/// input, resize, and transfer requests never reach the daemon; its control
+/// release still does.
+#[tokio::test]
+async fn a_paused_window_drops_queued_commands_before_the_daemon() {
+    let id = SplintId::new();
+    let hub = HandoffStatusHub::default();
+    let other_pane = hub.source();
+    assert!(other_pane.observe(1, HandoffStatusPhase::Preparing));
+    let (result, _, _) = run_case_in_window(
+        id,
+        true,
+        ServerLimits::default(),
+        vec![
+            WindowCommand::Input(b"typed".to_vec()),
+            WindowCommand::FocusReport(false),
+            WindowCommand::Resize {
+                columns: 90,
+                rows: 30,
+                pixel_width: 900,
+                pixel_height: 600,
+            },
+            WindowCommand::RequestControlTransfer,
+            WindowCommand::ForceControlTransfer,
+            WindowCommand::ReleaseControl,
+        ],
+        vec![(
+            Request::ReleaseControl { controller_id: 1 },
+            Ok(Response::Acknowledged),
+            Vec::new(),
+        )],
+        &hub,
+    )
+    .await;
+    result.unwrap();
+    assert!(hub.input_paused());
+}
+
+/// The pane's own control subscription delivers the pause; input queued
+/// behind it is dropped, and the Window-wide state records the phase.
+#[tokio::test]
+async fn a_handoff_status_on_the_control_subscription_pauses_the_window() {
+    let id = SplintId::new();
+    let hub = HandoffStatusHub::default();
+    let (result, _, _) = run_case_in_window(
+        id,
+        true,
+        ServerLimits::default(),
+        vec![
+            WindowCommand::ReleaseControl,
+            WindowCommand::Input(b"after the fence".to_vec()),
+        ],
+        vec![(
+            Request::ReleaseControl { controller_id: 1 },
+            Ok(Response::Acknowledged),
+            vec![
+                handoff_event(1, HandoffStatusPhase::Preparing),
+                handoff_event(2, HandoffStatusPhase::Fenced),
+            ],
+        )],
+        &hub,
+    )
+    .await;
+    // An Input sent to the daemon would have hung the script: it was dropped.
+    result.unwrap();
+    // Preparing and Fenced each changed the Window; the pane closing then
+    // withdrew its report, as a closed pane does.
+    let view = hub.view();
+    assert_eq!(view.revision, 3);
+    assert_eq!(
+        view.phase,
+        splinterm::handoff_status::WindowHandoffPhase::Idle
+    );
+}
+
+/// The daemon fenced before the pane heard the pause: the refused input is
+/// dropped and the controller keeps running.
+#[tokio::test]
+async fn a_handoff_refusal_drops_input_without_failing_the_controller() {
+    let id = SplintId::new();
+    let (result, _, _) = run_case(
+        id,
+        true,
+        vec![
+            WindowCommand::Input(b"raced".to_vec()),
+            WindowCommand::ReleaseControl,
+        ],
+        vec![
+            (
+                controlled_input(id, b"raced", false),
+                Err(ErrorCode::HandoffInProgress),
+            ),
+            (
+                Request::ReleaseControl { controller_id: 1 },
+                Ok(Response::Acknowledged),
+            ),
+        ],
+    )
+    .await;
+    result.unwrap();
+}
+
+/// A connection lost while fenced keeps the Window paused for reconnection.
+#[tokio::test]
+async fn a_connection_lost_while_fenced_keeps_the_window_paused() {
+    let id = SplintId::new();
+    let hub = HandoffStatusHub::default();
+    let (client, server) = tokio::io::duplex(65536);
+    let server = tokio::spawn(async move {
+        let (mut reader, mut writer) = tokio::io::split(server);
+        read_client(&mut reader).await;
+        send_frame(&mut writer, server_hello(ServerLimits::default())).await;
+        let ClientFrame::Request { request_id, .. } = read_client(&mut reader).await else {
+            panic!("expected the control subscription");
+        };
+        send_frame(
+            &mut writer,
+            ServerFrame::Response {
+                request_id,
+                result: control_subscribed(id, false),
+            },
+        )
+        .await;
+        send_frame(&mut writer, handoff_event(1, HandoffStatusPhase::Fenced)).await;
+        // The daemon execs: the connection closes.
+    });
+    let (reader, writer) = tokio::io::split(client);
+    let connection = Connection::connect_remote_interactive_transport(reader, writer)
+        .await
+        .unwrap();
+    let (_sender, receiver) = mpsc::channel(4);
+    let (updates, _update_receiver) = mpsc::channel(32);
+    let (resyncs, _resync_receiver) = mpsc::channel(32);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_controller(
+            connection,
+            receiver,
+            ControllerOutputs {
+                updates,
+                resyncs,
+                handoff: hub.source(),
+            },
+            None,
+            id,
+            7,
+            ForcedControlTransfer::Disabled,
+            0,
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("a lost connection ends the controller");
+    server.await.unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        hub.view().phase,
+        splinterm::handoff_status::WindowHandoffPhase::AwaitingReconnect
     );
 }

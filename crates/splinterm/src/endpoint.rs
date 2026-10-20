@@ -5,7 +5,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use splinterm_automation_client::Connection;
 
-use crate::{remote::RemoteProfile, remote_askpass::NativePrompt, remote_session::RemoteSession};
+use crate::{
+    handoff_status::HandoffStatusHub, remote::RemoteProfile, remote_askpass::NativePrompt,
+    remote_session::RemoteSession,
+};
 
 /// Informational connection-time identity, not a security or authority signal.
 /// Constructed only from a remote endpoint's negotiated daemon metadata.
@@ -80,6 +83,10 @@ enum EndpointKind {
 pub struct ConnectionFactory {
     endpoint: Arc<EndpointKind>,
     capabilities: Arc<EndpointCapabilities>,
+    /// The daemon handoff status every connection of this endpoint session
+    /// reports to: one per Window, shared by its panes and its frontend
+    /// (Plan 0061 M3.12a).
+    handoff_status: HandoffStatusHub,
 }
 
 impl ConnectionFactory {
@@ -95,6 +102,7 @@ impl ConnectionFactory {
                 forced_control_transfer: ForcedControlTransfer::Enabled,
                 recency_namespace: "local".to_owned(),
             }),
+            handoff_status: HandoffStatusHub::default(),
         }
     }
 
@@ -134,6 +142,7 @@ impl ConnectionFactory {
                 forced_control_transfer: ForcedControlTransfer::Disabled,
                 recency_namespace: format!("remote-{profile_name}"),
             }),
+            handoff_status: HandoffStatusHub::default(),
         }
     }
 
@@ -164,6 +173,12 @@ impl ConnectionFactory {
         connection: &Connection,
     ) -> Option<RemoteDisplayIdentity> {
         remote_display_identity(self.is_local(), connection.daemon_hostname())
+    }
+
+    /// The Window-wide daemon handoff status shared by this factory's clones.
+    #[must_use]
+    pub fn handoff_status(&self) -> &HandoffStatusHub {
+        &self.handoff_status
     }
 
     /// Returns the explicit endpoint behavior contract.

@@ -225,6 +225,7 @@ async fn run_live_multipane_window_inner(
     let (topology_update_sender, topology_updates) = mpsc::channel(4);
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
     let local_endpoint = factory.is_local();
+    let handoff_status = factory.handoff_status().clone();
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let optimistic_remote_splits =
@@ -299,6 +300,7 @@ async fn run_live_multipane_window_inner(
             agent_status_presentation: window_config.explorer_agent_status,
             keymap: window_config.keymap,
             prefix_timeout_ms: window_config.prefix_timeout_ms,
+            handoff_status: Some(handoff_status),
             ..WindowOptions::default()
         })
     })
@@ -412,6 +414,7 @@ pub(super) async fn run_live_window(
         ControllerOutputs {
             updates: updates.clone(),
             resyncs: resync_sender,
+            handoff: factory.handoff_status().source(),
         },
         controller_id,
         splint_id,
@@ -425,6 +428,7 @@ pub(super) async fn run_live_window(
     let window_config = config.clone();
     let (graphical_focus, _graphical_focus_reporter) = endpoint_graphical_focus(&factory);
     let local_endpoint = factory.is_local();
+    let handoff_status = factory.handoff_status().clone();
     let forced_control_transfer =
         factory.capabilities().forced_control_transfer == ForcedControlTransfer::Enabled;
     let mut window = tokio::task::spawn_blocking(move || {
@@ -452,6 +456,7 @@ pub(super) async fn run_live_window(
             agent_status_presentation: window_config.explorer_agent_status,
             keymap: window_config.keymap,
             prefix_timeout_ms: window_config.prefix_timeout_ms,
+            handoff_status: Some(handoff_status),
             ..WindowOptions::default()
         })
     });

@@ -98,6 +98,7 @@ pub(crate) use overlays::explorer::{
     lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
     lair_explorer_layout, paint_lair_explorer,
 };
+pub(crate) use overlays::handoff::paint_handoff_banner;
 pub(crate) use overlays::history::{
     HistoryOverlayStatus, SnapshotOverlays, history_overlay_layout, paint_history_overlay,
     paint_snapshot_overlays,

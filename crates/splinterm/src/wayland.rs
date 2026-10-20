@@ -137,8 +137,8 @@ use crate::frontend::{
     TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch, TabMenuRightPress,
     TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, TrustedDialogKey,
     WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, command_dispatch,
-    lair_lifecycle_command, tab_menu_right_press,
+    WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, lair_lifecycle_command,
+    tab_menu_right_press,
 };
 use crate::geometry::{
     FontSize, OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -163,8 +163,8 @@ use crate::renderer::{
     command_palette_hit_test, command_palette_layout, dojo_prompt_hit_test, dojo_prompt_layout,
     explorer_minimum_docked_terminal_width, fill_rect, history_overlay_layout,
     lair_explorer_disclosure_hit_test, lair_explorer_filter_hit_test, lair_explorer_hit_test,
-    lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_history_overlay,
-    paint_lair_explorer, paint_search_overlay, paint_session_picker_overlay,
+    lair_explorer_layout, paint, paint_command_palette, paint_dojo_prompt, paint_handoff_banner,
+    paint_history_overlay, paint_lair_explorer, paint_search_overlay, paint_session_picker_overlay,
     paint_snapshot_overlays, paint_snapshot_presented, paint_snapshot_region_presented,
     paint_snapshot_rows_presented, paint_tab_context_menu, premultiplied_theme_rgba,
     scroll_snapshot_pixels, session_picker_hit_test, session_picker_overlay_layout,
@@ -183,6 +183,7 @@ mod clipboard_image;
 mod damage;
 mod dispatch;
 mod file_drop;
+mod handoff;
 mod input;
 mod selection;
 mod tabs;
@@ -204,6 +205,7 @@ use file_drop::{
     FileDropTarget, URI_LIST_MIME, accepted_uri_list_mime, copy_action_supported,
     dropped_file_payload, file_drop_target_is_current, pane_drop_target,
 };
+use handoff::HandoffFrontend;
 use input::{
     CommandPaletteShortcutAction, CopyModeDesktopAction, FontZoomAction, HistoryNavigation,
     ModalPointerFrame, MouseAction, PaneFocusAction, PaneTopologyAction, PickerImeReconcile,
@@ -215,7 +217,8 @@ use input::{
     owned_field_clipboard_action, pane_focus_action, pane_topology_action,
     pending_selection_drag_anchor, picker_ime_reconcile, picker_release_activation,
     pointer_axis_focus_target, reconciled_focus_report, session_picker_shortcut_action,
-    shortcut_action_for, tab_action_dispatch_allowed, tab_shortcut_action, take_press_owner,
+    shortcut_action_for, shortcut_paused_during_handoff, tab_action_dispatch_allowed,
+    tab_shortcut_action, take_press_owner,
 };
 use selection::{
     CellPosition, CopyModeState, CopyMotion, CopyMoveOutcome, Selection, SelectionEndpoint,
@@ -961,6 +964,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
         },
         explorer: LairExplorerUi::default(),
         accessibility: navigation_accessibility::WindowAccessibility::new(update_waker.clone()),
+        handoff: HandoffFrontend::new(options.handoff_status.take(), &update_waker),
         tab_state: TabsState {
             tabs: WindowTabSet::new(DojoTab::new(initial_lair_id, initial_dojo_id, None)),
             active_identity: initial_identity,
@@ -2179,6 +2183,7 @@ struct App {
     tab_state: TabsState,
     modal: ModalState,
     scheduling: SchedulingState,
+    handoff: HandoffFrontend,
 }
 
 impl PlatformState {
@@ -2574,6 +2579,9 @@ struct ImeContext {
     command_palette: bool,
     dojo_prompt_input: bool,
     terminal_search: bool,
+    /// The Window is paused for a daemon handoff: no composition reaches the
+    /// PTY, while owned fields keep composing (Plan 0061 M3.12a).
+    terminal_input_paused: bool,
 }
 
 /// The single IME routing decision used by every IME gate in the Window.
@@ -2605,7 +2613,8 @@ impl ImeGate {
 /// Owned-field ownership follows typed text, except that Explorer focus keeps
 /// terminal and Explorer-search composition blocked. A consent prompt or a
 /// non-inline picker counts as modal, so without an owned field IME stays
-/// disabled and no batch reaches the PTY beneath it.
+/// disabled and no batch reaches the PTY beneath it. A handoff pause blocks
+/// terminal composition the same way, without hiding an owned field.
 fn ime_gate(context: ImeContext) -> ImeGate {
     let target = App::select_owned_field(
         context.input_modal_open,
@@ -2619,15 +2628,22 @@ fn ime_gate(context: ImeContext) -> ImeGate {
     .map(|(target, ())| target);
     ImeGate {
         target,
-        modal_open: context.input_modal_open || context.consent_or_picker_open,
+        modal_open: context.input_modal_open
+            || context.consent_or_picker_open
+            || context.terminal_input_paused,
         explorer_focused: context.explorer_focused,
     }
 }
 
 /// Typed, pasted, dropped, and composed bytes never reach the PTY behind an
-/// input modal or a pending trusted consent prompt.
-const fn terminal_input_blocked(input_modal_open: bool, consent_pending: bool) -> bool {
-    input_modal_open || consent_pending
+/// input modal or a pending trusted consent prompt, or while the Window is
+/// paused for a daemon handoff (Plan 0061 M3.12a), when they are dropped.
+const fn terminal_input_blocked(
+    input_modal_open: bool,
+    consent_pending: bool,
+    handoff_paused: bool,
+) -> bool {
+    input_modal_open || consent_pending || handoff_paused
 }
 
 fn explorer_pointer_returns_to_terminal(
@@ -4843,6 +4859,7 @@ impl App {
         terminal_input_blocked(
             self.modal.input_modal_open(),
             self.modal.trusted_consent.is_some(),
+            self.handoff_paused(),
         )
     }
 
@@ -4860,6 +4877,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|prompt| prompt.input().is_some()),
             terminal_search: self.panes.pane.search.input.is_some(),
+            terminal_input_paused: self.handoff_paused(),
         })
     }
 
@@ -5487,6 +5505,10 @@ impl App {
             pending_transfer_id: self.panes.pane.pending_control_transfer,
             agent_status_incarnation: self.tab_state.agent.clearable_incarnation(splint_id),
         }));
+        let paused = self.handoff_paused();
+        if let Some(palette) = self.modal.command_palette.as_mut() {
+            palette.set_mutations_paused(paused);
+        }
         self.modal.command_palette_layout = None;
         self.modal.command_palette_pressed = None;
         self.modal.command_palette_text_cache.clear();
@@ -5654,6 +5676,12 @@ impl App {
                 WindowTopologyCommand::FocusSplint { target }
             }
         };
+        if self.handoff_paused() && command.paused_during_handoff() {
+            self.explorer
+                .set_notice("Paused while splinterd upgrades; try again after it finishes");
+            self.presentation.full_redraw = true;
+            return true;
+        }
         if !returns_focus || !self.begin_lair_explorer_action(decision) {
             return false;
         }
@@ -5677,7 +5705,7 @@ impl App {
             .modal
             .command_palette
             .as_ref()
-            .and_then(|palette| command_dispatch(command, &palette.context()))
+            .and_then(|palette| palette.dispatch(command))
         else {
             return;
         };
@@ -6098,7 +6126,7 @@ impl App {
         clippy::cast_sign_loss,
         reason = "finite pointer coordinates are clamped to the logical surface"
     )]
-    fn show_context_menu(&mut self, menu: TabContextMenuUi, anchor: (f64, f64)) -> Result<()> {
+    fn show_context_menu(&mut self, mut menu: TabContextMenuUi, anchor: (f64, f64)) -> Result<()> {
         self.input.prefix_state.clear();
         anyhow::ensure!(
             self.tab_state.managed_tabs,
@@ -6141,6 +6169,7 @@ impl App {
         };
         self.presentation.explorer_pressed = None;
         self.explorer.cancel_context_press();
+        menu.set_mutations_paused(self.handoff_paused());
         self.modal.tab_context_menu = Some(menu);
         self.modal.tab_context_menu_anchor = (
             logical(anchor.0, self.surface.logical_width),
@@ -6433,6 +6462,18 @@ impl App {
     }
 
     fn send_topology_command(&mut self, command: WindowTopologyCommand) -> Result<()> {
+        // The final gate for every entry point, since a menu, picker, or
+        // prompt opened before the pause can still dispatch.
+        if self.handoff_paused() && command.paused_during_handoff() {
+            self.drop_topology_command_for_handoff(&command);
+            return Ok(());
+        }
+        // A Window kept open after its daemon connection was lost during a
+        // handoff has no topology manager left (M3.12b reconnects it).
+        if self.tab_state.topology_commands.is_none() && self.handoff.holds_window_on_disconnect() {
+            self.drop_topology_command_for_handoff(&command);
+            return Ok(());
+        }
         self.cancel_clipboard_image();
         // Capture all entry points, including keyboard shortcuts, before dispatch so
         // a failed load can retry the exact picker kind and original Lair scope.
@@ -6485,13 +6526,22 @@ impl App {
     }
 
     fn flush_pending_terminal_input(&mut self) {
+        // Input queued before a handoff pause is dropped, never replayed.
+        if self.handoff_paused() {
+            self.input.pending_terminal_input.clear();
+            self.input.terminal_input_saturated = false;
+            return;
+        }
         if try_flush_pending_terminal_input(&mut self.input.pending_terminal_input) {
             self.input.terminal_input_saturated = false;
         }
     }
 
     fn send_coalescible_input(&mut self, bytes: Vec<u8>) {
-        if self.modal.input_modal_open() || !self.input.pending_terminal_input.is_empty() {
+        if self.modal.input_modal_open()
+            || self.handoff_paused()
+            || !self.input.pending_terminal_input.is_empty()
+        {
             return;
         }
         let Some(commands) = &self.panes.pane.commands else {
@@ -7041,7 +7091,11 @@ impl App {
                 .computed_pane_layout()?
                 .and_then(|layout| layout.split_at(event.position, 6));
             if let Some(split) = split {
-                self.input.divider_drag = Some(DividerDrag { split, ratio: None });
+                // A layout change waits out a daemon handoff: the press is
+                // consumed without starting a drag.
+                if !self.handoff_paused() {
+                    self.input.divider_drag = Some(DividerDrag { split, ratio: None });
+                }
                 self.panes.pane.pointer_cell = None;
                 self.panes.pane.hovered_url = None;
                 return Ok(true);
@@ -7710,7 +7764,7 @@ impl App {
     /// The focused pane's terminal title, or `None` before it has a snapshot.
     fn terminal_window_title(&self) -> Option<String> {
         let snapshot = self.panes.pane.snapshot.as_ref()?;
-        Some(window_title(
+        let title = window_title(
             self.presentation
                 .title
                 .text
@@ -7718,9 +7772,17 @@ impl App {
                 .or(Some(&snapshot.title)),
             self.panes.pane.controller_active && self.presentation.title.controller_label,
             &self.panes.pane.authority,
-            self.panes.pane.pending_control_transfer.is_some(),
+            // Accepting or denying waits out a daemon handoff, so the title
+            // offers neither while paused.
+            self.panes.pane.pending_control_transfer.is_some() && !self.handoff_paused(),
             Some(&self.panes.pane.search),
-        ))
+        );
+        // The compositor title carries the upgrade banner too, so it stays
+        // truthful about whether typing reaches the terminal.
+        Some(match self.handoff.banner_text() {
+            Some(banner) => format!("{title} — {banner}"),
+            None => title,
+        })
     }
 
     fn refresh_search_overlay(&mut self, queue_handle: &QueueHandle<Self>) {
@@ -9191,6 +9253,12 @@ impl App {
                 WindowTopologyUpdate::Closed => self
                     .scheduling
                     .request_exit(ExitClass::CleanFinalTabRemoved),
+                WindowTopologyUpdate::Shutdown(_) if self.handoff.holds_window_on_disconnect() => {
+                    // The manager lost its daemon connection while a handoff
+                    // was fenced: the Window stays with its banner, and its
+                    // topology commands stop here until M3.12b reconnects.
+                    self.tab_state.topology_commands = None;
+                }
                 WindowTopologyUpdate::Shutdown(_) => {
                     if let Some(diagnostics) = diagnostics() {
                         diagnostics.emit(
@@ -9313,16 +9381,24 @@ impl App {
         reason = "bounded update draining and semantic damage coalescing stay adjacent"
     )]
     fn apply_updates(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
+        // First, so every gate below sees this turn's handoff pause.
+        self.apply_handoff_status(Instant::now());
         let (topology_changed, topology_theme) = self.apply_topology_updates(queue_handle)?;
         if topology_changed {
             self.cancel_copy_mode_for_topology();
         }
         let theme = self.presentation.theme;
         let waker = self.platform.update_waker.clone();
-        let topology_commands = self.tab_state.topology_commands.clone();
+        // Exited panes close once the pause ends; a fenced daemon refuses it.
+        let topology_commands = self
+            .tab_state
+            .topology_commands
+            .clone()
+            .filter(|_| !self.handoff_paused());
+        let hold_on_disconnect = self.handoff.holds_window_on_disconnect();
         for tab in self.tab_state.tabs.iter_mut() {
             if let Some(view) = tab.value.as_mut() {
-                view.drain_hidden_updates(&waker, theme)?;
+                view.drain_hidden_updates(&waker, theme, hold_on_disconnect)?;
                 for pane in std::iter::once(&mut view.pane).chain(view.inactive_panes.iter_mut()) {
                     let input_pending = terminal_input_pending_for(
                         &self.input.pending_terminal_input,
@@ -9378,7 +9454,17 @@ impl App {
             pending = drained.items;
             disconnected = drained.disconnected;
         }
-        if disconnected && !pane_stream_has_terminal_notice(&pending) {
+        if disconnected
+            && !pane_stream_has_terminal_notice(&pending)
+            && self.handoff.holds_window_on_disconnect()
+        {
+            // Lost while a handoff was fenced, as when it commits and the
+            // daemon execs: the Window stays with its banner and last screen.
+            // M3.12b reconnects and resnapshots from here.
+            self.panes.pane.controller_active = false;
+            self.panes.pane.commands = None;
+            self.panes.pane.updates = None;
+        } else if disconnected && !pane_stream_has_terminal_notice(&pending) {
             if let Some(diagnostics) = diagnostics() {
                 diagnostics.emit(
                     DiagnosticLevel::Error,
@@ -10258,7 +10344,12 @@ impl App {
         );
         let command_retry_pending =
             !self.input.pending_terminal_input.is_empty() || self.has_deferred_pane_command();
-        command_retry_dispatch_timeout(timeout, command_retry_pending)
+        let timeout = command_retry_dispatch_timeout(timeout, command_retry_pending);
+        // Wake to clear an expired upgrade outcome notice.
+        match (timeout, self.handoff.timeout(Instant::now())) {
+            (Some(timeout), Some(notice)) => Some(timeout.min(notice)),
+            (timeout, _) => timeout,
+        }
     }
 
     fn tick_cursor_blink(&mut self, queue_handle: &QueueHandle<Self>) -> Result<()> {
@@ -10965,6 +11056,50 @@ impl App {
                     &self.panes.pane.search.query,
                     self.panes.pane.search.matches.len(),
                     self.panes.pane.search.selected,
+                )?;
+            }
+            self.surface.buffers[buffer_index].stale.mark_full();
+        }
+        // The upgrade banner: inside the terminal area, below the tab strip,
+        // clear of the history overlay, and beneath interactive popups.
+        if let Some(text) = self.handoff.banner_text() {
+            if let Some(terminal) = search_paint_rect(content_rect, explorer_layout.as_ref()) {
+                let history = history_overlay_status(
+                    &self.panes.pane.scrollback_viewport,
+                    self.panes.pane.snapshot.as_ref(),
+                )
+                .and_then(|_| {
+                    history_overlay_layout(
+                        content_buffer_rect.width,
+                        content_buffer_rect.height,
+                        self.surface.scale_120,
+                    )
+                })
+                .map(|layout| {
+                    let (x, y, width, height) = layout.panel;
+                    Rect {
+                        x: content_buffer_rect
+                            .x
+                            .saturating_add(u32::try_from(x).unwrap_or(0)),
+                        y: content_buffer_rect
+                            .y
+                            .saturating_add(u32::try_from(y).unwrap_or(0)),
+                        width,
+                        height,
+                    }
+                });
+                paint_handoff_banner(
+                    &mut self.handoff.text_cache,
+                    &self.presentation.render_context,
+                    canvas,
+                    width,
+                    height,
+                    Self::buffer_rect(terminal, self.surface.scale_120)?,
+                    history,
+                    self.surface.scale_120,
+                    self.presentation.renderer_generation,
+                    chrome_panel_palette(self.presentation.theme, ChromeSurface::Popup),
+                    &text,
                 )?;
             }
             self.surface.buffers[buffer_index].stale.mark_full();
@@ -11725,7 +11860,7 @@ mod tests {
         }
         // Without a modal the PTY remains the IME destination.
         assert_eq!(ime_route(ImeContext::default()), (None, true, false));
-        assert!(terminal_input_blocked(false, true));
+        assert!(terminal_input_blocked(false, true, false));
     }
 
     #[test]
@@ -11769,13 +11904,13 @@ mod tests {
 
     #[test]
     fn terminal_input_blocked_behind_input_modals_and_pending_consent() {
-        assert!(!terminal_input_blocked(false, false));
-        assert!(terminal_input_blocked(true, false));
-        assert!(terminal_input_blocked(false, true));
-        assert!(terminal_input_blocked(true, true));
+        assert!(!terminal_input_blocked(false, false, false));
+        assert!(terminal_input_blocked(true, false, false));
+        assert!(terminal_input_blocked(false, true, false));
+        assert!(terminal_input_blocked(true, true, false));
         // A clipboard read finishing under a pending consent prompt is stale.
         assert!(!clipboard_read_is_current(
-            terminal_input_blocked(false, true),
+            terminal_input_blocked(false, true, false),
             7,
             7
         ));
@@ -13217,13 +13352,98 @@ mod tests {
             })
             .unwrap();
 
-        view.drain_hidden_updates(&waker, ResolvedTheme::default())
+        view.drain_hidden_updates(&waker, ResolvedTheme::default(), false)
             .unwrap();
 
         assert_eq!(view.pane.snapshot.as_ref().unwrap().revision, 2);
         assert!(view.dirty_inactive_panes.contains(&splint_id));
         assert!(view.pane.snapshot_frame.is_none());
         assert!(command_receiver.try_recv().is_err());
+    }
+
+    /// Plan 0061 M3.12a: a hidden pane's stream lost while a handoff is
+    /// fenced leaves the Window open with the pane disconnected; otherwise
+    /// the loss still ends the Window.
+    #[test]
+    fn a_hidden_pane_lost_during_a_fenced_handoff_keeps_the_window() {
+        let (_event_loop, waker) = update_test_waker();
+        for hold in [true, false] {
+            let splint = Splint::shell(PathBuf::from("/tmp"));
+            let splint_id = splint.id;
+            let (updates, update_receiver) = tokio::sync::mpsc::channel(1);
+            let (commands, _command_receiver) = tokio::sync::mpsc::channel(1);
+            let mut view = DojoTabView::from_open(
+                WindowDojoIdentity {
+                    topology_revision: TopologyRevision::new(1),
+                    lair_id: LairId::new(),
+                    dojo_id: DojoId::new(),
+                    lair_name: "hidden lair".to_owned(),
+                    lair_retention: splinterm_core::LairRetention::Disposable,
+                    dojo_name: "hidden dojo".to_owned(),
+                },
+                LayoutNode::Leaf(splint),
+                vec![WindowPaneOptions {
+                    snapshot: valid_snapshot(splint_id),
+                    terminal_grid_limits: TerminalGridLimits::default(),
+                    updates: update_receiver,
+                    commands,
+                    authority: AuthorityStatus::default(),
+                    controlled: true,
+                    image_sources: ImageContentLeaseSet::default(),
+                }],
+                splint_id,
+                ResolvedTheme::default(),
+                SCALE_DENOMINATOR,
+                &RenderContext::new(u16::MAX),
+            )
+            .unwrap();
+            drop(updates);
+            let result = view.drain_hidden_updates(&waker, ResolvedTheme::default(), hold);
+            if hold {
+                result.unwrap();
+                assert!(view.pane.commands.is_none());
+                assert!(view.pane.updates.is_none());
+                assert!(!view.pane.controller_active);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn handoff_pause_drops_keys_pastes_drops_and_terminal_composition() {
+        // Keys, IME commits, pastes, and file drops share this one gate.
+        assert!(terminal_input_blocked(false, false, true));
+        assert!(!terminal_input_blocked(false, false, false));
+        // A clipboard read that finishes during the pause is dropped.
+        assert!(!clipboard_read_is_current(
+            terminal_input_blocked(false, false, true),
+            7,
+            7
+        ));
+        // No composition reaches the terminal: the text input is disabled
+        // for it and any batch is dropped.
+        let paused = ImeContext {
+            terminal_input_paused: true,
+            ..ImeContext::default()
+        };
+        assert_eq!(ime_route(paused), (None, false, true));
+        // Owned fields, such as terminal search and the palette, still compose.
+        assert_eq!(
+            ime_route(ImeContext {
+                terminal_search: true,
+                ..paused
+            }),
+            (Some(OwnedFieldTarget::Search), true, false)
+        );
+        assert_eq!(
+            ime_route(ImeContext {
+                input_modal_open: true,
+                command_palette: true,
+                ..paused
+            }),
+            (Some(OwnedFieldTarget::CommandPalette), true, false)
+        );
     }
 
     #[test]

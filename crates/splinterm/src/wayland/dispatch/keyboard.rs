@@ -8,7 +8,8 @@ use super::super::{
     command_palette_shortcut_action, consume_detached_enter_press, font_zoom_action,
     keymap_press_consumes_key, keymap_press_for, lair_lifecycle_command, pane_focus_action,
     pane_topology_action, session_picker_shortcut_action, shortcut_action_for,
-    tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard, wl_surface,
+    shortcut_paused_during_handoff, tab_action_dispatch_allowed, tab_shortcut_action, wl_keyboard,
+    wl_surface,
 };
 
 impl KeyboardHandler for App {
@@ -176,6 +177,17 @@ impl KeyboardHandler for App {
                 Some(action)
             }
         };
+        // While splinterd upgrades, a shortcut that changes the session, takes
+        // control, or types into the terminal is consumed without effect.
+        if let Some(action) = shortcut
+            && self.handoff_paused()
+            && shortcut_paused_during_handoff(action)
+        {
+            self.modal
+                .session_picker_consumed_keys
+                .insert(event.raw_code);
+            return;
+        }
         if let Some(action) = command_palette_shortcut_action(
             shortcut,
             false,

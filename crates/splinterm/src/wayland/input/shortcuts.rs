@@ -421,9 +421,127 @@ fn key_identity(keysym: Keysym) -> Option<KeyIdentity> {
     Some(key)
 }
 
+/// Whether a resolved shortcut is consumed without effect while the Window
+/// is paused for a daemon handoff (Plan 0061 M3.12a): it changes the session,
+/// opens a prompt that only leads to such a change, attaches another Lair,
+/// takes or grants control, or sends terminal input. Help, the palette,
+/// pickers, history, search, focus, zoom, tab switching, copying, and
+/// releases keep working; a terminal paste is dropped where it is delivered.
+pub(in crate::wayland) const fn shortcut_paused_during_handoff(action: ActionId) -> bool {
+    match action {
+        ActionId::NewSession
+        | ActionId::RenameCurrentTab
+        | ActionId::NewDojo
+        | ActionId::CloseCurrentTab
+        | ActionId::CloseOtherTabs
+        | ActionId::TerminateCurrentDojo
+        | ActionId::RenameCurrentLair
+        | ActionId::SaveCurrentLair
+        | ActionId::ToggleCurrentLairPin
+        | ActionId::RestoreCurrentLair
+        | ActionId::TerminateCurrentLair
+        | ActionId::PreviousLair
+        | ActionId::NextLair
+        | ActionId::SplitHorizontal
+        | ActionId::SplitVertical
+        | ActionId::CloseFocusedPane
+        | ActionId::ResizePaneSmaller
+        | ActionId::ResizePaneLarger
+        | ActionId::ResizePaneLeftFive
+        | ActionId::ResizePaneRightFive
+        | ActionId::ResizePaneUpFive
+        | ActionId::ResizePaneDownFive
+        | ActionId::SendPrefix
+        | ActionId::RequestControl
+        | ActionId::ForceControl
+        | ActionId::AcceptControlTransfer
+        | ActionId::DenyControlTransfer
+        | ActionId::ClipboardSaveImage => true,
+        ActionId::CommandPalette
+        | ActionId::RecentSessions
+        | ActionId::PreviousDojo
+        | ActionId::NextDojo
+        | ActionId::DojoChooser
+        | ActionId::SelectDojo1
+        | ActionId::SelectDojo2
+        | ActionId::SelectDojo3
+        | ActionId::SelectDojo4
+        | ActionId::SelectDojo5
+        | ActionId::SelectDojo6
+        | ActionId::SelectDojo7
+        | ActionId::SelectDojo8
+        | ActionId::SelectDojo9
+        | ActionId::MoveDojoLeft
+        | ActionId::MoveDojoRight
+        | ActionId::PreviewCurrentLair
+        | ActionId::LairChooser
+        | ActionId::DetachWindow
+        | ActionId::FocusLeft
+        | ActionId::FocusRight
+        | ActionId::FocusUp
+        | ActionId::FocusDown
+        | ActionId::TogglePaneZoom
+        | ActionId::ToggleTabStrip
+        | ActionId::BindingHelp
+        | ActionId::CopyModeEnter
+        | ActionId::ConfigReload
+        | ActionId::SearchScrollback
+        | ActionId::PageUp
+        | ActionId::PageDown
+        | ActionId::ReturnToLive
+        | ActionId::ZoomIn
+        | ActionId::ZoomOut
+        | ActionId::ResetZoom
+        | ActionId::ReleaseControl
+        | ActionId::RevokeAllAccess
+        | ActionId::ClipboardCopy
+        | ActionId::ClipboardPaste => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_pause_consumes_session_changing_shortcuts_only() {
+        for action in [
+            ActionId::NewDojo,
+            ActionId::CloseCurrentTab,
+            ActionId::TerminateCurrentLair,
+            ActionId::NextLair,
+            ActionId::SplitVertical,
+            ActionId::CloseFocusedPane,
+            ActionId::ResizePaneUpFive,
+            ActionId::SendPrefix,
+            ActionId::RequestControl,
+            ActionId::AcceptControlTransfer,
+            ActionId::ClipboardSaveImage,
+        ] {
+            assert!(shortcut_paused_during_handoff(action), "{action:?}");
+        }
+        for action in [
+            ActionId::CommandPalette,
+            ActionId::BindingHelp,
+            ActionId::NextDojo,
+            ActionId::SelectDojo3,
+            ActionId::MoveDojoLeft,
+            ActionId::DojoChooser,
+            ActionId::PreviewCurrentLair,
+            ActionId::FocusLeft,
+            ActionId::TogglePaneZoom,
+            ActionId::SearchScrollback,
+            ActionId::PageUp,
+            ActionId::ReturnToLive,
+            ActionId::ZoomIn,
+            ActionId::DetachWindow,
+            ActionId::ReleaseControl,
+            ActionId::RevokeAllAccess,
+            ActionId::ClipboardCopy,
+        ] {
+            assert!(!shortcut_paused_during_handoff(action), "{action:?}");
+        }
+    }
 
     fn action_for_key(
         keymap: &ResolvedKeymap,
