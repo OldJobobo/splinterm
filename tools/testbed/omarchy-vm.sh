@@ -565,7 +565,9 @@ HYPRLAND_INSTANCE_SIGNATURE=$(jq -r '.instance' <<<"$instance")
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 export YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket"
 python "$package_root/source/tools/testbed/guest-window.py" prepare --state "$window_state"
-SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
+# Without RUST_LOG the packaged daemon logs only errors; VM acceptance reads
+# its info and warn lines (the TEST-ONLY banner, handoff phases).
+RUST_LOG=info SPLINTERM_SOCKET="$socket" XDG_STATE_HOME="$state" XDG_CONFIG_HOME="$config" \
   nohup /usr/bin/splinterd >"$runtime/daemon.log" 2>&1 </dev/null &
 daemon_pid=$!
 for _ in $(seq 1 100); do

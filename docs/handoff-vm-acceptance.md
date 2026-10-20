@@ -33,8 +33,10 @@ readiness**:
 - `splinterd`'s `vm-acceptance-live-handoff` feature makes live handoff treat
   window continuity as ready for a local package build
   (`local-committed-head`) only. Release-candidate, Nix-store, and unpackaged
-  builds stay refused. The daemon warns at every serve start: "TEST-ONLY VM
-  acceptance build".
+  builds stay refused. The daemon logs a warning at every serve start,
+  "TEST-ONLY VM acceptance build", at the `warn` level; `package-launch` runs
+  the private daemon with `RUST_LOG=info`, so its `daemon.log` carries this
+  and the handoff phase lines the steps check.
 - Such a daemon carries a marker. Package provenance generation and package
   validation refuse it in every release-candidate and Nix package, and in a
   local package unless explicitly requested. No PKGBUILD, Nix recipe,
