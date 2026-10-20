@@ -60,7 +60,8 @@ const ACL_BUFFER_BYTES: usize = 4 + 8 * 1023;
 /// ADR 0014 names the list's minimum. The dynamic loaders are added because a
 /// program started as `ld.so ./program` executes the loader, so remembering
 /// the loader would cover every program it loads, exactly as for a script
-/// interpreter.
+/// interpreter. The other additions (awk, csh, nu, julia, dotnet) also run
+/// whatever script or assembly they are given.
 const KNOWN_INTERPRETERS: &[&[u8]] = &[
     b"python",
     b"node",
@@ -84,6 +85,14 @@ const KNOWN_INTERPRETERS: &[&[u8]] = &[
     b"java",
     b"pwsh",
     b"Rscript",
+    b"awk",
+    b"gawk",
+    b"mawk",
+    b"tcsh",
+    b"csh",
+    b"nu",
+    b"julia",
+    b"dotnet",
     b"ld.so",
     b"ld-linux.so",
     b"ld-linux-x86-64.so",
@@ -1477,6 +1486,11 @@ mod tests {
             "Rscript",
             "lua5.4",
             "ld-linux-x86-64.so.2",
+            "gawk",
+            "tcsh",
+            "nu",
+            "julia1.10",
+            "dotnet",
         ] {
             assert!(
                 is_known_interpreter(OsStr::new(interpreter)),

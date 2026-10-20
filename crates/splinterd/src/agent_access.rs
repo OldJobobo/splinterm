@@ -592,6 +592,9 @@ impl StoreLocation {
 pub enum StoreFault {
     /// No state directory is configured (unit tests).
     NotConfigured,
+    /// A later round of this process owns the store; this handle never
+    /// writes again.
+    Retired,
     /// A link, a wrong owner or mode, or a wrong file type.
     Unsafe(&'static str),
     Corrupt(String),
@@ -605,6 +608,7 @@ impl fmt::Display for StoreFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotConfigured => formatter.write_str("no state directory is configured"),
+            Self::Retired => formatter.write_str("a later daemon round owns the store"),
             Self::Unsafe(why) => write!(formatter, "unsafe store: {why}"),
             Self::Corrupt(why) => write!(formatter, "corrupt store: {why}"),
             Self::Oversized => write!(formatter, "store exceeds {MAX_STORE_BYTES} bytes"),
@@ -842,6 +846,31 @@ fn validate_store_status(status: &Stat) -> Result<(), StoreFault> {
     Ok(())
 }
 
+/// The most leftover temporary stores one load removes.
+const MAX_STALE_TEMPORARIES: usize = 64;
+
+/// Removes temporary stores a write interrupted by a crash left behind. Only
+/// this daemon's own name pattern, only non-directories, and bounded; a
+/// failure leaves them for the next load.
+fn remove_stale_temporaries(directory: &OwnedFd) {
+    let prefix = format!(".{STORE_FILE}.tmp-");
+    let Ok(entries) = rustix::fs::Dir::read_from(directory) else {
+        return;
+    };
+    let stale: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type() != FileType::Directory
+                && entry.file_name().to_bytes().starts_with(prefix.as_bytes())
+        })
+        .map(|entry| entry.file_name().to_owned())
+        .take(MAX_STALE_TEMPORARIES)
+        .collect();
+    for name in stale {
+        let _ = rustix::fs::unlinkat(directory, name.as_c_str(), AtFlags::empty());
+    }
+}
+
 /// Loads the store with the policy-style checks. A missing store is no
 /// grants; anything unsafe, corrupt, oversized, or of an unsupported version
 /// makes the remembered source deny everything.
@@ -857,6 +886,7 @@ fn load_store(location: &StoreLocation, account: Option<(&Path, &OsStr)>) -> Loa
         }
         Err(fault) => return Loaded::unavailable(fault),
     };
+    remove_stale_temporaries(&directory);
     let descriptor = match rustix::fs::openat(
         &directory,
         STORE_FILE,
@@ -1272,7 +1302,6 @@ struct RememberedGrant {
     persisted_last_used: Option<u64>,
     /// Its Lair was absent when the store was loaded: it authorizes nothing
     /// and is listed as "workspace missing" until revoked.
-    #[allow(dead_code, reason = "listed by PR 4's inventory")]
     workspace_missing: bool,
 }
 
@@ -1364,12 +1393,41 @@ struct AuditSubject<'a> {
     access: Option<&'a AccessSet>,
 }
 
+/// A test hook run once inside a remembered commit, after the durable write
+/// and before the memory update, with the writer lock held.
+#[cfg(test)]
+#[derive(Default)]
+struct CommitHook(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+#[cfg(test)]
+impl CommitHook {
+    fn run(&self) {
+        let hook = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+#[cfg(test)]
+impl fmt::Debug for CommitHook {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CommitHook")
+    }
+}
+
 /// Workspace-session and remembered definitions, and the remembered store.
 #[derive(Debug)]
 pub struct AgentAccess {
     ids: Arc<GrantIds>,
     file: Mutex<DurableFile>,
     memory: Mutex<Memory>,
+    #[cfg(test)]
+    after_commit_write: CommitHook,
 }
 
 impl AgentAccess {
@@ -1425,6 +1483,8 @@ impl AgentAccess {
                 fail_after_rename: false,
             }),
             memory: Mutex::new(memory),
+            #[cfg(test)]
+            after_commit_write: CommitHook::default(),
         }
     }
 
@@ -1435,6 +1495,8 @@ impl AgentAccess {
             ids,
             file: Mutex::new(DurableFile::unconfigured()),
             memory: Mutex::new(Memory::default()),
+            #[cfg(test)]
+            after_commit_write: CommitHook::default(),
         }
     }
 
@@ -1492,6 +1554,7 @@ impl AgentAccess {
         let memory = &mut *memory;
         let grant = memory.remembered.iter_mut().find(|grant| {
             grant.entry.lair_id == lair_id
+                && !grant.workspace_missing
                 && evidence.matches(&grant.entry.identity)
                 && grant.entry.access.covers(required)
         })?;
@@ -1643,7 +1706,11 @@ impl AgentAccess {
             self.record_store_error(&error, Some(&entry));
             return Err(CommitError::Store(error));
         }
-        drop(file);
+        // The writer lock stays held until memory matches the file (ADR 0014:
+        // one lock over the read-modify-write and the memory change), so no
+        // flush can snapshot memory without the new entry and rewrite it away.
+        #[cfg(test)]
+        self.after_commit_write.run();
         let mut memory = self.memory();
         memory.written(&proposal);
         // The Lair ended while the write ran (which also removed any earlier
@@ -1829,7 +1896,6 @@ impl AgentAccess {
             memory.remembered_entries()
         };
         let result = file.write(&proposal);
-        drop(file);
         match &result {
             Ok(()) => {
                 let mut memory = self.memory();
@@ -1847,6 +1913,17 @@ impl AgentAccess {
             }
         }
         result
+    }
+
+    /// Retires this round's store handle and returns the removals it still
+    /// owes. Under the writer lock, so no write of this handle can follow:
+    /// a resumed round's fresh handle is then the store's only writer.
+    pub fn retire(&self) -> BTreeSet<EntryId> {
+        let mut file = self.file();
+        file.state = FileState::Unavailable(StoreFault::Retired);
+        let mut memory = self.memory();
+        memory.available = false;
+        memory.pending_removals.keys().cloned().collect()
     }
 
     /// Entries revoked in memory whose durable removal is still owed.
@@ -1892,6 +1969,15 @@ impl AgentAccess {
     #[cfg(test)]
     pub fn inject_write_failures(&self, count: usize) {
         self.file().injected_failures = count;
+    }
+
+    #[cfg(test)]
+    pub fn after_commit_write_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .after_commit_write
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     #[cfg(test)]
@@ -2075,6 +2161,20 @@ mod tests {
     }
 
     const NOW: u64 = 1_800_000_000;
+
+    /// A topology holding a Lair for each ID, so entries for them are not
+    /// "workspace missing".
+    fn topology_with(lairs: &[LairId]) -> Topology {
+        let mut topology = Topology::new();
+        for (index, lair_id) in lairs.iter().enumerate() {
+            let mut lair =
+                splinterm_core::Lair::new(format!("present-{index}"), PathBuf::from("/tmp"));
+            lair.id = *lair_id;
+            let revision = topology.revision();
+            topology.insert_lair_at(revision, lair).unwrap();
+        }
+        topology
+    }
 
     // ---- Levels and offers ----
 
@@ -2490,7 +2590,7 @@ mod tests {
             Arc::new(GrantIds::default()),
             Some(StoreLocation::new(linked.clone())),
             &context(),
-            &Topology::new(),
+            &topology_with(&[lair]),
             &BTreeSet::new(),
         );
         assert!(access.store_available());
@@ -2874,7 +2974,7 @@ mod tests {
             .collect();
         let ids: HashSet<_> = committed.iter().map(|commit| commit.grant_id).collect();
         assert_eq!(ids.len(), 16);
-        let reloaded = base.load();
+        let reloaded = base.load_with(&topology_with(&lairs), &BTreeSet::new());
         assert_eq!(reloaded.remembered_for_test().len(), 16);
         let peer = agent("/usr/bin/agent");
         for lair in lairs {
@@ -2953,7 +3053,7 @@ mod tests {
         drop(first);
         // A new generation: the remembered entry, by its stable ID, under a
         // new runtime ID space; the session grant did not survive.
-        let second = base.load();
+        let second = base.load_with(&topology_with(&[lair]), &BTreeSet::new());
         let reloaded = second.remembered_for_test();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(Some(&reloaded[0].1.id), committed.entry_id.as_ref());
@@ -2995,6 +3095,139 @@ mod tests {
             access.workspace_missing_for_test(&EntryId(entry_id(2))),
             Some(true)
         );
+        // A missing workspace's entry authorizes nothing, even for its own
+        // Lair ID.
+        assert!(
+            access
+                .authorize(
+                    &agent("/usr/bin/agent"),
+                    present,
+                    &[AccessScope::Observe],
+                    NOW
+                )
+                .is_some()
+        );
+        assert_eq!(
+            access.authorize(
+                &agent("/usr/bin/other"),
+                absent,
+                &[AccessScope::Observe],
+                NOW
+            ),
+            None
+        );
+    }
+
+    /// Review F1: the writer lock covers the durable write and the memory
+    /// update, so a flush queued between them cannot snapshot memory without
+    /// the new entry and rewrite it away.
+    #[test]
+    fn a_flush_queued_inside_a_commit_cannot_rewrite_the_commit_away() {
+        use std::{sync::mpsc, time::Duration};
+
+        let base = Base::new();
+        let access = Arc::new(base.load());
+        let lair = LairId::new();
+        // An existing entry with an owed last-used write gives the flush work.
+        access
+            .commit_remembered(protected("/usr/bin/old"), lair, look(), None)
+            .unwrap();
+        assert!(
+            access
+                .authorize(&agent("/usr/bin/old"), lair, &[AccessScope::Observe], NOW)
+                .unwrap()
+                .flush_due
+        );
+        let (written_tx, written_rx) = mpsc::channel::<()>();
+        let (flushed_tx, flushed_rx) = mpsc::channel::<()>();
+        access.after_commit_write_for_test(move || {
+            written_tx.send(()).unwrap();
+            // Without the lock the flush completes here; with it, the flush
+            // waits for this commit, and this wait times out.
+            let _ = flushed_rx.recv_timeout(Duration::from_millis(500));
+        });
+        let flusher = {
+            let access = Arc::clone(&access);
+            std::thread::spawn(move || {
+                written_rx.recv().unwrap();
+                let flushed = access.flush();
+                let _ = flushed_tx.send(());
+                flushed
+            })
+        };
+        let committed = access
+            .commit_remembered(protected("/usr/bin/new"), lair, look(), None)
+            .unwrap();
+        flusher.join().unwrap().unwrap();
+        let new_id = committed.entry_id.unwrap();
+        let ids: Vec<_> = base.document()["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids.contains(&new_id.0), "{ids:?}");
+        assert!(
+            base.load()
+                .remembered_for_test()
+                .iter()
+                .any(|(_, entry)| entry.id == new_id)
+        );
+    }
+
+    /// Review F3: a resumed round retires the previous round's handle, which
+    /// then never writes again; its owed removals carry over.
+    #[test]
+    fn a_retired_handle_never_writes_again() {
+        let base = Base::new();
+        let access = base.load();
+        let lair = LairId::new();
+        let committed = access
+            .commit_remembered(protected("/usr/bin/agent"), lair, look(), None)
+            .unwrap();
+        let entry_id = committed.entry_id.unwrap();
+        access.inject_write_failures(1);
+        access.revoke_remembered(&entry_id).unwrap();
+        assert!(access.flush().is_err());
+        let owed = access.retire();
+        assert_eq!(owed, BTreeSet::from([entry_id]));
+        assert!(!access.store_available());
+        let before = base.read();
+        assert_eq!(
+            access.flush(),
+            Err(StoreWriteError::Unavailable(StoreFault::Retired))
+        );
+        assert_eq!(
+            access.commit_remembered(protected("/usr/bin/other"), lair, look(), None),
+            Err(CommitError::Store(StoreWriteError::Unavailable(
+                StoreFault::Retired
+            )))
+        );
+        assert_eq!(base.read(), before);
+        // The next round keeps the removal owed and performs it.
+        let next = base.load_with(&topology_with(&[lair]), &owed);
+        assert_eq!(
+            next.authorize(&agent("/usr/bin/agent"), lair, &[AccessScope::Observe], NOW),
+            None
+        );
+        next.flush().unwrap();
+        assert_eq!(base.document()["entries"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_load_removes_leftover_temporary_stores_only() {
+        let base = Base::new();
+        let directory = base.path.join(STATE_DIRECTORY);
+        let leftover = directory.join(format!(".{STORE_FILE}.tmp-1-1"));
+        let unrelated = directory.join("topology.json");
+        let lookalike_directory = directory.join(format!(".{STORE_FILE}.tmp-dir"));
+        fs::write(&leftover, b"{").unwrap();
+        fs::write(&unrelated, b"{}").unwrap();
+        fs::create_dir(&lookalike_directory).unwrap();
+        assert!(base.load().store_available());
+        assert!(!leftover.exists());
+        assert!(unrelated.exists());
+        assert!(lookalike_directory.exists());
     }
 
     #[test]
@@ -3108,7 +3341,7 @@ mod tests {
         let lair = LairId::new();
         base.write(&valid_document(&[valid_entry(&entry_id(1), lair)]));
         let carried = BTreeSet::from([EntryId(entry_id(1))]);
-        let access = base.load_with(&Topology::new(), &carried);
+        let access = base.load_with(&topology_with(&[lair]), &carried);
         assert_eq!(
             access.authorize(&agent("/usr/bin/agent"), lair, &[AccessScope::Observe], NOW),
             None

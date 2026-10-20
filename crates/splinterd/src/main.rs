@@ -2371,6 +2371,13 @@ async fn record_handoff_adoption_audit(state: &DaemonState, rollback: bool) {
 /// resumes.
 const HANDOFF_ACTOR_END_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long the fenced old generation waits for its owed remembered-grant
+/// writes (removals a failed write left revoked only in memory, and last-used
+/// times) before it crosses the exec boundary. Best effort: the adopted
+/// generation reloads the store from disk, so an owed removal that is not
+/// written here would come back there.
+const HANDOFF_AGENT_ACCESS_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Bound on stopping the runtime: every task is dropped and the workers and
 /// idle blocking threads are joined at once, but a blocking task that is
 /// still running (a metadata save, an abandoned scope request) is waited for
@@ -2424,6 +2431,33 @@ struct StoppedForHandoff {
     excluded: Vec<splinterd::handoff_prepare::ExcludedSplint>,
     /// Whether every captured actor confirmed its handoff end in time.
     actors_handed_off: bool,
+}
+
+/// Writes owed remembered-grant changes under the handoff fence, within
+/// [`HANDOFF_AGENT_ACCESS_FLUSH_TIMEOUT`], so a removal a failed write left
+/// revoked only in memory does not come back in the adopted generation. A
+/// failure is logged (and recorded in the store's audit ring by the flush);
+/// it never blocks or fails the handoff. A write still running at the
+/// timeout is atomic: the store is the old or the new file, and the next
+/// load removes its temporary.
+async fn flush_agent_access_at_fence(state: &DaemonState) {
+    let access = Arc::clone(&state.agent_access);
+    if !access.flush_needed() {
+        return;
+    }
+    let flush = tokio::task::spawn_blocking(move || access.flush());
+    match time::timeout(HANDOFF_AGENT_ACCESS_FLUSH_TIMEOUT, flush).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            error!(%error, "owed remembered agent access writes failed at the handoff fence; revoked entries may return after the upgrade");
+        }
+        Ok(Err(error)) => error!(%error, "remembered agent access fence write task failed"),
+        Err(_) => {
+            error!(
+                "owed remembered agent access writes did not finish before the handoff boundary"
+            );
+        }
+    }
 }
 
 /// Turns every capture into a handed-off Splint and waits, within
@@ -2486,6 +2520,7 @@ async fn stop_for_handoff(state: Arc<DaemonState>, handoff: ServeHandoff) -> Sto
             "not every captured actor confirmed its handoff end; the old generation will resume"
         );
     }
+    flush_agent_access_at_fence(&state).await;
     info!(
         handed_off = handed_off.len(),
         excluded = excluded.len(),
@@ -2852,6 +2887,25 @@ struct ResumedRound {
     agent_status_timer: AbortOnDrop,
 }
 
+/// The remembered entries the previous round of this process revoked whose
+/// durable removal is still owed. The resumed round reads the store fresh
+/// like any round; each owed removal is tried once more first and, if it
+/// fails again, stays revoked in the new round. The previous round's handle
+/// is retired under its writer lock, so it never writes again.
+async fn owed_remembered_removals(
+    previous: &DaemonState,
+) -> std::collections::BTreeSet<agent_access::EntryId> {
+    let previous_access = Arc::clone(&previous.agent_access);
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = previous_access.flush() {
+            warn!(%error, "remembered agent access write owed by the previous round failed");
+        }
+        previous_access.retire()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Builds a fresh state for the same generation from the stopped round's
 /// parts and serves every handed-off Splint again (Plan 0061 D5).
 ///
@@ -2872,24 +2926,6 @@ struct ResumedRound {
 /// the topology snapshot, and the new gate is idle before any client can
 /// subscribe again. A reconnecting client sees the unchanged
 /// `daemon_generation` in `Hello`, which is the outcome.
-/// The remembered entries the previous round of this process revoked whose
-/// durable removal is still owed. The resumed round reads the store fresh
-/// like any round; each owed removal is tried once more first and, if it
-/// fails again, stays revoked in the new round.
-async fn owed_remembered_removals(
-    previous: &DaemonState,
-) -> std::collections::BTreeSet<agent_access::EntryId> {
-    let previous_access = Arc::clone(&previous.agent_access);
-    tokio::task::spawn_blocking(move || {
-        if let Err(error) = previous_access.flush() {
-            warn!(%error, "remembered agent access write owed by the previous round failed");
-        }
-        previous_access.pending_removal_ids()
-    })
-    .await
-    .unwrap_or_default()
-}
-
 async fn start_resumed(resumed: ResumedDaemon) -> ResumedRound {
     let ResumedDaemon {
         previous,
@@ -7380,6 +7416,8 @@ enum AgentGrantError {
     WorkspaceMissing,
     /// The durable identity no longer names the requester's executing file.
     IdentityChanged,
+    /// The scope set cannot be granted (empty, clipboard, or too many).
+    InvalidAccess(agent_access::InvalidAccess),
     Commit(agent_access::CommitError),
 }
 
@@ -7403,33 +7441,34 @@ async fn commit_agent_grant(
 ) -> Result<AgentGrantCommitted, AgentGrantError> {
     use agent_access::{CommitError, Committed, GrantDuration};
 
+    let AgentGrantRequest {
+        lair_id,
+        access,
+        duration,
+        display_name,
+    } = request;
+    // The set is classified again here, whatever the caller built: an exact
+    // bundle is that level, anything else Custom, and clipboard or empty
+    // sets are refused.
+    let access = agent_access::AccessSet::from_scopes(access.scopes())
+        .map_err(AgentGrantError::InvalidAccess)?;
     if state.handoff_gate.is_fenced() {
         return Err(AgentGrantError::Fenced);
     }
-    if state
-        .topology
-        .read()
-        .await
-        .find_lair(request.lair_id)
-        .is_none()
-    {
+    if state.topology.read().await.find_lair(lair_id).is_none() {
         return Err(AgentGrantError::WorkspaceMissing);
     }
-    let offer = agent_access::offered_durations(
-        peer,
-        &request.access,
-        state.agent_access.store_available(),
-    );
+    let offer =
+        agent_access::offered_durations(peer, &access, state.agent_access.store_available());
     offer
-        .allows(request.duration)
+        .allows(duration)
         .map_err(|why| AgentGrantError::Commit(CommitError::NotOffered(why)))?;
-    let duration = request.duration;
     let committed = match duration {
         GrantDuration::Once => {
             let mutation = state.grants.lock().await.grant_lair(
                 peer,
-                request.lair_id,
-                request.access.scopes().into_iter().collect(),
+                lair_id,
+                access.scopes().into_iter().collect(),
             );
             schedule_lair_grant_expiry(state, mutation.grant.grant_id);
             Committed {
@@ -7440,27 +7479,21 @@ async fn commit_agent_grant(
         }
         GrantDuration::WorkspaceSession => state
             .agent_access
-            .commit_session(peer, request.lair_id, request.access, request.display_name)
+            .commit_session(peer, lair_id, access, display_name)
             .map_err(AgentGrantError::Commit)?,
         GrantDuration::Remembered => {
             let identity = offer
                 .remembered
                 .map_err(|why| AgentGrantError::Commit(CommitError::NotOffered(why)))?;
-            let access = Arc::clone(&state.agent_access);
+            let store = Arc::clone(&state.agent_access);
             let context = Arc::clone(&state.identity_context);
             let executing = peer.executable_file();
-            let AgentGrantRequest {
-                lair_id,
-                access: access_set,
-                display_name,
-                ..
-            } = request;
             tokio::task::spawn_blocking(move || {
                 if !context.still_qualifies(&identity, executing) {
                     return Err(AgentGrantError::IdentityChanged);
                 }
-                access
-                    .commit_remembered(identity, lair_id, access_set, display_name)
+                store
+                    .commit_remembered(identity, lair_id, access, display_name)
                     .map_err(AgentGrantError::Commit)
             })
             .await
@@ -24410,16 +24443,20 @@ mod tests {
     fn agent_fixture_state(
         base: &Path,
         context: agent_access::IdentityContext,
+        topology: &Topology,
     ) -> Arc<DaemonState> {
         let mut state = test_state(false);
         let ids = Arc::new(agent_access::GrantIds::default());
         let inner = Arc::get_mut(&mut state).unwrap();
+        // As `build_daemon_state` does: the store loads against the topology
+        // the generation starts with.
+        inner.topology = RwLock::new(topology.clone());
         inner.grants = Mutex::new(GrantStore::with_ids(Arc::clone(&ids)));
         inner.agent_access = Arc::new(agent_access::AgentAccess::load(
             ids,
             Some(agent_access::StoreLocation::new(base.to_path_buf())),
             &context,
-            &Topology::new(),
+            topology,
             &std::collections::BTreeSet::new(),
         ));
         inner.identity_context = Arc::new(context);
@@ -24466,7 +24503,7 @@ mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        let state = agent_fixture_state(&base, context);
+        let state = agent_fixture_state(&base, context, &Topology::new());
         let lair = Lair::new("agents", PathBuf::from("/tmp"));
         let lair_id = lair.id;
         let dojo_id = lair.dojos[0].id;
@@ -24722,11 +24759,12 @@ mod tests {
             .unwrap();
         // The next generation (restart, adoption, or rollback) builds its
         // state with the same fresh load.
-        let next = agent_fixture_state(&fixture.base(), (*fixture.state.identity_context).clone());
-        {
-            let topology = fixture.state.topology.read().await.clone();
-            *next.topology.write().await = topology;
-        }
+        let topology = fixture.state.topology.read().await.clone();
+        let next = agent_fixture_state(
+            &fixture.base(),
+            (*fixture.state.identity_context).clone(),
+            &topology,
+        );
         let reloaded = next.agent_access.remembered_for_test();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(Some(&reloaded[0].1.id), remembered.entry_id.as_ref());
@@ -24962,6 +25000,90 @@ mod tests {
         assert_eq!(
             fixture.rename(&fixture.peer).await.unwrap_err().code,
             ErrorCode::Unauthorized
+        );
+    }
+
+    /// Review F2: the fenced old generation writes owed removals before the
+    /// boundary, so the adopted generation's fresh load does not bring them
+    /// back.
+    #[tokio::test]
+    async fn the_handoff_fence_writes_owed_remembered_removals() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let committed = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        fixture.state.agent_access.inject_write_failures(1);
+        let revoked = revoke_remembered_grant(&fixture.state, committed.entry_id.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert!(revoked.durable.is_err());
+        // Without the fence write, the next generation would load it again.
+        let store = fixture.base().join("splinterm/agent-access.json");
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
+        assert_eq!(before["entries"].as_array().unwrap().len(), 1);
+        flush_agent_access_at_fence(&fixture.state).await;
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
+        assert_eq!(after["entries"], serde_json::json!([]));
+        let next = agent_fixture_state(
+            &fixture.base(),
+            (*fixture.state.identity_context).clone(),
+            &Topology::new(),
+        );
+        assert!(next.agent_access.remembered_for_test().is_empty());
+        // Nothing owed: the fence does not write.
+        flush_agent_access_at_fence(&fixture.state).await;
+    }
+
+    /// Review F6: the commit entry point classifies the scope set itself.
+    #[tokio::test]
+    async fn committing_reclassifies_the_scope_set() {
+        use agent_access::{AccessLevel, AccessSet, GrantDuration, InvalidAccess};
+
+        let fixture = agent_fixture().await;
+        let clipboard: std::collections::BTreeSet<_> =
+            [AccessScope::Observe, AccessScope::ClipboardRead].into();
+        assert_eq!(
+            fixture
+                .commit(
+                    &fixture.peer,
+                    AccessSet::Custom(clipboard),
+                    GrantDuration::Once
+                )
+                .await,
+            Err(AgentGrantError::InvalidAccess(InvalidAccess::Clipboard))
+        );
+        assert_eq!(
+            fixture
+                .commit(
+                    &fixture.peer,
+                    AccessSet::Custom(std::collections::BTreeSet::new()),
+                    GrantDuration::WorkspaceSession
+                )
+                .await,
+            Err(AgentGrantError::InvalidAccess(InvalidAccess::Empty))
+        );
+        // A Custom set equal to a level is stored as that level.
+        let look_scopes = AccessLevel::Look.scopes().iter().copied().collect();
+        fixture
+            .commit(
+                &fixture.peer,
+                AccessSet::Custom(look_scopes),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.state.agent_access.remembered_for_test()[0].1.access,
+            AccessSet::Level(AccessLevel::Look)
         );
     }
 }

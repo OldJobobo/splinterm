@@ -7578,13 +7578,32 @@ async fn remembered_grant_probe() {
 /// Copies this test binary into `<target tmp>/<unique>/bin/end_to_end-agent`
 /// and returns its canonical path. Every directory on that path must be
 /// owned by root or this user and be neither group- nor world-writable, as
-/// the daemon's test owner seam requires.
-fn install_protected_agent(label: &str) -> PathBuf {
+/// the daemon's test owner seam requires. `None`, with the reason on stderr,
+/// when the target directory cannot qualify (for example a build under a
+/// world-writable `/tmp` or a group-writable home): the scenario then skips
+/// instead of failing an unrelated environment such as a package `check()`.
+fn install_protected_agent(label: &str) -> Option<PathBuf> {
+    let uid = rustix::process::geteuid().as_raw();
+    let base = fs::canonicalize(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    for ancestor in base.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor).unwrap();
+        if !(metadata.is_dir()
+            && (metadata.uid() == 0 || metadata.uid() == uid)
+            && metadata.mode() & 0o022 == 0)
+        {
+            eprintln!(
+                "skipping the remembered-grant scenario: {} is not a directory owned by root \
+                 or the test user that is neither group- nor world-writable",
+                ancestor.display()
+            );
+            return None;
+        }
+    }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let tree = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+    let tree = base.join(format!(
         "remembered-{label}-{}-{nonce:x}",
         std::process::id()
     ));
@@ -7596,20 +7615,7 @@ fn install_protected_agent(label: &str) -> PathBuf {
     let agent = directory.join("end_to_end-agent");
     fs::copy(std::env::current_exe().unwrap(), &agent).unwrap();
     fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
-    let agent = fs::canonicalize(agent).unwrap();
-    let uid = rustix::process::geteuid().as_raw();
-    for ancestor in agent.ancestors().skip(1) {
-        let metadata = fs::symlink_metadata(ancestor).unwrap();
-        assert!(
-            metadata.is_dir()
-                && (metadata.uid() == 0 || metadata.uid() == uid)
-                && metadata.mode() & 0o022 == 0,
-            "{} must be a directory owned by root or the test user that is not group- or \
-             world-writable for the remembered-grant scenario",
-            ancestor.display()
-        );
-    }
-    agent
+    Some(fs::canonicalize(agent).unwrap())
 }
 
 /// Runs the installed agent copy's probe and returns its outcome.
@@ -7676,6 +7682,12 @@ fn remembered_store(agent: &Path, lair_id: LairId, level: &str) -> Vec<u8> {
     reason = "one private daemon proves remembered access across restarts and a rejected store"
 )]
 async fn a_remembered_grant_survives_a_daemon_restart() {
+    let (Some(agent), Some(stranger)) = (
+        install_protected_agent("agent"),
+        install_protected_agent("stranger"),
+    ) else {
+        return;
+    };
     time::timeout(Duration::from_secs(180), async {
         let mut daemon = Daemon::start_with_policy(&exact_headless_policy(None)).await;
         let owner = rustix::process::geteuid().as_raw().to_string();
@@ -7705,8 +7717,6 @@ async fn a_remembered_grant_survives_a_daemon_restart() {
         };
         let splint_id = splint.id;
         drop(connection);
-        let agent = install_protected_agent("agent");
-        let stranger = install_protected_agent("stranger");
 
         // The answer "Always allow Look" was committed in an earlier
         // generation: its store entry is on disk when this daemon starts.

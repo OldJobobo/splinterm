@@ -228,9 +228,20 @@ impl PeerIdentity {
     }
 
     /// Records the durable-identity evidence its pinned verification read,
-    /// marking whether the peer executes the installed relay.
+    /// marking whether the peer executes the installed relay. The relay is
+    /// recognized by either executable snapshot this connection took (the
+    /// file the stream's peer executed, or the one the pinned identity
+    /// hashed), so a file replaced between the two cannot hide it.
     pub fn install_durable_evidence(&mut self, mut durable: DurableEvidence) {
-        durable.installed_relay = self.is_installed_relay();
+        let pinned_is_relay = self
+            .persistent_executable
+            .as_ref()
+            .is_some_and(|executable| {
+                fs::metadata(self.install_prefix.graphical_relay()).is_ok_and(|metadata| {
+                    metadata.dev() == executable.device && metadata.ino() == executable.inode
+                })
+            });
+        durable.installed_relay = self.is_installed_relay() || pinned_is_relay;
         self.durable = Some(durable);
     }
 
@@ -1468,6 +1479,44 @@ mod tests {
             install_prefix: Arc::new(install_prefix.clone()),
             ..PeerIdentity::for_test()
         }
+    }
+
+    /// The installed relay is never eligible for the longer durations: it is
+    /// recognized by the stream's executable or by the pinned snapshot's.
+    #[test]
+    fn durable_evidence_marks_the_installed_relay_by_either_snapshot() {
+        let prefix = scratch_prefix();
+        let relay = prefix.graphical_relay();
+        install_copy(system_sleep(), &relay);
+        let relay_child = spawn_sleep(&relay);
+        let mut running_relay = peer_for(relay_child.pid(), &prefix);
+        running_relay.install_durable_evidence(DurableEvidence::default());
+        assert!(running_relay.durable_evidence().unwrap().installed_relay);
+
+        // The stream's peer ran another file, but the pinned snapshot hashed
+        // the relay: still the relay.
+        let other_child = spawn_sleep(system_sleep());
+        let mut snapshot_relay = peer_for(other_child.pid(), &prefix);
+        let relay_file = fs::metadata(&relay).unwrap();
+        snapshot_relay.install_persistent_executable(ExecutableIdentity {
+            path: relay.clone(),
+            device: relay_file.dev(),
+            inode: relay_file.ino(),
+            owner_uid: relay_file.uid(),
+            mode: relay_file.mode(),
+            size: relay_file.len(),
+            sha256: "a".repeat(64),
+        });
+        snapshot_relay.install_durable_evidence(DurableEvidence::default());
+        assert!(snapshot_relay.durable_evidence().unwrap().installed_relay);
+
+        // Neither snapshot is the relay.
+        let mut not_relay = peer_for(other_child.pid(), &prefix);
+        not_relay.install_durable_evidence(DurableEvidence::default());
+        assert!(!not_relay.durable_evidence().unwrap().installed_relay);
+        drop(relay_child);
+        drop(other_child);
+        fs::remove_dir_all(prefix.directory()).unwrap();
     }
 
     #[test]
