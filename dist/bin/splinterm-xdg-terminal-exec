@@ -17,9 +17,21 @@ fail() {
   exit 1
 }
 
+# Only a plain interactive launch may ask before a restart. A launch with an
+# explicit app ID (such as the Omarchy screensaver's) or a command may be
+# unattended, so any question it meets is answered "Not now"; a restart of an
+# idle daemon stays automatic.
+ask=
+for argument do
+  case $argument in
+    --) ask=--no-ask; break ;;
+    --app-id | --app-id=*) ask=--no-ask ;;
+  esac
+done
+
 check() {
   status=0
-  splinterm launcher-check "$@" || status=$?
+  splinterm launcher-check ${ask:+"$ask"} "$@" || status=$?
 }
 
 if [ -n "${SPLINTERM_SOCKET:-}" ]; then
@@ -27,6 +39,13 @@ if [ -n "${SPLINTERM_SOCKET:-}" ]; then
   splinterm ping >/dev/null 2>&1 \
     || fail 'development socket is unavailable or incompatible'
 else
+  # One launcher at a time checks, restarts, and checks again, so concurrent
+  # launches cannot restart the daemon twice.
+  if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    exec 9>>"$XDG_RUNTIME_DIR/splinterm-launcher.lock"
+    flock 9 || fail 'could not take the launcher lock'
+  fi
+  restarted=false
   check
   if [ "$status" -eq 10 ]; then
     if ! command -v systemctl >/dev/null 2>&1 \
@@ -41,14 +60,21 @@ else
       || ! systemctl --user restart splinterd.service; then
       fail 'could not restart splinterd.service'
     fi
+    restarted=true
     check --after restart
   fi
   case $status in
     0) ;;
     3) exit 3 ;;
     1) exit 1 ;;
-    *) fail "the daemon check failed with status $status; nothing was restarted" ;;
+    *)
+      if [ "$restarted" = true ]; then
+        fail "the daemon check failed with status $status after the restart; no further restart"
+      fi
+      fail "the daemon check failed with status $status; nothing was restarted"
+      ;;
   esac
+  exec 9>&-
 fi
 
 case ${0##*/} in

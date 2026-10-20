@@ -165,6 +165,23 @@ fn backup_session_state(state: &Path) -> Result<Option<PathBuf>> {
     bail!("could not allocate a unique session backup path");
 }
 
+/// Runs `systemctl --user ARGUMENTS...` and returns its standard output, or
+/// `None` when it cannot run or fails. Read-only callers only (the desktop
+/// launcher's check); the Nix package patches the program path here too.
+pub(in crate::app) fn user_systemctl_output(arguments: &[&str]) -> Option<String> {
+    let output = ProcessCommand::new("systemctl")
+        .arg("--user")
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn run_user_systemctl(action: &str) -> Result<()> {
     let status = ProcessCommand::new("systemctl")
         .args(["--user", action, "splinterd.service"])

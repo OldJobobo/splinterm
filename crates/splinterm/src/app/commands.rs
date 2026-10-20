@@ -396,6 +396,9 @@ pub(in crate::app) enum Command {
         /// What the launcher just did to splinterd.service.
         #[arg(long, value_enum)]
         after: Option<LauncherStage>,
+        /// Never ask: an unattended launch answers any question "Not now".
+        #[arg(long)]
+        no_ask: bool,
     },
     /// Private trusted dialog child of `launcher-check`.
     #[command(hide = true, name = "restart-dialog")]
@@ -696,20 +699,33 @@ mod tests {
     fn launcher_check_takes_only_its_stage_and_stays_hidden() {
         use clap::CommandFactory as _;
 
-        for (arguments, after) in [
-            (&["splinterm", "launcher-check"][..], None),
+        for (arguments, after, no_ask) in [
+            (&["splinterm", "launcher-check"][..], None, false),
             (
                 &["splinterm", "launcher-check", "--after", "start"][..],
                 Some(LauncherStage::Start),
+                false,
             ),
             (
-                &["splinterm", "launcher-check", "--after", "restart"][..],
+                &[
+                    "splinterm",
+                    "launcher-check",
+                    "--no-ask",
+                    "--after",
+                    "restart",
+                ][..],
                 Some(LauncherStage::Restart),
+                true,
             ),
+            (&["splinterm", "launcher-check", "--no-ask"][..], None, true),
         ] {
             let parsed = Cli::try_parse_from(arguments).unwrap();
             assert!(
-                matches!(parsed.command, Some(Command::LauncherCheck { after: parsed_after }) if parsed_after == after),
+                matches!(
+                    parsed.command,
+                    Some(Command::LauncherCheck { after: parsed_after, no_ask: parsed_no_ask })
+                        if parsed_after == after && parsed_no_ask == no_ask
+                ),
                 "{arguments:?}"
             );
         }

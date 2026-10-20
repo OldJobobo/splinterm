@@ -231,11 +231,14 @@ command never restarts the daemon itself. See
 [Daemon upgrade](cli.md#daemon-upgrade) for its prompts, trust rule, and exit
 statuses.
 
-## Accepted 0.2 upgrade contract (not implemented)
+## Accepted 0.2 upgrade contract (launcher states implemented)
 
 The preceding restart procedure remains authoritative until the guarded
 in-place re-exec contract in [ADR 0011](adr/0011-guarded-in-place-daemon-reexec.md)
-is implemented and released. The accepted `0.2.0` target distinguishes four paths:
+is released. The desktop launcher now implements the matching, idle-restart,
+active-confirmation, and `0.1.x` bootstrap states below; see
+[Desktop launcher and the running daemon](packaging.md#desktop-launcher-and-the-running-daemon).
+The accepted `0.2.0` target distinguishes four paths:
 
 - **matching** — the installed and running build identities match;
 - **compatible** — explicit handoff and checkpoint ranges overlap, so a guarded
@@ -249,8 +252,9 @@ is implemented and released. The accepted `0.2.0` target distinguishes four path
 
 The first upgrade from `0.1.x` to a handoff-capable `0.2.0` daemon is a separate
 one-time bootstrap path because the running old daemon cannot gain handoff
-support retroactively. It always reports the exact live Splint count and requires
-confirmation, including when that count is zero. Package scriptlets only install
+support retroactively. It always requires confirmation, including when the old
+daemon may be idle; because a `0.1.x` daemon cannot report its live Splints, the
+count shown is a best-effort count of its running workload units. Package scriptlets only install
 files and report the boundary; they do not restart or hand off a user's service.
 
 During a compatible handoff, trusted graphical chrome reports **input paused**.

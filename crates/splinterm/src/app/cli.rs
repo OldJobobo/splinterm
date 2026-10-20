@@ -201,8 +201,8 @@ pub(crate) async fn run() -> Result<()> {
     if let Command::Upgrade { now } = command {
         return super::upgrade::run(now).await;
     }
-    if let Command::LauncherCheck { after } = command {
-        return super::launcher_check::run(after).await;
+    if let Command::LauncherCheck { after, no_ask } = command {
+        return super::launcher_check::run(after, no_ask).await;
     }
     if let Command::Diagnostics {
         last_exit,

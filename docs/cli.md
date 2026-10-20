@@ -261,14 +261,25 @@ daemon's build identity with the installed client's:
 - the installed build opens the Window; no daemon starts the service;
 - another build that reports no live terminal restarts without asking;
 - another build with live terminals, or a daemon it cannot read (a 0.1.x
-  daemon, another protocol, or no answer), opens a trusted dialog titled
-  "Splinterm — Upgrade". **Not now** is the default and opens nothing: `Enter`,
-  `Escape`, `D`, the red left area, closing the dialog, or no answer within 120
-  seconds. Only `R` or the green right area chooses **Restart now (ends N
-  shells)**, with the exact count, or "all running shells" when the daemon
-  cannot report it. Keys count only after about 600 ms of focus, and key
-  repeats never count. When the daemon reports that nothing blocks a live
-  upgrade, the dialog says to choose **Not now** and run `splinterm upgrade`.
+  daemon, another protocol, or no answer, after one retry), opens a trusted
+  dialog titled "Splinterm — Upgrade". **Not now** is the default and opens
+  nothing: `Enter`, `Escape`, `D`, the red left area, closing the dialog, or no
+  answer within 120 seconds. Only `R` or the green right area chooses
+  **Restart now (ends N shells)**, with the daemon's exact count; for a daemon
+  it cannot read, "ends about N shells" from a best-effort count of running
+  workload units, or "all running shells". Keys count only after about 600 ms
+  of focus, and key repeats never count. When the daemon reports that nothing
+  blocks a live upgrade, the dialog says to choose **Not now** and run
+  `splinterm upgrade`;
+- a daemon it cannot read whose executable is the installed `splinterd` is
+  busy, not incompatible: the launch fails and says to try again;
+- an unattended launch, with an explicit app ID (such as the Omarchy
+  screensaver's) or a command, never shows the dialog and opens nothing
+  instead; an idle restart stays automatic.
+
+A restart happens only while the daemon that answered is
+`splinterd.service`'s main process, and concurrent launches take a lock, so
+nothing is restarted twice.
 
 See [Packaging](packaging.md#desktop-launcher-and-the-running-daemon) for the
 complete state table and the 0.1.x bootstrap boundary.

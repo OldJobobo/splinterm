@@ -9,6 +9,7 @@
   wayland,
   systemd,
   coreutils,
+  util-linux,
   openssh,
   python3,
   desktop-file-utils,
@@ -125,10 +126,11 @@ rustPlatform.buildRustPackage {
     substituteInPlace "$out/bin/splinterm-xdg-terminal-exec" \
       --replace-fail '#!/bin/sh' '#!${runtimeShell}' \
       --replace-fail 'splinterm ping' "$out/bin/splinterm ping" \
+      --replace-fail 'splinterm launcher-check' "$out/bin/splinterm launcher-check" \
       --replace-fail 'exec splinterm ' "exec $out/bin/splinterm " \
       --replace-fail 'command -v systemctl' 'command -v ${systemd}/bin/systemctl' \
       --replace-fail 'systemctl --user' '${systemd}/bin/systemctl --user' \
-      --replace-fail 'sleep 0.05' '${coreutils}/bin/sleep 0.05'
+      --replace-fail 'flock 9' '${util-linux}/bin/flock 9'
     for alias in splinterm-dojos splinterm-sessions splinterm-reopen; do
       ln -s splinterm-xdg-terminal-exec "$out/bin/$alias"
     done

@@ -360,7 +360,7 @@ class InstallerSafetyTest(unittest.TestCase):
         source = (ROOT / "install.sh").read_text(encoding="utf-8")
         provenance = source.index("inspect-package-provenance")
         package_query = source.index('pacman -Qp "$download_dir/$main_asset"')
-        installation = source.rindex('sudo pacman "${pacman_args[@]}"')
+        installation = source.rindex('sudo pacman -U --noconfirm "${packages[@]}"')
         self.assertLess(provenance, package_query)
         self.assertLess(provenance, installation)
         self.assertIn("Downloaded package build provenance does not match", source)
@@ -431,9 +431,41 @@ class InstallerSafetyTest(unittest.TestCase):
         self.assertEqual(launcher.count("systemctl --user restart"), 1)
         self.assertIn("check --after restart", launcher)
 
+    def test_unattended_screensaver_launches_cannot_raise_the_restart_question(self) -> None:
+        # The Omarchy screensaver launches through xdg-terminal-exec at idle
+        # with its own app ID and a command; the launcher answers any
+        # question "Not now" for such launches (--no-ask).
+        screensaver = (ROOT / "dist/omarchy/omarchy-launch-screensaver").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('--app-id="$SCREENSAVER_APP_ID"', screensaver)
+        self.assertIn("-- omarchy-screensaver", screensaver)
+        launcher = (ROOT / "dist/bin/splinterm-xdg-terminal-exec").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--app-id | --app-id=*) ask=--no-ask ;;", launcher)
+        self.assertIn("--) ask=--no-ask; break ;;", launcher)
+
+    def test_nix_launcher_substitutions_still_match_the_launcher(self) -> None:
+        # nix/package.nix rewrites the installed launcher with --replace-fail;
+        # every pattern must still occur, or the Nix build fails.
+        package = (ROOT / "nix/package.nix").read_text(encoding="utf-8")
+        block = package.split('substituteInPlace "$out/bin/splinterm-xdg-terminal-exec"', 1)[1]
+        block = block.split("for alias in", 1)[0]
+        patterns = re.findall(r"--replace-fail '([^']+)'", block)
+        self.assertGreaterEqual(len(patterns), 6, patterns)
+        launcher = (ROOT / "dist/bin/splinterm-xdg-terminal-exec").read_text(
+            encoding="utf-8"
+        )
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                self.assertIn(pattern, launcher)
+        for required in ("splinterm launcher-check", "flock 9", "systemctl --user"):
+            self.assertIn(required, patterns)
+
     def local_upgrade_environment(
         self, directory: Path, *, active: bool, report: str | None, installed: str,
-        candidate: str, answer_yes: bool,
+        candidate: str, answer_yes: bool, scopes: int = 0, sudo_ok: bool = True,
     ) -> tuple[Path, dict[str, str], Path]:
         """A copy of the local upgrade script with every system command faked."""
         tree = directory / "tree"
@@ -450,7 +482,11 @@ class InstallerSafetyTest(unittest.TestCase):
         log.write_text("", encoding="utf-8")
         scripts = {
             "python": 'printf "python %s\\n" "$*" >>"$LOG"\n',
-            "sudo": 'printf "sudo %s\\n" "$*" >>"$LOG"\n"$@"\n',
+            "sudo": (
+                'printf "sudo %s\\n" "$*" >>"$LOG"\n'
+                f'[ "$1" = -v ] && exit {0 if sudo_ok else 1}\n'
+                '"$@"\n'
+            ),
             "pacman": (
                 'case $1 in\n'
                 f'  -Q) [ "$2" = splinterm ] && [ -n "{installed}" ] && echo "splinterm {installed}" || exit 1 ;;\n'
@@ -461,6 +497,10 @@ class InstallerSafetyTest(unittest.TestCase):
             "systemctl": (
                 'printf "systemctl %s\\n" "$*" >>"$LOG"\n'
                 f'case $2 in is-active) exit {0 if active else 3} ;; esac\n'
+                '[ "$2" = list-units ] || exit 0\n'
+                f'for i in $(seq 1 {scopes}); do '
+                'echo "splinterm-splint$i-i1.scope loaded active running Splint"; done\n'
+                'echo "app-splinterm-dojo1.slice loaded active active Dojo"\n'
             ),
             "gum": f'printf "gum %s\\n" "$*" >>"$LOG"\nexit {0 if answer_yes else 1}\n',
             "vercmp": (
@@ -515,7 +555,11 @@ class InstallerSafetyTest(unittest.TestCase):
                 for entry in log:
                     self.assertFalse(entry.startswith(("sudo", "pacman")), log)
                     if entry.startswith("systemctl"):
-                        self.assertEqual(entry, "systemctl --user is-active --quiet splinterd.service", log)
+                        self.assertTrue(
+                            entry == "systemctl --user is-active --quiet splinterd.service"
+                            or entry.startswith("systemctl --user list-units "),
+                            log,
+                        )
                     if entry.startswith("client"):
                         self.assertEqual(entry, "client upgrade", log)
                 self.assertIn("gum confirm Install this local Splinterm package?", log)
@@ -540,6 +584,25 @@ class InstallerSafetyTest(unittest.TestCase):
                     self.assertIn("must be reopened", result.stdout)
                 self.assertNotIn("downgrade", result.stdout)
 
+    def test_an_uncountable_daemon_gets_a_best_effort_scope_count(self) -> None:
+        result, log = self.run_local_upgrade(
+            active=True, report=None, installed="0.1.1-1", candidate="0.2.0-1",
+            answer_yes=False, scopes=2,
+        )
+        self.assertIn("About 2 shells appear to be running (a best-effort count", result.stdout)
+        self.assertIn("ends every running shell", result.stdout)
+        self.assertIn(
+            "systemctl --user list-units --type=scope --state=active --plain --no-legend"
+            " --no-pager splinterm-splint*.scope",
+            log,
+        )
+        uncounted, _ = self.run_local_upgrade(
+            active=True, report=None, installed="0.1.1-1", candidate="0.2.0-1",
+            answer_yes=False, scopes=0,
+        )
+        self.assertNotIn("About", uncounted.stdout)
+        self.assertIn("ends every running shell", uncounted.stdout)
+
     def test_local_upgrade_names_a_downgrade_before_confirming(self) -> None:
         result, _ = self.run_local_upgrade(
             active=False, report=None, installed="0.2.1-1", candidate="0.2.0-1",
@@ -547,7 +610,27 @@ class InstallerSafetyTest(unittest.TestCase):
         )
         self.assertIn("This is a downgrade from 0.2.1-1 to 0.2.0-1.", result.stdout)
         self.assertIn("topology.invalid-*", result.stdout)
+        self.assertNotIn("0.1 launcher", result.stdout)
         self.assertLess(result.stdout.index("downgrade"), result.stdout.index("Cancelled"))
+        to_0_1, _ = self.run_local_upgrade(
+            active=True, report=REPORT.format(count=1), installed="0.2.0-1",
+            candidate="0.1.1-1", answer_yes=False,
+        )
+        self.assertIn("The 0.1 launcher restarts an incompatible daemon without asking", to_0_1.stdout)
+        self.assertIn("never downgrade to 0.1.x with pacman alone", to_0_1.stdout)
+
+    def test_a_failed_sudo_ends_no_shell(self) -> None:
+        result, log = self.run_local_upgrade(
+            active=True, report=REPORT.format(count=2), installed="0.2.0-1",
+            candidate="0.2.1-1", answer_yes=True, sudo_ok=False,
+        )
+        self.assertEqual(result.returncode, 1, result)
+        self.assertIn("sudo authentication failed; nothing was installed, stopped, or restarted.", result.stderr)
+        self.assertIn("sudo -v", log)
+        self.assertFalse(
+            any(entry.startswith(("systemctl --user stop", "systemctl --user start", "pacman")) for entry in log),
+            log,
+        )
 
     def test_confirmed_local_upgrade_stops_installs_reloads_and_restarts_in_order(self) -> None:
         result, log = self.run_local_upgrade(
@@ -560,6 +643,7 @@ class InstallerSafetyTest(unittest.TestCase):
             [entry.split(" /")[0] for entry in actions],
             [
                 "systemctl --user is-active --quiet splinterd.service",
+                "sudo -v",
                 "systemctl --user stop splinterd.service",
                 "sudo pacman -U --noconfirm",
                 "systemctl --user daemon-reload",
@@ -570,7 +654,7 @@ class InstallerSafetyTest(unittest.TestCase):
     def test_installers_share_the_daemon_state_messages(self) -> None:
         local = (ROOT / "tools/package/upgrade-local-package.sh").read_text(encoding="utf-8")
         release = (ROOT / "install.sh").read_text(encoding="utf-8")
-        for name in ("describe_running_daemon", "describe_version_change"):
+        for name in ("describe_running_daemon", "describe_version_change", "authenticate_sudo"):
             with self.subTest(name=name):
                 self.assertEqual(shell_function(local, name), shell_function(release, name))
 
@@ -581,13 +665,17 @@ class InstallerSafetyTest(unittest.TestCase):
         confirmation = prebuilt.index("confirm 'Install this prebuilt Splinterm versioned release?'")
         cancelled = prebuilt.index("Cancelled; nothing was installed, stopped, or restarted.")
         snapshot = prebuilt.index('mkdir -p "$snapshot"')
+        authenticate = prebuilt.index("  authenticate_sudo\n")
         stop = prebuilt.index("systemctl --user stop splinterd.service")
-        installation = prebuilt.index('sudo pacman "${pacman_args[@]}"')
+        installation = prebuilt.index('sudo pacman -U --noconfirm "${packages[@]}"')
         self.assertLess(describe, confirmation)
         self.assertLess(confirmation, cancelled)
         self.assertLess(cancelled, snapshot)
-        self.assertLess(snapshot, stop)
+        self.assertLess(snapshot, authenticate)
+        self.assertLess(authenticate, stop)
         self.assertLess(stop, installation)
+        # Pacman never asks again once the daemon is stopped.
+        self.assertNotIn("pacman_args=(-U)", prebuilt)
         # The EXIT trap restarts the daemon only after this script stopped it.
         cleanup = prebuilt.split("cleanup_prebuilt_install() {", 1)[1].split("}", 1)[0]
         self.assertIn("if [[ $stopped == true ]]; then", cleanup)
@@ -613,6 +701,7 @@ class InstallerSafetyTest(unittest.TestCase):
             "splinterm upgrade",
             "reopen",
             "asks before",
+            "downgrading to 0.1.x",
         ):
             self.assertIn(expected, upgrade)
         # Messages only: no command but echo runs in any hook.
