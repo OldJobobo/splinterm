@@ -167,7 +167,19 @@ pub(crate) enum RollbackAuthority {
     NotPackaged,
     /// The daemon is packaged, but its rollback pair could not be retained.
     Unavailable,
+    /// This daemon was started by a live handoff: it is the adopted forward
+    /// daemon or the rollback daemon. Its sealed rollback pair closed at the
+    /// adoption commit, and no new one is captured, so it can perform no
+    /// further live handoff until it restarts (Plan 0061 D8). Rebuilding
+    /// rollback authority after a handoff is deferred to Milestone 4. On the
+    /// wire this is `RollbackUnavailable`; an `Execute` refusal names the
+    /// restart ([`SPENT_BY_HANDOFF`]).
+    SpentByHandoff,
 }
+
+/// Why an adopted or rollback daemon refuses another live handoff, worded
+/// for an `Execute` refusal (Plan 0061 D8).
+pub(crate) const SPENT_BY_HANDOFF: &str = "this daemon was itself started by a live upgrade or a rollback and keeps no rollback copy, so another live upgrade needs a daemon restart first";
 
 impl RollbackAuthority {
     /// Classifies the startup rollback capture, which must agree with the
@@ -206,7 +218,7 @@ impl RollbackAuthority {
     pub(crate) fn retained(&self) -> Option<&RollbackHandoffAuthority> {
         match self {
             Self::Retained { authority } => Some(authority),
-            Self::NotPackaged | Self::Unavailable => None,
+            Self::NotPackaged | Self::Unavailable | Self::SpentByHandoff => None,
         }
     }
 
@@ -214,7 +226,9 @@ impl RollbackAuthority {
         match self {
             Self::Retained { .. } => None,
             Self::NotPackaged => Some(HandoffBlockingReason::NotPackaged),
-            Self::Unavailable => Some(HandoffBlockingReason::RollbackUnavailable),
+            Self::Unavailable | Self::SpentByHandoff => {
+                Some(HandoffBlockingReason::RollbackUnavailable)
+            }
         }
     }
 
@@ -384,28 +398,40 @@ fn report_from(
 /// (no forward preparation, fence, capture, or runtime stop) while live
 /// handoff is unavailable.
 ///
+/// `rollback` is this daemon's rollback authority. An adopted or rollback
+/// daemon ([`RollbackAuthority::SpentByHandoff`]) always refuses, because its
+/// report names a rollback reason, and the message also says that a restart
+/// is needed first (Plan 0061 D8).
+///
 /// # Errors
 /// Returns `HandoffUnavailable` naming every reason the report names.
 pub(crate) fn refuse_blocked_execute(
     report: &HandoffReport,
     support: Result<(), LiveHandoffUnsupported>,
+    rollback: &RollbackAuthority,
 ) -> Result<(), ProtocolError> {
-    match support {
-        Err(unsupported) => {
-            let mut reasons = report.blocking_reasons.clone();
-            if !reasons.contains(&HandoffBlockingReason::Unsupported) {
-                reasons.push(HandoffBlockingReason::Unsupported);
-            }
-            Err(ProtocolError {
-                message: format!("daemon handoff is unavailable: {}", unsupported.message()),
-                ..ProtocolError::handoff_unavailable(reasons)
-            })
+    let mut reasons = report.blocking_reasons.clone();
+    let mut causes = Vec::with_capacity(2);
+    if let Err(unsupported) = support {
+        if !reasons.contains(&HandoffBlockingReason::Unsupported) {
+            reasons.push(HandoffBlockingReason::Unsupported);
         }
-        Ok(()) if report.blocking_reasons.is_empty() => Ok(()),
-        Ok(()) => Err(ProtocolError::handoff_unavailable(
-            report.blocking_reasons.clone(),
-        )),
+        causes.push(unsupported.message());
     }
+    if matches!(rollback, RollbackAuthority::SpentByHandoff) {
+        causes.push(SPENT_BY_HANDOFF);
+    }
+    if reasons.is_empty() && causes.is_empty() {
+        return Ok(());
+    }
+    let refused = ProtocolError::handoff_unavailable(reasons);
+    if causes.is_empty() {
+        return Err(refused);
+    }
+    Err(ProtocolError {
+        message: format!("daemon handoff is unavailable: {}", causes.join("; ")),
+        ..refused
+    })
 }
 
 /// The answer to an `Execute` whose gate ran and cancelled: unavailable, with
@@ -549,9 +575,12 @@ mod tests {
                 HandoffBlockingReason::Unsupported
             ]
         );
-        let refused =
-            refuse_blocked_execute(&report, live_handoff_support(report.build.provenance))
-                .expect_err("an unpackaged daemon refuses execute before the gate runs");
+        let refused = refuse_blocked_execute(
+            &report,
+            live_handoff_support(report.build.provenance),
+            &RollbackAuthority::NotPackaged,
+        )
+        .expect_err("an unpackaged daemon refuses execute before the gate runs");
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
     }
@@ -594,7 +623,8 @@ mod tests {
                 HandoffBlockingReason::Unsupported
             ]
         );
-        let refused = refuse_blocked_execute(&report, support).unwrap_err();
+        let refused =
+            refuse_blocked_execute(&report, support, &RollbackAuthority::Unavailable).unwrap_err();
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             refused.message,
@@ -604,7 +634,8 @@ mod tests {
         // With nothing else blocking, Nix alone still refuses, as Unsupported.
         let mut alone = report;
         alone.blocking_reasons.clear();
-        let refused = refuse_blocked_execute(&alone, support).unwrap_err();
+        let refused =
+            refuse_blocked_execute(&alone, support, &RollbackAuthority::Unavailable).unwrap_err();
         assert!(refused.message.contains("Nix-store"), "{}", refused.message);
         assert_eq!(
             refused.handoff_blocking_reasons,
@@ -652,8 +683,12 @@ mod tests {
                     HandoffBlockingReason::Unsupported
                 ]
             );
-            let refused =
-                refuse_blocked_execute(&pending, live_handoff_support(provenance)).unwrap_err();
+            let refused = refuse_blocked_execute(
+                &pending,
+                live_handoff_support(provenance),
+                &RollbackAuthority::Unavailable,
+            )
+            .unwrap_err();
             assert_eq!(
                 refused.message,
                 "daemon handoff is unavailable: live handoff is not available in this release because open Windows cannot survive it yet; restart the daemon to run the upgraded build"
@@ -696,10 +731,11 @@ mod tests {
         );
         let mut gated = blocked.clone();
         gated.blocking_reasons.clear();
-        assert!(refuse_blocked_execute(&gated, supported).is_ok());
+        assert!(refuse_blocked_execute(&gated, supported, &RollbackAuthority::Unavailable).is_ok());
         // Unsupported support refuses a report without reasons, and names
         // Unsupported.
-        let refused = refuse_blocked_execute(&gated, unsupported).unwrap_err();
+        let refused = refuse_blocked_execute(&gated, unsupported, &RollbackAuthority::Unavailable)
+            .unwrap_err();
         assert_eq!(
             refused.handoff_blocking_reasons,
             [HandoffBlockingReason::Unsupported]
@@ -707,13 +743,20 @@ mod tests {
         // `Unsupported` in the report refuses on its own now.
         let mut unsupported_only = gated.clone();
         unsupported_only.blocking_reasons = vec![HandoffBlockingReason::Unsupported];
-        let refused = refuse_blocked_execute(&unsupported_only, supported).unwrap_err();
+        let refused = refuse_blocked_execute(
+            &unsupported_only,
+            supported,
+            &RollbackAuthority::Unavailable,
+        )
+        .unwrap_err();
         assert_eq!(refused.message, "daemon handoff is unavailable");
         assert_eq!(
             refused.handoff_blocking_reasons,
             [HandoffBlockingReason::Unsupported]
         );
-        let refused = refuse_blocked_execute(&blocked, unsupported).unwrap_err();
+        let refused =
+            refuse_blocked_execute(&blocked, unsupported, &RollbackAuthority::Unavailable)
+                .unwrap_err();
         assert_eq!(
             refused.handoff_blocking_reasons,
             [
@@ -788,6 +831,100 @@ mod tests {
                 HandoffBlockingReason::RollbackUnavailable,
                 HandoffBlockingReason::Unsupported
             ]
+        );
+    }
+
+    /// Plan 0061 D8: a daemon started by a live handoff, whether the adopted
+    /// forward daemon or the rollback daemon, refuses another live handoff
+    /// until it restarts, even once window continuity is ready and nothing
+    /// else blocks. Its report names `RollbackUnavailable` and no rollback
+    /// copy, and the `Execute` refusal says a restart comes first.
+    #[test]
+    fn a_daemon_started_by_a_handoff_refuses_another_until_restart() {
+        let spent = RollbackAuthority::SpentByHandoff;
+        assert!(spent.retained().is_none());
+        assert_eq!(spent.prepare_forward().err(), Some(ForwardRefusal::Failed));
+        for provenance in [
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::LocalCommittedHead,
+        ] {
+            let packaged = HandoffBuild {
+                provenance,
+                ..build()
+            };
+            // Window continuity forced ready: only D8 remains.
+            let support = live_handoff_support_with(provenance, true);
+            assert_eq!(support, Ok(()));
+            let report = report_from(
+                FRESH_DAEMON_GENERATION + 1,
+                packaged,
+                capabilities(),
+                &Topology::new(),
+                2,
+                &spent,
+                support,
+            );
+            report.validate().unwrap();
+            assert!(!report.rollback_available);
+            assert_eq!(
+                report.blocking_reasons,
+                [HandoffBlockingReason::RollbackUnavailable]
+            );
+            let refused = refuse_blocked_execute(&report, support, &spent).unwrap_err();
+            assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+            assert_eq!(
+                refused.message,
+                format!("daemon handoff is unavailable: {SPENT_BY_HANDOFF}")
+            );
+            assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
+            // Even a report stripped of its reasons is refused for D8.
+            let mut stripped = report.clone();
+            stripped.blocking_reasons.clear();
+            let refused = refuse_blocked_execute(&stripped, support, &spent).unwrap_err();
+            assert!(
+                refused.message.contains("needs a daemon restart first"),
+                "{}",
+                refused.message
+            );
+            // While window continuity is pending, both causes are named.
+            let pending = live_handoff_support_with(provenance, false);
+            let refused = refuse_blocked_execute(&report, pending, &spent).unwrap_err();
+            assert_eq!(
+                refused.message,
+                format!(
+                    "daemon handoff is unavailable: {}; {SPENT_BY_HANDOFF}",
+                    LiveHandoffUnsupported::WindowContinuityPending.message()
+                )
+            );
+            assert_eq!(
+                refused.handoff_blocking_reasons,
+                [
+                    HandoffBlockingReason::RollbackUnavailable,
+                    HandoffBlockingReason::Unsupported
+                ]
+            );
+        }
+        // An unpackaged build (the real-exec tests) reports `NotPackaged`, as
+        // every unpackaged build does, and still names the restart.
+        let report = report_from(
+            FRESH_DAEMON_GENERATION + 1,
+            build(),
+            capabilities(),
+            &Topology::new(),
+            0,
+            &spent,
+            live_handoff_support_with(HandoffBuildProvenance::Unpackaged, true),
+        );
+        report.validate().unwrap();
+        assert_eq!(
+            report.blocking_reasons,
+            [HandoffBlockingReason::NotPackaged]
+        );
+        let refused = refuse_blocked_execute(&report, Ok(()), &spent).unwrap_err();
+        assert!(
+            refused.message.contains(SPENT_BY_HANDOFF),
+            "{}",
+            refused.message
         );
     }
 

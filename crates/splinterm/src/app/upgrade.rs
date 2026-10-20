@@ -242,7 +242,7 @@ pub(in crate::app) fn reason_line(
             )
         }
         HandoffBlockingReason::NotPackaged => "The running daemon is not an installed package build, so there is no installed build to hand off to and no rollback.".to_owned(),
-        HandoffBlockingReason::RollbackUnavailable => "The running daemon could not keep its rollback copy, so a failed upgrade could not roll back.".to_owned(),
+        HandoffBlockingReason::RollbackUnavailable => "The running daemon has no rollback copy, so a failed upgrade could not roll back. Either it could not keep one, or it was itself started by a live upgrade or a rollback, which needs a restart before another live upgrade.".to_owned(),
         HandoffBlockingReason::Unsupported if provenance == HandoffBuildProvenance::NixStore => {
             "Live upgrade is not supported for Nix installations in Splinterm 0.2.0.".to_owned()
         }

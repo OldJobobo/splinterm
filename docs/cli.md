@@ -195,7 +195,9 @@ Without `--now`, the command prints the running daemon's generation, build and
 provenance, its session counts, whether it kept a rollback copy, its
 compatibility ranges, and every reason a live upgrade cannot run now: open
 transient Lairs, a daemon that is not an installed package build, a missing
-rollback copy, or a build without live-upgrade support.
+rollback copy, or a build without live-upgrade support. A daemon that was itself
+started by a live upgrade or a rollback keeps no rollback copy, so it must
+restart before another live upgrade.
 
 With `--now`, open Windows that cannot take part in the upgrade are listed with
 their process ID, the reason, and their Dojos, and the command asks whether to

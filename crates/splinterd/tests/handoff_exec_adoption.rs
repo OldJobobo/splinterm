@@ -54,6 +54,34 @@
 //! rollback generation drops that Window, rather than reading the duplicate
 //! as an alias of the listener, and serves every carried Splint.
 //!
+//! # Proofs before live upgrade is enabled (Plan 0061 M3.17)
+//!
+//! * **A stale client.** The installed client before the upgrade is the same
+//!   `python3` image as the forward client, and the stage keeps a hard link
+//!   to its pre-upgrade inode. After the adoption, while the relaunched
+//!   Window holds its granted ticket unredeemed, a process executing that
+//!   stale inode is refused trusted UI at `Hello` and cannot present the
+//!   ticket as an automation client; the Window then redeems it. Same bytes,
+//!   stale inode: device and inode decide, never content.
+//! * **No second handoff (D8).** The adopted daemon and the rollback daemon
+//!   refuse another `Execute` and say a restart comes first; their dry run
+//!   reports no rollback copy.
+//! * **The rollback daemon refuses continuation claims.** It pins no client
+//!   snapshot, so a carried Window's claim gets no ticket, and a ticket
+//!   presented over trusted UI is invalid.
+//! * **The hold expires.** A relaunched Window that waits past the 30 s hold
+//!   loses its placeholders, and its claim and redemption then fail.
+//! * **The rollback guard timeout.** A thread that outlives the failed
+//!   candidate's runtime keeps the rollback executor from one thread; the
+//!   candidate exits loudly with no rollback exec.
+//! * **The old side's signal carry.** A real `splinterd` process in the
+//!   old-side drill (`OLD_SIDE_DRILL_ENV`, integration-test builds only)
+//!   runs `Execute` from a trusted UI through the binary's own attempt,
+//!   runtime stop, and exec boundary (`stop_runtime_and_cross`), which is
+//!   never armed there. A SIGTERM it takes during the runtime stop is
+//!   captured, carried across the boundary, and reaches the resumed round,
+//!   which shuts down in order.
+//!
 //! # Why the boundary is driven at the function level
 //!
 //! The real request path (a trusted-UI `PrepareDaemonHandoff { Execute }`
@@ -136,8 +164,8 @@ use splinterd::{
     handoff_preflight::compiled_handoff_generation,
     handoff_prepare::{CaptureLimits, HandedOffCapture, capture_live_splints},
     integration_test_seams::{
-        BUILD_SALT_BYTES, CANDIDATE_FAULT_ENV, CandidateFaultPoint, PACKAGED_OWNER_UID_ENV,
-        salt_slot_offset, salted_pair_build_identity,
+        BUILD_SALT_BYTES, CANDIDATE_FAULT_ENV, CandidateFaultPoint, OLD_SIDE_DRILL_ENV,
+        PACKAGED_OWNER_UID_ENV, salt_slot_offset, salted_pair_build_identity,
     },
 };
 use splinterm_core::{
@@ -145,9 +173,9 @@ use splinterm_core::{
     SplintLaunchMetadata, SplintState, Topology, TopologyDocument,
 };
 use splinterm_protocol::{
-    ClientFrame, ClientRole, ControlMode, LaunchParameters, MAX_FRAME_BYTES,
-    MAX_IMAGE_BYTES_PER_DAEMON, PROTOCOL_VERSION, ProtocolError, Request, Response, ServerFrame,
-    TerminalSnapshot, encode_frame,
+    ClientFrame, ClientRole, ControlMode, DaemonHandoffMode, ErrorCode, HandoffBlockingReason,
+    LaunchParameters, MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON, PROTOCOL_VERSION, ProtocolError,
+    Request, Response, ServerFrame, TerminalSnapshot, encode_frame,
     handoff_outcome::{HandoffOutcome, HandoffOutcomeKind},
     image_content_socket_path,
 };
@@ -175,6 +203,26 @@ const WINDOW: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW";
 /// The stage records a duplicate of its listener, not the Window's
 /// continuation end, at `Continuation(0)`.
 const ALIAS_WINDOW_CONTINUATION: &str = "SPLINTERD_EXEC_ADOPTION_ALIAS_WINDOW_CONTINUATION";
+/// The relaunched Window waits for the stale-client check between its
+/// ticket grant and its redemption.
+const WINDOW_STALE_CHECK: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_STALE_CHECK";
+/// The relaunched Window waits this many seconds before it claims.
+const WINDOW_CLAIM_DELAY: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_CLAIM_DELAY";
+/// The stand-in Window also claims on its continuation after a rollback.
+const WINDOW_CLAIM_AFTER_ROLLBACK: &str = "SPLINTERD_EXEC_ADOPTION_WINDOW_CLAIM_AFTER_ROLLBACK";
+/// A hard link the stage makes to the pre-upgrade installed client before
+/// the upgrade replaces it: the stale client inode.
+const STALE_CLIENT: &str = "stale-splinterm";
+/// Where the relaunched Window writes its granted ticket, hex encoded, when
+/// it waits for the stale-client check.
+const WINDOW_TICKET: &str = "window-ticket.hex";
+/// Created by the parent once the stale-client check is done.
+const STALE_CHECKED: &str = "stale-client-checked";
+/// What the stand-in Window recorded of its claim after a rollback.
+const WINDOW_ROLLBACK_CLAIM: &str = "window-rollback-claim.json";
+/// How long the adopted daemon holds a carried Window
+/// (`handoff_window_carry::HANDOFF_WINDOW_RESUME_HOLD`).
+const RESUME_HOLD_SECONDS: u64 = 30;
 /// Where the stand-in Window writes the first continuation packet it reads.
 const WINDOW_OUTCOME: &str = "window-outcome.bin";
 /// What the relaunched stand-in Window sends to claim its controller: the
@@ -195,8 +243,13 @@ const WINDOW_CONNECTION: u64 = 41;
 /// argument, a copy of the `python3` image, so the new image can run
 /// [`WINDOW_CLAIM_SCRIPT`]), in the same process, keeping only the
 /// continuation inheritable.
+///
+/// On a `RolledBack` outcome, when its claim frames name a `rollback_claim`,
+/// it claims on the continuation anyway and records how many bytes came
+/// back (Plan 0061 M3.17: the rollback daemon pins no snapshot and issues no
+/// ticket).
 const FAKE_WINDOW: &str = r#"
-import os, select, socket, sys
+import json, os, select, socket, sys
 channel = socket.socket(fileno=int(sys.argv[1]))
 ready, _, _ = select.select([channel], [], [], 120)
 data = channel.recv(64) if ready else b"timeout"
@@ -212,13 +265,33 @@ if len(data) == 16 and data[5] == 1:
         ["python3", "-c", sys.argv[5], str(channel.fileno()), sys.argv[4]],
         dict(os.environ, PYTHONHOME=home),
     )
+elif len(data) == 16 and data[5] == 2:
+    with open(sys.argv[4]) as source:
+        frames = json.load(source)
+    if "rollback_claim" in frames:
+        result = {}
+        try:
+            channel.send(bytes.fromhex(frames["rollback_claim"]))
+            ready, _, _ = select.select([channel], [], [], 30)
+            result["grant_bytes"] = len(channel.recv(128)) if ready else -1
+        except OSError as error:
+            result["error"] = type(error).__name__
+        partial = frames["rollback_result"] + ".partial"
+        with open(partial, "w") as out:
+            json.dump(result, out)
+        os.rename(partial, frames["rollback_result"])
 "#;
 /// The relaunched stand-in Window, executing the pinned snapshot: claims its
 /// resume ticket on the continuation, connects to the adopted daemon as
 /// trusted UI, presents the ticket for the Splint its old connection
 /// controlled, and writes both answers atomically.
+///
+/// Its frames may also ask it to wait `delay_seconds` before claiming and to
+/// present a zero ticket when none was granted (`claim_without_grant`, the
+/// expiry case), or to publish its granted ticket and wait for the
+/// stale-client check before redeeming (`ticket_file`, `proceed_file`).
 const WINDOW_CLAIM_SCRIPT: &str = r#"
-import json, os, socket, struct, sys
+import json, os, socket, struct, sys, time
 channel = socket.socket(fileno=int(sys.argv[1]))
 with open(sys.argv[2]) as source:
     frames = json.load(source)
@@ -227,12 +300,26 @@ def finish(value):
     with open(partial, "w") as out:
         json.dump(value, out)
     os.rename(partial, frames["result"])
-channel.send(bytes.fromhex(frames["claim"]))
-channel.settimeout(30)
-grant = channel.recv(128)
-if len(grant) != 48:
+time.sleep(frames.get("delay_seconds", 0))
+try:
+    channel.send(bytes.fromhex(frames["claim"]))
+    channel.settimeout(30)
+    grant = channel.recv(128)
+except OSError:
+    grant = b""
+if len(grant) != 48 and not frames.get("claim_without_grant"):
     finish({"grant_bytes": len(grant)})
     raise SystemExit(0)
+if len(grant) == 48 and "ticket_file" in frames:
+    partial = frames["ticket_file"] + ".partial"
+    with open(partial, "w") as out:
+        out.write(grant[16:].hex())
+    os.rename(partial, frames["ticket_file"])
+    deadline = time.monotonic() + 20
+    while not os.path.exists(frames["proceed_file"]):
+        if time.monotonic() > deadline:
+            raise SystemExit("the stale-client check never finished")
+        time.sleep(0.02)
 daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 daemon.settimeout(30)
 daemon.connect(os.environ["SPLINTERM_SOCKET"])
@@ -253,13 +340,54 @@ def read():
 send(frames["hello"])
 hello = read()
 request = frames["request"]
-request["request"]["ticket"] = list(grant[16:])
+request["request"]["ticket"] = list(grant[16:]) if len(grant) == 48 else [0] * 32
 send(request)
 while True:
     frame = read()
     if frame.get("request_id") == request["request_id"]:
         break
-finish({"hello": hello, "claim": frame})
+finish({"grant_bytes": len(grant), "hello": hello, "claim": frame})
+"#;
+/// One protocol session from a client process whose executable the daemon
+/// judges (a copy of `python3` at some path): says the spec's hello, then
+/// sends each request in order and records its answer. Prints a JSON list:
+/// the hello answer, then one answer per request; `null` where the daemon
+/// closed the connection first.
+const CLIENT_SESSION: &str = r#"
+import json, socket, struct, sys
+with open(sys.argv[1]) as source:
+    spec = json.load(source)
+daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+daemon.settimeout(30)
+daemon.connect(spec["socket"])
+def send(frame):
+    body = json.dumps(frame).encode()
+    daemon.sendall(struct.pack(">I", len(body)) + body)
+def exactly(count):
+    data = b""
+    while len(data) < count:
+        chunk = daemon.recv(count - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+def read():
+    header = exactly(4)
+    if header is None:
+        return None
+    (length,) = struct.unpack(">I", header)
+    return json.loads(exactly(length))
+send(spec["hello"])
+answers = [read()]
+if answers[0] is not None and answers[0].get("type") == "hello":
+    for request in spec["requests"]:
+        send(request)
+        while True:
+            frame = read()
+            if frame is None or frame.get("request_id") == request["request_id"]:
+                break
+        answers.append(frame)
+print(json.dumps(answers))
 "#;
 /// Every pre-commit step the fault matrix fails the forward candidate at.
 const FAULT_POINTS: [CandidateFaultPoint; 6] = [
@@ -270,27 +398,32 @@ const FAULT_POINTS: [CandidateFaultPoint; 6] = [
     CandidateFaultPoint::ScopeAdoption,
     CandidateFaultPoint::ActorStaging,
 ];
-const CASES: [&str; 9] = [
+const CASES: [&str; 13] = [
     "adopt",
     "rollback",
     "rollback-dropped-window",
+    "rollback-refuses-claims",
     "rollback-of-rollback",
+    "hold-expiry",
     "pending-sigterm",
     "tampered-rollback-image",
     "stray-descriptor",
     "terminate-during-teardown",
+    "rollback-guard-timeout",
+    "old-side-signal-carry",
     "fault-matrix",
 ];
 const DAEMON: &str = env!("CARGO_BIN_EXE_splinterd");
 /// The salt the forward image carries: any nonzero value makes its pair
 /// identity differ from the rollback image's.
 const SALT: [u8; BUILD_SALT_BYTES] = *b"m3.10b-exec-salt";
-const ROLLBACK_CLIENT: &[u8] = b"#!/bin/sh\n# rollback client fixture\nexit 0\n";
 
-/// The forward client the upgrade installs: a copy of the `python3` ELF
-/// image, so the stand-in Window can execute the sealed snapshot of it and
-/// still run a script (an interpreter script would execute as its
-/// interpreter, not as the snapshot).
+/// The client installed before the upgrade and the forward client the
+/// upgrade installs: both copies of the `python3` ELF image, each its own
+/// inode. The stand-in Window can execute the sealed snapshot of the forward
+/// one and still run a script (an interpreter script would execute as its
+/// interpreter, not as the snapshot), and a process executing the
+/// pre-upgrade inode is the stale client, with the very same bytes.
 fn forward_client() -> Vec<u8> {
     let python = env::var_os("PATH")
         .and_then(|path| {
@@ -355,6 +488,11 @@ fn main() -> ExitCode {
             tamper_rollback_image: env::var_os(TAMPER_ROLLBACK_IMAGE).is_some(),
             window: env::var_os(WINDOW).is_some(),
             alias_window_continuation: env::var_os(ALIAS_WINDOW_CONTINUATION).is_some(),
+            window_stale_check: env::var_os(WINDOW_STALE_CHECK).is_some(),
+            window_claim_delay: env::var(WINDOW_CLAIM_DELAY)
+                .ok()
+                .map(|seconds| seconds.parse().expect("a whole number of seconds")),
+            window_claim_after_rollback: env::var_os(WINDOW_CLAIM_AFTER_ROLLBACK).is_some(),
             fault: None,
         }),
         Some(stage) => panic!("unknown stage {stage:?}"),
@@ -371,8 +509,12 @@ fn main() -> ExitCode {
             println!("handoff_exec_adoption: rollback passed");
             rollback_dropped_window_case();
             println!("handoff_exec_adoption: rollback-dropped-window passed");
+            rollback_refuses_claims_case();
+            println!("handoff_exec_adoption: rollback-refuses-claims passed");
             rollback_of_rollback_case();
             println!("handoff_exec_adoption: rollback-of-rollback passed");
+            hold_expiry_case();
+            println!("handoff_exec_adoption: hold-expiry passed");
             pending_sigterm_case(false);
             println!("handoff_exec_adoption: pending-sigterm (adopt) passed");
             pending_sigterm_case(true);
@@ -383,6 +525,10 @@ fn main() -> ExitCode {
             println!("handoff_exec_adoption: stray-descriptor passed");
             terminate_during_teardown_case();
             println!("handoff_exec_adoption: terminate-during-teardown passed");
+            rollback_guard_timeout_case();
+            println!("handoff_exec_adoption: rollback-guard-timeout passed");
+            old_side_signal_carry_case();
+            println!("handoff_exec_adoption: old-side-signal-carry passed");
             for point in FAULT_POINTS {
                 fault_case(point);
                 println!(
@@ -418,6 +564,15 @@ struct StageOptions {
     /// With `window`, record a duplicate of the listener at
     /// `Continuation(0)` instead of the Window's continuation end.
     alias_window_continuation: bool,
+    /// With `window`, the relaunched Window publishes its granted ticket and
+    /// waits for the parent's stale-client check before redeeming it.
+    window_stale_check: bool,
+    /// With `window`, the relaunched Window waits this many seconds before
+    /// it claims, and presents a zero ticket when none was granted.
+    window_claim_delay: Option<u64>,
+    /// With `window`, the stand-in Window claims on its continuation after a
+    /// rollback too.
+    window_claim_after_rollback: bool,
     /// Candidate fault points, as `CANDIDATE_FAULT_ENV` spells them; the
     /// parent sets the variable, and it crosses both execs.
     fault: Option<String>,
@@ -495,7 +650,9 @@ fn old_generation_stage(options: &StageOptions) -> ! {
     // The running generation's installed pair, retained before the upgrade.
     let daemon_bytes = fs::read(DAEMON).unwrap();
     install(&daemon_path, &daemon_bytes);
-    install(&client_path, ROLLBACK_CLIENT);
+    install(&client_path, &forward_client());
+    // The pre-upgrade client inode, kept past the upgrade's rename.
+    fs::hard_link(&client_path, directory.join(STALE_CLIENT)).unwrap();
     // Launches in the prefix use its PTY helper, as a packaged daemon's do.
     install(
         &prefix.join("splinterm-pty-child"),
@@ -523,7 +680,7 @@ fn old_generation_stage(options: &StageOptions) -> ! {
         .window
         .then(|| spawn_window(&directory, snapshots.forward().client().descriptor()));
     if window.is_some() {
-        write_window_claim_frames(&directory, &stopped);
+        write_window_claim_frames(&directory, &stopped, options);
     }
     // The listener's object at a distinct close-on-exec number.
     let listener_duplicate = options
@@ -734,20 +891,23 @@ fn spawn_window(directory: &Path, snapshot: std::os::fd::BorrowedFd<'_>) -> Stan
 /// continuation claim naming generation 2, a trusted-UI hello, and a
 /// `ClaimHandoffControl` frame for the first carried Splint, whose
 /// controller the manifest records as held by the Window's old connection.
-/// The Window fills in the ticket it is granted.
-fn write_window_claim_frames(directory: &Path, stopped: &Stopped) {
+/// The Window fills in the ticket it is granted. `options` adds the
+/// stale-client wait, the claim delay, or the claim after a rollback
+/// (naming generation 1, which the rollback daemon serves).
+fn write_window_claim_frames(directory: &Path, stopped: &Stopped, options: &StageOptions) {
     let evidence = stopped.handed_off[0].handed_off.evidence;
-    let claim = splinterm_protocol::handoff_continuation::HandoffTicketClaim {
-        daemon_generation: 2,
-    }
-    .encode()
-    .iter()
-    .fold(String::new(), |mut hex, byte| {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-        hex
-    });
-    let frames = json!({
+    let claim_for = |daemon_generation| {
+        splinterm_protocol::handoff_continuation::HandoffTicketClaim { daemon_generation }
+            .encode()
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    };
+    let claim = claim_for(2);
+    let mut frames = json!({
         "claim": claim,
         "hello": ClientFrame::Hello {
             minimum_version: PROTOCOL_VERSION,
@@ -772,6 +932,18 @@ fn write_window_claim_frames(directory: &Path, stopped: &Stopped) {
         "splint_id": evidence.splint_id,
         "incarnation": evidence.incarnation.value(),
     });
+    if options.window_stale_check {
+        frames["ticket_file"] = json!(directory.join(WINDOW_TICKET));
+        frames["proceed_file"] = json!(directory.join(STALE_CHECKED));
+    }
+    if let Some(seconds) = options.window_claim_delay {
+        frames["delay_seconds"] = json!(seconds);
+        frames["claim_without_grant"] = json!(true);
+    }
+    if options.window_claim_after_rollback {
+        frames["rollback_claim"] = json!(claim_for(1));
+        frames["rollback_result"] = json!(directory.join(WINDOW_ROLLBACK_CLAIM));
+    }
     write_atomically(
         &directory.join(WINDOW_CLAIM_FRAMES),
         &serde_json::to_vec(&frames).unwrap(),
@@ -1238,6 +1410,18 @@ struct Stage {
 
 impl Stage {
     fn launch(directory: &TestDirectory, options: StageOptions) -> Self {
+        Self::launch_program(directory, options, &env::current_exe().unwrap(), &[])
+    }
+
+    /// Launches `program` instead of this test binary's stage, with the
+    /// stage's private environment plus `extra`: the old-side drill runs a
+    /// real `splinterd` this way.
+    fn launch_program(
+        directory: &TestDirectory,
+        options: StageOptions,
+        program: &Path,
+        extra: &[(&str, &str)],
+    ) -> Self {
         let stdout = fs::File::create(directory.0.join(STDOUT)).unwrap();
         let stderr = fs::File::create(directory.0.join(STDERR)).unwrap();
         let mut command = Command::new("python3");
@@ -1246,7 +1430,14 @@ impl Stage {
         command.env_remove(TAMPER_ROLLBACK_IMAGE);
         command.env_remove(WINDOW);
         command.env_remove(ALIAS_WINDOW_CONTINUATION);
+        command.env_remove(WINDOW_STALE_CHECK);
+        command.env_remove(WINDOW_CLAIM_DELAY);
+        command.env_remove(WINDOW_CLAIM_AFTER_ROLLBACK);
         command.env_remove(CANDIDATE_FAULT_ENV);
+        command.env_remove(OLD_SIDE_DRILL_ENV);
+        for (name, value) in extra {
+            command.env(name, value);
+        }
         if options.remove_forward_client {
             command.env(REMOVE_FORWARD_CLIENT, "1");
         }
@@ -1262,13 +1453,22 @@ impl Stage {
         if options.alias_window_continuation {
             command.env(ALIAS_WINDOW_CONTINUATION, "1");
         }
+        if options.window_stale_check {
+            command.env(WINDOW_STALE_CHECK, "1");
+        }
+        if let Some(seconds) = options.window_claim_delay {
+            command.env(WINDOW_CLAIM_DELAY, seconds.to_string());
+        }
+        if options.window_claim_after_rollback {
+            command.env(WINDOW_CLAIM_AFTER_ROLLBACK, "1");
+        }
         if let Some(fault) = options.fault {
             command.env(CANDIDATE_FAULT_ENV, fault);
         }
         let launcher = command
             .arg("-c")
             .arg(LAUNCHER)
-            .arg(env::current_exe().unwrap())
+            .arg(program)
             .env(PARENT, std::process::id().to_string())
             .env(STAGE, "old-generation")
             .env(DIRECTORY, &directory.0)
@@ -1355,15 +1555,21 @@ impl Stage {
 
     /// Waits for what the relaunched stand-in Window recorded of its claim.
     fn window_claim(&mut self) -> Value {
-        let path = self.directory.join(WINDOW_CLAIM);
-        let deadline = Instant::now() + STAGE_WAIT;
+        self.window_record(WINDOW_CLAIM, STAGE_WAIT)
+    }
+
+    /// Waits up to `wait` for the JSON record the stand-in Window writes at
+    /// `name`.
+    fn window_record(&mut self, name: &str, wait: Duration) -> Value {
+        let path = self.directory.join(name);
+        let deadline = Instant::now() + wait;
         loop {
             if let Ok(bytes) = fs::read(&path) {
                 return serde_json::from_slice(&bytes).unwrap();
             }
             assert!(
                 Instant::now() < deadline,
-                "the relaunched Window never recorded its claim\n{}",
+                "the stand-in Window never recorded {name}\n{}",
                 self.logs()
             );
             thread::sleep(Duration::from_millis(20));
@@ -1693,6 +1899,7 @@ fn adopt_case() {
         &directory,
         StageOptions {
             window: true,
+            window_stale_check: true,
             ..StageOptions::default()
         },
     );
@@ -1700,6 +1907,8 @@ fn adopt_case() {
     let pid = record.pid;
     // The stage is the launcher's only child.
     assert_eq!(children_of(stage.launcher.id()), [pid]);
+    // While the relaunched Window holds its granted ticket unredeemed.
+    assert_stale_client_refused(&mut stage, &directory);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1774,9 +1983,228 @@ fn adopt_case() {
         }
     );
     assert_window_restored_its_controller(&mut stage, &directory);
+    // Plan 0061 D8: the adopted daemon serves on, but hands off no further.
+    assert_refuses_another_handoff(&directory, record.source_daemon_generation + 1, &[]);
+    assert_same_pid_serves(&mut stage, &directory, pid);
 
     // An ordered shutdown of the adopted daemon ends it and its Splints.
     shut_down(&mut stage, &record, &[launched]);
+}
+
+/// The `PYTHONHOME` a copy of `python3` needs when it runs from another
+/// path.
+fn python_home() -> String {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg("import sys; print(sys.prefix if sys.prefix == sys.exec_prefix else sys.prefix + ':' + sys.exec_prefix)")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Runs one [`CLIENT_SESSION`] from `client`, a copy of `python3` whose
+/// executable identity the daemon judges: `hello` with `role`, then each
+/// request. Returns the hello answer and one answer per request sent; `None`
+/// where the daemon closed the connection first.
+fn client_session(
+    client: &Path,
+    socket: &Path,
+    role: ClientRole,
+    requests: &[Request],
+) -> Vec<Option<ServerFrame>> {
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    let spec_path = socket.with_file_name(format!("client-session-{sequence}.json"));
+    let spec = json!({
+        "socket": socket,
+        "hello": ClientFrame::Hello {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+            role,
+            handoff_window: false,
+        },
+        "requests": requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| ClientFrame::Request {
+                request_id: u64::try_from(index).unwrap() + 1,
+                diagnostic_correlation: None,
+                request: request.clone(),
+            })
+            .collect::<Vec<_>>(),
+    });
+    fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    let output = Command::new(client)
+        .arg("-c")
+        .arg(CLIENT_SESSION)
+        .arg(&spec_path)
+        .env("PYTHONHOME", python_home())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} session failed: {output:?}",
+        client.display()
+    );
+    let answers: Vec<Option<Value>> = serde_json::from_slice(&output.stdout).unwrap();
+    answers
+        .into_iter()
+        .map(|answer| {
+            answer.map(|frame| {
+                serde_json::from_value(frame.clone())
+                    .unwrap_or_else(|error| panic!("{error}: {frame}"))
+            })
+        })
+        .collect()
+}
+
+fn hex_ticket(hex: &str) -> [u8; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES] {
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+        .collect::<Vec<_>>();
+    bytes.try_into().expect("a whole resume ticket")
+}
+
+/// Plan 0061 M3.17, the stale client: once the relaunched Window has been
+/// granted its ticket (it waits before redeeming), a process executing the
+/// pre-upgrade client inode, with exactly the bytes of the installed client,
+/// is refused trusted UI at `Hello`, and as an automation client cannot
+/// present that very ticket. The Window then redeems it
+/// ([`assert_window_restored_its_controller`]): the refusals did not end it.
+fn assert_stale_client_refused(stage: &mut Stage, directory: &TestDirectory) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let ticket_path = directory.0.join(WINDOW_TICKET);
+    let deadline = Instant::now() + STAGE_WAIT;
+    let ticket = loop {
+        if let Ok(hex) = fs::read_to_string(&ticket_path) {
+            break hex_ticket(hex.trim());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the relaunched Window was never granted a ticket\n{}",
+            stage.logs()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stale_client = directory.0.join(STALE_CLIENT);
+    let installed = directory.0.join("prefix/splinterm");
+    assert_eq!(
+        fs::read(&stale_client).unwrap(),
+        fs::read(&installed).unwrap()
+    );
+    let identity = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    assert_ne!(identity(&stale_client), identity(&installed));
+    let socket = directory.socket();
+
+    let answers = client_session(&stale_client, &socket, ClientRole::TrustedUi, &[]);
+    match answers.as_slice() {
+        [Some(ServerFrame::Error { error, .. })] if error.code == ErrorCode::Unauthorized => {}
+        answers => panic!(
+            "the stale client was not refused trusted UI: {answers:?}\n{}",
+            stage.logs()
+        ),
+    }
+    let frames: Value =
+        serde_json::from_slice(&fs::read(directory.0.join(WINDOW_CLAIM_FRAMES)).unwrap()).unwrap();
+    let claim = Request::ClaimHandoffControl {
+        ticket: splinterm_protocol::HandoffResumeTicket::new(ticket),
+        splint: Some(splinterm_protocol::HandoffClaimTarget {
+            splint_id: serde_json::from_value(frames["splint_id"].clone()).unwrap(),
+            incarnation: frames["incarnation"].as_u64().unwrap(),
+        }),
+    };
+    let answers = client_session(&stale_client, &socket, ClientRole::Automation, &[claim]);
+    match answers.as_slice() {
+        [
+            Some(ServerFrame::Hello { .. }),
+            Some(ServerFrame::Error { error, .. }),
+        ] if error.code == ErrorCode::Unauthorized => {}
+        answers => panic!(
+            "the stale client could present the ticket: {answers:?}\n{}",
+            stage.logs()
+        ),
+    }
+    fs::write(directory.0.join(STALE_CHECKED), b"").unwrap();
+}
+
+/// Plan 0061 D8: a daemon started by a live handoff refuses another. Over
+/// trusted UI from the installed client, the dry run reports no rollback
+/// copy and `Execute` is refused, saying a restart comes first. `first`
+/// requests run before those two on the same connection.
+fn assert_refuses_another_handoff(
+    directory: &TestDirectory,
+    daemon_generation: u64,
+    first: &[Request],
+) -> Vec<Option<ServerFrame>> {
+    let mut requests = first.to_vec();
+    requests.extend([
+        Request::PrepareDaemonHandoff {
+            mode: DaemonHandoffMode::DryRun,
+        },
+        Request::PrepareDaemonHandoff {
+            mode: DaemonHandoffMode::Execute,
+        },
+    ]);
+    let answers = client_session(
+        &directory.0.join("prefix/splinterm"),
+        &directory.socket(),
+        ClientRole::TrustedUi,
+        &requests,
+    );
+    assert_eq!(answers.len(), requests.len() + 1, "{answers:?}");
+    assert!(
+        matches!(
+            answers[0],
+            Some(ServerFrame::Hello { daemon_generation: generation, .. }) if generation == daemon_generation
+        ),
+        "the installed client connects as trusted UI: {answers:?}"
+    );
+    let Some(ServerFrame::Response {
+        result: Response::HandoffReport { report },
+        ..
+    }) = &answers[answers.len() - 2]
+    else {
+        panic!("no dry-run report: {answers:?}");
+    };
+    assert_eq!(report.daemon_generation, daemon_generation);
+    assert!(!report.rollback_available, "{report:?}");
+    // A test build is unpackaged, so its rollback reason is `NotPackaged`.
+    assert!(
+        report
+            .blocking_reasons
+            .contains(&HandoffBlockingReason::NotPackaged),
+        "{report:?}"
+    );
+    let Some(ServerFrame::Error { error, .. }) = &answers[answers.len() - 1] else {
+        panic!("Execute was not refused: {answers:?}");
+    };
+    assert_eq!(error.code, ErrorCode::HandoffUnavailable, "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("another live upgrade needs a daemon restart first"),
+        "{error:?}"
+    );
+    answers
+}
+
+/// The same daemon process still serves after a refused handoff.
+fn assert_same_pid_serves(stage: &mut Stage, directory: &TestDirectory, pid: u32) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (client, _) = connect_adopted(stage, &directory.socket()).await;
+        let peer = rustix::net::sockopt::socket_peercred(&client.stream).unwrap();
+        assert_eq!(peer.pid.as_raw_nonzero().get(), i32::try_from(pid).unwrap());
+    });
 }
 
 /// The stand-in Window relaunched into the pinned forward client snapshot
@@ -1789,8 +2217,9 @@ fn assert_window_restored_its_controller(stage: &mut Stage, directory: &TestDire
         serde_json::from_slice(&fs::read(directory.0.join(WINDOW_CLAIM_FRAMES)).unwrap()).unwrap();
     let claim = stage.window_claim();
     let logs = stage.logs();
-    assert!(
-        claim.get("grant_bytes").is_none(),
+    assert_eq!(
+        claim["grant_bytes"].as_u64(),
+        Some(48),
         "no ticket was granted: {claim}\n{logs}"
     );
     let hello: ServerFrame = serde_json::from_value(claim["hello"].clone())
@@ -2236,6 +2665,157 @@ fn rollback_dropped_window_case() {
     shut_down(&mut stage, &record, &[launched]);
 }
 
+/// Plan 0061 M3.17: the rollback daemon refuses continuation claims and,
+/// like the adopted daemon, a second handoff (D8). The forward candidate
+/// fails at startup with the forward client still installed, so the
+/// rollback daemon trusts that installed client. The carried Window reads
+/// `RolledBack` and claims anyway: the rollback daemon pins no snapshot, so
+/// it sends no ticket and closes the channel. A ticket presented over
+/// trusted UI is invalid, and `Execute` is refused until a restart.
+fn rollback_refuses_claims_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            window: true,
+            window_claim_after_rollback: true,
+            fault: Some(format!("{}@forward", CandidateFaultPoint::Startup.name())),
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    let launched = assert_rolled_back(&mut stage, &directory, &record, false, false);
+    assert_eq!(
+        stage.window_outcome(),
+        HandoffOutcome {
+            kind: HandoffOutcomeKind::RolledBack,
+            daemon_generation: record.source_daemon_generation,
+        }
+    );
+    let claimed = stage.window_record(WINDOW_ROLLBACK_CLAIM, STAGE_WAIT);
+    let logs = stage.logs();
+    assert!(
+        claimed["grant_bytes"].as_i64() == Some(0) || claimed.get("error").is_some(),
+        "the rollback daemon answered a claim: {claimed}\n{logs}"
+    );
+    for expected in [
+        "phase=\"startup\"",
+        "injected candidate fault at startup",
+        "daemon handoff: refused a carried Window's continuation claim",
+        "NoSnapshot",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
+    assert!(
+        !logs.contains("issued a carried Window its resume ticket"),
+        "{logs}"
+    );
+    let frames: Value =
+        serde_json::from_slice(&fs::read(directory.0.join(WINDOW_CLAIM_FRAMES)).unwrap()).unwrap();
+    let presented = Request::ClaimHandoffControl {
+        ticket: splinterm_protocol::HandoffResumeTicket::new(
+            [0; splinterm_protocol::HANDOFF_RESUME_TICKET_BYTES],
+        ),
+        splint: Some(splinterm_protocol::HandoffClaimTarget {
+            splint_id: serde_json::from_value(frames["splint_id"].clone()).unwrap(),
+            incarnation: frames["incarnation"].as_u64().unwrap(),
+        }),
+    };
+    let answers =
+        assert_refuses_another_handoff(&directory, record.source_daemon_generation, &[presented]);
+    assert!(
+        matches!(
+            &answers[1],
+            Some(ServerFrame::Error { error, .. }) if error.code == ErrorCode::InvalidHandoffTicket
+        ),
+        "{answers:?}"
+    );
+    assert_same_pid_serves(&mut stage, &directory, record.pid);
+    shut_down(&mut stage, &record, &[launched]);
+}
+
+/// Plan 0061 M3.17: the resume hold expires. The relaunched Window waits
+/// past the 30 s hold before it claims. The hold has ended by then, with
+/// the Window's placeholder: the continuation is closed, so no ticket comes
+/// back, and a redemption over trusted UI (the Window still runs the pinned
+/// snapshot) is invalid.
+fn hold_expiry_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            window: true,
+            window_claim_delay: Some(RESUME_HOLD_SECONDS + 3),
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (client, daemon_generation) = connect_adopted(&mut stage, &directory.socket()).await;
+        assert_eq!(daemon_generation, record.source_daemon_generation + 1);
+        assert_same_process(&client, &stage, record.pid);
+    });
+    assert_eq!(
+        stage.window_outcome(),
+        HandoffOutcome {
+            kind: HandoffOutcomeKind::Adopted,
+            daemon_generation: record.source_daemon_generation + 1,
+        }
+    );
+    let claim = stage.window_record(
+        WINDOW_CLAIM,
+        STAGE_WAIT + Duration::from_secs(RESUME_HOLD_SECONDS),
+    );
+    let logs = stage.logs();
+    assert_eq!(
+        claim["grant_bytes"].as_u64(),
+        Some(0),
+        "a ticket came after the hold: {claim}\n{logs}"
+    );
+    let hello: ServerFrame = serde_json::from_value(claim["hello"].clone()).unwrap();
+    assert!(
+        matches!(
+            hello,
+            ServerFrame::Hello {
+                daemon_generation: 2,
+                ..
+            }
+        ),
+        "the pinned snapshot is still trusted UI: {hello:?}\n{logs}"
+    );
+    let frame: ServerFrame = serde_json::from_value(claim["claim"].clone()).unwrap();
+    assert!(
+        matches!(
+            &frame,
+            ServerFrame::Error { error, .. } if error.code == ErrorCode::InvalidHandoffTicket
+        ),
+        "a redemption after the hold: {frame:?}\n{logs}"
+    );
+    let ended = log_line(
+        &logs,
+        "daemon handoff: the carried Windows' resume hold ended",
+    );
+    for expected in ["windows=1", "placeholders=1"] {
+        assert!(
+            ended.contains(expected),
+            "missing {expected:?} in {ended:?}\n{logs}"
+        );
+    }
+    assert!(
+        !logs.contains("issued a carried Window its resume ticket"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("restored a relaunched Window's controller"),
+        "{logs}"
+    );
+    shut_down(&mut stage, &record, &[]);
+}
+
 /// The rollback daemon's own adoption fails too. A rollback generation has
 /// no rollback edge: it exits loudly and nothing is executed again.
 fn rollback_of_rollback_case() {
@@ -2360,8 +2940,10 @@ fn fault_case(point: CandidateFaultPoint) {
         CandidateFaultPoint::ActorStaging => {
             ("adoption", "injected candidate fault at actor staging")
         }
-        CandidateFaultPoint::StrayDescriptor | CandidateFaultPoint::TerminateDuringTeardown => {
-            unreachable!("not a fault point")
+        CandidateFaultPoint::StrayDescriptor
+        | CandidateFaultPoint::TerminateDuringTeardown
+        | CandidateFaultPoint::GuardTimeout => {
+            unreachable!("not a fault point of the matrix")
         }
     };
     let logs = stage.logs();
@@ -2481,4 +3063,161 @@ fn terminate_during_teardown_case() {
     for splint in &record.carried {
         wait_until_exited(splint.child_pid, "carried Splint after an ordered shutdown");
     }
+}
+
+/// Plan 0061 M3.17, the rollback guard timeout: the failed forward candidate
+/// still runs a thread that outlives its runtime, so the rollback executor
+/// never reaches one thread. It refuses to execute the rollback daemon (an
+/// exec could lose a termination that thread's handler took) and the
+/// candidate exits loudly: every carried Splint is hung up, and nothing
+/// committed, so the durable Topology is the old generation's.
+fn rollback_guard_timeout_case() {
+    let directory = TestDirectory::new();
+    let mut stage = Stage::launch(
+        &directory,
+        StageOptions {
+            fault: Some(format!(
+                "{}@forward",
+                CandidateFaultPoint::GuardTimeout.name()
+            )),
+            ..StageOptions::default()
+        },
+    );
+    let record = stage.record();
+    let status = stage.wait(STAGE_WAIT);
+    let logs = stage.logs();
+    assert!(!status.success(), "the refused rollback exited 0\n{logs}");
+    for expected in [
+        "test seam: started a thread that outlives the runtime",
+        "phase=\"startup\"",
+        "injected candidate fault: a thread outlives the runtime",
+        "rollback_edge=true",
+        "the process did not reach one thread",
+        "daemon handoff: no rollback; the candidate exits",
+        "live-process continuity is not guaranteed",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?}\n{logs}");
+    }
+    assert!(
+        !logs.contains("executing the sealed rollback daemon"),
+        "{logs}"
+    );
+    assert!(!logs.contains("adoption committed"), "{logs}");
+    for splint in &record.carried {
+        wait_until_exited(splint.child_pid, "carried Splint after a refused rollback");
+    }
+    assert_eq!(
+        fs::read(directory.0.join("state/splinterm/topology.json")).unwrap(),
+        fs::read(directory.0.join(STAGED_TOPOLOGY)).unwrap()
+    );
+}
+
+/// Plan 0061 M3.17, the old side's full signal carry in a real daemon
+/// process (`stop_runtime_and_cross`, untested end to end since M3.11b).
+///
+/// A real `splinterd`, copied into a private prefix beside a `python3` copy
+/// as its installed client, runs the old-side drill: a trusted-UI `Execute`
+/// takes the binary's whole attempt (fence, capture, manifests, serve's
+/// exit for the boundary) with a test preparation that holds no forward
+/// daemon. During the runtime stop the drill sends the process a SIGTERM,
+/// after serve stopped listening for one. The old side waits for one
+/// thread, captures the termination its handler took, makes it pending
+/// again under the block, and crosses the boundary, which is not armed
+/// (`ExecNotWired`); the resumed round then receives the termination and
+/// shuts down in order, exactly once.
+fn old_side_signal_carry_case() {
+    let directory = TestDirectory::new();
+    let prefix = directory.0.join("prefix");
+    fs::create_dir(&prefix).unwrap();
+    let daemon = prefix.join("splinterd");
+    install(&daemon, &fs::read(DAEMON).unwrap());
+    install(&prefix.join("splinterm"), &forward_client());
+    install(
+        &prefix.join("splinterm-pty-child"),
+        &fs::read(pty_helper()).unwrap(),
+    );
+    let mut stage = Stage::launch_program(
+        &directory,
+        StageOptions::default(),
+        &daemon,
+        &[(OLD_SIDE_DRILL_ENV, "1")],
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_, daemon_generation) = connect_adopted(&mut stage, &directory.socket()).await;
+        assert_eq!(daemon_generation, 1);
+    });
+    let answers = client_session(
+        &prefix.join("splinterm"),
+        &directory.socket(),
+        ClientRole::TrustedUi,
+        &[Request::PrepareDaemonHandoff {
+            mode: DaemonHandoffMode::Execute,
+        }],
+    );
+    // The attempt reached exec readiness, so serve closed the connection
+    // instead of answering.
+    assert!(
+        matches!(answers.as_slice(), [Some(ServerFrame::Hello { .. }), None]),
+        "{answers:?}\n{}",
+        stage.logs()
+    );
+    let status = stage.wait(STAGE_WAIT);
+    let logs = stage.logs();
+    assert!(
+        status.success(),
+        "the carried SIGTERM must become an ordered shutdown of the resumed round: {status}\n{logs}"
+    );
+    log_line(
+        &logs,
+        "test seam: driving an unarmed handoff attempt to the exec boundary",
+    );
+    log_line(
+        &logs,
+        "test seam: sent SIGTERM to this process during the runtime stop",
+    );
+    let carried = log_line(
+        &logs,
+        "daemon handoff: carrying taken termination signals across the exec boundary",
+    );
+    assert!(
+        carried.contains("terminate=true") && carried.contains("interrupt=false"),
+        "{carried:?}\n{logs}"
+    );
+    assert!(
+        logs.contains("live handoff is unsupported; the forward exec is not armed"),
+        "{logs}"
+    );
+    let resumed = log_line(
+        &logs,
+        "daemon handoff did not exec; resuming the running generation",
+    );
+    assert!(
+        resumed.contains("exec of the forward daemon is not armed for this attempt"),
+        "the boundary was crossed and returned unarmed: {resumed:?}\n{logs}"
+    );
+    // Served twice (fresh, then resumed), and the resumed round ended on the
+    // carried termination.
+    let ready = logs
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("splinterd ready"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let resumed_at = logs
+        .lines()
+        .position(|line| line.contains("resuming the running generation"))
+        .unwrap();
+    assert!(
+        matches!(ready.as_slice(), [fresh, again] if *fresh < resumed_at && resumed_at < *again),
+        "{ready:?}\n{logs}"
+    );
+    assert!(!socket_exists(&directory.socket()), "{logs}");
+}
+
+fn socket_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
