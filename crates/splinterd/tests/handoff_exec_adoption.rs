@@ -92,7 +92,9 @@
 //! * live handoff is unsupported in every build until window continuity
 //!   lands (the binary's `live_handoff_support`, Plan 0061 M3.11b), so the
 //!   report names `Unsupported` and `Execute` is refused before the gate,
-//!   whatever else holds. No feature or seam overrides that decision;
+//!   whatever else holds. No seam overrides that decision, and the only
+//!   feature that does (`vm-acceptance-live-handoff`) is test-only and
+//!   refused by packaging;
 //! * `cargo test` builds are unpackaged (zero source commit), so the report
 //!   names `NotPackaged` too;
 //! * the running daemon retains rollback authority, and finds the forward

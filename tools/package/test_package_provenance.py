@@ -27,6 +27,7 @@ PROTOCOL_SOURCE = ROOT / "crates/splinterm-protocol/src/lib.rs"
 PREFLIGHT_SOURCE = ROOT / "crates/splinterd/src/handoff_preflight.rs"
 CHECKPOINT_SOURCE = ROOT / "crates/splinterm-terminal/src/terminal/checkpoint.rs"
 SEAMS_SOURCE = ROOT / "crates/splinterd/src/integration_test_seams.rs"
+REQUESTS_SOURCE = ROOT / "crates/splinterd/src/handoff_requests.rs"
 
 COMMIT = "1234567890abcdef1234567890abcdef12345678"
 
@@ -102,6 +103,138 @@ class PackageProvenanceTests(unittest.TestCase):
                             COMMIT, "local-committed-head", "0.1.0", daemon, client
                         )
             MODULE.generate(COMMIT, "local-committed-head", "0.1.0", clean, clean)
+
+    def test_vm_acceptance_marker_matches_the_rust_authority(self) -> None:
+        rust = re.findall(
+            r'^pub\(crate\) static VM_ACCEPTANCE_MARKER: \[u8; (\d+)\] = \*b"([^"]+)";$',
+            REQUESTS_SOURCE.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+        marker = MODULE.VM_ACCEPTANCE_MARKER
+        self.assertEqual(rust, [(str(len(marker)), marker.decode("ascii"))])
+        # The marker is compiled only into the feature build.
+        source = REQUESTS_SOURCE.read_text(encoding="utf-8")
+        declaration = source.index("pub(crate) static VM_ACCEPTANCE_MARKER")
+        self.assertIn(
+            '#[cfg(feature = "vm-acceptance-live-handoff")]\n#[used]\n',
+            source[declaration - 80 : declaration],
+        )
+        self.assertNotIn(marker.decode("ascii"), source.replace(
+            f'*b"{marker.decode("ascii")}"', ""
+        ))
+
+    def test_refuses_vm_acceptance_builds_outside_explicit_local_packages(self) -> None:
+        marker = MODULE.VM_ACCEPTANCE_MARKER
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = root / "clean"
+            clean.write_bytes(b"x" * 100_000)
+            # A marker straddling a read-block boundary must still be found.
+            marked = root / "marked"
+            marked.write_bytes(b"x" * (64 * 1024 - 7) + marker + bytes(16))
+            self.assertFalse(MODULE.contains_vm_acceptance_marker(clean))
+            self.assertTrue(MODULE.contains_vm_acceptance_marker(marked))
+            # Release and Nix packages never, even when asked.
+            for provenance in ("release-candidate", "nix-store"):
+                for allow in (False, True):
+                    with self.subTest(provenance=provenance, allow=allow):
+                        with self.assertRaisesRegex(
+                            ValueError, "release and Nix packages must never enable it"
+                        ):
+                            MODULE.generate(
+                                COMMIT, provenance, "0.2.0", marked, clean, allow
+                            )
+                # Asking without a marked daemon is refused too.
+                with self.assertRaisesRegex(ValueError, "local-committed-head provenance"):
+                    MODULE.generate(COMMIT, provenance, "0.2.0", clean, clean, True)
+            # A local package only when explicitly requested.
+            for daemon, client in ((marked, clean), (clean, marked)):
+                with self.assertRaisesRegex(
+                    ValueError, "--allow-vm-acceptance-live-handoff"
+                ):
+                    MODULE.generate(
+                        COMMIT, "local-committed-head", "0.2.0", daemon, client
+                    )
+            record = MODULE.generate(
+                COMMIT, "local-committed-head", "0.2.0", marked, clean, True
+            )
+            self.assertEqual(record["provenance"], "local-committed-head")
+            # A request whose daemon lacks the marker is a mislabelled build.
+            with self.assertRaisesRegex(ValueError, "was not built with the"):
+                MODULE.generate(
+                    COMMIT, "local-committed-head", "0.2.0", clean, marked, True
+                )
+            with self.assertRaisesRegex(ValueError, "was not built with the"):
+                MODULE.generate(COMMIT, "local-committed-head", "0.2.0", clean, clean, True)
+            # Ordinary local builds are unaffected.
+            MODULE.generate(COMMIT, "local-committed-head", "0.2.0", clean, clean)
+
+    def test_the_generator_cli_refuses_a_marked_release_daemon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            daemon = root / "splinterd"
+            client = root / "splinterm"
+            daemon.write_bytes(b"daemon" + MODULE.VM_ACCEPTANCE_MARKER)
+            client.write_bytes(b"client")
+            for extra in ([], ["--allow-vm-acceptance-live-handoff"]):
+                with self.subTest(extra=extra):
+                    result = subprocess.run(
+                        [
+                            sys.executable, str(SOURCE), "--commit", COMMIT,
+                            "--provenance", "release-candidate", "--version", "0.2.0",
+                            "--daemon", str(daemon), "--client", str(client),
+                            "--output", str(root / "record.json"), *extra,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 1, result)
+                    self.assertIn("vm-acceptance-live-handoff", result.stderr)
+                    self.assertFalse((root / "record.json").exists())
+
+    def test_package_validation_refuses_test_only_builds(self) -> None:
+        def package_root(directory: Path, provenance: str, daemon: bytes) -> Path:
+            root = directory / provenance
+            (root / "usr/bin").mkdir(parents=True)
+            (root / "usr/share/splinterm").mkdir(parents=True)
+            (root / "usr/share/splinterm/package-provenance-v1.json").write_text(
+                json.dumps({"provenance": provenance}), encoding="utf-8"
+            )
+            (root / "usr/bin/splinterd").write_bytes(daemon)
+            for name in ("splinterm", "splinterm-relay", "splinterm-pty-child"):
+                (root / "usr/bin" / name).write_bytes(b"clean " + name.encode())
+            return root
+
+        marker = MODULE.VM_ACCEPTANCE_MARKER
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            release = package_root(base, "release-candidate", b"daemon" + marker)
+            for allow in (False, True):
+                with self.assertRaisesRegex(AssertionError, "must never enable it"):
+                    VALIDATOR.validate_test_only_builds(release, allow)
+            local = package_root(base, "local-committed-head", b"daemon" + marker)
+            with self.assertRaisesRegex(
+                AssertionError, "--allow-vm-acceptance-live-handoff"
+            ):
+                VALIDATOR.validate_test_only_builds(local, False)
+            self.assertTrue(VALIDATOR.validate_test_only_builds(local, True))
+            # No other packaged binary may carry it.
+            (local / "usr/bin/splinterm-relay").write_bytes(b"relay" + marker)
+            with self.assertRaisesRegex(AssertionError, "splinterm-relay"):
+                VALIDATOR.validate_test_only_builds(local, True)
+            plain = base / "plain"
+            plain.mkdir()
+            plain = package_root(plain, "local-committed-head", b"daemon")
+            self.assertFalse(VALIDATOR.validate_test_only_builds(plain, False))
+            with self.assertRaisesRegex(AssertionError, "was not built with the"):
+                VALIDATOR.validate_test_only_builds(plain, True)
+            # The integration-test salt marker is refused in every binary.
+            (plain / "usr/bin/splinterm-pty-child").write_bytes(
+                b"pty" + MODULE.INTEGRATION_TEST_MARKER
+            )
+            with self.assertRaisesRegex(AssertionError, "integration-test feature"):
+                VALIDATOR.validate_test_only_builds(plain, False)
 
     def test_rejects_zero_malformed_and_unsupported_provenance(self) -> None:
         for commit, provenance, version in [

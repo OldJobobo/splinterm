@@ -25,6 +25,13 @@
 //!   and the continuation, resume, and ticket work (M3.13 to M3.16), every
 //!   open Window would lose its daemon.
 //!
+//! The one exception is a test-only build: the `vm-acceptance-live-handoff`
+//! feature (Plan 0061 M3.17, operator-approved 2026-10-19) treats window
+//! continuity as ready, so VM acceptance can drive a real live upgrade
+//! before the constant flips. Nix stays refused in that build too. It
+//! carries `VM_ACCEPTANCE_MARKER`, which package provenance generation
+//! and package validation refuse for release and Nix packages.
+//!
 //! While live handoff is unsupported no running daemon hands off, so no
 //! adopted daemon holds a Window and every resume ticket claim fails closed
 //! (M3.16, `splinterd::handoff_continuation`). No handoff prepare is ever
@@ -58,10 +65,42 @@ pub(crate) const FRESH_DAEMON_GENERATION: u64 = 1;
 /// and the Window continuation, resume, and ticket work (M3.13 to M3.16).
 /// Setting this to `true` is the production enablement step for live
 /// handoff. It may happen only once that work has landed, the M3.17 proofs
-/// pass, and VM acceptance is recorded. No build feature, environment
-/// variable, or test seam overrides it. Unit tests reach the gate only
-/// through [`live_handoff_support_with`], with readiness passed explicitly.
+/// pass, and VM acceptance is recorded. No environment variable or test
+/// seam overrides it. The only override is the test-only
+/// `vm-acceptance-live-handoff` build feature ([`VM_ACCEPTANCE_BUILD`]),
+/// which no package recipe enables and packaging refuses. Unit tests reach
+/// the gate only through [`live_handoff_support_with`], with readiness
+/// passed explicitly.
 pub(crate) const WINDOW_CONTINUITY_READY: bool = false;
+
+/// Whether this is the test-only VM acceptance build (Plan 0061 M3.17): the
+/// `vm-acceptance-live-handoff` feature treats window continuity as ready.
+pub(crate) const VM_ACCEPTANCE_BUILD: bool = cfg!(feature = "vm-acceptance-live-handoff");
+
+/// The bytes a VM acceptance build carries, which package provenance
+/// generation and package validation search for
+/// (`tools/package/generate-package-provenance.py`). Compiled only into that
+/// build, and read at run time so that the binary keeps it.
+#[cfg(feature = "vm-acceptance-live-handoff")]
+#[used]
+pub(crate) static VM_ACCEPTANCE_MARKER: [u8; 37] = *b"splinterm-vm-acceptance-live-handoff:";
+
+/// Whether window continuity counts as ready in this build: the shipped
+/// [`WINDOW_CONTINUITY_READY`], or the test-only VM acceptance build.
+fn window_continuity_ready() -> bool {
+    WINDOW_CONTINUITY_READY || vm_acceptance_build()
+}
+
+#[cfg(feature = "vm-acceptance-live-handoff")]
+fn vm_acceptance_build() -> bool {
+    // Through `black_box`, so the marker stays in the binary.
+    std::hint::black_box(&VM_ACCEPTANCE_MARKER)[0] == b's'
+}
+
+#[cfg(not(feature = "vm-acceptance-live-handoff"))]
+const fn vm_acceptance_build() -> bool {
+    false
+}
 
 /// Why this daemon cannot perform a live handoff at all. On the wire every
 /// cause is [`HandoffBlockingReason::Unsupported`]; the cause is named only
@@ -109,16 +148,16 @@ impl LiveHandoffUnsupported {
 /// # Errors
 /// Returns the cause whenever live handoff is unavailable. Nix is checked
 /// first, so a Nix-store daemon keeps being named as such after window
-/// continuity lands.
+/// continuity lands, and in the VM acceptance build.
 pub(crate) fn live_handoff_support(
     provenance: HandoffBuildProvenance,
 ) -> Result<(), LiveHandoffUnsupported> {
-    live_handoff_support_with(provenance, WINDOW_CONTINUITY_READY)
+    live_handoff_support_with(provenance, window_continuity_ready())
 }
 
 /// [`live_handoff_support`] with window-continuity readiness passed in.
-/// Production passes only [`WINDOW_CONTINUITY_READY`]; only unit tests pass
-/// anything else.
+/// Production passes only [`WINDOW_CONTINUITY_READY`], or `true` in the
+/// test-only VM acceptance build; only unit tests pass anything else.
 fn live_handoff_support_with(
     provenance: HandoffBuildProvenance,
     window_continuity_ready: bool,
@@ -528,6 +567,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn an_unpackaged_build_always_reports_not_packaged() {
         // Startup found a record but could not retain the pair; an unpackaged
         // build still has no installed pair to roll back to.
@@ -552,6 +595,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn idle_development_daemon_reports_not_packaged_and_unsupported() {
         let topology = Topology::new();
         let report = report_from(
@@ -646,6 +693,10 @@ mod tests {
     /// A packaged Arch build is unsupported only until window continuity
     /// lands; once it has, nothing in the decision blocks it.
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn a_packaged_build_is_unsupported_only_until_window_continuity() {
         for provenance in [
             HandoffBuildProvenance::ReleaseCandidate,
@@ -783,6 +834,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn transient_lairs_block_with_an_exact_count_and_a_bounded_named_subset() {
         let mut topology = Topology::new();
         insert(&mut topology, Lair::new("durable", PathBuf::from("/tmp")));
@@ -940,6 +995,15 @@ mod tests {
         assert_eq!(report.build.version, env!("CARGO_PKG_VERSION"));
         assert_ne!(report.build.identity, [0; HANDOFF_BUILD_IDENTITY_BYTES]);
         assert_eq!(report.private_protocol.minimum, PROTOCOL_VERSION);
+        if VM_ACCEPTANCE_BUILD {
+            // An unpackaged test build is still refused, as not packaged.
+            assert!(
+                report
+                    .blocking_reasons
+                    .contains(&HandoffBlockingReason::NotPackaged)
+            );
+            return;
+        }
         assert!(
             report
                 .blocking_reasons
@@ -951,6 +1015,30 @@ mod tests {
             live_handoff_support(report.build.provenance)
         );
         assert!(compiled_live_handoff_support().is_err());
+    }
+
+    /// The shipped decision never forces window continuity; only the
+    /// test-only VM acceptance build does, and even that build refuses Nix.
+    #[test]
+    fn only_the_vm_acceptance_build_forces_window_continuity() {
+        assert_eq!(
+            VM_ACCEPTANCE_BUILD,
+            cfg!(feature = "vm-acceptance-live-handoff")
+        );
+        assert_eq!(window_continuity_ready(), VM_ACCEPTANCE_BUILD);
+        assert_eq!(
+            live_handoff_support(HandoffBuildProvenance::NixStore),
+            Err(LiveHandoffUnsupported::NixStore)
+        );
+        let packaged = live_handoff_support(HandoffBuildProvenance::LocalCommittedHead);
+        if VM_ACCEPTANCE_BUILD {
+            assert_eq!(packaged, Ok(()));
+        } else {
+            assert_eq!(
+                packaged,
+                Err(LiveHandoffUnsupported::WindowContinuityPending)
+            );
+        }
     }
 
     #[test]

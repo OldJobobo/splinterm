@@ -7,6 +7,7 @@ import argparse
 import configparser
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -76,6 +77,16 @@ PACKAGE_PROVENANCE_KEYS = {
     "schema", "package", "architecture", "provenance", "source_commit",
     "build_version", "pair_build_identity", "daemon_sha256", "client_sha256",
 }
+
+# The provenance generator owns the test-only build markers (Plan 0061 D9
+# and M3.17); validation searches the packaged binaries for the same bytes.
+GENERATOR_SPEC = importlib.util.spec_from_file_location(
+    "splinterm_package_provenance_generator",
+    Path(__file__).resolve().with_name("generate-package-provenance.py"),
+)
+assert GENERATOR_SPEC is not None and GENERATOR_SPEC.loader is not None
+GENERATOR = importlib.util.module_from_spec(GENERATOR_SPEC)
+GENERATOR_SPEC.loader.exec_module(GENERATOR)
 
 EXECUTABLES = {
     "usr/bin/generate-omarchy-theme.py",
@@ -290,6 +301,52 @@ def validate_package_provenance(root: Path) -> None:
     assert len(expected_version) == 3
     assert struct.unpack(">HHH", daemon_report[76:82]) == expected_version
     assert daemon_report[82:] == client_report[82:]
+
+
+def validate_test_only_builds(root: Path, allow_vm_acceptance: bool) -> bool:
+    """Refuse packaged binaries built with a test-only feature.
+
+    No packaged binary may carry the integration-test salt marker. A daemon
+    built with the TEST-ONLY `vm-acceptance-live-handoff` feature (Plan 0061
+    M3.17) is accepted only in a local-committed-head package validated with
+    `--allow-vm-acceptance-live-handoff`, whose daemon must then carry it.
+    Returns whether this is such a package.
+    """
+    record = json.loads(
+        (root / "usr/share/splinterm/package-provenance-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    binaries = [
+        root / "usr/bin" / name
+        for name in (
+            "splinterd",
+            "splinterm",
+            "splinterm-relay",
+            "splinterm-pty-child",
+            "splinterm-mcp",
+        )
+        if (root / "usr/bin" / name).is_file()
+    ]
+    for binary in binaries:
+        if GENERATOR.contains_integration_test_marker(binary):
+            raise AssertionError(
+                f"{binary.name} was built with the splinterd integration-test feature"
+            )
+    daemon = root / "usr/bin/splinterd"
+    client = root / "usr/bin/splinterm"
+    try:
+        marked = GENERATOR.check_vm_acceptance(
+            record["provenance"], daemon, client, allow_vm_acceptance
+        )
+    except ValueError as error:
+        raise AssertionError(str(error)) from error
+    for binary in binaries:
+        if binary not in (daemon, client) and GENERATOR.contains_vm_acceptance_marker(binary):
+            raise AssertionError(
+                f"{binary.name} carries the test-only vm-acceptance-live-handoff marker"
+            )
+    return marked
 
 
 def validate_systemd_unit(root: Path) -> None:
@@ -1078,6 +1135,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("package", type=Path)
     parser.add_argument("--mcp-package", required=True, type=Path)
+    parser.add_argument(
+        "--allow-vm-acceptance-live-handoff",
+        action="store_true",
+        help=(
+            "TEST-ONLY: accept a local VM acceptance package whose daemon forces "
+            "live handoff on (never for release packages)"
+        ),
+    )
     args = parser.parse_args()
     package = args.package.resolve()
     mcp_package = args.mcp_package.resolve()
@@ -1164,6 +1229,9 @@ def main() -> int:
         ), "MCP split package must depend on the exact main package version"
         validate_systemd_unit(root)
         validate_package_provenance(root)
+        vm_acceptance = validate_test_only_builds(
+            root, args.allow_vm_acceptance_live_handoff
+        )
         validate_headless_runtime(
             root / "usr/bin/splinterd",
             root / "usr/bin/splinterm",
@@ -1185,6 +1253,11 @@ def main() -> int:
         run([sys.executable, str(Path(__file__).with_name("validate-mcp-package.py")), str(root)], timeout=180)
 
     print(f"Package validation passed: {package} + {mcp_package}")
+    if vm_acceptance:
+        print(
+            "TEST-ONLY VM acceptance package: its daemon forces live handoff on. "
+            "Install it only in the VM testbed; never publish or ship it."
+        )
     return 0
 
 

@@ -103,6 +103,46 @@ class OmarchyVmRunnerTests(unittest.TestCase):
         self.assertIn("--confirm-guest-install", result.stderr)
         self.assertFalse(log.exists())
 
+    def test_vm_acceptance_flags_are_explicit_and_test_only(self) -> None:
+        # Plan 0061 M3.17: only an explicit flag builds or installs the
+        # test-only live-handoff package.
+        result, log = self.run_runner("package-build", "--bogus")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--vm-acceptance-live-handoff", result.stderr)
+        self.assertFalse(log.exists())
+        for arguments in (
+            ("package-install", "--vm-acceptance-live-handoff"),
+            ("package-install", "--vm-acceptance-live-handoff", "--confirm-guest-install"),
+            ("package-install", "--confirm-guest-install", "--bogus"),
+        ):
+            with self.subTest(arguments=arguments):
+                result, log = self.run_runner(*arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--confirm-guest-install", result.stderr)
+                self.assertFalse(log.exists())
+        result, log = self.run_runner(
+            "package-install", "--confirm-guest-install", "--vm-acceptance-live-handoff"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SPLINTERM_TESTBED_VM_ACCEPTANCE=true", log.read_text())
+        result, log = self.run_runner("package-install", "--confirm-guest-install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SPLINTERM_TESTBED_VM_ACCEPTANCE=false", log.read_text())
+        runner = RUNNER.read_text(encoding="utf-8")
+        install = runner.split("  package-install)", 1)[1].split("  package-launch)", 1)[0]
+        self.assertIn(
+            'vm_acceptance_arguments=(--allow-vm-acceptance-live-handoff)', install
+        )
+        self.assertIn(
+            './tools/package/upgrade-local-package.sh --yes "${vm_acceptance_arguments[@]}"',
+            install,
+        )
+        build = runner.split("  package-build)", 1)[1].split("  package-status)", 1)[0]
+        self.assertIn("build_arguments=(--vm-acceptance-live-handoff)", build)
+        self.assertIn(
+            'build-local-package.sh $(quote_command "${build_arguments[@]}")', build
+        )
+
     def test_packaged_acceptance_uses_clean_head_and_private_guest_state(self) -> None:
         runner = RUNNER.read_text(encoding="utf-8")
         self.assertIn('git -C "$repo_root" bundle create "$bundle" HEAD', runner)

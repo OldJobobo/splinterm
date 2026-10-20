@@ -1438,7 +1438,8 @@ fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 /// since Plan 0061 M3.11b, but no round leaves serve for the boundary while
 /// [`handoff_requests::live_handoff_support`] refuses, because `Execute` is
 /// refused before the gate. That covers every build until window continuity
-/// lands, and Nix-store builds in 0.2.0, and the boundary arms the exec only
+/// lands (except the test-only VM acceptance build), and Nix-store builds in
+/// 0.2.0, and the boundary arms the exec only
 /// under the same decision ([`arm_forward_exec`]). When the boundary comes
 /// back, the next round serves the same generation again on a new runtime
 /// ([`StartupSource::Resumed`]).
@@ -2766,9 +2767,10 @@ fn cross_boundary(
 /// Compiled into every build since Plan 0061 M3.11b. The forward exec is
 /// armed only when [`handoff_requests::compiled_live_handoff_support`]
 /// allows it: never for a Nix-store build in 0.2.0, and never in any build
-/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false. `Execute` is
-/// already refused before the gate in both cases, so this second check is
-/// defence in depth. An unarmed plan returns `ExecNotWired` from the
+/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false, except the
+/// test-only VM acceptance build (`vm-acceptance-live-handoff`, which
+/// packaging refuses). `Execute` is already refused before the gate in both
+/// cases, so this second check is defence in depth. An unarmed plan returns `ExecNotWired` from the
 /// boundary, and the old generation resumes in process.
 ///
 /// The argument vector is rebuilt from this daemon's state, never copied
@@ -3578,6 +3580,11 @@ async fn serve(
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
     info!(socket = %socket.display(), image_socket = %image_socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
+    if handoff_requests::VM_ACCEPTANCE_BUILD {
+        warn!(
+            "TEST-ONLY VM acceptance build: live handoff treats window continuity as ready (Plan 0061 M3.17); never ship this build"
+        );
+    }
     let image_transfer_expiry =
         time::sleep_until(image_transfer_expiry_deadline(state, false).await);
     tokio::pin!(image_transfer_expiry);
@@ -17928,6 +17935,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn dry_run_reports_current_state_and_refused_execute_changes_nothing() {
         let state = test_state(false);
         let transient = Lair::transient("transient", PathBuf::from("/tmp"));
@@ -17985,6 +17996,10 @@ mod tests {
     /// continuity has not landed. The answer names `Unsupported` and the
     /// cause, and nothing is fenced, prepared, or broadcast.
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn execute_is_refused_before_the_gate_while_live_handoff_is_unsupported() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -18430,6 +18445,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn a_second_execute_is_refused_while_a_handoff_runs_and_a_dry_run_still_reports() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -19000,6 +19019,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn execute_runs_the_gate_and_reaches_topology_subscribers_in_sequence() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -19480,6 +19503,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn an_installed_running_build_cancels_as_blocked_and_says_so() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;

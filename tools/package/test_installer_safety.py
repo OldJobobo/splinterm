@@ -95,6 +95,121 @@ class InstallerSafetyTest(unittest.TestCase):
         self.assertIn("local-committed-head", build)
         self.assertIn("SPLINTERM_BUILD_PROVENANCE=release-candidate", workflow)
 
+    def test_no_shipped_recipe_or_workflow_enables_vm_acceptance(self) -> None:
+        # Plan 0061 M3.17: the test-only live-handoff feature is reachable only
+        # through the explicit local build flag, never a shipped recipe.
+        shipped = [
+            ROOT / "packaging/PKGBUILD",
+            ROOT / "packaging/aur/PKGBUILD",
+            ROOT / "packaging/aur-bin/PKGBUILD",
+            ROOT / "nix/package.nix",
+            ROOT / "nix/module.nix",
+            ROOT / "flake.nix",
+            ROOT / "install.sh",
+            *sorted((ROOT / ".github/workflows").glob("*.yml")),
+        ]
+        for path in shipped:
+            with self.subTest(path=path.relative_to(ROOT)):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn("vm-acceptance", source)
+                self.assertNotIn("vm_acceptance", source)
+        cargo = (ROOT / "crates/splinterd/Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn("vm-acceptance-live-handoff = []", cargo)
+        self.assertNotRegex(cargo, r"default\s*=\s*\[[^\]]*vm-acceptance")
+        for manifest in ROOT.glob("crates/*/Cargo.toml"):
+            if manifest.parent.name == "splinterd":
+                continue
+            with self.subTest(manifest=manifest.relative_to(ROOT)):
+                self.assertNotIn(
+                    "vm-acceptance", manifest.read_text(encoding="utf-8")
+                )
+
+    def test_vm_acceptance_buildscript_changes_exactly_the_build(self) -> None:
+        build = (ROOT / "tools/package/build-local-package.sh").read_text(
+            encoding="utf-8"
+        )
+        function = re.search(
+            r"^derive_vm_acceptance_buildscript\(\) \{\n.*?^\}\n",
+            build,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(function)
+        source = ROOT / "packaging/PKGBUILD"
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "PKGBUILD.vm-acceptance-live-handoff"
+            subprocess.run(
+                [
+                    "bash", "-c",
+                    function.group(0) + 'derive_vm_acceptance_buildscript "$1" "$2"',
+                    "_", str(source), str(target),
+                ],
+                check=True,
+            )
+            original = source.read_text(encoding="utf-8").splitlines()
+            derived = target.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(
+                [line for line in derived if line not in original],
+                [
+                    "  cargo build --frozen --release --features splinterd/vm-acceptance-live-handoff \\",
+                    "  pkgdesc='TEST-ONLY VM acceptance build (live handoff forced on): never ship'",
+                    "    --allow-vm-acceptance-live-handoff \\",
+                ],
+            )
+            self.assertEqual(
+                [line for line in original if line not in derived],
+                [
+                    "  cargo build --frozen --release \\",
+                    "  pkgdesc='Persistent Wayland terminal for humans and bounded automation'",
+                ],
+            )
+            # The derived script still parses and names the same packages.
+            names = subprocess.run(
+                ["bash", "-c", 'source "$1"; printf "%s\n" "${pkgname[@]}"', "_", str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+            self.assertEqual(names, ["splinterm", "splinterm-mcp"])
+            # A changed recipe is refused rather than silently built without
+            # the feature.
+            changed = Path(directory) / "PKGBUILD.changed"
+            changed.write_text(
+                source.read_text(encoding="utf-8").replace(
+                    "  cargo build --frozen --release \\\n", "  cargo build --release \\\n"
+                ),
+                encoding="utf-8",
+            )
+            refused = subprocess.run(
+                [
+                    "bash", "-c",
+                    function.group(0) + 'derive_vm_acceptance_buildscript "$1" "$2"',
+                    "_", str(changed), str(target) + ".refused",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("PKGBUILD changed", refused.stderr)
+
+    def test_vm_acceptance_build_refuses_release_provenance(self) -> None:
+        environment = os.environ.copy()
+        environment["SPLINTERM_BUILD_PROVENANCE"] = "release-candidate"
+        result = subprocess.run(
+            [
+                str(ROOT / "tools/package/build-local-package.sh"),
+                "--vm-acceptance-live-handoff",
+                "--skip-system-dependency-check",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1, result)
+        self.assertIn("needs local-committed-head provenance", result.stderr)
+
     def test_provenance_protocol_constants_match_all_authorities(self) -> None:
         generator = (ROOT / "tools/package/generate-package-provenance.py").read_text(
             encoding="utf-8"
