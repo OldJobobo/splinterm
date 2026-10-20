@@ -846,15 +846,43 @@ def candidate_record() -> Path:
     return (ROOT / git_path).resolve()
 
 
-def commit_package_b() -> None:
+def require_private_clone(what: str) -> None:
     if PRIVATE_CLONES not in ROOT.parents:
-        raise SystemExit(
-            f"package B is committed only in a private clone under {PRIVATE_CLONES}, not {ROOT}"
-        )
+        raise SystemExit(f"{what} only in a private clone under {PRIVATE_CLONES}, not {ROOT}")
+
+
+def revision(name: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "--quiet", name],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def recorded_candidate() -> str | None:
+    """The candidate u3 recorded, checked against this clone's history: HEAD
+    is the candidate (B not yet committed) or B on top of it. Anything else is
+    a record from an earlier run, refused rather than guessed at."""
     record = candidate_record()
     if not record.exists():
-        head = run_capture(["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"]).strip()
-        record.write_text(head + "\n", encoding="utf-8")
+        return None
+    candidate = record.read_text(encoding="utf-8").strip()
+    if candidate not in (revision("HEAD"), revision("HEAD^")):
+        raise SystemExit(
+            f"stale candidate record {candidate} in {record}: this clone was reused; "
+            "start again from a fresh private clone"
+        )
+    return candidate
+
+
+def commit_package_b() -> None:
+    require_private_clone("package B is committed")
+    candidate = recorded_candidate()
+    if candidate is None:
+        candidate_record().write_text(revision("HEAD") + "\n", encoding="utf-8")
+    elif candidate != revision("HEAD"):
+        print(f"package B is already committed on the candidate {candidate}")
+        return
     subprocess.run(
         [
             "git", "-C", str(ROOT), "commit", "--allow-empty", "--quiet",
@@ -867,11 +895,11 @@ def commit_package_b() -> None:
 def checkout_candidate() -> None:
     """Return the private clone to the candidate commit after package B, so
     the plain package z2 builds records the candidate, not B's commit."""
-    record = candidate_record()
-    if not record.exists():
+    candidate = recorded_candidate()
+    if candidate is None:
         print("package B was never committed; the clone is at the candidate")
         return
-    candidate = record.read_text(encoding="utf-8").strip()
+    require_private_clone("the candidate is checked out")
     subprocess.run(
         ["git", "-C", str(ROOT), "checkout", "--quiet", "--detach", candidate], check=True
     )
