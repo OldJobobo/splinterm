@@ -175,9 +175,14 @@ fn validate_continuation(continuation: &OwnedFd) -> Result<()> {
     {
         bail!("the continuation descriptor is not a Unix sequenced-packet socket");
     }
-    let peer = sockopt::socket_peercred(continuation)
-        .context("the continuation socket has no peer credentials")?;
-    if peer.uid != rustix::process::geteuid() {
+    // nix decodes the peer credentials as plain integers: a peer outside
+    // this PID namespace (a Window in a PID-namespaced sandbox) is reported
+    // with PID 0, which a non-zero PID type cannot hold. Only the UID is
+    // compared.
+    let peer =
+        nix::sys::socket::getsockopt(continuation, nix::sys::socket::sockopt::PeerCredentials)
+            .context("the continuation socket has no peer credentials")?;
+    if peer.uid() != rustix::process::geteuid().as_raw() {
         bail!("the continuation socket's peer runs as another user");
     }
     Ok(())

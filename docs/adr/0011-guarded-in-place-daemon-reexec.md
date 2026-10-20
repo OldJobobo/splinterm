@@ -225,7 +225,14 @@ one connection:
    `CAP_SYS_ADMIN` cannot name another PID; the kernel refuses it with
    `EPERM`) from the daemon's UID and the held Window's PID, the pinned
    pidfd still alive with the recorded start time, and `/proc/<pid>/exe` at
-   the pinned snapshot's device and inode. It answers with one grant carrying
+   the pinned snapshot's device and inode. That executable check is by
+   device and inode only, never by content hash (AGENTS.md §4.4, the
+   2026-10-18 exception), where the decision above speaks of
+   "device/inode and digest identity": the pinned inode is the sealed
+   snapshot the candidate verified against its package record, and its
+   bytes cannot change, so a copy with the same digest is refused. Kernel
+   credentials naming PID 0 (a sender outside the daemon's PID namespace)
+   are refused. It answers with one grant carrying
    a 256-bit ticket from `getrandom` and closes the channel. Any refusal
    closes the channel with nothing sent and drops that Window and its
    placeholders. A rollback daemon pins no snapshot and issues no ticket.

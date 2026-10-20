@@ -38,7 +38,11 @@
 //!   cannot forge them: the kernel refuses a supplied PID other than the
 //!   sender's own with `EPERM` (`scm_check_creds`), and fills in the real
 //!   sender when none is supplied. A root sender can forge anything, as it
-//!   can ptrace the Window; that is outside the threat model.
+//!   can ptrace the Window; that is outside the threat model. The kernel
+//!   reports PID 0 for a sender outside the daemon's PID namespace; the
+//!   credentials are decoded with nix as a plain `pid_t`, never into a
+//!   non-zero type, and a PID of zero or below is refused before anything
+//!   else reads them ([`sender_pid`]).
 //! - The credentials' UID must be the daemon's, and their PID the held
 //!   Window's: a forked child, or any other process holding a duplicate of
 //!   the Window's end (the #175 note), has another PID and is refused.
@@ -96,15 +100,16 @@
 use std::{
     fmt,
     io::IoSliceMut,
-    mem::MaybeUninit,
-    os::fd::{AsFd, BorrowedFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
     time::Instant,
 };
 
+use nix::{
+    errno::Errno,
+    sys::socket::{ControlMessageOwned, MsgFlags, UnixCredentials, recvmsg},
+};
 use rustix::{
-    net::{
-        RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendFlags, recvmsg, send,
-    },
+    net::{SendFlags, send},
     rand::{GetRandomFlags, getrandom},
 };
 use splinterm_core::SplintId;
@@ -205,71 +210,110 @@ pub enum ClaimRefusal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ReceivedClaim {
     pub(crate) claim: HandoffTicketClaim,
-    /// The sender's PID, translated into this daemon's PID namespace.
-    pub(crate) pid: i32,
+    /// The sender's PID, translated into this daemon's PID namespace; never
+    /// zero ([`sender_pid`]).
+    pub(crate) pid: u32,
     pub(crate) uid: u32,
+}
+
+/// The sender PID from a packet's kernel credentials. The kernel reports 0
+/// for a sender whose PID is not visible in this daemon's PID namespace,
+/// which can name no held Window, and no PID is negative: both are refused.
+///
+/// # Errors
+/// [`ClaimRefusal::Credentials`] for a PID of zero or below.
+pub(crate) fn sender_pid(pid: libc::pid_t) -> Result<u32, ClaimRefusal> {
+    match u32::try_from(pid) {
+        Ok(pid) if pid > 0 => Ok(pid),
+        _ => Err(ClaimRefusal::Credentials),
+    }
+}
+
+/// What one `recvmsg` delivered, copied out of its borrowed buffers.
+struct Received {
+    bytes: usize,
+    truncated: bool,
+    descriptors: bool,
+    /// `(pid, uid)` of every `SCM_CREDENTIALS` message, as the kernel wrote
+    /// them: decoded by nix into a plain `pid_t`, so a PID of zero is a value
+    /// to refuse, never an invalid one.
+    credentials: Vec<(libc::pid_t, u32)>,
 }
 
 /// Reads at most one packet from a continuation end, without blocking.
 ///
 /// `Ok(None)` means nothing is queued. Descriptors are received
 /// close-on-exec and closed at once; a packet carrying any, truncated
-/// data or control, not exactly one set of credentials, or not a claim
-/// layout is refused. Zero bytes is end of file.
+/// data or control, not exactly one set of credentials, credentials naming
+/// no visible PID, or not a claim layout is refused. Zero bytes is end of
+/// file.
 pub(crate) fn receive_claim(
     continuation: BorrowedFd<'_>,
 ) -> Result<Option<ReceivedClaim>, ClaimRefusal> {
     let mut buffer = [0_u8; RECEIVE_BUFFER_BYTES];
-    let mut space = [MaybeUninit::uninit();
-        rustix::cmsg_space!(ScmRights(MAX_REFUSED_DESCRIPTORS), ScmCredentials(1))];
-    let mut control = RecvAncillaryBuffer::new(&mut space);
+    let mut space = nix::cmsg_space!(UnixCredentials, [RawFd; MAX_REFUSED_DESCRIPTORS]);
     let received = loop {
-        match recvmsg(
-            continuation,
-            &mut [IoSliceMut::new(&mut buffer)],
-            &mut control,
-            RecvFlags::DONTWAIT | RecvFlags::CMSG_CLOEXEC,
+        let mut iov = [IoSliceMut::new(&mut buffer)];
+        match recvmsg::<()>(
+            continuation.as_raw_fd(),
+            &mut iov,
+            Some(&mut space),
+            MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_CMSG_CLOEXEC,
         ) {
-            Ok(received) => break received,
-            Err(rustix::io::Errno::INTR) => {}
-            Err(rustix::io::Errno::AGAIN) => return Ok(None),
+            Ok(message) => {
+                let mut received = Received {
+                    bytes: message.bytes,
+                    truncated: message
+                        .flags
+                        .intersects(MsgFlags::MSG_TRUNC | MsgFlags::MSG_CTRUNC),
+                    descriptors: false,
+                    credentials: Vec::with_capacity(1),
+                };
+                let Ok(messages) = message.cmsgs() else {
+                    return Err(ClaimRefusal::Receive);
+                };
+                for control in messages {
+                    match control {
+                        ControlMessageOwned::ScmRights(descriptors) => {
+                            received.descriptors = true;
+                            // Received close-on-exec and owned by nothing
+                            // else: closed here, at once.
+                            for descriptor in descriptors {
+                                let _ = nix::unistd::close(descriptor);
+                            }
+                        }
+                        ControlMessageOwned::ScmCredentials(sender) => {
+                            received.credentials.push((sender.pid(), sender.uid()));
+                        }
+                        _ => {}
+                    }
+                }
+                break received;
+            }
+            Err(Errno::EINTR) => {}
+            Err(Errno::EAGAIN) => return Ok(None),
             Err(_) => return Err(ClaimRefusal::Receive),
         }
     };
-    let mut descriptors = false;
-    let mut credentials = Vec::with_capacity(1);
-    for message in control.drain() {
-        match message {
-            // Dropping the iterator closes every received descriptor.
-            RecvAncillaryMessage::ScmRights(received) => {
-                descriptors = true;
-                drop(received);
-            }
-            RecvAncillaryMessage::ScmCredentials(sender) => credentials.push(sender),
-            _ => {}
-        }
-    }
-    if received
-        .flags
-        .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
-    {
+    if received.truncated {
         return Err(ClaimRefusal::Truncated);
     }
-    if descriptors {
+    if received.descriptors {
         return Err(ClaimRefusal::Descriptors);
     }
     if received.bytes == 0 {
         return Err(ClaimRefusal::EndOfFile);
     }
-    let [sender] = credentials.as_slice() else {
+    let [(pid, uid)] = received.credentials.as_slice() else {
         return Err(ClaimRefusal::Credentials);
     };
+    let pid = sender_pid(*pid)?;
     let claim = HandoffTicketClaim::decode(&buffer[..received.bytes])
         .map_err(|_| ClaimRefusal::Malformed)?;
     Ok(Some(ReceivedClaim {
         claim,
-        pid: sender.pid.as_raw_nonzero().get(),
-        uid: sender.uid.as_raw(),
+        pid,
+        uid: *uid,
     }))
 }
 
@@ -528,9 +572,8 @@ impl HandoffWindowHold {
             if received.uid != binding.uid {
                 return Err(ClaimRefusal::User);
             }
-            let pid = u32::try_from(received.pid).map_err(|_| ClaimRefusal::Process)?;
             let snapshot = binding.client_snapshot.ok_or(ClaimRefusal::NoSnapshot)?;
-            verify_window_process(&held.windows[position], pid, snapshot)?;
+            verify_window_process(&held.windows[position], received.pid, snapshot)?;
             if !held
                 .placeholders
                 .iter()
@@ -675,7 +718,9 @@ impl HandoffWindowHold {
 
     /// A hold of one Window whose continuation claim already issued
     /// `ticket`, for the daemon binary's handler tests: the lib's types are
-    /// not constructible from there.
+    /// not constructible from there. Only with the `test-support` feature,
+    /// which only this package's own dev-dependency enables.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "a test seam names every binding")]

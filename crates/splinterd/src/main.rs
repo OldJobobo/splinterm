@@ -10266,26 +10266,27 @@ async fn claim_handoff_control(
             "a handoff control claim names a live incarnation",
         ));
     }
-    let live_incarnation = state
-        .runtimes
-        .lock()
-        .await
-        .handle(splint_id)
-        .map(|handle| handle.incarnation.value());
     let hold = state.handoff_window_hold.lock().unwrap().clone();
-    let presentation = TicketPresentation {
-        ticket: *ticket.as_bytes(),
-        claimant_pid: peer.pid,
-        claimant_start_time: peer.start_time(),
-        splint_id,
-        incarnation,
-        live_incarnation,
-        daemon_generation: state.daemon_generation,
-    };
     let redemption = {
-        // The live controller state is read and changed under the hold's
-        // mutex, inside `redeem`, so the expiry cannot interleave.
+        // The registry is held until the lease exists, so the live
+        // incarnation read here cannot change before it (a relaunch replaces
+        // the runtime under this lock). Nothing takes the controller lock and
+        // then the registry's, so this order cannot deadlock. The controller
+        // state is then read and changed under the hold's mutex, inside
+        // `redeem`, so the expiry cannot interleave either.
+        let runtimes = state.runtimes.lock().await;
         let mut controllers = state.controller.lock().await;
+        let presentation = TicketPresentation {
+            ticket: *ticket.as_bytes(),
+            claimant_pid: peer.pid,
+            claimant_start_time: peer.start_time(),
+            splint_id,
+            incarnation,
+            live_incarnation: runtimes
+                .handle(splint_id)
+                .map(|handle| handle.incarnation.value()),
+            daemon_generation: state.daemon_generation,
+        };
         hold.redeem(&presentation, Instant::now(), |placeholder| {
             controllers
                 .acquire(

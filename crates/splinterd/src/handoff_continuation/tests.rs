@@ -549,7 +549,7 @@ fn forged_sender_credentials_never_reach_the_daemon() {
     }
     assert_eq!(send_as(own_pid()).unwrap(), 16);
     let received = receive_claim(daemon.as_fd()).unwrap().unwrap();
-    assert_eq!(received.pid, i32::try_from(own_pid()).unwrap());
+    assert_eq!(received.pid, own_pid());
     assert_eq!(received.uid, geteuid().as_raw());
 }
 
@@ -603,7 +603,7 @@ fn a_second_or_concurrent_claim_never_issues_a_second_ticket() {
         claim: HandoffTicketClaim {
             daemon_generation: GENERATION,
         },
-        pid: i32::try_from(own_pid()).unwrap(),
+        pid: own_pid(),
         uid: geteuid().as_raw(),
     };
     let (daemon, client) = seqpacket_pair(true);
@@ -1055,4 +1055,19 @@ fn tickets_are_compared_in_full_and_never_printed() {
         presentation(&ticket, placeholder(0, 1, 1), 1)
     );
     assert!(!debug.contains("129"), "{debug}");
+}
+
+/// The kernel reports PID 0 for a sender outside the daemon's PID
+/// namespace; nix decodes it as a plain value, which is refused, as is any
+/// negative PID, before the credentials are used for anything.
+#[test]
+fn credentials_naming_no_visible_pid_are_refused() {
+    for pid in [0, -1, libc::pid_t::MIN] {
+        assert_eq!(sender_pid(pid), Err(ClaimRefusal::Credentials), "{pid}");
+    }
+    assert_eq!(sender_pid(1), Ok(1));
+    assert_eq!(
+        sender_pid(libc::pid_t::try_from(own_pid()).unwrap()),
+        Ok(own_pid())
+    );
 }

@@ -193,13 +193,18 @@ impl HandoffControlRestore {
         Some(ticket)
     }
 
-    /// Whether any pane may still present the ticket.
+    /// Whether any pane may still present the ticket. A ticket whose window
+    /// passed is forgotten here too, not only when a pane asks for it.
     #[must_use]
     pub fn is_armed(&self) -> bool {
-        self.armed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_some()
+        let mut armed = self.armed.lock().unwrap_or_else(PoisonError::into_inner);
+        if armed
+            .as_ref()
+            .is_some_and(|current| tokio::time::Instant::now() >= current.until)
+        {
+            *armed = None;
+        }
+        armed.is_some()
     }
 }
 
@@ -325,8 +330,8 @@ mod tests {
         assert!(!restore.is_armed(), "disarmed once every Splint took it");
 
         restore.arm(ticket, [first], Duration::ZERO);
+        assert!(!restore.is_armed(), "its window passed: forgotten unasked");
         assert!(restore.take(first).is_none(), "its window passed");
-        assert!(!restore.is_armed());
         restore.arm(ticket, [], CONTROL_RESTORE_WINDOW);
         assert!(!restore.is_armed(), "nothing to restore arms nothing");
     }
