@@ -5,15 +5,20 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 package_dir="$root/packaging"
 build=false
 confirm=true
+validate_args=()
 
 usage() {
   cat <<'EOF'
 Usage: tools/package/upgrade-local-package.sh [--build] [-y|--yes]
+                                              [--allow-vm-acceptance-live-handoff]
 
 Validate and install the newest local Splinterm Arch package.
 
   --build      First build a package from the clean, committed checkout
   -y, --yes    Skip the confirmation prompt
+  --allow-vm-acceptance-live-handoff
+               TEST-ONLY: accept a local VM acceptance package whose daemon
+               forces live handoff on (VM testbed only)
   -h, --help   Show this help
 EOF
 }
@@ -22,6 +27,14 @@ while (($#)); do
   case $1 in
     --build) build=true ;;
     -y|--yes) confirm=false ;;
+    --allow-vm-acceptance-live-handoff)
+      # TEST-ONLY packages belong in the VM testbed only, whose package-install
+      # action sets SPLINTERM_TESTBED_PACKAGE_ROOT.
+      [[ -n ${SPLINTERM_TESTBED_PACKAGE_ROOT:-} ]] || {
+        printf 'refusing --allow-vm-acceptance-live-handoff outside the VM testbed (SPLINTERM_TESTBED_PACKAGE_ROOT is unset)\n' >&2
+        exit 1
+      }
+      validate_args+=(--allow-vm-acceptance-live-handoff) ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -80,7 +93,8 @@ mcp_package=$(
   printf 'no matching optional MCP package found; rebuild the split package set\n' >&2
   exit 1
 }
-python "$root/tools/package/validate-package.py" "$package" --mcp-package "$mcp_package"
+python "$root/tools/package/validate-package.py" "$package" --mcp-package "$mcp_package" \
+  "${validate_args[@]}"
 
 installed=$(pacman -Q splinterm 2>/dev/null | awk '{print $2}' || true)
 mcp_installed=$(pacman -Q splinterm-mcp 2>/dev/null | awk '{print $2}' || true)

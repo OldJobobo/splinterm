@@ -139,6 +139,16 @@ Pass `--no-check` to build and validate package contents without running the
 complete package test suite. This is the mode used by `./install.sh --source`;
 `./install.sh --check` retains the complete package test suite.
 
+`--vm-acceptance-live-handoff` is for maintainers' live-upgrade VM acceptance
+only (`docs/handoff-vm-acceptance.md`). It builds a **test-only** daemon with
+the `vm-acceptance-live-handoff` feature, which forces live upgrade on before
+the release enables it. The checked-in recipes never enable that feature. The
+package's provenance record and package validation refuse a daemon carrying the
+feature's marker in any release-candidate or Nix package, and in a local
+package unless it was explicitly requested. Install such a package only in the
+VM testbed (`tools/testbed/omarchy-vm.sh package-install --confirm-guest-install
+--vm-acceptance-live-handoff`), and never publish or ship it.
+
 Its equivalent manual build from a clean checkout is:
 
 ```bash

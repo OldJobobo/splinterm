@@ -43,10 +43,14 @@ Actions:
   input ARGS...       Send guest-native ydotool keyboard or pointer input
   launch             Sync and launch development Splinterm on guest Wayland
   stop               Stop the isolated development daemon and test client
-  package-build      Build packages from clean committed HEAD inside the guest
+  package-build [--vm-acceptance-live-handoff]
+                     Build packages from clean committed HEAD inside the guest
+                     (the flag builds a TEST-ONLY daemon that forces live
+                     handoff on, for live-upgrade VM acceptance only)
   package-status     Inspect guest package and trusted sibling identities
-  package-install --confirm-guest-install
+  package-install --confirm-guest-install [--vm-acceptance-live-handoff]
                      Install the built guest package, preserving rollback copies
+                     (the flag accepts a TEST-ONLY VM acceptance package)
   package-launch     Launch installed /usr/bin siblings with private guest state
   package-config RELPATH | --clear
                      Seed (and, when live, write) a private config file from stdin
@@ -358,11 +362,17 @@ fi
 REMOTE
     ;;
   package-build)
-    (($# == 0)) || fail 'package-build takes no arguments'
+    build_arguments=()
+    if [[ $# == 1 && $1 == --vm-acceptance-live-handoff ]]; then
+      build_arguments=(--vm-acceptance-live-handoff)
+      printf 'TEST-ONLY: the guest daemon will force live handoff on (VM acceptance only).\n'
+    else
+      (($# == 0)) || fail 'package-build takes no arguments except --vm-acceptance-live-handoff'
+    fi
     prepare_package_checkout
     package_root="$remote_root/.testbed-package"
     ssh "${ssh_options[@]}" "$target" \
-      "cd $(printf '%q' "$package_root/source") && exec ./tools/package/build-local-package.sh"
+      "cd $(printf '%q' "$package_root/source") && exec ./tools/package/build-local-package.sh $(quote_command "${build_arguments[@]}")"
     ;;
   package-status)
     (($# == 0)) || fail 'package-status takes no arguments'
@@ -385,15 +395,25 @@ if [[ -e /usr/bin/splinterm || -L /usr/bin/splinterm ]]; then
   pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
   stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
   desktop-file-validate /usr/share/applications/com.oldjobobo.splinterm.desktop
+  # Plan 0061 M3.17: a VM acceptance build forces live handoff on.
+  if pacman -Qi splinterm | grep -Fq 'TEST-ONLY' \
+    || grep -aqF 'splinterm-vm-acceptance-live-handoff:' /usr/bin/splinterd; then
+    printf 'WARNING: the installed package is a TEST-ONLY VM acceptance build (live handoff forced on); reinstall a plain build\n'
+  fi
 fi
 REMOTE
     ;;
   package-install)
-    [[ ${1:-} == --confirm-guest-install && $# == 1 ]] \
-      || fail 'package-install requires --confirm-guest-install'
+    install_vm_acceptance=false
+    if [[ $# == 2 && ${1:-} == --confirm-guest-install && ${2:-} == --vm-acceptance-live-handoff ]]; then
+      install_vm_acceptance=true
+    else
+      [[ ${1:-} == --confirm-guest-install && $# == 1 ]] \
+        || fail 'package-install requires --confirm-guest-install [--vm-acceptance-live-handoff]'
+    fi
     package_root="$remote_root/.testbed-package"
     ssh "${ssh_options[@]}" "$target" \
-      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") bash -s" <<'REMOTE'
+      "SPLINTERM_TESTBED_PACKAGE_ROOT=$(printf '%q' "$package_root") SPLINTERM_TESTBED_RUNTIME_LEAF=$(printf '%q' "$remote_leaf") SPLINTERM_TESTBED_VM_ACCEPTANCE=$install_vm_acceptance bash -s" <<'REMOTE'
 set -euo pipefail
 package_root=$SPLINTERM_TESTBED_PACKAGE_ROOT
 source_root="$package_root/source"
@@ -424,7 +444,12 @@ if pacman -Q splinterm >/dev/null 2>&1; then
   printf 'rollback copies: %s\n' "$rollback"
 fi
 cd "$source_root"
-./tools/package/upgrade-local-package.sh --yes
+vm_acceptance_arguments=()
+if [[ $SPLINTERM_TESTBED_VM_ACCEPTANCE == true ]]; then
+  vm_acceptance_arguments=(--allow-vm-acceptance-live-handoff)
+  printf 'TEST-ONLY: installing a VM acceptance package that forces live handoff on.\n'
+fi
+./tools/package/upgrade-local-package.sh --yes "${vm_acceptance_arguments[@]}"
 command -v splinterm | grep -Fx /usr/bin/splinterm
 pacman -Qo /usr/bin/splinterm /usr/bin/splinterd
 stat -Lc 'identity: %d:%i %n' /usr/bin/splinterm /usr/bin/splinterd
@@ -470,13 +495,15 @@ socket="$runtime/splinterd.sock"
 window_state="$runtime/guest-window.json"
 state="$package_root/acceptance-state"
 config="$package_root/acceptance-config"
+# A live upgrade (Plan 0061) leaves packaged test processes executing a
+# replaced inode or a sealed memfd snapshot.
 for process in /proc/[0-9]*; do
   [[ -r $process/environ ]] || continue
   cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
     | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
-  executable=$(readlink -f "$process/exe" 2>/dev/null || true)
+  executable=$(readlink "$process/exe" 2>/dev/null || true)
   case $executable in
-    /usr/bin/splinterm|/usr/bin/splinterd)
+    /usr/bin/splinterm|/usr/bin/splinterd|'/usr/bin/splinterm (deleted)'|'/usr/bin/splinterd (deleted)'|'/memfd:splinterd-client (deleted)'|'/memfd:splinterd-daemon (deleted)')
       printf 'packaged test is already active; run package-stop first\n' >&2
       exit 1
       ;;
@@ -582,26 +609,36 @@ owner="$runtime/testbed-root"
   printf 'packaged guest runtime owner mismatch: %s\n' "$runtime" >&2
   exit 1
 }
+# A live upgrade (Plan 0061) leaves packaged test processes executing a
+# replaced inode ("/usr/bin/... (deleted)") or a sealed memfd snapshot (the
+# adopted daemon and relaunched Windows), still bound to the private socket.
+packaged_role() {
+  case $1 in
+    /usr/bin/splinterm|'/usr/bin/splinterm (deleted)'|'/memfd:splinterd-client (deleted)') printf client ;;
+    /usr/bin/splinterd|'/usr/bin/splinterd (deleted)'|'/memfd:splinterd-daemon (deleted)') printf daemon ;;
+    *) return 1 ;;
+  esac
+}
 stop_matching() {
   local expected=$1 process executable
   for process in /proc/[0-9]*; do
     [[ -r $process/environ ]] || continue
     cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
       | grep -Fqx "SPLINTERM_SOCKET=$socket" || continue
-    executable=$(readlink -f "$process/exe" 2>/dev/null || true)
-    [[ $executable == "$expected" ]] && kill "${process##*/}" 2>/dev/null || true
+    executable=$(readlink "$process/exe" 2>/dev/null || true)
+    [[ $(packaged_role "$executable") == "$expected" ]] && kill "${process##*/}" 2>/dev/null || true
   done
 }
-stop_matching /usr/bin/splinterm
-stop_matching /usr/bin/splinterd
+stop_matching client
+stop_matching daemon
 for _ in $(seq 1 100); do
   alive=false
   for process in /proc/[0-9]*; do
     [[ -r $process/environ ]] || continue
     if cat "$process/environ" 2>/dev/null | tr '\0' '\n' \
       | grep -Fqx "SPLINTERM_SOCKET=$socket"; then
-      executable=$(readlink -f "$process/exe" 2>/dev/null || true)
-      case $executable in /usr/bin/splinterm|/usr/bin/splinterd) alive=true ;; esac
+      executable=$(readlink "$process/exe" 2>/dev/null || true)
+      packaged_role "$executable" >/dev/null && alive=true
     fi
   done
   [[ $alive == false ]] && break

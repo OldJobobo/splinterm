@@ -27,6 +27,14 @@
 //!   the steps, each for one manifest kind, so the same environment, which
 //!   crosses both execs, fails the forward candidate but not the rollback
 //!   daemon (or, for the rollback-of-a-rollback case, the rollback daemon).
+//! * **An old-side drill.** The old generation's full runtime stop and exec
+//!   boundary (`stop_runtime_and_cross` in the binary) is reachable only
+//!   through a trusted-UI `Execute`, which no test build can pass: live
+//!   handoff is unsupported and the build is unpackaged. With
+//!   [`OLD_SIDE_DRILL_ENV`] set, a real daemon process runs `Execute` with
+//!   support and reasons forced and a test preparation that holds no forward
+//!   daemon, so the boundary is crossed but never armed, and it sends itself
+//!   a SIGTERM during the runtime stop (Plan 0061 M3.17).
 //!
 //! Packaging must never ship any of these seams. Every package recipe (the PKGBUILDs
 //! and the Nix package) generates its provenance record with
@@ -166,6 +174,12 @@ pub enum CandidateFaultPoint {
     /// SIGTERM ([`terminate_this_process`]) while the runtime's workers still
     /// run with them unblocked, as `systemctl stop` during rollback teardown.
     TerminateDuringTeardown,
+    /// At startup, starts a thread that outlives the runtime
+    /// ([`outlive_the_runtime`]), then fails as at [`Self::Startup`]. The
+    /// rollback executor's wait for one thread then times out, as it would
+    /// for a blocking task the runtime abandoned, and the candidate exits
+    /// loudly with no rollback exec (Plan 0061 M3.17).
+    GuardTimeout,
 }
 
 impl CandidateFaultPoint {
@@ -181,6 +195,7 @@ impl CandidateFaultPoint {
             Self::ActorStaging => "actor-staging",
             Self::StrayDescriptor => "stray-descriptor",
             Self::TerminateDuringTeardown => "terminate-during-teardown",
+            Self::GuardTimeout => "guard-timeout",
         }
     }
 }
@@ -220,9 +235,33 @@ pub fn leak_inheritable_descriptor() -> std::io::Result<std::os::fd::RawFd> {
     Ok(file.into_raw_fd())
 }
 
+/// Starts a detached thread that sleeps for `duration`, a stand-in for a
+/// blocking task that outlived the runtime's shutdown. Only the
+/// [`CandidateFaultPoint::GuardTimeout`] seam calls it.
+///
+/// # Errors
+/// Reports a failed thread spawn.
+pub fn outlive_the_runtime(duration: std::time::Duration) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("test-seam-outlives-runtime".to_owned())
+        .spawn(move || std::thread::sleep(duration))
+        .map(drop)
+}
+
+/// Arms the old-side drill in a real daemon process (see the module
+/// documentation). Read only by `integration-test` builds.
+pub const OLD_SIDE_DRILL_ENV: &str = "SPLINTERD_INTEGRATION_TEST_OLD_SIDE_DRILL";
+
+/// Whether [`OLD_SIDE_DRILL_ENV`] is set to `1`.
+#[must_use]
+pub fn old_side_drill() -> bool {
+    std::env::var(OLD_SIDE_DRILL_ENV).is_ok_and(|value| value == "1")
+}
+
 /// Sends this process a process-directed SIGTERM, which the kernel delivers
 /// to any thread that does not block it. Only the
-/// [`CandidateFaultPoint::TerminateDuringTeardown`] seam calls it.
+/// [`CandidateFaultPoint::TerminateDuringTeardown`] seam and the old-side
+/// drill ([`OLD_SIDE_DRILL_ENV`]) call it.
 ///
 /// # Errors
 /// Reports a failed `kill`.

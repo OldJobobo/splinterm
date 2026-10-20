@@ -253,6 +253,7 @@ jobs:
             tools/automation/test_dojo_picker.py \
             tools/testbed/test_font_fixture.py \
             tools/testbed/test_guest_window.py \
+            tools/testbed/test_handoff_vm_acceptance.py \
             tools/testbed/test_omarchy_vm.py \
             tools/testbed/test_qmp_input.py \
             tools/package/test_release_manifest.py \

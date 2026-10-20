@@ -9,6 +9,16 @@ repository.workspace = true
 
 [features]
 integration-test = []
+# TEST-ONLY (Plan 0061 M3.17, operator-approved 2026-10-19): live handoff
+# treats window continuity as ready for a local-committed-head package build
+# only, so VM acceptance can drive a real live upgrade before the release
+# enables it. Every other provenance, Nix-store included, stays refused. A
+# binary built with it carries a marker that package provenance generation
+# and package validation refuse for every release and Nix package; only an
+# explicitly requested local VM acceptance package
+# (`tools/package/build-local-package.sh --vm-acceptance-live-handoff`) may
+# contain it. No package recipe or release workflow enables it.
+vm-acceptance-live-handoff = []
 # Exposes the resume-hold constructor the daemon binary's own unit tests use
 # (Plan 0061 M3.16). Enabled only through the dev-dependency on this package
 # below: Cargo unifies it only when building test targets, never in `cargo

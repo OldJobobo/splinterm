@@ -1438,7 +1438,8 @@ fn build_daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 /// since Plan 0061 M3.11b, but no round leaves serve for the boundary while
 /// [`handoff_requests::live_handoff_support`] refuses, because `Execute` is
 /// refused before the gate. That covers every build until window continuity
-/// lands, and Nix-store builds in 0.2.0, and the boundary arms the exec only
+/// lands (except the test-only VM acceptance build), and Nix-store builds in
+/// 0.2.0, and the boundary arms the exec only
 /// under the same decision ([`arm_forward_exec`]). When the boundary comes
 /// back, the next round serves the same generation again on a new runtime
 /// ([`StartupSource::Resumed`]).
@@ -1987,8 +1988,9 @@ async fn connect_adoption_workload_units(required: bool) -> Option<WorkloadUnitM
 /// startup capture of an installed image it no longer runs from. Handoff is
 /// therefore unavailable until the daemon restarts (Plan 0061 D8); this
 /// holds for a forward adoption and a rollback adoption alike, since both
-/// serve with `RollbackAuthority::Unavailable`. Rebuilding that authority
-/// after a handoff is M3.17's.
+/// serve with `RollbackAuthority::SpentByHandoff`, whose `Execute` refusal
+/// names the restart. Rebuilding that authority after a handoff is deferred
+/// to Milestone 4 (M3.17 coordinator decision).
 #[allow(
     clippy::too_many_lines,
     reason = "one ordered adopt, commit, publish sequence with nothing fallible after commit"
@@ -2052,6 +2054,21 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
     if stage.injected_fault(splinterd::integration_test_seams::CandidateFaultPoint::Startup) {
         let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
             "injected candidate fault at startup".to_owned(),
+        ));
+        return Err(refused("startup", failure, None, signals));
+    }
+    #[cfg(feature = "integration-test")]
+    if stage.injected_fault(splinterd::integration_test_seams::CandidateFaultPoint::GuardTimeout) {
+        // Started on this (main) thread before the failure blocks the handoff
+        // signals, and sleeping well past the rollback executor's wait.
+        match splinterd::integration_test_seams::outlive_the_runtime(HANDOFF_GUARD_WAIT * 10) {
+            Ok(()) => warn!("test seam: started a thread that outlives the runtime"),
+            Err(error) => {
+                warn!(%error, "test seam: cannot start a thread that outlives the runtime");
+            }
+        }
+        let failure = stage.refuse(splinterd::handoff_adoption::AdoptionError::DaemonStartup(
+            "injected candidate fault: a thread outlives the runtime".to_owned(),
         ));
         return Err(refused("startup", failure, None, signals));
     }
@@ -2162,7 +2179,7 @@ async fn start_adopted(startup: AdoptedStartup) -> Result<StartedDaemon, Box<Can
         pinned_client_snapshot,
         workload_units,
         workload_cgroups_required: require_workload_cgroups,
-        rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::Unavailable),
+        rollback_handoff: Arc::new(handoff_requests::RollbackAuthority::SpentByHandoff),
         daemon_generation,
         handoff_listeners: Some(handoff_listeners),
     });
@@ -2528,6 +2545,15 @@ fn stop_runtime_and_cross(
     {
         error!(%error, "workload unit manager did not shut down cleanly");
     }
+    // The old-side drill: a termination while the runtime stops, after
+    // serve stopped listening for one, as `systemctl stop` at that moment.
+    #[cfg(feature = "integration-test")]
+    if splinterd::integration_test_seams::old_side_drill() {
+        match splinterd::integration_test_seams::terminate_this_process() {
+            Ok(()) => warn!("test seam: sent SIGTERM to this process during the runtime stop"),
+            Err(error) => warn!(%error, "test seam: cannot send SIGTERM during the runtime stop"),
+        }
+    }
     runtime.shutdown_timeout(HANDOFF_RUNTIME_STOP_TIMEOUT);
     let reason = match boundary.refresh_excluded_exits(&state.rollback_handoff, &excluded) {
         Ok(()) => cross_boundary(
@@ -2634,6 +2660,13 @@ fn carry_taken_terminations_with(
         // streams (capture failed before polling them) or pending under the
         // block, for the resumed round.
         let taken = captured_terminations(signals).map_err(ExecBoundaryError::SignalCarry)?;
+        if taken.terminate || taken.interrupt {
+            info!(
+                terminate = taken.terminate,
+                interrupt = taken.interrupt,
+                "daemon handoff: carrying taken termination signals across the exec boundary"
+            );
+        }
         // Both are replayed even when one fails, so neither taken request
         // is skipped; each one made pending reaches the resumed round.
         let mut failure = None;
@@ -2734,9 +2767,10 @@ fn cross_boundary(
 /// Compiled into every build since Plan 0061 M3.11b. The forward exec is
 /// armed only when [`handoff_requests::compiled_live_handoff_support`]
 /// allows it: never for a Nix-store build in 0.2.0, and never in any build
-/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false. `Execute` is
-/// already refused before the gate in both cases, so this second check is
-/// defence in depth. An unarmed plan returns `ExecNotWired` from the
+/// while `handoff_requests::WINDOW_CONTINUITY_READY` is false, except the
+/// test-only VM acceptance build (`vm-acceptance-live-handoff`, which
+/// packaging refuses). `Execute` is already refused before the gate in both
+/// cases, so this second check is defence in depth. An unarmed plan returns `ExecNotWired` from the
 /// boundary, and the old generation resumes in process.
 ///
 /// The argument vector is rebuilt from this daemon's state, never copied
@@ -3546,6 +3580,11 @@ async fn serve(
     let image_connections = Arc::new(Semaphore::new(IMAGE_CONTENT_CONNECTION_LIMIT));
     let mut connection_tasks = tokio::task::JoinSet::new();
     info!(socket = %socket.display(), image_socket = %image_socket.display(), development_terminal_access = state.development_terminal_access, "splinterd ready");
+    if handoff_requests::VM_ACCEPTANCE_BUILD {
+        warn!(
+            "TEST-ONLY VM acceptance build: live handoff treats window continuity as ready (Plan 0061 M3.17); never ship this build"
+        );
+    }
     let image_transfer_expiry =
         time::sleep_until(image_transfer_expiry_deadline(state, false).await);
     tokio::pin!(image_transfer_expiry);
@@ -11551,6 +11590,20 @@ async fn execute_daemon_handoff(
     report: &splinterm_protocol::HandoffReport,
     initiator: Option<HandoffInitiator>,
 ) -> ProtocolError {
+    // The old-side drill (integration-test builds only): the full attempt,
+    // runtime stop, and exec boundary in a real daemon process, with support
+    // and reasons forced and a preparation that holds no forward daemon, so
+    // the boundary is never armed and the generation resumes.
+    #[cfg(feature = "integration-test")]
+    if splinterd::integration_test_seams::old_side_drill() {
+        warn!("test seam: driving an unarmed handoff attempt to the exec boundary");
+        let mut gated = report.clone();
+        gated.blocking_reasons.clear();
+        return execute_daemon_handoff_with(state, &gated, Ok(()), initiator, |_| async {
+            Ok(ExecTestPreparation)
+        })
+        .await;
+    }
     // Evaluated here, not read back from the report's reasons. The report's
     // provenance is the one compiled into this daemon.
     let support = handoff_requests::live_handoff_support(report.build.provenance);
@@ -11575,7 +11628,9 @@ where
     if state.handoff_gate.phase() != HandoffGatePhase::Idle {
         return handoff_in_progress();
     }
-    if let Err(refused) = handoff_requests::refuse_blocked_execute(report, support) {
+    if let Err(refused) =
+        handoff_requests::refuse_blocked_execute(report, support, &state.rollback_handoff)
+    {
         return refused;
     }
     let mut attempt = match HandoffAttempt::begin(state).await {
@@ -12452,13 +12507,16 @@ impl<T: Send + Sync + 'static> ForwardPreparation for Arc<T> {
 }
 
 /// A test preparation that leaves serve for the exec boundary, with stand-in
-/// manifests: two empty sealable memfds and fixed encodings. Unit tests run
-/// under libtest's threads, so the boundary's guard always refuses and the
-/// attempt resumes before anything is sealed.
-#[cfg(test)]
+/// manifests: two empty sealable memfds and fixed encodings, and no forward
+/// daemon, so the boundary is never armed. Unit tests run under libtest's
+/// threads, so the boundary's guard always refuses and the attempt resumes
+/// before anything is sealed. The old-side drill (`integration-test` builds,
+/// `OLD_SIDE_DRILL_ENV`) uses it in a real daemon process, which reaches one
+/// thread, seals both memfds, and returns `ExecNotWired`.
+#[cfg(any(test, feature = "integration-test"))]
 struct ExecTestPreparation;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration-test"))]
 impl ForwardPreparation for ExecTestPreparation {
     type Manifests = ();
 
@@ -12478,22 +12536,21 @@ impl ForwardPreparation for ExecTestPreparation {
                 "splinterd-test-manifest",
                 rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
             )
-            .unwrap()
         };
-        Ok(Box::new(TestExecInputs {
-            forward: memfd(),
-            rollback: memfd(),
-        }))
+        match (memfd(), memfd()) {
+            (Ok(forward), Ok(rollback)) => Ok(Box::new(TestExecInputs { forward, rollback })),
+            _ => Err((self, ())),
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration-test"))]
 struct TestExecInputs {
     forward: std::os::fd::OwnedFd,
     rollback: std::os::fd::OwnedFd,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration-test"))]
 impl ExecBoundaryInputs for TestExecInputs {
     fn recorded_dojos(&self) -> HashMap<SplintId, DojoId> {
         HashMap::new()
@@ -17878,6 +17935,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn dry_run_reports_current_state_and_refused_execute_changes_nothing() {
         let state = test_state(false);
         let transient = Lair::transient("transient", PathBuf::from("/tmp"));
@@ -17935,6 +17996,10 @@ mod tests {
     /// continuity has not landed. The answer names `Unsupported` and the
     /// cause, and nothing is fenced, prepared, or broadcast.
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn execute_is_refused_before_the_gate_while_live_handoff_is_unsupported() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -17979,6 +18044,50 @@ mod tests {
         assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
         assert!(!state.handoff_exit.is_ready());
         assert_eq!(state.topology.read().await.revision(), revision);
+    }
+
+    /// Plan 0061 D8: a daemon started by a live handoff (adopted forward or
+    /// rollback) refuses another `Execute` before the gate until it restarts,
+    /// even with live handoff support forced and a report naming no reason.
+    /// Nothing is prepared, fenced, or broadcast, and the answer says that a
+    /// restart comes first.
+    #[tokio::test]
+    async fn an_adopted_daemon_refuses_another_handoff_before_the_gate() {
+        let mut state = test_state(false);
+        Arc::get_mut(&mut state).unwrap().rollback_handoff =
+            Arc::new(handoff_requests::RollbackAuthority::SpentByHandoff);
+        let full = daemon_handoff_report(&state).await.unwrap();
+        assert!(!full.rollback_available);
+        let report = gated_handoff_report(&state).await;
+        let mut subscription = state.topology_hub.lock().await.subscribe(1, 41);
+        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = execute_daemon_handoff_with(&state, &report, Ok(()), None, {
+            let prepared = Arc::clone(&prepared);
+            move |_| async move {
+                prepared.store(true, Ordering::SeqCst);
+                Ok(ExecTestPreparation)
+            }
+        })
+        .await;
+        assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+        assert_eq!(
+            refused.message,
+            format!(
+                "daemon handoff is unavailable: {}",
+                handoff_requests::SPENT_BY_HANDOFF
+            )
+        );
+        // The shipped wrapper names window continuity as well.
+        let shipped = execute_daemon_handoff(&state, &full, None).await;
+        assert!(
+            shipped.message.contains(handoff_requests::SPENT_BY_HANDOFF),
+            "{}",
+            shipped.message
+        );
+        assert!(!prepared.load(Ordering::SeqCst));
+        assert!(handoff_status_phases(&mut subscription).is_empty());
+        assert_eq!(state.handoff_gate.phase(), HandoffGatePhase::Idle);
+        assert!(!state.handoff_exit.is_ready());
     }
 
     /// Runs `Execute` as a packaged daemon with an installed upgrade would:
@@ -18336,6 +18445,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn a_second_execute_is_refused_while_a_handoff_runs_and_a_dry_run_still_reports() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -18906,6 +19019,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn execute_runs_the_gate_and_reaches_topology_subscribers_in_sequence() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;
@@ -19386,6 +19503,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     async fn an_installed_running_build_cancels_as_blocked_and_says_so() {
         let state = test_state(false);
         let report = gated_handoff_report(&state).await;

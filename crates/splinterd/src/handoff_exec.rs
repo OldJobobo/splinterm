@@ -30,7 +30,9 @@
 //! `handoff_requests::live_handoff_support`, decides whether a running
 //! daemon ever reaches the boundary. It refuses every build until window
 //! continuity lands (its `WINDOW_CONTINUITY_READY` flag, Plan 0061 M3.12 to
-//! M3.16), and it refuses a Nix-store build for all of 0.2.0 (operator
+//! M3.16; only the test-only `vm-acceptance-live-handoff` build, which
+//! packaging refuses, treats it as ready), and it refuses a Nix-store build
+//! for all of 0.2.0 (operator
 //! decision 2026-10-18). The dry-run report and `Execute` both use it, so
 //! `Execute` is refused before the handoff gate. The binary arms this call
 //! site ([`ExecInheritancePlan::with_forward_daemon`]) only when the
@@ -653,7 +655,8 @@ fn under_guard(
     // the binary armed. The binary arms a plan, and accepts `Execute` at all,
     // only when `handoff_requests::live_handoff_support` allows live
     // handoff. That function refuses Nix-store builds for 0.2.0, and every
-    // build while `WINDOW_CONTINUITY_READY` is false. Flipping that flag is
+    // build while `WINDOW_CONTINUITY_READY` is false, except the test-only
+    // VM acceptance build that packaging refuses. Flipping that flag is
     // the production enablement step, gated by the M3.17 proofs and VM
     // acceptance (see the module documentation, "Staging").
     let failure = match stage(&mut hook, ExecBoundaryStage::Exec) {

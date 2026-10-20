@@ -25,6 +25,14 @@
 //!   and the continuation, resume, and ticket work (M3.13 to M3.16), every
 //!   open Window would lose its daemon.
 //!
+//! The one exception is a test-only build: the `vm-acceptance-live-handoff`
+//! feature (Plan 0061 M3.17, operator-approved 2026-10-19) treats window
+//! continuity as ready for a local package build (`local-committed-head`)
+//! only, so VM acceptance can drive a real live upgrade before the constant
+//! flips. Nix and every other provenance stay refused in that build. It
+//! carries `VM_ACCEPTANCE_MARKER`, which package provenance generation
+//! and package validation refuse for release and Nix packages.
+//!
 //! While live handoff is unsupported no running daemon hands off, so no
 //! adopted daemon holds a Window and every resume ticket claim fails closed
 //! (M3.16, `splinterd::handoff_continuation`). No handoff prepare is ever
@@ -58,10 +66,55 @@ pub(crate) const FRESH_DAEMON_GENERATION: u64 = 1;
 /// and the Window continuation, resume, and ticket work (M3.13 to M3.16).
 /// Setting this to `true` is the production enablement step for live
 /// handoff. It may happen only once that work has landed, the M3.17 proofs
-/// pass, and VM acceptance is recorded. No build feature, environment
-/// variable, or test seam overrides it. Unit tests reach the gate only
-/// through [`live_handoff_support_with`], with readiness passed explicitly.
+/// pass, and VM acceptance is recorded. No environment variable or test
+/// seam overrides it. The only override is the test-only
+/// `vm-acceptance-live-handoff` build feature ([`VM_ACCEPTANCE_BUILD`]),
+/// which no package recipe enables and packaging refuses. Unit tests reach
+/// the gate only through [`live_handoff_support_with`], with readiness
+/// passed explicitly.
 pub(crate) const WINDOW_CONTINUITY_READY: bool = false;
+
+/// Whether this is the test-only VM acceptance build (Plan 0061 M3.17): the
+/// `vm-acceptance-live-handoff` feature treats window continuity as ready
+/// for a local package build ([`window_continuity_ready`]).
+pub(crate) const VM_ACCEPTANCE_BUILD: bool = cfg!(feature = "vm-acceptance-live-handoff");
+
+/// The bytes a VM acceptance build carries, which package provenance
+/// generation and package validation search for
+/// (`tools/package/generate-package-provenance.py`). Compiled only into that
+/// build, and read at run time so that the binary keeps it.
+#[cfg(feature = "vm-acceptance-live-handoff")]
+#[used]
+pub(crate) static VM_ACCEPTANCE_MARKER: [u8; 37] = *b"splinterm-vm-acceptance-live-handoff:";
+
+/// Whether window continuity counts as ready for a build of `provenance`:
+/// the shipped [`WINDOW_CONTINUITY_READY`], or the test-only VM acceptance
+/// build, and that only for a local package build (`local-committed-head`),
+/// the only provenance packaging lets it carry.
+fn window_continuity_ready(provenance: HandoffBuildProvenance) -> bool {
+    continuity_ready_with(WINDOW_CONTINUITY_READY, vm_acceptance_build(), provenance)
+}
+
+/// [`window_continuity_ready`] with the shipped constant and the build kind
+/// passed in, so unit tests can cover every build.
+const fn continuity_ready_with(
+    shipped: bool,
+    vm_acceptance: bool,
+    provenance: HandoffBuildProvenance,
+) -> bool {
+    shipped || (vm_acceptance && matches!(provenance, HandoffBuildProvenance::LocalCommittedHead))
+}
+
+#[cfg(feature = "vm-acceptance-live-handoff")]
+fn vm_acceptance_build() -> bool {
+    // Through `black_box`, so the marker stays in the binary.
+    std::hint::black_box(&VM_ACCEPTANCE_MARKER)[0] == b's'
+}
+
+#[cfg(not(feature = "vm-acceptance-live-handoff"))]
+const fn vm_acceptance_build() -> bool {
+    false
+}
 
 /// Why this daemon cannot perform a live handoff at all. On the wire every
 /// cause is [`HandoffBlockingReason::Unsupported`]; the cause is named only
@@ -109,16 +162,16 @@ impl LiveHandoffUnsupported {
 /// # Errors
 /// Returns the cause whenever live handoff is unavailable. Nix is checked
 /// first, so a Nix-store daemon keeps being named as such after window
-/// continuity lands.
+/// continuity lands, and in the VM acceptance build.
 pub(crate) fn live_handoff_support(
     provenance: HandoffBuildProvenance,
 ) -> Result<(), LiveHandoffUnsupported> {
-    live_handoff_support_with(provenance, WINDOW_CONTINUITY_READY)
+    live_handoff_support_with(provenance, window_continuity_ready(provenance))
 }
 
 /// [`live_handoff_support`] with window-continuity readiness passed in.
-/// Production passes only [`WINDOW_CONTINUITY_READY`]; only unit tests pass
-/// anything else.
+/// Production passes only [`WINDOW_CONTINUITY_READY`], or `true` in the
+/// test-only VM acceptance build; only unit tests pass anything else.
 fn live_handoff_support_with(
     provenance: HandoffBuildProvenance,
     window_continuity_ready: bool,
@@ -167,7 +220,19 @@ pub(crate) enum RollbackAuthority {
     NotPackaged,
     /// The daemon is packaged, but its rollback pair could not be retained.
     Unavailable,
+    /// This daemon was started by a live handoff: it is the adopted forward
+    /// daemon or the rollback daemon. Its sealed rollback pair closed at the
+    /// adoption commit, and no new one is captured, so it can perform no
+    /// further live handoff until it restarts (Plan 0061 D8). Rebuilding
+    /// rollback authority after a handoff is deferred to Milestone 4. On the
+    /// wire this is `RollbackUnavailable`; an `Execute` refusal names the
+    /// restart ([`SPENT_BY_HANDOFF`]).
+    SpentByHandoff,
 }
+
+/// Why an adopted or rollback daemon refuses another live handoff, worded
+/// for an `Execute` refusal (Plan 0061 D8).
+pub(crate) const SPENT_BY_HANDOFF: &str = "this daemon was itself started by a live upgrade or a rollback and keeps no rollback copy, so another live upgrade needs a daemon restart first";
 
 impl RollbackAuthority {
     /// Classifies the startup rollback capture, which must agree with the
@@ -206,7 +271,7 @@ impl RollbackAuthority {
     pub(crate) fn retained(&self) -> Option<&RollbackHandoffAuthority> {
         match self {
             Self::Retained { authority } => Some(authority),
-            Self::NotPackaged | Self::Unavailable => None,
+            Self::NotPackaged | Self::Unavailable | Self::SpentByHandoff => None,
         }
     }
 
@@ -214,7 +279,9 @@ impl RollbackAuthority {
         match self {
             Self::Retained { .. } => None,
             Self::NotPackaged => Some(HandoffBlockingReason::NotPackaged),
-            Self::Unavailable => Some(HandoffBlockingReason::RollbackUnavailable),
+            Self::Unavailable | Self::SpentByHandoff => {
+                Some(HandoffBlockingReason::RollbackUnavailable)
+            }
         }
     }
 
@@ -384,28 +451,40 @@ fn report_from(
 /// (no forward preparation, fence, capture, or runtime stop) while live
 /// handoff is unavailable.
 ///
+/// `rollback` is this daemon's rollback authority. An adopted or rollback
+/// daemon ([`RollbackAuthority::SpentByHandoff`]) always refuses, because its
+/// report names a rollback reason, and the message also says that a restart
+/// is needed first (Plan 0061 D8).
+///
 /// # Errors
 /// Returns `HandoffUnavailable` naming every reason the report names.
 pub(crate) fn refuse_blocked_execute(
     report: &HandoffReport,
     support: Result<(), LiveHandoffUnsupported>,
+    rollback: &RollbackAuthority,
 ) -> Result<(), ProtocolError> {
-    match support {
-        Err(unsupported) => {
-            let mut reasons = report.blocking_reasons.clone();
-            if !reasons.contains(&HandoffBlockingReason::Unsupported) {
-                reasons.push(HandoffBlockingReason::Unsupported);
-            }
-            Err(ProtocolError {
-                message: format!("daemon handoff is unavailable: {}", unsupported.message()),
-                ..ProtocolError::handoff_unavailable(reasons)
-            })
+    let mut reasons = report.blocking_reasons.clone();
+    let mut causes = Vec::with_capacity(2);
+    if let Err(unsupported) = support {
+        if !reasons.contains(&HandoffBlockingReason::Unsupported) {
+            reasons.push(HandoffBlockingReason::Unsupported);
         }
-        Ok(()) if report.blocking_reasons.is_empty() => Ok(()),
-        Ok(()) => Err(ProtocolError::handoff_unavailable(
-            report.blocking_reasons.clone(),
-        )),
+        causes.push(unsupported.message());
     }
+    if matches!(rollback, RollbackAuthority::SpentByHandoff) {
+        causes.push(SPENT_BY_HANDOFF);
+    }
+    if reasons.is_empty() && causes.is_empty() {
+        return Ok(());
+    }
+    let refused = ProtocolError::handoff_unavailable(reasons);
+    if causes.is_empty() {
+        return Err(refused);
+    }
+    Err(ProtocolError {
+        message: format!("daemon handoff is unavailable: {}", causes.join("; ")),
+        ..refused
+    })
 }
 
 /// The answer to an `Execute` whose gate ran and cancelled: unavailable, with
@@ -502,6 +581,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn an_unpackaged_build_always_reports_not_packaged() {
         // Startup found a record but could not retain the pair; an unpackaged
         // build still has no installed pair to roll back to.
@@ -526,6 +609,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn idle_development_daemon_reports_not_packaged_and_unsupported() {
         let topology = Topology::new();
         let report = report_from(
@@ -549,9 +636,12 @@ mod tests {
                 HandoffBlockingReason::Unsupported
             ]
         );
-        let refused =
-            refuse_blocked_execute(&report, live_handoff_support(report.build.provenance))
-                .expect_err("an unpackaged daemon refuses execute before the gate runs");
+        let refused = refuse_blocked_execute(
+            &report,
+            live_handoff_support(report.build.provenance),
+            &RollbackAuthority::NotPackaged,
+        )
+        .expect_err("an unpackaged daemon refuses execute before the gate runs");
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
     }
@@ -594,7 +684,8 @@ mod tests {
                 HandoffBlockingReason::Unsupported
             ]
         );
-        let refused = refuse_blocked_execute(&report, support).unwrap_err();
+        let refused =
+            refuse_blocked_execute(&report, support, &RollbackAuthority::Unavailable).unwrap_err();
         assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
         assert_eq!(
             refused.message,
@@ -604,7 +695,8 @@ mod tests {
         // With nothing else blocking, Nix alone still refuses, as Unsupported.
         let mut alone = report;
         alone.blocking_reasons.clear();
-        let refused = refuse_blocked_execute(&alone, support).unwrap_err();
+        let refused =
+            refuse_blocked_execute(&alone, support, &RollbackAuthority::Unavailable).unwrap_err();
         assert!(refused.message.contains("Nix-store"), "{}", refused.message);
         assert_eq!(
             refused.handoff_blocking_reasons,
@@ -615,6 +707,10 @@ mod tests {
     /// A packaged Arch build is unsupported only until window continuity
     /// lands; once it has, nothing in the decision blocks it.
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn a_packaged_build_is_unsupported_only_until_window_continuity() {
         for provenance in [
             HandoffBuildProvenance::ReleaseCandidate,
@@ -652,8 +748,12 @@ mod tests {
                     HandoffBlockingReason::Unsupported
                 ]
             );
-            let refused =
-                refuse_blocked_execute(&pending, live_handoff_support(provenance)).unwrap_err();
+            let refused = refuse_blocked_execute(
+                &pending,
+                live_handoff_support(provenance),
+                &RollbackAuthority::Unavailable,
+            )
+            .unwrap_err();
             assert_eq!(
                 refused.message,
                 "daemon handoff is unavailable: live handoff is not available in this release because open Windows cannot survive it yet; restart the daemon to run the upgraded build"
@@ -696,10 +796,11 @@ mod tests {
         );
         let mut gated = blocked.clone();
         gated.blocking_reasons.clear();
-        assert!(refuse_blocked_execute(&gated, supported).is_ok());
+        assert!(refuse_blocked_execute(&gated, supported, &RollbackAuthority::Unavailable).is_ok());
         // Unsupported support refuses a report without reasons, and names
         // Unsupported.
-        let refused = refuse_blocked_execute(&gated, unsupported).unwrap_err();
+        let refused = refuse_blocked_execute(&gated, unsupported, &RollbackAuthority::Unavailable)
+            .unwrap_err();
         assert_eq!(
             refused.handoff_blocking_reasons,
             [HandoffBlockingReason::Unsupported]
@@ -707,13 +808,20 @@ mod tests {
         // `Unsupported` in the report refuses on its own now.
         let mut unsupported_only = gated.clone();
         unsupported_only.blocking_reasons = vec![HandoffBlockingReason::Unsupported];
-        let refused = refuse_blocked_execute(&unsupported_only, supported).unwrap_err();
+        let refused = refuse_blocked_execute(
+            &unsupported_only,
+            supported,
+            &RollbackAuthority::Unavailable,
+        )
+        .unwrap_err();
         assert_eq!(refused.message, "daemon handoff is unavailable");
         assert_eq!(
             refused.handoff_blocking_reasons,
             [HandoffBlockingReason::Unsupported]
         );
-        let refused = refuse_blocked_execute(&blocked, unsupported).unwrap_err();
+        let refused =
+            refuse_blocked_execute(&blocked, unsupported, &RollbackAuthority::Unavailable)
+                .unwrap_err();
         assert_eq!(
             refused.handoff_blocking_reasons,
             [
@@ -740,6 +848,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "vm-acceptance-live-handoff",
+        ignore = "asserts the shipped live handoff decision, which this test-only build overrides"
+    )]
     fn transient_lairs_block_with_an_exact_count_and_a_bounded_named_subset() {
         let mut topology = Topology::new();
         insert(&mut topology, Lair::new("durable", PathBuf::from("/tmp")));
@@ -791,6 +903,100 @@ mod tests {
         );
     }
 
+    /// Plan 0061 D8: a daemon started by a live handoff, whether the adopted
+    /// forward daemon or the rollback daemon, refuses another live handoff
+    /// until it restarts, even once window continuity is ready and nothing
+    /// else blocks. Its report names `RollbackUnavailable` and no rollback
+    /// copy, and the `Execute` refusal says a restart comes first.
+    #[test]
+    fn a_daemon_started_by_a_handoff_refuses_another_until_restart() {
+        let spent = RollbackAuthority::SpentByHandoff;
+        assert!(spent.retained().is_none());
+        assert_eq!(spent.prepare_forward().err(), Some(ForwardRefusal::Failed));
+        for provenance in [
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::LocalCommittedHead,
+        ] {
+            let packaged = HandoffBuild {
+                provenance,
+                ..build()
+            };
+            // Window continuity forced ready: only D8 remains.
+            let support = live_handoff_support_with(provenance, true);
+            assert_eq!(support, Ok(()));
+            let report = report_from(
+                FRESH_DAEMON_GENERATION + 1,
+                packaged,
+                capabilities(),
+                &Topology::new(),
+                2,
+                &spent,
+                support,
+            );
+            report.validate().unwrap();
+            assert!(!report.rollback_available);
+            assert_eq!(
+                report.blocking_reasons,
+                [HandoffBlockingReason::RollbackUnavailable]
+            );
+            let refused = refuse_blocked_execute(&report, support, &spent).unwrap_err();
+            assert_eq!(refused.code, ErrorCode::HandoffUnavailable);
+            assert_eq!(
+                refused.message,
+                format!("daemon handoff is unavailable: {SPENT_BY_HANDOFF}")
+            );
+            assert_eq!(refused.handoff_blocking_reasons, report.blocking_reasons);
+            // Even a report stripped of its reasons is refused for D8.
+            let mut stripped = report.clone();
+            stripped.blocking_reasons.clear();
+            let refused = refuse_blocked_execute(&stripped, support, &spent).unwrap_err();
+            assert!(
+                refused.message.contains("needs a daemon restart first"),
+                "{}",
+                refused.message
+            );
+            // While window continuity is pending, both causes are named.
+            let pending = live_handoff_support_with(provenance, false);
+            let refused = refuse_blocked_execute(&report, pending, &spent).unwrap_err();
+            assert_eq!(
+                refused.message,
+                format!(
+                    "daemon handoff is unavailable: {}; {SPENT_BY_HANDOFF}",
+                    LiveHandoffUnsupported::WindowContinuityPending.message()
+                )
+            );
+            assert_eq!(
+                refused.handoff_blocking_reasons,
+                [
+                    HandoffBlockingReason::RollbackUnavailable,
+                    HandoffBlockingReason::Unsupported
+                ]
+            );
+        }
+        // An unpackaged build (the real-exec tests) reports `NotPackaged`, as
+        // every unpackaged build does, and still names the restart.
+        let report = report_from(
+            FRESH_DAEMON_GENERATION + 1,
+            build(),
+            capabilities(),
+            &Topology::new(),
+            0,
+            &spent,
+            live_handoff_support_with(HandoffBuildProvenance::Unpackaged, true),
+        );
+        report.validate().unwrap();
+        assert_eq!(
+            report.blocking_reasons,
+            [HandoffBlockingReason::NotPackaged]
+        );
+        let refused = refuse_blocked_execute(&report, Ok(()), &spent).unwrap_err();
+        assert!(
+            refused.message.contains(SPENT_BY_HANDOFF),
+            "{}",
+            refused.message
+        );
+    }
+
     #[test]
     fn compiled_build_identity_reports_a_valid_dry_run() {
         let report = handoff_report(
@@ -803,6 +1009,15 @@ mod tests {
         assert_eq!(report.build.version, env!("CARGO_PKG_VERSION"));
         assert_ne!(report.build.identity, [0; HANDOFF_BUILD_IDENTITY_BYTES]);
         assert_eq!(report.private_protocol.minimum, PROTOCOL_VERSION);
+        if VM_ACCEPTANCE_BUILD {
+            // An unpackaged test build is still refused, as not packaged.
+            assert!(
+                report
+                    .blocking_reasons
+                    .contains(&HandoffBlockingReason::NotPackaged)
+            );
+            return;
+        }
         assert!(
             report
                 .blocking_reasons
@@ -814,6 +1029,73 @@ mod tests {
             live_handoff_support(report.build.provenance)
         );
         assert!(compiled_live_handoff_support().is_err());
+    }
+
+    /// The shipped decision never forces window continuity; only the
+    /// test-only VM acceptance build does, and even that build refuses Nix.
+    #[test]
+    fn only_the_vm_acceptance_build_forces_window_continuity() {
+        assert_eq!(
+            VM_ACCEPTANCE_BUILD,
+            cfg!(feature = "vm-acceptance-live-handoff")
+        );
+        assert_eq!(
+            window_continuity_ready(HandoffBuildProvenance::LocalCommittedHead),
+            VM_ACCEPTANCE_BUILD
+        );
+        assert_eq!(
+            live_handoff_support(HandoffBuildProvenance::NixStore),
+            Err(LiveHandoffUnsupported::NixStore)
+        );
+        // In either build, a release candidate waits for window continuity.
+        assert_eq!(
+            live_handoff_support(HandoffBuildProvenance::ReleaseCandidate),
+            Err(LiveHandoffUnsupported::WindowContinuityPending)
+        );
+        let packaged = live_handoff_support(HandoffBuildProvenance::LocalCommittedHead);
+        if VM_ACCEPTANCE_BUILD {
+            assert_eq!(packaged, Ok(()));
+        } else {
+            assert_eq!(
+                packaged,
+                Err(LiveHandoffUnsupported::WindowContinuityPending)
+            );
+        }
+    }
+
+    /// The VM acceptance override applies only to a local package build: a
+    /// feature build with release-candidate, Nix-store, or unpackaged
+    /// provenance still waits for window continuity (and Nix stays refused
+    /// first), while the shipped constant, once true, covers every kind.
+    #[test]
+    fn the_vm_acceptance_override_covers_only_local_package_builds() {
+        let kinds = [
+            HandoffBuildProvenance::Unpackaged,
+            HandoffBuildProvenance::LocalCommittedHead,
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::NixStore,
+        ];
+        for provenance in kinds {
+            let local = provenance == HandoffBuildProvenance::LocalCommittedHead;
+            assert_eq!(continuity_ready_with(false, true, provenance), local);
+            assert!(!continuity_ready_with(false, false, provenance));
+            assert!(continuity_ready_with(true, false, provenance));
+        }
+        for refused in [
+            HandoffBuildProvenance::ReleaseCandidate,
+            HandoffBuildProvenance::NixStore,
+        ] {
+            let support =
+                live_handoff_support_with(refused, continuity_ready_with(false, true, refused));
+            assert!(support.is_err(), "{refused:?}: {support:?}");
+        }
+        assert_eq!(
+            live_handoff_support_with(
+                HandoffBuildProvenance::NixStore,
+                continuity_ready_with(false, true, HandoffBuildProvenance::NixStore),
+            ),
+            Err(LiveHandoffUnsupported::NixStore)
+        );
     }
 
     #[test]

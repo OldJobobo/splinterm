@@ -21,6 +21,16 @@ DESCRIPTOR_MANIFEST = 1
 # Plan 0061 D9). Such a build also honours test-only handoff seams, so no
 # packaged daemon or client may contain it.
 INTEGRATION_TEST_MARKER = b"splinterm-integration-test-salt:"
+# Every daemon built with the TEST-ONLY `vm-acceptance-live-handoff` feature
+# carries this marker (`VM_ACCEPTANCE_MARKER` in
+# crates/splinterd/src/handoff_requests.rs, Plan 0061 M3.17). Such a daemon
+# treats window continuity as ready and performs live handoff before the
+# release enables it, so no release or Nix package may contain it. Only an
+# explicitly requested local VM acceptance package
+# (`--allow-vm-acceptance-live-handoff`, local-committed-head provenance)
+# may, and then its daemon must.
+VM_ACCEPTANCE_MARKER = b"splinterm-vm-acceptance-live-handoff:"
+VM_ACCEPTANCE_PROVENANCE = "local-committed-head"
 
 
 def sha256(path: Path) -> str:
@@ -31,15 +41,55 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def contains_integration_test_marker(path: Path) -> bool:
-    overlap = len(INTEGRATION_TEST_MARKER) - 1
+def contains_marker(path: Path, marker: bytes) -> bool:
+    overlap = len(marker) - 1
     tail = b""
     with path.open("rb") as stream:
         while block := stream.read(64 * 1024):
-            if INTEGRATION_TEST_MARKER in tail + block:
+            if marker in tail + block:
                 return True
             tail = block[-overlap:]
     return False
+
+
+def contains_integration_test_marker(path: Path) -> bool:
+    return contains_marker(path, INTEGRATION_TEST_MARKER)
+
+
+def contains_vm_acceptance_marker(path: Path) -> bool:
+    return contains_marker(path, VM_ACCEPTANCE_MARKER)
+
+
+def check_vm_acceptance(
+    provenance: str, daemon: Path, client: Path, allow_vm_acceptance: bool
+) -> bool:
+    """Refuse a test-only VM acceptance build anywhere but an explicitly
+    requested local package; return whether this is one."""
+    marked = [
+        binary for binary in (daemon, client) if contains_vm_acceptance_marker(binary)
+    ]
+    if marked and provenance != VM_ACCEPTANCE_PROVENANCE:
+        raise ValueError(
+            f"{marked[0]} was built with the test-only vm-acceptance-live-handoff "
+            "feature; release and Nix packages must never enable it"
+        )
+    if marked and not allow_vm_acceptance:
+        raise ValueError(
+            f"{marked[0]} was built with the test-only vm-acceptance-live-handoff "
+            "feature; only an explicitly requested local VM acceptance package "
+            "(--allow-vm-acceptance-live-handoff) may contain it"
+        )
+    if allow_vm_acceptance and provenance != VM_ACCEPTANCE_PROVENANCE:
+        raise ValueError(
+            "a VM acceptance live-handoff package is test-only and must have "
+            f"{VM_ACCEPTANCE_PROVENANCE} provenance"
+        )
+    if allow_vm_acceptance and daemon not in marked:
+        raise ValueError(
+            "a VM acceptance live-handoff package was requested, but the daemon "
+            "was not built with the vm-acceptance-live-handoff feature"
+        )
+    return bool(marked)
 
 
 def pair_identity(commit: str, provenance: str, version: str) -> str:
@@ -76,6 +126,7 @@ def generate(
     version: str,
     daemon: Path,
     client: Path,
+    allow_vm_acceptance: bool = False,
 ) -> dict[str, object]:
     if not daemon.is_file() or not client.is_file():
         raise ValueError("daemon and client must be regular files")
@@ -85,6 +136,7 @@ def generate(
                 f"{binary} was built with the splinterd integration-test feature; "
                 "packaged builds must never enable it"
             )
+    check_vm_acceptance(provenance, daemon, client, allow_vm_acceptance)
     return {
         "architecture": "x86_64",
         "build_version": version,
@@ -106,6 +158,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--daemon", required=True, type=Path)
     result.add_argument("--client", required=True, type=Path)
     result.add_argument("--output", required=True, type=Path)
+    result.add_argument(
+        "--allow-vm-acceptance-live-handoff",
+        action="store_true",
+        help=(
+            "TEST-ONLY: this local package's daemon is a VM acceptance build "
+            "that forces live handoff on (never for release or Nix packages)"
+        ),
+    )
     return result
 
 
@@ -118,6 +178,7 @@ def main() -> int:
             arguments.version,
             arguments.daemon,
             arguments.client,
+            arguments.allow_vm_acceptance_live_handoff,
         )
     except (OSError, ValueError) as error:
         print(error, file=__import__("sys").stderr)
