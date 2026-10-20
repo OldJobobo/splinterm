@@ -356,10 +356,20 @@ Do not claim that a slice is complete unless both of the following exist:
 
 ### 4.4 Local Client Installation and Trusted-UI Identity
 
-The daemon grants the graphical trusted-UI bypass only when the client process
-matches the device and inode of the `splinterm` binary adjacent to the running
-`splinterd` executable. On the packaged system, that authority is
-`/usr/bin/splinterm` next to `/usr/bin/splinterd`.
+The daemon grants the graphical trusted-UI bypass to a new connection only when
+the client process, at `Hello`, matches the device and inode of the `splinterm`
+binary adjacent to the running `splinterd` executable. On the packaged system,
+that authority is `/usr/bin/splinterm` next to `/usr/bin/splinterd`.
+
+Trust is per connection (operator decision, 2026-10-20). A connection trusted
+at `Hello` stays trusted while its own process still executes the file it
+executed at `Hello`. On every request the daemon re-reads that process's
+executable device and inode from `/proc/<pid>/exe`, and the connection's pinned
+pidfd proves the process is still the one that said `Hello`. A package upgrade
+that replaces the installed binary therefore leaves running Windows trusted.
+A process that executes another program over its socket loses trust, and so
+does a process that can no longer be proven to be the same one. Every new
+connection must match the installed binary, or the pinned snapshot below.
 
 One exception, approved by the operator on 2026-10-18 for the upgrade handoff
 (Plan 0037, ADR 0011): a daemon adopted through a verified handoff may also
@@ -394,8 +404,6 @@ For installation work:
   save a rollback copy, use `pkexec`, remove any shadowing user-local client, and
   disclose that Pacman integrity checks will report the host file as altered
   until reinstall or upgrade.
-* Reopen existing Splinterm windows after replacement. Their running executable
-  retains the old inode and no longer matches the newly installed trusted UI.
 * Validate non-graphically with normal human-mode `/usr/bin/splinterm list`,
   checksum and ownership checks, `command -v splinterm`, and
   `desktop-file-validate`. Do not use `--output json list` as the trusted-UI

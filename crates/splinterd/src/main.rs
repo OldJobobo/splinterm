@@ -4434,7 +4434,12 @@ async fn serve_authenticated(
         bail!("incompatible protocol version");
     }
     let trusted_ui_client = role == ClientRole::TrustedUi;
-    let matching_splinterm = peer.is_matching_splinterm();
+    // AGENTS.md §4.4: the installed-client test runs once, here; afterwards
+    // this connection keeps it while its process runs that same executable.
+    let mut connection_peer = peer.clone();
+    connection_peer.record_hello_client_match(peer_monitor);
+    let peer = &connection_peer;
+    let matching_splinterm = peer.connection_matches_splinterm();
     let remote_interactive_client = role == ClientRole::RemoteInteractive;
     let matching_graphical_relay = peer.is_matching_graphical_relay();
     debug!(
@@ -5073,7 +5078,7 @@ fn first_party_human_ui(
     peer: &PeerIdentity,
     scopes: &[AccessScope],
 ) -> bool {
-    ((trusted_ui_client && peer.is_matching_splinterm()) || remote_interactive_client)
+    ((trusted_ui_client && peer.connection_matches_splinterm()) || remote_interactive_client)
         && first_party_ui_scopes(scopes)
 }
 
@@ -6536,7 +6541,7 @@ fn interactive_authorization_context(
 ) -> Option<RequestAuthorizationContext> {
     interactive_bypass(
         trusted_ui_client,
-        peer.is_matching_splinterm(),
+        peer.connection_matches_splinterm(),
         remote_interactive_client,
         request,
     )
@@ -8413,7 +8418,7 @@ async fn handle_authorized_request(
         }
         Request::RequestImageContent { request } => {
             request.validate()?;
-            if !trusted_ui_client || !peer.is_matching_splinterm() {
+            if !trusted_ui_client || !peer.connection_matches_splinterm() {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
                     "image content is available only to the trusted local UI",
@@ -8674,7 +8679,7 @@ async fn handle_authorized_request(
             }
             if !authorization.may_manage_authorization(
                 state.development_terminal_access,
-                peer.is_matching_splinterm(),
+                peer.connection_matches_splinterm(),
             ) {
                 return Err(ProtocolError::new(
                     ErrorCode::Unauthorized,
@@ -8732,7 +8737,7 @@ async fn handle_authorized_request(
             if !owns_lair_grant
                 && !authorization.may_manage_authorization(
                     state.development_terminal_access,
-                    peer.is_matching_splinterm(),
+                    peer.connection_matches_splinterm(),
                 )
             {
                 return Err(ProtocolError::new(
@@ -9871,7 +9876,7 @@ async fn handle_authorized_request(
         } => {
             let incarnation = incarnation.ok_or_else(internal)?;
             let include_images =
-                include_image_metadata(trusted_ui_client, peer.is_matching_splinterm());
+                include_image_metadata(trusted_ui_client, peer.connection_matches_splinterm());
             let required = if scrollback_rows == 0 {
                 vec![AccessScope::Observe]
             } else {
@@ -10256,7 +10261,7 @@ async fn handle_authorized_request(
             splint_id,
             incarnation,
         } => {
-            let trusted_local = trusted_ui_client && peer.is_matching_splinterm();
+            let trusted_local = trusted_ui_client && peer.connection_matches_splinterm();
             if !trusted_local
                 && !authorization.policy_authorized()
                 && authorization.authorized_grant_id().is_none()
@@ -10574,7 +10579,7 @@ fn require_trusted_local_ui(
     trusted_ui_client: bool,
     peer: &PeerIdentity,
 ) -> Result<(), ProtocolError> {
-    if trusted_ui_client && peer.is_matching_splinterm() {
+    if trusted_ui_client && peer.connection_matches_splinterm() {
         Ok(())
     } else {
         Err(ProtocolError::new(
@@ -18065,6 +18070,9 @@ mod tests {
                 .expect("snapshot test executable"),
         );
         assert!(peer.is_matching_splinterm());
+        // Its connection said Hello as the pinned client.
+        peer.record_hello_client_match(None);
+        assert!(peer.connection_matches_splinterm());
         peer
     }
 

@@ -410,11 +410,13 @@ transaction that did not complete is repaired by installing the package again.
 
 Trusted graphical authority requires `/usr/bin/splinterm` to match the device
 and inode of the client sibling adjacent to the running `/usr/bin/splinterd`.
-After an upgrade replaces that sibling, close and reopen every existing
-Splinterm Window: an already-running client retains the old inode and will be
-rejected as unauthorized. Verify the new daemon/client sibling identity before
-launching graphical acceptance; graphical testing remains a separately approved,
-guarded operation.
+That check runs when a connection says `Hello`. A Window already connected keeps
+its trusted connection after an upgrade replaces that sibling, as long as its
+process runs the file it ran then. A new connection from a client that still
+runs the old inode, such as a Window reconnecting after a daemon restart, is
+rejected as unauthorized: reopen that Window from the launcher. Verify the new
+daemon/client sibling identity before launching graphical acceptance; graphical
+testing remains a separately approved, guarded operation.
 
 The equivalent manual lifecycle for the stable 0.1.1 packages built above is
 shown below. Run it from a terminal not owned by `splinterd`; stopping the daemon
