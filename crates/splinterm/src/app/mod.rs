@@ -8,6 +8,7 @@ mod diagnostics_cli;
 mod font_watch;
 mod human_output;
 mod integrations;
+mod interrupted;
 mod keymap_cli;
 mod local_service;
 mod machine;

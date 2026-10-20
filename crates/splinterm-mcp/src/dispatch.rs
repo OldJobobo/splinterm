@@ -10,7 +10,7 @@ use std::{
 use anyhow::Error;
 use serde_json::{Value, json};
 use splinterm_automation_client::{
-    Connection, project_terminal_rows, protocol_error, request_cancellation,
+    Connection, is_connection_loss, project_terminal_rows, protocol_error, request_cancellation,
 };
 use splinterm_core::{Axis, DojoId, LairId, LayoutNode, SplintId, SplitRatio, SplitSide};
 use splinterm_protocol::{
@@ -333,6 +333,9 @@ async fn daemon_request(
         .await
 }
 
+/// What a tool call whose daemon connection ended says (Plan 0061 M3.12b).
+pub(crate) const CONNECTION_LOST_DURING_CALL: &str = "the splinterd connection ended during the call, as when splinterd is upgraded; it was not retried and may or may not have taken effect, so check the current state before calling again";
+
 pub(crate) fn map_client_error(error: &Error) -> DispatchFailure {
     if let Some(reason) = request_cancellation(error) {
         return match reason {
@@ -343,6 +346,11 @@ pub(crate) fn map_client_error(error: &Error) -> DispatchFailure {
                 DispatchFailure::new("cancelled", "the tool call was cancelled", true)
             }
         };
+    }
+    // Plan 0061 M3.12b: a call is never retried after its connection ended;
+    // whether it took effect is unknown.
+    if is_connection_loss(error) {
+        return DispatchFailure::new("internal", CONNECTION_LOST_DURING_CALL, false);
     }
     let Some(error) = protocol_error(error) else {
         return DispatchFailure::internal();

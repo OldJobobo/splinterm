@@ -43,9 +43,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 mod daemon_handoff;
+mod reconnect;
 
 pub use daemon_handoff::{
     DaemonHandoffOutcome, HANDOFF_DECISION_SAFETY_MARGIN, HandoffDecision, HandoffDecisionPrompt,
+};
+pub use reconnect::{
+    DaemonChange, DaemonIdentity, RECONNECT_INITIAL_DELAY, RECONNECT_MAX_DELAY, ReconnectBackoff,
+    is_connection_loss, retry_until,
 };
 
 const READ_CHUNK_BYTES: usize = 16 * 1024;
@@ -1954,6 +1959,19 @@ impl std::fmt::Display for DaemonClosedConnection {
 
 impl std::error::Error for DaemonClosedConnection {}
 
+/// The daemon ended the connection in the middle of a frame or of a terminal
+/// frame transaction, as when its process image is replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DaemonConnectionTruncated(&'static str);
+
+impl std::fmt::Display for DaemonConnectionTruncated {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "splinterd closed {}", self.0)
+    }
+}
+
+impl std::error::Error for DaemonConnectionTruncated {}
+
 /// Whether an error is the daemon's clean end of file between frames.
 #[must_use]
 pub fn is_daemon_closed_connection(error: &anyhow::Error) -> bool {
@@ -3741,12 +3759,16 @@ impl Connection {
                 .await?;
             if read == 0 {
                 if self.read_buffer.is_empty() && self.server_frame_assembler.has_pending() {
-                    bail!("splinterd closed an incomplete terminal frame transaction");
+                    return Err(anyhow::Error::new(DaemonConnectionTruncated(
+                        "an incomplete terminal frame transaction",
+                    )));
                 }
                 if self.read_buffer.is_empty() {
                     return Err(anyhow::Error::new(DaemonClosedConnection));
                 }
-                bail!("splinterd closed a partial frame");
+                return Err(anyhow::Error::new(DaemonConnectionTruncated(
+                    "a partial frame",
+                )));
             }
             self.read_buffer
                 .extend_from_slice(&self.read_scratch[..read]);

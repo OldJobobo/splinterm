@@ -248,6 +248,36 @@ command has no machine output and rejects `--output`, `--schema-major`,
 | 6 | The upgrade did not complete: the same daemon process serves the same generation with the previous build, after a rollback or because it never left. Terminals were kept. |
 | 7 | The connection closed as a committed upgrade's does, but the result is unconfirmed: no daemon answered within 15 seconds, or the daemon process could not be identified (for example from another PID namespace). Run `splinterm upgrade` to check. |
 
+### Commands during an upgrade
+
+While an upgrade prepares, the daemon refuses requests that would change
+something, and a committed upgrade ends every client connection as the daemon
+starts the installed build. Commands, in human and machine mode, never retry a
+mutation, because whether it took effect is unknown:
+
+- A refused command did not run. It fails with "splinterd is upgrading, so it
+  refused this command, which did not run". Run it again once the upgrade
+  finishes.
+- A command whose connection ends while it runs fails with an error that names
+  the upgrade, for example "splinterd was upgraded while this command ran
+  (generation 3 → 4); the command was not retried and may or may not have taken
+  effect, so check the current state before running it again". To say which
+  daemon serves now, the command reconnects once for up to 10 seconds; only the
+  handshake runs, never a request.
+- `ping`, `list`, `topology`, `inspect`, and `focus` only read and are safe to
+  repeat, so after a lost connection they are sent once more on that fresh
+  connection. If that is interrupted too, the error ends "the read was retried
+  once and was interrupted again, so run it again". Reads that carry
+  continuation state (`snapshot`, `scrollback`, `search`) and `subscribe`
+  streams are not repeated; they fail with the same kind of error, ending "the
+  read was not retried, so run it again".
+
+In machine mode a refused command reports `resource_limit`, retryable, and exits
+5. A lost connection reports `internal`, retryable only for a read, and exits 4.
+The reconnection fits within what is left of `--timeout-ms`; with nothing left,
+the command does not reconnect and says its deadline left no time to look for
+the daemon.
+
 ## Terminal observation and input
 
 | Command | Purpose |

@@ -778,6 +778,52 @@ async fn one_logical_channel_loss_does_not_retarget_or_close_another_channel() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// Plan 0061 M3.12b: a remote Window reconnecting after a lost daemon
+/// connection opens new logical channels on its authenticated SSH session
+/// and never starts OpenSSH again, so nothing re-authenticates. Once the
+/// outer transport is gone, reconnection fails and reports the loss.
+#[tokio::test]
+async fn reconnection_never_reauthenticates_after_outer_transport_loss() {
+    use splinterm::{automation::retry_until, endpoint::ConnectionFactory};
+    let directory = test_directory("no-reauth");
+    let ssh = fake_ssh(&directory, "read-only");
+    let catalog = profile();
+    let session =
+        RemoteSession::connect_with_program(catalog.get("test").unwrap(), ssh.as_os_str())
+            .await
+            .unwrap();
+    let factory = ConnectionFactory::from_remote_session("test", session);
+    // While the outer transport lives, a lost channel is replaced on it.
+    let lost = factory.connect().await.unwrap();
+    drop(lost);
+    let mut replacement = factory.connect().await.unwrap();
+    assert!(matches!(
+        replacement.request(Request::Ping).await.unwrap(),
+        Response::Pong
+    ));
+    drop(replacement);
+    // The outer transport dies with the OpenSSH process.
+    let pid = fs::read_to_string(directory.join("pid-1")).unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-KILL", pid.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let reconnected = retry_until(deadline, || factory.connect()).await;
+    assert!(reconnected.is_err(), "only what is local reconnects");
+    assert_eq!(
+        fs::read_to_string(directory.join("count")).unwrap(),
+        "1",
+        "OpenSSH ran once: no automatic re-authentication"
+    );
+    drop(factory);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn incoming_channel_budget_covers_one_maximum_private_frame() {
     assert_eq!(

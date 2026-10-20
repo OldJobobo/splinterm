@@ -1,11 +1,16 @@
 //! The Window's daemon handoff (upgrade) banner and input gate
-//! (Plan 0061 M3.12a).
+//! (Plan 0061 M3.12a, reconnection M3.12b).
 //!
 //! The Window's [`HandoffStatusHub`] is fed by every pane's control
 //! subscription. Here the frontend folds its view in once per event-loop
 //! turn, pauses the local input paths while the Window is paused, and paints
 //! the banner. The controllers drop paused commands too, so input queued
 //! before this turn never reaches the daemon either.
+//!
+//! A daemon connection lost while a handoff is preparing or fenced keeps the
+//! Window open with its last screen: the hub turns to "Reconnecting…" and the
+//! Window's coordinator resnapshots every pane from the serving daemon, or
+//! gives up and leaves the Window paused with a lost-connection message.
 
 use std::{
     task::Waker,
@@ -19,19 +24,38 @@ use crate::{
     renderer::SessionPickerTextCache,
 };
 
+use splinterm_core::DojoId;
+
 use super::{
-    App, DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, ExitClass, PaneView,
+    App, DiagnosticErrorCode, DiagnosticEventCode, DiagnosticLevel, PaneView,
     WindowTopologyCommand, diagnostics, terminal_input_pending_for,
 };
 
-/// A daemon connection lost while a handoff was fenced, which kept the
-/// Window open instead of ending it.
+/// A daemon connection lost while a handoff was preparing or fenced, which
+/// kept the Window open instead of ending it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum HeldFailure {
     /// A pane's update stream ended unexpectedly.
     PaneStream,
     /// The topology manager stopped.
     TopologyManager,
+}
+
+impl HeldFailure {
+    /// The diagnostic event and error the failure would have reported had
+    /// it ended the Window.
+    const fn diagnostic(self) -> (DiagnosticEventCode, DiagnosticErrorCode) {
+        match self {
+            Self::PaneStream => (
+                DiagnosticEventCode::PaneStreamFailure,
+                DiagnosticErrorCode::PaneStream,
+            ),
+            Self::TopologyManager => (
+                DiagnosticEventCode::TopologyFailure,
+                DiagnosticErrorCode::TopologyManager,
+            ),
+        }
+    }
 }
 
 /// The frontend's handoff state: its Window's hub, the presented copy, any
@@ -41,6 +65,8 @@ pub(super) struct HandoffFrontend {
     hub: Option<HandoffStatusHub>,
     presentation: HandoffPresentation,
     held_failure: Option<HeldFailure>,
+    /// The held failure was reported once the Window was declared lost.
+    lost_reported: bool,
     pub(super) text_cache: SessionPickerTextCache,
 }
 
@@ -72,29 +98,68 @@ impl HandoffFrontend {
         self.presentation.input_paused()
     }
 
+    /// The hub's phase now, which can be ahead of the presented copy.
+    fn hub_phase(&self) -> WindowHandoffPhase {
+        self.hub
+            .as_ref()
+            .map_or(WindowHandoffPhase::Idle, |hub| hub.view().phase)
+    }
+
     /// Whether a lost daemon connection keeps the Window open with its
-    /// banner rather than ending it: the handoff was fenced, so the loss is
-    /// most likely its exec. Read from the hub, not the presented copy,
+    /// banner rather than ending it: a handoff was preparing or fenced, so
+    /// the loss is most likely its exec, or the Window is already
+    /// reconnecting or lost. Read from the hub, not the presented copy,
     /// because a stream can fail before this turn folds in.
     pub(super) fn holds_window_on_disconnect(&self) -> bool {
-        self.hub.as_ref().is_some_and(|hub| {
-            matches!(
-                hub.view().phase,
-                WindowHandoffPhase::Fenced | WindowHandoffPhase::AwaitingReconnect
-            )
-        })
+        self.hub_phase().input_paused()
     }
 
-    /// Records a failure the Window was kept open across. If the pause then
-    /// ends without a reconnection, the failure takes its original path.
+    /// Whether the Window has no usable daemon connection: while it
+    /// reconnects or after it gave up, no topology request is sent at all.
+    pub(super) fn disconnected(&self) -> bool {
+        self.hub_phase().disconnected()
+    }
+
+    /// Records a failure the Window was kept open across and starts
+    /// reconnection, or joins the one already running.
     pub(super) fn hold(&mut self, failure: HeldFailure) {
         self.held_failure = Some(self.held_failure.map_or(failure, |held| held.max(failure)));
+        if let Some(hub) = &self.hub {
+            let _ = hub.begin_reconnect();
+        }
     }
 
-    /// The failure held open, taken once the pause ends. M3.12b reconnects
-    /// and resnapshots the dead pieces instead, clearing this first.
-    fn take_held_failure(&mut self) -> Option<HeldFailure> {
-        self.held_failure.take()
+    /// Nothing is left to reconnect the Window, as when its topology manager
+    /// stopped: it is lost.
+    pub(super) fn give_up(&mut self, failure: HeldFailure) {
+        self.hold(failure);
+        if let Some(hub) = &self.hub {
+            hub.reconnect_failed();
+        }
+    }
+
+    /// The coordinator resnapshotted every pane from the daemon serving
+    /// `daemon_generation` for reconnection `epoch`: the held failure is
+    /// gone and the pause ends, unless another connection was lost since
+    /// that epoch began, which keeps the Window reconnecting.
+    pub(super) fn reconnected(&mut self, daemon_generation: u64, epoch: u64) {
+        if self
+            .hub
+            .as_ref()
+            .is_none_or(|hub| hub.reconnected(daemon_generation, epoch))
+        {
+            self.held_failure = None;
+            self.lost_reported = false;
+        }
+    }
+
+    /// The failure to report once the Window is declared lost, at most once.
+    fn take_lost_report(&mut self) -> Option<HeldFailure> {
+        if self.presentation.phase() != WindowHandoffPhase::Lost || self.lost_reported {
+            return None;
+        }
+        self.lost_reported = true;
+        self.held_failure
     }
 
     /// The banner's text, also appended to the Window title.
@@ -107,6 +172,19 @@ impl HandoffFrontend {
         self.presentation
             .deadline()
             .map(|deadline| deadline.saturating_duration_since(now))
+    }
+}
+
+/// The tab a topology command switches to when the Window is disconnected
+/// (reconnecting or lost), if it is a plain tab switch: the one topology
+/// command that touches no daemon state, so it still happens then. Every
+/// other command is dropped until the Window is connected again.
+pub(super) const fn tab_switch_while_disconnected(
+    command: &WindowTopologyCommand,
+) -> Option<DojoId> {
+    match command {
+        WindowTopologyCommand::ActivateTab { dojo_id } => Some(*dojo_id),
+        _ => None,
     }
 }
 
@@ -130,6 +208,17 @@ impl App {
         if transition.pause_changed {
             self.handoff_pause_changed();
         }
+        if let Some(failure) = self.handoff.take_lost_report() {
+            // The Window stays open; the failure that kept it open is still
+            // reported, as it would have been had it ended the Window.
+            let (event, error) = failure.diagnostic();
+            if let Some(diagnostics) = diagnostics() {
+                diagnostics.emit(DiagnosticLevel::Error, event, Some(error));
+            }
+            eprintln!(
+                "splinterm: lost connection to splinterd during an upgrade; reopen this Window from the launcher"
+            );
+        }
         if transition.changed {
             self.update_window_title();
             self.presentation.full_redraw = true;
@@ -151,11 +240,6 @@ impl App {
             self.input.terminal_input_saturated = false;
             self.input.prefix_state.clear();
             self.cancel_clipboard_image();
-        } else if let Some(failure) = self.handoff.take_held_failure() {
-            // The handoff was cancelled, yet a connection lost meanwhile was
-            // not a committed exec and nothing reconnected it.
-            self.end_window_for_held_failure(failure);
-            return;
         } else {
             self.ready_panes_for_handoff_resume();
             if self.surface.configured
@@ -179,29 +263,6 @@ impl App {
         if self.input.ime.entered {
             self.enable_text_input_if_allowed();
         }
-    }
-
-    /// Takes the exit the held failure would have taken when it happened.
-    fn end_window_for_held_failure(&mut self, failure: HeldFailure) {
-        let (event, error, exit) = match failure {
-            HeldFailure::PaneStream => (
-                DiagnosticEventCode::PaneStreamFailure,
-                DiagnosticErrorCode::PaneStream,
-                ExitClass::ErrorPaneStream,
-            ),
-            HeldFailure::TopologyManager => (
-                DiagnosticEventCode::TopologyFailure,
-                DiagnosticErrorCode::TopologyManager,
-                ExitClass::ErrorTopologyManager,
-            ),
-        };
-        if let Some(diagnostics) = diagnostics() {
-            diagnostics.emit(DiagnosticLevel::Error, event, Some(error));
-        }
-        if failure == HeldFailure::TopologyManager {
-            self.scheduling.failure = Some(anyhow::anyhow!("topology manager stopped"));
-        }
-        self.scheduling.request_exit(exit);
     }
 
     /// Resizes and focus reports were dropped while paused: every pane sends
@@ -298,37 +359,94 @@ mod tests {
         fn wake(self: Arc<Self>) {}
     }
 
+    fn frontend(hub: &HandoffStatusHub) -> HandoffFrontend {
+        HandoffFrontend::new(Some(hub.clone()), &Waker::from(Arc::new(NoWake)))
+    }
+
     #[test]
-    fn a_failure_held_through_a_cancelled_handoff_is_taken_on_resume() {
+    fn a_failure_held_during_preparing_reconnects_and_a_reconnection_clears_it() {
         let hub = HandoffStatusHub::default();
-        let mut frontend = HandoffFrontend::new(Some(hub.clone()), &Waker::from(Arc::new(NoWake)));
-        let lost = hub.source();
+        let mut frontend = frontend(&hub);
         let live = hub.source();
-        lost.observe(1, HandoffStatusPhase::Fenced);
-        live.observe(1, HandoffStatusPhase::Fenced);
+        live.observe(1, HandoffStatusPhase::Preparing);
         assert!(frontend.fold(Instant::now()).pause_changed);
+        // The exec race: a pane stream ends after only Preparing was heard.
         assert!(frontend.holds_window_on_disconnect());
-        // A pane stream and then the topology manager fail while fenced.
         frontend.hold(HeldFailure::PaneStream);
         frontend.hold(HeldFailure::TopologyManager);
         frontend.hold(HeldFailure::PaneStream);
-        lost.connection_lost();
         assert!(!frontend.fold(Instant::now()).pause_changed);
-        // A live pane then hears Cancelled: the daemon kept serving, so the
-        // held failure was no exec and now ends the Window.
+        assert_eq!(
+            frontend.presentation.phase(),
+            WindowHandoffPhase::Reconnecting
+        );
+        assert!(frontend.disconnected());
+        assert_eq!(frontend.held_failure, Some(HeldFailure::TopologyManager));
+        // A live pane's Cancelled does not end the pause: the dead pieces
+        // have no stream until the coordinator replaces them.
         live.observe(
             1,
             HandoffStatusPhase::Cancelled {
                 reason: HandoffCancelReason::Failed,
             },
         );
+        assert!(!frontend.fold(Instant::now()).pause_changed);
+        assert!(frontend.input_paused());
+        // The resnapshot lands: the held failure is cleared and input resumes.
+        let epoch = hub.reconnect_pending().unwrap();
+        frontend.reconnected(1, epoch);
         let transition = frontend.fold(Instant::now());
         assert!(transition.pause_changed && !frontend.input_paused());
+        assert_eq!(frontend.held_failure, None);
+        assert!(!frontend.disconnected());
+        assert_eq!(frontend.banner_text(), None);
+    }
+
+    #[test]
+    fn a_window_that_gives_up_stays_open_paused_and_reports_once() {
+        let hub = HandoffStatusHub::default();
+        let mut frontend = frontend(&hub);
+        hub.source().observe(1, HandoffStatusPhase::Fenced);
+        frontend.fold(Instant::now());
+        frontend.give_up(HeldFailure::TopologyManager);
+        frontend.fold(Instant::now());
+        assert!(frontend.input_paused());
+        assert!(frontend.holds_window_on_disconnect());
         assert_eq!(
-            frontend.take_held_failure(),
+            frontend.banner_text().as_deref(),
+            Some("Lost connection to splinterd — reopen from the launcher")
+        );
+        assert_eq!(
+            frontend.take_lost_report(),
             Some(HeldFailure::TopologyManager)
         );
-        assert_eq!(frontend.take_held_failure(), None);
+        assert_eq!(frontend.take_lost_report(), None);
+    }
+
+    #[test]
+    fn an_ordinary_loss_with_no_handoff_is_not_held() {
+        let hub = HandoffStatusHub::default();
+        let frontend = frontend(&hub);
+        assert!(!frontend.holds_window_on_disconnect());
+        assert!(!frontend.disconnected());
+    }
+
+    #[test]
+    fn only_a_plain_tab_switch_happens_while_disconnected() {
+        let dojo_id = splinterm_core::DojoId::new();
+        assert_eq!(
+            tab_switch_while_disconnected(&WindowTopologyCommand::ActivateTab { dojo_id }),
+            Some(dojo_id)
+        );
+        for command in [
+            WindowTopologyCommand::CloseTab { dojo_id },
+            WindowTopologyCommand::RequestSessionPicker,
+            WindowTopologyCommand::RequestLairExplorer {
+                focused_splint: None,
+            },
+        ] {
+            assert_eq!(tab_switch_while_disconnected(&command), None, "{command:?}");
+        }
     }
 
     #[test]

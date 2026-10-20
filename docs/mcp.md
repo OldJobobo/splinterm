@@ -319,6 +319,22 @@ To revoke immediately, remove/narrow the rule and reload policy, then terminate
 the MCP host if desired. Reload disconnects affected daemon connections and
 invalidates connection-owned state.
 
+A live daemon upgrade ends every daemon connection the server holds, and the
+server reconnects without a restart:
+
+- Ordinary tool calls connect afresh and need nothing. A call whose connection
+  ends while it runs fails with `internal`, says it was not retried, and may or
+  may not have taken effect: check the state before calling again.
+- Controller and transfer handles expire with their connections, since the
+  daemon released their control. Using one afterwards fails with
+  `controller_unavailable` ("the handle expired because its splinterd
+  connection ended…"). Acquire control again with `splinterm.acquire_control`,
+  under the same policy and consent. Splint, Dojo, and Lair IDs stay valid.
+- Resource subscriptions resubscribe on their own for up to 30 seconds from a
+  fresh snapshot. The resource reads stale meanwhile, and its public `sequence`
+  keeps increasing. If resubscribing fails, it stays stale until subscribed
+  again.
+
 Troubleshooting checklist:
 
 1. `test -x /usr/bin/splinterm-mcp` and verify `sha256sum` matches policy.

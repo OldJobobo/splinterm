@@ -345,6 +345,16 @@ pub enum WindowTopologyUpdate {
     },
     Theme(ThemeUpdate),
     Font(FontUpdate),
+    /// Plan 0061 M3.12b: after a daemon connection lost during a handoff, the
+    /// topology manager reconnected and resnapshotted every tab (the `Apply`
+    /// updates ahead of this one). `exited` names the Splints that ended
+    /// meanwhile, by tab. The frontend ends the handoff pause on this update.
+    Reconnected {
+        daemon_generation: u64,
+        /// The reconnection epoch this resnapshot answers.
+        reconnect_epoch: u64,
+        exited: Vec<(DojoId, SplintId)>,
+    },
     Closed,
     Shutdown(String),
 }

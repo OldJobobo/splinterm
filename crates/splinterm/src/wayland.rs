@@ -6494,9 +6494,25 @@ impl App {
             self.drop_topology_command_for_handoff(&command);
             return Ok(());
         }
-        // A Window kept open after its daemon connection was lost during a
-        // handoff has no topology manager left (M3.12b reconnects it).
-        if self.tab_state.topology_commands.is_none() && self.handoff.holds_window_on_disconnect() {
+        // While the Window reconnects after a lost daemon connection, or once
+        // it gave up, no daemon request runs: reads included, they would
+        // only queue behind the resnapshot or never be answered.
+        if self.handoff.disconnected()
+            || (self.tab_state.topology_commands.is_none()
+                && self.handoff.holds_window_on_disconnect())
+        {
+            // Visual tab switching needs no daemon and keeps working
+            // (operator decision 1): it happens here at once, and the
+            // topology manager's tab order follows once it listens again.
+            if let Some(dojo_id) = handoff::tab_switch_while_disconnected(&command) {
+                if self.activate_tab(dojo_id)? && self.surface.configured {
+                    self.scheduling.redraw_pending = true;
+                }
+                if let Some(commands) = &self.tab_state.topology_commands {
+                    let _ = commands.try_send(command);
+                }
+                return Ok(());
+            }
             self.drop_topology_command_for_handoff(&command);
             return Ok(());
         }
@@ -8878,18 +8894,26 @@ impl App {
         let mut changed = false;
         let mut next_theme = None;
         while let Some(update) = pending.pop_front() {
+            // A reconnection's resnapshot must land before input resumes, and
+            // a picker opened before it shows stale state: it closes the
+            // picker and applies every deferred update in order first.
+            let reconnected = matches!(&update, WindowTopologyUpdate::Reconnected { .. });
             let defer_for_picker = self.modal.inline_picker_open()
-                && matches!(
-                    &update,
-                    WindowTopologyUpdate::Apply { .. }
-                        | WindowTopologyUpdate::OpenTab { .. }
-                        | WindowTopologyUpdate::ActivateTab { .. }
-                        | WindowTopologyUpdate::ActivateSplint { .. }
-                        | WindowTopologyUpdate::RemoveTab { .. }
-                        | WindowTopologyUpdate::UpdateIdentity(_)
-                );
+                && (reconnected
+                    || matches!(
+                        &update,
+                        WindowTopologyUpdate::Apply { .. }
+                            | WindowTopologyUpdate::OpenTab { .. }
+                            | WindowTopologyUpdate::ActivateTab { .. }
+                            | WindowTopologyUpdate::ActivateSplint { .. }
+                            | WindowTopologyUpdate::RemoveTab { .. }
+                            | WindowTopologyUpdate::UpdateIdentity(_)
+                    ));
             if defer_for_picker {
-                if self.tab_state.deferred_topology_updates.len() < MAX_DEFERRED_TOPOLOGY_UPDATES {
+                if !reconnected
+                    && self.tab_state.deferred_topology_updates.len()
+                        < MAX_DEFERRED_TOPOLOGY_UPDATES
+                {
                     self.tab_state.deferred_topology_updates.push(update);
                     continue;
                 }
@@ -9279,12 +9303,35 @@ impl App {
                 WindowTopologyUpdate::Closed => self
                     .scheduling
                     .request_exit(ExitClass::CleanFinalTabRemoved),
+                WindowTopologyUpdate::Reconnected {
+                    daemon_generation,
+                    reconnect_epoch,
+                    exited,
+                } => {
+                    // Every tab was resnapshotted ahead of this update. Splints
+                    // that exited meanwhile take the path an exit event takes.
+                    let active_dojo = self.tab_state.active_dojo_id();
+                    for (dojo_id, splint_id) in exited {
+                        if dojo_id == active_dojo {
+                            self.panes.pending_exited_splints.insert(splint_id);
+                        } else if let Some(view) = self
+                            .tab_state
+                            .tabs
+                            .get_mut(dojo_id)
+                            .and_then(|tab| tab.value.as_mut())
+                        {
+                            view.pending_exited_splints.insert(splint_id);
+                        }
+                    }
+                    self.handoff.reconnected(daemon_generation, reconnect_epoch);
+                    changed = true;
+                }
                 WindowTopologyUpdate::Shutdown(_) if self.handoff.holds_window_on_disconnect() => {
-                    // The manager lost its daemon connection while a handoff
-                    // was fenced: the Window stays with its banner, and its
-                    // topology commands stop here until M3.12b reconnects.
+                    // The manager stopped while a handoff was under way.
+                    // Nothing is left to reconnect the Window: it stays open,
+                    // paused, with its last screen and the lost connection.
                     self.tab_state.topology_commands = None;
-                    self.handoff.hold(HeldFailure::TopologyManager);
+                    self.handoff.give_up(HeldFailure::TopologyManager);
                 }
                 WindowTopologyUpdate::Shutdown(_) => {
                     if let Some(diagnostics) = diagnostics() {
@@ -9488,9 +9535,10 @@ impl App {
             && !pane_stream_has_terminal_notice(&pending)
             && self.handoff.holds_window_on_disconnect()
         {
-            // Lost while a handoff was fenced, as when it commits and the
-            // daemon execs: the Window stays with its banner and last screen.
-            // M3.12b reconnects and resnapshots from here.
+            // Lost while a handoff was preparing or fenced, as when it
+            // commits and the daemon execs: the Window stays with its banner
+            // and last screen while its coordinator reconnects and replaces
+            // this pane with a resnapshotted one.
             self.panes.pane.controller_active = false;
             self.panes.pane.commands = None;
             self.panes.pane.updates = None;

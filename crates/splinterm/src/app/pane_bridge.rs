@@ -462,6 +462,18 @@ pub(in crate::app) fn handoff_refused(error: &anyhow::Error) -> bool {
     protocol_error(error).is_some_and(|error| error.code == ErrorCode::HandoffInProgress)
 }
 
+/// A handshake the daemon refused because this client is not the installed
+/// graphical client it trusts, as after an upgrade or a rollback replaced
+/// the installed build (AGENTS.md section 4.4). Retrying cannot help; only a
+/// Window reopened from the launcher runs the trusted build (Plan 0061
+/// M3.12b). Window continuation (M3.14-M3.16) relaunches instead.
+pub(in crate::app) fn refused_as_untrusted(error: &anyhow::Error) -> bool {
+    protocol_error(error).is_some_and(|error| error.code == ErrorCode::Unauthorized)
+}
+
+/// What a Window whose client build the daemon no longer trusts reports.
+pub(in crate::app) const UNTRUSTED_AFTER_UPGRADE: &str = "splinterm: splinterd no longer trusts this client build, as after an upgrade replaced it; reopen this Window from the launcher";
+
 /// Whether the controller drops `command` while its Window's input is paused
 /// for a daemon handoff: terminal input, resize, and control transfer. Reads
 /// (scrollback, search, resynchronization) and the releases a fenced daemon
@@ -730,12 +742,44 @@ pub(in crate::app) async fn handle_control_event(
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "the controller task's whole configuration is passed through"
+)]
+pub(in crate::app) async fn run_controller(
+    control: Connection,
+    mut commands: mpsc::Receiver<WindowCommand>,
+    outputs: ControllerOutputs,
+    controller_id: Option<u64>,
+    splint_id: SplintId,
+    incarnation: u64,
+    forced_control_transfer: ForcedControlTransfer,
+    resize_delay_ms: u64,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    drive_controller(
+        control,
+        &mut commands,
+        outputs,
+        controller_id,
+        splint_id,
+        incarnation,
+        forced_control_transfer,
+        resize_delay_ms,
+        cancellation,
+    )
+    .await
+}
+
+/// [`run_controller`] on a borrowed command queue, so a single-pane Window
+/// keeps the queue its frontend sends to when a reconnection replaces the
+/// controller (Plan 0061 M3.12b).
+#[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "one task serializes control ownership, search, resize, input, and cancellation"
 )]
-pub(in crate::app) async fn run_controller(
+pub(in crate::app) async fn drive_controller(
     mut control: Connection,
-    mut commands: mpsc::Receiver<WindowCommand>,
+    commands: &mut mpsc::Receiver<WindowCommand>,
     outputs: ControllerOutputs,
     controller_id: Option<u64>,
     splint_id: SplintId,
@@ -1158,8 +1202,9 @@ pub(in crate::app) async fn run_controller(
         let _ = control.release_control(controller_id).await;
     }
     // A pane closed or cancelled withdraws its handoff report when `outputs`
-    // drops. A failed connection instead keeps a fenced Window paused: that
-    // is how a committed handoff's exec looks from here (M3.12b reconnects).
+    // drops. A failed connection while a handoff is preparing or fenced
+    // instead starts the Window's reconnection: that is how a committed
+    // handoff's exec looks from here, even before `Fenced` was read.
     if result.is_err() && !cancellation.is_cancelled() {
         outputs.handoff.connection_lost();
     }
@@ -1865,6 +1910,28 @@ mod tests {
             "operation failed",
         ));
         assert!(!recoverable_input_error(&error));
+    }
+
+    /// Plan 0061 M3.12b: a reconnecting Window gives up at once when the
+    /// daemon no longer trusts its client build, rather than retrying.
+    #[test]
+    fn only_an_unauthorized_handshake_marks_the_client_untrusted() {
+        let untrusted = response_protocol_error(splinterm_protocol::ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "trusted UI role requires the installed graphical client",
+        ));
+        assert!(refused_as_untrusted(&untrusted));
+        let fenced = response_protocol_error(splinterm_protocol::ProtocolError::new(
+            ErrorCode::HandoffInProgress,
+            "daemon handoff in progress",
+        ));
+        assert!(!refused_as_untrusted(&fenced));
+        let refused =
+            anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(
+            !refused_as_untrusted(&refused),
+            "an adopting daemon is retried"
+        );
     }
 
     #[test]

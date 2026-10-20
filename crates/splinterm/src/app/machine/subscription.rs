@@ -3,6 +3,7 @@ use super::{
     ResyncReasonV2, ServerFrame, SplintId, SubscribeCommand, SubscriptionEvent, bail,
     require_incarnation, response_protocol_error, write_json_document,
 };
+use super::{DaemonIdentity, explain_result, machine_probe_window};
 
 async fn next_private_event(connection: &mut Connection) -> Result<(u64, u64, SubscriptionEvent)> {
     match connection.next_server_frame().await? {
@@ -425,7 +426,8 @@ pub(in crate::app) async fn run_machine_subscription(
     let mut connection = tokio::time::timeout(setup_deadline, Connection::connect_automation())
         .await
         .context("subscription connection deadline elapsed")??;
-    match stream {
+    let before = DaemonIdentity::of(&connection);
+    let result = match stream {
         SubscribeCommand::Terminal {
             splint_id,
             expected_incarnation,
@@ -453,7 +455,18 @@ pub(in crate::app) async fn run_machine_subscription(
             )
             .await
         }
-    }
+    };
+    // Plan 0061 M3.12b: a stream is not resumed after a lost connection,
+    // since its sequence and resync state belong to that connection; it
+    // ends with an error naming the upgrade.
+    explain_result(
+        result,
+        before,
+        true,
+        machine_probe_window(setup_deadline),
+        Connection::connect_automation,
+    )
+    .await
 }
 
 #[cfg(test)]
