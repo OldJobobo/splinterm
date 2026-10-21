@@ -1148,6 +1148,9 @@ struct DaemonState {
     /// Trusted-UI connections and declared Window anchors (Plan 0061
     /// M3.13b1).
     handoff_windows: handoff_windows::SharedHandoffWindows,
+    /// Client processes holding a trusted-UI connection trusted at its own
+    /// Hello (AGENTS.md §4.4): their later connections match too.
+    trusted_client_processes: consent::TrustedClientProcesses,
     /// The initiating connection's side of an in-flight `Execute`, by
     /// connection, until its handler takes it; see [`HandoffInitiator`].
     handoff_initiators: StdMutex<HashMap<u64, HandoffInitiator>>,
@@ -3459,6 +3462,7 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         handoff_listeners,
         handoff_exit: HandoffExit::default(),
         handoff_windows: Arc::default(),
+        trusted_client_processes: consent::TrustedClientProcesses::default(),
         handoff_initiators: StdMutex::default(),
         handoff_window_hold: StdMutex::default(),
         #[cfg(test)]
@@ -4434,10 +4438,12 @@ async fn serve_authenticated(
         bail!("incompatible protocol version");
     }
     let trusted_ui_client = role == ClientRole::TrustedUi;
-    // AGENTS.md §4.4: the installed-client test runs once, here; afterwards
-    // this connection keeps it while its process runs that same executable.
+    // AGENTS.md §4.4: the client test runs once, here (the installed client,
+    // the pinned snapshot, or a process already holding a trusted connection);
+    // afterwards this connection keeps it while its process runs that same
+    // executable.
     let mut connection_peer = peer.clone();
-    connection_peer.record_hello_client_match(peer_monitor);
+    connection_peer.record_hello_client_match(peer_monitor, &state.trusted_client_processes);
     let peer = &connection_peer;
     let matching_splinterm = peer.connection_matches_splinterm();
     let remote_interactive_client = role == ClientRole::RemoteInteractive;
@@ -4470,6 +4476,13 @@ async fn serve_authenticated(
         .await?;
         bail!("remote interactive role claimed outside the installed graphical relay");
     }
+    // Held for the connection: its process's later connections match while
+    // any trusted connection of it is open.
+    let _trusted_client = if trusted_ui_client {
+        peer.register_trusted_client(&state.trusted_client_processes)
+    } else {
+        None
+    };
     if trusted_ui_client {
         state.handoff_windows.lock().unwrap().register_connection(
             connection_id,
@@ -16243,6 +16256,7 @@ mod tests {
             handoff_listeners: None,
             handoff_exit: HandoffExit::default(),
             handoff_windows: Arc::default(),
+            trusted_client_processes: consent::TrustedClientProcesses::default(),
             handoff_initiators: StdMutex::default(),
             handoff_window_hold: StdMutex::default(),
             handoff_client_identities: StdMutex::default(),
@@ -18071,7 +18085,7 @@ mod tests {
         );
         assert!(peer.is_matching_splinterm());
         // Its connection said Hello as the pinned client.
-        peer.record_hello_client_match(None);
+        peer.record_hello_client_match(None, &consent::TrustedClientProcesses::default());
         assert!(peer.connection_matches_splinterm());
         peer
     }

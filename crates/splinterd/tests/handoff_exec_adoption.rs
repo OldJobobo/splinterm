@@ -384,44 +384,55 @@ finish({"grant_bytes": len(grant), "hello": hello, "claim": frame})
 /// the hello answer, then one answer per request; `null` where the daemon
 /// closed the connection first. A spec naming `pause_before` first prints
 /// the answers so far on their own line before that request, and waits for
-/// a line on its standard input.
+/// a line on its standard input. A spec naming `second_requests` then opens
+/// a second connection from the same process, while the first stays open,
+/// and appends its hello answer and one answer per request.
 const CLIENT_SESSION: &str = r#"
 import json, socket, struct, sys
 with open(sys.argv[1]) as source:
     spec = json.load(source)
-daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-daemon.settimeout(30)
-daemon.connect(spec["socket"])
-def send(frame):
+def connect():
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel.settimeout(30)
+    channel.connect(spec["socket"])
+    return channel
+def send(channel, frame):
     body = json.dumps(frame).encode()
-    daemon.sendall(struct.pack(">I", len(body)) + body)
-def exactly(count):
+    channel.sendall(struct.pack(">I", len(body)) + body)
+def exactly(channel, count):
     data = b""
     while len(data) < count:
-        chunk = daemon.recv(count - len(data))
+        chunk = channel.recv(count - len(data))
         if not chunk:
             return None
         data += chunk
     return data
-def read():
-    header = exactly(4)
+def read(channel):
+    header = exactly(channel, 4)
     if header is None:
         return None
     (length,) = struct.unpack(">I", header)
-    return json.loads(exactly(length))
-send(spec["hello"])
-answers = [read()]
-if answers[0] is not None and answers[0].get("type") == "hello":
-    for index, request in enumerate(spec["requests"]):
-        if index == spec.get("pause_before"):
+    return json.loads(exactly(channel, length))
+def converse(channel, requests, answers, pause_before=None):
+    send(channel, spec["hello"])
+    answers.append(read(channel))
+    if answers[-1] is None or answers[-1].get("type") != "hello":
+        return
+    for index, request in enumerate(requests):
+        if index == pause_before:
             print(json.dumps(answers), flush=True)
             sys.stdin.readline()
-        send(request)
+        send(channel, request)
         while True:
-            frame = read()
+            frame = read(channel)
             if frame is None or frame.get("request_id") == request["request_id"]:
                 break
         answers.append(frame)
+answers = []
+daemon = connect()
+converse(daemon, spec["requests"], answers, spec.get("pause_before"))
+if spec.get("second_requests") is not None:
+    converse(connect(), spec["second_requests"], answers)
 print(json.dumps(answers))
 "#;
 /// Every pre-commit step the fault matrix fails the forward candidate at.
@@ -2368,7 +2379,7 @@ fn client_session(
     role: ClientRole,
     requests: &[Request],
 ) -> Vec<Option<ServerFrame>> {
-    let spec_path = client_session_spec(socket, role, requests, None);
+    let spec_path = client_session_spec(socket, role, requests, None, None);
     let output = Command::new(client)
         .arg("-c")
         .arg(CLIENT_SESSION)
@@ -2394,11 +2405,13 @@ fn paused_client_session(
     role: ClientRole,
     requests: &[Request],
     pause_before: usize,
+    second_requests: Option<&[Request]>,
     between: impl FnOnce(&[Option<ServerFrame>]),
 ) -> Vec<Option<ServerFrame>> {
     use std::io::{BufRead as _, BufReader, Read as _};
 
-    let spec_path = client_session_spec(socket, role, requests, Some(pause_before));
+    let spec_path =
+        client_session_spec(socket, role, requests, Some(pause_before), second_requests);
     let mut session = Command::new(client)
         .arg("-c")
         .arg(CLIENT_SESSION)
@@ -2441,7 +2454,19 @@ fn client_session_spec(
     role: ClientRole,
     requests: &[Request],
     pause_before: Option<usize>,
+    second_requests: Option<&[Request]>,
 ) -> PathBuf {
+    let frames = |requests: &[Request]| {
+        requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| ClientFrame::Request {
+                request_id: u64::try_from(index).unwrap() + 1,
+                diagnostic_correlation: None,
+                request: request.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
     let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
     let spec_path = socket.with_file_name(format!("client-session-{sequence}.json"));
     let spec = json!({
@@ -2453,15 +2478,8 @@ fn client_session_spec(
             role,
             handoff_window: false,
         },
-        "requests": requests
-            .iter()
-            .enumerate()
-            .map(|(index, request)| ClientFrame::Request {
-                request_id: u64::try_from(index).unwrap() + 1,
-                diagnostic_correlation: None,
-                request: request.clone(),
-            })
-            .collect::<Vec<_>>(),
+        "requests": frames(requests),
+        "second_requests": second_requests.map(frames),
     });
     fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
     spec_path
@@ -3746,10 +3764,12 @@ fn old_side_signal_carry_case() {
 /// trusted request (a handoff dry run, which both the authorization table
 /// and its handler gate on the trusted client), pauses while a
 /// byte-identical copy is renamed over the installed client (a new inode;
-/// a hard link keeps the old one), then makes it again on the same
-/// connection: it must still succeed. A new connection from the replaced
-/// inode is refused trusted UI at `Hello`, and one from the newly installed
-/// client is served.
+/// a hard link keeps the old one). Meanwhile another process executing the
+/// replaced inode is refused trusted UI at `Hello`. The session then makes
+/// the request again on the same connection, and the same process opens a
+/// second trusted-UI connection, as a Window opening a pane does: both must
+/// succeed. Afterwards a new connection from the newly installed client is
+/// served.
 fn replaced_client_keeps_its_connection_case() {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -3797,6 +3817,7 @@ fn replaced_client_keeps_its_connection_case() {
         ClientRole::TrustedUi,
         &[dry_run.clone(), dry_run.clone()],
         1,
+        Some(&[dry_run.clone()]),
         |before| {
             assert!(
                 matches!(before, [Some(ServerFrame::Hello { .. }), answer] if reported(answer)),
@@ -3807,24 +3828,32 @@ fn replaced_client_keeps_its_connection_case() {
             fs::hard_link(&client, &stale_client).unwrap();
             install(&client, &fs::read(&client).unwrap());
             assert_ne!(identity(&client), identity(&stale_client));
+            assert_eq!(fs::read(&stale_client).unwrap(), fs::read(&client).unwrap());
+            // Another process on the replaced inode, while the session holds
+            // its trusted connection open.
+            let refused = client_session(&stale_client, &socket, ClientRole::TrustedUi, &[]);
+            assert!(
+                matches!(
+                    refused.as_slice(),
+                    [Some(ServerFrame::Error { error, .. })] if error.code == ErrorCode::Unauthorized
+                ),
+                "another process on the replaced inode was not refused: {refused:?}\n{}",
+                stage.logs()
+            );
         },
     );
     assert!(
         matches!(
             answers.as_slice(),
-            [Some(ServerFrame::Hello { .. }), before, after] if reported(before) && reported(after)
+            [
+                Some(ServerFrame::Hello { .. }),
+                before,
+                after,
+                Some(ServerFrame::Hello { .. }),
+                second,
+            ] if reported(before) && reported(after) && reported(second)
         ),
-        "the open connection lost trust when its client was replaced: {answers:?}\n{}",
-        stage.logs()
-    );
-    assert_eq!(fs::read(&stale_client).unwrap(), fs::read(&client).unwrap());
-    let refused = client_session(&stale_client, &socket, ClientRole::TrustedUi, &[]);
-    assert!(
-        matches!(
-            refused.as_slice(),
-            [Some(ServerFrame::Error { error, .. })] if error.code == ErrorCode::Unauthorized
-        ),
-        "a new connection from the replaced inode was not refused: {refused:?}\n{}",
+        "the Window process lost trust when its client was replaced: {answers:?}\n{}",
         stage.logs()
     );
     let served = client_session(&client, &socket, ClientRole::TrustedUi, &[dry_run]);
