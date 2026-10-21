@@ -190,6 +190,9 @@ impl ServerHandler for SplintermServer {
                 None,
             ));
         }
+        // The host's name labels consent prompts as data; it is never an
+        // identity (ADR 0014).
+        dispatch::record_client_name(&request.client_info.name);
         context.peer.set_peer_info(request);
         Ok(ServerHandler::get_info(self))
     }

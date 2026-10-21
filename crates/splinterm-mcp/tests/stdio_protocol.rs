@@ -1017,7 +1017,10 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
             request:
                 Request::RequestLairAccess {
                     lair_id: requested,
+                    level,
                     scopes,
+                    wait_millis,
+                    agent_name,
                 },
             ..
         } = read_private_frame(&mut stream)
@@ -1025,6 +1028,7 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
             panic!("mock daemon expected a Lair access request");
         };
         assert_eq!(requested, lair_id);
+        assert_eq!(level, None);
         assert_eq!(
             scopes,
             [
@@ -1033,6 +1037,10 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
                 AccessScope::TopologyLayout,
             ]
         );
+        // The wait budget stays a margin below the 5-second default
+        // deadline, and the host's name travels as display data.
+        assert!((3_000..=4_000).contains(&wait_millis), "{wait_millis}");
+        assert_eq!(agent_name.as_deref(), Some("splinterm-black-box-test"));
         write_private_frame(
             &mut stream,
             &ServerFrame::Response {
@@ -1075,6 +1083,194 @@ fn lair_access_tool_requests_one_typed_ephemeral_grant() {
         9
     );
     assert!(!response.to_string().contains("/private/requester"));
+
+    server.close_input();
+    assert!(server.wait().success());
+    fake.join().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// ADR 0014: a level request the person has not answered returns `pending`,
+/// a repeat collects a remembered grant, a pending request can be cancelled,
+/// and a different request while one is pending is a retryable resource
+/// limit. Exactly one of level, scopes, or a cancel is accepted.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered mock-daemon session proves the whole pending round trip"
+)]
+fn lair_access_tool_returns_pending_collects_the_answer_and_cancels() {
+    let (directory, socket) = isolated_socket("lair-access-pending");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let lair_id: LairId = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101".parse().unwrap();
+    let fake = thread::spawn(move || {
+        let look: Vec<AccessScope> = splinterm_protocol::AccessLevel::Look.scopes().to_vec();
+        for index in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(matches!(
+                read_private_frame::<ClientFrame>(&mut stream),
+                ClientFrame::Hello { .. }
+            ));
+            write_private_frame(
+                &mut stream,
+                &ServerFrame::Hello {
+                    version: splinterm_protocol::PROTOCOL_VERSION,
+                    limits: ServerLimits::default(),
+                    development_terminal_access: false,
+                    daemon_hostname: None,
+                    daemon_generation: 1,
+                },
+            );
+            let ClientFrame::Request {
+                request_id,
+                request,
+                ..
+            } = read_private_frame(&mut stream)
+            else {
+                panic!("mock daemon expected a request");
+            };
+            let result = match (index, request) {
+                (
+                    0 | 1,
+                    Request::RequestLairAccess {
+                        lair_id: requested,
+                        level: Some(splinterm_protocol::AccessLevel::Look),
+                        scopes,
+                        wait_millis,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(requested, lair_id);
+                    assert!(scopes.is_empty(), "the daemon expands the level");
+                    assert!(wait_millis > 0 && wait_millis < 5_000);
+                    if index == 0 {
+                        Ok(Response::LairAccessPending {
+                            lair_id,
+                            topology_revision: TopologyRevision::new(9),
+                            request_id: 3,
+                            expires_at_unix_seconds: 1_800_000_120,
+                        })
+                    } else {
+                        Ok(Response::LairAccessGranted {
+                            topology_revision: TopologyRevision::new(9),
+                            authorization_revision: 4,
+                            grant: LairAccessGrant {
+                                grant_id: 21,
+                                source: AccessGrantSource::Remembered,
+                                lair_id,
+                                scopes: look.clone(),
+                                requester: "/private/requester".to_owned(),
+                                expires_at_unix_seconds: 0,
+                            },
+                        })
+                    }
+                }
+                (
+                    2,
+                    Request::RequestLairAccess {
+                        scopes,
+                        level: None,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(scopes, [AccessScope::AgentStatusReport]);
+                    let mut refused = ProtocolError::new(ErrorCode::ResourceLimit, "pending");
+                    refused.pending_request_id = Some(5);
+                    Err(refused)
+                }
+                (
+                    3,
+                    Request::CancelLairAccessRequest {
+                        lair_id: requested,
+                        request_id: 5,
+                    },
+                ) => {
+                    assert_eq!(requested, lair_id);
+                    Ok(Response::LairAccessRequestCancelled {
+                        lair_id,
+                        topology_revision: TopologyRevision::new(9),
+                        request_id: 5,
+                    })
+                }
+                (index, request) => panic!("unexpected request {index}: {request:?}"),
+            };
+            let frame = match result {
+                Ok(result) => ServerFrame::Response { request_id, result },
+                Err(error) => ServerFrame::Error {
+                    request_id: Some(request_id),
+                    error,
+                },
+            };
+            write_private_frame(&mut stream, &frame);
+        }
+    });
+
+    let mut server = Harness::spawn_with_socket(&socket, None);
+    server.initialize();
+    server.initialized();
+    let look = json!({"lair_id": lair_id.to_string(), "level": "look"});
+    let pending = call_tool(
+        &mut server,
+        31,
+        "splinterm.request_lair_access",
+        look.clone(),
+    );
+    let data = &pending["structuredContent"]["data"];
+    assert_eq!(data["committed"], false, "{pending}");
+    assert_eq!(data["status"], "pending");
+    assert_eq!(data["pending_request_id"], "3");
+    assert_eq!(data["expires_at"], "1800000120");
+    assert_eq!(
+        pending["structuredContent"]["resource"],
+        json!({"kind": "lair", "lair_id": lair_id.to_string(), "topology_revision": 9})
+    );
+    let granted = call_tool(&mut server, 32, "splinterm.request_lair_access", look);
+    let data = &granted["structuredContent"]["data"];
+    assert_eq!(data["source"], "remembered", "{granted}");
+    assert_eq!(data["grant_id"], "21");
+    assert_eq!(data["expires_at"], Value::Null);
+    assert_eq!(
+        data["granted_scopes"],
+        json!([
+            "topology_metadata_read",
+            "terminal_visible_read",
+            "scrollback_read",
+            "agent_status_report"
+        ])
+    );
+    assert!(!granted.to_string().contains("/private/requester"));
+    let different = call_tool(
+        &mut server,
+        33,
+        "splinterm.request_lair_access",
+        json!({"lair_id": lair_id.to_string(), "scopes": ["agent_status_report"]}),
+    );
+    let error = &different["structuredContent"]["error"];
+    assert_eq!(error["code"], "resource_limit", "{different}");
+    assert_eq!(error["retryable"], true);
+    let cancelled = call_tool(
+        &mut server,
+        34,
+        "splinterm.request_lair_access",
+        json!({"lair_id": lair_id.to_string(), "cancel_request_id": "5"}),
+    );
+    let data = &cancelled["structuredContent"]["data"];
+    assert_eq!(data["status"], "cancelled", "{cancelled}");
+    assert_eq!(data["pending_request_id"], "5");
+    // More than one of level, scopes, and a cancel never reaches the daemon.
+    for arguments in [
+        json!({"lair_id": lair_id.to_string(), "level": "look", "scopes": ["input"]}),
+        json!({"lair_id": lair_id.to_string(), "level": "look", "cancel_request_id": "5"}),
+        json!({"lair_id": lair_id.to_string()}),
+        // Fits the decimal pattern but not a 64-bit identifier.
+        json!({"lair_id": lair_id.to_string(), "cancel_request_id": "99999999999999999999"}),
+    ] {
+        let refused = call_tool(&mut server, 35, "splinterm.request_lair_access", arguments);
+        assert_eq!(
+            refused["structuredContent"]["error"]["code"], "invalid_argument",
+            "{refused}"
+        );
+    }
 
     server.close_input();
     assert!(server.wait().success());

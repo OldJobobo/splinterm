@@ -6,6 +6,7 @@ mod consent;
 mod handoff_requests;
 mod handoff_windows;
 mod omarchy_environment;
+mod pending_access;
 mod persistence;
 
 use std::{
@@ -63,14 +64,15 @@ use splinterm_core::{
 };
 use splinterm_protocol::{
     AccessGrant, AccessScope, ActiveScreen as WireActiveScreen, CellAttributes, ClientFrame,
-    ClientRole, ColorSource, ControlStatus, ControlTransferDecision, ControlTransferOutcome,
-    DojoUse, ErrorCode, HandoffCancelReason, HandoffStatusPhase, HistoryTransition,
-    ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES, MAX_IMAGE_BYTES_PER_DAEMON,
-    MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS, MAX_SEARCH_CURSOR_BYTES,
-    MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS, MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS,
-    MAX_UPDATE_SCROLLS, MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch,
-    PresetLayoutLaunch, PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError,
-    Request, Response, RestoreLeafResult, ScrollDirection as WireScrollDirection,
+    ClientRole, ColorSource, ConsentDecision, ControlStatus, ControlTransferDecision,
+    ControlTransferOutcome, DojoUse, ErrorCode, HandoffCancelReason, HandoffStatusPhase,
+    HistoryTransition, ImageTransferMode, MAX_COLUMNS, MAX_CWD_BYTES, MAX_FRAME_BYTES,
+    MAX_IMAGE_BYTES_PER_DAEMON, MAX_INPUT_BYTES, MAX_ROWS, MAX_SCROLLBACK_PAGE_ROWS,
+    MAX_SEARCH_CURSOR_BYTES, MAX_SEARCH_QUERY_BYTES, MAX_SEARCH_RESULTS,
+    MAX_SNAPSHOT_SCROLLBACK_ROWS, MAX_SUBSCRIPTIONS, MAX_UPDATE_SCROLLS,
+    MouseTracking as WireMouseTracking, PROTOCOL_VERSION, PresetDojoLaunch, PresetLayoutLaunch,
+    PresetPaneIdentity, PresetTarget, ProcessExitStatus, ProtocolError, Request, Response,
+    RestoreLeafResult, ScrollDirection as WireScrollDirection,
     ScrollbackPage as WireScrollbackPage, SearchMatch as WireSearchMatch,
     SearchPage as WireSearchPage, ServerFrame, ServerLimits, SplintLifecycle, SplintRuntimeSummary,
     SubscriptionEvent, TerminalCell, TerminalCursor, TerminalInputModes, TerminalProvenance,
@@ -1108,6 +1110,13 @@ struct DaemonState {
     agent_access: Arc<agent_access::AgentAccess>,
     /// The root and account durable identities are checked against.
     identity_context: Arc<agent_access::IdentityContext>,
+    /// Pending workspace access requests and their prompt queue (ADR 0014).
+    /// Never carried across a handoff or restart.
+    pending_access: pending_access::PendingAccess,
+    /// Unit tests answer workspace prompts through this instead of the
+    /// trusted consent client.
+    #[cfg(test)]
+    consent_script: StdMutex<Option<tokio::sync::mpsc::UnboundedSender<ScriptedPrompt>>>,
     revocations: broadcast::Sender<Revocation>,
     image_transfers: Mutex<TransferAdmission>,
     image_transfer_expiry_changed: Notify,
@@ -3374,6 +3383,10 @@ fn connect_workload_units(require_workload_cgroups: bool) -> Result<Option<Workl
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one generation's complete daemon state is assembled in one reviewable place"
+)]
 fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
     let DaemonStateInputs {
         topology,
@@ -3446,6 +3459,9 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         grants: Mutex::new(GrantStore::with_ids(grant_ids)),
         agent_access,
         identity_context,
+        pending_access: pending_access::PendingAccess::default(),
+        #[cfg(test)]
+        consent_script: StdMutex::default(),
         revocations,
         image_transfers: Mutex::new(TransferAdmission::default()),
         image_transfer_expiry_changed: Notify::new(),
@@ -3815,6 +3831,9 @@ async fn serve(
 /// precedence over a socket-removal failure.
 async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> Result<()> {
     state.exit_observers.close();
+    // Pending access requests never outlive the daemon (ADR 0014); their
+    // prompts close.
+    state.pending_access.close();
     let runtimes = state.runtimes.lock().await.drain();
     let shutdown_result = async {
         let mut tasks = tokio::task::JoinSet::new();
@@ -5165,6 +5184,7 @@ async fn require_current_topology_revision(
         message: "topology revision is stale".into(),
         current_topology_revision: Some(current),
         handoff_blocking_reasons: Vec::new(),
+        pending_request_id: None,
     })
 }
 
@@ -5175,6 +5195,7 @@ fn model_error(error: TopologyError) -> ProtocolError {
             message: "topology revision is stale".into(),
             current_topology_revision: Some(current),
             handoff_blocking_reasons: Vec::new(),
+            pending_request_id: None,
         },
         TopologyError::SplintNotFound(_)
         | TopologyError::LairNotFound(_)
@@ -6460,6 +6481,7 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::RequestAccess { .. }
             | Request::AuthorizationStatus { .. }
             | Request::RevokeAccess { .. }
+            | Request::CancelAllLairAccessRequests
             | Request::PrepareMutation { .. }
             | Request::CreateLair { .. }
             | Request::CreateTransientLair { .. }
@@ -6604,14 +6626,23 @@ fn requested_operation_scopes(request: &Request) -> Option<Vec<authorization::Op
             let mut scopes = base.to_vec();
             match requirement {
                 ConditionalRequirement::RequestedAccessScopes => {
-                    let (Request::RequestAccess {
-                        scopes: requested, ..
-                    }
-                    | Request::RequestLairAccess {
-                        scopes: requested, ..
-                    }) = request
-                    else {
-                        return None;
+                    let requested = match request {
+                        Request::RequestAccess {
+                            scopes: requested, ..
+                        }
+                        | Request::RequestLairAccess {
+                            level: None,
+                            scopes: requested,
+                            ..
+                        } => requested.as_slice(),
+                        // A level is exactly its bundle; naming both is
+                        // invalid and refused by the handler.
+                        Request::RequestLairAccess {
+                            level: Some(level),
+                            scopes,
+                            ..
+                        } if scopes.is_empty() => level.scopes(),
+                        _ => return None,
                     };
                     for scope in requested {
                         scopes.push(match scope {
@@ -6893,41 +6924,598 @@ fn schedule_lair_grant_expiry(state: &Arc<DaemonState>, grant_id: u64) {
     });
 }
 
-/// Commits the answer to a Lair consent prompt: a recorded denial, or a new
-/// grant unless the handoff fence went up while the prompt was open.
-async fn commit_lair_consent(
-    state: &Arc<DaemonState>,
-    peer: &PeerIdentity,
-    lair_id: LairId,
+/// The exact consent scopes a workspace request asks for: one level's
+/// bundle, or an explicit set, sorted and deduplicated. Clipboard scopes stay
+/// invalid and are never shown as Custom.
+fn requested_lair_scopes(
+    level: Option<splinterm_protocol::AccessLevel>,
     scopes: Vec<AccessScope>,
-    granted: bool,
-) -> Result<Response, ProtocolError> {
-    if !granted {
-        state.grants.lock().await.deny_lair(
-            peer,
-            lair_id,
-            &scopes,
-            "denied or consent client unavailable",
-        );
-        return Err(ProtocolError::new(
-            ErrorCode::ConsentDenied,
-            "Lair access was denied",
+) -> Result<Vec<AccessScope>, ProtocolError> {
+    let requested = match (level, scopes.is_empty()) {
+        (Some(level), true) => level.scopes().to_vec(),
+        (None, false) => scopes,
+        _ => {
+            return Err(invalid(
+                "a Lair access request names exactly one of a level or scopes",
+            ));
+        }
+    };
+    let canonical: std::collections::BTreeSet<_> = requested.into_iter().collect();
+    if canonical.is_empty()
+        || canonical.len() > splinterm_protocol::MAX_ACCESS_SCOPES
+        || canonical.iter().any(|scope| {
+            matches!(
+                scope,
+                AccessScope::ClipboardRead | AccessScope::ClipboardWrite
+            )
+        })
+    {
+        return Err(invalid(
+            "Lair access scopes are empty, unsupported, or exceed limits",
         ));
     }
-    refuse_while_fenced(state)?;
-    grant_lair_access_response(state, peer, lair_id, scopes).await
+    Ok(canonical.into_iter().collect())
 }
 
-async fn grant_lair_access_response(
-    state: &Arc<DaemonState>,
+/// A covered request's answer from a "while open" or remembered grant. These
+/// grants never expire by time, so the expiry is zero.
+async fn agent_grant_lair_response(
+    state: &DaemonState,
     peer: &PeerIdentity,
     lair_id: LairId,
     scopes: Vec<AccessScope>,
-) -> Result<Response, ProtocolError> {
+    grant_id: u64,
+    duration: agent_access::GrantDuration,
+) -> Response {
     let topology_revision = state.topology.read().await.revision();
-    let mutation = state.grants.lock().await.grant_lair(peer, lair_id, scopes);
-    schedule_lair_grant_expiry(state, mutation.grant.grant_id);
-    Ok(lair_access_response(topology_revision, mutation))
+    let authorization_revision = state.grants.lock().await.authorization_revision();
+    Response::LairAccessGranted {
+        topology_revision,
+        authorization_revision,
+        grant: splinterm_protocol::LairAccessGrant {
+            grant_id,
+            source: match duration {
+                agent_access::GrantDuration::Once => {
+                    splinterm_protocol::AccessGrantSource::Ephemeral
+                }
+                agent_access::GrantDuration::WorkspaceSession => {
+                    splinterm_protocol::AccessGrantSource::WorkspaceSession
+                }
+                agent_access::GrantDuration::Remembered => {
+                    splinterm_protocol::AccessGrantSource::Remembered
+                }
+            },
+            lair_id,
+            scopes,
+            requester: peer.requester_label(),
+            expires_at_unix_seconds: 0,
+        },
+    }
+}
+
+/// One workspace request that needs the person's answer.
+struct LairConsentRequest {
+    lair_id: LairId,
+    scopes: Vec<AccessScope>,
+    agent_name: Option<String>,
+    wait_millis: u32,
+}
+
+/// Admits a workspace request to the pending lifecycle (ADR 0014) and waits
+/// for its answer at most the call's wait budget, capped at 25 seconds,
+/// outside the handoff admission. A budget that runs out replies `pending`;
+/// repeating the request joins it.
+async fn request_lair_consent(
+    state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
+    request: LairConsentRequest,
+    admission: &mut HandoffAdmission<'_>,
+) -> Result<Response, ProtocolError> {
+    let LairConsentRequest {
+        lair_id,
+        scopes,
+        agent_name,
+        wait_millis,
+    } = request;
+    let admitted = state.pending_access.admit(
+        peer,
+        lair_id,
+        scopes,
+        agent_name,
+        Instant::now(),
+        open_requester_pidfd,
+    )?;
+    if let Some(opened) = admitted.opened {
+        watch_pending_request(state, admitted.request_id, admitted.expires, opened);
+        ensure_consent_prompter(state);
+    }
+    let budget = Duration::from_millis(u64::from(
+        wait_millis.min(splinterm_protocol::MAX_CONSENT_WAIT_MILLIS),
+    ));
+    let mut outcome = admitted.outcome;
+    // A person answers, so the fence never waits this out: the admission is
+    // released while the call waits and retaken before it replies.
+    let waited = admission
+        .outside(async {
+            time::timeout(budget, async {
+                outcome
+                    .wait_for(Option::is_some)
+                    .await
+                    .ok()
+                    .and_then(|outcome| outcome.clone())
+            })
+            .await
+        })
+        .await;
+    match waited {
+        Ok(Some(pending_access::Outcome::Granted(response))) => Ok(*response),
+        Ok(Some(pending_access::Outcome::Failed(error))) => Err(error),
+        Ok(None) => Err(pending_access::cancelled("the access request ended")),
+        Err(_) => Ok(Response::LairAccessPending {
+            lair_id,
+            topology_revision: state.topology.read().await.revision(),
+            request_id: admitted.request_id,
+            expires_at_unix_seconds: admitted.expires_at_unix_seconds,
+        }),
+    }
+}
+
+/// Pins the requesting process for a new pending request: a pidfd opened by
+/// PID, proven to name the verified connection's process by its start time,
+/// with the file that process executes now. A reused PID is never watched or
+/// granted.
+fn open_requester_pidfd(
+    process: &pending_access::ProcessKey,
+) -> Result<pending_access::PinnedRequester, ProtocolError> {
+    let unavailable = || {
+        ProtocolError::new(
+            ErrorCode::ConsentUnavailable,
+            "the requesting process cannot be pinned for a pending request",
+        )
+    };
+    let pid = i32::try_from(process.pid())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(unavailable)?;
+    let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        .map_err(|_| unavailable())?;
+    let executing = consent::executable_file_identity(process.pid()).map_err(|_| unavailable())?;
+    if !requester_still_runs(process, &pidfd, executing) {
+        return Err(unavailable());
+    }
+    Ok(pending_access::PinnedRequester { pidfd, executing })
+}
+
+/// Whether the pinned requester is still the same live process, executing
+/// the same file it executed when its request opened. Every read happens
+/// between two liveness checks of the pidfd, so a reused PID cannot pass.
+fn requester_still_runs(
+    process: &pending_access::ProcessKey,
+    pidfd: &std::os::fd::OwnedFd,
+    executing: (u64, u64),
+) -> bool {
+    consent::require_live_pidfd(pidfd).is_ok()
+        && agent_status::process_start_time(process.pid()) == Some(process.start_time())
+        && consent::executable_file_identity(process.pid()).is_ok_and(|file| file == executing)
+        && consent::require_live_pidfd(pidfd).is_ok()
+}
+
+/// Ends a new pending request when its process exits or it expires; stops
+/// once it ends for any other reason.
+fn watch_pending_request(
+    state: &Arc<DaemonState>,
+    request_id: u64,
+    expires: Instant,
+    opened: pending_access::Opened,
+) {
+    let state = Arc::clone(state);
+    drop(tokio::spawn(async move {
+        let exited = async {
+            match tokio::io::unix::AsyncFd::with_interest(
+                Arc::clone(&opened.pidfd),
+                tokio::io::Interest::READABLE,
+            ) {
+                Ok(pidfd) => {
+                    let _ = pidfd.readable().await;
+                }
+                // Without a monitor the request still expires and is checked
+                // again before any commit.
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            () = opened.done.cancelled() => {}
+            () = exited => {
+                state.pending_access.end_request(
+                    request_id,
+                    &pending_access::cancelled("the requesting process exited"),
+                );
+            }
+            () = time::sleep_until(time::Instant::from_std(expires)) => {
+                state.pending_access.expire(request_id, Instant::now());
+            }
+        }
+    }));
+}
+
+/// Starts the single prompter unless it runs: it shows queued prompts one at
+/// a time, in arrival order.
+fn ensure_consent_prompter(state: &Arc<DaemonState>) {
+    /// Gives the prompter role back if the prompter panics, so later
+    /// requests are still shown. A normal exit already gave it back.
+    struct PrompterRole(Arc<DaemonState>);
+
+    impl Drop for PrompterRole {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.pending_access.release_prompter();
+            }
+        }
+    }
+
+    if state.pending_access.claim_prompter() {
+        let role = PrompterRole(Arc::clone(state));
+        drop(tokio::spawn(async move {
+            let state = &role.0;
+            while let Some(job) = state.pending_access.next_prompt() {
+                let decision = Box::pin(show_lair_prompt(state, &job)).await;
+                Box::pin(settle_lair_prompt(state, job, decision)).await;
+            }
+        }));
+    }
+}
+
+/// A test's stand-in for the trusted consent client.
+#[cfg(test)]
+#[derive(Debug)]
+struct ScriptedPrompt {
+    request_id: u64,
+    lair_name: String,
+    details: consent::PromptDetails,
+    answer: tokio::sync::oneshot::Sender<ConsentDecision>,
+}
+
+/// Shows one queued request's prompt until the person answers, the request
+/// ends, or it expires.
+async fn show_lair_prompt(
+    state: &Arc<DaemonState>,
+    job: &pending_access::PromptJob,
+) -> anyhow::Result<ConsentDecision> {
+    let lair_name = state
+        .topology
+        .read()
+        .await
+        .find_lair(job.lair_id)
+        .map(|lair| lair.name.clone())
+        .context("the workspace no longer exists")?;
+    let access = agent_access::AccessSet::from_scopes(job.scopes.iter().copied())
+        .map_err(|why| anyhow::anyhow!("the requested access is invalid: {why:?}"))?;
+    let details = lair_prompt_details(
+        state,
+        &job.peer,
+        job.lair_id,
+        &access,
+        job.agent_name.clone(),
+    );
+    let deadline = job.expires.saturating_duration_since(Instant::now());
+    #[cfg(test)]
+    {
+        let script = state
+            .consent_script
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(script) = script {
+            let (answer, answered) = tokio::sync::oneshot::channel();
+            script
+                .send(ScriptedPrompt {
+                    request_id: job.request_id,
+                    lair_name,
+                    details,
+                    answer,
+                })
+                .ok()
+                .context("the test prompter is gone")?;
+            return tokio::select! {
+                answer = answered => answer.context("the test prompt closed unanswered"),
+                () = job.cancel.cancelled() => anyhow::bail!("consent prompt cancelled"),
+                () = time::sleep(deadline) => anyhow::bail!("consent prompt timed out"),
+            };
+        }
+    }
+    let prompt = consent::prompt_lair(
+        &state.install_prefix,
+        &job.peer,
+        job.lair_id,
+        lair_name,
+        job.scopes.clone(),
+        details,
+        deadline,
+        Arc::clone(&job.cancel),
+    );
+    tokio::select! {
+        answer = prompt => answer,
+        // The client is killed by the cancel; this only stops waiting.
+        () = job.cancel.cancelled() => anyhow::bail!("consent prompt cancelled"),
+    }
+}
+
+/// What the prompt shows for this requester and request: the level or
+/// Custom, every duration with its withheld reason, the shared-identity path
+/// for each longer one, and what a longer answer would replace.
+fn lair_prompt_details(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    lair_id: LairId,
+    access: &agent_access::AccessSet,
+    agent_name: Option<String>,
+) -> consent::PromptDetails {
+    use splinterm_protocol::{ConsentDurationOffer, ConsentReplacement, GrantDuration};
+
+    fn display_path(path: &Path) -> String {
+        path.to_string_lossy()
+            .chars()
+            .take(splinterm_protocol::MAX_CONSENT_PATH_CHARS)
+            .collect()
+    }
+    fn replacement(access: &agent_access::AccessSet) -> ConsentReplacement {
+        ConsentReplacement {
+            level: access.level(),
+            scopes: access.scopes().into_iter().collect(),
+        }
+    }
+    fn withheld(duration: GrantDuration, why: agent_access::Withheld) -> ConsentDurationOffer {
+        ConsentDurationOffer {
+            duration,
+            withheld: Some(why),
+            shared_by: None,
+            replaces: None,
+        }
+    }
+
+    let offer = agent_access::offered_durations(peer, access, state.agent_access.store_available());
+    let session = match offer.workspace_session {
+        Ok(()) => ConsentDurationOffer {
+            duration: GrantDuration::WorkspaceSession,
+            withheld: None,
+            shared_by: peer
+                .persistent_executable()
+                .map(|executable| display_path(&executable.path)),
+            replaces: state
+                .agent_access
+                .session_definition(peer, lair_id)
+                .as_ref()
+                .map(replacement),
+        },
+        Err(why) => withheld(GrantDuration::WorkspaceSession, why),
+    };
+    let remembered = match &offer.remembered {
+        Ok(identity) => ConsentDurationOffer {
+            duration: GrantDuration::Remembered,
+            withheld: None,
+            shared_by: Some(display_path(identity.path())),
+            replaces: state
+                .agent_access
+                .remembered_definition(identity, lair_id)
+                .as_ref()
+                .map(replacement),
+        },
+        Err(why) => withheld(GrantDuration::Remembered, *why),
+    };
+    let mut details = consent::PromptDetails::once_only();
+    details.agent_name = agent_name;
+    details.level = access.level();
+    details.durations.extend([session, remembered]);
+    details
+}
+
+/// Acts on one prompt's answer. A deny cools the identity down; a grant
+/// commits only while its request is still pending, through
+/// `commit_agent_grant`, after checking the requester still runs as the
+/// verified process. An end that arrives during the commit wins, and the
+/// committed grant is revoked again.
+async fn settle_lair_prompt(
+    state: &Arc<DaemonState>,
+    job: pending_access::PromptJob,
+    decision: anyhow::Result<ConsentDecision>,
+) {
+    let request_id = job.request_id;
+    let duration = match decision {
+        Err(error) => {
+            if job.cancel.is_cancelled() {
+                return;
+            }
+            let ended = if Instant::now() >= job.expires {
+                pending_access::cancelled("the access request expired without an answer")
+            } else {
+                warn!(%error, "trusted Lair consent client failed closed");
+                ProtocolError::new(
+                    ErrorCode::ConsentUnavailable,
+                    "no trusted graphical session could show the access prompt",
+                )
+            };
+            state.pending_access.end_request(request_id, &ended);
+            return;
+        }
+        Ok(ConsentDecision::Deny) => {
+            if let Some(denied) = state.pending_access.deny(request_id, Instant::now()) {
+                state.grants.lock().await.deny_lair(
+                    &denied.peer,
+                    denied.lair_id,
+                    &denied.scopes,
+                    "denied by the person",
+                );
+            }
+            return;
+        }
+        Ok(ConsentDecision::Grant { duration }) => duration,
+    };
+    // The whole commit holds the handoff admission, as a fenced request
+    // does, so the fence waits for it and never meets a half-written grant
+    // or a store write after its flush. Under it the fence is checked again.
+    let _admitted = state.handoff_in_flight.read().await;
+    let Some(ticket) = state.pending_access.begin_commit(request_id) else {
+        // The request ended while the prompt was open: the answer grants
+        // nothing.
+        return;
+    };
+    // If the commit ends early, even by a panic, its request still ends
+    // instead of holding a slot until it expires.
+    let mut guard = CommitGuard {
+        state,
+        request_id,
+        armed: true,
+    };
+    let committed = if let Err(fenced) = refuse_while_fenced(state) {
+        Err(fenced)
+    } else if requester_still_runs(&ticket.process, &ticket.pidfd, ticket.executing) {
+        match agent_access::AccessSet::from_scopes(job.scopes.iter().copied()) {
+            Ok(access) => commit_agent_grant(
+                state,
+                &ticket.peer,
+                AgentGrantRequest {
+                    lair_id: job.lair_id,
+                    access,
+                    duration,
+                    display_name: job.agent_name.clone(),
+                },
+                Some(request_id),
+            )
+            .await
+            .map_err(|error| agent_grant_protocol_error(&error)),
+            Err(_) => Err(invalid("the requested access is invalid")),
+        }
+    } else {
+        Err(pending_access::cancelled("the requesting process exited"))
+    };
+    guard.armed = false;
+    let committed = match committed {
+        Ok(committed) => committed,
+        Err(error) => {
+            state
+                .pending_access
+                .finish_commit(request_id, pending_access::Outcome::Failed(error));
+            return;
+        }
+    };
+    let response = committed_lair_response(state, &ticket.peer, &job, &committed).await;
+    if !state.pending_access.finish_commit(
+        request_id,
+        pending_access::Outcome::Granted(Box::new(response)),
+    ) {
+        // Only an "Always" grant can get here: the others become visible
+        // only while their request is live.
+        revoke_committed_grant(state, &committed).await;
+    }
+}
+
+/// Ends a committing request that its committer abandoned (a panic or an
+/// early exit), so it never holds a pending slot until it expires.
+struct CommitGuard<'a> {
+    state: &'a DaemonState,
+    request_id: u64,
+    armed: bool,
+}
+
+impl Drop for CommitGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state
+                .pending_access
+                .finish_commit(self.request_id, pending_access::Outcome::Failed(internal()));
+        }
+    }
+}
+
+/// The answer the requester receives for a committed grant.
+async fn committed_lair_response(
+    state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
+    job: &pending_access::PromptJob,
+    committed: &AgentGrantCommitted,
+) -> Response {
+    if committed.duration == agent_access::GrantDuration::Once
+        && let Ok(response) =
+            existing_lair_access_response(state, committed.grant_id, job.lair_id).await
+    {
+        return response;
+    }
+    agent_grant_lair_response(
+        state,
+        peer,
+        job.lair_id,
+        job.scopes.clone(),
+        committed.grant_id,
+        committed.duration,
+    )
+    .await
+}
+
+/// Revokes a grant committed for a request that ended meanwhile.
+async fn revoke_committed_grant(state: &Arc<DaemonState>, committed: &AgentGrantCommitted) {
+    match (committed.duration, &committed.entry_id) {
+        (agent_access::GrantDuration::Remembered, Some(entry_id)) => {
+            match revoke_remembered_grant(state, entry_id).await {
+                Some(RememberedRevocation {
+                    durable: Err(error),
+                    ..
+                }) => warn!(
+                    %error,
+                    "a remembered grant whose request ended stays revoked; its durable removal failed and is retried"
+                ),
+                Some(_) => {}
+                None => warn!("a remembered grant whose request ended was already gone"),
+            }
+        }
+        (agent_access::GrantDuration::WorkspaceSession, _) => {
+            revoke_session_grant(state, committed.grant_id).await;
+        }
+        _ => {
+            if state
+                .grants
+                .lock()
+                .await
+                .revoke_any(committed.grant_id)
+                .is_some()
+            {
+                revoke_grant_controllers(state, committed.grant_id).await;
+                let _ = state.revocations.send(Revocation {
+                    grant_id: committed.grant_id,
+                });
+            }
+        }
+    }
+}
+
+/// The requester's error when an answer could not be committed. A failed
+/// durable write grants nothing, not even a shorter grant.
+fn agent_grant_protocol_error(error: &AgentGrantError) -> ProtocolError {
+    match error {
+        AgentGrantError::Fenced => ProtocolError::new(
+            ErrorCode::HandoffInProgress,
+            "the daemon is upgrading; ask again after it restarts",
+        ),
+        AgentGrantError::WorkspaceMissing
+        | AgentGrantError::Commit(agent_access::CommitError::WorkspaceEnded) => {
+            ProtocolError::new(ErrorCode::NotFound, "the workspace no longer exists")
+        }
+        AgentGrantError::IdentityChanged
+        | AgentGrantError::Commit(agent_access::CommitError::NotOffered(_)) => ProtocolError::new(
+            ErrorCode::ConsentUnavailable,
+            "the chosen duration is no longer available for this program; nothing was granted",
+        ),
+        AgentGrantError::InvalidAccess(_) => invalid("the requested access is invalid"),
+        AgentGrantError::Commit(agent_access::CommitError::Ended) => {
+            pending_access::cancelled("the access request ended before it was granted")
+        }
+        AgentGrantError::Commit(agent_access::CommitError::Store(store)) => {
+            warn!(%store, "remembered agent access could not be saved; nothing was granted");
+            ProtocolError::new(
+                ErrorCode::Internal,
+                "remembered access could not be saved; nothing was granted",
+            )
+        }
+    }
 }
 
 async fn existing_lair_access_response(
@@ -7162,6 +7750,8 @@ async fn request_policy_resources(
         | Request::Detach { .. }
         | Request::PrepareDaemonHandoff { .. }
         | Request::ClaimHandoffControl { .. }
+        | Request::CancelLairAccessRequest { .. }
+        | Request::CancelAllLairAccessRequests
         | Request::AcknowledgeHandoffPrepare { .. } => Vec::new(),
         Request::ListLairs
         | Request::InspectTopology
@@ -7394,6 +7984,9 @@ fn schedule_agent_access_flush(state: &DaemonState) {
 /// for it of every duration is revoked, its controllers released, and its
 /// subscriptions cancelled; its remembered entries are removed durably.
 async fn end_lair_grants(state: &DaemonState, lair_id: LairId, reason: &'static str) {
+    // Its pending requests end first, so an answer still being committed is
+    // revoked by its committer rather than outliving the workspace.
+    state.pending_access.end_lair(lair_id);
     let mut grant_ids = state.grants.lock().await.revoke_lair(lair_id, reason);
     let ended = state.agent_access.end_lair(lair_id, reason);
     grant_ids.extend(ended.grant_ids);
@@ -7408,7 +8001,6 @@ async fn end_lair_grants(state: &DaemonState, lair_id: LairId, reason: &'static 
 
 /// One answer to commit as a grant (ADR 0014).
 #[derive(Clone, Debug)]
-#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
 struct AgentGrantRequest {
     lair_id: LairId,
     access: agent_access::AccessSet,
@@ -7418,7 +8010,6 @@ struct AgentGrantRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
 struct AgentGrantCommitted {
     grant_id: u64,
     duration: agent_access::GrantDuration,
@@ -7426,7 +8017,10 @@ struct AgentGrantCommitted {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "payloads are kept for diagnostics and tests")
+)]
 enum AgentGrantError {
     /// An upgrade fence is up.
     Fenced,
@@ -7439,23 +8033,26 @@ enum AgentGrantError {
     Commit(agent_access::CommitError),
 }
 
-/// The crate-internal entry point that commits a grant of any duration.
-/// PR 3's consent flow calls it after the person answers; tests call it now.
-/// No public request reaches it yet.
+/// The crate-internal entry point that commits a grant of any duration. The
+/// consent flow (`settle_lair_prompt`) calls it after the person answers.
 ///
 /// It validates again before committing: no fence is up, the workspace
 /// exists, the duration is offered to this requester for this access, and,
 /// for "Always", the durable identity still qualifies and the durable write
 /// succeeds. A failed write grants nothing, not even a shorter grant. A
 /// replaced definition's controllers and subscriptions end.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "PR 3's consent flow commits through this")
-)]
+///
+/// With `live`, the pending request the answer belongs to, a "just this
+/// once" or "while open" grant becomes visible only through
+/// `PendingAccess::publish_if_live`, under the lock that holds the grant
+/// (grants or engine memory first, then the registry): a request ended first
+/// publishes nothing. An "Always" grant is written durably first; if its
+/// request ended meanwhile, the committer revokes it.
 async fn commit_agent_grant(
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
     request: AgentGrantRequest,
+    live: Option<u64>,
 ) -> Result<AgentGrantCommitted, AgentGrantError> {
     use agent_access::{CommitError, Committed, GrantDuration};
 
@@ -7483,11 +8080,16 @@ async fn commit_agent_grant(
         .map_err(|why| AgentGrantError::Commit(CommitError::NotOffered(why)))?;
     let committed = match duration {
         GrantDuration::Once => {
-            let mutation = state.grants.lock().await.grant_lair(
-                peer,
-                lair_id,
-                access.scopes().into_iter().collect(),
-            );
+            let scopes: Vec<_> = access.scopes().into_iter().collect();
+            let mut grants = state.grants.lock().await;
+            let mutation = match live {
+                Some(request_id) => state
+                    .pending_access
+                    .publish_if_live(request_id, || grants.grant_lair(peer, lair_id, scopes))
+                    .ok_or(AgentGrantError::Commit(CommitError::Ended))?,
+                None => grants.grant_lair(peer, lair_id, scopes),
+            };
+            drop(grants);
             schedule_lair_grant_expiry(state, mutation.grant.grant_id);
             Committed {
                 grant_id: mutation.grant.grant_id,
@@ -7497,7 +8099,14 @@ async fn commit_agent_grant(
         }
         GrantDuration::WorkspaceSession => state
             .agent_access
-            .commit_session(peer, lair_id, access, display_name)
+            .commit_session_gated(peer, lair_id, access, display_name, || {
+                live.is_none_or(|request_id| {
+                    state
+                        .pending_access
+                        .publish_if_live(request_id, || ())
+                        .is_some()
+                })
+            })
             .map_err(AgentGrantError::Commit)?,
         GrantDuration::Remembered => {
             let identity = offer
@@ -7536,10 +8145,6 @@ async fn commit_agent_grant(
 
 /// Revokes one "while this workspace is open" definition: new requests stop
 /// at once, its subscriptions are cancelled, and its controllers released.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "PR 4's inventory revokes through this")
-)]
 async fn revoke_session_grant(state: &DaemonState, grant_id: u64) -> bool {
     if !state.agent_access.revoke_session(grant_id) {
         return false;
@@ -7551,7 +8156,10 @@ async fn revoke_session_grant(state: &DaemonState, grant_id: u64) -> bool {
 
 /// What revoking a remembered definition did.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code, reason = "dormant until PR 3 and PR 4"))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "PR 4's inventory reports the durable outcome")
+)]
 struct RememberedRevocation {
     grant_id: u64,
     /// The durable removal. On failure the grant stays revoked in memory and
@@ -7562,10 +8170,6 @@ struct RememberedRevocation {
 
 /// Revokes one remembered definition: in memory at once, with its
 /// subscriptions and controllers, then durably.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "PR 4's inventory revokes through this")
-)]
 async fn revoke_remembered_grant(
     state: &DaemonState,
     entry_id: &agent_access::EntryId,
@@ -8541,6 +9145,14 @@ async fn handle_authorized_request(
                 ));
             }
             let scopes: Vec<_> = canonical.into_iter().collect();
+            // Looked up first: a guard in an `if let` scrutinee would live
+            // through its branch, and the answer locks the grants again.
+            let existing_grant =
+                state
+                    .grants
+                    .lock()
+                    .await
+                    .authorize(peer, splint_id, incarnation, &scopes);
             if authorization.policy_authorized() {
                 grant_access_response(state, peer, splint_id, incarnation, scopes).await?
             } else if state.development_terminal_access {
@@ -8557,13 +9169,7 @@ async fn handle_authorized_request(
             ) {
                 nonstored_access_response(state, first_party_grant(splint_id, incarnation, scopes))
                     .await?
-            } else if let Some(grant_id) =
-                state
-                    .grants
-                    .lock()
-                    .await
-                    .authorize(peer, splint_id, incarnation, &scopes)
-            {
+            } else if let Some(grant_id) = existing_grant {
                 existing_access_response(state, grant_id, splint_id, incarnation).await?
             } else {
                 // A person answers the prompt, so the fence never waits it
@@ -8602,30 +9208,30 @@ async fn handle_authorized_request(
                 grant_access_response(state, peer, splint_id, incarnation, scopes).await?
             }
         }
-        Request::RequestLairAccess { lair_id, scopes } => {
-            let canonical: std::collections::BTreeSet<_> = scopes.into_iter().collect();
-            if canonical.is_empty()
-                || canonical.len() > splinterm_protocol::MAX_ACCESS_SCOPES
-                || canonical.iter().any(|scope| {
-                    matches!(
-                        scope,
-                        AccessScope::ClipboardRead | AccessScope::ClipboardWrite
-                    )
-                })
+        Request::RequestLairAccess {
+            lair_id,
+            level,
+            scopes,
+            wait_millis,
+            agent_name,
+        } => {
+            let scopes = requested_lair_scopes(level, scopes)?;
+            if agent_name
+                .as_ref()
+                .is_some_and(|name| name.chars().count() > splinterm_protocol::MAX_AGENT_NAME_CHARS)
             {
-                return Err(invalid(
-                    "Lair access scopes are empty, unsupported, or exceed limits",
-                ));
+                return Err(invalid("the agent name exceeds its limit"));
             }
-            let scopes: Vec<_> = canonical.into_iter().collect();
-            let lair_name = {
-                let topology = state.topology.read().await;
-                topology
-                    .lairs()
-                    .find(|lair| lair.id == lair_id)
-                    .map(|lair| lair.name.clone())
-                    .ok_or_else(not_found)?
-            };
+            if state.topology.read().await.find_lair(lair_id).is_none() {
+                return Err(not_found());
+            }
+            // Looked up first: a guard in an `if let` scrutinee would live
+            // through its branch, and the answer locks the grants again.
+            let once_grant = state
+                .grants
+                .lock()
+                .await
+                .authorize_lair(peer, lair_id, &scopes);
             if authorization.policy_authorized() {
                 nonstored_lair_access_response(
                     state,
@@ -8644,35 +9250,63 @@ async fn handle_authorized_request(
                     splinterm_protocol::AccessGrantSource::Development,
                 )
                 .await?
-            } else if let Some(grant_id) = state
-                .grants
-                .lock()
-                .await
-                .authorize_lair(peer, lair_id, &scopes)
-            {
+            } else if let Some(grant_id) = once_grant {
                 existing_lair_access_response(state, grant_id, lair_id).await?
+            } else if let Some(authorized) =
+                state
+                    .agent_access
+                    .authorize(peer, lair_id, &scopes, unix_seconds_now())
+            {
+                // ADR 0014: a request a "while open" or remembered grant
+                // already covers is answered without a prompt.
+                if authorized.flush_due {
+                    schedule_agent_access_flush(state);
+                }
+                agent_grant_lair_response(
+                    state,
+                    peer,
+                    lair_id,
+                    scopes,
+                    authorized.grant_id,
+                    authorized.duration,
+                )
+                .await
             } else {
-                // As for a Splint prompt: released for the prompt, retaken
-                // before the answer is committed.
-                let prompted = admission
-                    .outside(consent::prompt_lair(
-                        &state.install_prefix,
-                        peer,
+                Box::pin(request_lair_consent(
+                    state,
+                    peer,
+                    LairConsentRequest {
                         lair_id,
-                        lair_name,
-                        scopes.clone(),
-                    ))
-                    .await;
-                let granted = match prompted {
-                    Ok(granted) => granted,
-                    Err(error) => {
-                        warn!(%error, "trusted Lair consent client failed closed");
-                        false
-                    }
-                };
-                commit_lair_consent(state, peer, lair_id, scopes, granted).await?
+                        scopes,
+                        agent_name,
+                        wait_millis,
+                    },
+                    admission,
+                ))
+                .await?
             }
         }
+        Request::CancelLairAccessRequest {
+            lair_id,
+            request_id,
+        } => {
+            let cancelled = pending_access::ProcessKey::of(peer)
+                .is_some_and(|process| state.pending_access.cancel(&process, lair_id, request_id));
+            if !cancelled {
+                return Err(ProtocolError::new(
+                    ErrorCode::NotFound,
+                    "no pending access request of this process for this Lair has that identifier",
+                ));
+            }
+            Response::LairAccessRequestCancelled {
+                lair_id,
+                topology_revision: state.topology.read().await.revision(),
+                request_id,
+            }
+        }
+        Request::CancelAllLairAccessRequests => Response::LairAccessRequestsCancelled {
+            cancelled: u32::try_from(state.pending_access.cancel_all()).unwrap_or(u32::MAX),
+        },
         Request::AuthorizationStatus {
             splint_id,
             incarnation: requested_incarnation,
@@ -11199,6 +11833,8 @@ const fn handoff_fenced(request: &Request) -> bool {
         | Request::Detach { .. }
         | Request::ReleaseControl { .. }
         | Request::RevokeAccess { .. }
+        | Request::CancelLairAccessRequest { .. }
+        | Request::CancelAllLairAccessRequests
         | Request::PrepareDaemonHandoff { .. }
         | Request::AcknowledgeHandoffPrepare { .. } => false,
         Request::CreateLair { .. }
@@ -11321,6 +11957,10 @@ impl HandoffAttempt {
         hold.fence = Some(permit.map_err(|_| HandoffCancelReason::Failed)?);
         state.handoff_gate.set(HandoffGatePhase::Fenced);
         drop(drained);
+        // ADR 0014: no pending access request survives the fence. Its prompt
+        // closes, and an answer being committed now meets the fence in
+        // `commit_agent_grant` or is revoked by its committer.
+        state.pending_access.end_all_at_fence();
         publish_handoff_status(&state, HandoffStatusPhase::Fenced).await;
         Ok(())
     }
@@ -16238,6 +16878,8 @@ mod tests {
             grants: Mutex::new(GrantStore::with_ids(Arc::clone(&grant_ids))),
             agent_access: Arc::new(agent_access::AgentAccess::unconfigured(grant_ids)),
             identity_context: Arc::new(agent_access::IdentityContext::for_daemon()),
+            pending_access: pending_access::PendingAccess::default(),
+            consent_script: StdMutex::default(),
             revocations,
             image_transfers: Mutex::new(TransferAdmission::default()),
             image_transfer_expiry_changed: Notify::new(),
@@ -18607,6 +19249,11 @@ mod tests {
             Request::Detach { subscription_id: 1 },
             Request::ReleaseControl { controller_id: 1 },
             Request::RevokeAccess { grant_id: 1 },
+            Request::CancelLairAccessRequest {
+                lair_id,
+                request_id: 1,
+            },
+            Request::CancelAllLairAccessRequests,
             Request::PrepareDaemonHandoff {
                 mode: splinterm_protocol::DaemonHandoffMode::Execute,
             },
@@ -18795,7 +19442,10 @@ mod tests {
             },
             Request::RequestLairAccess {
                 lair_id,
+                level: None,
                 scopes: vec![AccessScope::Input],
+                wait_millis: 0,
+                agent_name: None,
             },
             Request::SubscribeTopology,
             Request::SubscribeControl {
@@ -20810,54 +21460,663 @@ mod tests {
         assert_eq!(generation().await, before + 3);
     }
 
-    #[tokio::test]
-    async fn a_lair_consent_answered_under_the_fence_commits_no_grant() {
-        let state = test_state(false);
-        let peer = PeerIdentity::for_test();
-        let lair = Lair::new("durable", PathBuf::from("/tmp"));
-        let lair_id = lair.id;
-        {
-            let mut topology = state.topology.write().await;
-            let revision = topology.revision();
-            topology.insert_lair_at(revision, lair).unwrap();
-        }
-        let scopes = vec![AccessScope::Input];
-        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
-        attempt.fence().await.unwrap();
-        // The prompt was admitted before the fence and answered under it.
-        let refused = commit_lair_consent(&state, &peer, lair_id, scopes.clone(), true)
+    // ---- ADR 0014 consent and pending lifecycle (Plan 0053 PR 3) ----
+
+    /// Routes every workspace prompt the daemon shows to the test, in place
+    /// of the trusted consent client.
+    fn script_prompts(state: &DaemonState) -> tokio::sync::mpsc::UnboundedReceiver<ScriptedPrompt> {
+        let (prompts, receiver) = tokio::sync::mpsc::unbounded_channel();
+        *state.consent_script.lock().unwrap() = Some(prompts);
+        receiver
+    }
+
+    async fn next_scripted_prompt(
+        prompts: &mut tokio::sync::mpsc::UnboundedReceiver<ScriptedPrompt>,
+    ) -> ScriptedPrompt {
+        time::timeout(Duration::from_secs(5), prompts.recv())
             .await
-            .unwrap_err();
-        assert_eq!(refused.code, ErrorCode::HandoffInProgress);
-        assert!(
-            state
-                .grants
-                .lock()
-                .await
-                .authorize_lair(&peer, lair_id, &scopes)
-                .is_none(),
-            "no grant is committed under the fence"
+            .expect("a prompt is shown")
+            .expect("the prompter is running")
+    }
+
+    /// `peer` with this process's start time, as connection verification
+    /// records it.
+    fn with_start_time(mut peer: PeerIdentity) -> PeerIdentity {
+        peer.install_start_time(
+            agent_status::process_start_time(std::process::id()).expect("own start time"),
         );
-        // A denial is still recorded as denied, not as in progress.
+        peer
+    }
+
+    async fn insert_test_lair(state: &DaemonState, name: &str) -> LairId {
+        let lair = Lair::new(name, PathBuf::from("/tmp"));
+        let lair_id = lair.id;
+        let mut topology = state.topology.write().await;
+        let revision = topology.revision();
+        topology.insert_lair_at(revision, lair).unwrap();
+        lair_id
+    }
+
+    fn lair_request(lair_id: LairId, scopes: &[AccessScope], wait_millis: u32) -> Request {
+        Request::RequestLairAccess {
+            lair_id,
+            level: None,
+            scopes: scopes.to_vec(),
+            wait_millis,
+            agent_name: Some("Test agent".to_owned()),
+        }
+    }
+
+    async fn ask(
+        state: &Arc<DaemonState>,
+        peer: &PeerIdentity,
+        request: Request,
+    ) -> Result<Response, ProtocolError> {
+        handle_request(request, state, peer, 1, 0, false, false)
+            .await
+            .map(|handled| handled.response)
+    }
+
+    fn spawn_ask(
+        state: &Arc<DaemonState>,
+        peer: &PeerIdentity,
+        request: Request,
+    ) -> tokio::task::JoinHandle<Result<Response, ProtocolError>> {
+        let state = Arc::clone(state);
+        let peer = peer.clone();
+        tokio::spawn(async move { ask(&state, &peer, request).await })
+    }
+
+    fn pending_request_id(response: &Response) -> u64 {
+        match response {
+            Response::LairAccessPending { request_id, .. } => *request_id,
+            other => panic!("not pending: {other:?}"),
+        }
+    }
+
+    fn granted(response: Response) -> splinterm_protocol::LairAccessGrant {
+        match response {
+            Response::LairAccessGranted { grant, .. } => grant,
+            other => panic!("not granted: {other:?}"),
+        }
+    }
+
+    async fn wait_until_no_request_is_pending(state: &DaemonState) {
+        time::timeout(Duration::from_secs(5), async {
+            while state.pending_access.len() != 0 {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the pending request ends");
+    }
+
+    async fn has_once_grant(state: &DaemonState, peer: &PeerIdentity, lair_id: LairId) -> bool {
+        state
+            .grants
+            .lock()
+            .await
+            .authorize_lair(peer, lair_id, &[AccessScope::Observe])
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn a_request_a_grant_covers_is_answered_without_a_prompt() {
+        let fixture = agent_fixture().await;
+        let mut prompts = script_prompts(&fixture.state);
+        let session = fixture
+            .commit(
+                &fixture.peer,
+                agent_access::AccessSet::Level(agent_access::AccessLevel::LookAndType),
+                agent_access::GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        let grant = granted(
+            ask(
+                &fixture.state,
+                &fixture.peer,
+                Request::RequestLairAccess {
+                    lair_id: fixture.lair_id,
+                    level: Some(splinterm_protocol::AccessLevel::Look),
+                    scopes: Vec::new(),
+                    wait_millis: 0,
+                    agent_name: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
         assert_eq!(
-            commit_lair_consent(&state, &peer, lair_id, scopes.clone(), false)
+            grant.source,
+            splinterm_protocol::AccessGrantSource::WorkspaceSession
+        );
+        assert_eq!(grant.grant_id, session.grant_id);
+        assert_eq!(grant.expires_at_unix_seconds, 0);
+        // The while-open Look and type grant does not cover renaming; the
+        // remembered Manage grant does, as an independent source.
+        let remembered = fixture
+            .commit(
+                &fixture.peer,
+                agent_access::AccessSet::Level(agent_access::AccessLevel::Manage),
+                agent_access::GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        let grant = granted(
+            ask(
+                &fixture.state,
+                &fixture.peer,
+                lair_request(fixture.lair_id, &[AccessScope::TopologyName], 0),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(
+            grant.source,
+            splinterm_protocol::AccessGrantSource::Remembered
+        );
+        assert_eq!(grant.grant_id, remembered.grant_id);
+        assert!(prompts.try_recv().is_err(), "no prompt was shown");
+        assert_eq!(fixture.state.pending_access.len(), 0);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one request's whole pending, join, answer, and collection path"
+    )]
+    async fn the_wait_budget_replies_pending_and_a_repeat_joins_without_a_second_prompt() {
+        use splinterm_protocol::{DurationWithheld, GrantDuration};
+
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(&state);
+        let scopes = [AccessScope::Observe, AccessScope::Input];
+        let first = ask(&state, &peer, lair_request(lair_id, &scopes, 0))
+            .await
+            .unwrap();
+        let request_id = pending_request_id(&first);
+        let Response::LairAccessPending {
+            expires_at_unix_seconds,
+            lair_id: pending_lair,
+            ..
+        } = first
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_lair, lair_id);
+        let now = unix_seconds_now();
+        assert!((now + 118..=now + 121).contains(&expires_at_unix_seconds));
+        let prompt = next_scripted_prompt(&mut prompts).await;
+        assert_eq!(prompt.request_id, request_id);
+        assert_eq!(prompt.lair_name, "agents");
+        assert_eq!(prompt.details.level, None, "two scopes are Custom");
+        assert_eq!(prompt.details.agent_name.as_deref(), Some("Test agent"));
+        // Without a pinned identity only "Just this once" is offered; the
+        // others are shown withheld, with the reason.
+        assert_eq!(
+            prompt
+                .details
+                .durations
+                .iter()
+                .map(|offer| (offer.duration, offer.withheld))
+                .collect::<Vec<_>>(),
+            [
+                (GrantDuration::Once, None),
+                (
+                    GrantDuration::WorkspaceSession,
+                    Some(DurationWithheld::NoPinnedIdentity)
+                ),
+                (
+                    GrantDuration::Remembered,
+                    Some(DurationWithheld::NoPinnedIdentity)
+                ),
+            ]
+        );
+        // A repeat joins: the same request, and no second prompt.
+        let joined = ask(&state, &peer, lair_request(lair_id, &scopes, 20))
+            .await
+            .unwrap();
+        assert_eq!(pending_request_id(&joined), request_id);
+        assert!(prompts.try_recv().is_err(), "one prompt per request");
+        // A call still waiting receives the answer directly.
+        let waiting = spawn_ask(&state, &peer, lair_request(lair_id, &scopes, 5_000));
+        time::sleep(Duration::from_millis(50)).await;
+        prompt
+            .answer
+            .send(ConsentDecision::Grant {
+                duration: GrantDuration::Once,
+            })
+            .unwrap();
+        let grant = granted(waiting.await.unwrap().unwrap());
+        assert_eq!(
+            grant.source,
+            splinterm_protocol::AccessGrantSource::Ephemeral
+        );
+        assert_eq!(grant.scopes, scopes);
+        assert_ne!(grant.expires_at_unix_seconds, 0);
+        wait_until_no_request_is_pending(&state).await;
+        // Later repeats are covered by the grant and answered at once.
+        let again = granted(
+            ask(&state, &peer, lair_request(lair_id, &scopes, 0))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(again.grant_id, grant.grant_id);
+        assert!(prompts.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_closes_the_prompt_and_a_late_answer_grants_nothing() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(&state);
+        let scopes = [AccessScope::Observe];
+        let request_id = pending_request_id(
+            &ask(&state, &peer, lair_request(lair_id, &scopes, 0))
+                .await
+                .unwrap(),
+        );
+        let prompt = next_scripted_prompt(&mut prompts).await;
+        // Different access while one is pending fails, naming it.
+        let refused = ask(
+            &state,
+            &peer,
+            lair_request(lair_id, &[AccessScope::Observe, AccessScope::Input], 0),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::ResourceLimit);
+        assert_eq!(refused.pending_request_id, Some(request_id));
+        assert_eq!(
+            ask(
+                &state,
+                &peer,
+                Request::CancelLairAccessRequest {
+                    lair_id,
+                    request_id: request_id + 100,
+                },
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            ask(
+                &state,
+                &peer,
+                Request::CancelLairAccessRequest {
+                    lair_id,
+                    request_id,
+                }
+            )
+            .await
+            .unwrap(),
+            Response::LairAccessRequestCancelled {
+                lair_id,
+                topology_revision: state.topology.read().await.revision(),
+                request_id,
+            }
+        );
+        // The prompt closed, so its answer reaches nothing and grants
+        // nothing.
+        let _ = prompt.answer.send(ConsentDecision::Grant {
+            duration: splinterm_protocol::GrantDuration::Once,
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        // Cancelling is not a deny: asking again opens a new prompt.
+        let again = pending_request_id(
+            &ask(&state, &peer, lair_request(lair_id, &scopes, 0))
+                .await
+                .unwrap(),
+        );
+        assert_ne!(again, request_id);
+        assert_eq!(next_scripted_prompt(&mut prompts).await.request_id, again);
+    }
+
+    #[tokio::test]
+    async fn a_deny_is_collected_once_and_then_cools_the_agent_down() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(&state);
+        let scopes = [AccessScope::Observe];
+        ask(&state, &peer, lair_request(lair_id, &scopes, 0))
+            .await
+            .unwrap();
+        next_scripted_prompt(&mut prompts)
+            .await
+            .answer
+            .send(ConsentDecision::Deny)
+            .unwrap();
+        wait_until_no_request_is_pending(&state).await;
+        let code = |result: Result<Response, ProtocolError>| result.unwrap_err().code;
+        assert_eq!(
+            code(ask(&state, &peer, lair_request(lair_id, &scopes, 0)).await),
+            ErrorCode::ConsentDenied,
+            "the requester collects its deny"
+        );
+        assert_eq!(
+            code(ask(&state, &peer, lair_request(lair_id, &scopes, 0)).await),
+            ErrorCode::RateLimited,
+        );
+        assert_eq!(
+            code(
+                ask(
+                    &state,
+                    &peer,
+                    lair_request(lair_id, &[AccessScope::Input], 0)
+                )
+                .await
+            ),
+            ErrorCode::RateLimited,
+            "the cooldown covers the identity and workspace, not one request"
+        );
+        assert!(prompts.try_recv().is_err(), "the prompt does not reopen");
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ending_while_pending_ends_the_request() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(&state);
+        let waiting = spawn_ask(
+            &state,
+            &peer,
+            lair_request(lair_id, &[AccessScope::Observe], 5_000),
+        );
+        let prompt = next_scripted_prompt(&mut prompts).await;
+        end_lair_grants(&state, lair_id, "test workspace end").await;
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        let _ = prompt.answer.send(ConsentDecision::Grant {
+            duration: splinterm_protocol::GrantDuration::Once,
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        assert_eq!(state.pending_access.len(), 0);
+    }
+
+    /// The fence never waits for a call waiting on the person, and nothing
+    /// pending survives it (ADR 0011 and 0014).
+    #[tokio::test]
+    async fn the_handoff_fence_ends_pending_requests_without_waiting_for_them() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(&state);
+        let waiting = spawn_ask(
+            &state,
+            &peer,
+            lair_request(lair_id, &[AccessScope::Observe], 20_000),
+        );
+        let prompt = next_scripted_prompt(&mut prompts).await;
+        let mut attempt = HandoffAttempt::begin(&state).await.unwrap();
+        time::timeout(Duration::from_secs(1), attempt.fence())
+            .await
+            .expect("the fence never waits out a pending request")
+            .unwrap();
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            ErrorCode::HandoffInProgress
+        );
+        let _ = prompt.answer.send(ConsentDecision::Grant {
+            duration: splinterm_protocol::GrantDuration::Once,
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        assert_eq!(state.pending_access.len(), 0);
+        // New requests are refused while fenced.
+        assert_eq!(
+            ask(
+                &state,
+                &peer,
+                lair_request(lair_id, &[AccessScope::Observe], 0)
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::HandoffInProgress
+        );
+        attempt.cancel(HandoffCancelReason::Requested).await;
+    }
+
+    #[tokio::test]
+    async fn revoke_all_access_cancels_every_pending_request() {
+        let state = test_state(false);
+        let first = insert_test_lair(&state, "first").await;
+        let second = insert_test_lair(&state, "second").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(&state);
+        for lair_id in [first, second] {
+            ask(
+                &state,
+                &peer,
+                lair_request(lair_id, &[AccessScope::Observe], 0),
+            )
+            .await
+            .unwrap();
+        }
+        let shown = next_scripted_prompt(&mut prompts).await;
+        // Only the trusted UI may end every pending request.
+        assert_eq!(
+            ask(&state, &peer, Request::CancelAllLairAccessRequests)
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::ConsentDenied
+            ErrorCode::Unauthorized
         );
-        attempt.cancel(HandoffCancelReason::Requested).await;
-        commit_lair_consent(&state, &peer, lair_id, scopes.clone(), true)
-            .await
+        assert_eq!(state.pending_access.cancel_all(), 2);
+        let _ = shown.answer.send(ConsentDecision::Grant {
+            duration: splinterm_protocol::GrantDuration::Once,
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        for lair_id in [first, second] {
+            assert!(!has_once_grant(&state, &peer, lair_id).await);
+        }
+        assert!(prompts.try_recv().is_err(), "the queued prompt never shows");
+    }
+
+    fn sleeping_child() -> (std::process::Child, std::os::fd::OwnedFd, (u64, u64)) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a sleeping child");
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        let executing = consent::executable_file_identity(child.id()).unwrap();
+        (child, pidfd, executing)
+    }
+
+    #[tokio::test]
+    async fn a_pending_request_ends_when_its_process_exits() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let (mut child, pidfd, executing) = sleeping_child();
+        let admitted = state
+            .pending_access
+            .admit(
+                &peer,
+                lair_id,
+                vec![AccessScope::Observe],
+                None,
+                Instant::now(),
+                |_| Ok(pending_access::PinnedRequester { pidfd, executing }),
+            )
             .unwrap();
-        assert!(
-            state
-                .grants
-                .lock()
-                .await
-                .authorize_lair(&peer, lair_id, &scopes)
-                .is_some()
+        let mut outcome = admitted.outcome.clone();
+        watch_pending_request(
+            &state,
+            admitted.request_id,
+            admitted.expires,
+            admitted.opened.unwrap(),
         );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let ended = time::timeout(Duration::from_secs(5), outcome.wait_for(Option::is_some))
+            .await
+            .expect("the exit ends the request")
+            .unwrap()
+            .clone();
+        assert!(matches!(
+            ended,
+            Some(pending_access::Outcome::Failed(error)) if error.code == ErrorCode::Cancelled
+        ));
+        assert_eq!(state.pending_access.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_answer_commits_only_for_a_live_requester_and_an_offered_duration() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let process = pending_access::ProcessKey::of(&peer).unwrap();
+        let scopes = vec![AccessScope::Observe];
+        let admit = |pin: pending_access::PinnedRequester| {
+            state
+                .pending_access
+                .admit(&peer, lair_id, scopes.clone(), None, Instant::now(), |_| {
+                    Ok(pin)
+                })
+                .unwrap()
+        };
+        let settled = |admitted: &pending_access::Admitted| admitted.outcome.borrow().clone();
+        // The pinned process exited before the answer: nothing commits.
+        let (mut child, pidfd, executing) = sleeping_child();
+        let gone = admit(pending_access::PinnedRequester { pidfd, executing });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let job = state.pending_access.next_prompt().unwrap();
+        settle_lair_prompt(
+            &state,
+            job,
+            Ok(ConsentDecision::Grant {
+                duration: splinterm_protocol::GrantDuration::Once,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            settled(&gone),
+            Some(pending_access::Outcome::Failed(error)) if error.code == ErrorCode::Cancelled
+        ));
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        // A duration the requester is not offered commits nothing.
+        let offered_once = admit(open_requester_pidfd(&process).unwrap());
+        let job = state.pending_access.next_prompt().unwrap();
+        settle_lair_prompt(
+            &state,
+            job,
+            Ok(ConsentDecision::Grant {
+                duration: splinterm_protocol::GrantDuration::Remembered,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            settled(&offered_once),
+            Some(pending_access::Outcome::Failed(error))
+                if error.code == ErrorCode::ConsentUnavailable
+        ));
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        // The live requester with an offered duration is granted.
+        let live = admit(open_requester_pidfd(&process).unwrap());
+        let job = state.pending_access.next_prompt().unwrap();
+        settle_lair_prompt(
+            &state,
+            job,
+            Ok(ConsentDecision::Grant {
+                duration: splinterm_protocol::GrantDuration::Once,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            settled(&live),
+            Some(pending_access::Outcome::Granted(response))
+                if matches!(*response, Response::LairAccessGranted { .. })
+        ));
+        assert!(has_once_grant(&state, &peer, lair_id).await);
+    }
+
+    /// F1: an answer committing while the fence is up grants nothing; the
+    /// commit holds the handoff admission and checks the fence under it.
+    #[tokio::test]
+    async fn an_answer_under_the_handoff_fence_commits_nothing() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let process = pending_access::ProcessKey::of(&peer).unwrap();
+        let admitted = state
+            .pending_access
+            .admit(
+                &peer,
+                lair_id,
+                vec![AccessScope::Observe],
+                None,
+                Instant::now(),
+                |_| open_requester_pidfd(&process),
+            )
+            .unwrap();
+        let job = state.pending_access.next_prompt().unwrap();
+        // The gate reads fenced, as after a fence that has not yet ended
+        // this request.
+        state.handoff_gate.set(HandoffGatePhase::Fenced);
+        settle_lair_prompt(
+            &state,
+            job,
+            Ok(ConsentDecision::Grant {
+                duration: splinterm_protocol::GrantDuration::Once,
+            }),
+        )
+        .await;
+        state.handoff_gate.set(HandoffGatePhase::Idle);
+        assert!(matches!(
+            &*admitted.outcome.borrow(),
+            Some(pending_access::Outcome::Failed(error))
+                if error.code == ErrorCode::HandoffInProgress
+        ));
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        assert_eq!(state.pending_access.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn without_a_trusted_session_a_request_fails_closed_at_once() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        // No script: the daemon launches its installed client, which the
+        // test prefix does not hold.
+        let failed = time::timeout(
+            Duration::from_secs(5),
+            ask(
+                &state,
+                &peer,
+                lair_request(lair_id, &[AccessScope::Observe], 20_000),
+            ),
+        )
+        .await
+        .expect("the failure does not wait out the budget")
+        .unwrap_err();
+        assert_eq!(failed.code, ErrorCode::ConsentUnavailable);
+        assert_eq!(state.pending_access.len(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -24568,6 +25827,7 @@ mod tests {
                     duration,
                     display_name: Some("Test agent".into()),
                 },
+                None,
             )
             .await
         }
@@ -24892,7 +26152,7 @@ mod tests {
             display_name: None,
         };
         assert_eq!(
-            commit_agent_grant(&fixture.state, &fixture.peer, gone).await,
+            commit_agent_grant(&fixture.state, &fixture.peer, gone, None).await,
             Err(AgentGrantError::WorkspaceMissing)
         );
     }
@@ -25107,5 +26367,144 @@ mod tests {
             fixture.state.agent_access.remembered_for_test()[0].1.access,
             AccessSet::Level(AccessLevel::Look)
         );
+    }
+
+    /// The prompt follows the ADR 0014 eligibility table, names who shares
+    /// each longer duration, and says what a longer answer would replace.
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture walks the whole eligibility table"
+    )]
+    async fn the_prompt_offers_durations_by_the_eligibility_table() {
+        use agent_access::{AccessLevel, AccessSet, DurableEvidence, GrantDuration, Withheld};
+
+        let fixture = agent_fixture().await;
+        let details = |peer: &PeerIdentity, access: &AccessSet| {
+            lair_prompt_details(&fixture.state, peer, fixture.lair_id, access, None)
+        };
+        let offered = |details: &consent::PromptDetails| {
+            details
+                .durations
+                .iter()
+                .map(|offer| (offer.duration, offer.withheld))
+                .collect::<Vec<_>>()
+        };
+        let all = [
+            (GrantDuration::Once, None),
+            (GrantDuration::WorkspaceSession, None),
+            (GrantDuration::Remembered, None),
+        ];
+        let once_only = |why| {
+            [
+                (GrantDuration::Once, None),
+                (GrantDuration::WorkspaceSession, Some(why)),
+                (GrantDuration::Remembered, Some(why)),
+            ]
+        };
+        let no_always = |why| {
+            [
+                (GrantDuration::Once, None),
+                (GrantDuration::WorkspaceSession, None),
+                (GrantDuration::Remembered, Some(why)),
+            ]
+        };
+        let look = AccessSet::Level(AccessLevel::Look);
+        // A protected install is offered all three; each longer duration
+        // names the program every sharer runs.
+        let protected = details(&fixture.peer, &look);
+        assert_eq!(protected.level, Some(AccessLevel::Look));
+        assert_eq!(offered(&protected), all);
+        assert_eq!(
+            protected.durations[1].shared_by.as_deref(),
+            Some("/usr/bin/agent")
+        );
+        assert_eq!(
+            protected.durations[2].shared_by.as_deref(),
+            Some("/usr/bin/agent")
+        );
+        // A Custom request with takeover is offered once only.
+        let takeover = details(
+            &fixture.peer,
+            &AccessSet::from_scopes([AccessScope::Observe, AccessScope::ControlTakeover]).unwrap(),
+        );
+        assert_eq!(takeover.level, None);
+        assert_eq!(offered(&takeover), once_only(Withheld::CustomTakeover));
+        // A peer without a pidfd-pinned identity is offered once only.
+        assert_eq!(
+            offered(&details(&PeerIdentity::for_test(), &look)),
+            once_only(Withheld::NoPinnedIdentity)
+        );
+        let executable = fixture.peer.persistent_executable().unwrap().clone();
+        let with_evidence =
+            |evidence| PeerIdentity::for_test_executing(executable.clone(), evidence);
+        // The relay is offered once only.
+        let mut relay = DurableEvidence::for_test(Some("/usr/bin/agent"), &[], false);
+        relay.installed_relay = true;
+        assert_eq!(
+            offered(&details(&with_evidence(relay), &look)),
+            once_only(Withheld::Relay)
+        );
+        // An interpreter and a development build are never offered Always.
+        assert_eq!(
+            offered(&details(
+                &with_evidence(DurableEvidence::for_test(Some("/usr/bin/agent"), &[], true)),
+                &look
+            )),
+            no_always(Withheld::Interpreter)
+        );
+        assert_eq!(
+            offered(&details(
+                &with_evidence(DurableEvidence::for_test(None, &[], false)),
+                &look
+            )),
+            no_always(Withheld::NoDurableIdentity)
+        );
+        // What a longer answer replaces is named.
+        for duration in [GrantDuration::WorkspaceSession, GrantDuration::Remembered] {
+            fixture
+                .commit(&fixture.peer, look.clone(), duration)
+                .await
+                .unwrap();
+        }
+        let manage = details(&fixture.peer, &AccessSet::Level(AccessLevel::Manage));
+        for offer in &manage.durations[1..] {
+            let replaced = offer.replaces.as_ref().expect("names the replaced grant");
+            assert_eq!(replaced.level, Some(AccessLevel::Look));
+            assert_eq!(
+                replaced
+                    .scopes
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                look.scopes()
+            );
+        }
+        assert_eq!(manage.durations[0].replaces, None);
+        // Every prompt built this way is valid on the wire.
+        for details in [protected, takeover, manage] {
+            let prompt = splinterm_protocol::ConsentPrompt {
+                capability: vec![1; splinterm_protocol::CONSENT_CAPABILITY_BYTES],
+                requester: "/usr/bin/agent".to_owned(),
+                requester_pid: 1,
+                requester_uid: 1,
+                agent_name: details.agent_name,
+                target: splinterm_protocol::ConsentTarget::Lair {
+                    lair_id: fixture.lair_id,
+                    lair_name: "agents".to_owned(),
+                },
+                scopes: AccessSet::from_scopes(details.level.map_or_else(
+                    || vec![AccessScope::Observe, AccessScope::ControlTakeover],
+                    |level| level.scopes().to_vec(),
+                ))
+                .unwrap()
+                .scopes()
+                .into_iter()
+                .collect(),
+                level: details.level,
+                durations: details.durations,
+            };
+            assert_eq!(prompt.validate(), Ok(()));
+        }
     }
 }

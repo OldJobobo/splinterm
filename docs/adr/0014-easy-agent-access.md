@@ -1,6 +1,8 @@
 # ADR 0014: easy agent access
 
-- **Status:** Accepted for `0.2.0`; implementation pending
+- **Status:** Accepted for `0.2.0`; implementation in progress (the grant
+  engine, the consent prompt, and pending requests are implemented; the access
+  list, its revoke UI, the Explorer marks, and one-step setup are pending)
 - **Date:** 2026-10-20
 - **Amends:** [ADR 0005](0005-trusted-consent-broker.md) (consent outcomes,
   prompt input, and persistence), [ADR 0007](0007-supported-automation-policy.md)
@@ -301,9 +303,19 @@ changes as follows:
 - It is **default-deny**. Enter, Escape, and `D` deny. Only `G` or a pointer
   click on the grant button grants. This is a deliberate change: the access
   dialog grants on Enter today.
-- Key presses and the grant click are ignored until an arming delay of 600 ms
-  has passed. The delay restarts every time the Window gains keyboard focus and
-  every time the selected duration changes. Key repeats are always ignored.
+- It **never takes keyboard focus** when it appears (operator rule for every
+  trusted Splinterm dialog, 2026-10-20). The prompt maps under its own app ID,
+  `com.oldjobobo.splinterm.trusted-dialog`, which the Omarchy integration's
+  Hyprland module gives `no_initial_focus` and `focus_on_activate = false`, and
+  Splinterm never asks the compositor to activate it. Whatever the
+  compositor does, the prompt's keyboard is inert until the person **clicks
+  inside it**: until then every key, including the deny keys, is ignored.
+  Keyboard focus alone never engages it. Closing it, or no answer before the
+  request expires, denies. A hint line says to click it first.
+- After that click, key presses and the grant click are ignored until an
+  arming delay of 600 ms has passed. The delay restarts every time the Window
+  gains keyboard focus again and every time the selected duration changes. Key
+  repeats are always ignored. A click on the deny area always counts.
 - The person selects a duration with the pointer or the arrow keys, never with
   a letter key. **Just this once** is preselected. Selecting a duration never
   grants.
@@ -581,8 +593,9 @@ non-graphical evidence must prove:
   versions by denying only the remembered source; refuses a write after an
   outside change; writes only its loaded version; a failed write grants
   nothing; success is never reported before the durable write;
-- the prompt denies on Enter, Escape, and `D`, ignores input before arming,
-  after each focus gain and duration change, and all key repeats, changes
+- the prompt takes no keyboard focus, ignores every key until a click inside
+  it, denies on Enter, Escape, and `D`, ignores input before arming, after each
+  focus gain and duration change, and all key repeats, changes
   duration only by pointer or arrow keys, and grants only on `G` or the grant
   button;
 - pending requests honor their bounds, wait budget, queue, and deny cooldown,

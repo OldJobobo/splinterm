@@ -15,8 +15,10 @@
 //!
 //! Its keys differ from consent because proceeding closes Windows: `D`,
 //! `Escape`, `Enter`, and the red left area cancel; only `G` or the green
-//! right area proceeds. Keys and the proceed click count only 600 ms after
-//! the Window first gains focus, and key repeats never count
+//! right area proceeds. The dialog never takes keyboard focus when it
+//! appears, and its keys stay inert until the person clicks inside it; keys
+//! and the proceed click count only 600 ms after that click,
+//! and key repeats never count
 //! (`frontend::trusted_dialog`). The Window title is "Splinterm — Upgrade".
 //!
 //! The child mechanism is generic over [`DialogPrompt`], so the desktop
@@ -194,7 +196,7 @@ fn dialog_lines(prompt: &UpgradeDialogPrompt) -> Vec<String> {
     }
     lines.extend(DIALOG_FOOTER.map(str::to_owned));
     lines.insert(
-        lines.len() - 3,
+        lines.len() - 4,
         format!(
             "Closing this dialog, or no answer within {} seconds, cancels.",
             prompt.respond_within_seconds
@@ -204,8 +206,8 @@ fn dialog_lines(prompt: &UpgradeDialogPrompt) -> Vec<String> {
 }
 
 /// The explanation and the actions, always shown in full below the list.
-/// The deadline line is inserted before the last three.
-const DIALOG_FOOTER: [&str; 7] = [
+/// The deadline line is inserted before the last four.
+const DIALOG_FOOTER: [&str; 8] = [
     "",
     "Proceeding closes these Windows. Their terminals keep running in the",
     "upgraded daemon; reopen them from the Recent Dojos picker.",
@@ -213,6 +215,7 @@ const DIALOG_FOOTER: [&str; 7] = [
     "",
     "[D / Esc / Enter  Cancel]     [G  Proceed]",
     "Click the red left area to cancel or the green right area to proceed.",
+    "Click inside this dialog first to answer with the keyboard.",
 ];
 
 /// Lines above and below the Window list: the three header lines, the

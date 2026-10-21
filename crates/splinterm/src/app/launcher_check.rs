@@ -571,6 +571,7 @@ pub(in crate::app) fn dialog_lines(question: &RestartQuestion) -> Vec<String> {
     ));
     lines
         .push("Click the red left area for Not now or the green right area to restart.".to_owned());
+    lines.push("Click inside this dialog first to answer with the keyboard.".to_owned());
     lines
 }
 
@@ -1343,6 +1344,7 @@ mod tests {
             "Not now opens nothing and changes nothing.",
             "no answer within 120 seconds, means Not now",
             "[D / Esc / Enter  Not now]     [R  Restart now (ends 4 shells)]",
+            "Click inside this dialog first to answer with the keyboard.",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
         }

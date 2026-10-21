@@ -743,6 +743,7 @@ fn handoff_pause_drops_input_resize_and_transfer_but_not_reads_or_releases() {
             before_row_id: 1,
         },
         WindowCommand::RevokeAccess(4),
+        WindowCommand::CancelPendingAccess,
         WindowCommand::Search {
             terminal_revision: 1,
             history_generation: 1,

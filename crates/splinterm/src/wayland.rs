@@ -136,9 +136,9 @@ use crate::frontend::{
     SessionPickerCreationTarget, SessionPickerDecision, SessionPickerTarget, SessionPickerUi,
     TabContextMenuUi, TabMenuActionId, TabMenuContext, TabMenuDispatch, TabMenuRightPress,
     TerminalGridLimits, TerminationDecision, ThemeUpdate, TrustedConsentUi, TrustedDialogKey,
-    WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions, WindowTopologyCommand,
-    WindowTopologyUpdate, WindowUpdate, close_other_tabs_command, lair_lifecycle_command,
-    tab_menu_right_press,
+    TrustedInput, WindowCommand, WindowDojoIdentity, WindowOptions, WindowPaneOptions,
+    WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate, close_other_tabs_command,
+    lair_lifecycle_command, tab_menu_right_press,
 };
 use crate::geometry::{
     FontSize, OutputDpiObservation, Rect, SurfaceGeometry, WindowGeometry, buffer_to_logical_ceil,
@@ -763,7 +763,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     window.set_title(initial_window_title(&options));
     let trusted_consent = options.trusted_consent;
     let session_picker = options.session_picker;
-    window.set_app_id(options.app_id.clone());
+    window.set_app_id(window_app_id(trusted_consent.is_some(), &options.app_id).to_owned());
     window
         .set_buffer_scale(1)
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
@@ -2852,7 +2852,22 @@ const fn trusted_dialog_key(keysym: Keysym) -> TrustedDialogKey {
         Keysym::r | Keysym::R => TrustedDialogKey::R,
         Keysym::Return | Keysym::KP_Enter => TrustedDialogKey::Enter,
         Keysym::Escape => TrustedDialogKey::Escape,
+        Keysym::Up | Keysym::KP_Up => TrustedDialogKey::Up,
+        Keysym::Down | Keysym::KP_Down => TrustedDialogKey::Down,
+        Keysym::Left | Keysym::KP_Left => TrustedDialogKey::Left,
+        Keysym::Right | Keysym::KP_Right => TrustedDialogKey::Right,
         _ => TrustedDialogKey::Other,
+    }
+}
+
+/// The app ID a Window maps with. Every trusted dialog uses its own, so the
+/// desktop can map it without keyboard focus. Splinterm never asks the
+/// compositor to activate a Window.
+fn window_app_id(trusted_dialog: bool, app_id: &str) -> &str {
+    if trusted_dialog {
+        crate::config::TRUSTED_DIALOG_APP_ID
+    } else {
+        app_id
     }
 }
 
@@ -5969,6 +5984,7 @@ impl App {
                 for id in &grant_ids {
                     self.send_command(WindowCommand::RevokeAccess(*id));
                 }
+                self.send_command(WindowCommand::CancelPendingAccess);
                 self.panes
                     .pane
                     .authority
@@ -7032,9 +7048,47 @@ impl App {
 
     fn decide_consent(&mut self, granted: bool) {
         if let Some(consent) = self.modal.trusted_consent.take() {
-            let _ = consent.decision.send(granted);
+            consent.answer(granted);
         }
         self.scheduling.request_exit(ExitClass::CleanUserClose);
+    }
+
+    /// Acts on a trusted dialog key or click: an answer closes the Window; a
+    /// new duration selection draws the dialog again.
+    fn trusted_dialog_input(
+        &mut self,
+        input: Option<TrustedInput>,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        match input {
+            Some(TrustedInput::Answer(granted)) => self.decide_consent(granted),
+            Some(TrustedInput::Redraw) => {
+                let Some(mut snapshot) = self
+                    .modal
+                    .trusted_consent
+                    .as_mut()
+                    .and_then(TrustedConsentUi::render)
+                else {
+                    return;
+                };
+                apply_theme(&mut snapshot, self.presentation.theme);
+                snapshot.revision = self
+                    .panes
+                    .pane
+                    .snapshot
+                    .as_ref()
+                    .map_or(snapshot.revision, |current| {
+                        current.revision.saturating_add(1)
+                    });
+                self.invalidate_local_content_state();
+                self.panes.pane.snapshot = Some(snapshot);
+                self.presentation.full_redraw = true;
+                if let Err(error) = self.schedule_draw(queue_handle) {
+                    self.scheduling.fail(error);
+                }
+            }
+            None => {}
+        }
     }
 
     fn refresh_session_picker(&mut self) -> Result<()> {
@@ -8221,14 +8275,11 @@ impl App {
             }
             return;
         }
-        if let Some(consent) = &self.modal.trusted_consent {
-            // Repeats never reach here for a kind that ignores them
-            // (`repeat_key`), so every key seen is a fresh press.
-            if let Some(granted) =
-                consent.key_decision(trusted_dialog_key(event.keysym), false, Instant::now())
-            {
-                self.decide_consent(granted);
-            }
+        if let Some(consent) = self.modal.trusted_consent.as_mut() {
+            // Repeats never reach here (`repeat_key`), so every key seen is
+            // a fresh press.
+            let input = consent.key_input(trusted_dialog_key(event.keysym), false, Instant::now());
+            self.trusted_dialog_input(input, queue_handle);
             return;
         }
         if self.explorer.focused() {
@@ -8411,6 +8462,7 @@ impl App {
                 for id in ids {
                     self.send_command(WindowCommand::RevokeAccess(id));
                 }
+                self.send_command(WindowCommand::CancelPendingAccess);
                 self.panes.pane.authority.grants.clear();
                 if let Some(title) = self.terminal_window_title() {
                     self.surface.window.set_title(title);
@@ -14084,10 +14136,31 @@ mod tests {
     }
 
     #[test]
+    fn trusted_dialogs_map_with_their_own_app_id() {
+        assert_eq!(
+            window_app_id(true, crate::config::APP_ID),
+            "com.oldjobobo.splinterm.trusted-dialog"
+        );
+        assert_eq!(
+            window_app_id(false, crate::config::APP_ID),
+            crate::config::APP_ID
+        );
+    }
+
+    #[test]
     fn trusted_dialogs_map_with_their_own_titles() {
         let (decision, _receiver) = std::sync::mpsc::channel();
+        let (consent_decision, _consent_receiver) = std::sync::mpsc::channel();
+        let (access, _snapshot) = TrustedConsentUi::access_consent(
+            consent_decision,
+            vec![(splinterm_protocol::GrantDuration::Once, true)],
+            Box::new(|_| crate::frontend::AccessConsentView {
+                snapshot: valid_snapshot(SplintId::new()),
+                duration_rows: vec![(0, 0)],
+            }),
+        );
         let consent = WindowOptions {
-            trusted_consent: Some(TrustedConsentUi::access_consent(decision.clone())),
+            trusted_consent: Some(access),
             ..WindowOptions::default()
         };
         assert_eq!(
@@ -14118,7 +14191,12 @@ mod tests {
             (Keysym::Return, TrustedDialogKey::Enter),
             (Keysym::KP_Enter, TrustedDialogKey::Enter),
             (Keysym::Escape, TrustedDialogKey::Escape),
+            (Keysym::Up, TrustedDialogKey::Up),
+            (Keysym::KP_Down, TrustedDialogKey::Down),
+            (Keysym::Left, TrustedDialogKey::Left),
+            (Keysym::Right, TrustedDialogKey::Right),
             (Keysym::y, TrustedDialogKey::Other),
+            (Keysym::j, TrustedDialogKey::Other),
             (Keysym::space, TrustedDialogKey::Other),
         ] {
             assert_eq!(trusted_dialog_key(keysym), key, "{keysym:?}");

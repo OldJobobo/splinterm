@@ -112,6 +112,12 @@ MCP_MUTATION_TOOLS = {
     "splinterm.resize",
     "splinterm.report_agent_status",
 }
+# ADR 0014: a workspace request that waits for the person is a successful
+# result that committed nothing. Only a variant whose status is exactly
+# "pending" may say committed=false; every other variant still commits.
+MCP_PENDING_RESULT_TOOLS = {
+    "splinterm.request_lair_access",
+}
 MCP_CONFIRMED_TOOLS = {
     "splinterm.revoke_access",
     "splinterm.close_splint",
@@ -140,7 +146,7 @@ MCP_OUTPUT_RESOURCE_DEFS = {
     "splinterm.read_scrollback": "terminal_resource",
     "splinterm.search_scrollback": "terminal_resource",
     "splinterm.request_access": "authorization_resource",
-    "splinterm.request_lair_access": "lair_authorization_resource",
+    "splinterm.request_lair_access": ("lair_authorization_resource", "lair_resource"),
     "splinterm.authorization_status": "splint_resource",
     "splinterm.revoke_access": (
         "authorization_resource",
@@ -256,8 +262,8 @@ EXPECTED_MCP_SCHEMA_SHA256 = {
     'tools/report_agent_status.output.schema.json': '519c75e937b7b9e7b65a32ae0d7b5186baa681ac6742186cd9445936f21d5c49',
     'tools/request_access.input.schema.json': '97aaf9b747784f6274a40b7de3f00f8a85bcf905719f91ceb2701993d8de5041',
     'tools/request_access.output.schema.json': 'cda84ab8391295f4c13c8ab0d9f25e9388df5f52f84992d6d46c56400facec1c',
-    'tools/request_lair_access.input.schema.json': '8ef09af1c7a20c59ab710a66f21d26e611f01e4ab31d71429e1b80d15ed2bf08',
-    'tools/request_lair_access.output.schema.json': '53999206db7f81e40884643d56697754e12e2489edbae0d66a3dc458ef478e76',
+    'tools/request_lair_access.input.schema.json': '5bd105c65f842d670d651beeef505e6890d8290432f63a11c083ab036cdaa376',
+    'tools/request_lair_access.output.schema.json': '25fc6f69261cf81341240bbf5770a5047f05d42d4a2eca09d01bedf8221bf08d',
     'tools/request_control_transfer.input.schema.json': '02d45ae645149890df20a4ab68a3216696db2bc2c61c569febc9ea9635ff582f',
     'tools/request_control_transfer.output.schema.json': 'a0f46afac3df5d2f0ebed0266e1ecfb145fdc685d018bffc2a08c3c0c99d1360',
     'tools/resize.input.schema.json': '6c3bfa8444814d73957345ad829343f062c8a8150c8c027a023e2362a1417cad',
@@ -290,6 +296,13 @@ EXPECTED_MCP_VALID_FIXTURES = {
     "report_agent_status-clear.output.json",
     # A first clear for an incarnation is a no-op the daemon numbers 0.
     "report_agent_status-first-clear.output.json",
+    # ADR 0014: a level, a cancel, a pending answer, a cancelled request, and
+    # a remembered grant.
+    "request_lair_access-level.input.json",
+    "request_lair_access-cancel.input.json",
+    "request_lair_access-pending.output.json",
+    "request_lair_access-cancelled.output.json",
+    "request_lair_access-remembered.output.json",
 }
 EXPECTED_MCP_INVALID_FIXTURES = {
     "argv-echo.json",
@@ -319,6 +332,8 @@ EXPECTED_MCP_INVALID_FIXTURES = {
     "report_agent_status-control-detail.input.json",
     "report_agent_status-detail-echo.json",
     "report_agent_status-unknown-state.input.json",
+    "request_lair_access-pending-committed.output.json",
+    "request_lair_access-unknown-level.input.json",
     "request_lair_access-unsupported-scope.input.json",
     "resource-open-metadata.json",
     "resource-private-controller-id.json",
@@ -553,10 +568,21 @@ def validate_mcp_schema_contract(schemas: dict[str, dict[str, Any]]) -> None:
                 f"{tool}: provenance must be carried once by terminal resource identity",
             )
         if tool in MCP_MUTATION_TOOLS:
+
+            def commits(schema: dict[str, Any]) -> bool:
+                committed = schema["properties"]["committed"].get("const")
+                if committed is True:
+                    return True
+                return (
+                    tool in MCP_PENDING_RESULT_TOOLS
+                    and committed is False
+                    and "status" in schema.get("required", [])
+                    and schema["properties"]["status"].get("const") == "pending"
+                )
+
             require_schema_condition(
                 all(
-                    "committed" in schema.get("required", [])
-                    and schema["properties"]["committed"].get("const") is True
+                    "committed" in schema.get("required", []) and commits(schema)
                     for schema in data_schemas
                 ),
                 f"{tool}: successful mutation must require committed=true",

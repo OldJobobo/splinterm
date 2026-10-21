@@ -491,6 +491,7 @@ pub(in crate::app) const fn paused_during_handoff(command: &WindowCommand) -> bo
         WindowCommand::Resynchronize
         | WindowCommand::FetchScrollback { .. }
         | WindowCommand::RevokeAccess(_)
+        | WindowCommand::CancelPendingAccess
         | WindowCommand::Search { .. }
         | WindowCommand::ReleaseControl => false,
     }
@@ -1049,6 +1050,15 @@ pub(in crate::app) async fn drive_controller(
                     continue;
                 }
                 WindowCommand::RevokeAccess(grant_id) => Request::RevokeAccess { grant_id },
+                WindowCommand::CancelPendingAccess => {
+                    // Best effort: a daemon that refuses it still revoked
+                    // every grant this Window named, and the pane keeps
+                    // serving.
+                    if let Err(error) = control.request(Request::CancelAllLairAccessRequests).await {
+                        eprintln!("splinterm could not cancel pending access requests: {error:#}");
+                    }
+                    continue;
+                }
                 WindowCommand::RequestControlTransfer => {
                     // A released/unowned pane has nobody to consent to a
                     // transfer. Reuse ordinary acquisition, including deferred

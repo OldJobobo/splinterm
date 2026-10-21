@@ -24,7 +24,8 @@ impl KeyboardHandler for App {
         _keysyms: &[Keysym],
     ) {
         if surface == self.surface.window.wl_surface() {
-            // A trusted dialog arms its delayed actions from the first focus.
+            // A trusted dialog arms its delayed actions from focus: the
+            // access consent dialog again on every focus gain.
             if let Some(consent) = self.modal.trusted_consent.as_mut() {
                 consent.note_focus(Instant::now());
             }
@@ -657,7 +658,7 @@ impl KeyboardHandler for App {
             return;
         }
         if let Some(consent) = &self.modal.trusted_consent {
-            // The upgrade question ignores repeats, including those of a key
+            // Trusted dialogs ignore repeats, including those of a key
             // already held when it gained focus.
             if !consent.kind.ignores_repeats() {
                 self.handle_key(&event, queue_handle);

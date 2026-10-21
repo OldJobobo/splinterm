@@ -199,7 +199,11 @@ class HandoffVmAcceptanceHelperTests(unittest.TestCase):
                         )
                         self.assertEqual(syntax.returncode, 0, syntax.stderr)
                     if action.vm[0] == "input":
-                        self.assertIn(action.vm[1], ("key", "type"))
+                        self.assertIn(action.vm[1], ("key", "type", "click"))
+                        if action.vm[1] == "click":
+                            # A left click only; trusted dialogs need one
+                            # before their keys count.
+                            self.assertEqual(action.vm[2:], ("0xC0",))
 
     def test_packages_are_test_only_builds_and_installs(self) -> None:
         builds = [
@@ -330,3 +334,37 @@ class RunnerUpgradeAwarenessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrustedDialogEngagementTests(unittest.TestCase):
+    """Trusted dialogs take no focus and ignore keys until a click inside."""
+
+    def test_every_dialog_answer_follows_a_click_inside_the_dialog(self) -> None:
+        answered = 0
+        for step in HELPER_MODULE.STEPS:
+            actions = step.actions
+            for index, action in enumerate(actions):
+                if not (
+                    action.kind == "vm"
+                    and action.vm[0] == "desktop-exec"
+                    and action.note == "closed dialog-address"
+                ):
+                    continue
+                answered += 1
+                before = actions[:index]
+                with self.subTest(step=step.id):
+                    points = [
+                        position
+                        for position, earlier in enumerate(before)
+                        if earlier.kind == "vm"
+                        and earlier.vm[0] == "desktop-exec"
+                        and earlier.note == "point_into dialog-address"
+                    ]
+                    self.assertTrue(points, "the dialog was never clicked")
+                    clicked = [
+                        earlier
+                        for earlier in before[points[-1] :]
+                        if HELPER_MODULE.is_input(earlier) and earlier.vm[1] == "click"
+                    ]
+                    self.assertEqual(len(clicked), 1)
+        self.assertGreaterEqual(answered, 4)

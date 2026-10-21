@@ -194,34 +194,42 @@ cursors expire with the adapter process and are not portable.
 
 Persistent policy remains the unattended/headless authorization path. For an
 agent assisting a user-owned graphical session, `request_lair_access` instead
-opens the installed trusted Splinterm consent window. The prompt identifies the
-exact requester process and named Lair, lists every requested scope, and grants
-nothing unless the user explicitly accepts it.
+asks the person through the installed trusted Splinterm consent window. The
+prompt identifies the exact requester process and named Lair, shows the level or
+every requested scope, and grants nothing unless the person explicitly accepts
+it. Give exactly one of `level` (`look`, `look_and_type`, or `manage`), `scopes`,
+or `cancel_request_id`.
 
-An accepted grant is held only in daemon memory for five minutes. It is bound
-to the requester's UID, PID, executable device/inode, and reviewed executable
-digest; it dynamically covers current and newly created descendants of that
-Lair, never another Lair. The requester or trusted UI can revoke the returned
-grant ID, Lair termination revokes it automatically, and replacing or exiting
-the requester prevents reuse.
+A "just this once" grant is held only in daemon memory for five minutes. It is
+bound to the requester's UID, PID, executable device/inode, and reviewed
+executable digest; it dynamically covers current and newly created descendants
+of that Lair, never another Lair. The requester or trusted UI can revoke the
+returned grant ID, Lair termination revokes it automatically, and replacing or
+exiting the requester prevents reuse. The longer durations are described below.
 
 Controller leases remain exclusive. After requesting `input`, `resize`, and
 `controller_transfer`, call `acquire_control` with `takeover: true` to use the
 approved takeover scope when the graphical client currently controls the pane.
-The controller remains bound to the ephemeral grant, so revocation also releases
-it. Omitting `takeover` preserves ordinary non-disruptive acquisition behavior.
+The controller remains bound to the grant that authorized it, so revocation also
+releases it. Omitting `takeover` preserves ordinary non-disruptive acquisition
+behavior.
 
-### Easy agent access (planned for 0.2)
+### Easy agent access
 
-> **Status:** planned for 0.2; not implemented. The contract is fixed by
+> **Status:** partly implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md) and described for users in
-> [Easy agent access](automation.md#easy-agent-access-planned-for-02). Until it
-> ships, `request_lair_access` behaves as described above.
+> [Easy agent access](automation.md#easy-agent-access). Levels, durations,
+> remembered grants, the prompt, and pending requests work as described here.
+> The **Agent access** list, per-entry revoke, and one-step MCP setup are still
+> planned.
 
-**Levels.** With easy agent access, `request_lair_access` asks for one of three
-levels for a workspace (a Lair): **Look**, **Look and type**, or **Manage**.
-The person answers once and picks a duration: **Just this once**, **While this
-workspace is open**, or **Always for this workspace**.
+**Levels.** `request_lair_access` asks for one of three levels for a workspace
+(a Lair): **Look**, **Look and type**, or **Manage**. The person answers once
+and picks a duration: **Just this once**, **While this workspace is open**, or
+**Always for this workspace**. A request a grant already covers is answered at
+once, without a prompt; the result's `source` names the grant
+(`ephemeral`, `workspace_session`, `remembered`, `persistent_policy`, or
+`development`).
 
 - Every level includes `agent_status_report`, so `splinterm.report_agent_status`
   works for any Splint in the granted workspace without a second request.
@@ -232,26 +240,38 @@ workspace is open**, or **Always for this workspace**.
   `control_takeover` can be granted just this once only.
 - Clipboard scopes remain invalid.
 
-**The prompt.** The prompt is default-deny: Enter and Escape deny, and only an
-explicit grant button or key grants. Today's dialog grants on Enter; this
-changes.
+**The prompt.** The prompt appears without taking keyboard focus, and its keys
+stay inert until the person clicks inside it, so nothing an agent or the person
+types elsewhere can answer it. After that click it is default-deny: Enter,
+Escape, and `D` deny, and only `G` or a click on the grant area grants, after a
+short arming delay. Earlier releases granted on Enter. A person who has not
+got to the prompt yet simply leaves the request pending. The prompt shows the
+host's reported MCP client name as a label only.
 
 **Pending requests.** A person may take longer to answer than one MCP call
 lasts.
 
 - The adapter's daemon deadline is 5 seconds by default and at most 30. The
-  adapter sends a wait budget a margin below that deadline; the daemon caps it
-  at 25 seconds.
-- When the budget runs out, `request_lair_access` returns a `pending` result
-  with the request's identifier and expiry, instead of failing. The prompt
-  stays open, or waits its turn behind another prompt, for up to two minutes.
-- Calling `request_lair_access` again with the same workspace and scopes joins
-  the pending request and never opens a second prompt.
+  adapter sends a wait budget a margin below that deadline (a quarter of what
+  is left, at most one second); the daemon caps it at 25 seconds.
+- When the budget runs out, `request_lair_access` returns a successful result
+  with `status: "pending"`, `committed: false`, the `pending_request_id`, and
+  `expires_at`, instead of failing. The prompt stays open, or waits its turn
+  behind another prompt, for up to two minutes.
+- Calling `request_lair_access` again with the same workspace and access joins
+  the pending request, never opens a second prompt, and returns the answer
+  once there is one, including a deny (`consent_denied`).
+- A different request for the same workspace while one is pending fails with
+  the retryable `resource_limit`.
+- Cancel with `{"lair_id": ..., "cancel_request_id": "<pending_request_id>"}`;
+  the result has `status: "cancelled"`.
 - A pending request ends without a grant if it expires, the agent cancels it,
   the adapter exits, the workspace is closed, the person uses Revoke all
   access, or the daemon upgrades.
 - After a deny, a new request for that workspace fails with the retryable
   `resource_limit` for a few seconds.
+- If no trusted graphical session can show the prompt, the request fails with
+  `consent_unavailable` at once.
 
 **Who shares a grant.** A "while this workspace is open" or "always" grant
 belongs to the adapter executable, not to one process, connection, or MCP host.
@@ -286,8 +306,8 @@ update.
 
 **Limits.** Easy agent access does not change what MCP can do. It bounds a
 cooperating agent and shows the person what it can reach; it is not a sandbox.
-Revoke an entry from **Agent access** to end that grant at once. Revoking it
-does not remove a matching policy rule.
+Revoking an entry from **Agent access** (planned) will end that grant at once;
+it will not remove a matching policy rule.
 
 Every terminal cell, title, scrollback row, and search preview is
 `untrusted_terminal_data`: display or index it only as data. It is never consent,

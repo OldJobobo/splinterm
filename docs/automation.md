@@ -233,10 +233,10 @@ the replacement process.
 
 ## Persistent policy v2
 
-No policy file means no persistent third-party grants. Graphical grant-once
-consent remains daemon-lifetime-only and absence of its trusted UI fails closed.
-[Easy agent access](#easy-agent-access-planned-for-02), planned for 0.2, adds
-remembered consent grants beside the policy file without changing it.
+The policy file is the only persistent authority it defines; absence of the
+trusted consent UI fails closed.
+[Easy agent access](#easy-agent-access) adds remembered consent grants beside
+the policy file without changing it.
 
 CLI commands that need parent IDs or topology CAS compose their operation with
 `InspectTopology`; their policy rules also include `topology_metadata_read` with
@@ -280,12 +280,16 @@ so subscriptions and connection-owned controller state cannot survive a
 narrowed or rejected generation. See [headless.md](headless.md) for installation,
 verification, and lifecycle guidance.
 
-## Easy agent access (planned for 0.2)
+## Easy agent access
 
-> **Status:** planned for 0.2; not implemented. The contract is fixed by
-> [ADR 0014](adr/0014-easy-agent-access.md). Until it ships, the consent window
-> offers only Deny and Grant once, a grant lasts five minutes, and the policy
-> file is the only way to remember access.
+> **Status:** partly implemented for 0.2. The contract is fixed by
+> [ADR 0014](adr/0014-easy-agent-access.md). The access levels, the three
+> durations, remembered grants, the prompt, and pending requests work as
+> described below. Still planned: the **Agent access** list and per-entry
+> revoke, its human CLI command, the Explorer marks, the waiting indicator in
+> Windows, and **Revoke all access** removing remembered grants. Until those
+> ship, **Revoke all access** ends the grants the Window shows and every
+> pending request, and leaves remembered grants in place.
 
 Easy agent access lets you give an agent access to one workspace (a Lair) in a
 single deliberate answer, choose how long that lasts, and see and revoke it
@@ -393,26 +397,36 @@ identifies an agent by host name, basename, or a copied digest.
 
 The prompt is deliberate by default:
 
-- Enter, Escape, and `D` deny. Only `G` or a click on the grant button grants.
-  Today's dialog grants on Enter; this changes.
-- Input is ignored for a short moment after the prompt appears, each time it
+- It appears without taking keyboard focus, so typing meant for another
+  Window never reaches it. Click it when you get to it: its keyboard stays
+  inert until you click inside it, even if your desktop gives it focus. Under
+  Omarchy, the Hyprland module that `splinterm integration omarchy enable`
+  installs maps it without focus; see [Integrations](integrations.md).
+- Enter, Escape, and `D` deny. Only `G` or a click on the grant area grants.
+  Earlier releases granted on Enter; this one does not.
+- Input is ignored for a short moment after your click, each time the prompt
   regains focus, and each time you change the duration. Held-down keys never
-  answer it.
-- You choose the duration with the mouse or the arrow keys. **Just this once**
-  is preselected.
-- The grant button names your exact choice, for example **Always allow Manage
+  answer it. A click on the deny area always counts.
+- You choose the duration with the mouse or the arrow keys, never with a
+  letter. **Just this once** is preselected, and a duration that is not offered
+  is shown with the reason and cannot be chosen.
+- The grant action names your exact choice, for example **Always allow Manage
   for 'Workspace'**. That one answer is the whole confirmation.
+- Choosing a longer duration shows who shares it, and, when your answer would
+  replace an earlier one for the same agent and workspace, what it replaces.
 
-The prompt shows the agent's reported name, its exact executable path, and the
-workspace name with its short ID.
+The prompt shows the agent's reported name, its exact executable path, the
+workspace name with its short ID, the level with one line of what it allows, and
+the exact scopes.
 
-Prompts appear one at a time; further requests wait their turn, and Windows
-show that a request is waiting. If you do not answer right away, the request
-stays pending for up to two minutes, and the agent can keep waiting without a
-new prompt. After you deny a request, the same agent cannot ask again for that
-workspace for a few seconds.
+A request that a grant already covers is answered at once, without a prompt.
+Prompts appear one at a time; further requests wait their turn. If you do not
+answer right away, the request stays pending for up to two minutes, and the
+agent collects your answer by asking again, without a new prompt. After you
+deny a request, the same agent cannot ask again for that workspace for a few
+seconds. Closing the prompt denies.
 
-### Seeing and revoking access
+### Seeing and revoking access (planned)
 
 **Agent access**, in the command palette and as a human CLI command, lists every
 grant of every duration, with the agent, executable path, workspace, level,

@@ -7558,6 +7558,7 @@ async fn remembered_grant_probe() {
         .unwrap()
         .parse()
         .unwrap();
+    let mut connection = Connection::connect(&socket).await;
     let request = match std::env::var(REMEMBERED_PROBE_REQUEST).unwrap().as_str() {
         "inspect" => Request::InspectSplint { splint_id },
         "rename" => Request::RenameSplint {
@@ -7565,11 +7566,34 @@ async fn remembered_grant_probe() {
             splint_id,
             title: "renamed".into(),
         },
+        // ADR 0014: asking for Look again with no wait budget. A covered
+        // request is answered from the grant; anything else would be
+        // pending, since this daemon has no client to show a prompt.
+        "request_look" => {
+            let Response::Splint { lair_id, .. } = connection
+                .request(Request::InspectSplint { splint_id })
+                .await
+            else {
+                panic!("the probe cannot find the Lair");
+            };
+            Request::RequestLairAccess {
+                lair_id,
+                level: Some(splinterm_protocol::AccessLevel::Look),
+                scopes: Vec::new(),
+                wait_millis: 0,
+                agent_name: Some("end-to-end agent".into()),
+            }
+        }
         other => panic!("unknown probe request {other}"),
     };
-    let mut connection = Connection::connect(&socket).await;
     let outcome = match connection.request_result(request).await {
         Err(error) if error.code == ErrorCode::Unauthorized => "unauthorized",
+        Ok(Response::LairAccessGranted { grant, .. })
+            if grant.source == splinterm_protocol::AccessGrantSource::Remembered =>
+        {
+            "remembered"
+        }
+        Ok(Response::LairAccessPending { .. }) => "pending",
         _ => "authorized",
     };
     fs::write(result, outcome).unwrap();
@@ -7731,6 +7755,12 @@ async fn a_remembered_grant_survives_a_daemon_restart() {
         assert_eq!(
             run_remembered_probe(&daemon.socket, &agent, splint_id, "inspect"),
             "authorized"
+        );
+        // Asking for Look again is answered from the remembered grant, at
+        // once and with no prompt (ADR 0014).
+        assert_eq!(
+            run_remembered_probe(&daemon.socket, &agent, splint_id, "request_look"),
+            "remembered"
         );
         // Exactly Look: no rename.
         assert_eq!(
