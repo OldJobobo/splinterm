@@ -25,7 +25,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -164,7 +164,9 @@ impl PolicyView<'_> {
 
 /// The policy rules under which an agent still reaches `lair_id`: rules for
 /// the exact executable (`exact`, path and digest), rules naming the same
-/// path (`path`), or rules matching one of the agent's connected processes.
+/// canonical path (`path`: a protected install, or the store file a Nix
+/// profile entry resolves to now), or rules matching one of the agent's
+/// connected processes.
 fn continuing_rules(
     policies: &[PolicyView<'_>],
     lair_id: LairId,
@@ -214,6 +216,28 @@ async fn snapshot(state: &DaemonState) -> Snapshot {
         .collect();
     let once = state.grants.lock().await.inventory();
     let engine = state.agent_access.inventory();
+    // The canonical file each remembered identity names now, so a policy
+    // rule for the same program is named even with the agent disconnected:
+    // a Nix profile entry is walked to its physical store path (blocking).
+    let canonical_targets: HashMap<DurableIdentity, PathBuf> = {
+        let context = Arc::clone(&state.identity_context);
+        let identities: BTreeSet<DurableIdentity> = engine
+            .remembered
+            .iter()
+            .map(|remembered| remembered.entry.identity.clone())
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            identities
+                .into_iter()
+                .filter_map(|identity| {
+                    let target = context.canonical_target(&identity)?;
+                    Some((identity, target))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    };
     let pending = state.pending_access.inventory();
     let generation = state.policy.lock().await.snapshot();
     let now = unix_seconds_now();
@@ -261,9 +285,6 @@ async fn snapshot(state: &DaemonState) -> Snapshot {
                 Some((splint_id, incarnation)),
             ),
         };
-        // A Splint grant outlives nothing: its Splint left topology, so it
-        // is about to be revoked with it and is not listed.
-        let Some(lair_id) = lair_id else { continue };
         let exact = grant
             .peer
             .persistent_executable()
@@ -283,7 +304,9 @@ async fn snapshot(state: &DaemonState) -> Snapshot {
                 pid: Some(grant.peer.pid),
                 display_name: display_name(grant.display_name.as_deref()),
             },
-            workspace: Some(workspace(&topology, lair_id)),
+            // A Splint grant whose Splint left topology is still listed, with
+            // no workspace, so the list shows what Revoke all access counts.
+            workspace: lair_id.map(|lair_id| workspace(&topology, lair_id)),
             splint_id: splint.map(|(splint_id, _)| splint_id),
             incarnation: splint.map(|(_, incarnation)| incarnation),
             level: AccessLevel::exactly(&scopes),
@@ -295,7 +318,9 @@ async fn snapshot(state: &DaemonState) -> Snapshot {
             expires_at_unix_seconds: Some(grant.expires_at_unix_seconds),
             connections: count(peers.len()),
             controllers: controllers_of(grant.grant_id),
-            policy_rules: continuing_rules(&policies, lair_id, exact, None, &peers),
+            policy_rules: lair_id.map_or_else(Vec::new, |lair_id| {
+                continuing_rules(&policies, lair_id, exact, None, &peers)
+            }),
         });
     }
 
@@ -403,7 +428,7 @@ async fn snapshot(state: &DaemonState) -> Snapshot {
                 &policies,
                 entry.lair_id,
                 None,
-                Some(entry.identity.path()),
+                canonical_targets.get(&entry.identity).map(PathBuf::as_path),
                 &peers,
             ),
         });
@@ -785,6 +810,10 @@ pub(crate) async fn revoke_all(
                 .await
                 .map_err(|_| internal())?,
         )
+    } else if !engine.remembered_grant_ids.is_empty() {
+        // Remembered grants were removed and nothing is owed: a concurrent
+        // write already took them out of the store.
+        DurableRemoval::Written
     } else {
         DurableRemoval::NotNeeded
     };
@@ -825,3 +854,28 @@ pub(crate) fn revoked_grant() -> ProtocolError {
 
 /// Keeps the private map type in one place for the connection registry.
 pub(crate) type AutomationPeers = HashMap<u64, consent::PeerIdentity>;
+
+/// [`grant_live`] plus how long a terminal subscription may run, for a
+/// subscription registering after authorization: a revoked grant is refused;
+/// a once grant gives its remaining lifetime (it also ends by its expiry
+/// broadcast); a while-open or remembered grant, policy, or trusted
+/// authority gives no timer, so it ends only by revoke or workspace end.
+///
+/// # Errors
+/// The grant was revoked (or expired) after authorization.
+pub(crate) async fn checked_subscription_lifetime(
+    state: &DaemonState,
+    grant_id: Option<u64>,
+) -> Result<Option<std::time::Duration>, ProtocolError> {
+    let Some(grant_id) = grant_id else {
+        return Ok(None);
+    };
+    if let Some(remaining) = state.grants.lock().await.once_remaining(grant_id) {
+        return Ok(Some(remaining));
+    }
+    if state.agent_access.is_live(grant_id) {
+        Ok(None)
+    } else {
+        Err(revoked_grant())
+    }
+}

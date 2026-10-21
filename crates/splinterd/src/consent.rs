@@ -1336,6 +1336,71 @@ impl GrantStore {
         }))
     }
 
+    /// The time left on a once grant (Lair or Splint) that is in force.
+    pub fn once_remaining(&self, grant_id: u64) -> Option<Duration> {
+        let now = Instant::now();
+        self.grants
+            .iter()
+            .find(|grant| grant.id == grant_id)
+            .map(|grant| grant.expires)
+            .or_else(|| {
+                self.lair_grants
+                    .iter()
+                    .find(|grant| grant.id == grant_id)
+                    .map(|grant| grant.expires)
+            })
+            .filter(|expires| *expires > now)
+            .map(|expires| expires - now)
+    }
+
+    /// At a once grant's expiry: `true` when it is no longer in force, after
+    /// removing it if it is still held, so the caller broadcasts its end and
+    /// releases its controllers. A grant refreshed meanwhile stays, and a
+    /// grant already removed (expired silently or revoked) reports `true`
+    /// again, which only repeats an end.
+    pub fn end_if_expired(&mut self, grant_id: u64) -> bool {
+        let now = Instant::now();
+        if let Some(index) = self.grants.iter().position(|grant| grant.id == grant_id) {
+            if self.grants[index].expires > now {
+                return false;
+            }
+            let grant = self.grants.remove(index);
+            self.advance_authorization_revision();
+            self.record(
+                &grant.peer,
+                grant.splint_id,
+                grant.incarnation,
+                grant.scopes,
+                AuditDecision::Revoked,
+                "grant expired",
+            );
+            return true;
+        }
+        if let Some(grant) = self.lair_grants.iter().find(|grant| grant.id == grant_id)
+            && grant.expires > now
+        {
+            return false;
+        }
+        let _ = self.revoke_lair_if_expired(grant_id);
+        true
+    }
+
+    /// Moves a once grant's expiry to now (tests of expiry handling).
+    #[cfg(test)]
+    pub fn expire_now_for_test(&mut self, grant_id: u64) {
+        let now = Instant::now();
+        for grant in &mut self.grants {
+            if grant.id == grant_id {
+                grant.expires = now;
+            }
+        }
+        for grant in &mut self.lair_grants {
+            if grant.id == grant_id {
+                grant.expires = now;
+            }
+        }
+    }
+
     pub fn revoke_lair_if_expired(&mut self, grant_id: u64) -> Option<LairAuthorizationMutation> {
         let index = self
             .lair_grants

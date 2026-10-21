@@ -4988,6 +4988,10 @@ enum PendingSubscription {
 #[derive(Clone, Debug)]
 struct SubscriptionAccess {
     grant_id: Option<u64>,
+    /// The time left on the once grant that authorized it; `None` for no
+    /// timer: policy and trusted authority, and while-open and remembered
+    /// grants, which end only by revoke or workspace end (broadcast).
+    expires_in: Option<Duration>,
     maximum_returned_bytes: Option<usize>,
     scrollback_rows: usize,
     include_images: bool,
@@ -6972,12 +6976,16 @@ fn lair_access_response(
     }
 }
 
-fn schedule_lair_grant_expiry(state: &Arc<DaemonState>, grant_id: u64) {
+/// Ends a once grant (for a Lair or one Splint) at its expiry: its
+/// controllers are released and its subscriptions hear the end, as on a
+/// revoke. A grant refreshed meanwhile is left alone; its refresh scheduled
+/// its own end.
+fn schedule_once_grant_expiry(state: &Arc<DaemonState>, grant_id: u64, after: Duration) {
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        tokio::time::sleep(consent::GRANT_LIFETIME).await;
-        let expired = state.grants.lock().await.revoke_lair_if_expired(grant_id);
-        if expired.is_some() {
+        tokio::time::sleep(after).await;
+        let ended = state.grants.lock().await.end_if_expired(grant_id);
+        if ended {
             revoke_grant_controllers(&state, grant_id).await;
             let _ = state.revocations.send(Revocation { grant_id });
         }
@@ -7648,7 +7656,7 @@ async fn access_containment(
 }
 
 async fn grant_access_response(
-    state: &DaemonState,
+    state: &Arc<DaemonState>,
     peer: &PeerIdentity,
     splint_id: SplintId,
     incarnation: u64,
@@ -7665,6 +7673,9 @@ async fn grant_access_response(
         .lock()
         .await
         .grant(peer, splint_id, incarnation, scopes);
+    // A Splint once grant ends at its expiry like a Lair once grant, so
+    // its subscriptions and controllers end then too.
+    schedule_once_grant_expiry(state, mutation.grant.grant_id, consent::GRANT_LIFETIME);
     Ok(access_granted_response(&containment, mutation))
 }
 
@@ -8162,7 +8173,7 @@ async fn commit_agent_grant(
                 None => grants.grant_lair_named(peer, lair_id, scopes, display_name),
             };
             drop(grants);
-            schedule_lair_grant_expiry(state, mutation.grant.grant_id);
+            schedule_once_grant_expiry(state, mutation.grant.grant_id, consent::GRANT_LIFETIME);
             Committed {
                 grant_id: mutation.grant.grant_id,
                 replaced: None,
@@ -9517,15 +9528,16 @@ async fn handle_authorized_request(
             }
         }
         // ADR 0014: the authorization table already admitted only the
-        // trusted UI or a policy rule with the administrative scope.
+        // trusted UI or a policy rule with the administrative scope. Boxed:
+        // the inventory read is a large future the dispatcher need not hold.
         Request::ListAccess { after, max_entries } => {
-            access_inventory::list(state, after, max_entries).await?
+            Box::pin(access_inventory::list(state, after, max_entries)).await?
         }
         Request::RevokeAccessEntry { target } => {
-            access_inventory::revoke_entry(state, &target).await?
+            Box::pin(access_inventory::revoke_entry(state, &target)).await?
         }
         Request::RevokeAllAccess { dry_run } => {
-            access_inventory::revoke_all(state, dry_run).await?
+            Box::pin(access_inventory::revoke_all(state, dry_run)).await?
         }
         Request::CreateTransientLair {
             expected_topology_revision,
@@ -10633,9 +10645,8 @@ async fn handle_authorized_request(
             // Subscribed before the grant is checked live: a revoke after the
             // check is heard, and one before it registers nothing (PR #188).
             let revocations = state.revocations.subscribe();
-            if !access_inventory::grant_live(state, grant_id).await {
-                return Err(access_inventory::revoked_grant());
-            }
+            let expires_in =
+                access_inventory::checked_subscription_lifetime(state, grant_id).await?;
             let handle = current_handle(state, splint_id, incarnation).await?;
             let scrollback_rows = scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS);
             let (snapshot, subscription) = handle
@@ -10667,6 +10678,7 @@ async fn handle_authorized_request(
                     revocations,
                     access: SubscriptionAccess {
                         grant_id,
+                        expires_in,
                         maximum_returned_bytes: authorization.maximum_returned_bytes(),
                         scrollback_rows,
                         include_images,
@@ -14586,6 +14598,7 @@ fn classify_revocation(
 async fn wait_terminal_subscription_frame(
     revocations: &mut broadcast::Receiver<Revocation>,
     grant_id: Option<u64>,
+    expires: bool,
     mut expiry: Pin<&mut time::Sleep>,
 ) -> FramePacingOutcome {
     let frame_pacing = terminal_subscription_frame_sleep();
@@ -14602,7 +14615,7 @@ async fn wait_terminal_subscription_frame(
                     RevocationDecision::Terminate => return FramePacingOutcome::Terminate,
                 }
             }
-            () = expiry.as_mut(), if grant_id.is_some() => {
+            () = expiry.as_mut(), if expires => {
                 return grant_id.map_or(FramePacingOutcome::Terminate, FramePacingOutcome::Expire);
             }
         }
@@ -14692,7 +14705,7 @@ fn spawn_subscription(
         let mut sequence = 1_u64;
         let mut previous_history = access.history;
         let mut previous_visible_rows = access.visible_rows.clone();
-        let expiry = time::sleep(consent::GRANT_LIFETIME);
+        let expiry = time::sleep(access.expires_in.unwrap_or(Duration::ZERO));
         tokio::pin!(expiry);
         let subscriber_publication_memory = Arc::new(Semaphore::new(1));
         'subscription: loop {
@@ -14710,7 +14723,7 @@ fn spawn_subscription(
                         RevocationDecision::Terminate => break,
                     }
                 }
-                () = &mut expiry, if access.grant_id.is_some() => {
+                () = &mut expiry, if access.expires_in.is_some() => {
                     if let Some(grant_id) = access.grant_id {
                         send_access_revoked(&outputs.control, id, sequence, grant_id).await;
                         record_subscription_expiry(&audit, &handle).await;
@@ -14865,6 +14878,7 @@ fn spawn_subscription(
                         match wait_terminal_subscription_frame(
                             &mut revocations,
                             access.grant_id,
+                            access.expires_in.is_some(),
                             expiry.as_mut(),
                         )
                         .await
@@ -16494,7 +16508,7 @@ mod tests {
         tokio::pin!(expiry);
         let started = time::Instant::now();
         assert_eq!(
-            wait_terminal_subscription_frame(&mut receiver, None, expiry.as_mut()).await,
+            wait_terminal_subscription_frame(&mut receiver, None, false, expiry.as_mut()).await,
             FramePacingOutcome::Ready
         );
         assert_eq!(started.elapsed(), TERMINAL_SUBSCRIPTION_FRAME_INTERVAL);
@@ -16503,7 +16517,7 @@ mod tests {
         tokio::pin!(expiry);
         revocations.send(Revocation { grant_id: 8 }).unwrap();
         assert_eq!(
-            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            wait_terminal_subscription_frame(&mut receiver, Some(7), true, expiry.as_mut()).await,
             FramePacingOutcome::Ready
         );
 
@@ -16511,15 +16525,25 @@ mod tests {
         tokio::pin!(expiry);
         revocations.send(Revocation { grant_id: 7 }).unwrap();
         assert_eq!(
-            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            wait_terminal_subscription_frame(&mut receiver, Some(7), true, expiry.as_mut()).await,
             FramePacingOutcome::Revoke(7)
         );
 
         let expiry = time::sleep(Duration::from_millis(10));
         tokio::pin!(expiry);
         assert_eq!(
-            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            wait_terminal_subscription_frame(&mut receiver, Some(7), true, expiry.as_mut()).await,
             FramePacingOutcome::Expire(7)
+        );
+
+        // A while-open or remembered grant has no timer: a long-elapsed
+        // deadline never ends its subscription; only its revoke does.
+        let expiry = time::sleep(Duration::ZERO);
+        tokio::pin!(expiry);
+        time::sleep(consent::GRANT_LIFETIME * 2).await;
+        assert_eq!(
+            wait_terminal_subscription_frame(&mut receiver, Some(7), false, expiry.as_mut()).await,
+            FramePacingOutcome::Ready
         );
     }
 
@@ -16532,7 +16556,7 @@ mod tests {
         tokio::pin!(expiry);
 
         assert_eq!(
-            wait_terminal_subscription_frame(&mut receiver, Some(7), expiry.as_mut()).await,
+            wait_terminal_subscription_frame(&mut receiver, Some(7), true, expiry.as_mut()).await,
             FramePacingOutcome::Terminate
         );
     }
@@ -27738,5 +27762,229 @@ mod tests {
             ask(state, peer, revoke).await.unwrap(),
             Response::AccessEntryRevoked { .. }
         ));
+    }
+
+    /// Review F2: a terminal subscription's timer is the once grant's own
+    /// remaining lifetime, and none for while-open and remembered grants.
+    #[tokio::test]
+    async fn subscription_lifetimes_follow_the_grant_that_authorized_them() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        assert_eq!(
+            access_inventory::checked_subscription_lifetime(state, None)
+                .await
+                .unwrap(),
+            None
+        );
+        let once = fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Once)
+            .await
+            .unwrap();
+        let left = access_inventory::checked_subscription_lifetime(state, Some(once.grant_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(left <= consent::GRANT_LIFETIME, "{left:?}");
+        assert!(
+            left > consent::GRANT_LIFETIME - Duration::from_secs(30),
+            "{left:?}"
+        );
+        state.grants.lock().await.expire_now_for_test(once.grant_id);
+        // An expired once grant registers nothing at all.
+        assert_eq!(
+            access_inventory::checked_subscription_lifetime(state, Some(once.grant_id))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+        for duration in [GrantDuration::WorkspaceSession, GrantDuration::Remembered] {
+            let durable = fixture
+                .commit(peer, level(AccessLevel::Look), duration)
+                .await
+                .unwrap();
+            assert_eq!(
+                access_inventory::checked_subscription_lifetime(state, Some(durable.grant_id))
+                    .await
+                    .unwrap(),
+                None,
+                "{duration:?} subscriptions end only by revoke or workspace end"
+            );
+        }
+    }
+
+    /// Review F2: a Splint once grant now ends at its expiry with a
+    /// revocation broadcast and released controllers, like a Lair once grant;
+    /// a grant still in force is left alone.
+    #[tokio::test]
+    async fn a_splint_once_grant_ends_at_its_own_expiry() {
+        let state = test_state(false);
+        let peer = PeerIdentity::for_test();
+        let expiring = state
+            .grants
+            .lock()
+            .await
+            .grant(&peer, SplintId::new(), 1, vec![AccessScope::Observe])
+            .grant
+            .grant_id;
+        let live = state
+            .grants
+            .lock()
+            .await
+            .grant(&peer, SplintId::new(), 1, vec![AccessScope::Observe])
+            .grant
+            .grant_id;
+        state_controller_acquire(&state, 31, expiring).await;
+        let mut revocations = state.revocations.subscribe();
+        state.grants.lock().await.expire_now_for_test(expiring);
+        schedule_once_grant_expiry(&state, live, Duration::ZERO);
+        schedule_once_grant_expiry(&state, expiring, Duration::ZERO);
+        let ended = time::timeout(Duration::from_secs(5), revocations.recv())
+            .await
+            .expect("the expiry is broadcast")
+            .unwrap();
+        assert_eq!(ended.grant_id, expiring);
+        assert!(state.controller.lock().await.by_id.is_empty());
+        assert!(!state.grants.lock().await.is_live(expiring));
+        assert!(state.grants.lock().await.is_live(live));
+        assert!(
+            time::timeout(Duration::from_millis(100), revocations.recv())
+                .await
+                .is_err(),
+            "a grant still in force is not ended"
+        );
+    }
+
+    /// Review F3: a Splint once grant whose Splint left topology is listed
+    /// (without a workspace), so the list and the dry-run count agree.
+    #[tokio::test]
+    async fn the_list_and_the_revoke_all_count_cover_the_same_grants() {
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let orphan = state
+            .grants
+            .lock()
+            .await
+            .grant(&fixture.peer, SplintId::new(), 4, vec![AccessScope::Input])
+            .grant
+            .grant_id;
+        let entries = inventory(state).await;
+        let listed = entry_for(&entries, &grant_key(orphan));
+        assert_eq!(listed.workspace, None);
+        assert_eq!(listed.incarnation, Some(4));
+        assert!(listed.revocable);
+        let Response::AllAccessRevoked { counts, .. } =
+            access_inventory::revoke_all(state, true).await.unwrap()
+        else {
+            panic!("not a dry run");
+        };
+        assert_eq!(
+            usize::try_from(counts.once).unwrap(),
+            entries
+                .iter()
+                .filter(|entry| entry.kind == splinterm_protocol::AccessEntryKind::Once)
+                .count()
+        );
+        // And it is revoked on the daemon resource, its workspace being gone.
+        assert_eq!(
+            access_inventory::target_lair(
+                state,
+                &splinterm_protocol::AccessRevokeTarget::Grant { grant_id: orphan }
+            )
+            .await,
+            Some(None)
+        );
+    }
+
+    /// Review F1: with the agent disconnected, a remembered Nix profile grant
+    /// still names the policy rule for the store file its profile entry
+    /// resolves to now.
+    #[tokio::test]
+    async fn a_nix_profile_grant_names_the_policy_rule_for_its_store_file() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let mut fixture = agent_fixture().await;
+        let tree = fixture.root.join("tree");
+        let object = "0123456789abcdfghijklmnpqrsvwxyz-agent";
+        let bin = tree.join("nix/store").join(object).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for directory in [
+            tree.join("nix"),
+            tree.join("nix/store"),
+            tree.join("nix/store").join(object),
+            bin.clone(),
+        ] {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(bin.join("agent"), b"#!/bin/false agent\n").unwrap();
+        std::fs::set_permissions(bin.join("agent"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::create_dir_all(tree.join("home/user")).unwrap();
+        symlink(
+            format!("/nix/store/{object}"),
+            tree.join("home/user/.nix-profile"),
+        )
+        .unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        let context = agent_access::IdentityContext::at(
+            splinterm_policy::durable_identity::IdentityRoot::at(tree, vec![uid]),
+            Some((PathBuf::from("/home/user"), "user".into())),
+        );
+        Arc::get_mut(&mut fixture.state).unwrap().identity_context = Arc::new(context);
+        let state = &fixture.state;
+        let entry = PathBuf::from("/home/user/.nix-profile/bin/agent");
+        let committed = state
+            .agent_access
+            .commit_remembered(
+                splinterm_policy::durable_identity::DurableIdentity::NixProfile(entry),
+                fixture.lair_id,
+                level(agent_access::AccessLevel::Look),
+                None,
+            )
+            .unwrap();
+        // A rule for the canonical store file, as the policy file names it.
+        let path = fixture.root.join("nix-rule.json");
+        let policy = serde_json::json!({
+            "schema": "splinterm.policy.v2",
+            "rules": [{
+                "id": "nix-agent",
+                "executable": {
+                    "path": format!("/nix/store/{object}/bin/agent"),
+                    "sha256": "c".repeat(64),
+                },
+                "scopes": ["topology_metadata_read"],
+                "resources": [{"kind": "lair", "lair_id": fixture.lair_id}],
+                "limits": {"deadline_ms": 1000},
+            }],
+        });
+        std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let topology = state.topology.read().await.clone();
+        let generation = state
+            .policy
+            .lock()
+            .await
+            .reload(Some(path.as_path()), &topology);
+        assert_eq!(generation.diagnostic, None);
+        assert!(state.automation_connections.lock().await.is_empty());
+        let entries = inventory(state).await;
+        let listed = entry_for(
+            &entries,
+            &splinterm_protocol::AccessEntryKey::Remembered {
+                entry_id: committed.entry_id.unwrap().as_str().to_owned(),
+            },
+        );
+        assert_eq!(
+            listed.identity.kind,
+            splinterm_protocol::AccessIdentityKind::NixProfile
+        );
+        assert_eq!(
+            listed.identity.executable_path,
+            "/home/user/.nix-profile/bin/agent"
+        );
+        assert_eq!(listed.policy_rules, vec!["nix-agent".to_owned()]);
     }
 }

@@ -2885,7 +2885,8 @@ pub struct AccessEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<u64>,
     pub identity: AccessIdentity,
-    /// The workspace, for every entry except a policy rule.
+    /// The workspace, for every entry except a policy rule. A once grant for
+    /// a Splint that left topology has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<AccessWorkspace>,
     /// The Splint incarnation a once grant for one Splint covers.
@@ -3031,7 +3032,7 @@ impl AccessEntry {
             {
                 return Err("policy access entry has a grant shape");
             }
-        } else if self.workspace.is_none()
+        } else if (self.workspace.is_none() && self.splint_id.is_none())
             || self.scopes.is_empty()
             || !self.policy_scopes.is_empty()
             || !self.policy_resources.is_empty()

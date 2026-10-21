@@ -366,6 +366,26 @@ impl IdentityContext {
         }
     }
 
+    /// The canonical file a stored identity names now: the path itself for a
+    /// protected install, and for a Nix profile entry of this account the
+    /// physical store path its full walk ends at. Display data for the
+    /// access list (to name the policy rule for the same program), never an
+    /// authorization. Blocking.
+    pub fn canonical_target(&self, identity: &DurableIdentity) -> Option<PathBuf> {
+        match identity {
+            DurableIdentity::ProtectedInstall(path) => Some(path.clone()),
+            DurableIdentity::NixProfile(path) => {
+                let (home, user) = self.account()?;
+                if !durable_identity::is_nix_profile_entry(path, home, user) {
+                    return None;
+                }
+                durable_identity::nix_profile_target(&self.root, path)
+                    .ok()
+                    .map(|(resolved, _)| resolved)
+            }
+        }
+    }
+
     /// Whether `identity` still names the executing file now, checked in
     /// full again.
     pub fn still_qualifies(&self, identity: &DurableIdentity, executing: FileId) -> bool {
@@ -417,11 +437,22 @@ impl GrantIds {
         self.next.fetch_add(1, Ordering::Relaxed).saturating_add(1)
     }
 
-    /// Advances the authorization revision and returns the new value.
+    /// Advances the authorization revision and returns the new value. It
+    /// saturates rather than wrapping, so it never moves backwards.
     pub fn advance_revision(&self) -> u64 {
-        self.revision
-            .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1)
+        let mut current = self.revision.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_add(1);
+            match self.revision.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     pub fn revision(&self) -> u64 {
@@ -2369,6 +2400,17 @@ mod tests {
     }
 
     // ---- Levels and offers ----
+
+    #[test]
+    fn the_authorization_revision_saturates_instead_of_wrapping() {
+        let ids = GrantIds {
+            next: AtomicU64::new(0),
+            revision: AtomicU64::new(u64::MAX - 1),
+        };
+        assert_eq!(ids.advance_revision(), u64::MAX);
+        assert_eq!(ids.advance_revision(), u64::MAX);
+        assert_eq!(ids.revision(), u64::MAX);
+    }
 
     #[test]
     fn levels_expand_to_exactly_the_adr_bundles() {

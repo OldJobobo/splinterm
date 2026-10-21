@@ -483,7 +483,12 @@ exists, the list and the revoke result name the rule and tell you to edit
 an agent can reach and those it is connected to now.
 
 The human command speaks as the installed trusted client, so it works only
-with the packaged `splinterm` next to the running daemon. Machine output
+with the packaged `splinterm` next to the running daemon. The installed
+graphical relay a native remote Window uses (the remote interactive role) may
+list and revoke as well, as it may already revoke grants; like the rest of
+easy agent access this bounds cooperating clients and is not a sandbox
+([ADR 0014](adr/0014-easy-agent-access.md)). `splinterm access` itself refuses
+`--remote`. Machine output
 (`--output json`) uses the automation role: listing needs
 `authorization_inspect` on the daemon, revoking one entry needs
 `authorization_revoke` on its workspace (on the daemon for a workspace that no

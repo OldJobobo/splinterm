@@ -214,6 +214,9 @@ fn headline(entry: &AccessEntry) -> String {
     let workspace = workspace_text(entry);
     match (entry.kind, entry.state) {
         (AccessEntryKind::Once, _) => match (entry.splint_id, entry.incarnation) {
+            (Some(splint_id), Some(incarnation)) if entry.workspace.is_none() => format!(
+                "Just this once for Splint {splint_id} incarnation {incarnation}, no longer in a workspace: {access}"
+            ),
             (Some(splint_id), Some(incarnation)) => format!(
                 "Just this once for Splint {splint_id} incarnation {incarnation} in {workspace}: {access}"
             ),
@@ -364,6 +367,28 @@ pub(in crate::app) fn render_inventory(
     output
 }
 
+/// What a person should know about a listing read across pages: it
+/// changed meanwhile, or it stopped at the page cap.
+pub(in crate::app) fn listing_notes(
+    changed: bool,
+    stopped_before: Option<&AccessEntryKey>,
+) -> String {
+    let mut notes = String::new();
+    if let Some(next) = stopped_before {
+        let _ = writeln!(
+            notes,
+            "The list stopped after {MAX_HUMAN_PAGES} pages; continue with `splinterm access list --after {}`.",
+            access_entry_id(next)
+        );
+    }
+    if changed {
+        notes.push_str(
+            "Access changed while the list was read; run it again for a consistent view.\n",
+        );
+    }
+    notes
+}
+
 fn durable_failure_text(message: &str) -> String {
     format!(
         "removing it from the remembered-grant store failed: {}. It authorizes nothing now, but returns after a restart until a later write succeeds; the daemon retries on its next write and at shutdown",
@@ -459,8 +484,12 @@ pub(in crate::app) async fn run_human_access(request: AccessRequest) -> Result<(
             let mut entries = Vec::new();
             let mut store = RememberedStoreStatus::NotConfigured;
             let mut cursor = after;
+            let mut first_revision = None;
+            let mut changed = false;
+            let mut complete = false;
             for _ in 0..MAX_HUMAN_PAGES {
                 let Response::AccessInventory {
+                    authorization_revision,
                     remembered_store,
                     entries: page,
                     next_after,
@@ -476,8 +505,13 @@ pub(in crate::app) async fn run_human_access(request: AccessRequest) -> Result<(
                 };
                 store = remembered_store;
                 entries.extend(page);
+                changed |=
+                    *first_revision.get_or_insert(authorization_revision) != authorization_revision;
                 match next_after {
-                    None => break,
+                    None => {
+                        complete = true;
+                        break;
+                    }
                     // An explicit page size prints exactly one page.
                     Some(next) if max_entries.is_some() => {
                         print!("{}", render_inventory(&entries, &store));
@@ -488,6 +522,10 @@ pub(in crate::app) async fn run_human_access(request: AccessRequest) -> Result<(
                 }
             }
             print!("{}", render_inventory(&entries, &store));
+            print!(
+                "{}",
+                listing_notes(changed, (!complete).then_some(cursor).flatten().as_ref())
+            );
             Ok(())
         }
         AccessRequest::Revoke { target, .. } => {
@@ -747,6 +785,29 @@ mod tests {
             render_revocation(&written)
                 .unwrap()
                 .contains("removed from")
+        );
+    }
+
+    #[test]
+    fn a_listing_says_when_it_moved_or_stopped_at_the_page_cap() {
+        assert_eq!(listing_notes(false, None), "");
+        let stopped = listing_notes(false, Some(&AccessEntryKey::Grant { grant_id: 9 }));
+        assert!(stopped.contains("--after 9"), "{stopped}");
+        assert!(listing_notes(true, None).contains("Access changed while the list was read"));
+    }
+
+    #[test]
+    fn a_splint_grant_without_a_workspace_is_listed_as_such() {
+        let mut orphan = entry(AccessEntryKind::Once, AccessEntryState::Active);
+        orphan.workspace = None;
+        orphan.splint_id = Some(splinterm_core::SplintId::new());
+        orphan.incarnation = Some(3);
+        orphan.policy_rules.clear();
+        assert_eq!(orphan.validate(), Ok(()));
+        let text = render_inventory(&[orphan], &RememberedStoreStatus::Available);
+        assert!(
+            text.contains("incarnation 3, no longer in a workspace"),
+            "{text}"
         );
     }
 

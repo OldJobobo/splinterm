@@ -3438,9 +3438,6 @@
           },
           "else": {
             "properties": {
-              "workspace": {
-                "type": "object"
-              },
               "scopes": {
                 "minItems": 1
               },
@@ -3449,6 +3446,27 @@
               },
               "policy_resources": {
                 "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "const": "policy"
+                }
+              },
+              "splint": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "workspace": {
+                "type": "object"
               }
             }
           }
