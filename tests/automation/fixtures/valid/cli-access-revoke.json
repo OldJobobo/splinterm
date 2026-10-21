@@ -1,0 +1,26 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "access_revoke",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "id": "ra_0123456789abcdef0123456789abcdef",
+      "kind": "remembered",
+      "revoked_grant_id": "21",
+      "lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77101",
+      "durable_removal": {
+        "status": "failed",
+        "message": "write temporary store: Read-only file system (os error 30)",
+        "returns_after_restart": true
+      },
+      "policy_rules": [
+        "mcp-reader"
+      ],
+      "authorization_revision": 13,
+      "confirmed": true
+    }
+  }
+}

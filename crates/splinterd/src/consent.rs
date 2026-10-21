@@ -807,6 +807,7 @@ struct Grant {
     scopes: BTreeSet<AccessScope>,
     expires: Instant,
     expires_at_unix_seconds: u64,
+    created_unix_seconds: u64,
 }
 
 impl Grant {
@@ -830,6 +831,9 @@ struct LairGrant {
     scopes: BTreeSet<AccessScope>,
     expires: Instant,
     expires_at_unix_seconds: u64,
+    created_unix_seconds: u64,
+    /// The host-reported agent name: display data only.
+    display_name: Option<String>,
 }
 
 impl LairGrant {
@@ -900,11 +904,23 @@ pub enum RevokedAuthorization {
     Lair(LairAuthorizationMutation),
 }
 
+/// One "just this once" grant as the access inventory shows it.
+#[derive(Clone, Debug)]
+pub struct OnceGrantView {
+    pub grant_id: u64,
+    /// The requesting process the grant is bound to.
+    pub peer: PeerIdentity,
+    pub target: GrantResource,
+    pub scopes: Vec<AccessScope>,
+    pub display_name: Option<String>,
+    pub created_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct GrantStore {
     ids: Arc<GrantIds>,
     next_audit_order: u64,
-    authorization_revision: u64,
     grants: Vec<Grant>,
     lair_grants: Vec<LairGrant>,
     audit: VecDeque<AuditRecord>,
@@ -912,7 +928,7 @@ pub struct GrantStore {
 
 impl GrantStore {
     /// A store allocating runtime grant IDs from the space every authority
-    /// source shares.
+    /// source shares, and advancing the revision they share.
     pub fn with_ids(ids: Arc<GrantIds>) -> Self {
         Self {
             ids,
@@ -920,13 +936,115 @@ impl GrantStore {
         }
     }
 
+    /// The daemon-wide authorization revision.
     #[must_use]
-    pub const fn authorization_revision(&self) -> u64 {
-        self.authorization_revision
+    pub fn authorization_revision(&self) -> u64 {
+        self.ids.revision()
     }
 
     fn advance_authorization_revision(&mut self) {
-        self.authorization_revision = self.authorization_revision.saturating_add(1);
+        self.ids.advance_revision();
+    }
+
+    /// Whether a once grant is still in force: present and unexpired.
+    /// Controller and subscription registration check this under their own
+    /// lock, after authorization, so a revoke that lands in between wins.
+    pub fn is_live(&self, grant_id: u64) -> bool {
+        let now = Instant::now();
+        self.grants
+            .iter()
+            .any(|grant| grant.id == grant_id && grant.expires > now)
+            || self
+                .lair_grants
+                .iter()
+                .any(|grant| grant.id == grant_id && grant.expires > now)
+    }
+
+    /// Every unexpired once grant, for the access inventory.
+    pub fn inventory(&mut self) -> Vec<OnceGrantView> {
+        self.remove_expired();
+        let now = Instant::now();
+        let splint = self.grants.iter().map(|grant| OnceGrantView {
+            grant_id: grant.id,
+            peer: grant.peer.clone(),
+            target: GrantResource::Splint {
+                splint_id: grant.splint_id,
+                incarnation: grant.incarnation,
+            },
+            scopes: grant.scopes.iter().copied().collect(),
+            display_name: None,
+            created_unix_seconds: grant.created_unix_seconds,
+            expires_at_unix_seconds: grant.expires_at_unix_seconds,
+        });
+        let lair = self
+            .lair_grants
+            .iter()
+            .filter(|grant| grant.expires > now)
+            .map(|grant| OnceGrantView {
+                grant_id: grant.id,
+                peer: grant.peer.clone(),
+                target: GrantResource::Lair {
+                    lair_id: grant.lair_id,
+                },
+                scopes: grant.scopes.iter().copied().collect(),
+                display_name: grant.display_name.clone(),
+                created_unix_seconds: grant.created_unix_seconds,
+                expires_at_unix_seconds: grant.expires_at_unix_seconds,
+            });
+        splint.chain(lair).collect()
+    }
+
+    /// How many once grants are in force, for a dry-run **Revoke all
+    /// access**.
+    pub fn live_count(&mut self) -> usize {
+        self.remove_expired();
+        let now = Instant::now();
+        self.grants.len()
+            + self
+                .lair_grants
+                .iter()
+                .filter(|grant| grant.expires > now)
+                .count()
+    }
+
+    /// **Revoke all access**: removes every once grant, for a Lair or a
+    /// Splint, and returns the IDs of those that were in force. The caller
+    /// ends their controllers and subscriptions.
+    pub fn revoke_all(&mut self, reason: &'static str) -> Vec<u64> {
+        self.remove_expired();
+        let now = Instant::now();
+        let grants = std::mem::take(&mut self.grants);
+        let lair_grants = std::mem::take(&mut self.lair_grants);
+        let mut revoked = Vec::new();
+        for grant in grants {
+            revoked.push(grant.id);
+            self.record(
+                &grant.peer,
+                grant.splint_id,
+                grant.incarnation,
+                grant.scopes,
+                AuditDecision::Revoked,
+                reason,
+            );
+        }
+        for grant in lair_grants {
+            // An expired grant was already out of force; it leaves silently.
+            if grant.expires <= now {
+                continue;
+            }
+            revoked.push(grant.id);
+            self.record_lair(
+                &grant.peer,
+                grant.lair_id,
+                grant.scopes,
+                AuditDecision::Revoked,
+                reason,
+            );
+        }
+        if !revoked.is_empty() {
+            self.advance_authorization_revision();
+        }
+        revoked
     }
 
     pub fn authorize(
@@ -1012,7 +1130,7 @@ impl GrantStore {
             );
             return AuthorizationMutation {
                 grant: wire,
-                authorization_revision: self.authorization_revision,
+                authorization_revision: self.ids.revision(),
             };
         }
         let grant = Grant {
@@ -1023,6 +1141,7 @@ impl GrantStore {
             scopes: scopes.clone(),
             expires: Instant::now() + GRANT_LIFETIME,
             expires_at_unix_seconds: unix_seconds() + GRANT_LIFETIME.as_secs(),
+            created_unix_seconds: unix_seconds(),
         };
         let wire = grant.wire();
         self.grants.push(grant);
@@ -1037,15 +1156,28 @@ impl GrantStore {
         );
         AuthorizationMutation {
             grant: wire,
-            authorization_revision: self.authorization_revision,
+            authorization_revision: self.ids.revision(),
         }
     }
 
+    #[cfg(test)]
     pub fn grant_lair(
         &mut self,
         peer: &PeerIdentity,
         lair_id: LairId,
         scopes: Vec<AccessScope>,
+    ) -> LairAuthorizationMutation {
+        self.grant_lair_named(peer, lair_id, scopes, None)
+    }
+
+    /// [`Self::grant_lair`], keeping the host-reported agent name as
+    /// display data for the access inventory.
+    pub fn grant_lair_named(
+        &mut self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        scopes: Vec<AccessScope>,
+        display_name: Option<String>,
     ) -> LairAuthorizationMutation {
         self.remove_expired();
         let scopes: BTreeSet<_> = scopes.into_iter().collect();
@@ -1059,6 +1191,9 @@ impl GrantStore {
                 grant.scopes.extend(scopes.iter().copied());
                 grant.expires = Instant::now() + GRANT_LIFETIME;
                 grant.expires_at_unix_seconds = unix_seconds() + GRANT_LIFETIME.as_secs();
+                if display_name.is_some() {
+                    grant.display_name = display_name;
+                }
                 grant.wire()
             };
             self.advance_authorization_revision();
@@ -1071,7 +1206,7 @@ impl GrantStore {
             );
             return LairAuthorizationMutation {
                 grant: wire,
-                authorization_revision: self.authorization_revision,
+                authorization_revision: self.ids.revision(),
             };
         }
         let grant = LairGrant {
@@ -1081,6 +1216,8 @@ impl GrantStore {
             scopes: scopes.clone(),
             expires: Instant::now() + GRANT_LIFETIME,
             expires_at_unix_seconds: unix_seconds() + GRANT_LIFETIME.as_secs(),
+            created_unix_seconds: unix_seconds(),
+            display_name,
         };
         let wire = grant.wire();
         self.lair_grants.push(grant);
@@ -1094,7 +1231,7 @@ impl GrantStore {
         );
         LairAuthorizationMutation {
             grant: wire,
-            authorization_revision: self.authorization_revision,
+            authorization_revision: self.ids.revision(),
         }
     }
 
@@ -1171,7 +1308,7 @@ impl GrantStore {
         );
         Some(AuthorizationMutation {
             grant: wire,
-            authorization_revision: self.authorization_revision,
+            authorization_revision: self.ids.revision(),
         })
     }
 
@@ -1195,8 +1332,73 @@ impl GrantStore {
         );
         Some(RevokedAuthorization::Lair(LairAuthorizationMutation {
             grant: wire,
-            authorization_revision: self.authorization_revision,
+            authorization_revision: self.ids.revision(),
         }))
+    }
+
+    /// The time left on a once grant (Lair or Splint) that is in force.
+    pub fn once_remaining(&self, grant_id: u64) -> Option<Duration> {
+        let now = Instant::now();
+        self.grants
+            .iter()
+            .find(|grant| grant.id == grant_id)
+            .map(|grant| grant.expires)
+            .or_else(|| {
+                self.lair_grants
+                    .iter()
+                    .find(|grant| grant.id == grant_id)
+                    .map(|grant| grant.expires)
+            })
+            .filter(|expires| *expires > now)
+            .map(|expires| expires - now)
+    }
+
+    /// At a once grant's expiry: `true` when it is no longer in force, after
+    /// removing it if it is still held, so the caller broadcasts its end and
+    /// releases its controllers. A grant refreshed meanwhile stays, and a
+    /// grant already removed (expired silently or revoked) reports `true`
+    /// again, which only repeats an end.
+    pub fn end_if_expired(&mut self, grant_id: u64) -> bool {
+        let now = Instant::now();
+        if let Some(index) = self.grants.iter().position(|grant| grant.id == grant_id) {
+            if self.grants[index].expires > now {
+                return false;
+            }
+            let grant = self.grants.remove(index);
+            self.advance_authorization_revision();
+            self.record(
+                &grant.peer,
+                grant.splint_id,
+                grant.incarnation,
+                grant.scopes,
+                AuditDecision::Revoked,
+                "grant expired",
+            );
+            return true;
+        }
+        if let Some(grant) = self.lair_grants.iter().find(|grant| grant.id == grant_id)
+            && grant.expires > now
+        {
+            return false;
+        }
+        let _ = self.revoke_lair_if_expired(grant_id);
+        true
+    }
+
+    /// Moves a once grant's expiry to now (tests of expiry handling).
+    #[cfg(test)]
+    pub fn expire_now_for_test(&mut self, grant_id: u64) {
+        let now = Instant::now();
+        for grant in &mut self.grants {
+            if grant.id == grant_id {
+                grant.expires = now;
+            }
+        }
+        for grant in &mut self.lair_grants {
+            if grant.id == grant_id {
+                grant.expires = now;
+            }
+        }
     }
 
     pub fn revoke_lair_if_expired(&mut self, grant_id: u64) -> Option<LairAuthorizationMutation> {
@@ -1216,7 +1418,7 @@ impl GrantStore {
         );
         Some(LairAuthorizationMutation {
             grant: wire,
-            authorization_revision: self.authorization_revision,
+            authorization_revision: self.ids.revision(),
         })
     }
 
@@ -1227,7 +1429,7 @@ impl GrantStore {
             .find(|grant| grant.id == grant_id)
             .map(|grant| LairAuthorizationMutation {
                 grant: grant.wire(),
-                authorization_revision: self.authorization_revision,
+                authorization_revision: self.ids.revision(),
             })
     }
 
@@ -1238,7 +1440,7 @@ impl GrantStore {
             .find(|grant| grant.id == grant_id)
             .map(|grant| AuthorizationMutation {
                 grant: grant.wire(),
-                authorization_revision: self.authorization_revision,
+                authorization_revision: self.ids.revision(),
             })
     }
 

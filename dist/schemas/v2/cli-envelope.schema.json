@@ -50,7 +50,10 @@
         "kill_splint",
         "agent_status_set",
         "agent_status_clear",
-        "agent_status_get"
+        "agent_status_get",
+        "access_list",
+        "access_revoke",
+        "access_revoke_all"
       ]
     },
     "ok": {
@@ -1896,6 +1899,189 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "access_list"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/access_list_success"
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "truncated": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "truncated"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "next_after": {
+                            "$ref": "#/$defs/access_entry_id"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "data": {
+                        "properties": {
+                          "next_after": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "access_revoke"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/access_revoke_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "access_revoke_all"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              },
+              "required": [
+                "ok"
+              ]
+            },
+            "then": {
+              "properties": {
+                "data": {
+                  "$ref": "#/$defs/access_revoke_all_success"
+                },
+                "truncated": {
+                  "const": false
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "error": {
+                  "$ref": "#/$defs/error"
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "required": [
+            "resource"
+          ]
+        }
+      }
     }
   ],
   "$defs": {
@@ -2839,6 +3025,872 @@
           "const": true
         }
       }
+    },
+    "access_entry_id": {
+      "type": "string",
+      "pattern": "^([1-9][0-9]{0,19}|ra_[0-9a-f]{32}|pending:[1-9][0-9]{0,19}|policy:[a-z][a-z0-9-]{0,63})$"
+    },
+    "access_revoke_id": {
+      "type": "string",
+      "pattern": "^([1-9][0-9]{0,19}|ra_[0-9a-f]{32})$"
+    },
+    "access_rule_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "access_consent_scope": {
+      "enum": [
+        "topology_observe",
+        "observe",
+        "scrollback",
+        "agent_status_report",
+        "input",
+        "resize",
+        "control_takeover",
+        "process_spawn",
+        "topology_layout",
+        "topology_name",
+        "terminate",
+        "process_restore"
+      ]
+    },
+    "access_policy_scope": {
+      "enum": [
+        "topology_metadata_read",
+        "topology_subscribe",
+        "terminal_visible_read",
+        "terminal_subscribe",
+        "scrollback_read",
+        "scrollback_search",
+        "controller_acquire",
+        "controller_transfer",
+        "input",
+        "resize",
+        "process_spawn",
+        "process_restore",
+        "process_terminate",
+        "topology_layout_mutate",
+        "topology_name_mutate",
+        "authorization_inspect",
+        "authorization_revoke",
+        "audit_inspect",
+        "agent_status_report"
+      ]
+    },
+    "access_policy_resource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "daemon"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "lair_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "lair"
+            },
+            "lair_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "dojo_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "dojo"
+            },
+            "dojo_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "splint_id"
+          ],
+          "properties": {
+            "kind": {
+              "const": "splint"
+            },
+            "splint_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          }
+        }
+      ]
+    },
+    "access_display_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {
+        "pattern": "[\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]"
+      }
+    },
+    "access_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "state",
+        "revocable",
+        "grant_id",
+        "agent",
+        "workspace",
+        "splint",
+        "level",
+        "scopes",
+        "policy_scopes",
+        "policy_resources",
+        "created_unix_seconds",
+        "last_used_unix_seconds",
+        "expires_unix_seconds",
+        "connections",
+        "controllers",
+        "policy_rules"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/access_entry_id"
+        },
+        "kind": {
+          "enum": [
+            "once",
+            "workspace_session",
+            "remembered",
+            "pending",
+            "policy"
+          ]
+        },
+        "state": {
+          "enum": [
+            "active",
+            "workspace_missing",
+            "removal_pending",
+            "prompting",
+            "queued"
+          ]
+        },
+        "revocable": {
+          "type": "boolean"
+        },
+        "grant_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/decimal_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "identity",
+            "executable_path",
+            "pid",
+            "display_name"
+          ],
+          "properties": {
+            "identity": {
+              "enum": [
+                "process",
+                "exact_build",
+                "protected_install",
+                "nix_profile",
+                "policy_digest"
+              ]
+            },
+            "executable_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "pid": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "display_name": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/access_display_text"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "workspace": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "lair_id",
+                "name"
+              ],
+              "properties": {
+                "lair_id": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "name": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "splint": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "splint_id",
+                "incarnation"
+              ],
+              "properties": {
+                "splint_id": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "incarnation": {
+                  "$ref": "#/$defs/counter"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "level": {
+          "enum": [
+            "look",
+            "look_and_type",
+            "manage",
+            null
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/access_consent_scope"
+          }
+        },
+        "policy_scopes": {
+          "type": "array",
+          "maxItems": 19,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/access_policy_scope"
+          }
+        },
+        "policy_resources": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/access_policy_resource"
+          }
+        },
+        "created_unix_seconds": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/counter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_used_unix_seconds": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/counter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expires_unix_seconds": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/counter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connections": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "controllers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_rules": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/access_rule_id"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "policy"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "pattern": "^policy:"
+              },
+              "state": {
+                "const": "active"
+              },
+              "revocable": {
+                "const": false
+              },
+              "grant_id": {
+                "type": "null"
+              },
+              "workspace": {
+                "type": "null"
+              },
+              "splint": {
+                "type": "null"
+              },
+              "level": {
+                "const": null
+              },
+              "scopes": {
+                "maxItems": 0
+              },
+              "policy_scopes": {
+                "minItems": 1
+              },
+              "policy_resources": {
+                "minItems": 1
+              },
+              "agent": {
+                "properties": {
+                  "identity": {
+                    "const": "policy_digest"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "scopes": {
+                "minItems": 1
+              },
+              "policy_scopes": {
+                "maxItems": 0
+              },
+              "policy_resources": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "const": "policy"
+                }
+              },
+              "splint": {
+                "type": "null"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "workspace": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pending"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "pattern": "^pending:"
+              },
+              "state": {
+                "enum": [
+                  "prompting",
+                  "queued"
+                ]
+              },
+              "revocable": {
+                "const": false
+              },
+              "grant_id": {
+                "type": "null"
+              },
+              "splint": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "remembered"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "pattern": "^ra_"
+              },
+              "splint": {
+                "type": "null"
+              }
+            },
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "removal_pending"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "revocable": {
+                  "const": false
+                },
+                "grant_id": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "active",
+                    "workspace_missing"
+                  ]
+                },
+                "revocable": {
+                  "const": true
+                },
+                "grant_id": {
+                  "$ref": "#/$defs/decimal_id"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "once",
+                  "workspace_session"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "state": {
+                "const": "active"
+              },
+              "revocable": {
+                "const": true
+              },
+              "grant_id": {
+                "$ref": "#/$defs/decimal_id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "workspace_session"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "splint": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "access_durable_removal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "not_needed",
+                "written"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "message",
+            "returns_after_restart"
+          ],
+          "properties": {
+            "status": {
+              "const": "failed"
+            },
+            "message": {
+              "$ref": "#/$defs/access_display_text"
+            },
+            "returns_after_restart": {
+              "const": true
+            }
+          }
+        }
+      ]
+    },
+    "access_list_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authorization_revision",
+        "policy_generation",
+        "remembered_store",
+        "total_entries",
+        "entries",
+        "next_after"
+      ],
+      "properties": {
+        "authorization_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remembered_store": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "available",
+                    "not_configured"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "reason"
+              ],
+              "properties": {
+                "status": {
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "$ref": "#/$defs/access_display_text"
+                }
+              }
+            }
+          ]
+        },
+        "total_entries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/access_entry"
+          }
+        },
+        "next_after": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/access_entry_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "access_revoke_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "revoked_grant_id",
+        "lair_id",
+        "durable_removal",
+        "policy_rules",
+        "authorization_revision",
+        "confirmed"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/access_revoke_id"
+        },
+        "kind": {
+          "enum": [
+            "once",
+            "workspace_session",
+            "remembered"
+          ]
+        },
+        "revoked_grant_id": {
+          "$ref": "#/$defs/decimal_id"
+        },
+        "lair_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durable_removal": {
+          "$ref": "#/$defs/access_durable_removal"
+        },
+        "policy_rules": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/access_rule_id"
+          }
+        },
+        "authorization_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "confirmed": {
+          "const": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "remembered"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "pattern": "^ra_"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "id": {
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "durable_removal": {
+                "properties": {
+                  "status": {
+                    "const": "not_needed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "access_revoke_all_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dry_run",
+        "confirmed",
+        "counts",
+        "durable_removal",
+        "authorization_revision"
+      ],
+      "properties": {
+        "dry_run": {
+          "type": "boolean"
+        },
+        "confirmed": {
+          "type": "boolean"
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "once",
+            "workspace_session",
+            "remembered",
+            "pending_requests"
+          ],
+          "properties": {
+            "once": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "workspace_session": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "remembered": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pending_requests": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "durable_removal": {
+          "$ref": "#/$defs/access_durable_removal"
+        },
+        "authorization_revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dry_run": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "confirmed": {
+                "const": false
+              },
+              "durable_removal": {
+                "properties": {
+                  "status": {
+                    "const": "not_needed"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "confirmed": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
     },
     "audit_resource": {
       "type": "object",

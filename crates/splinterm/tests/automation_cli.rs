@@ -2544,3 +2544,327 @@ fn a_machine_read_lost_twice_fails_clearly_without_a_third_try() {
         "{message}"
     );
 }
+
+/// One access request (ADR 0014): the role, the exact request, and one reply.
+fn serve_access(
+    role: ClientRole,
+    expected: splinterm_protocol::Request,
+    result: Result<Response, ProtocolError>,
+) -> (PathBuf, thread::JoinHandle<()>) {
+    let socket = socket_path();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let ClientFrame::Hello {
+            role: actual_role, ..
+        } = read_client_frame(&mut stream)
+        else {
+            panic!("no hello");
+        };
+        assert_eq!(actual_role, role);
+        stream
+            .write_all(
+                &encode_frame(&ServerFrame::Hello {
+                    version: PROTOCOL_VERSION,
+                    limits: ServerLimits::default(),
+                    development_terminal_access: false,
+                    daemon_hostname: None,
+                    daemon_generation: 1,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let ClientFrame::Request {
+            request_id,
+            request,
+            ..
+        } = read_client_frame(&mut stream)
+        else {
+            panic!("no request");
+        };
+        assert_eq!(request, expected);
+        let frame = match result {
+            Ok(result) => ServerFrame::Response { request_id, result },
+            Err(error) => ServerFrame::Error {
+                request_id: Some(request_id),
+                error,
+            },
+        };
+        stream.write_all(&encode_frame(&frame).unwrap()).unwrap();
+    });
+    (socket, server)
+}
+
+const ACCESS_LAIR: &str = "018f4d8c-2a18-4b31-8c2f-9e7c5de77101";
+const ACCESS_ENTRY: &str = "ra_0123456789abcdef0123456789abcdef";
+
+fn pending_access_entry() -> splinterm_protocol::AccessEntry {
+    use splinterm_protocol::{
+        AccessEntry, AccessEntryKey, AccessEntryKind, AccessEntryState, AccessIdentity,
+        AccessIdentityKind, AccessLevel, AccessWorkspace,
+    };
+    AccessEntry {
+        key: AccessEntryKey::Pending { request_id: 3 },
+        kind: AccessEntryKind::Pending,
+        state: AccessEntryState::Queued,
+        revocable: false,
+        grant_id: None,
+        identity: AccessIdentity {
+            kind: AccessIdentityKind::Process,
+            executable_path: "/usr/bin/splinterm-mcp".to_owned(),
+            pid: Some(4343),
+            display_name: Some("vscode".to_owned()),
+        },
+        workspace: Some(AccessWorkspace {
+            lair_id: ACCESS_LAIR.parse().unwrap(),
+            name: Some("work".to_owned()),
+        }),
+        splint_id: None,
+        incarnation: None,
+        level: Some(AccessLevel::Look),
+        scopes: AccessLevel::Look.scopes().to_vec(),
+        policy_scopes: Vec::new(),
+        policy_resources: Vec::new(),
+        created_at_unix_seconds: Some(1_760_918_400),
+        last_used_at_unix_seconds: None,
+        expires_at_unix_seconds: Some(1_760_918_520),
+        connections: 1,
+        controllers: 0,
+        policy_rules: Vec::new(),
+    }
+}
+
+#[test]
+fn access_list_pages_through_the_reviewed_projection() {
+    use splinterm_protocol::{AccessEntryKey, RememberedStoreStatus, Request};
+
+    let entry = pending_access_entry();
+    let (socket, server) = serve_access(
+        ClientRole::Automation,
+        Request::ListAccess {
+            after: Some(AccessEntryKey::Grant { grant_id: 17 }),
+            max_entries: 1,
+        },
+        Ok(Response::AccessInventory {
+            authorization_revision: 12,
+            policy_generation: 3,
+            remembered_store: RememberedStoreStatus::Available,
+            total_entries: 4,
+            entries: vec![entry.clone()],
+            next_after: Some(entry.key.clone()),
+        }),
+    );
+    let output = run_json_ping(
+        &[
+            "--output",
+            "json",
+            "access",
+            "list",
+            "--after",
+            "17",
+            "--max-entries",
+            "1",
+        ],
+        &socket,
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "access_list");
+    assert_eq!(document["truncated"], true);
+    assert!(document.get("resource").is_none());
+    assert_eq!(document["data"]["next_after"], "pending:3");
+    assert_eq!(document["data"]["entries"][0]["id"], "pending:3");
+    assert_eq!(document["data"]["entries"][0]["revocable"], false);
+    assert_eq!(document["data"]["entries"][0]["level"], "look");
+}
+
+#[test]
+fn access_revoke_reports_a_failed_durable_removal_as_a_revoked_grant() {
+    use splinterm_protocol::{
+        AccessEntryKey, AccessEntryKind, AccessRevocation, AccessRevokeTarget, DurableRemoval,
+        Request,
+    };
+
+    let (socket, server) = serve_access(
+        ClientRole::Automation,
+        Request::RevokeAccessEntry {
+            target: AccessRevokeTarget::Remembered {
+                entry_id: ACCESS_ENTRY.to_owned(),
+            },
+        },
+        Ok(Response::AccessEntryRevoked {
+            authorization_revision: 13,
+            revocation: AccessRevocation {
+                key: AccessEntryKey::Remembered {
+                    entry_id: ACCESS_ENTRY.to_owned(),
+                },
+                kind: AccessEntryKind::Remembered,
+                grant_id: 21,
+                lair_id: Some(ACCESS_LAIR.parse().unwrap()),
+                durable_removal: DurableRemoval::Failed {
+                    message: "write temporary store: Read-only file system (os error 30)"
+                        .to_owned(),
+                },
+                policy_rules: vec!["mcp-reader".to_owned()],
+            },
+        }),
+    );
+    let output = run_json_ping(
+        &[
+            "--output",
+            "json",
+            "access",
+            "revoke",
+            ACCESS_ENTRY,
+            "--yes",
+        ],
+        &socket,
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/automation/fixtures/valid/cli-access-revoke.json"
+    ))
+    .unwrap();
+    assert_eq!(document, fixture["document"]);
+}
+
+#[test]
+fn access_revokes_need_yes_and_a_revocable_id_before_connecting() {
+    let socket = socket_path();
+    // No daemon listens: each refusal happens before connecting.
+    let missing = run_json_ping(&["--output", "json", "access", "revoke", "17"], &socket);
+    assert_eq!(missing.status.code(), Some(3));
+    let document: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(document["operation"], "access_revoke");
+    assert_eq!(document["error"]["code"], "confirmation_required");
+    let all = run_json_ping(&["--output", "json", "access", "revoke", "--all"], &socket);
+    assert_eq!(all.status.code(), Some(3));
+    let document: Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(document["operation"], "access_revoke_all");
+    for refused in ["pending:3", "policy:mcp-reader", "ra_short", "0"] {
+        let output = run_json_ping(
+            &["--output", "json", "access", "revoke", refused, "--yes"],
+            &socket,
+        );
+        assert_eq!(output.status.code(), Some(2), "{refused}");
+        assert!(output.stdout.is_empty(), "{refused}");
+    }
+    for refused in [
+        &["--output", "ndjson", "access", "list"][..],
+        &["access", "list", "--timeout-ms", "10"],
+        &["--remote", "wintermute", "access", "list"],
+    ] {
+        let output = run_json_ping(refused, &socket);
+        assert_eq!(output.status.code(), Some(2), "{refused:?}");
+        assert!(output.stdout.is_empty(), "{refused:?}");
+    }
+}
+
+#[test]
+fn access_revoke_all_dry_run_counts_and_a_policy_refusal_is_an_authorization_failure() {
+    use splinterm_protocol::{AccessRevocationCounts, DurableRemoval, Request};
+
+    let counts = AccessRevocationCounts {
+        once: 1,
+        workspace_session: 0,
+        remembered: 2,
+        pending_requests: 1,
+    };
+    let (socket, server) = serve_access(
+        ClientRole::Automation,
+        Request::RevokeAllAccess { dry_run: true },
+        Ok(Response::AllAccessRevoked {
+            authorization_revision: 12,
+            dry_run: true,
+            counts,
+            durable_removal: DurableRemoval::NotNeeded,
+        }),
+    );
+    let output = run_json_ping(
+        &["--output", "json", "access", "revoke", "--all", "--dry-run"],
+        &socket,
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/automation/fixtures/valid/cli-access-revoke-all.json"
+    ))
+    .unwrap();
+    assert_eq!(document, fixture["document"]);
+
+    let (socket, server) = serve_access(
+        ClientRole::Automation,
+        Request::ListAccess {
+            after: None,
+            max_entries: 64,
+        },
+        Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "no exact persistent policy rule authorizes this request",
+        )),
+    );
+    let output = run_json_ping(&["--output", "json", "access", "list"], &socket);
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["operation"], "access_list");
+    assert_eq!(document["error"]["code"], "unauthorized");
+}
+
+#[test]
+fn human_access_list_speaks_as_the_trusted_client_and_names_each_entry() {
+    use splinterm_protocol::{RememberedStoreStatus, Request};
+
+    let (socket, server) = serve_access(
+        ClientRole::TrustedUi,
+        Request::ListAccess {
+            after: None,
+            max_entries: 64,
+        },
+        Ok(Response::AccessInventory {
+            authorization_revision: 12,
+            policy_generation: 3,
+            remembered_store: RememberedStoreStatus::Unavailable {
+                reason: "the store is corrupt".to_owned(),
+            },
+            total_entries: 1,
+            entries: vec![pending_access_entry()],
+            next_after: None,
+        }),
+    );
+    let output = run_json_ping(&["access", "list"], &socket);
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("pending:3"), "{text}");
+    assert!(
+        text.contains("Waiting for an answer (queued): Look"),
+        "{text}"
+    );
+    assert!(text.contains("Remembered access is unavailable"), "{text}");
+}

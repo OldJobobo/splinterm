@@ -23,8 +23,9 @@
 //!
 //! The consent flow (`RequestLairAccess`, Plan 0053 PR 3) commits answers
 //! through [`crate::commit_agent_grant`] and answers covered requests from
-//! [`AgentAccess::authorize`]. Per-entry revocation and the inventory stay
-//! dormant until PR 4.
+//! [`AgentAccess::authorize`]. The access inventory (`ListAccess`), per-entry
+//! revocation (`RevokeAccessEntry`), and **Revoke all access**
+//! (`RevokeAllAccess`, Plan 0053 PR 4) read and revoke these definitions.
 //!
 //! # Locks
 //!
@@ -34,14 +35,6 @@
 //! Authorization only reads memory, never the file, so a slow `fsync` never
 //! stalls a request. Both are synchronous locks; store I/O runs on blocking
 //! threads.
-
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the revoke and inventory paths stay dormant until PR 4 calls them"
-    )
-)]
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -373,6 +366,26 @@ impl IdentityContext {
         }
     }
 
+    /// The canonical file a stored identity names now: the path itself for a
+    /// protected install, and for a Nix profile entry of this account the
+    /// physical store path its full walk ends at. Display data for the
+    /// access list (to name the policy rule for the same program), never an
+    /// authorization. Blocking.
+    pub fn canonical_target(&self, identity: &DurableIdentity) -> Option<PathBuf> {
+        match identity {
+            DurableIdentity::ProtectedInstall(path) => Some(path.clone()),
+            DurableIdentity::NixProfile(path) => {
+                let (home, user) = self.account()?;
+                if !durable_identity::is_nix_profile_entry(path, home, user) {
+                    return None;
+                }
+                durable_identity::nix_profile_target(&self.root, path)
+                    .ok()
+                    .map(|(resolved, _)| resolved)
+            }
+        }
+    }
+
     /// Whether `identity` still names the executing file now, checked in
     /// full again.
     pub fn still_qualifies(&self, identity: &DurableIdentity, executing: FileId) -> bool {
@@ -410,13 +423,40 @@ fn daemon_identity_root() -> IdentityRoot {
 // ---------------------------------------------------------------------------
 
 /// The one runtime grant ID space every source shares, so a revocation or a
-/// controller lease names exactly one grant whatever its duration.
+/// controller lease names exactly one grant whatever its duration, and the
+/// one daemon-wide authorization revision every source advances on each
+/// grant or pending-request change (ADR 0014's inventory reports it).
 #[derive(Debug, Default)]
-pub struct GrantIds(AtomicU64);
+pub struct GrantIds {
+    next: AtomicU64,
+    revision: AtomicU64,
+}
 
 impl GrantIds {
     pub fn next(&self) -> u64 {
-        self.0.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+        self.next.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+    }
+
+    /// Advances the authorization revision and returns the new value. It
+    /// saturates rather than wrapping, so it never moves backwards.
+    pub fn advance_revision(&self) -> u64 {
+        let mut current = self.revision.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_add(1);
+            match self.revision.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return next,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 }
 
@@ -451,6 +491,16 @@ impl EntryId {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+    }
+
+    /// An entry ID named by a client, when it is well formed.
+    pub fn parse(id: &str) -> Option<Self> {
+        let parsed = Self(id.to_owned());
+        parsed.is_valid().then_some(parsed)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -1148,6 +1198,51 @@ pub struct Committed {
     pub entry_id: Option<EntryId>,
 }
 
+/// One "while this workspace is open" definition, for the inventory.
+#[derive(Clone, Debug)]
+pub struct SessionView {
+    pub grant_id: u64,
+    pub uid: u32,
+    pub path: PathBuf,
+    pub sha256: String,
+    pub lair_id: LairId,
+    pub access: AccessSet,
+    pub display_name: Option<String>,
+    pub created_unix_seconds: u64,
+}
+
+/// One remembered definition, for the inventory: listed (with its runtime
+/// grant ID) or revoked with its durable removal still owed (`None`).
+#[derive(Clone, Debug)]
+pub struct RememberedView {
+    pub grant_id: Option<u64>,
+    pub entry: RememberedEntry,
+    pub workspace_missing: bool,
+}
+
+/// Whether the remembered source can be used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoreStatus {
+    Available,
+    Unavailable(String),
+    NotConfigured,
+}
+
+/// Every definition the engine holds.
+#[derive(Clone, Debug)]
+pub struct AgentInventory {
+    pub sessions: Vec<SessionView>,
+    pub remembered: Vec<RememberedView>,
+    pub store: StoreStatus,
+}
+
+/// What **Revoke all access** revoked in the engine.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct RevokedAll {
+    pub session_grant_ids: Vec<u64>,
+    pub remembered_grant_ids: Vec<u64>,
+}
+
 /// What ending a Lair removed.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct LairEnd {
@@ -1191,9 +1286,7 @@ struct SessionGrant {
     sha256: String,
     lair_id: LairId,
     access: AccessSet,
-    #[allow(dead_code, reason = "display data for PR 4's inventory")]
     display_name: Option<String>,
-    #[allow(dead_code, reason = "display data for PR 4's inventory")]
     created_unix_seconds: u64,
 }
 
@@ -1219,6 +1312,8 @@ struct Memory {
     ended_lairs: HashSet<LairId>,
     /// The remembered source is usable (the store is absent or loaded).
     available: bool,
+    /// Why it is not, for the inventory.
+    fault: Option<StoreFault>,
     flush_in_flight: bool,
     next_last_used_attempt: u64,
     next_audit_order: u64,
@@ -1273,7 +1368,8 @@ impl Memory {
 
     /// After a durable write of exactly `written`: those entries' last-used
     /// times are persisted, and every pending removal absent from it is done.
-    fn written(&mut self, written: &[RememberedEntry]) {
+    /// Returns whether a pending removal completed.
+    fn written(&mut self, written: &[RememberedEntry]) -> bool {
         let by_id: BTreeMap<_, _> = written
             .iter()
             .map(|entry| (&entry.id, entry.last_used_unix_seconds))
@@ -1283,7 +1379,9 @@ impl Memory {
                 grant.persisted_last_used = *last_used;
             }
         }
+        let before = self.pending_removals.len();
         self.pending_removals.retain(|id, _| by_id.contains_key(id));
+        self.pending_removals.len() != before
     }
 }
 
@@ -1351,6 +1449,10 @@ impl AgentAccess {
         let loaded = load_store(&location, context.account());
         let mut memory = Memory {
             available: !matches!(loaded.state, FileState::Unavailable(_)),
+            fault: match &loaded.state {
+                FileState::Unavailable(fault) => Some(fault.clone()),
+                _ => None,
+            },
             ..Memory::default()
         };
         if let FileState::Unavailable(fault) = &loaded.state {
@@ -1397,7 +1499,10 @@ impl AgentAccess {
         Self {
             ids,
             file: Mutex::new(DurableFile::unconfigured()),
-            memory: Mutex::new(Memory::default()),
+            memory: Mutex::new(Memory {
+                fault: Some(StoreFault::NotConfigured),
+                ..Memory::default()
+            }),
             #[cfg(test)]
             after_commit_write: CommitHook::default(),
         }
@@ -1507,12 +1612,14 @@ impl AgentAccess {
         })
     }
 
+    #[cfg(test)]
     /// Commits a "while this workspace is open" definition for the peer's
     /// verified executable identity, replacing an earlier one for the same
     /// identity and Lair with exactly `access`.
     ///
     /// # Errors
     /// The peer has no verified executable identity, or the Lair ended.
+    #[cfg(test)]
     pub fn commit_session(
         &self,
         peer: &PeerIdentity,
@@ -1600,6 +1707,7 @@ impl AgentAccess {
             "while this workspace is open",
         );
         memory.sessions.push(grant);
+        self.ids.advance_revision();
         Ok(committed)
     }
 
@@ -1666,7 +1774,9 @@ impl AgentAccess {
         #[cfg(test)]
         self.after_commit_write.run();
         let mut memory = self.memory();
-        memory.written(&proposal);
+        if memory.written(&proposal) {
+            self.ids.advance_revision();
+        }
         // The Lair ended while the write ran (which also removed any earlier
         // definition): the new entry never authorizes and leaves the file at
         // the next write.
@@ -1715,6 +1825,7 @@ impl AgentAccess {
             persisted_last_used: None,
             workspace_missing: false,
         });
+        self.ids.advance_revision();
         Ok(Committed {
             grant_id,
             replaced: replaced.map(|old| old.grant_id),
@@ -1745,6 +1856,7 @@ impl AgentAccess {
             },
             "explicit local revocation",
         );
+        self.ids.advance_revision();
         true
     }
 
@@ -1774,6 +1886,7 @@ impl AgentAccess {
         memory
             .pending_removals
             .insert(grant.entry.id.clone(), grant.entry);
+        self.ids.advance_revision();
         Some(grant.grant_id)
     }
 
@@ -1824,6 +1937,9 @@ impl AgentAccess {
                 .pending_removals
                 .insert(grant.entry.id.clone(), grant.entry);
         }
+        if !end.grant_ids.is_empty() {
+            self.ids.advance_revision();
+        }
         end
     }
 
@@ -1853,7 +1969,9 @@ impl AgentAccess {
         match &result {
             Ok(()) => {
                 let mut memory = self.memory();
-                memory.written(&proposal);
+                if memory.written(&proposal) {
+                    self.ids.advance_revision();
+                }
                 memory.flush_in_flight = false;
             }
             Err(error) => {
@@ -1877,12 +1995,160 @@ impl AgentAccess {
         file.state = FileState::Unavailable(StoreFault::Retired);
         let mut memory = self.memory();
         memory.available = false;
+        memory.fault = Some(StoreFault::Retired);
         memory.pending_removals.keys().cloned().collect()
     }
 
     /// Entries revoked in memory whose durable removal is still owed.
+    #[cfg(test)]
     pub fn pending_removal_ids(&self) -> BTreeSet<EntryId> {
         self.memory().pending_removals.keys().cloned().collect()
+    }
+
+    /// Whether a runtime grant ID is a session or remembered grant still in
+    /// force. Controller and subscription registration check this under
+    /// their own lock, so a revoke that lands after authorization wins.
+    pub fn is_live(&self, grant_id: u64) -> bool {
+        let memory = self.memory();
+        memory
+            .sessions
+            .iter()
+            .any(|grant| grant.grant_id == grant_id)
+            || (memory.available
+                && memory
+                    .remembered
+                    .iter()
+                    .any(|grant| grant.grant_id == grant_id && !grant.workspace_missing))
+    }
+
+    /// Whether a runtime grant ID belongs to a listed remembered entry, which
+    /// is revoked by its durable entry ID instead.
+    pub fn is_remembered_grant(&self, grant_id: u64) -> bool {
+        self.memory()
+            .remembered
+            .iter()
+            .any(|grant| grant.grant_id == grant_id)
+    }
+
+    /// The Lair of a session grant, by its runtime ID.
+    pub fn session_lair(&self, grant_id: u64) -> Option<LairId> {
+        self.memory()
+            .sessions
+            .iter()
+            .find(|grant| grant.grant_id == grant_id)
+            .map(|grant| grant.lair_id)
+    }
+
+    /// The Lair of a listed remembered entry.
+    pub fn remembered_lair(&self, entry_id: &EntryId) -> Option<LairId> {
+        self.memory()
+            .remembered
+            .iter()
+            .find(|grant| &grant.entry.id == entry_id)
+            .map(|grant| grant.entry.lair_id)
+    }
+
+    /// Every definition this engine holds, for the access inventory.
+    pub fn inventory(&self) -> AgentInventory {
+        let memory = self.memory();
+        AgentInventory {
+            sessions: memory
+                .sessions
+                .iter()
+                .map(|grant| SessionView {
+                    grant_id: grant.grant_id,
+                    uid: grant.uid,
+                    path: grant.path.clone(),
+                    sha256: grant.sha256.clone(),
+                    lair_id: grant.lair_id,
+                    access: grant.access.clone(),
+                    display_name: grant.display_name.clone(),
+                    created_unix_seconds: grant.created_unix_seconds,
+                })
+                .collect(),
+            remembered: memory
+                .remembered
+                .iter()
+                .map(|grant| RememberedView {
+                    grant_id: Some(grant.grant_id),
+                    entry: grant.entry.clone(),
+                    workspace_missing: grant.workspace_missing,
+                })
+                .chain(
+                    memory
+                        .pending_removals
+                        .values()
+                        .map(|entry| RememberedView {
+                            grant_id: None,
+                            entry: entry.clone(),
+                            workspace_missing: false,
+                        }),
+                )
+                .collect(),
+            store: if memory.available {
+                StoreStatus::Available
+            } else {
+                match &memory.fault {
+                    None | Some(StoreFault::NotConfigured) => StoreStatus::NotConfigured,
+                    Some(fault) => StoreStatus::Unavailable(fault.to_string()),
+                }
+            },
+        }
+    }
+
+    /// How many session and remembered definitions **Revoke all access**
+    /// would revoke now.
+    pub fn revocable_counts(&self) -> (usize, usize) {
+        let memory = self.memory();
+        (memory.sessions.len(), memory.remembered.len())
+    }
+
+    /// **Revoke all access**: every session and remembered definition, in
+    /// memory at once. The caller ends their controllers and subscriptions
+    /// and runs [`Self::flush`] to remove the remembered ones durably; until
+    /// that succeeds they stay revoked here and are retried.
+    pub fn revoke_all(&self, reason: &'static str) -> RevokedAll {
+        let mut memory = self.memory();
+        let sessions = std::mem::take(&mut memory.sessions);
+        let remembered = std::mem::take(&mut memory.remembered);
+        let mut revoked = RevokedAll::default();
+        for grant in sessions {
+            revoked.session_grant_ids.push(grant.grant_id);
+            memory.record(
+                AgentAuditEvent::Revoked,
+                GrantDuration::WorkspaceSession,
+                AuditSubject {
+                    lair_id: Some(grant.lair_id),
+                    identity: Some(&grant.path),
+                    grant_id: Some(grant.grant_id),
+                    access: Some(&grant.access),
+                    ..AuditSubject::default()
+                },
+                reason,
+            );
+        }
+        for grant in remembered {
+            revoked.remembered_grant_ids.push(grant.grant_id);
+            memory.record(
+                AgentAuditEvent::Revoked,
+                GrantDuration::Remembered,
+                AuditSubject {
+                    lair_id: Some(grant.entry.lair_id),
+                    identity: Some(grant.entry.identity.path()),
+                    entry_id: Some(&grant.entry.id),
+                    grant_id: Some(grant.grant_id),
+                    access: Some(&grant.entry.access),
+                },
+                reason,
+            );
+            memory
+                .pending_removals
+                .insert(grant.entry.id.clone(), grant.entry);
+        }
+        if !revoked.session_grant_ids.is_empty() || !revoked.remembered_grant_ids.is_empty() {
+            self.ids.advance_revision();
+        }
+        revoked
     }
 
     fn record_store_error(&self, error: &StoreWriteError, entry: Option<&RememberedEntry>) {
@@ -2134,6 +2400,17 @@ mod tests {
     }
 
     // ---- Levels and offers ----
+
+    #[test]
+    fn the_authorization_revision_saturates_instead_of_wrapping() {
+        let ids = GrantIds {
+            next: AtomicU64::new(0),
+            revision: AtomicU64::new(u64::MAX - 1),
+        };
+        assert_eq!(ids.advance_revision(), u64::MAX);
+        assert_eq!(ids.advance_revision(), u64::MAX);
+        assert_eq!(ids.revision(), u64::MAX);
+    }
 
     #[test]
     fn levels_expand_to_exactly_the_adr_bundles() {

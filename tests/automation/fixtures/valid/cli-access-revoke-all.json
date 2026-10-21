@@ -1,0 +1,24 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "access_revoke_all",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "dry_run": true,
+      "confirmed": false,
+      "counts": {
+        "once": 1,
+        "workspace_session": 0,
+        "remembered": 2,
+        "pending_requests": 1
+      },
+      "durable_removal": {
+        "status": "not_needed"
+      },
+      "authorization_revision": 12
+    }
+  }
+}

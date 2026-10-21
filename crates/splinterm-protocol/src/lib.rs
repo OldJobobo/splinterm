@@ -18,7 +18,7 @@ use splinterm_core::{
     TopologyRevision,
 };
 
-pub const PROTOCOL_VERSION: u16 = 43;
+pub const PROTOCOL_VERSION: u16 = 44;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_TERMINAL_TRANSACTION_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -68,6 +68,24 @@ pub const MAX_AGENT_NAME_CHARS: usize = 128;
 pub const MAX_CONSENT_PATH_CHARS: usize = 1024;
 /// A consent prompt offers at most the three ADR 0014 durations.
 pub const MAX_CONSENT_DURATIONS: usize = 3;
+/// The most entries one access inventory page carries (ADR 0014).
+pub const MAX_ACCESS_INVENTORY_PAGE: u16 = 64;
+/// The longest executable path an access inventory entry carries, in bytes.
+pub const MAX_ACCESS_PATH_BYTES: usize = 4096;
+/// The longest agent display name an access inventory entry carries, in
+/// bytes. Display data only; never an identity.
+pub const MAX_ACCESS_DISPLAY_NAME_BYTES: usize = 256;
+/// The longest workspace name an access inventory entry carries, in bytes.
+pub const MAX_ACCESS_WORKSPACE_NAME_BYTES: usize = 1024;
+/// The most policy rule IDs or resource selectors one access inventory entry
+/// names (the policy file holds at most 64 rules of at most 64 selectors).
+pub const MAX_ACCESS_POLICY_ITEMS: usize = 64;
+/// The longest policy rule ID, in bytes.
+pub const MAX_ACCESS_RULE_ID_BYTES: usize = 64;
+/// The longest store failure or durable-removal message, in bytes.
+pub const MAX_ACCESS_FAULT_BYTES: usize = 256;
+/// A remembered entry ID: `ra_` and 32 lowercase hex digits.
+pub const REMEMBERED_ENTRY_ID_BYTES: usize = 35;
 pub const MAX_IMAGE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES_PER_SPLINT: usize = 32 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES_PER_DAEMON: usize = 64 * 1024 * 1024;
@@ -674,6 +692,32 @@ pub enum Request {
     RevokeAccess {
         grant_id: u64,
     },
+    /// One page of the daemon-wide access inventory (ADR 0014): every grant
+    /// definition of every duration, pending requests, and the policy rules
+    /// that match a connected agent. Entries come in [`AccessEntryKey`]
+    /// order; `after` continues after the last key of the previous page.
+    /// Trusted UI, or `authorization_inspect` on the daemon from policy.
+    ListAccess {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<AccessEntryKey>,
+        /// At most [`MAX_ACCESS_INVENTORY_PAGE`].
+        max_entries: u16,
+    },
+    /// Revokes one grant definition of any duration at once, cancelling its
+    /// subscriptions and releasing its controllers; a remembered entry is
+    /// also removed durably. Trusted UI, or `authorization_revoke` from
+    /// policy on the grant's workspace.
+    RevokeAccessEntry {
+        target: AccessRevokeTarget,
+    },
+    /// **Revoke all access**: every consent-derived grant of every duration
+    /// and every pending request; never a policy rule or the trusted UI.
+    /// `dry_run` only counts, so the person can confirm the exact number of
+    /// remembered grants first. Trusted UI, or `authorization_revoke` on the
+    /// daemon from policy.
+    RevokeAllAccess {
+        dry_run: bool,
+    },
     PrepareMutation {
         mutation: MutationPreflight,
     },
@@ -1134,6 +1178,33 @@ pub enum Response {
     },
     LairAccessRequestsCancelled {
         cancelled: u32,
+    },
+    /// One page of the access inventory. `authorization_revision` advances
+    /// on every grant or pending-request change, so a client paging through
+    /// sees whether the inventory changed between pages.
+    AccessInventory {
+        authorization_revision: u64,
+        policy_generation: u64,
+        remembered_store: RememberedStoreStatus,
+        /// Every entry in the inventory, not only this page.
+        total_entries: u32,
+        #[serde(deserialize_with = "deserialize_access_entries")]
+        entries: Vec<AccessEntry>,
+        /// The key to continue after; `None` on the last page.
+        next_after: Option<AccessEntryKey>,
+    },
+    AccessEntryRevoked {
+        authorization_revision: u64,
+        revocation: AccessRevocation,
+    },
+    /// What **Revoke all access** revoked, or with `dry_run` would revoke.
+    AllAccessRevoked {
+        authorization_revision: u64,
+        dry_run: bool,
+        counts: AccessRevocationCounts,
+        /// The durable removal of the remembered grants; `NotNeeded` for a
+        /// dry run or when none were removed.
+        durable_removal: DurableRemoval,
     },
     AuthorizationStatus {
         lair_id: LairId,
@@ -2646,6 +2717,419 @@ pub struct PersistentAuthorizationStatus {
     pub expires_at_unix_seconds: Option<u64>,
 }
 
+/// Names one access inventory entry, and orders the inventory: remembered
+/// entries, then runtime grants, then pending requests, then policy rules.
+///
+/// A remembered entry's durable ID and every runtime grant ID are distinct
+/// kinds, so the inventory never confuses the two (ADR 0014).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AccessEntryKey {
+    /// A remembered ("Always") definition, by its durable entry ID.
+    Remembered {
+        entry_id: String,
+    },
+    /// A "just this once" or "while this workspace is open" grant, by its
+    /// runtime grant ID.
+    Grant {
+        grant_id: u64,
+    },
+    Pending {
+        request_id: u64,
+    },
+    /// A policy-file rule; listed only, never revoked here.
+    Policy {
+        rule_id: String,
+    },
+}
+
+impl AccessEntryKey {
+    /// Whether the key is within protocol bounds.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::Remembered { entry_id } => is_remembered_entry_id(entry_id),
+            Self::Grant { grant_id } => *grant_id != 0,
+            Self::Pending { request_id } => *request_id != 0,
+            Self::Policy { rule_id } => {
+                !rule_id.is_empty() && rule_id.len() <= MAX_ACCESS_RULE_ID_BYTES
+            }
+        }
+    }
+}
+
+/// Whether `id` is a remembered entry ID: `ra_` and 32 lowercase hex digits.
+#[must_use]
+pub fn is_remembered_entry_id(id: &str) -> bool {
+    id.len() == REMEMBERED_ENTRY_ID_BYTES
+        && id.strip_prefix("ra_").is_some_and(|hex| {
+            hex.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+/// What a per-entry revoke names: a runtime grant (once or while open) or a
+/// remembered entry. A remembered entry is revoked by its durable entry ID,
+/// never by its runtime grant ID; pending requests and policy rules are not
+/// revocable here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AccessRevokeTarget {
+    Grant { grant_id: u64 },
+    Remembered { entry_id: String },
+}
+
+impl AccessRevokeTarget {
+    #[must_use]
+    pub fn key(&self) -> AccessEntryKey {
+        match self {
+            Self::Grant { grant_id } => AccessEntryKey::Grant {
+                grant_id: *grant_id,
+            },
+            Self::Remembered { entry_id } => AccessEntryKey::Remembered {
+                entry_id: entry_id.clone(),
+            },
+        }
+    }
+}
+
+/// What kind of authority an inventory entry is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessEntryKind {
+    /// "Just this once", for a Lair or for one Splint incarnation.
+    Once,
+    WorkspaceSession,
+    Remembered,
+    /// A workspace request waiting for the person's answer.
+    Pending,
+    /// A policy-file rule that matches a connected agent: read-only here.
+    PersistentPolicy,
+}
+
+/// The state of an inventory entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessEntryState {
+    Active,
+    /// A remembered entry whose workspace was absent when the store loaded:
+    /// it authorizes nothing until revoked.
+    WorkspaceMissing,
+    /// A remembered entry revoked in memory whose durable removal has not
+    /// succeeded yet: it authorizes nothing now, and returns after a restart
+    /// until a later write removes it.
+    RemovalPending,
+    /// A pending request whose prompt is showing.
+    Prompting,
+    /// A pending request waiting behind another prompt.
+    Queued,
+}
+
+/// How an entry's agent is identified (ADR 0014).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessIdentityKind {
+    /// One requesting process ("just this once", or a pending request).
+    Process,
+    /// The exact executable path and digest ("while this workspace is open").
+    ExactBuild,
+    ProtectedInstall,
+    NixProfile,
+    /// A policy rule's executable path and SHA-256 digest.
+    PolicyDigest,
+}
+
+/// The agent behind an inventory entry. The path is the identity; the name
+/// is host-reported display data, never an identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessIdentity {
+    pub kind: AccessIdentityKind,
+    pub executable_path: String,
+    /// The requesting process, for a process-bound entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// The workspace an entry covers, with its user-chosen name when the Lair
+/// still exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessWorkspace {
+    pub lair_id: LairId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// One policy resource selector, as configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AccessPolicyResource {
+    Daemon,
+    Lair { lair_id: LairId },
+    Dojo { dojo_id: DojoId },
+    Splint { splint_id: SplintId },
+}
+
+/// One access inventory entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessEntry {
+    pub key: AccessEntryKey,
+    pub kind: AccessEntryKind,
+    pub state: AccessEntryState,
+    /// Whether a per-entry revoke may name it. Never for pending requests or
+    /// policy rules.
+    pub revocable: bool,
+    /// The runtime grant ID controllers and subscriptions are bound to;
+    /// for a remembered entry it is distinct from its durable entry ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<u64>,
+    pub identity: AccessIdentity,
+    /// The workspace, for every entry except a policy rule. A once grant for
+    /// a Splint that left topology has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AccessWorkspace>,
+    /// The Splint incarnation a once grant for one Splint covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub splint_id: Option<SplintId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<u64>,
+    /// The level the consent scopes are exactly, or `None` for Custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<AccessLevel>,
+    /// Consent scopes, for every entry except a policy rule.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_access_scopes"
+    )]
+    pub scopes: Vec<AccessScope>,
+    /// Policy scopes and selectors, for a policy rule.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_policy_scopes"
+    )]
+    pub policy_scopes: Vec<AutomationScope>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_policy_resources"
+    )]
+    pub policy_resources: Vec<AccessPolicyResource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_unix_seconds: Option<u64>,
+    /// For a remembered entry: display data that never extends or ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at_unix_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_unix_seconds: Option<u64>,
+    /// Connected automation connections this entry authorizes now.
+    pub connections: u32,
+    /// Controllers this entry authorized that are held now.
+    pub controllers: u32,
+    /// Policy rules under which the same agent keeps reaching this
+    /// workspace after a revoke; they must be edited in the policy file.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_policy_rule_ids"
+    )]
+    pub policy_rules: Vec<String>,
+}
+
+impl AccessEntry {
+    /// Checks the bounds and the per-kind shape of one entry.
+    ///
+    /// # Errors
+    /// Names the first violated rule.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.validate_bounds()?;
+        self.validate_shape()
+    }
+
+    fn validate_bounds(&self) -> Result<(), &'static str> {
+        if !self.key.is_valid() {
+            return Err("access entry key is out of bounds");
+        }
+        let identity = &self.identity;
+        if identity.executable_path.is_empty()
+            || identity.executable_path.len() > MAX_ACCESS_PATH_BYTES
+        {
+            return Err("access entry executable path is out of bounds");
+        }
+        if identity
+            .display_name
+            .as_ref()
+            .is_some_and(|name| name.len() > MAX_ACCESS_DISPLAY_NAME_BYTES)
+        {
+            return Err("access entry display name exceeds the limit");
+        }
+        if self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.name.as_ref())
+            .is_some_and(|name| name.len() > MAX_ACCESS_WORKSPACE_NAME_BYTES)
+        {
+            return Err("access entry workspace name exceeds the limit");
+        }
+        if self
+            .policy_rules
+            .iter()
+            .any(|rule| rule.is_empty() || rule.len() > MAX_ACCESS_RULE_ID_BYTES)
+        {
+            return Err("access entry policy rule ID is out of bounds");
+        }
+        if self
+            .level
+            .is_some_and(|level| AccessLevel::exactly(&self.scopes) != Some(level))
+        {
+            return Err("access entry level does not match its scopes");
+        }
+        Ok(())
+    }
+
+    fn validate_shape(&self) -> Result<(), &'static str> {
+        let policy = self.kind == AccessEntryKind::PersistentPolicy;
+        let key_matches = matches!(
+            (&self.key, self.kind),
+            (
+                AccessEntryKey::Remembered { .. },
+                AccessEntryKind::Remembered
+            ) | (
+                AccessEntryKey::Grant { .. },
+                AccessEntryKind::Once | AccessEntryKind::WorkspaceSession
+            ) | (AccessEntryKey::Pending { .. }, AccessEntryKind::Pending)
+                | (
+                    AccessEntryKey::Policy { .. },
+                    AccessEntryKind::PersistentPolicy
+                )
+        );
+        if !key_matches {
+            return Err("access entry key does not match its kind");
+        }
+        if self.revocable
+            != matches!(
+                (self.kind, self.state),
+                (
+                    AccessEntryKind::Once | AccessEntryKind::WorkspaceSession,
+                    AccessEntryState::Active
+                ) | (
+                    AccessEntryKind::Remembered,
+                    AccessEntryState::Active | AccessEntryState::WorkspaceMissing
+                )
+            )
+        {
+            return Err("access entry revocability does not match its kind and state");
+        }
+        if policy {
+            if self.workspace.is_some()
+                || !self.scopes.is_empty()
+                || self.policy_scopes.is_empty()
+                || self.policy_resources.is_empty()
+                || self.grant_id.is_some()
+                || self.state != AccessEntryState::Active
+            {
+                return Err("policy access entry has a grant shape");
+            }
+        } else if (self.workspace.is_none() && self.splint_id.is_none())
+            || self.scopes.is_empty()
+            || !self.policy_scopes.is_empty()
+            || !self.policy_resources.is_empty()
+        {
+            return Err("grant access entry has a policy shape");
+        }
+        if let AccessEntryKey::Grant { grant_id } = self.key
+            && self.grant_id != Some(grant_id)
+        {
+            return Err("runtime grant entry names another grant ID");
+        }
+        if self.kind == AccessEntryKind::Pending && self.grant_id.is_some() {
+            return Err("pending access entry carries a grant ID");
+        }
+        if self.splint_id.is_some() != self.incarnation.is_some()
+            || (self.splint_id.is_some() && self.kind != AccessEntryKind::Once)
+        {
+            return Err("only a once grant for one Splint names a Splint incarnation");
+        }
+        let state_fits = match self.kind {
+            AccessEntryKind::Pending => {
+                matches!(
+                    self.state,
+                    AccessEntryState::Prompting | AccessEntryState::Queued
+                )
+            }
+            AccessEntryKind::Remembered => !matches!(
+                self.state,
+                AccessEntryState::Prompting | AccessEntryState::Queued
+            ),
+            _ => self.state == AccessEntryState::Active,
+        };
+        if !state_fits {
+            return Err("access entry state does not fit its kind");
+        }
+        Ok(())
+    }
+}
+
+/// Whether the remembered source can be used, as the inventory reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RememberedStoreStatus {
+    Available,
+    /// Unsafe, corrupt, oversized, of an unsupported version, or retired:
+    /// remembered access denies everything until it is repaired.
+    Unavailable {
+        reason: String,
+    },
+    /// This daemon has no state directory (tests).
+    NotConfigured,
+}
+
+/// The durable side of revoking remembered grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DurableRemoval {
+    /// Nothing durable was involved.
+    NotNeeded,
+    /// The store no longer holds it.
+    Written,
+    /// The grant is revoked now, but the store still holds it, so it returns
+    /// after a restart until a later write (or shutdown) removes it.
+    Failed { message: String },
+}
+
+/// What a per-entry revoke did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessRevocation {
+    pub key: AccessEntryKey,
+    pub kind: AccessEntryKind,
+    /// The runtime grant whose controllers and subscriptions ended.
+    pub grant_id: u64,
+    /// The workspace it covered, when it is still known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lair_id: Option<LairId>,
+    pub durable_removal: DurableRemoval,
+    /// Policy rules under which the agent still reaches the workspace.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_policy_rule_ids"
+    )]
+    pub policy_rules: Vec<String>,
+}
+
+/// Exact counts for **Revoke all access**.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessRevocationCounts {
+    /// "Just this once" grants, for a Lair or one Splint.
+    pub once: u32,
+    pub workspace_session: u32,
+    /// Remembered grants removed, the number the person confirms.
+    pub remembered: u32,
+    pub pending_requests: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -2723,6 +3207,39 @@ where
     }
 
     deserializer.deserialize_seq(BoundedVec::<T, MAX>(std::marker::PhantomData))
+}
+
+fn deserialize_access_entries<'de, D>(deserializer: D) -> Result<Vec<AccessEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, { MAX_ACCESS_INVENTORY_PAGE as usize }>(deserializer)
+}
+
+/// Every closed policy scope once.
+const MAX_POLICY_SCOPES: usize = 19;
+
+fn deserialize_policy_scopes<'de, D>(deserializer: D) -> Result<Vec<AutomationScope>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_POLICY_SCOPES>(deserializer)
+}
+
+fn deserialize_policy_resources<'de, D>(
+    deserializer: D,
+) -> Result<Vec<AccessPolicyResource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_ACCESS_POLICY_ITEMS>(deserializer)
+}
+
+fn deserialize_policy_rule_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_vec::<D, _, MAX_ACCESS_POLICY_ITEMS>(deserializer)
 }
 
 fn deserialize_access_scopes<'de, D>(deserializer: D) -> Result<Vec<AccessScope>, D::Error>
@@ -5124,6 +5641,287 @@ mod tests {
         }
     }
 
+    fn inventory_entry(key: AccessEntryKey, kind: AccessEntryKind) -> AccessEntry {
+        let grant_id = match &key {
+            AccessEntryKey::Grant { grant_id } => Some(*grant_id),
+            AccessEntryKey::Remembered { .. } => Some(77),
+            _ => None,
+        };
+        let policy = kind == AccessEntryKind::PersistentPolicy;
+        AccessEntry {
+            revocable: matches!(
+                kind,
+                AccessEntryKind::Once
+                    | AccessEntryKind::WorkspaceSession
+                    | AccessEntryKind::Remembered
+            ),
+            state: if kind == AccessEntryKind::Pending {
+                AccessEntryState::Queued
+            } else {
+                AccessEntryState::Active
+            },
+            key,
+            kind,
+            grant_id,
+            identity: AccessIdentity {
+                kind: AccessIdentityKind::ProtectedInstall,
+                executable_path: "/usr/bin/splinterm-mcp".to_owned(),
+                pid: None,
+                display_name: Some("claude-code".to_owned()),
+            },
+            workspace: (!policy).then(|| AccessWorkspace {
+                lair_id: LairId::new(),
+                name: Some("work".to_owned()),
+            }),
+            splint_id: None,
+            incarnation: None,
+            level: (!policy).then_some(AccessLevel::Look),
+            scopes: if policy {
+                Vec::new()
+            } else {
+                AccessLevel::Look.scopes().to_vec()
+            },
+            policy_scopes: if policy {
+                vec![AutomationScope::TopologyMetadataRead]
+            } else {
+                Vec::new()
+            },
+            policy_resources: if policy {
+                vec![AccessPolicyResource::Daemon]
+            } else {
+                Vec::new()
+            },
+            created_at_unix_seconds: Some(1_800_000_000),
+            last_used_at_unix_seconds: None,
+            expires_at_unix_seconds: None,
+            connections: 1,
+            controllers: 0,
+            policy_rules: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every new frame and its bounds are checked together"
+    )]
+    fn access_inventory_frames_round_trip_within_their_bounds() {
+        let entry_id = format!("ra_{}", "0123456789abcdef".repeat(2));
+        let keys = [
+            AccessEntryKey::Remembered {
+                entry_id: entry_id.clone(),
+            },
+            AccessEntryKey::Grant { grant_id: 3 },
+            AccessEntryKey::Pending { request_id: 2 },
+            AccessEntryKey::Policy {
+                rule_id: "mcp-read".to_owned(),
+            },
+        ];
+        // The inventory order: remembered, grants, pending, policy.
+        let mut sorted = keys.to_vec();
+        sorted.reverse();
+        sorted.sort();
+        assert_eq!(sorted, keys);
+        for key in &keys {
+            assert!(key.is_valid());
+        }
+        for invalid in [
+            AccessEntryKey::Remembered {
+                entry_id: "ra_short".to_owned(),
+            },
+            AccessEntryKey::Remembered {
+                entry_id: format!("ra_{}", "0123456789ABCDEF".repeat(2)),
+            },
+            AccessEntryKey::Grant { grant_id: 0 },
+            AccessEntryKey::Pending { request_id: 0 },
+            AccessEntryKey::Policy {
+                rule_id: "r".repeat(MAX_ACCESS_RULE_ID_BYTES + 1),
+            },
+        ] {
+            assert!(!invalid.is_valid(), "{invalid:?}");
+        }
+
+        for (request, name) in [
+            (
+                Request::ListAccess {
+                    after: Some(AccessEntryKey::Grant { grant_id: 3 }),
+                    max_entries: MAX_ACCESS_INVENTORY_PAGE,
+                },
+                "list_access",
+            ),
+            (
+                Request::RevokeAccessEntry {
+                    target: AccessRevokeTarget::Remembered {
+                        entry_id: entry_id.clone(),
+                    },
+                },
+                "revoke_access_entry",
+            ),
+            (
+                Request::RevokeAllAccess { dry_run: true },
+                "revoke_all_access",
+            ),
+        ] {
+            let encoded = serde_json::to_value(&request).unwrap();
+            assert_eq!(encoded["type"], name);
+            assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+        }
+        assert_eq!(
+            serde_json::to_value(Request::ListAccess {
+                after: None,
+                max_entries: 1
+            })
+            .unwrap(),
+            serde_json::json!({"type": "list_access", "max_entries": 1})
+        );
+        // A target is a grant or a remembered entry only.
+        for invalid in [
+            serde_json::json!({"type": "revoke_access_entry", "target": {"kind": "pending", "request_id": 2}}),
+            serde_json::json!({"type": "revoke_access_entry", "target": {"kind": "policy", "rule_id": "r"}}),
+            serde_json::json!({"type": "revoke_access_entry", "target": {"kind": "grant", "grant_id": 1, "entry_id": "x"}}),
+        ] {
+            assert!(serde_json::from_value::<Request>(invalid).is_err());
+        }
+
+        let entries: Vec<_> = keys
+            .iter()
+            .cloned()
+            .zip([
+                AccessEntryKind::Remembered,
+                AccessEntryKind::Once,
+                AccessEntryKind::Pending,
+                AccessEntryKind::PersistentPolicy,
+            ])
+            .map(|(key, kind)| inventory_entry(key, kind))
+            .collect();
+        for entry in &entries {
+            assert_eq!(entry.validate(), Ok(()), "{entry:?}");
+        }
+        let page = Response::AccessInventory {
+            authorization_revision: 9,
+            policy_generation: 2,
+            remembered_store: RememberedStoreStatus::Unavailable {
+                reason: "corrupt".to_owned(),
+            },
+            total_entries: 4,
+            entries: entries.clone(),
+            next_after: None,
+        };
+        let encoded = serde_json::to_value(&page).unwrap();
+        assert_eq!(encoded["type"], "access_inventory");
+        assert_eq!(encoded["remembered_store"]["status"], "unavailable");
+        assert_eq!(encoded["entries"][0]["key"]["kind"], "remembered");
+        assert_eq!(encoded["entries"][0]["grant_id"], 77);
+        assert!(encoded["entries"][3].get("workspace").is_none());
+        assert_eq!(serde_json::from_value::<Response>(encoded).unwrap(), page);
+
+        let oversized = Response::AccessInventory {
+            authorization_revision: 9,
+            policy_generation: 2,
+            remembered_store: RememberedStoreStatus::Available,
+            total_entries: 65,
+            entries: vec![entries[1].clone(); usize::from(MAX_ACCESS_INVENTORY_PAGE) + 1],
+            next_after: None,
+        };
+        assert!(
+            serde_json::from_value::<Response>(serde_json::to_value(&oversized).unwrap()).is_err()
+        );
+
+        for response in [
+            Response::AccessEntryRevoked {
+                authorization_revision: 10,
+                revocation: AccessRevocation {
+                    key: keys[0].clone(),
+                    kind: AccessEntryKind::Remembered,
+                    grant_id: 77,
+                    lair_id: Some(LairId::new()),
+                    durable_removal: DurableRemoval::Failed {
+                        message: "read-only file system".to_owned(),
+                    },
+                    policy_rules: vec!["mcp-read".to_owned()],
+                },
+            },
+            Response::AllAccessRevoked {
+                authorization_revision: 11,
+                dry_run: true,
+                counts: AccessRevocationCounts {
+                    once: 1,
+                    workspace_session: 2,
+                    remembered: 3,
+                    pending_requests: 4,
+                },
+                durable_removal: DurableRemoval::NotNeeded,
+            },
+        ] {
+            let encoded = serde_json::to_value(&response).unwrap();
+            assert_eq!(
+                serde_json::from_value::<Response>(encoded).unwrap(),
+                response
+            );
+        }
+    }
+
+    #[test]
+    fn access_entries_validate_their_per_kind_shape() {
+        let remembered = AccessEntryKey::Remembered {
+            entry_id: format!("ra_{}", "a".repeat(32)),
+        };
+        let valid = inventory_entry(AccessEntryKey::Grant { grant_id: 5 }, AccessEntryKind::Once);
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut wrong_kind = valid.clone();
+        wrong_kind.kind = AccessEntryKind::Remembered;
+        assert!(wrong_kind.validate().is_err());
+
+        let mut other_grant = valid.clone();
+        other_grant.grant_id = Some(6);
+        assert!(other_grant.validate().is_err());
+
+        let mut custom_as_level = valid.clone();
+        custom_as_level.scopes = vec![AccessScope::Observe];
+        assert!(custom_as_level.validate().is_err());
+        custom_as_level.level = None;
+        assert_eq!(custom_as_level.validate(), Ok(()));
+
+        let mut policy_revocable = inventory_entry(
+            AccessEntryKey::Policy {
+                rule_id: "r".to_owned(),
+            },
+            AccessEntryKind::PersistentPolicy,
+        );
+        policy_revocable.revocable = true;
+        assert!(policy_revocable.validate().is_err());
+
+        let mut pending_revocable = inventory_entry(
+            AccessEntryKey::Pending { request_id: 1 },
+            AccessEntryKind::Pending,
+        );
+        pending_revocable.revocable = true;
+        assert!(pending_revocable.validate().is_err());
+
+        let mut removal_pending = inventory_entry(remembered, AccessEntryKind::Remembered);
+        removal_pending.state = AccessEntryState::RemovalPending;
+        assert!(removal_pending.validate().is_err(), "no longer revocable");
+        removal_pending.revocable = false;
+        assert_eq!(removal_pending.validate(), Ok(()));
+
+        let mut splint_session = inventory_entry(
+            AccessEntryKey::Grant { grant_id: 5 },
+            AccessEntryKind::WorkspaceSession,
+        );
+        splint_session.splint_id = Some(SplintId::new());
+        splint_session.incarnation = Some(1);
+        assert!(splint_session.validate().is_err());
+
+        let mut long_path = valid.clone();
+        long_path.identity.executable_path = "/".repeat(MAX_ACCESS_PATH_BYTES + 1);
+        assert!(long_path.validate().is_err());
+
+        let mut long_name = valid;
+        long_name.identity.display_name = Some("n".repeat(MAX_ACCESS_DISPLAY_NAME_BYTES + 1));
+        assert!(long_name.validate().is_err());
+    }
+
     #[test]
     fn levels_are_exact_bundles_and_never_round_up() {
         for level in AccessLevel::ALL {
@@ -5544,7 +6342,7 @@ mod tests {
 
     #[test]
     fn first_terminal_read_requests_are_explicit_protocol_v20_shapes() {
-        assert_eq!(PROTOCOL_VERSION, 43);
+        assert_eq!(PROTOCOL_VERSION, 44);
         let splint_id = SplintId::new();
         let attach = Request::Attach {
             splint_id,
@@ -7083,8 +7881,8 @@ mod tests {
         // An undeclared hello keeps its exact protocol 41 shape.
         let plain = serde_json::json!({
             "type": "hello",
-            "minimum_version": 43,
-            "maximum_version": 43,
+            "minimum_version": 44,
+            "maximum_version": 44,
             "role": "trusted_ui",
         });
         assert_eq!(serde_json::to_value(hello(false)).unwrap(), plain);

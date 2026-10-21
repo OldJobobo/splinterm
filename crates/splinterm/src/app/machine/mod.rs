@@ -36,6 +36,7 @@ use super::{
     session_catalog::launch_parameters,
 };
 
+mod access;
 mod agent_status;
 mod control;
 mod history;
@@ -149,6 +150,7 @@ async fn safe_machine_read(
         .map_err(retried_once)
 }
 
+pub(in crate::app) use access::run_machine_access;
 pub(in crate::app) use agent_status::run_machine_agent_status;
 pub(in crate::app) use mutation::{require_expected_incarnation, require_incarnation};
 pub(in crate::app) use subscription::run_machine_subscription;

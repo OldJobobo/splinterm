@@ -115,6 +115,9 @@ outside this inventory.
 | `search SPLINT_ID QUERY` | `search_scrollback` |
 | `authorization status SPLINT_ID` | `authorization_status` |
 | `authorization revoke GRANT_ID --yes` | `revoke_access` |
+| `access list [--after ID] [--max-entries N]` | `access_list` |
+| `access revoke ID --yes` | `access_revoke` |
+| `access revoke --all --yes` or `--all --dry-run` | `access_revoke_all` |
 | `audit` | `audit_inspect` |
 | `new NAME [-- ARGV...]` | `create_lair` |
 | `split TARGET_SPLINT_ID ... [-- ARGV...]` | `split_splint` |
@@ -284,12 +287,13 @@ verification, and lifecycle guidance.
 
 > **Status:** partly implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md). The access levels, the three
-> durations, remembered grants, the prompt, and pending requests work as
-> described below. Still planned: the **Agent access** list and per-entry
-> revoke, its human CLI command, the Explorer marks, the waiting indicator in
-> Windows, and **Revoke all access** removing remembered grants. Until those
-> ship, **Revoke all access** ends the grants the Window shows and every
-> pending request, and leaves remembered grants in place.
+> durations, remembered grants, the prompt, pending requests, and the access
+> list with per-entry revoke and **Revoke all access** through
+> `splinterm access` work as described below. Still planned: **Agent access**
+> in the command palette, the Explorer marks, and the waiting indicator in
+> Windows. Until the palette uses the new list, its **Revoke all access** ends
+> the grants the Window shows and every pending request, and leaves
+> remembered grants in place; `splinterm access revoke --all` removes them.
 
 Easy agent access lets you give an agent access to one workspace (a Lair) in a
 single deliberate answer, choose how long that lasts, and see and revoke it
@@ -429,23 +433,79 @@ agent collects your answer by asking again, without a new prompt. After you
 deny a request, the same agent cannot ask again for that workspace for a few
 seconds. Closing the prompt denies.
 
-### Seeing and revoking access (planned)
+### Seeing and revoking access
 
-**Agent access**, in the command palette and as a human CLI command, lists every
-grant of every duration, with the agent, executable path, workspace, level,
-duration, when it was created and last used, and what it is doing now:
-connections, control it holds, and pending requests. Policy rules that match a
-connected agent are listed too, marked as coming from the policy file.
+`splinterm access list` shows every grant of every duration, with the agent's
+reported name, its executable path and how it is identified (one process, an
+exact build, a protected install, or a Nix profile entry), the workspace, the
+level or Custom scopes, when it was created, when an "Always" grant was last
+used, when a shorter one expires, and what it is doing now: the agent
+connections it authorizes and the control it holds. Pending requests are
+listed too, and so are policy rules that match a connected agent, marked as
+coming from the policy file and read-only here. **Agent access** in the command
+palette (planned) will show the same list.
 
-Revoke works per entry and takes effect immediately: subscriptions close and
-control is released. **Revoke all access** first tells you how many remembered
-grants it will remove, then ends every consent grant and pending request when
-you confirm.
+Each entry has one ID:
+
+| ID | Entry | Revocable here |
+| --- | --- | --- |
+| `17` | A just-this-once or while-open grant (its runtime grant ID) | Yes |
+| `ra_` and 32 hex digits | An "Always" grant (its remembered entry ID) | Yes |
+| `pending:3` | A pending request | No; it ends when answered or expired, or with `--all` |
+| `policy:RULE` | A policy rule | No; edit `policy.json` |
+
+An "Always" grant also shows the runtime grant ID its controllers belong to;
+revoke it by its `ra_` ID, never by that runtime ID.
+
+```bash
+splinterm access list
+splinterm access revoke 17
+splinterm access revoke ra_0123456789abcdef0123456789abcdef
+splinterm access revoke --all --dry-run
+splinterm access revoke --all
+```
+
+Revoke takes effect immediately: new requests stop, subscriptions close, and
+control is released, including a control transfer the grant asked for. An
+"Always" grant is then removed from the store. If that write fails, the grant
+stays revoked now, the command says so and exits with an error, and the list
+shows it as returning after a restart until a later write succeeds; Splinterm
+retries on its next write and at shutdown.
+
+`splinterm access revoke --all` first shows the exact number of remembered
+grants it will remove, with the shorter grants and pending requests it ends,
+and asks before acting (`--yes` skips the question; `--dry-run` only counts).
+It never touches policy rules or the trusted UI.
 
 Revoking a remembered grant does not remove a matching policy rule. When one
-exists, the list says that access continues under the policy file, names the
-rule, and tells you to edit `policy.json` to remove it. The Explorer marks
-workspaces an agent can reach and those it is connected to now.
+exists, the list and the revoke result name the rule and tell you to edit
+`policy.json` to remove it. The Explorer marks (planned) will show workspaces
+an agent can reach and those it is connected to now.
+
+The human command speaks as the installed trusted client, so it works only
+with the packaged `splinterm` next to the running daemon. The installed
+graphical relay a native remote Window uses (the remote interactive role) may
+list and revoke as well, as it may already revoke grants; like the rest of
+easy agent access this bounds cooperating clients and is not a sandbox
+([ADR 0014](adr/0014-easy-agent-access.md)). `splinterm access` itself refuses
+`--remote`. Machine output
+(`--output json`) uses the automation role: listing needs
+`authorization_inspect` on the daemon, revoking one entry needs
+`authorization_revoke` on its workspace (on the daemon for a workspace that no
+longer exists), and `--all` needs `authorization_revoke` on the daemon, all from
+the policy file. No access level includes these scopes. Machine revokes require
+`--yes`; a failed durable removal is a successful revoke whose
+`durable_removal.status` is `failed`. `access list` pages with `--after ID` and
+`--max-entries N` (at most 64); `truncated: true` means `next_after` names the
+ID to continue after, and `authorization_revision` advances on every grant or
+pending-request change, so a changed revision between pages means the list
+moved.
+
+`splinterm authorization status` and `splinterm authorization revoke` still
+work for one Splint and its just-this-once grants; `splinterm access` covers
+every grant.
+Audit records a listing as `authorization_status` and every revoke as
+`revoke_access`.
 
 ### Where remembered access is stored
 

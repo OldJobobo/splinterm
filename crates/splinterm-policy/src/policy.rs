@@ -51,6 +51,13 @@ impl PolicyDocument {
         self.rules.len()
     }
 
+    /// The validated rules, read-only: the access inventory lists those that
+    /// match a connected agent (ADR 0014).
+    #[must_use]
+    pub fn rules(&self) -> &[PolicyRule] {
+        &self.rules
+    }
+
     #[must_use]
     pub fn authorize(
         &self,

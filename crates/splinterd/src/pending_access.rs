@@ -40,7 +40,10 @@ use splinterm_protocol::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::consent::{PeerIdentity, PromptCancel};
+use crate::{
+    agent_access::GrantIds,
+    consent::{PeerIdentity, PromptCancel},
+};
 
 /// At most this many pending workspace requests at once, daemon-wide.
 pub const MAX_PENDING_TOTAL: usize = 8;
@@ -206,6 +209,7 @@ struct Entry {
     lair_id: LairId,
     scopes: Vec<AccessScope>,
     agent_name: Option<String>,
+    opened_unix_seconds: u64,
     expires: Instant,
     expires_at_unix_seconds: u64,
     outcome: watch::Sender<Option<Outcome>>,
@@ -291,6 +295,23 @@ impl Inner {
 #[derive(Debug, Default)]
 pub struct PendingAccess {
     inner: Mutex<Inner>,
+    /// The daemon-wide authorization revision, advanced whenever a request
+    /// opens, is shown, or ends, so the access inventory sees the change.
+    ids: Arc<GrantIds>,
+}
+
+/// One pending request, for the access inventory.
+#[derive(Clone, Debug)]
+pub struct PendingView {
+    pub request_id: u64,
+    pub peer: PeerIdentity,
+    pub lair_id: LairId,
+    pub scopes: Vec<AccessScope>,
+    pub agent_name: Option<String>,
+    pub opened_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
+    /// Its prompt is showing (or its answer is being committed).
+    pub prompting: bool,
 }
 
 pub fn cancelled(message: &'static str) -> ProtocolError {
@@ -310,10 +331,56 @@ fn unix_seconds_at(expires: Instant, now: Instant) -> u64 {
 }
 
 impl PendingAccess {
+    /// A registry advancing the authorization revision every grant source
+    /// shares.
+    pub fn with_ids(ids: Arc<GrantIds>) -> Self {
+        Self {
+            inner: Mutex::default(),
+            ids,
+        }
+    }
+
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Advances the revision when `count` requests ended.
+    fn ended(&self, count: usize) -> usize {
+        if count > 0 {
+            self.ids.advance_revision();
+        }
+        count
+    }
+
+    /// Every pending request, in arrival order, for the access inventory. A
+    /// request whose grant is already published is no longer pending.
+    pub fn inventory(&self) -> Vec<PendingView> {
+        self.inner()
+            .entries
+            .iter()
+            .filter(|entry| !matches!(entry.phase, Phase::Published))
+            .map(|entry| PendingView {
+                request_id: entry.id,
+                peer: entry.peer.clone(),
+                lair_id: entry.lair_id,
+                scopes: entry.scopes.clone(),
+                agent_name: entry.agent_name.clone(),
+                opened_unix_seconds: entry.opened_unix_seconds,
+                expires_at_unix_seconds: entry.expires_at_unix_seconds,
+                prompting: !matches!(entry.phase, Phase::Queued),
+            })
+            .collect()
+    }
+
+    /// How many requests **Revoke all access** would end now.
+    pub fn live_count(&self) -> usize {
+        self.inner()
+            .entries
+            .iter()
+            .filter(|entry| !matches!(entry.phase, Phase::Published))
+            .count()
     }
 
     /// Admits one call: it collects its own uncollected deny, joins its
@@ -408,6 +475,7 @@ impl PendingAccess {
             lair_id,
             scopes,
             agent_name,
+            opened_unix_seconds: unix_seconds_at(now, now),
             expires,
             expires_at_unix_seconds: unix_seconds_at(expires, now),
             outcome,
@@ -425,6 +493,7 @@ impl PendingAccess {
             opened: Some(Opened { pidfd, done }),
         };
         inner.entries.push(entry);
+        self.ids.advance_revision();
         Ok(admitted)
     }
 
@@ -452,6 +521,7 @@ impl PendingAccess {
             return None;
         };
         entry.phase = Phase::Prompting;
+        self.ids.advance_revision();
         Some(PromptJob {
             request_id: entry.id,
             peer: entry.peer.clone(),
@@ -472,6 +542,7 @@ impl PendingAccess {
             return None;
         }
         let entry = inner.entries.remove(index);
+        self.ids.advance_revision();
         inner.cooldowns.push(Cooldown {
             identity: entry.identity.clone(),
             lair_id: entry.lair_id,
@@ -500,33 +571,38 @@ impl PendingAccess {
 
     /// Ends one request with `error`, whatever its phase.
     pub fn end_request(&self, request_id: u64, error: &ProtocolError) -> bool {
-        self.inner()
-            .end_where(error, |entry| entry.id == request_id)
-            == 1
+        let count = self
+            .inner()
+            .end_where(error, |entry| entry.id == request_id);
+        self.ended(count) == 1
     }
 
     /// Ends one request when it has expired by `now`.
     pub fn expire(&self, request_id: u64, now: Instant) -> bool {
-        self.inner().end_where(
+        let count = self.inner().end_where(
             &cancelled("the access request expired without an answer"),
             |entry| entry.id == request_id && entry.expires <= now,
-        ) == 1
+        );
+        self.ended(count) == 1
     }
 
     /// The requester cancels its own request for this workspace; another
     /// process's request, or one for another workspace, is never found.
     pub fn cancel(&self, process: &ProcessKey, lair_id: LairId, request_id: u64) -> bool {
-        self.inner()
+        let count = self
+            .inner()
             .end_where(&cancelled("the access request was cancelled"), |entry| {
                 entry.id == request_id && entry.process == *process && entry.lair_id == lair_id
-            })
-            == 1
+            });
+        self.ended(count) == 1
     }
 
     /// **Revoke all access**: every pending request ends.
     pub fn cancel_all(&self) -> usize {
-        self.inner()
-            .end_where(&cancelled("access was revoked"), |_| true)
+        let count = self
+            .inner()
+            .end_where(&cancelled("access was revoked"), |_| true);
+        self.ended(count)
     }
 
     /// Ordinary shutdown: every pending request ends and none is admitted
@@ -534,7 +610,9 @@ impl PendingAccess {
     pub fn close(&self) -> usize {
         let mut inner = self.inner();
         inner.closed = true;
-        inner.end_where(&cancelled("the daemon is shutting down"), |_| true)
+        let count = inner.end_where(&cancelled("the daemon is shutting down"), |_| true);
+        drop(inner);
+        self.ended(count)
     }
 
     /// Runs `publish` (the step that makes a committed grant visible) only
@@ -557,21 +635,23 @@ impl PendingAccess {
 
     /// The workspace ended: its pending requests end.
     pub fn end_lair(&self, lair_id: LairId) -> usize {
-        self.inner().end_where(
+        let count = self.inner().end_where(
             &ProtocolError::new(ErrorCode::NotFound, "the workspace no longer exists"),
             |entry| entry.lair_id == lair_id,
-        )
+        );
+        self.ended(count)
     }
 
     /// The handoff fence went up: nothing pending survives it.
     pub fn end_all_at_fence(&self) -> usize {
-        self.inner().end_where(
+        let count = self.inner().end_where(
             &ProtocolError::new(
                 ErrorCode::HandoffInProgress,
                 "the daemon is upgrading; ask again after it restarts",
             ),
             |_| true,
-        )
+        );
+        self.ended(count)
     }
 
     /// Moves a shown request to committing; `None` when it already ended,
@@ -601,6 +681,7 @@ impl PendingAccess {
             return false;
         };
         let entry = inner.entries.remove(index);
+        self.ids.advance_revision();
         if let Phase::Committing {
             ended: Some(error), ..
         } = &entry.phase

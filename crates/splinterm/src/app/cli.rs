@@ -30,7 +30,7 @@ use {
     tokio::sync::mpsc,
 };
 
-use super::commands::{AgentStatusCommand, Cli, Command, OutputMode, PresetCommand};
+use super::commands::{AccessCommand, AgentStatusCommand, Cli, Command, OutputMode, PresetCommand};
 #[cfg(test)]
 use super::commands::{NewSplintSide, SplitAxis};
 use super::window::run_live_multipane_window;
@@ -42,6 +42,7 @@ use super::pane_bridge::{
     update_advances_from, validate_attached_snapshot, validate_scrollback_page_response,
 };
 use super::{
+    access_cli::{resolve_access_request, run_human_access},
     agent_status_cli::{resolve_agent_status_request, run_human_agent_status},
     consent::run_consent_client,
     human_output::{print_lairs, print_response},
@@ -55,7 +56,7 @@ use super::{
         confirm_kill, run_policy_command, run_relay_command, run_reset_command, usage_error,
     },
     machine::{
-        machine_exit_code, require_expected_incarnation, require_incarnation,
+        machine_exit_code, require_expected_incarnation, require_incarnation, run_machine_access,
         run_machine_agent_status, run_machine_command, run_machine_subscription,
     },
     presets::{materialize_preset, run_preset_command},
@@ -131,6 +132,9 @@ pub(crate) async fn run() -> Result<()> {
     }
     if let Command::AgentStatus { command } = command {
         return run_agent_status_command(command, output, schema_major, timeout_ms, remote).await;
+    }
+    if let Command::Access { command } = command {
+        return run_access_command(command, output, schema_major, timeout_ms, remote).await;
     }
     if output == Some(OutputMode::Json) {
         let focus_command = matches!(&command, Command::Focus);
@@ -338,6 +342,48 @@ async fn run_agent_status_command(
                 usage_error("--schema-major and --timeout-ms require --output json or ndjson");
             }
             run_human_agent_status(request, remote).await
+        }
+    }
+}
+
+/// Resolves the access command before connecting, so a malformed ID is a
+/// usage error (exit 2, no machine document) in every output mode. Access is
+/// administered on the local daemon only.
+async fn run_access_command(
+    command: AccessCommand,
+    output: Option<OutputMode>,
+    schema_major: Option<u16>,
+    timeout_ms: Option<u64>,
+    remote: Option<String>,
+) -> Result<()> {
+    if remote.is_some() {
+        usage_error("agent access is administered on the local daemon; run it on that host");
+    }
+    let request = resolve_access_request(command).unwrap_or_else(|message| usage_error(&message));
+    match output {
+        Some(OutputMode::Json) => {
+            match run_machine_access(
+                request,
+                schema_major.unwrap_or(2),
+                timeout_ms.unwrap_or(5_000),
+            )
+            .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    std::process::exit(machine_exit_code(&error));
+                }
+            }
+        }
+        Some(OutputMode::Ndjson) => {
+            usage_error("NDJSON output is reserved for subscription commands")
+        }
+        Some(OutputMode::Human) | None => {
+            if schema_major.is_some() || timeout_ms.is_some() {
+                usage_error("--schema-major and --timeout-ms require --output json or ndjson");
+            }
+            run_human_access(request).await
         }
     }
 }
@@ -597,6 +643,7 @@ async fn run_headless_on(
         | Command::Policy { .. }
         | Command::Relay { .. }
         | Command::AgentStatus { .. }
+        | Command::Access { .. }
         | Command::Remote { .. }
         | Command::Reset { .. } => {
             unreachable!("graphical, policy, or relay command returned before daemon connection")

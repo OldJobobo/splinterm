@@ -350,6 +350,24 @@ pub fn resolve_nix_profile_entry(
     entry: &Path,
     executing: FileId,
 ) -> Result<PathBuf, IdentityRefusal> {
+    let (resolved, file) = nix_profile_target(root, entry)?;
+    if file != executing {
+        return Err(IdentityRefusal::DifferentFile);
+    }
+    Ok(resolved)
+}
+
+/// Walks the profile entry `entry` as [`resolve_nix_profile_entry`] does,
+/// with every protection check, but without comparing the result to an
+/// executing file: the physical path and file identity it ends at now.
+/// Display data for the access list; never an authorization.
+///
+/// # Errors
+/// The first rule the walk or its result breaks.
+pub fn nix_profile_target(
+    root: &IdentityRoot,
+    entry: &Path,
+) -> Result<(PathBuf, FileId), IdentityRefusal> {
     let bytes = entry.as_os_str().as_bytes();
     if !entry.is_absolute() || bytes.len() > MAX_PATH_BYTES || entry.to_str().is_none() {
         return Err(IdentityRefusal::InvalidPath);
@@ -384,14 +402,11 @@ pub fn resolve_nix_profile_entry(
     for (_, descriptor) in &physical[2..] {
         require_unwritable_owner(root, &stat(descriptor)?)?;
     }
-    if file_id(&status) != executing {
-        return Err(IdentityRefusal::DifferentFile);
-    }
     let mut resolved = PathBuf::from("/");
     for name in names {
         resolved.push(name);
     }
-    Ok(resolved)
+    Ok((resolved, file_id(&status)))
 }
 
 /// One walk step's physical path so far: each component below the root with
