@@ -23,15 +23,15 @@ use crate::{
 use super::{
     AuthorityStatus, SessionPickerUi, TrustedDialogKey, TrustedDialogKind, WindowCommand,
     WindowDojoIdentity, WindowTopologyCommand, WindowTopologyUpdate, WindowUpdate,
-    trusted_dialog::{AccessChoice, ConsentAction},
+    trusted_dialog::{AccessChoice, ConsentAction, Engagement},
 };
 
 /// One rendering of the access consent dialog.
 pub struct AccessConsentView {
     pub snapshot: TerminalSnapshot,
-    /// The snapshot row of each shown duration, in order, so a click on that
-    /// row selects it.
-    pub duration_rows: Vec<usize>,
+    /// Every snapshot row that shows a duration, with that duration's index,
+    /// so a click on any of its rows selects it.
+    pub duration_rows: Vec<(usize, usize)>,
 }
 
 /// Renders the access consent dialog with the duration at this index
@@ -55,7 +55,7 @@ enum TrustedAnswer {
 struct AccessConsentDialog {
     choice: AccessChoice,
     durations: Vec<GrantDuration>,
-    duration_rows: Vec<usize>,
+    duration_rows: Vec<(usize, usize)>,
     render: AccessConsentRenderer,
 }
 
@@ -65,15 +65,16 @@ struct AccessConsentDialog {
 pub struct TrustedConsentUi {
     answer: TrustedAnswer,
     pub(crate) kind: TrustedDialogKind,
-    /// When the Window first gained keyboard focus; the upgrade question
-    /// arms itself from it.
-    pub(crate) focused_at: Option<Instant>,
+    /// Whether a click inside engaged the yes/no questions' keyboard, and
+    /// since when they arm. The access consent dialog keeps its own.
+    engagement: Engagement,
     access: Option<AccessConsentDialog>,
 }
 
 impl TrustedConsentUi {
-    /// The access consent dialog (ADR 0014): default-deny, armed after every
-    /// focus gain and duration change, with the durations the prompt shows
+    /// The access consent dialog (ADR 0014): default-deny, inert until a
+    /// click inside engages it, then armed after that click, every focus
+    /// gain, and every duration change, with the durations the prompt shows
     /// (`true` when offered; the first is "Just this once") and a renderer
     /// for each selection. Returns the dialog and its first rendering.
     #[must_use]
@@ -87,7 +88,7 @@ impl TrustedConsentUi {
         let dialog = Self {
             answer: TrustedAnswer::Consent(decision),
             kind: TrustedDialogKind::AccessConsent,
-            focused_at: None,
+            engagement: Engagement::default(),
             access: Some(AccessConsentDialog {
                 choice: AccessChoice::new(offered),
                 durations,
@@ -105,7 +106,7 @@ impl TrustedConsentUi {
         Self {
             answer: TrustedAnswer::YesNo(decision),
             kind: TrustedDialogKind::Upgrade,
-            focused_at: None,
+            engagement: Engagement::default(),
             access: None,
         }
     }
@@ -117,17 +118,26 @@ impl TrustedConsentUi {
         Self {
             answer: TrustedAnswer::YesNo(decision),
             kind: TrustedDialogKind::Restart,
-            focused_at: None,
+            engagement: Engagement::default(),
             access: None,
         }
     }
 
-    /// Records keyboard focus. The yes/no questions arm from the first
-    /// focus; the access consent dialog arms again on every one.
+    /// Records keyboard focus. Focus never engages a dialog; an engaged one
+    /// arms again.
     pub(crate) fn note_focus(&mut self, now: Instant) {
-        self.focused_at.get_or_insert(now);
+        self.engagement.note_focus(now);
         if let Some(access) = self.access.as_mut() {
             access.choice.note_focus(now);
+        }
+    }
+
+    /// A pointer press inside the dialog: the first one engages its
+    /// keyboard, which then arms. Nothing else does.
+    pub(crate) fn engage(&mut self, now: Instant) {
+        self.engagement.engage(now);
+        if let Some(access) = self.access.as_mut() {
+            access.choice.engage(now);
         }
     }
 
@@ -158,7 +168,7 @@ impl TrustedConsentUi {
             return self.consent_input(action, now);
         }
         self.kind
-            .key_decision(key, repeat, self.focused_at, now)
+            .key_decision(key, repeat, self.engagement, now)
             .map(TrustedInput::Answer)
     }
 
@@ -173,7 +183,7 @@ impl TrustedConsentUi {
             return self.consent_input(action, now);
         }
         self.kind
-            .click_decision(proceed_area, self.focused_at, now)
+            .click_decision(proceed_area, self.engagement, now)
             .map(TrustedInput::Answer)
     }
 
@@ -183,7 +193,7 @@ impl TrustedConsentUi {
         let index = access
             .duration_rows
             .iter()
-            .position(|shown| *shown == row)?;
+            .find_map(|(shown, index)| (*shown == row).then_some(*index))?;
         let action = access.choice.click_duration(index);
         self.consent_input(action, now)
     }
@@ -383,6 +393,106 @@ impl Default for WindowOptions {
             mapped: None,
             handoff_status: None,
             layout_ledger: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use splinterm_core::SplintId;
+
+    use super::*;
+    use crate::frontend::trusted_dialog::UPGRADE_ARMING_DELAY;
+
+    fn snapshot() -> TerminalSnapshot {
+        crate::frontend::synthetic_text_snapshot(
+            SplintId::new(),
+            1,
+            "prompt",
+            vec!["prompt".into()],
+        )
+    }
+
+    /// The operator rule end to end: a dialog that has focus still ignores
+    /// every key until a click inside engages it; then it arms, and the
+    /// answer names the selected duration.
+    #[test]
+    fn a_trusted_dialog_answers_only_after_a_click_inside() {
+        let (decision, answers) = std::sync::mpsc::channel();
+        let (mut dialog, _) = TrustedConsentUi::access_consent(
+            decision,
+            vec![
+                (GrantDuration::Once, true),
+                (GrantDuration::WorkspaceSession, true),
+            ],
+            Box::new(|_| AccessConsentView {
+                snapshot: snapshot(),
+                duration_rows: vec![(4, 0), (5, 1), (6, 1)],
+            }),
+        );
+        let appeared = Instant::now();
+        dialog.note_focus(appeared);
+        let later = appeared + Duration::from_secs(30);
+        for key in [
+            TrustedDialogKey::G,
+            TrustedDialogKey::Enter,
+            TrustedDialogKey::Escape,
+            TrustedDialogKey::D,
+            TrustedDialogKey::Down,
+        ] {
+            assert_eq!(dialog.key_input(key, false, later), None, "{key:?}");
+        }
+        assert_eq!(dialog.action_area_input(true, later), None);
+        // A click on the second row of the wrapped "while open" duration
+        // engages the dialog and selects it.
+        dialog.engage(later);
+        assert_eq!(dialog.row_input(6, later), Some(TrustedInput::Redraw));
+        assert_eq!(dialog.key_input(TrustedDialogKey::G, false, later), None);
+        let armed = later + UPGRADE_ARMING_DELAY;
+        assert_eq!(
+            dialog.key_input(TrustedDialogKey::G, false, armed),
+            Some(TrustedInput::Answer(true))
+        );
+        dialog.answer(true);
+        assert_eq!(
+            answers.try_recv().unwrap(),
+            ConsentDecision::Grant {
+                duration: GrantDuration::WorkspaceSession
+            }
+        );
+    }
+
+    #[test]
+    fn the_upgrade_and_restart_questions_need_a_click_too() {
+        for build in [TrustedConsentUi::upgrade, TrustedConsentUi::restart] {
+            let (decision, answers) = std::sync::mpsc::channel();
+            let mut dialog = build(decision);
+            let appeared = Instant::now();
+            dialog.note_focus(appeared);
+            let later = appeared + Duration::from_secs(30);
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Escape, false, later),
+                None
+            );
+            assert_eq!(dialog.action_area_input(true, later), None);
+            assert_eq!(
+                dialog.action_area_input(false, later),
+                Some(TrustedInput::Answer(false)),
+                "cancelling by click always counts"
+            );
+            dialog.engage(later);
+            assert_eq!(
+                dialog.key_input(
+                    TrustedDialogKey::Escape,
+                    false,
+                    later + UPGRADE_ARMING_DELAY
+                ),
+                Some(TrustedInput::Answer(false))
+            );
+            dialog.answer(false);
+            assert!(!answers.try_recv().unwrap());
         }
     }
 }

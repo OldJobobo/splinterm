@@ -192,6 +192,9 @@ enum Phase {
     Committing {
         ended: Option<ProtocolError>,
     },
+    /// The grant is committed and visible: the request can no longer be
+    /// ended, and its callers receive the grant when the commit finishes.
+    Published,
 }
 
 #[derive(Debug)]
@@ -244,6 +247,8 @@ struct Inner {
     cooldowns: Vec<Cooldown>,
     prompter_running: bool,
     next_id: u64,
+    /// Set at shutdown: no request is admitted any more.
+    closed: bool,
 }
 
 impl Inner {
@@ -258,11 +263,14 @@ impl Inner {
 
     /// Ends every matching request without a grant: queued and prompting
     /// ones leave at once, committing ones are marked for the committer.
+    /// A published grant is already out, so its request is not ended.
     fn end_where(&mut self, error: &ProtocolError, selected: impl Fn(&Entry) -> bool) -> usize {
         let mut count = 0;
         let mut index = 0;
         while index < self.entries.len() {
-            if !selected(&self.entries[index]) {
+            if matches!(self.entries[index].phase, Phase::Published)
+                || !selected(&self.entries[index])
+            {
                 index += 1;
                 continue;
             }
@@ -336,6 +344,12 @@ impl PendingAccess {
         })?;
         let identity = IdentityKey::of(peer);
         let mut inner = self.inner();
+        if inner.closed {
+            return Err(ProtocolError::new(
+                ErrorCode::ConsentUnavailable,
+                "the daemon is shutting down",
+            ));
+        }
         inner.prune(now);
         if let Some(index) = inner.denials.iter().position(|denial| {
             denial.process == process && denial.lair_id == lair_id && denial.scopes == scopes
@@ -513,6 +527,32 @@ impl PendingAccess {
     pub fn cancel_all(&self) -> usize {
         self.inner()
             .end_where(&cancelled("access was revoked"), |_| true)
+    }
+
+    /// Ordinary shutdown: every pending request ends and none is admitted
+    /// again, so no prompt opens while the daemon stops.
+    pub fn close(&self) -> usize {
+        let mut inner = self.inner();
+        inner.closed = true;
+        inner.end_where(&cancelled("the daemon is shutting down"), |_| true)
+    }
+
+    /// Runs `publish` (the step that makes a committed grant visible) only
+    /// while the request is still committing and nothing has ended it, and
+    /// then marks it published, all under this registry's lock. A request
+    /// ended first returns `None` and nothing is published, so an end can
+    /// never race a grant into existence. Take any lock `publish` needs
+    /// before calling this.
+    pub fn publish_if_live<T>(&self, request_id: u64, publish: impl FnOnce() -> T) -> Option<T> {
+        let mut inner = self.inner();
+        let index = inner.position(request_id)?;
+        let entry = &mut inner.entries[index];
+        if !matches!(entry.phase, Phase::Committing { ended: None }) {
+            return None;
+        }
+        let published = publish();
+        entry.phase = Phase::Published;
+        Some(published)
     }
 
     /// The workspace ended: its pending requests end.
@@ -782,5 +822,60 @@ mod tests {
             Some(Outcome::Failed(error)) if error.code == ErrorCode::HandoffInProgress
         ));
         assert_eq!(pending.len(), 0);
+    }
+
+    /// F3: a grant becomes visible only while its request is committing and
+    /// unended; once visible, the request can no longer be ended.
+    #[test]
+    fn publishing_happens_only_for_a_live_committing_request() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let peer = peer_with_start(1);
+        let process = ProcessKey::of(&peer).unwrap();
+        // Not committing yet: nothing publishes.
+        let first = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        assert_eq!(pending.publish_if_live(first.request_id, || ()), None);
+        let job = pending.next_prompt().unwrap();
+        pending.begin_commit(job.request_id).unwrap();
+        // Ended during the commit: the publish closure never runs.
+        assert!(pending.cancel(&process, lair, job.request_id));
+        let mut ran = false;
+        assert_eq!(pending.publish_if_live(job.request_id, || ran = true), None);
+        assert!(!ran);
+        assert!(!pending.finish_commit(job.request_id, Outcome::Failed(cancelled("test"))));
+        // Live: it publishes, and then nothing can end it.
+        let second = admit(&pending, &peer, lair, LOOK, now).unwrap();
+        let job = pending.next_prompt().unwrap();
+        pending.begin_commit(job.request_id).unwrap();
+        assert_eq!(pending.publish_if_live(job.request_id, || 7), Some(7));
+        assert!(!pending.cancel(&process, lair, job.request_id));
+        assert_eq!(pending.cancel_all(), 0);
+        assert_eq!(pending.end_all_at_fence(), 0);
+        let granted = Response::LairAccessRequestsCancelled { cancelled: 0 };
+        assert!(pending.finish_commit(job.request_id, Outcome::Granted(Box::new(granted.clone()))));
+        assert_eq!(
+            *second.outcome.borrow(),
+            Some(Outcome::Granted(Box::new(granted)))
+        );
+    }
+
+    #[test]
+    fn a_closed_registry_ends_everything_and_admits_nothing() {
+        let pending = PendingAccess::default();
+        let now = Instant::now();
+        let lair = LairId::new();
+        let first = admit(&pending, &peer_with_start(1), lair, LOOK, now).unwrap();
+        assert_eq!(pending.close(), 1);
+        assert!(matches!(
+            &*first.outcome.borrow(),
+            Some(Outcome::Failed(error)) if error.code == ErrorCode::Cancelled
+        ));
+        assert_eq!(
+            admit(&pending, &peer_with_start(2), lair, LOOK, now)
+                .unwrap_err()
+                .code,
+            ErrorCode::ConsentUnavailable
+        );
     }
 }

@@ -514,6 +514,20 @@ pub(crate) fn record_client_name(name: &str) {
     }
 }
 
+/// The pending request a cancel names: a decimal identifier that fits 64
+/// bits. One that only fits the schema's pattern is an invalid argument.
+fn parse_cancel_request_id(arguments: &Value) -> Result<u64, DispatchFailure> {
+    arguments["cancel_request_id"]
+        .as_str()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .ok_or(DispatchFailure::new(
+            "invalid_argument",
+            "cancel_request_id is not a pending request identifier",
+            false,
+        ))
+}
+
 fn level_from_name(value: &str) -> Option<splinterm_protocol::AccessLevel> {
     match value {
         "look" => Some(splinterm_protocol::AccessLevel::Look),
@@ -538,11 +552,7 @@ async fn request_lair_access(
     let cancel = arguments.get("cancel_request_id");
     let request = match (level, scopes, cancel) {
         (None, None, Some(_)) => {
-            let request_id = arguments["cancel_request_id"]
-                .as_str()
-                .and_then(|value| value.parse().ok())
-                .filter(|value| *value > 0)
-                .ok_or_else(DispatchFailure::internal)?;
+            let request_id = parse_cancel_request_id(arguments)?;
             return cancel_lair_access(tool, lair_id, request_id, cancellation).await;
         }
         (Some(level), None, None) => (

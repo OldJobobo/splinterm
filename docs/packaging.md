@@ -311,8 +311,9 @@ exact number of shells a restart ends, and, when the running daemon reports
 that nothing blocks a live upgrade, says to choose **Not now** and run
 `splinterm upgrade` instead. `Enter`, `Escape`, `D`, or the red left area
 answer **Not now**, the default; only `R` or the green right area chooses
-**Restart now (ends N shells)**. Keys and the restart click count only after
-the dialog has had focus for about 600 ms, and held or repeating keys never
+**Restart now (ends N shells)**. The dialog appears without taking keyboard
+focus, and its keys stay inert until you click inside it; keys and the restart
+click count only about 600 ms after that click, and held or repeating keys never
 count. Closing the dialog or no answer within 120 seconds means **Not now**.
 Before restarting, the launcher reads the daemon again and asks again if what
 the restart would end has changed. **Not now** opens nothing and changes

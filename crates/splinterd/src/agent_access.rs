@@ -1520,12 +1520,33 @@ impl AgentAccess {
         access: AccessSet,
         display_name: Option<String>,
     ) -> Result<Committed, CommitError> {
+        self.commit_session_gated(peer, lair_id, access, display_name, || true)
+    }
+
+    /// [`Self::commit_session`], committing only when `gate` agrees. The gate
+    /// runs under this engine's memory lock, just before the definition
+    /// becomes visible, so whatever it checks cannot change in between.
+    ///
+    /// # Errors
+    /// As [`Self::commit_session`], or [`CommitError::Ended`] when the gate
+    /// refused.
+    pub fn commit_session_gated(
+        &self,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        access: AccessSet,
+        display_name: Option<String>,
+        gate: impl FnOnce() -> bool,
+    ) -> Result<Committed, CommitError> {
         let executable = peer
             .persistent_executable()
             .ok_or(CommitError::NotOffered(Withheld::NoPinnedIdentity))?;
         let mut memory = self.memory();
         if memory.ended_lairs.contains(&lair_id) {
             return Err(CommitError::WorkspaceEnded);
+        }
+        if !gate() {
+            return Err(CommitError::Ended);
         }
         let replaced = memory
             .sessions
@@ -1934,6 +1955,8 @@ pub enum CommitError {
     NotOffered(Withheld),
     WorkspaceEnded,
     Store(StoreWriteError),
+    /// The answer's pending request ended before the grant became visible.
+    Ended,
 }
 
 impl fmt::Display for CommitError {
@@ -1941,6 +1964,7 @@ impl fmt::Display for CommitError {
         match self {
             Self::NotOffered(why) => write!(formatter, "duration not offered: {why:?}"),
             Self::WorkspaceEnded => formatter.write_str("the workspace has ended"),
+            Self::Ended => formatter.write_str("the access request ended"),
             Self::Store(error) => error.fmt(formatter),
         }
     }

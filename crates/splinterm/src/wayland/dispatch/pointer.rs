@@ -184,6 +184,9 @@ impl PointerHandler for App {
                     {
                         let (x, y) = event.position;
                         let now = std::time::Instant::now();
+                        // A click inside is the only thing that engages a
+                        // trusted dialog's keyboard; focus never does.
+                        consent.engage(now);
                         // The bottom action areas answer; a click on a
                         // duration's row only selects it.
                         let input = if y >= f64::from(self.surface.logical_height) * 0.78 {

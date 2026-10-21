@@ -397,11 +397,16 @@ identifies an agent by host name, basename, or a copied digest.
 
 The prompt is deliberate by default:
 
+- It appears without taking keyboard focus, so typing meant for another
+  Window never reaches it. Click it when you get to it: its keyboard stays
+  inert until you click inside it, even if your desktop gives it focus. Under
+  Omarchy, the Hyprland module that `splinterm integration omarchy enable`
+  installs maps it without focus; see [Integrations](integrations.md).
 - Enter, Escape, and `D` deny. Only `G` or a click on the grant area grants.
   Earlier releases granted on Enter; this one does not.
-- Input is ignored for a short moment after the prompt appears, each time it
+- Input is ignored for a short moment after your click, each time the prompt
   regains focus, and each time you change the duration. Held-down keys never
-  answer it.
+  answer it. A click on the deny area always counts.
 - You choose the duration with the mouse or the arrow keys, never with a
   letter. **Just this once** is preselected, and a duration that is not offered
   is shown with the reason and cannot be chosen.

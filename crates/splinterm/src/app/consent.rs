@@ -7,9 +7,9 @@ use anyhow::{Context, Result, bail};
 use splinterm::{AccessConsentView, TrustedConsentUi, WindowOptions, run_window};
 use splinterm_protocol::{
     AccessLevel, ActiveScreen, CellAttributes, ColorSource, ConsentDecision, ConsentPrompt,
-    ConsentReplacement, ConsentReply, ConsentTarget, GrantDuration, MAX_AGENT_NAME_CHARS,
-    MAX_CONSENT_FRAME_BYTES, MAX_CONSENT_PATH_CHARS, TerminalCell, TerminalInputModes, TerminalRow,
-    TerminalSnapshot, UnderlineStyle, shared_identity_line,
+    ConsentReplacement, ConsentReply, ConsentTarget, GrantDuration, MAX_CONSENT_FRAME_BYTES,
+    MAX_CONSENT_PATH_CHARS, TerminalCell, TerminalInputModes, TerminalRow, TerminalSnapshot,
+    UnderlineStyle, shared_identity_line,
 };
 
 /// Reads one length-prefixed JSON frame of at most `maximum` bytes from a
@@ -83,13 +83,82 @@ pub(in crate::app) fn trusted_label(value: &str, maximum: usize) -> String {
         .collect()
 }
 
-/// The longest workspace name, in characters, inside a grant label or a
-/// duration row; longer names end in an ellipsis there. The workspace line
-/// shows the name in full.
-const WORKSPACE_LABEL_CHARS: usize = 40;
+/// The longest agent or workspace name the prompt shows, in characters;
+/// longer names end in an ellipsis. Fixed text always comes first on a line,
+/// so a long name can never push it out of view.
+const DISPLAY_NAME_CHARS: usize = 60;
 
-/// The widest wrapped scope line, in characters.
-const SCOPE_LINE_CHARS: usize = 100;
+/// The widest line the prompt draws, in characters. Longer text wraps onto
+/// indented lines, so nothing the person must read is ever cut off.
+const PROMPT_LINE_CHARS: usize = 100;
+
+/// `value` as one line of display text: unsafe characters replaced, runs of
+/// whitespace collapsed to one space, and at most `maximum` characters, the
+/// last an ellipsis when it was cut.
+fn display_name(value: &str, maximum: usize) -> String {
+    // Whitespace (tabs and newlines among it) collapses first; what stays
+    // unsafe is then replaced.
+    let collapsed = trusted_label(
+        &value.split_whitespace().collect::<Vec<_>>().join(" "),
+        MAX_CONSENT_PATH_CHARS,
+    );
+    if collapsed.chars().count() <= maximum {
+        return collapsed;
+    }
+    let mut cut: String = collapsed.chars().take(maximum.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+/// Wraps `text` into lines of at most [`PROMPT_LINE_CHARS`] characters,
+/// breaking at spaces where it can and inside a word (a path) where it must.
+/// Every line after the first starts with `indent`.
+fn wrap(text: &str, indent: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let body = text.trim_start_matches(' ');
+    // A leading indent is kept as given.
+    let mut line_chars = text.len() - body.len();
+    let mut line = " ".repeat(line_chars);
+    for word in body.split(' ') {
+        let mut word: Vec<char> = word.chars().collect();
+        loop {
+            let separator = usize::from(line_chars > 0 && !line.ends_with(' '));
+            if line_chars + separator + word.len() <= PROMPT_LINE_CHARS {
+                if separator == 1 {
+                    line.push(' ');
+                }
+                line.extend(word.iter());
+                line_chars += separator + word.len();
+                break;
+            }
+            let indent_only = line.trim().is_empty();
+            if !indent_only {
+                // The word starts a new line.
+                lines.push(std::mem::take(&mut line));
+                line.push_str(indent);
+                line_chars = indent.chars().count();
+                continue;
+            }
+            // A word too long for any line is split.
+            let room = PROMPT_LINE_CHARS.saturating_sub(line_chars).max(1);
+            line.extend(word.drain(..room));
+            lines.push(std::mem::take(&mut line));
+            line.push_str(indent);
+            line_chars = indent.chars().count();
+        }
+    }
+    if !line.trim().is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// `lines` padded with blank lines to `count`, so every selection keeps
+/// the same rows.
+fn padded(mut lines: Vec<String>, count: usize) -> Vec<String> {
+    lines.resize(count.max(lines.len()), String::new());
+    lines
+}
 
 fn consent_target_line(target: &ConsentTarget) -> String {
     match target {
@@ -98,12 +167,12 @@ fn consent_target_line(target: &ConsentTarget) -> String {
             incarnation,
         } => format!("Splint: {splint_id:?} · incarnation {incarnation}"),
         // The name is user data any agent with Manage can change, so the
-        // short ID is always shown with it.
+        // short ID is always shown, before it.
         ConsentTarget::Lair { lair_id, lair_name } => {
             let short_id: String = lair_id.to_string().chars().take(8).collect();
             format!(
-                "Workspace: '{}' · {short_id}",
-                trusted_label(lair_name, MAX_CONSENT_PATH_CHARS)
+                "Workspace {short_id}: '{}'",
+                display_name(lair_name, DISPLAY_NAME_CHARS)
             )
         }
     }
@@ -114,11 +183,7 @@ fn workspace_label(target: &ConsentTarget) -> String {
     let ConsentTarget::Lair { lair_name, .. } = target else {
         return String::new();
     };
-    let mut label = trusted_label(lair_name, WORKSPACE_LABEL_CHARS);
-    if lair_name.chars().count() > WORKSPACE_LABEL_CHARS {
-        label.push('…');
-    }
-    label
+    display_name(lair_name, DISPLAY_NAME_CHARS)
 }
 
 /// What the grant names: the level, "Custom access" for any other workspace
@@ -168,115 +233,147 @@ fn replacement_line(
     )
 }
 
-/// Wraps the scope labels into lines of at most [`SCOPE_LINE_CHARS`].
+/// Wraps the scope labels into lines of at most [`PROMPT_LINE_CHARS`].
 fn scope_lines(prompt: &ConsentPrompt) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = "Scopes: ".to_owned();
-    for (index, scope) in prompt.scopes.iter().enumerate() {
-        let item = if index + 1 == prompt.scopes.len() {
-            scope.label().to_owned()
-        } else {
-            format!("{},", scope.label())
-        };
-        if line.chars().count() + item.chars().count() + 1 > SCOPE_LINE_CHARS
-            && line.trim() != "Scopes:"
-        {
-            lines.push(std::mem::replace(&mut line, "        ".to_owned()));
-        } else if !line.ends_with(' ') {
-            line.push(' ');
-        }
-        line.push_str(&item);
-    }
-    lines.push(line);
-    lines
+    let labels: Vec<_> = prompt.scopes.iter().map(|scope| scope.label()).collect();
+    wrap(&format!("Scopes: {}", labels.join(", ")), "        ")
 }
 
 /// One rendering of the access prompt's text.
 struct ConsentLayout {
     lines: Vec<String>,
-    /// The line of each shown duration, in order.
-    duration_rows: Vec<usize>,
+    /// Each line that shows a duration, with that duration's index.
+    duration_rows: Vec<(usize, usize)>,
+}
+
+/// The lines one chosen duration adds below the duration list.
+struct ChosenLines {
+    shared: Vec<String>,
+    replaced: Vec<String>,
+    grant: Vec<String>,
+}
+
+/// The lines a chosen duration adds below the list: who shares it, what it
+/// replaces, and the grant action that names it exactly.
+fn chosen_lines(prompt: &ConsentPrompt, selected: usize, workspace: &str) -> ChosenLines {
+    let chosen = prompt.durations.get(selected);
+    let shared = chosen
+        .and_then(|offer| offer.shared_by.as_deref())
+        .map(|path| {
+            wrap(
+                &shared_identity_line(&trusted_label(path, MAX_CONSENT_PATH_CHARS)),
+                "    ",
+            )
+        })
+        .unwrap_or_default();
+    let replaced = chosen
+        .and_then(|offer| {
+            offer.replaces.as_ref().map(|replaced| {
+                wrap(
+                    &replacement_line(replaced, offer.duration, workspace),
+                    "    ",
+                )
+            })
+        })
+        .unwrap_or_default();
+    let label = grant_label(
+        access_label(prompt.level, &prompt.target),
+        chosen.map_or(GrantDuration::Once, |offer| offer.duration),
+        workspace,
+    );
+    ChosenLines {
+        shared,
+        replaced,
+        grant: wrap(&format!("Grant: {label}"), "       "),
+    }
 }
 
 /// The prompt's text with the duration at `selected` chosen. Every
 /// selection has the same lines in the same places, so choosing a duration
-/// never moves the rows the pointer selects.
+/// never moves the rows the pointer selects. No line is wider than
+/// [`PROMPT_LINE_CHARS`].
 fn consent_layout(prompt: &ConsentPrompt, selected: usize) -> ConsentLayout {
     let workspace = workspace_label(&prompt.target);
-    let access = access_label(prompt.level, &prompt.target);
     let mut lines = vec!["TRUSTED SPLINTERM ACCESS REQUEST".to_owned(), String::new()];
     if let Some(name) = &prompt.agent_name {
-        lines.push(format!(
-            "Agent: {} (as the agent reports it; not verified)",
-            trusted_label(name, MAX_AGENT_NAME_CHARS)
+        lines.extend(wrap(
+            &format!(
+                "Agent (reported by the agent, not verified): {}",
+                display_name(name, DISPLAY_NAME_CHARS)
+            ),
+            "    ",
         ));
     }
-    lines.extend([
-        format!(
+    lines.extend(wrap(
+        &format!(
             "Program: {}",
             trusted_label(&prompt.requester, MAX_CONSENT_PATH_CHARS)
         ),
-        format!(
-            "Process: PID {} · UID {}",
-            prompt.requester_pid, prompt.requester_uid
-        ),
-        consent_target_line(&prompt.target),
-        String::new(),
-    ]);
-    lines.push(match prompt.level {
-        Some(level) => format!("Access: {} ({})", level.label(), level.summary()),
-        None if matches!(prompt.target, ConsentTarget::Lair { .. }) => {
-            "Access: Custom, exactly these scopes and nothing more".to_owned()
-        }
-        None => "Access: exactly these scopes, once".to_owned(),
-    });
+        "         ",
+    ));
+    lines.push(format!(
+        "Process: PID {} · UID {}",
+        prompt.requester_pid, prompt.requester_uid
+    ));
+    lines.extend(wrap(&consent_target_line(&prompt.target), "    "));
+    lines.push(String::new());
+    lines.extend(wrap(
+        &match prompt.level {
+            Some(level) => format!("Access: {} ({})", level.label(), level.summary()),
+            None if matches!(prompt.target, ConsentTarget::Lair { .. }) => {
+                "Access: Custom, exactly these scopes and nothing more".to_owned()
+            }
+            None => "Access: exactly these scopes, once".to_owned(),
+        },
+        "    ",
+    ));
     lines.extend(scope_lines(prompt));
     lines.push(String::new());
     lines.push("How long (choose with the arrow keys or a click):".to_owned());
-    let mut duration_rows = Vec::with_capacity(prompt.durations.len());
+    let mut duration_rows = Vec::new();
     for (index, offer) in prompt.durations.iter().enumerate() {
-        duration_rows.push(lines.len());
         let marker = match (offer.withheld, index == selected) {
             (Some(_), _) => "(-)",
             (None, true) => "(•)",
             (None, false) => "( )",
         };
-        lines.push(format!(
-            "  {marker} {}",
-            duration_row(offer.duration, &workspace)
-        ));
+        for line in wrap(
+            &format!("  {marker} {}", duration_row(offer.duration, &workspace)),
+            "      ",
+        ) {
+            duration_rows.push((lines.len(), index));
+            lines.push(line);
+        }
         if let Some(withheld) = offer.withheld {
-            lines.push(format!("      Unavailable: {}", withheld.reason()));
+            lines.extend(wrap(
+                &format!("      Unavailable: {}", withheld.reason()),
+                "        ",
+            ));
         }
     }
     lines.push(String::new());
-    // Reserved for every selection, blank when they do not apply.
-    let chosen = prompt.durations.get(selected);
-    lines.push(
-        chosen
-            .and_then(|offer| offer.shared_by.as_deref())
-            .map(|path| shared_identity_line(&trusted_label(path, MAX_CONSENT_PATH_CHARS)))
-            .unwrap_or_default(),
-    );
-    lines.push(
-        chosen
-            .and_then(|offer| {
-                offer
-                    .replaces
-                    .as_ref()
-                    .map(|replaced| replacement_line(replaced, offer.duration, &workspace))
-            })
-            .unwrap_or_default(),
-    );
+    // Reserved for every selection at its tallest, blank when they do not
+    // apply, so the layout never moves.
+    let every: Vec<_> = (0..prompt.durations.len())
+        .map(|index| chosen_lines(prompt, index, &workspace))
+        .collect();
+    let tallest = |part: fn(&ChosenLines) -> usize| every.iter().map(part).max().unwrap_or(0);
+    let shared_rows = tallest(|lines| lines.shared.len());
+    let replaced_rows = tallest(|lines| lines.replaced.len());
+    let grant_rows = tallest(|lines| lines.grant.len());
+    let ChosenLines {
+        shared,
+        replaced,
+        grant,
+    } = chosen_lines(prompt, selected, &workspace);
+    lines.extend(padded(shared, shared_rows));
+    lines.extend(padded(replaced, replaced_rows));
     lines.push(String::new());
-    let label = grant_label(
-        access,
-        chosen.map_or(GrantDuration::Once, |offer| offer.duration),
-        &workspace,
-    );
+    lines.extend(padded(grant, grant_rows));
     lines.extend([
-        format!("Enter / Escape / D: DENY        G: {label}"),
-        format!("Red area (left): DENY        Green area (right): {label}"),
+        "G or the green area (right) grants. Enter, Escape, D, or the red area (left) deny."
+            .to_owned(),
+        "Click inside this prompt first to answer with the keyboard.".to_owned(),
     ]);
     ConsentLayout {
         lines,
@@ -478,7 +575,7 @@ pub(in crate::app) fn run_consent_client() -> Result<()> {
 mod tests {
     use splinterm_protocol::{
         AccessLevel, AccessScope, ConsentDurationOffer, ConsentPrompt, ConsentReplacement,
-        ConsentTarget, DurationWithheld, GrantDuration,
+        ConsentTarget, DurationWithheld, GrantDuration, MAX_CONSENT_PATH_CHARS,
     };
 
     use super::{
@@ -544,17 +641,17 @@ mod tests {
             unreachable!()
         };
         let text = consent_layout(&prompt, 0).lines.join("\n");
-        assert!(text.contains("Agent: Claude Code (as the agent reports it; not verified)"));
+        assert!(text.contains("Agent (reported by the agent, not verified): Claude Code"));
         assert!(text.contains("Program: /usr/bin/splinterm-mcp"));
         let short_id: String = lair_id.to_string().chars().take(8).collect();
-        assert!(text.contains(&format!("Workspace: 'Workspace' · {short_id}")));
+        assert!(text.contains(&format!("Workspace {short_id}: 'Workspace'")));
         assert!(text.contains(
             "Access: Manage (Read terminals, type commands, and create or close sessions)"
         ));
         assert!(text.contains("start processes in this Lair"));
         // Just this once is preselected and needs no shared-identity line.
         assert!(text.contains("(•) Just this once"));
-        assert!(text.contains("G: Allow Manage once"));
+        assert!(text.contains("Grant: Allow Manage once"));
         assert!(!text.contains("shares this access"));
     }
 
@@ -567,13 +664,13 @@ mod tests {
         });
         let text = consent_layout(&prompt, 2).lines.join("\n");
         assert!(text.contains("(•) Always for 'Workspace'"));
-        assert!(text.contains("G: Always allow Manage for 'Workspace'"));
+        assert!(text.contains("Grant: Always allow Manage for 'Workspace'"));
         assert!(text.contains("Any program that runs /usr/bin/splinterm-mcp shares this access."));
         assert!(
             text.contains("This replaces the earlier answer: Always allow Look for 'Workspace'.")
         );
         let session = consent_layout(&prompt, 1).lines.join("\n");
-        assert!(session.contains("G: Allow Manage while 'Workspace' is open"));
+        assert!(session.contains("Grant: Allow Manage while 'Workspace' is open"));
         assert!(!session.contains("replaces"));
     }
 
@@ -604,19 +701,90 @@ mod tests {
                 .count(),
             2
         );
-        assert!(text.contains("G: Allow Custom access once"));
-        // Each duration row is where the layout says it is.
-        for (row, duration) in
-            layout
+        assert!(text.contains("Grant: Allow Custom access once"));
+        // Each duration's first row is where the layout says it is.
+        for (index, duration) in ["Just this once", "While", "Always"]
+            .into_iter()
+            .enumerate()
+        {
+            let (row, _) = layout
                 .duration_rows
                 .iter()
-                .zip(["Just this once", "While", "Always"])
-        {
+                .find(|(_, shown)| *shown == index)
+                .unwrap();
             assert!(
                 layout.lines[*row].contains(duration),
                 "{}",
                 layout.lines[*row]
             );
+        }
+    }
+
+    /// The longest inputs a valid prompt can carry still show every fixed
+    /// word and every character of the paths: nothing is cut off.
+    #[test]
+    fn the_longest_prompt_fits_its_columns_and_cuts_nothing() {
+        let path = format!("/{}", "p".repeat(MAX_CONSENT_PATH_CHARS - 1));
+        let shared = format!("/{}", "s".repeat(MAX_CONSENT_PATH_CHARS - 1));
+        let mut prompt = manage_prompt();
+        prompt.agent_name = Some(format!("Agent  \t name {}", "a".repeat(200))[..128].to_owned());
+        prompt.requester.clone_from(&path);
+        prompt.target = ConsentTarget::Lair {
+            lair_id: splinterm_core::LairId::new(),
+            lair_name: "n".repeat(MAX_CONSENT_PATH_CHARS),
+        };
+        prompt.scopes = vec![
+            AccessScope::TopologyObserve,
+            AccessScope::Observe,
+            AccessScope::Scrollback,
+            AccessScope::Input,
+            AccessScope::Resize,
+            AccessScope::ControlTakeover,
+            AccessScope::ProcessSpawn,
+            AccessScope::TopologyLayout,
+            AccessScope::TopologyName,
+            AccessScope::Terminate,
+            AccessScope::ProcessRestore,
+        ];
+        prompt.level = None;
+        for offer in &mut prompt.durations[1..] {
+            offer.shared_by = Some(shared.clone());
+            offer.replaces = Some(ConsentReplacement {
+                level: None,
+                scopes: prompt.scopes.clone(),
+            });
+        }
+        assert_eq!(prompt.validate(), Ok(()));
+        let render = consent_renderer(prompt.clone());
+        for selected in 0..prompt.durations.len() {
+            let view = render(selected);
+            let layout = consent_layout(&prompt, selected);
+            for line in &layout.lines {
+                assert!(
+                    line.chars().count() <= super::PROMPT_LINE_CHARS
+                        && line.chars().count() <= view.snapshot.columns,
+                    "{} chars: {line}",
+                    line.chars().count()
+                );
+            }
+            // Joined back, the lines hold every character of each path.
+            let joined: String = layout
+                .lines
+                .iter()
+                .map(|line| line.trim())
+                .collect::<Vec<_>>()
+                .concat();
+            assert!(joined.contains(&path));
+            if selected > 0 {
+                assert!(joined.contains(&shared));
+            }
+            let text = layout.lines.join("\n");
+            assert!(text.contains("Agent (reported by the agent, not verified): Agent name"));
+            assert!(text.contains(&format!("{}…", "a".repeat(10))));
+            assert!(text.contains(&format!("'{}…'", "n".repeat(59))));
+            assert!(text.contains("Click inside this prompt first to answer with the keyboard."));
+            // The rendered snapshot keeps every row of the text.
+            assert!(layout.lines.len() <= view.snapshot.rows);
         }
     }
 
@@ -644,7 +812,7 @@ mod tests {
             lair_name: format!("{}\u{202e}", "w".repeat(60)),
         };
         let text = consent_layout(&prompt, 2).lines.join("\n");
-        assert!(text.contains(&format!("Always allow Manage for '{}…'", "w".repeat(40))));
+        assert!(text.contains(&format!("Always allow Manage for '{}…'", "w".repeat(59))));
         assert!(!text.contains('\u{202e}'));
     }
 

@@ -763,7 +763,7 @@ pub fn run(mut options: WindowOptions) -> Result<()> {
     window.set_title(initial_window_title(&options));
     let trusted_consent = options.trusted_consent;
     let session_picker = options.session_picker;
-    window.set_app_id(options.app_id.clone());
+    window.set_app_id(window_app_id(trusted_consent.is_some(), &options.app_id).to_owned());
     window
         .set_buffer_scale(1)
         .map_err(|_| anyhow::anyhow!("compositor does not support integer buffer scale"))?;
@@ -2857,6 +2857,17 @@ const fn trusted_dialog_key(keysym: Keysym) -> TrustedDialogKey {
         Keysym::Left | Keysym::KP_Left => TrustedDialogKey::Left,
         Keysym::Right | Keysym::KP_Right => TrustedDialogKey::Right,
         _ => TrustedDialogKey::Other,
+    }
+}
+
+/// The app ID a Window maps with. Every trusted dialog uses its own, so the
+/// desktop can map it without keyboard focus. Splinterm never asks the
+/// compositor to activate a Window.
+fn window_app_id(trusted_dialog: bool, app_id: &str) -> &str {
+    if trusted_dialog {
+        crate::config::TRUSTED_DIALOG_APP_ID
+    } else {
+        app_id
     }
 }
 
@@ -14125,6 +14136,18 @@ mod tests {
     }
 
     #[test]
+    fn trusted_dialogs_map_with_their_own_app_id() {
+        assert_eq!(
+            window_app_id(true, crate::config::APP_ID),
+            "com.oldjobobo.splinterm.trusted-dialog"
+        );
+        assert_eq!(
+            window_app_id(false, crate::config::APP_ID),
+            crate::config::APP_ID
+        );
+    }
+
+    #[test]
     fn trusted_dialogs_map_with_their_own_titles() {
         let (decision, _receiver) = std::sync::mpsc::channel();
         let (consent_decision, _consent_receiver) = std::sync::mpsc::channel();
@@ -14133,7 +14156,7 @@ mod tests {
             vec![(splinterm_protocol::GrantDuration::Once, true)],
             Box::new(|_| crate::frontend::AccessConsentView {
                 snapshot: valid_snapshot(SplintId::new()),
-                duration_rows: vec![0],
+                duration_rows: vec![(0, 0)],
             }),
         );
         let consent = WindowOptions {

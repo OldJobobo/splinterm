@@ -30,6 +30,10 @@ use crate::{
 };
 
 pub const APP_ID: &str = "com.oldjobobo.splinterm";
+/// The Wayland app ID of every trusted dialog (access consent, upgrade,
+/// restart), so the desktop can map them without keyboard focus: the Omarchy
+/// integration's Hyprland module gives it `no_initial_focus`.
+pub const TRUSTED_DIALOG_APP_ID: &str = "com.oldjobobo.splinterm.trusted-dialog";
 pub const DEFAULT_FONT: &str = "monospace:style=Regular";
 pub const STARTUP_FONT_FALLBACK: &str = "JetBrains Mono Nerd Font:style=Regular";
 

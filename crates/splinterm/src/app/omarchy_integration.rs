@@ -17,9 +17,26 @@ use super::{commands::IntegrationAction, integrations::ScreensaverPaths};
 const DESKTOP_ID: &str = "com.oldjobobo.splinterm.desktop";
 const SCREENSAVER_HELPER: &str = "/usr/lib/splinterm/integrations/omarchy-launch-screensaver";
 const MANAGED_TERMINALS: &str = "# Managed by `splinterm integration omarchy`; edit only after disabling it.\ncom.oldjobobo.splinterm.desktop\n";
-const HYPR_MODULE: &str = "-- Managed by `splinterm integration omarchy`; edit only after disabling it.\nhl.window_rule({\n  name = \"splinterm-terminal-tag\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm$\" },\n  tag = \"+terminal\",\n})\n";
+/// The managed module: Omarchy's terminal tag for Splinterm Windows, and no
+/// keyboard focus for trusted dialogs when they appear (they are answered by
+/// clicking them first; see `frontend::trusted_dialog`).
+const HYPR_MODULE: &str = "-- Managed by `splinterm integration omarchy`; edit only after disabling it.\nhl.window_rule({\n  name = \"splinterm-terminal-tag\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm$\" },\n  tag = \"+terminal\",\n})\n-- Trusted Splinterm dialogs appear without keyboard focus; click one to answer it.\nhl.window_rule({\n  name = \"splinterm-trusted-dialog-focus\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm\\\\.trusted-dialog$\" },\n  no_initial_focus = true,\n  focus_on_activate = false,\n})\n";
+/// Earlier exact texts of the managed module. They stay Splinterm-owned, so
+/// disable still removes them, and enabling again upgrades them.
+const LEGACY_HYPR_MODULES: &[&str] = &[
+    "-- Managed by `splinterm integration omarchy`; edit only after disabling it.\nhl.window_rule({\n  name = \"splinterm-terminal-tag\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm$\" },\n  tag = \"+terminal\",\n})\n",
+];
 const HYPR_REQUIRE_BLOCK: &str = "\n-- BEGIN SPLINTERM OMARCHY INTEGRATION\nrequire(\"hypr.splinterm-integration\")\n-- END SPLINTERM OMARCHY INTEGRATION\n";
 const EXTERNAL_HYPR_RULE: &str = "hl.window_rule({\n  name = \"splinterm-terminal-tag\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm$\" },\n  tag = \"+terminal\",\n})";
+/// The trusted-dialog rule as status also counts it in any other
+/// `~/.config/hypr/*.lua` file.
+const EXTERNAL_DIALOG_RULE: &str = "hl.window_rule({\n  name = \"splinterm-trusted-dialog-focus\",\n  match = { initial_class = \"^com\\\\.oldjobobo\\\\.splinterm\\\\.trusted-dialog$\" },\n  no_initial_focus = true,\n  focus_on_activate = false,\n})";
+
+/// Whether `text` is a managed module Splinterm wrote: the current one or
+/// an earlier one.
+fn owned_hypr_module(text: &str) -> bool {
+    text == HYPR_MODULE || LEGACY_HYPR_MODULES.contains(&text)
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Roots {
@@ -306,9 +323,44 @@ pub(super) fn terminal_tag_ready(roots: &Roots) -> bool {
 }
 
 fn managed_hypr_ready(roots: &Roots) -> bool {
-    fs::read_to_string(roots.hypr_module()).is_ok_and(|text| text == HYPR_MODULE)
+    fs::read_to_string(roots.hypr_module()).is_ok_and(|text| owned_hypr_module(&text))
         && fs::read_to_string(roots.hypr_entrypoint())
             .is_ok_and(|text| text.matches(HYPR_REQUIRE_BLOCK).count() == 1)
+}
+
+/// Whether Hyprland maps trusted Splinterm dialogs without keyboard focus,
+/// through the current managed module or the same rule in another user
+/// file. Only reads files.
+pub(super) fn dialog_focus_ready(roots: &Roots) -> bool {
+    let managed = managed_hypr_ready(roots)
+        && fs::read_to_string(roots.hypr_module()).is_ok_and(|text| text == HYPR_MODULE);
+    managed
+        || fs::read_dir(roots.config.join("hypr")).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "lua")
+                    && fs::read_to_string(entry.path())
+                        .is_ok_and(|text| active_lua(&text).contains(EXTERNAL_DIALOG_RULE))
+            })
+        })
+}
+
+/// Rewrites an earlier managed module as the current one and reloads
+/// Hyprland; a failed reload puts the earlier text back.
+fn upgrade_hypr_module(roots: &Roots, runtime: &mut impl Runtime) -> Result<bool> {
+    let module = fs::read_to_string(roots.hypr_module()).context("read managed Hyprland module")?;
+    if module == HYPR_MODULE || !owned_hypr_module(&module) {
+        return Ok(false);
+    }
+    super::integrations::replace_file(&roots.hypr_module(), HYPR_MODULE)
+        .context("upgrade managed Hyprland module")?;
+    if let Err(error) = runtime.reload_hyprland() {
+        let _ = super::integrations::replace_file(&roots.hypr_module(), &module);
+        return Err(error).context("reload Hyprland after upgrading its managed module");
+    }
+    Ok(true)
 }
 
 fn enable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) -> Result<()> {
@@ -316,10 +368,15 @@ fn enable(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) -> 
         writeln!(output, "Splinterm's Omarchy integration is already enabled")?;
         // An integration enabled before Omarchy 4 keeps a shadowed launcher;
         // enabling again migrates it.
-        if read_manifest(roots)?.screensaver_owned
-            && (!screensaver_ready(roots) || screensaver_legacy(roots))
-        {
+        let manifest = read_manifest(roots)?;
+        if manifest.screensaver_owned && (!screensaver_ready(roots) || screensaver_legacy(roots)) {
             runtime.screensaver(IntegrationAction::Enable, roots, output)?;
+        }
+        // A module written by an earlier release gains the trusted-dialog
+        // rule.
+        if manifest.hypr_owned && managed_hypr_ready(roots) && upgrade_hypr_module(roots, runtime)?
+        {
+            writeln!(output, "Upgraded the managed Hyprland module")?;
         }
         return status(roots, runtime, output);
     }
@@ -523,7 +580,7 @@ fn preflight_disable(roots: &Roots, manifest: &Manifest) -> Result<()> {
     if manifest.hypr_owned {
         let module =
             fs::read_to_string(roots.hypr_module()).context("read managed Hyprland module")?;
-        if module != HYPR_MODULE {
+        if !owned_hypr_module(&module) {
             bail!("refusing to remove edited Hyprland integration module");
         }
         let entrypoint = fs::read_to_string(roots.hypr_entrypoint())?;
@@ -621,7 +678,7 @@ fn rollback_disable_hypr(roots: &Roots) -> Result<()> {
 
 fn disable_hypr(roots: &Roots) -> Result<()> {
     let module = fs::read_to_string(roots.hypr_module()).context("read managed Hyprland module")?;
-    if module != HYPR_MODULE {
+    if !owned_hypr_module(&module) {
         bail!("refusing to remove edited Hyprland integration module");
     }
     let entrypoint = fs::read_to_string(roots.hypr_entrypoint())?;
@@ -765,6 +822,11 @@ fn status(roots: &Roots, runtime: &mut impl Runtime, output: &mut dyn Write) -> 
     )?;
     writeln!(output, "  Default terminal  {}", ready_label(terminal))?;
     writeln!(output, "  Terminal tag      {}", ready_label(hypr))?;
+    writeln!(
+        output,
+        "  Dialog focus      {}",
+        ready_label(dialog_focus_ready(roots))
+    )?;
     writeln!(output, "  Screensaver       {}", ready_label(screensaver))?;
     writeln!(
         output,
@@ -1020,7 +1082,68 @@ mod tests {
         assert!(text.contains("integration: ready"));
         assert!(text.contains("Default terminal  ready"));
         assert!(text.contains("Terminal tag      ready"));
+        assert!(text.contains("Dialog focus      missing"));
         assert!(text.contains("Screensaver       ready"));
+    }
+
+    /// Trusted dialogs map without keyboard focus through the managed module.
+    /// A module an earlier release wrote stays Splinterm-owned, and enabling
+    /// again upgrades it.
+    #[test]
+    fn the_managed_module_maps_trusted_dialogs_without_focus_and_upgrades() {
+        let (_root, roots) = TestRoot::new();
+        assert!(HYPR_MODULE.contains(EXTERNAL_DIALOG_RULE));
+        assert!(HYPR_MODULE.contains(EXTERNAL_HYPR_RULE));
+        assert!(
+            HYPR_MODULE.contains(
+                splinterm::config::TRUSTED_DIALOG_APP_ID
+                    .replace('.', "\\\\.")
+                    .as_str()
+            )
+        );
+        let mut runtime = FakeRuntime {
+            terminal: DESKTOP_ID.to_owned(),
+            reloads: 0,
+            screensaver: false,
+            fail_reload: false,
+            fail_reloads: 0,
+            fail_screensaver_disable: false,
+            terminals: None,
+        };
+        let mut output = Cursor::new(Vec::new());
+        enable(&roots, &mut runtime, &mut output).unwrap();
+        assert!(dialog_focus_ready(&roots));
+        // An earlier release's module: still owned, and missing the rule.
+        fs::write(roots.hypr_module(), LEGACY_HYPR_MODULES[0]).unwrap();
+        assert!(managed_hypr_ready(&roots) && terminal_tag_ready(&roots));
+        assert!(!dialog_focus_ready(&roots));
+        let reloads = runtime.reloads;
+        let mut output = Cursor::new(Vec::new());
+        enable(&roots, &mut runtime, &mut output).unwrap();
+        let text = String::from_utf8(output.into_inner()).unwrap();
+        assert!(
+            text.contains("Upgraded the managed Hyprland module"),
+            "{text}"
+        );
+        assert!(text.contains("Dialog focus      ready"), "{text}");
+        assert_eq!(
+            fs::read_to_string(roots.hypr_module()).unwrap(),
+            HYPR_MODULE
+        );
+        assert_eq!(runtime.reloads, reloads + 1);
+        // A failed reload puts the earlier text back.
+        fs::write(roots.hypr_module(), LEGACY_HYPR_MODULES[0]).unwrap();
+        runtime.fail_reloads = 1;
+        let mut output = Cursor::new(Vec::new());
+        assert!(enable(&roots, &mut runtime, &mut output).is_err());
+        assert_eq!(
+            fs::read_to_string(roots.hypr_module()).unwrap(),
+            LEGACY_HYPR_MODULES[0]
+        );
+        // Disable still removes the earlier module.
+        let mut output = Cursor::new(Vec::new());
+        disable(&roots, &mut runtime, &mut output).unwrap();
+        assert!(fs::symlink_metadata(roots.hypr_module()).is_err());
     }
 
     #[test]

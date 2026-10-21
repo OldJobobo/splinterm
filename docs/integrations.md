@@ -24,8 +24,29 @@ The lifecycle manages three independently verified components:
 2. an exact user-owned Hyprland module that applies Omarchy's `terminal` tag to
    `com.oldjobobo.splinterm`, so universal `Super+C/V` arrives as copy and
    paste (`Ctrl+Insert`/`Shift+Insert` or `Ctrl+Shift+C/V`, depending on the
-   Omarchy revision; see below); and
+   Omarchy revision; see below), and maps Splinterm's trusted dialogs
+   (`com.oldjobobo.splinterm.trusted-dialog`: the access prompt, the upgrade
+   question, and the launcher's restart question) with `no_initial_focus` and
+   `focus_on_activate = false`, so they never take keyboard focus when they
+   appear; and
 3. the guarded Omarchy screensaver adapter described below.
+
+Trusted dialogs ignore every key until you click inside them, with or without
+this module; the module also keeps them from taking focus at all. A module that
+an earlier release wrote has only the terminal tag. Status then reports
+`Dialog focus missing`, and running `splinterm integration omarchy enable`
+again upgrades it in place. With a terminal tag rule of your own instead of the
+module, add the same dialog rule to one of your `~/.config/hypr/*.lua` files;
+status counts it there too:
+
+```lua
+hl.window_rule({
+  name = "splinterm-trusted-dialog-focus",
+  match = { initial_class = "^com\\.oldjobobo\\.splinterm\\.trusted-dialog$" },
+  no_initial_focus = true,
+  focus_on_activate = false,
+})
+```
 
 Enable preflights every destination before mutation, records a versioned pending
 journal, verifies terminal resolution and Hyprland reload, and rolls back on a

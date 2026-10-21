@@ -78,6 +78,13 @@ closed() {
   exit 1
 }
 capture() { grim -o Virtual-1 "$ev/$1.png"; }
+# Moves the pointer onto the text of the window an evidence file names,
+# above a trusted dialog's action areas (its bottom 22%).
+point_into() {
+  local x y
+  read -r x y < <(hyprctl -j clients | jq -er --arg a "$(cat "$ev/$1")" 'map(select(.address == $a)) | if length == 1 then .[0] | "\(.at[0] + (.size[0] / 2 | floor)) \(.at[1] + (.size[1] * 3 / 10 | floor))" else error("expected one window") end')
+  hyprctl dispatch "hl.dsp.cursor.move({ x = $x, y = $y })" >/dev/null
+}
 expect() { grep -Fq -- "$1" "$2" || { printf 'missing %q in %s\n' "$1" "$2" >&2; exit 1; }; }
 """
 
@@ -140,6 +147,13 @@ def chord(*names: str) -> Action:
 
 def line(text: str) -> tuple[Action, ...]:
     return (vm("input", "type", text), chord("enter"))
+
+
+def click_inside(target: str) -> tuple[Action, ...]:
+    """Engages a trusted dialog: the pointer onto its text, then a left
+    click. A trusted dialog takes no keyboard focus when it appears, and its
+    keys count only after a click inside it and the 600 ms arming delay."""
+    return (desktop(f"point_into {target}"), vm("input", "click", "0xC0"), pause(1))
 
 
 def guard(target: str) -> Action:
@@ -250,8 +264,15 @@ def d10_case(case: str, answer: str, expected_exit: int) -> tuple[Action, ...]:
         record_dialog(case),
         # Typed into the paused Window while the question is open: dropped.
         *guarded("target-address", *line(f"echo dropped-{case}")),
-        # The dialog ignores input for about 600 ms after it gains focus.
-        *guarded("dialog-address", chord(answer), settle=1, then="closed"),
+        # The dialog takes no focus and ignores keys until a click inside it
+        # and its 600 ms arming delay; focus is taken only for the guards.
+        *guarded(
+            "dialog-address",
+            *click_inside("dialog-address"),
+            chord(answer),
+            settle=1,
+            then="closed",
+        ),
         wait_for_exit(case, expected_exit),
     )
 
@@ -590,7 +611,13 @@ stat -c '%d:%i' /usr/bin/splinterm | tee "$ev/r3-client-after"
 ! cmp -s "$ev/r3-client-before" "$ev/r3-client-after"
 pacman -Qk splinterm"""
             ),
-            *guarded("dialog-address", chord("g"), settle=1, then="closed"),
+            *guarded(
+                "dialog-address",
+                *click_inside("dialog-address"),
+                chord("g"),
+                settle=1,
+                then="closed",
+            ),
             wait_for_exit("r3", 6),
             pause(5),
             guest(

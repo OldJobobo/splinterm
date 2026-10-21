@@ -1262,6 +1262,8 @@ fn lair_access_tool_returns_pending_collects_the_answer_and_cancels() {
         json!({"lair_id": lair_id.to_string(), "level": "look", "scopes": ["input"]}),
         json!({"lair_id": lair_id.to_string(), "level": "look", "cancel_request_id": "5"}),
         json!({"lair_id": lair_id.to_string()}),
+        // Fits the decimal pattern but not a 64-bit identifier.
+        json!({"lair_id": lair_id.to_string(), "cancel_request_id": "99999999999999999999"}),
     ] {
         let refused = call_tool(&mut server, 35, "splinterm.request_lair_access", arguments);
         assert_eq!(

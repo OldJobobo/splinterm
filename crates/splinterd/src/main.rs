@@ -3829,7 +3829,7 @@ async fn ordered_shutdown(state: &DaemonState, listeners: ServingListeners) -> R
     state.exit_observers.close();
     // Pending access requests never outlive the daemon (ADR 0014); their
     // prompts close.
-    state.pending_access.cancel_all();
+    state.pending_access.close();
     let runtimes = state.runtimes.lock().await.drain();
     let shutdown_result = async {
         let mut tasks = tokio::task::JoinSet::new();
@@ -7332,12 +7332,25 @@ async fn settle_lair_prompt(
         }
         Ok(ConsentDecision::Grant { duration }) => duration,
     };
+    // The whole commit holds the handoff admission, as a fenced request
+    // does, so the fence waits for it and never meets a half-written grant
+    // or a store write after its flush. Under it the fence is checked again.
+    let _admitted = state.handoff_in_flight.read().await;
     let Some(ticket) = state.pending_access.begin_commit(request_id) else {
         // The request ended while the prompt was open: the answer grants
         // nothing.
         return;
     };
-    let committed = if requester_still_runs(&ticket.process, &ticket.pidfd, ticket.executing) {
+    // If the commit ends early, even by a panic, its request still ends
+    // instead of holding a slot until it expires.
+    let mut guard = CommitGuard {
+        state,
+        request_id,
+        armed: true,
+    };
+    let committed = if let Err(fenced) = refuse_while_fenced(state) {
+        Err(fenced)
+    } else if requester_still_runs(&ticket.process, &ticket.pidfd, ticket.executing) {
         match agent_access::AccessSet::from_scopes(job.scopes.iter().copied()) {
             Ok(access) => commit_agent_grant(
                 state,
@@ -7348,6 +7361,7 @@ async fn settle_lair_prompt(
                     duration,
                     display_name: job.agent_name.clone(),
                 },
+                Some(request_id),
             )
             .await
             .map_err(|error| agent_grant_protocol_error(&error)),
@@ -7356,6 +7370,7 @@ async fn settle_lair_prompt(
     } else {
         Err(pending_access::cancelled("the requesting process exited"))
     };
+    guard.armed = false;
     let committed = match committed {
         Ok(committed) => committed,
         Err(error) => {
@@ -7370,7 +7385,27 @@ async fn settle_lair_prompt(
         request_id,
         pending_access::Outcome::Granted(Box::new(response)),
     ) {
+        // Only an "Always" grant can get here: the others become visible
+        // only while their request is live.
         revoke_committed_grant(state, &committed).await;
+    }
+}
+
+/// Ends a committing request that its committer abandoned (a panic or an
+/// early exit), so it never holds a pending slot until it expires.
+struct CommitGuard<'a> {
+    state: &'a DaemonState,
+    request_id: u64,
+    armed: bool,
+}
+
+impl Drop for CommitGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state
+                .pending_access
+                .finish_commit(self.request_id, pending_access::Outcome::Failed(internal()));
+        }
     }
 }
 
@@ -7402,7 +7437,17 @@ async fn committed_lair_response(
 async fn revoke_committed_grant(state: &Arc<DaemonState>, committed: &AgentGrantCommitted) {
     match (committed.duration, &committed.entry_id) {
         (agent_access::GrantDuration::Remembered, Some(entry_id)) => {
-            let _ = revoke_remembered_grant(state, entry_id).await;
+            match revoke_remembered_grant(state, entry_id).await {
+                Some(RememberedRevocation {
+                    durable: Err(error),
+                    ..
+                }) => warn!(
+                    %error,
+                    "a remembered grant whose request ended stays revoked; its durable removal failed and is retried"
+                ),
+                Some(_) => {}
+                None => warn!("a remembered grant whose request ended was already gone"),
+            }
         }
         (agent_access::GrantDuration::WorkspaceSession, _) => {
             revoke_session_grant(state, committed.grant_id).await;
@@ -7442,6 +7487,9 @@ fn agent_grant_protocol_error(error: &AgentGrantError) -> ProtocolError {
             "the chosen duration is no longer available for this program; nothing was granted",
         ),
         AgentGrantError::InvalidAccess(_) => invalid("the requested access is invalid"),
+        AgentGrantError::Commit(agent_access::CommitError::Ended) => {
+            pending_access::cancelled("the access request ended before it was granted")
+        }
         AgentGrantError::Commit(agent_access::CommitError::Store(store)) => {
             warn!(%store, "remembered agent access could not be saved; nothing was granted");
             ProtocolError::new(
@@ -7975,10 +8023,18 @@ enum AgentGrantError {
 /// for "Always", the durable identity still qualifies and the durable write
 /// succeeds. A failed write grants nothing, not even a shorter grant. A
 /// replaced definition's controllers and subscriptions end.
+///
+/// With `live`, the pending request the answer belongs to, a "just this
+/// once" or "while open" grant becomes visible only through
+/// `PendingAccess::publish_if_live`, under the lock that holds the grant
+/// (grants or engine memory first, then the registry): a request ended first
+/// publishes nothing. An "Always" grant is written durably first; if its
+/// request ended meanwhile, the committer revokes it.
 async fn commit_agent_grant(
     state: &Arc<DaemonState>,
     peer: &PeerIdentity,
     request: AgentGrantRequest,
+    live: Option<u64>,
 ) -> Result<AgentGrantCommitted, AgentGrantError> {
     use agent_access::{CommitError, Committed, GrantDuration};
 
@@ -8006,11 +8062,16 @@ async fn commit_agent_grant(
         .map_err(|why| AgentGrantError::Commit(CommitError::NotOffered(why)))?;
     let committed = match duration {
         GrantDuration::Once => {
-            let mutation = state.grants.lock().await.grant_lair(
-                peer,
-                lair_id,
-                access.scopes().into_iter().collect(),
-            );
+            let scopes: Vec<_> = access.scopes().into_iter().collect();
+            let mut grants = state.grants.lock().await;
+            let mutation = match live {
+                Some(request_id) => state
+                    .pending_access
+                    .publish_if_live(request_id, || grants.grant_lair(peer, lair_id, scopes))
+                    .ok_or(AgentGrantError::Commit(CommitError::Ended))?,
+                None => grants.grant_lair(peer, lair_id, scopes),
+            };
+            drop(grants);
             schedule_lair_grant_expiry(state, mutation.grant.grant_id);
             Committed {
                 grant_id: mutation.grant.grant_id,
@@ -8020,7 +8081,14 @@ async fn commit_agent_grant(
         }
         GrantDuration::WorkspaceSession => state
             .agent_access
-            .commit_session(peer, lair_id, access, display_name)
+            .commit_session_gated(peer, lair_id, access, display_name, || {
+                live.is_none_or(|request_id| {
+                    state
+                        .pending_access
+                        .publish_if_live(request_id, || ())
+                        .is_some()
+                })
+            })
             .map_err(AgentGrantError::Commit)?,
         GrantDuration::Remembered => {
             let identity = offer
@@ -21966,6 +22034,47 @@ mod tests {
         assert!(has_once_grant(&state, &peer, lair_id).await);
     }
 
+    /// F1: an answer committing while the fence is up grants nothing; the
+    /// commit holds the handoff admission and checks the fence under it.
+    #[tokio::test]
+    async fn an_answer_under_the_handoff_fence_commits_nothing() {
+        let state = test_state(false);
+        let lair_id = insert_test_lair(&state, "agents").await;
+        let peer = with_start_time(PeerIdentity::for_test());
+        let process = pending_access::ProcessKey::of(&peer).unwrap();
+        let admitted = state
+            .pending_access
+            .admit(
+                &peer,
+                lair_id,
+                vec![AccessScope::Observe],
+                None,
+                Instant::now(),
+                |_| open_requester_pidfd(&process),
+            )
+            .unwrap();
+        let job = state.pending_access.next_prompt().unwrap();
+        // The gate reads fenced, as after a fence that has not yet ended
+        // this request.
+        state.handoff_gate.set(HandoffGatePhase::Fenced);
+        settle_lair_prompt(
+            &state,
+            job,
+            Ok(ConsentDecision::Grant {
+                duration: splinterm_protocol::GrantDuration::Once,
+            }),
+        )
+        .await;
+        state.handoff_gate.set(HandoffGatePhase::Idle);
+        assert!(matches!(
+            &*admitted.outcome.borrow(),
+            Some(pending_access::Outcome::Failed(error))
+                if error.code == ErrorCode::HandoffInProgress
+        ));
+        assert!(!has_once_grant(&state, &peer, lair_id).await);
+        assert_eq!(state.pending_access.len(), 0);
+    }
+
     #[tokio::test]
     async fn without_a_trusted_session_a_request_fails_closed_at_once() {
         let state = test_state(false);
@@ -25696,6 +25805,7 @@ mod tests {
                     duration,
                     display_name: Some("Test agent".into()),
                 },
+                None,
             )
             .await
         }
@@ -26020,7 +26130,7 @@ mod tests {
             display_name: None,
         };
         assert_eq!(
-            commit_agent_grant(&fixture.state, &fixture.peer, gone).await,
+            commit_agent_grant(&fixture.state, &fixture.peer, gone, None).await,
             Err(AgentGrantError::WorkspaceMissing)
         );
     }
