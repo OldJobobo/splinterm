@@ -1,0 +1,45 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "access_list",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "authorization_revision": 12,
+      "policy_generation": 3,
+      "remembered_store": {"status": "available"},
+      "total_entries": 1,
+      "entries": [
+        {
+          "id": "policy:mcp-reader",
+          "kind": "policy",
+          "state": "active",
+          "revocable": true,
+          "grant_id": null,
+          "agent": {
+            "identity": "policy_digest",
+            "executable_path": "/usr/bin/splinterm-mcp",
+            "pid": null,
+            "display_name": null
+
+          },
+          "workspace": null,
+          "splint": null,
+          "level": null,
+          "scopes": [],
+          "policy_scopes": ["topology_metadata_read"],
+          "policy_resources": [{"kind": "daemon"}],
+          "created_unix_seconds": null,
+          "last_used_unix_seconds": null,
+          "expires_unix_seconds": null,
+          "connections": 1,
+          "controllers": 0,
+          "policy_rules": []
+        }
+      ],
+      "next_after": null
+    }
+  }
+}

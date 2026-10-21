@@ -145,6 +145,14 @@ pub const fn for_request(request: &Request) -> RequestAuthorization {
             RequestAuthorization::policy(&[Scope::AuthorizationInspect])
         }
         Request::RevokeAccess { .. } => RequestAuthorization::policy(&[Scope::AuthorizationRevoke]),
+        // ADR 0014: the access inventory and its revokes belong to the
+        // trusted UI and the human CLI; a machine client needs these
+        // administrative scopes from the policy file, which no consent level
+        // includes.
+        Request::ListAccess { .. } => RequestAuthorization::policy(&[Scope::AuthorizationInspect]),
+        Request::RevokeAccessEntry { .. } | Request::RevokeAllAccess { .. } => {
+            RequestAuthorization::policy(&[Scope::AuthorizationRevoke])
+        }
         Request::PrepareMutation { mutation } => preflight_authorization(mutation),
         Request::CreateLair { .. }
         | Request::CreateLairAutomation { .. }

@@ -42,8 +42,15 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod access;
 mod daemon_handoff;
 mod reconnect;
+
+pub use access::{
+    AccessRevokeIdError, access_entry_id, access_kind_name, access_level_name,
+    access_list_envelope, access_revoke_all_envelope, access_revoke_envelope, consent_scope_name,
+    parse_access_entry_id, parse_access_revoke_target, public_display_text,
+};
 
 pub use daemon_handoff::{
     DaemonHandoffOutcome, HANDOFF_DECISION_SAFETY_MARGIN, HandoffDecision, HandoffDecisionPrompt,

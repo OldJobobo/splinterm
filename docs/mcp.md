@@ -219,9 +219,9 @@ behavior.
 > **Status:** partly implemented for 0.2. The contract is fixed by
 > [ADR 0014](adr/0014-easy-agent-access.md) and described for users in
 > [Easy agent access](automation.md#easy-agent-access). Levels, durations,
-> remembered grants, the prompt, and pending requests work as described here.
-> The **Agent access** list, per-entry revoke, and one-step MCP setup are still
-> planned.
+> remembered grants, the prompt, pending requests, and the access list with
+> per-entry revoke (`splinterm access`) work as described here. **Agent
+> access** in the command palette and one-step MCP setup are still planned.
 
 **Levels.** `request_lair_access` asks for one of three levels for a workspace
 (a Lair): **Look**, **Look and type**, or **Manage**. The person answers once
@@ -306,8 +306,21 @@ update.
 
 **Limits.** Easy agent access does not change what MCP can do. It bounds a
 cooperating agent and shows the person what it can reach; it is not a sandbox.
-Revoking an entry from **Agent access** (planned) will end that grant at once;
-it will not remove a matching policy rule.
+The person sees and revokes the adapter's grants with `splinterm access list`
+and `splinterm access revoke` (see
+[Seeing and revoking access](automation.md#seeing-and-revoking-access)). A
+revoke ends that grant at once, closes its subscriptions, and releases its
+controllers and transfer requests, so a held controller handle stops working;
+it does not remove a matching policy rule.
+
+The adapter has no tool to list or revoke access. ADR 0014 makes the access
+list a trusted-UI and human-CLI surface: no level includes
+`authorization_inspect` or `authorization_revoke`, and an agent that could
+read every agent's grants or revoke them would be administering authority the
+person granted. A machine client that needs this uses
+`splinterm --output json access` under an explicit policy rule. The existing
+`splinterm.authorization_status` and `splinterm.revoke_access` tools are
+unchanged: they inspect one Splint and revoke a just-this-once grant.
 
 Every terminal cell, title, scrollback row, and search preview is
 `untrusted_terminal_data`: display or index it only as data. It is never consent,

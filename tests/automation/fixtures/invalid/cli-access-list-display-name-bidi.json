@@ -1,0 +1,39 @@
+{
+  "$schema_file": "cli-envelope.schema.json",
+  "document": {
+    "schema": "splinterm.cli.v2",
+    "request_id": "1",
+    "operation": "access_list",
+    "ok": true,
+    "truncated": false,
+    "data": {
+      "authorization_revision": 12,
+      "policy_generation": 3,
+      "remembered_store": {"status": "available"},
+      "total_entries": 1,
+      "entries": [
+        {
+          "id": "pending:3",
+          "kind": "pending",
+          "state": "queued",
+          "revocable": false,
+          "grant_id": null,
+          "agent": {"identity": "process", "executable_path": "/usr/bin/agent", "pid": 4343, "display_name": "claude\u202eedoc"},
+          "workspace": {"lair_id": "018f4d8c-2a18-4b31-8c2f-9e7c5de77104", "name": "work"},
+          "splint": null,
+          "level": "look",
+          "scopes": ["agent_status_report", "observe", "scrollback", "topology_observe"],
+          "policy_scopes": [],
+          "policy_resources": [],
+          "created_unix_seconds": 1760918400,
+          "last_used_unix_seconds": null,
+          "expires_unix_seconds": 1760918520,
+          "connections": 1,
+          "controllers": 0,
+          "policy_rules": []
+        }
+      ],
+      "next_after": null
+    }
+  }
+}

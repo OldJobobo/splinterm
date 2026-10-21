@@ -384,7 +384,10 @@ caller must explicitly resubscribe.
 | Command | Purpose |
 | --- | --- |
 | `authorization status SPLINT_ID` | Inspect effective authority for one Splint. |
-| `authorization revoke GRANT_ID` | Revoke an ephemeral grant. |
+| `authorization revoke GRANT_ID` | Revoke a just-this-once grant for one Splint. |
+| `access list` | List every agent grant of every duration, pending requests, and matching policy rules. |
+| `access revoke ID` | Revoke one grant: a runtime grant ID or a remembered `ra_` entry ID. |
+| `access revoke --all [--dry-run]` | Revoke every agent grant and pending request after showing the exact counts; policy rules are untouched. |
 | `policy validate PATH` | Validate a policy through the daemon's secure loader without publishing it. |
 | `policy inspect PATH` | Print normalized validated policy. |
 | `policy reload` | Request reload through the canonical user service. |

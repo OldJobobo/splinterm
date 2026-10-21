@@ -1,3 +1,4 @@
+mod access_inventory;
 mod agent_access;
 mod agent_status;
 mod audit;
@@ -535,14 +536,30 @@ impl ControllerState {
             .collect()
     }
 
-    fn release_grant(&mut self, grant_id: u64) -> Vec<ControllerLease> {
+    /// Releases every lease a grant authorized and cancels every transfer it
+    /// requested, so a revoked grant leaves no controller behind.
+    fn release_grant(
+        &mut self,
+        grant_id: u64,
+    ) -> (Vec<ControllerLease>, Vec<PendingControlTransfer>) {
         let ids: Vec<_> = self
             .by_id
             .values()
             .filter(|lease| lease.grant_id == Some(grant_id))
             .map(|lease| lease.id)
             .collect();
-        ids.into_iter().filter_map(|id| self.release(id)).collect()
+        let leases = ids.into_iter().filter_map(|id| self.release(id)).collect();
+        let transfer_ids: Vec<_> = self
+            .transfers
+            .values()
+            .filter(|transfer| transfer.grant_id == Some(grant_id))
+            .map(|transfer| transfer.id)
+            .collect();
+        let transfers = transfer_ids
+            .into_iter()
+            .filter_map(|id| self.expire_transfer(id))
+            .collect();
+        (leases, transfers)
     }
 
     fn release_connections(
@@ -1099,7 +1116,9 @@ struct DaemonState {
     audit: Mutex<audit::AuditStore>,
     daemon_audit_peer: splinterm_protocol::AuditPeer,
     policy_reloads: broadcast::Sender<u64>,
-    automation_connections: Mutex<HashSet<u64>>,
+    /// Every automation-role connection and its verified peer, so the
+    /// access inventory can show which grants are in use now.
+    automation_connections: Mutex<access_inventory::AutomationPeers>,
     controller: Mutex<ControllerState>,
     control_events: broadcast::Sender<ControlNotice>,
     connection_revocations: broadcast::Sender<u64>,
@@ -3452,14 +3471,14 @@ fn build_daemon_state(inputs: DaemonStateInputs) -> Arc<DaemonState> {
         audit: Mutex::new(audit::AuditStore::default()),
         daemon_audit_peer,
         policy_reloads,
-        automation_connections: Mutex::new(HashSet::new()),
+        automation_connections: Mutex::new(HashMap::new()),
         controller: Mutex::new(ControllerState::default()),
         control_events,
         connection_revocations,
-        grants: Mutex::new(GrantStore::with_ids(grant_ids)),
+        grants: Mutex::new(GrantStore::with_ids(Arc::clone(&grant_ids))),
         agent_access,
         identity_context,
-        pending_access: pending_access::PendingAccess::default(),
+        pending_access: pending_access::PendingAccess::with_ids(Arc::clone(&grant_ids)),
         #[cfg(test)]
         consent_script: StdMutex::default(),
         revocations,
@@ -3520,7 +3539,15 @@ async fn apply_policy_reload(state: Arc<DaemonState>) -> Result<()> {
         .await
         .publish(candidate, &topology_snapshot);
     record_policy_reload(state, &generation).await;
-    let automation_connections = Arc::new(state.automation_connections.lock().await.clone());
+    let automation_connections = Arc::new(
+        state
+            .automation_connections
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>(),
+    );
     state
         .topology_hub
         .lock()
@@ -4514,7 +4541,7 @@ async fn serve_authenticated(
             .automation_connections
             .lock()
             .await
-            .insert(connection_id);
+            .insert(connection_id, peer.clone());
     }
     let hello = ServerFrame::Hello {
         version: PROTOCOL_VERSION,
@@ -4838,6 +4865,7 @@ async fn serve_authenticated(
                                     stream,
                                     handle,
                                     access,
+                                    revocations,
                                 } => (
                                     id,
                                     spawn_subscription(
@@ -4848,7 +4876,7 @@ async fn serve_authenticated(
                                             outbound: outbound.clone(),
                                             control: control.clone(),
                                         },
-                                        state.revocations.subscribe(),
+                                        revocations,
                                         access,
                                         SubscriptionAudit {
                                             state: Arc::clone(state),
@@ -4876,6 +4904,8 @@ async fn serve_authenticated(
                                     splint_id,
                                     incarnation,
                                     maximum_returned_bytes,
+                                    grant_id,
+                                    revocations,
                                 } => (
                                     id,
                                     spawn_control_subscription(
@@ -4888,6 +4918,8 @@ async fn serve_authenticated(
                                             splint_id,
                                             incarnation,
                                             maximum_returned_bytes,
+                                            grant_id,
+                                            revocations,
                                         },
                                     ),
                                 ),
@@ -4931,6 +4963,9 @@ enum PendingSubscription {
         stream: CompactSubscription,
         handle: LiveSplintHandle,
         access: SubscriptionAccess,
+        /// Subscribed before the grant was checked live, so a revoke after
+        /// that check is always heard.
+        revocations: broadcast::Receiver<Revocation>,
     },
     Topology {
         id: u64,
@@ -4944,6 +4979,9 @@ enum PendingSubscription {
         splint_id: SplintId,
         incarnation: u64,
         maximum_returned_bytes: Option<usize>,
+        /// The grant that authorized the subscription, whose revoke ends it.
+        grant_id: Option<u64>,
+        revocations: broadcast::Receiver<Revocation>,
     },
 }
 
@@ -5036,14 +5074,33 @@ fn schedule_transfer_timeout(state: Arc<DaemonState>, transfer: PendingControlTr
     });
 }
 
+/// Ends what a revoked grant authorized in the controller registry: its
+/// leases are released and their connections closed, and its pending
+/// transfers are cancelled. Every revoke removes the grant from its source
+/// first, and controller registration checks the grant under this same lock
+/// (`access_inventory::grant_live`), so nothing it authorized outlives it.
 async fn revoke_grant_controllers(state: &DaemonState, grant_id: u64) {
-    let released = state.controller.lock().await.release_grant(grant_id);
+    let (released, cancelled) = state.controller.lock().await.release_grant(grant_id);
     for lease in released {
         // Revocation removes both daemon and connection-owned adapter
         // authority. The connection close makes stale handles and resource
         // overlays disappear without waiting for reuse.
         let _ = state.connection_revocations.send(lease.connection_id);
         publish_control_status(state, lease.splint_id, lease.incarnation).await;
+    }
+    for transfer in cancelled {
+        let _ = state
+            .connection_revocations
+            .send(transfer.requester_connection_id);
+        publish_control_notice(
+            state,
+            ControlNotice::TransferResolved {
+                transfer,
+                outcome: ControlTransferOutcome::Cancelled,
+                controller_id: None,
+                excluded_connections: None,
+            },
+        );
     }
 }
 
@@ -6482,6 +6539,9 @@ fn trusted_ui_request(request: &Request) -> bool {
             | Request::AuthorizationStatus { .. }
             | Request::RevokeAccess { .. }
             | Request::CancelAllLairAccessRequests
+            | Request::ListAccess { .. }
+            | Request::RevokeAccessEntry { .. }
+            | Request::RevokeAllAccess { .. }
             | Request::PrepareMutation { .. }
             | Request::CreateLair { .. }
             | Request::CreateTransientLair { .. }
@@ -7762,7 +7822,17 @@ async fn request_policy_resources(
         | Request::PrepareMutation {
             mutation: splinterm_protocol::MutationPreflight::CreateLair,
         }
-        | Request::AuditInspect { .. } => vec![policy::PolicyResource::Daemon],
+        | Request::AuditInspect { .. }
+        | Request::ListAccess { .. }
+        | Request::RevokeAllAccess { .. } => vec![policy::PolicyResource::Daemon],
+        // A revoke is authorized on the workspace it covers, or on the daemon
+        // for a remembered entry whose workspace is gone.
+        Request::RevokeAccessEntry { target } => {
+            match access_inventory::target_lair(state, target).await? {
+                Some(lair_id) => vec![policy::PolicyResource::Lair { lair_id }],
+                None => vec![policy::PolicyResource::Daemon],
+            }
+        }
         Request::RevokeAccess { grant_id } => {
             match state.grants.lock().await.grant_resource(*grant_id)? {
                 consent::GrantResource::Splint {
@@ -8085,9 +8155,11 @@ async fn commit_agent_grant(
             let mutation = match live {
                 Some(request_id) => state
                     .pending_access
-                    .publish_if_live(request_id, || grants.grant_lair(peer, lair_id, scopes))
+                    .publish_if_live(request_id, || {
+                        grants.grant_lair_named(peer, lair_id, scopes, display_name)
+                    })
                     .ok_or(AgentGrantError::Commit(CommitError::Ended))?,
-                None => grants.grant_lair(peer, lair_id, scopes),
+                None => grants.grant_lair_named(peer, lair_id, scopes, display_name),
             };
             drop(grants);
             schedule_lair_grant_expiry(state, mutation.grant.grant_id);
@@ -8156,10 +8228,6 @@ async fn revoke_session_grant(state: &DaemonState, grant_id: u64) -> bool {
 
 /// What revoking a remembered definition did.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "PR 4's inventory reports the durable outcome")
-)]
 struct RememberedRevocation {
     grant_id: u64,
     /// The durable removal. On failure the grant stays revoked in memory and
@@ -8519,7 +8587,13 @@ async fn append_request_result_audit(
                 | ErrorCode::InvalidHandoffTicket
         )
     });
-    let revoked = result.is_ok() && matches!(request, Request::RevokeAccess { .. });
+    let revoked = result.is_ok()
+        && matches!(
+            request,
+            Request::RevokeAccess { .. }
+                | Request::RevokeAccessEntry { .. }
+                | Request::RevokeAllAccess { dry_run: false }
+        );
     let decision = if denied {
         splinterm_protocol::AuditDecision::Denied
     } else if revoked {
@@ -9441,6 +9515,17 @@ async fn handle_authorized_request(
                 }
                 _ => return Err(internal()),
             }
+        }
+        // ADR 0014: the authorization table already admitted only the
+        // trusted UI or a policy rule with the administrative scope.
+        Request::ListAccess { after, max_entries } => {
+            access_inventory::list(state, after, max_entries).await?
+        }
+        Request::RevokeAccessEntry { target } => {
+            access_inventory::revoke_entry(state, &target).await?
+        }
+        Request::RevokeAllAccess { dry_run } => {
+            access_inventory::revoke_all(state, dry_run).await?
         }
         Request::CreateTransientLair {
             expected_topology_revision,
@@ -10545,6 +10630,12 @@ async fn handle_authorized_request(
                 )
                 .await?
             };
+            // Subscribed before the grant is checked live: a revoke after the
+            // check is heard, and one before it registers nothing (PR #188).
+            let revocations = state.revocations.subscribe();
+            if !access_inventory::grant_live(state, grant_id).await {
+                return Err(access_inventory::revoked_grant());
+            }
             let handle = current_handle(state, splint_id, incarnation).await?;
             let scrollback_rows = scrollback_rows.min(MAX_SNAPSHOT_SCROLLBACK_ROWS);
             let (snapshot, subscription) = handle
@@ -10573,6 +10664,7 @@ async fn handle_authorized_request(
                     id,
                     stream: subscription,
                     handle,
+                    revocations,
                     access: SubscriptionAccess {
                         grant_id,
                         maximum_returned_bytes: authorization.maximum_returned_bytes(),
@@ -10781,12 +10873,15 @@ async fn handle_authorized_request(
                     })?
             };
             let _ = current_handle(state, splint_id, incarnation).await?;
-            let lease = state.controller.lock().await.acquire(
-                connection_id,
-                splint_id,
-                incarnation,
-                grant_id,
-            )?;
+            let lease = {
+                // A grant revoked after authorization registers nothing: the
+                // revoke removed it before taking this lock (PR #188).
+                let mut controllers = state.controller.lock().await;
+                if !access_inventory::grant_live(state, grant_id).await {
+                    return Err(access_inventory::revoked_grant());
+                }
+                controllers.acquire(connection_id, splint_id, incarnation, grant_id)?
+            };
             publish_control_status(state, splint_id, incarnation).await;
             let (lair_id, dojo_id, _) =
                 splint_containment(&*state.topology.read().await, splint_id)
@@ -10817,6 +10912,17 @@ async fn handle_authorized_request(
                 ));
             }
             let _ = current_handle(state, splint_id, incarnation).await?;
+            // Bound to the grant that authorized it, like a terminal
+            // subscription: subscribed to revocations first, then checked.
+            let grant_id = if authorization.policy_authorized() {
+                None
+            } else {
+                authorization.authorized_grant_id()
+            };
+            let revocations = state.revocations.subscribe();
+            if !access_inventory::grant_live(state, grant_id).await {
+                return Err(access_inventory::revoked_grant());
+            }
             let status =
                 state
                     .controller
@@ -10836,6 +10942,8 @@ async fn handle_authorized_request(
                     splint_id,
                     incarnation,
                     maximum_returned_bytes: authorization.maximum_returned_bytes(),
+                    grant_id,
+                    revocations,
                 }),
             });
         }
@@ -10861,12 +10969,14 @@ async fn handle_authorized_request(
                 ));
             }
             let _ = current_handle(state, splint_id, incarnation).await?;
-            let transfer = state.controller.lock().await.request_transfer(
-                connection_id,
-                splint_id,
-                incarnation,
-                authorization.authorized_grant_id(),
-            )?;
+            let transfer = {
+                let grant_id = authorization.authorized_grant_id();
+                let mut controllers = state.controller.lock().await;
+                if !access_inventory::grant_live(state, grant_id).await {
+                    return Err(access_inventory::revoked_grant());
+                }
+                controllers.request_transfer(connection_id, splint_id, incarnation, grant_id)?
+            };
             publish_control_notice(state, ControlNotice::TransferRequested(transfer));
             schedule_transfer_timeout(Arc::clone(state), transfer);
             let (lair_id, dojo_id, _) =
@@ -10946,12 +11056,14 @@ async fn handle_authorized_request(
                 }
                 refuse_while_fenced(state)?;
             }
-            let lease = state.controller.lock().await.force_transfer(
-                connection_id,
-                splint_id,
-                incarnation,
-                authorization.authorized_grant_id(),
-            )?;
+            let lease = {
+                let grant_id = authorization.authorized_grant_id();
+                let mut controllers = state.controller.lock().await;
+                if !access_inventory::grant_live(state, grant_id).await {
+                    return Err(access_inventory::revoked_grant());
+                }
+                controllers.force_transfer(connection_id, splint_id, incarnation, grant_id)?
+            };
             publish_control_status(state, splint_id, incarnation).await;
             let (lair_id, dojo_id, _) =
                 splint_containment(&*state.topology.read().await, splint_id)
@@ -11835,6 +11947,9 @@ const fn handoff_fenced(request: &Request) -> bool {
         | Request::RevokeAccess { .. }
         | Request::CancelLairAccessRequest { .. }
         | Request::CancelAllLairAccessRequests
+        | Request::ListAccess { .. }
+        | Request::RevokeAccessEntry { .. }
+        | Request::RevokeAllAccess { .. }
         | Request::PrepareDaemonHandoff { .. }
         | Request::AcknowledgeHandoffPrepare { .. } => false,
         Request::CreateLair { .. }
@@ -14179,6 +14294,8 @@ struct ControlSubscriptionContext {
     splint_id: SplintId,
     incarnation: u64,
     maximum_returned_bytes: Option<usize>,
+    grant_id: Option<u64>,
+    revocations: broadcast::Receiver<Revocation>,
 }
 
 #[allow(
@@ -14198,6 +14315,8 @@ fn spawn_control_subscription(
             splint_id,
             incarnation,
             maximum_returned_bytes,
+            grant_id,
+            mut revocations,
         } = context;
         let ControlStream {
             notices: mut stream,
@@ -14222,7 +14341,31 @@ fn spawn_control_subscription(
             let event = if let Some(event) = pending_handoff.take() {
                 Some(event)
             } else {
-                match stream.recv().await {
+                // A subscription a grant authorized ends when that grant is
+                // revoked, like a terminal subscription.
+                let received = tokio::select! {
+                    received = stream.recv() => received,
+                    revoked = revocations.recv(), if grant_id.is_some() => {
+                        match classify_revocation(&revoked, grant_id) {
+                            RevocationDecision::Continue => continue,
+                            RevocationDecision::Revoke(grant_id) => {
+                                let _ = outbound
+                                    .send(
+                                        ServerFrame::Event {
+                                            subscription_id: id,
+                                            sequence,
+                                            event: SubscriptionEvent::AccessRevoked { grant_id },
+                                        }
+                                        .into(),
+                                    )
+                                    .await;
+                                break;
+                            }
+                            RevocationDecision::Terminate => break,
+                        }
+                    }
+                };
+                match received {
                     Ok(ControlNotice::HandoffStatus { serial, phase })
                         if serial > handoff_floor =>
                     {
@@ -16871,14 +17014,16 @@ mod tests {
                 inode: Some(1),
             },
             policy_reloads: broadcast::channel(1).0,
-            automation_connections: Mutex::new(HashSet::new()),
+            automation_connections: Mutex::new(HashMap::new()),
             controller: Mutex::new(ControllerState::default()),
             control_events,
             connection_revocations: broadcast::channel(CONNECTION_LIMIT).0,
             grants: Mutex::new(GrantStore::with_ids(Arc::clone(&grant_ids))),
-            agent_access: Arc::new(agent_access::AgentAccess::unconfigured(grant_ids)),
+            agent_access: Arc::new(agent_access::AgentAccess::unconfigured(Arc::clone(
+                &grant_ids,
+            ))),
             identity_context: Arc::new(agent_access::IdentityContext::for_daemon()),
-            pending_access: pending_access::PendingAccess::default(),
+            pending_access: pending_access::PendingAccess::with_ids(grant_ids),
             consent_script: StdMutex::default(),
             revocations,
             image_transfers: Mutex::new(TransferAdmission::default()),
@@ -20144,6 +20289,8 @@ mod tests {
             splint_id: SplintId::new(),
             incarnation: 1,
             maximum_returned_bytes: None,
+            grant_id: None,
+            revocations: state.revocations.subscribe(),
         };
         let spawn = |id| {
             let (outbound, frames) = mpsc::channel(8);
@@ -20234,6 +20381,8 @@ mod tests {
                 splint_id,
                 incarnation: 1,
                 maximum_returned_bytes: None,
+                grant_id: None,
+                revocations: state.revocations.subscribe(),
             },
         ));
         let first = time::timeout(Duration::from_secs(5), frames.recv())
@@ -20309,6 +20458,8 @@ mod tests {
                 splint_id: SplintId::new(),
                 incarnation: 1,
                 maximum_returned_bytes: None,
+                grant_id: None,
+                revocations: state.revocations.subscribe(),
             },
         ));
         assert!(
@@ -23549,7 +23700,10 @@ mod tests {
                 .authorize(replacement.connection_id, replacement.id, splint_id, 4)
                 .is_ok()
         );
-        assert_eq!(controllers.release_grant(77), vec![replacement]);
+        assert_eq!(
+            controllers.release_grant(77),
+            (vec![replacement], Vec::new())
+        );
     }
 
     #[tokio::test]
@@ -25733,6 +25887,7 @@ mod tests {
         // the generation starts with.
         inner.topology = RwLock::new(topology.clone());
         inner.grants = Mutex::new(GrantStore::with_ids(Arc::clone(&ids)));
+        inner.pending_access = pending_access::PendingAccess::with_ids(Arc::clone(&ids));
         inner.agent_access = Arc::new(agent_access::AgentAccess::load(
             ids,
             Some(agent_access::StoreLocation::new(base.to_path_buf())),
@@ -26198,6 +26353,7 @@ mod tests {
                 .lock()
                 .await
                 .release_grant(look.grant_id)
+                .0
                 .is_empty()
         );
         assert_eq!(
@@ -26506,5 +26662,1081 @@ mod tests {
             };
             assert_eq!(prompt.validate(), Ok(()));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The access inventory and its revokes (ADR 0014, Plan 0053 PR 4)
+    // -----------------------------------------------------------------------
+
+    async fn commit_for(
+        state: &Arc<DaemonState>,
+        peer: &PeerIdentity,
+        lair_id: LairId,
+        access: agent_access::AccessSet,
+        duration: agent_access::GrantDuration,
+    ) -> AgentGrantCommitted {
+        commit_agent_grant(
+            state,
+            peer,
+            AgentGrantRequest {
+                lair_id,
+                access,
+                duration,
+                display_name: Some("Test agent".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    struct InventoryPage {
+        revision: u64,
+        total: u32,
+        entries: Vec<splinterm_protocol::AccessEntry>,
+        next_after: Option<splinterm_protocol::AccessEntryKey>,
+        store: splinterm_protocol::RememberedStoreStatus,
+    }
+
+    async fn inventory_page(
+        state: &DaemonState,
+        after: Option<splinterm_protocol::AccessEntryKey>,
+        max_entries: u16,
+    ) -> InventoryPage {
+        match access_inventory::list(state, after, max_entries)
+            .await
+            .unwrap()
+        {
+            Response::AccessInventory {
+                authorization_revision,
+                total_entries,
+                entries,
+                next_after,
+                remembered_store,
+                ..
+            } => InventoryPage {
+                revision: authorization_revision,
+                total: total_entries,
+                entries,
+                next_after,
+                store: remembered_store,
+            },
+            other => panic!("not an inventory: {other:?}"),
+        }
+    }
+
+    async fn inventory(state: &DaemonState) -> Vec<splinterm_protocol::AccessEntry> {
+        inventory_page(state, None, splinterm_protocol::MAX_ACCESS_INVENTORY_PAGE)
+            .await
+            .entries
+    }
+
+    async fn revision(state: &DaemonState) -> u64 {
+        state.grants.lock().await.authorization_revision()
+    }
+
+    fn entry_for<'a>(
+        entries: &'a [splinterm_protocol::AccessEntry],
+        key: &splinterm_protocol::AccessEntryKey,
+    ) -> &'a splinterm_protocol::AccessEntry {
+        entries
+            .iter()
+            .find(|entry| entry.key == *key)
+            .unwrap_or_else(|| panic!("no entry {key:?} in {entries:?}"))
+    }
+
+    fn grant_key(grant_id: u64) -> splinterm_protocol::AccessEntryKey {
+        splinterm_protocol::AccessEntryKey::Grant { grant_id }
+    }
+
+    fn remembered_key(committed: &AgentGrantCommitted) -> splinterm_protocol::AccessEntryKey {
+        splinterm_protocol::AccessEntryKey::Remembered {
+            entry_id: committed.entry_id.as_ref().unwrap().as_str().to_owned(),
+        }
+    }
+
+    fn remembered_target(
+        committed: &AgentGrantCommitted,
+    ) -> splinterm_protocol::AccessRevokeTarget {
+        splinterm_protocol::AccessRevokeTarget::Remembered {
+            entry_id: committed.entry_id.as_ref().unwrap().as_str().to_owned(),
+        }
+    }
+
+    /// Installs a policy rule for the fixture agent's exact executable.
+    async fn install_agent_policy(
+        fixture: &AgentFixture,
+        id: &str,
+        scopes: &[&str],
+        resources: serde_json::Value,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let executable = fixture.peer.persistent_executable().unwrap().clone();
+        let path = fixture.root.join(format!("{id}.json"));
+        let policy = serde_json::json!({
+            "schema": "splinterm.policy.v2",
+            "rules": [{
+                "id": id,
+                "executable": {"path": executable.path, "sha256": executable.sha256},
+                "scopes": scopes,
+                "resources": resources,
+                "limits": {"deadline_ms": 1000},
+            }],
+        });
+        std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let topology = fixture.state.topology.read().await.clone();
+        let generation = fixture
+            .state
+            .policy
+            .lock()
+            .await
+            .reload(Some(path.as_path()), &topology);
+        assert_eq!(generation.diagnostic, None);
+    }
+
+    fn store_entries(fixture: &AgentFixture) -> usize {
+        let store = fixture.base().join("splinterm/agent-access.json");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store).unwrap()).unwrap();
+        document["entries"].as_array().unwrap().len()
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one inventory shows every duration, source, and active use together"
+    )]
+    async fn the_access_inventory_lists_every_duration_source_and_policy_rule() {
+        use agent_access::{AccessLevel, GrantDuration};
+        use splinterm_protocol::{
+            AccessEntryKey, AccessEntryKind, AccessEntryState, AccessIdentityKind,
+        };
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        let remembered = fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Remembered)
+            .await
+            .unwrap();
+        // A remembered use updates last-used.
+        assert_eq!(
+            fixture.inspect(peer).await.unwrap().authorized_grant_id(),
+            Some(remembered.grant_id)
+        );
+        let session = fixture
+            .commit(
+                peer,
+                level(AccessLevel::Manage),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        let once = fixture
+            .commit(
+                peer,
+                agent_access::AccessSet::from_scopes([AccessScope::Observe]).unwrap(),
+                GrantDuration::Once,
+            )
+            .await
+            .unwrap();
+        let splint_once = state
+            .grants
+            .lock()
+            .await
+            .grant(peer, fixture.splint_id, 1, vec![AccessScope::Input])
+            .grant
+            .grant_id;
+        // The agent is connected and holds a controller the remembered grant
+        // authorized.
+        state
+            .automation_connections
+            .lock()
+            .await
+            .insert(7, peer.clone());
+        state_controller_acquire(state, 7, remembered.grant_id).await;
+        install_agent_policy(
+            &fixture,
+            "agent-reader",
+            &["topology_metadata_read"],
+            serde_json::json!([{"kind": "lair", "lair_id": fixture.lair_id}]),
+        )
+        .await;
+        // A pending request from another process.
+        let requester = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(state);
+        let pending = pending_request_id(
+            &ask(
+                state,
+                &requester,
+                lair_request(fixture.lair_id, &[AccessScope::Observe], 0),
+            )
+            .await
+            .unwrap(),
+        );
+        let _shown = next_scripted_prompt(&mut prompts).await;
+
+        let page = inventory_page(state, None, splinterm_protocol::MAX_ACCESS_INVENTORY_PAGE).await;
+        assert_eq!(
+            page.store,
+            splinterm_protocol::RememberedStoreStatus::Available
+        );
+        assert_eq!(page.total, 6);
+        assert_eq!(page.next_after, None);
+        let entries = page.entries;
+        let keys: Vec<_> = entries.iter().map(|entry| entry.key.clone()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "the inventory comes in key order");
+        for entry in &entries {
+            assert_eq!(entry.validate(), Ok(()), "{entry:?}");
+        }
+
+        let always = entry_for(&entries, &remembered_key(&remembered));
+        assert_eq!(always.kind, AccessEntryKind::Remembered);
+        assert_eq!(always.state, AccessEntryState::Active);
+        assert!(always.revocable);
+        // The durable entry ID and the runtime grant ID are distinct.
+        assert_eq!(always.grant_id, Some(remembered.grant_id));
+        assert_eq!(always.identity.kind, AccessIdentityKind::ProtectedInstall);
+        assert_eq!(always.identity.executable_path, "/usr/bin/agent");
+        assert_eq!(always.identity.display_name.as_deref(), Some("Test agent"));
+        assert_eq!(always.level, Some(AccessLevel::Look));
+        assert!(always.last_used_at_unix_seconds.is_some());
+        assert!(always.created_at_unix_seconds.is_some());
+        assert_eq!(always.expires_at_unix_seconds, None);
+        assert_eq!((always.connections, always.controllers), (1, 1));
+        assert_eq!(always.policy_rules, vec!["agent-reader".to_owned()]);
+        let workspace = always.workspace.as_ref().unwrap();
+        assert_eq!(workspace.lair_id, fixture.lair_id);
+        assert_eq!(workspace.name.as_deref(), Some("agents"));
+
+        let open = entry_for(&entries, &grant_key(session.grant_id));
+        assert_eq!(open.kind, AccessEntryKind::WorkspaceSession);
+        assert_eq!(open.identity.kind, AccessIdentityKind::ExactBuild);
+        assert_eq!(open.level, Some(AccessLevel::Manage));
+        assert_eq!((open.connections, open.controllers), (1, 0));
+        assert_eq!(open.policy_rules, vec!["agent-reader".to_owned()]);
+
+        let just_once = entry_for(&entries, &grant_key(once.grant_id));
+        assert_eq!(just_once.kind, AccessEntryKind::Once);
+        assert_eq!(just_once.identity.kind, AccessIdentityKind::Process);
+        assert_eq!(just_once.identity.pid, Some(std::process::id()));
+        assert_eq!(just_once.level, None, "a Custom set is never a level");
+        assert_eq!(just_once.scopes, vec![AccessScope::Observe]);
+        assert!(just_once.expires_at_unix_seconds.is_some());
+        assert_eq!(just_once.splint_id, None);
+
+        let splint = entry_for(&entries, &grant_key(splint_once));
+        assert_eq!(splint.kind, AccessEntryKind::Once);
+        assert_eq!(splint.splint_id, Some(fixture.splint_id));
+        assert_eq!(splint.incarnation, Some(1));
+
+        let waiting = entry_for(
+            &entries,
+            &AccessEntryKey::Pending {
+                request_id: pending,
+            },
+        );
+        assert_eq!(waiting.kind, AccessEntryKind::Pending);
+        assert_eq!(waiting.state, AccessEntryState::Prompting);
+        assert!(!waiting.revocable);
+        assert_eq!(waiting.grant_id, None);
+
+        let rule = entry_for(
+            &entries,
+            &AccessEntryKey::Policy {
+                rule_id: "agent-reader".to_owned(),
+            },
+        );
+        assert_eq!(rule.kind, AccessEntryKind::PersistentPolicy);
+        assert!(!rule.revocable, "policy rules are read-only here");
+        assert_eq!(rule.identity.kind, AccessIdentityKind::PolicyDigest);
+        assert_eq!(
+            rule.policy_scopes,
+            vec![splinterm_protocol::AutomationScope::TopologyMetadataRead]
+        );
+        assert_eq!(
+            rule.policy_resources,
+            vec![splinterm_protocol::AccessPolicyResource::Lair {
+                lair_id: fixture.lair_id
+            }]
+        );
+        assert_eq!(rule.connections, 1);
+        assert!(rule.workspace.is_none());
+
+        // A policy rule no connected agent matches is not listed.
+        state.automation_connections.lock().await.clear();
+        assert!(
+            !inventory(state)
+                .await
+                .iter()
+                .any(|entry| entry.kind == AccessEntryKind::PersistentPolicy)
+        );
+        state.pending_access.cancel_all();
+    }
+
+    #[tokio::test]
+    async fn the_inventory_pages_by_key_within_its_bounds() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        for index in 0..3 {
+            let lair_id = insert_test_lair(state, &format!("paged-{index}")).await;
+            commit_for(
+                state,
+                &fixture.peer,
+                lair_id,
+                level(AccessLevel::Look),
+                GrantDuration::WorkspaceSession,
+            )
+            .await;
+        }
+        let everything = inventory(state).await;
+        assert_eq!(everything.len(), 3);
+        let first = inventory_page(state, None, 2).await;
+        assert_eq!(first.total, 3);
+        assert_eq!(first.entries, everything[..2]);
+        assert_eq!(first.next_after.as_ref(), Some(&everything[1].key));
+        let second = inventory_page(state, first.next_after, 2).await;
+        assert_eq!(second.entries, everything[2..]);
+        assert_eq!(second.next_after, None);
+        let past = inventory_page(state, Some(everything[2].key.clone()), 2).await;
+        assert!(past.entries.is_empty());
+        assert_eq!(past.next_after, None);
+        for (after, max_entries) in [
+            (None, 0),
+            (None, splinterm_protocol::MAX_ACCESS_INVENTORY_PAGE + 1),
+            (Some(grant_key(0)), 1),
+            (
+                Some(splinterm_protocol::AccessEntryKey::Remembered {
+                    entry_id: "ra_nope".to_owned(),
+                }),
+                1,
+            ),
+        ] {
+            assert_eq!(
+                access_inventory::list(state, after, max_entries)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each duration's revoke is checked end to end in one place"
+    )]
+    async fn revoking_each_duration_ends_its_access_controllers_and_subscriptions() {
+        use agent_access::{AccessLevel, GrantDuration};
+        use splinterm_protocol::{AccessEntryKind, AccessRevokeTarget, DurableRemoval};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        for duration in [
+            GrantDuration::Once,
+            GrantDuration::WorkspaceSession,
+            GrantDuration::Remembered,
+        ] {
+            let committed = fixture
+                .commit(peer, level(AccessLevel::Look), duration)
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture.inspect(peer).await.unwrap().authorized_grant_id(),
+                Some(committed.grant_id)
+            );
+            let connection_id = 40;
+            state_controller_acquire(state, connection_id, committed.grant_id).await;
+            let mut revocations = state.revocations.subscribe();
+            let mut connection_revocations = state.connection_revocations.subscribe();
+            let before = revision(state).await;
+            let target = match duration {
+                GrantDuration::Remembered => remembered_target(&committed),
+                _ => AccessRevokeTarget::Grant {
+                    grant_id: committed.grant_id,
+                },
+            };
+            let Response::AccessEntryRevoked {
+                authorization_revision,
+                revocation,
+            } = access_inventory::revoke_entry(state, &target)
+                .await
+                .unwrap()
+            else {
+                panic!("not a revocation");
+            };
+            assert!(authorization_revision > before, "{duration:?}");
+            assert_eq!(revocation.grant_id, committed.grant_id);
+            assert_eq!(revocation.lair_id, Some(fixture.lair_id));
+            assert_eq!(
+                revocation.kind,
+                match duration {
+                    GrantDuration::Once => AccessEntryKind::Once,
+                    GrantDuration::WorkspaceSession => AccessEntryKind::WorkspaceSession,
+                    GrantDuration::Remembered => AccessEntryKind::Remembered,
+                }
+            );
+            assert_eq!(
+                revocation.durable_removal,
+                if duration == GrantDuration::Remembered {
+                    DurableRemoval::Written
+                } else {
+                    DurableRemoval::NotNeeded
+                }
+            );
+            // New requests stop, subscriptions hear it, controllers end.
+            assert_eq!(
+                fixture.inspect(peer).await.unwrap_err().code,
+                ErrorCode::Unauthorized,
+                "{duration:?}"
+            );
+            assert_eq!(
+                revocations.recv().await.unwrap().grant_id,
+                committed.grant_id
+            );
+            assert_eq!(connection_revocations.recv().await.unwrap(), connection_id);
+            assert!(state.controller.lock().await.by_id.is_empty());
+            assert!(inventory(state).await.is_empty(), "{duration:?}");
+            // Revoking it again finds nothing.
+            assert_eq!(
+                access_inventory::revoke_entry(state, &target)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::NotFound
+            );
+        }
+        assert_eq!(store_entries(&fixture), 0);
+
+        // A remembered entry is revoked by its entry ID, never by its
+        // runtime grant ID; malformed and unknown IDs are refused.
+        let remembered = fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Remembered)
+            .await
+            .unwrap();
+        assert_eq!(
+            access_inventory::revoke_entry(
+                state,
+                &AccessRevokeTarget::Grant {
+                    grant_id: remembered.grant_id
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            access_inventory::revoke_entry(
+                state,
+                &AccessRevokeTarget::Remembered {
+                    entry_id: "ra_short".to_owned()
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            access_inventory::revoke_entry(state, &AccessRevokeTarget::Grant { grant_id: 9_999 })
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        assert!(
+            fixture.inspect(peer).await.is_ok(),
+            "nothing else was revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_remembered_grant_names_the_policy_rule_that_keeps_access() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        install_agent_policy(
+            &fixture,
+            "agent-reader",
+            &["topology_metadata_read"],
+            serde_json::json!([{"kind": "lair", "lair_id": fixture.lair_id}]),
+        )
+        .await;
+        let remembered = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        let Response::AccessEntryRevoked { revocation, .. } =
+            access_inventory::revoke_entry(&fixture.state, &remembered_target(&remembered))
+                .await
+                .unwrap()
+        else {
+            panic!("not a revocation");
+        };
+        assert_eq!(revocation.policy_rules, vec!["agent-reader".to_owned()]);
+        // The rule stays in force.
+        assert!(
+            fixture
+                .inspect(&fixture.peer)
+                .await
+                .unwrap()
+                .policy_authorized()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_durable_removal_is_reported_and_listed_until_it_succeeds() {
+        use agent_access::{AccessLevel, GrantDuration};
+        use splinterm_protocol::{AccessEntryState, DurableRemoval};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let remembered = fixture
+            .commit(
+                &fixture.peer,
+                level(AccessLevel::Look),
+                GrantDuration::Remembered,
+            )
+            .await
+            .unwrap();
+        state.agent_access.inject_write_failures(1);
+        let Response::AccessEntryRevoked { revocation, .. } =
+            access_inventory::revoke_entry(state, &remembered_target(&remembered))
+                .await
+                .unwrap()
+        else {
+            panic!("not a revocation");
+        };
+        assert!(
+            matches!(revocation.durable_removal, DurableRemoval::Failed { .. }),
+            "{revocation:?}"
+        );
+        // Revoked now, but still in the store, so listed as returning after
+        // a restart and no longer revocable.
+        assert_eq!(
+            fixture.inspect(&fixture.peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(store_entries(&fixture), 1);
+        let entries = inventory(state).await;
+        let owed = entry_for(&entries, &remembered_key(&remembered));
+        assert_eq!(owed.state, AccessEntryState::RemovalPending);
+        assert!(!owed.revocable);
+        assert_eq!(owed.grant_id, None);
+        assert_eq!((owed.connections, owed.controllers), (0, 0));
+        assert_eq!(
+            access_inventory::revoke_entry(state, &remembered_target(&remembered))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        // The next write removes it.
+        let before = revision(state).await;
+        state.agent_access.flush().unwrap();
+        assert_eq!(store_entries(&fixture), 0);
+        assert!(inventory(state).await.is_empty());
+        assert!(revision(state).await > before);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the dry run, the counts, and the durable outcome are checked together"
+    )]
+    async fn revoke_all_counts_exactly_and_its_dry_run_changes_nothing() {
+        use agent_access::{AccessLevel, GrantDuration};
+        use splinterm_protocol::{AccessRevocationCounts, DurableRemoval};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        let second = insert_test_lair(state, "second").await;
+        let remembered = [
+            fixture
+                .commit(peer, level(AccessLevel::Look), GrantDuration::Remembered)
+                .await
+                .unwrap(),
+            commit_for(
+                state,
+                peer,
+                second,
+                level(AccessLevel::Manage),
+                GrantDuration::Remembered,
+            )
+            .await,
+        ];
+        let session = fixture
+            .commit(
+                peer,
+                level(AccessLevel::Look),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        let once = fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Once)
+            .await
+            .unwrap();
+        state
+            .grants
+            .lock()
+            .await
+            .grant(peer, fixture.splint_id, 1, vec![AccessScope::Observe]);
+        let requester = with_start_time(PeerIdentity::for_test());
+        let _prompts = script_prompts(state);
+        ask(
+            state,
+            &requester,
+            lair_request(second, &[AccessScope::Observe], 0),
+        )
+        .await
+        .unwrap();
+        state_controller_acquire(state, 41, session.grant_id).await;
+        let expected = AccessRevocationCounts {
+            once: 2,
+            workspace_session: 1,
+            remembered: 2,
+            pending_requests: 1,
+        };
+
+        let before = revision(state).await;
+        let Response::AllAccessRevoked {
+            authorization_revision,
+            dry_run: true,
+            counts,
+            durable_removal: DurableRemoval::NotNeeded,
+        } = access_inventory::revoke_all(state, true).await.unwrap()
+        else {
+            panic!("not a dry run");
+        };
+        assert_eq!(counts, expected);
+        assert_eq!(authorization_revision, before, "a dry run changes nothing");
+        assert_eq!(inventory(state).await.len(), 6);
+        assert!(fixture.inspect(peer).await.is_ok());
+
+        let mut revocations = state.revocations.subscribe();
+        let Response::AllAccessRevoked {
+            authorization_revision,
+            dry_run: false,
+            counts,
+            durable_removal,
+        } = access_inventory::revoke_all(state, false).await.unwrap()
+        else {
+            panic!("not a revoke");
+        };
+        assert_eq!(counts, expected);
+        assert_eq!(durable_removal, DurableRemoval::Written);
+        assert!(authorization_revision > before);
+        assert!(inventory(state).await.is_empty());
+        assert!(state.controller.lock().await.by_id.is_empty());
+        assert_eq!(store_entries(&fixture), 0);
+        assert_eq!(state.pending_access.live_count(), 0);
+        assert_eq!(
+            fixture.inspect(peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        // Two once grants (the Lair and the Splint), one while open, two
+        // remembered.
+        let mut revoked = std::collections::BTreeSet::new();
+        for _ in 0..5 {
+            let revocation = time::timeout(Duration::from_secs(5), revocations.recv())
+                .await
+                .expect("every revoked grant is broadcast")
+                .unwrap();
+            revoked.insert(revocation.grant_id);
+        }
+        for grant_id in [
+            remembered[0].grant_id,
+            remembered[1].grant_id,
+            session.grant_id,
+            once.grant_id,
+        ] {
+            assert!(revoked.contains(&grant_id));
+        }
+
+        // Nothing left: everything counts zero and nothing durable happens.
+        let Response::AllAccessRevoked {
+            counts,
+            durable_removal,
+            ..
+        } = access_inventory::revoke_all(state, false).await.unwrap()
+        else {
+            panic!("not a revoke");
+        };
+        assert_eq!(counts, AccessRevocationCounts::default());
+        assert_eq!(durable_removal, DurableRemoval::NotNeeded);
+
+        // A failed write is reported, and the grants stay revoked.
+        fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Remembered)
+            .await
+            .unwrap();
+        state.agent_access.inject_write_failures(1);
+        let Response::AllAccessRevoked {
+            counts,
+            durable_removal,
+            ..
+        } = access_inventory::revoke_all(state, false).await.unwrap()
+        else {
+            panic!("not a revoke");
+        };
+        assert_eq!(counts.remembered, 1);
+        assert!(matches!(durable_removal, DurableRemoval::Failed { .. }));
+        assert_eq!(
+            fixture.inspect(peer).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(store_entries(&fixture), 1);
+    }
+
+    #[tokio::test]
+    async fn every_grant_and_pending_change_advances_the_authorization_revision() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        let mut last = revision(state).await;
+        let mut advanced = |now: u64, what: &str| {
+            assert!(now > last, "{what}: {now} after {last}");
+            last = now;
+        };
+        let remembered = fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Remembered)
+            .await
+            .unwrap();
+        advanced(revision(state).await, "remembered commit");
+        let session = fixture
+            .commit(
+                peer,
+                level(AccessLevel::Look),
+                GrantDuration::WorkspaceSession,
+            )
+            .await
+            .unwrap();
+        advanced(revision(state).await, "session commit");
+        fixture
+            .commit(peer, level(AccessLevel::Look), GrantDuration::Once)
+            .await
+            .unwrap();
+        advanced(revision(state).await, "once commit");
+        let requester = with_start_time(PeerIdentity::for_test());
+        let mut prompts = script_prompts(state);
+        let pending = pending_request_id(
+            &ask(
+                state,
+                &requester,
+                lair_request(fixture.lair_id, &[AccessScope::Scrollback], 0),
+            )
+            .await
+            .unwrap(),
+        );
+        let _shown = next_scripted_prompt(&mut prompts).await;
+        advanced(revision(state).await, "pending request opened and shown");
+        assert_eq!(
+            inventory_page(state, None, 1).await.revision,
+            revision(state).await
+        );
+        let key = pending_access::ProcessKey::of(&requester).unwrap();
+        assert!(state.pending_access.cancel(&key, fixture.lair_id, pending));
+        advanced(revision(state).await, "pending request cancelled");
+        access_inventory::revoke_entry(
+            state,
+            &splinterm_protocol::AccessRevokeTarget::Grant {
+                grant_id: session.grant_id,
+            },
+        )
+        .await
+        .unwrap();
+        advanced(revision(state).await, "session revoke");
+        revoke_remembered_grant(state, remembered.entry_id.as_ref().unwrap())
+            .await
+            .unwrap();
+        advanced(revision(state).await, "remembered revoke");
+        end_lair_grants(state, fixture.lair_id, "Lair terminated").await;
+        advanced(revision(state).await, "workspace end");
+    }
+
+    /// The PR #188 follow-up: a request authorized just before a revoke
+    /// registers neither a controller, a transfer, nor a subscription after
+    /// it, because each checks its grant again under its own lock.
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "every registration path of one revoked grant is checked together"
+    )]
+    async fn a_request_authorized_before_a_revoke_registers_nothing_after_it() {
+        use agent_access::{AccessLevel, GrantDuration};
+        use splinterm_protocol::ControlMode;
+
+        let mut fixture = agent_fixture().await;
+        Arc::get_mut(&mut fixture.state).unwrap().pty_backend = test_pty_backend();
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        let handle = live_cat_splints(state, 1).await.remove(0);
+        let splint_id = handle.splint_id;
+        let incarnation = handle.incarnation.value();
+        let lair_id = splint_containment(&*state.topology.read().await, splint_id)
+            .unwrap()
+            .0;
+        let run = |request: Request, authorization: RequestAuthorizationContext| {
+            let state = Arc::clone(state);
+            let peer = peer.clone();
+            async move {
+                handle_authorized_request(
+                    request,
+                    &state,
+                    &peer,
+                    9,
+                    false,
+                    false,
+                    &authorization,
+                    &mut HandoffAdmission::unfenced(),
+                )
+                .await
+                .map(|handled| handled.response)
+            }
+        };
+        let acquire = Request::AcquireControl {
+            splint_id,
+            incarnation,
+            modes: vec![ControlMode::Input],
+        };
+        let attach = Request::Attach {
+            splint_id,
+            incarnation: Some(incarnation),
+            scrollback_rows: 0,
+        };
+        let subscribe_control = Request::SubscribeControl {
+            splint_id,
+            incarnation,
+        };
+        for request in [acquire.clone(), attach, subscribe_control] {
+            let session = commit_for(
+                state,
+                peer,
+                lair_id,
+                level(AccessLevel::LookAndType),
+                GrantDuration::WorkspaceSession,
+            )
+            .await;
+            let authorization = authorize_request(&request, state, peer, 0, false, false)
+                .await
+                .unwrap();
+            assert_eq!(authorization.authorized_grant_id(), Some(session.grant_id));
+            // The revoke lands between authorization and registration.
+            assert!(revoke_session_grant(state, session.grant_id).await);
+            let refused = run(request.clone(), authorization).await.unwrap_err();
+            assert_eq!(refused.code, ErrorCode::Unauthorized, "{request:?}");
+            assert!(refused.message.contains("revoked"), "{refused:?}");
+            assert!(state.controller.lock().await.by_id.is_empty());
+        }
+
+        // Without the revoke, the same path registers the controller, and a
+        // later revoke releases it.
+        let session = commit_for(
+            state,
+            peer,
+            lair_id,
+            level(AccessLevel::LookAndType),
+            GrantDuration::WorkspaceSession,
+        )
+        .await;
+        let authorization = authorize_request(&acquire, state, peer, 0, false, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            run(acquire.clone(), authorization).await.unwrap(),
+            Response::ControlGranted { .. }
+        ));
+        assert_eq!(state.controller.lock().await.by_id.len(), 1);
+        assert!(revoke_session_grant(state, session.grant_id).await);
+        assert!(state.controller.lock().await.by_id.is_empty());
+
+        // A transfer a grant requested is cancelled when the grant is
+        // revoked, so a later decision cannot hand it the controller.
+        let owner = state
+            .controller
+            .lock()
+            .await
+            .acquire(3, splint_id, incarnation, None)
+            .unwrap();
+        let session = commit_for(
+            state,
+            peer,
+            lair_id,
+            level(AccessLevel::LookAndType),
+            GrantDuration::WorkspaceSession,
+        )
+        .await;
+        let transfer = Request::RequestControlTransfer {
+            splint_id,
+            incarnation,
+            modes: vec![ControlMode::Input],
+        };
+        let authorization = authorize_request(&transfer, state, peer, 0, false, false)
+            .await
+            .unwrap();
+        let Response::ControlTransferPending { transfer_id, .. } =
+            run(transfer, authorization).await.unwrap()
+        else {
+            panic!("no pending transfer");
+        };
+        let mut connection_revocations = state.connection_revocations.subscribe();
+        assert!(revoke_session_grant(state, session.grant_id).await);
+        assert_eq!(connection_revocations.recv().await.unwrap(), 9);
+        assert!(state.controller.lock().await.transfers.is_empty());
+        assert_eq!(
+            state
+                .controller
+                .lock()
+                .await
+                .decide_transfer(3, transfer_id, ControlTransferDecision::Accept)
+                .unwrap_err()
+                .code,
+            ErrorCode::RequestNotFound
+        );
+        assert_eq!(
+            state.controller.lock().await.by_id.get(&owner.id),
+            Some(&owner),
+            "the owner keeps its controller"
+        );
+    }
+
+    /// A subscription a grant authorized ends when that grant is revoked:
+    /// terminal subscriptions already did; control subscriptions now do too.
+    #[tokio::test]
+    async fn a_revoked_grant_ends_the_control_subscriptions_it_authorized() {
+        let state = test_state(false);
+        let (outbound, mut frames) = mpsc::channel(8);
+        let _task = AbortOnDrop::new(spawn_control_subscription(
+            11,
+            state.handoff_gate.subscribe_control(&state.control_events),
+            outbound,
+            ControlSubscriptionContext {
+                state: Arc::clone(&state),
+                connection_id: 41,
+                splint_id: SplintId::new(),
+                incarnation: 1,
+                maximum_returned_bytes: None,
+                grant_id: Some(77),
+                revocations: state.revocations.subscribe(),
+            },
+        ));
+        // Another grant's revoke is not this one.
+        let _ = state.revocations.send(Revocation { grant_id: 76 });
+        let _ = state.revocations.send(Revocation { grant_id: 77 });
+        let frame = time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ServerFrame::Event {
+            subscription_id,
+            event,
+            ..
+        } = frame.frame
+        else {
+            panic!("not an event");
+        };
+        assert_eq!(subscription_id, 11);
+        assert_eq!(event, SubscriptionEvent::AccessRevoked { grant_id: 77 });
+        assert!(
+            time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .unwrap()
+                .is_none(),
+            "the subscription ended"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_inventory_and_revokes_need_the_trusted_ui_or_an_administrative_policy_scope() {
+        use agent_access::{AccessLevel, GrantDuration};
+
+        let fixture = agent_fixture().await;
+        let state = &fixture.state;
+        let peer = &fixture.peer;
+        // A Manage grant never reaches authorization administration.
+        let manage = fixture
+            .commit(peer, level(AccessLevel::Manage), GrantDuration::Remembered)
+            .await
+            .unwrap();
+        let list = Request::ListAccess {
+            after: None,
+            max_entries: 8,
+        };
+        let revoke = Request::RevokeAccessEntry {
+            target: remembered_target(&manage),
+        };
+        let revoke_all = Request::RevokeAllAccess { dry_run: true };
+        for request in [&list, &revoke, &revoke_all] {
+            assert_eq!(
+                ask(state, peer, request.clone()).await.unwrap_err().code,
+                ErrorCode::Unauthorized,
+                "{request:?}"
+            );
+        }
+        // The trusted UI may.
+        let pinned = Arc::new(consent::PinnedClientSnapshot::own_executable_for_test());
+        let ui = pinned_window_peer(&pinned);
+        for request in [&list, &revoke_all] {
+            assert!(
+                handle_request(request.clone(), state, &ui, 2, 0, true, false)
+                    .await
+                    .is_ok(),
+                "{request:?}"
+            );
+        }
+        // A policy rule: inspect on the daemon lists; revoke on the
+        // workspace revokes one entry; neither does the other's job.
+        install_agent_policy(
+            &fixture,
+            "access-admin",
+            &["authorization_inspect"],
+            serde_json::json!([{"kind": "daemon"}]),
+        )
+        .await;
+        assert!(matches!(
+            ask(state, peer, list.clone()).await.unwrap(),
+            Response::AccessInventory { .. }
+        ));
+        assert_eq!(
+            ask(state, peer, revoke.clone()).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        install_agent_policy(
+            &fixture,
+            "access-revoker",
+            &["authorization_revoke"],
+            serde_json::json!([{"kind": "lair", "lair_id": fixture.lair_id}]),
+        )
+        .await;
+        assert_eq!(
+            ask(state, peer, list).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        // Revoke all is daemon-wide, so a workspace rule does not reach it.
+        assert_eq!(
+            ask(state, peer, revoke_all).await.unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        assert!(matches!(
+            ask(state, peer, revoke).await.unwrap(),
+            Response::AccessEntryRevoked { .. }
+        ));
     }
 }

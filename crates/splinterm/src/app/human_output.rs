@@ -278,6 +278,27 @@ pub(in crate::app) fn print_response(response: Response) -> Result<()> {
         Response::LairAccessRequestsCancelled { cancelled } => {
             println!("Cancelled {cancelled} pending Lair access requests.");
         }
+        Response::AccessInventory {
+            entries,
+            total_entries,
+            ..
+        } => println!(
+            "Access inventory page: {} of {total_entries} entries.",
+            entries.len()
+        ),
+        Response::AccessEntryRevoked { revocation, .. } => {
+            println!("Access grant {} revoked.", revocation.grant_id);
+        }
+        Response::AllAccessRevoked {
+            dry_run, counts, ..
+        } => println!(
+            "{} {} remembered, {} once, {} while-open grants and {} pending requests.",
+            if dry_run { "Would revoke" } else { "Revoked" },
+            counts.remembered,
+            counts.once,
+            counts.workspace_session,
+            counts.pending_requests
+        ),
         Response::AuthorizationStatus {
             grants,
             lair_grants,

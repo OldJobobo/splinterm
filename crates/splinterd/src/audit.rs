@@ -11,6 +11,10 @@ const MAX_AUDIT_RECORDS: usize = 1024;
 const MAX_REASON_BYTES: usize = 64;
 
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "every request maps to its closed audit operation in one exhaustive table"
+)]
 pub const fn operation_for_request(request: &Request) -> AuditOperation {
     match request {
         Request::Ping => AuditOperation::Ping,
@@ -27,8 +31,14 @@ pub const fn operation_for_request(request: &Request) -> AuditOperation {
         Request::RequestLairAccess { .. }
         | Request::CancelLairAccessRequest { .. }
         | Request::CancelAllLairAccessRequests => AuditOperation::RequestLairAccess,
-        Request::AuthorizationStatus { .. } => AuditOperation::AuthorizationStatus,
-        Request::RevokeAccess { .. } => AuditOperation::RevokeAccess,
+        // The access inventory and its revokes reuse the closed public audit
+        // vocabulary (`splinterm.audit.v2`): inspecting and revoking.
+        Request::AuthorizationStatus { .. } | Request::ListAccess { .. } => {
+            AuditOperation::AuthorizationStatus
+        }
+        Request::RevokeAccess { .. }
+        | Request::RevokeAccessEntry { .. }
+        | Request::RevokeAllAccess { .. } => AuditOperation::RevokeAccess,
         Request::PrepareMutation { mutation } => match mutation {
             splinterm_protocol::MutationPreflight::CreateLair => AuditOperation::CreateLair,
             splinterm_protocol::MutationPreflight::SplitSplint { .. } => {

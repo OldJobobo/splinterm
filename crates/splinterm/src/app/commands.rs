@@ -109,10 +109,16 @@ pub(in crate::app) enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Inspect effective authority or revoke ephemeral grants.
+    /// Inspect one Splint's effective authority or revoke a Splint-scoped
+    /// once grant. `splinterm access` lists and revokes every grant.
     Authorization {
         #[command(subcommand)]
         command: AuthorizationCommand,
+    },
+    /// See which agents can reach which workspaces, and revoke their access.
+    Access {
+        #[command(subcommand)]
+        command: AccessCommand,
     },
     /// Bridge private protocol bytes over non-terminal stdin/stdout.
     Relay {
@@ -632,6 +638,40 @@ pub(in crate::app) enum AuthorizationCommand {
     Revoke {
         #[arg(value_parser = clap::value_parser!(u64).range(1..))]
         grant_id: u64,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(in crate::app) enum AccessCommand {
+    /// List every agent grant of every duration, pending requests, and the
+    /// policy rules that match a connected agent.
+    List {
+        /// Continue after this entry ID (machine output pages).
+        #[arg(long, value_name = "ID")]
+        after: Option<String>,
+        /// Entries per page, at most 64 (machine output pages).
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=64))]
+        max_entries: Option<u16>,
+    },
+    /// Revoke one grant by its ID, or every agent grant with --all.
+    Revoke {
+        /// A grant ID or a remembered entry ID (ra_…) from `access list`.
+        #[arg(
+            value_name = "ID",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
+        id: Option<String>,
+        /// Revoke every consent grant of every duration and end every pending
+        /// request. Policy rules are never touched.
+        #[arg(long)]
+        all: bool,
+        /// With --all: only report how many grants would be revoked.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm without asking.
         #[arg(long)]
         yes: bool,
     },
