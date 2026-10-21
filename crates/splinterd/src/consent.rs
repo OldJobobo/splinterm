@@ -1597,6 +1597,10 @@ fn prompt_blocking(
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("launch trusted consent client {}", executable.display()))?;
+    // Every path below reaps the client before it returns, and only then
+    // does this drop: it removes the dialog shortcut entry the client
+    // registered, even when the client was killed (`dialog_shortcut`).
+    let _shortcut = splinterd::dialog_shortcut::DialogShortcutLease::for_child(process.id());
     if !cancel.register(process.id()) {
         let _ = process.kill();
         let _ = process.wait();

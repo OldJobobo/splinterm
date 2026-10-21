@@ -2860,6 +2860,32 @@ const fn trusted_dialog_key(keysym: Keysym) -> TrustedDialogKey {
     }
 }
 
+/// The trusted dialog key one press is: the exact dialog shortcut engages;
+/// any other key with Ctrl, Alt or Super held is inert, so the chord's
+/// modifiers can never turn into an answer; otherwise the plain key counts.
+fn trusted_dialog_press(
+    keysym: Keysym,
+    modifiers: Modifiers,
+    shortcut: Option<splinterd::dialog_shortcut::DialogShortcut>,
+) -> TrustedDialogKey {
+    let character = u8::try_from(keysym.raw()).ok().map(char::from);
+    if let (Some(shortcut), Some(character)) = (shortcut, character)
+        && shortcut.matches(
+            modifiers.ctrl,
+            modifiers.alt,
+            modifiers.shift,
+            modifiers.logo,
+            character,
+        )
+    {
+        return TrustedDialogKey::Engage;
+    }
+    if modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return TrustedDialogKey::Other;
+    }
+    trusted_dialog_key(keysym)
+}
+
 /// The app ID a Window maps with. Every trusted dialog uses its own, so the
 /// desktop can map it without keyboard focus. Splinterm never asks the
 /// compositor to activate a Window.
@@ -8278,7 +8304,8 @@ impl App {
         if let Some(consent) = self.modal.trusted_consent.as_mut() {
             // Repeats never reach here (`repeat_key`), so every key seen is
             // a fresh press.
-            let input = consent.key_input(trusted_dialog_key(event.keysym), false, Instant::now());
+            let key = trusted_dialog_press(event.keysym, self.input.modifiers, consent.shortcut());
+            let input = consent.key_input(key, false, Instant::now());
             self.trusted_dialog_input(input, queue_handle);
             return;
         }
@@ -14201,6 +14228,82 @@ mod tests {
         ] {
             assert_eq!(trusted_dialog_key(keysym), key, "{keysym:?}");
         }
+    }
+
+    /// Plan 0053 item 9: only the exact dialog shortcut engages; other
+    /// Ctrl, Alt or Super chords, the chord's own `G` among them, never
+    /// answer; plain keys keep their meaning.
+    #[test]
+    fn only_the_exact_dialog_shortcut_engages_and_other_chords_are_inert() {
+        use splinterd::dialog_shortcut::DialogShortcut;
+        let chord = Some(DialogShortcut::default());
+        let held = |ctrl, alt, shift, logo| Modifiers {
+            ctrl,
+            alt,
+            shift,
+            logo,
+            ..Modifiers::default()
+        };
+        let none = Modifiers::default();
+        let ctrl_alt = held(true, true, false, false);
+        assert_eq!(
+            trusted_dialog_press(Keysym::g, ctrl_alt, chord),
+            TrustedDialogKey::Engage
+        );
+        assert_eq!(
+            trusted_dialog_press(Keysym::G, ctrl_alt, chord),
+            TrustedDialogKey::Engage,
+            "caps lock"
+        );
+        // Other Ctrl+Alt chords, and the chord's key with other modifiers,
+        // engage nothing and answer nothing.
+        for (keysym, modifiers) in [
+            (Keysym::d, ctrl_alt),
+            (Keysym::r, ctrl_alt),
+            (Keysym::Return, ctrl_alt),
+            (Keysym::Escape, ctrl_alt),
+            (Keysym::h, ctrl_alt),
+            (Keysym::G, held(true, true, true, false)),
+            (Keysym::g, held(true, true, false, true)),
+            (Keysym::g, held(true, false, false, false)),
+            (Keysym::g, held(false, true, false, false)),
+            (Keysym::g, held(false, false, false, true)),
+            (Keysym::d, held(true, false, false, false)),
+        ] {
+            assert_eq!(
+                trusted_dialog_press(keysym, modifiers, chord),
+                TrustedDialogKey::Other,
+                "{keysym:?} {modifiers:?}"
+            );
+        }
+        // Without the shortcut, the chord is just another inert chord.
+        assert_eq!(
+            trusted_dialog_press(Keysym::g, ctrl_alt, None),
+            TrustedDialogKey::Other
+        );
+        // Plain keys, and Shift, keep their meaning.
+        assert_eq!(
+            trusted_dialog_press(Keysym::g, none, chord),
+            TrustedDialogKey::G
+        );
+        assert_eq!(
+            trusted_dialog_press(Keysym::G, held(false, false, true, false), chord),
+            TrustedDialogKey::G
+        );
+        assert_eq!(
+            trusted_dialog_press(Keysym::Escape, none, None),
+            TrustedDialogKey::Escape
+        );
+        // A configured chord engages only itself.
+        let super_seven = DialogShortcut::parse_setting("super+7").unwrap();
+        assert_eq!(
+            trusted_dialog_press(Keysym::_7, held(false, false, false, true), super_seven),
+            TrustedDialogKey::Engage
+        );
+        assert_eq!(
+            trusted_dialog_press(Keysym::g, ctrl_alt, super_seven),
+            TrustedDialogKey::Other
+        );
     }
 
     #[test]

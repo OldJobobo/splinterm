@@ -454,15 +454,24 @@ async fn run_configured_command(
                 launch(name, cwd, splint_id, new, command, config, factory).await
             }
         }
-        Command::Consent => tokio::task::spawn_blocking(run_consent_client)
-            .await
-            .context("trusted consent task failed")?,
-        Command::UpgradeDialog => tokio::task::spawn_blocking(run_upgrade_dialog_client)
-            .await
-            .context("trusted upgrade dialog task failed")?,
-        Command::RestartDialog => tokio::task::spawn_blocking(run_restart_dialog_client)
-            .await
-            .context("trusted restart dialog task failed")?,
+        Command::Consent => {
+            let shortcut = config.dialog_shortcut;
+            tokio::task::spawn_blocking(move || run_consent_client(shortcut))
+                .await
+                .context("trusted consent task failed")?
+        }
+        Command::UpgradeDialog => {
+            let shortcut = config.dialog_shortcut;
+            tokio::task::spawn_blocking(move || run_upgrade_dialog_client(shortcut))
+                .await
+                .context("trusted upgrade dialog task failed")?
+        }
+        Command::RestartDialog => {
+            let shortcut = config.dialog_shortcut;
+            tokio::task::spawn_blocking(move || run_restart_dialog_client(shortcut))
+                .await
+                .context("trusted restart dialog task failed")?
+        }
         Command::Preset {
             command:
                 PresetCommand::Run {

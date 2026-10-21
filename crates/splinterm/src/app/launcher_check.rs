@@ -47,13 +47,14 @@ use std::{
 use anyhow::{Result, anyhow};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use splinterd::dialog_shortcut::DialogShortcut;
 use splinterm::automation::{Connection, protocol_error, socket_path};
 use splinterm::{TrustedConsentUi, WindowOptions};
 use splinterm_protocol::{ErrorCode, HandoffReport};
 use tokio::net::UnixStream;
 
 use super::{
-    consent::{static_dialog_snapshot, trusted_label},
+    consent::{keyboard_hint, static_dialog_snapshot, trusted_label},
     local_service::user_systemctl_output,
     upgrade::reason_line,
     upgrade_dialog::{
@@ -557,7 +558,8 @@ pub(in crate::app) fn question_text(question: &RestartQuestion) -> Vec<String> {
     lines
 }
 
-/// The whole dialog: the question, the deadline, and the actions.
+/// The whole dialog: the question, the deadline, and the actions. The dialog
+/// child adds the keyboard hint, which names its dialog shortcut.
 pub(in crate::app) fn dialog_lines(question: &RestartQuestion) -> Vec<String> {
     let mut lines = question_text(question);
     lines.push(format!(
@@ -571,7 +573,6 @@ pub(in crate::app) fn dialog_lines(question: &RestartQuestion) -> Vec<String> {
     ));
     lines
         .push("Click the red left area for Not now or the green right area to restart.".to_owned());
-    lines.push("Click inside this dialog first to answer with the keyboard.".to_owned());
     lines
 }
 
@@ -659,12 +660,17 @@ impl DialogPrompt for RestartDialogPrompt {
         Ok(())
     }
 
-    fn window_options(&self, decision: std_mpsc::Sender<bool>) -> WindowOptions {
-        let lines = self
+    fn window_options(
+        &self,
+        decision: std_mpsc::Sender<bool>,
+        shortcut: Option<DialogShortcut>,
+    ) -> WindowOptions {
+        let mut lines = self
             .lines
             .iter()
             .map(|line| trusted_label(line, MAX_DIALOG_COLUMNS))
             .collect::<Vec<_>>();
+        lines.push(keyboard_hint("dialog", shortcut));
         let rows = dialog_rows(lines.len());
         let snapshot = static_dialog_snapshot(
             lines,
@@ -677,7 +683,7 @@ impl DialogPrompt for RestartDialogPrompt {
         let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
         WindowOptions {
             snapshot: Some(snapshot),
-            trusted_consent: Some(TrustedConsentUi::restart(decision)),
+            trusted_consent: Some(TrustedConsentUi::restart(decision).with_shortcut(shortcut)),
             initial_columns: columns,
             initial_rows: rows,
             ..WindowOptions::default()
@@ -687,8 +693,8 @@ impl DialogPrompt for RestartDialogPrompt {
 
 /// The hidden `restart-dialog` child: shows one restart question and
 /// answers on stdout. Closing the Window answers "Not now".
-pub(in crate::app) fn run_restart_dialog_client() -> Result<()> {
-    run_dialog_client::<RestartDialogPrompt>()
+pub(in crate::app) fn run_restart_dialog_client(shortcut: Option<DialogShortcut>) -> Result<()> {
+    run_dialog_client::<RestartDialogPrompt>(shortcut)
 }
 
 /// Runs the check and exits with its [`LauncherExit`].
@@ -1344,7 +1350,6 @@ mod tests {
             "Not now opens nothing and changes nothing.",
             "no answer within 120 seconds, means Not now",
             "[D / Esc / Enter  Not now]     [R  Restart now (ends 4 shells)]",
-            "Click inside this dialog first to answer with the keyboard.",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
         }
@@ -1391,9 +1396,35 @@ mod tests {
         };
         prompt.validate().unwrap();
         let (decision, _receiver) = std_mpsc::channel();
-        let options = prompt.window_options(decision);
+        let shortcut = Some(DialogShortcut::default());
+        let options = prompt.window_options(decision, shortcut);
         let snapshot = options.snapshot.as_ref().unwrap();
         assert_eq!(usize::from(options.initial_rows), snapshot.rows);
+        // The child adds the keyboard hint and engages by the same chord.
+        assert_eq!(
+            options
+                .trusted_consent
+                .as_ref()
+                .and_then(TrustedConsentUi::shortcut),
+            shortcut
+        );
+        let shown = snapshot
+            .visible_rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| cell.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            shown.contains(
+                "Click inside this dialog or press Ctrl+Alt+G first to answer with the keyboard."
+            ),
+            "{shown}"
+        );
         assert_eq!(snapshot.title, "Upgrade question");
     }
 

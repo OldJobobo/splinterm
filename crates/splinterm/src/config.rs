@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use splinterd::dialog_shortcut::DialogShortcut;
 use splinterm_protocol::{LaunchDirectory, MAX_COLUMNS, MAX_ROWS};
 
 use crate::{
@@ -108,6 +109,10 @@ pub struct AppConfig {
     /// that recommends `splinterm integration omarchy enable`
     /// (`[main] omarchy-integration-hint`).
     pub omarchy_integration_hint: bool,
+    /// The chord that engages a waiting trusted dialog's keyboard, which
+    /// Splinterm also binds in Hyprland while a dialog waits; `None` turns
+    /// it off (`[integration] dialog-shortcut`, default `ctrl+alt+g`).
+    pub dialog_shortcut: Option<DialogShortcut>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -230,6 +235,7 @@ impl Default for AppConfig {
             allow_unrestricted_commands: false,
             explorer_agent_status: true,
             omarchy_integration_hint: true,
+            dialog_shortcut: Some(DialogShortcut::default()),
         }
     }
 }
@@ -978,6 +984,7 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
                     | "multiplexer"
                     | "clipboard"
                     | "explorer"
+                    | "integration"
             ) {
                 diagnostics.push(format!(
                     "line {}: unsupported section [{section}]",
@@ -1177,6 +1184,13 @@ fn parse_with_base(text: &str, config_dir: &Path) -> Result<ConfigLoad> {
             }
             "main.omarchy-integration-hint" | "omarchy-integration-hint" => {
                 config.omarchy_integration_hint = parse_bool(value, index)?;
+                false
+            }
+            "integration.dialog-shortcut" => {
+                config.dialog_shortcut =
+                    DialogShortcut::parse_setting(value).map_err(|reason| {
+                        anyhow::anyhow!("line {}: dialog-shortcut {value:?}: {reason}", index + 1)
+                    })?;
                 false
             }
             "multiplexer.frame-title" => {
@@ -2508,6 +2522,41 @@ mod tests {
         let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
         assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
         assert!(shipped.config.omarchy_integration_hint);
+    }
+
+    #[test]
+    fn the_dialog_shortcut_defaults_to_ctrl_alt_g_and_can_change_or_turn_off() {
+        let default = Some(DialogShortcut::default());
+        assert_eq!(AppConfig::default().dialog_shortcut, default);
+        let loaded = parse("[integration]\ndialog-shortcut=Ctrl+Alt+G\n").unwrap();
+        assert_eq!(loaded.config.dialog_shortcut, default);
+        assert_eq!(loaded.diagnostics, Vec::<String>::new());
+        let changed = parse("[integration]\ndialog-shortcut=super+alt+7\n").unwrap();
+        assert_eq!(
+            changed.config.dialog_shortcut.map(DialogShortcut::label),
+            Some("Alt+Super+7".to_owned())
+        );
+        for off in ["none", "NONE", " none "] {
+            let loaded = parse(&format!("[integration]\ndialog-shortcut={off}\n")).unwrap();
+            assert_eq!(loaded.config.dialog_shortcut, None, "{off:?}");
+        }
+        for invalid in ["g", "shift+g", "ctrl+alt+enter", "ctrl+alt+", ""] {
+            let error = parse(&format!("[integration]\ndialog-shortcut={invalid}\n"))
+                .expect_err(invalid)
+                .to_string();
+            assert!(error.contains("line 2: dialog-shortcut"), "{error}");
+        }
+        assert_eq!(
+            parse("[integration]\nunknown=x\n")
+                .unwrap()
+                .diagnostics
+                .len(),
+            1,
+            "unknown keys in the section are still reported"
+        );
+        let shipped = parse(include_str!("../../../config/splinterm/config.ini")).unwrap();
+        assert!(shipped.diagnostics.is_empty(), "{:?}", shipped.diagnostics);
+        assert_eq!(shipped.config.dialog_shortcut, default);
     }
 
     #[test]

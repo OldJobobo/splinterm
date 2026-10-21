@@ -418,6 +418,39 @@ Closing a controlling Window releases its connection-owned lease. A later client
 must acquire control explicitly; observation never silently becomes input
 authority.
 
+## Trusted dialogs
+
+Three small trusted dialogs ask questions that only a person may answer: the
+access prompt for an agent ([Automation](automation.md#the-prompt)), the
+`splinterm upgrade --now` question ([CLI](cli.md)), and the desktop launcher's
+restart question ([Packaging](packaging.md)). Each appears without taking
+keyboard focus, so typing meant for another Window never reaches it.
+
+A dialog's keyboard stays inert until you engage it, even if your desktop
+gives it focus:
+
+- **Click inside it**, or
+- press **Ctrl+Alt+G**. Under Omarchy with `splinterm integration omarchy
+  enable` (or its dialog rule in your own Hyprland file; see
+  [Integrations](integrations.md)), Ctrl+Alt+G works from any Window while a
+  dialog waits: it focuses the waiting dialog and engages it. Anywhere else it
+  engages a dialog that already has keyboard focus.
+
+Ctrl+Alt+G never answers. After either one, keys and the proceed or grant
+click count only about 600 ms later, and then `G` grants or proceeds (`R`
+restarts in the launcher's question) while `D`, `Escape`, or `Enter` deny or
+cancel. Held or repeating keys never count, and no key answers while Ctrl,
+Alt, or Super is held. The dialog's last line names the shortcut.
+
+Splinterm binds Ctrl+Alt+G in Hyprland only while a dialog waits and removes
+the binding when the last one closes, however it closes, so applications keep
+the chord the rest of the time. The binding also lets the chord through to the
+focused application whenever no dialog is on screen. When your own Hyprland
+configuration already binds Ctrl+Alt+G, Splinterm leaves it alone and binds
+nothing; the chord then still engages a dialog that has focus. Choose another
+chord, or turn it off, with
+[`[integration] dialog-shortcut`](configuration.md#supported-keys).
+
 ## Exit, restore, and relaunch
 
 A Splint has a stable ID across process exits. Each new process under that leaf

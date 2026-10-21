@@ -8,6 +8,7 @@ use tokio::sync::{
     watch::Sender as WatchSender,
 };
 
+use splinterd::dialog_shortcut::DialogShortcut;
 use splinterm_automation_client::ImageContentLeaseSet;
 use splinterm_core::{LayoutNode, SplintId};
 use splinterm_protocol::{ConsentDecision, GrantDuration, MAX_COLUMNS, MAX_ROWS, TerminalSnapshot};
@@ -69,6 +70,9 @@ pub struct TrustedConsentUi {
     /// since when they arm. The access consent dialog keeps its own.
     engagement: Engagement,
     access: Option<AccessConsentDialog>,
+    /// The chord that engages the keyboard as a click inside does, or
+    /// `None` when the dialog shortcut is off.
+    shortcut: Option<DialogShortcut>,
 }
 
 impl TrustedConsentUi {
@@ -95,6 +99,7 @@ impl TrustedConsentUi {
                 duration_rows: view.duration_rows,
                 render,
             }),
+            shortcut: None,
         };
         (dialog, view.snapshot)
     }
@@ -108,6 +113,7 @@ impl TrustedConsentUi {
             kind: TrustedDialogKind::Upgrade,
             engagement: Engagement::default(),
             access: None,
+            shortcut: None,
         }
     }
 
@@ -120,7 +126,23 @@ impl TrustedConsentUi {
             kind: TrustedDialogKind::Restart,
             engagement: Engagement::default(),
             access: None,
+            shortcut: None,
         }
+    }
+
+    /// The dialog shortcut (`[integration] dialog-shortcut`): pressed while
+    /// the dialog has keyboard focus, it engages the keyboard as a click
+    /// inside does. Without this, only a click engages.
+    #[must_use]
+    pub fn with_shortcut(mut self, shortcut: Option<DialogShortcut>) -> Self {
+        self.shortcut = shortcut;
+        self
+    }
+
+    /// The chord that engages this dialog, if any.
+    #[must_use]
+    pub const fn shortcut(&self) -> Option<DialogShortcut> {
+        self.shortcut
     }
 
     /// Records keyboard focus. Focus never engages a dialog; an engaged one
@@ -132,8 +154,9 @@ impl TrustedConsentUi {
         }
     }
 
-    /// A pointer press inside the dialog: the first one engages its
-    /// keyboard, which then arms. Nothing else does.
+    /// A pointer press inside the dialog, or the dialog shortcut while it
+    /// has focus: the first one engages its keyboard, which then arms.
+    /// Nothing else does.
     pub(crate) fn engage(&mut self, now: Instant) {
         self.engagement.engage(now);
         if let Some(access) = self.access.as_mut() {
@@ -163,6 +186,14 @@ impl TrustedConsentUi {
         repeat: bool,
         now: Instant,
     ) -> Option<TrustedInput> {
+        if key == TrustedDialogKey::Engage {
+            // The dialog shortcut engages as a click inside does and never
+            // answers; the arming delay then applies as usual.
+            if !repeat {
+                self.engage(now);
+            }
+            return None;
+        }
         if let Some(access) = &self.access {
             let action = access.choice.key(key, repeat, now);
             return self.consent_input(action, now);
@@ -494,5 +525,91 @@ mod tests {
             dialog.answer(false);
             assert!(!answers.try_recv().unwrap());
         }
+    }
+
+    fn consent_dialog() -> TrustedConsentUi {
+        let (decision, _answers) = std::sync::mpsc::channel();
+        TrustedConsentUi::access_consent(
+            decision,
+            vec![(GrantDuration::Once, true)],
+            Box::new(|_| AccessConsentView {
+                snapshot: snapshot(),
+                duration_rows: vec![(4, 0)],
+            }),
+        )
+        .0
+        .with_shortcut(Some(DialogShortcut::default()))
+    }
+
+    /// Plan 0053 item 9: the dialog shortcut engages a focused dialog as a
+    /// click does but never answers; the arming delay then applies, and
+    /// stray keys before it stay inert.
+    #[test]
+    fn the_dialog_shortcut_engages_without_answering_then_arms() {
+        let upgrade = |decision| {
+            TrustedConsentUi::upgrade(decision).with_shortcut(Some(DialogShortcut::default()))
+        };
+        let restart = |decision| {
+            TrustedConsentUi::restart(decision).with_shortcut(Some(DialogShortcut::default()))
+        };
+        let builds: [&dyn Fn() -> TrustedConsentUi; 3] = [
+            &consent_dialog,
+            &|| upgrade(std::sync::mpsc::channel().0),
+            &|| restart(std::sync::mpsc::channel().0),
+        ];
+        for build in builds {
+            let mut dialog = build();
+            assert_eq!(dialog.shortcut(), Some(DialogShortcut::default()));
+            let appeared = Instant::now();
+            dialog.note_focus(appeared);
+            let later = appeared + Duration::from_secs(30);
+            // Stray keys before engagement are still ignored.
+            for key in [
+                TrustedDialogKey::G,
+                TrustedDialogKey::R,
+                TrustedDialogKey::D,
+                TrustedDialogKey::Enter,
+                TrustedDialogKey::Other,
+            ] {
+                assert_eq!(dialog.key_input(key, false, later), None, "{key:?}");
+            }
+            assert_eq!(dialog.action_area_input(true, later), None);
+            // A repeated chord is not a press and engages nothing.
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Engage, true, later),
+                None
+            );
+            assert_eq!(dialog.action_area_input(true, later), None);
+            // The chord engages and answers nothing.
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Engage, false, later),
+                None
+            );
+            // Arming applies after it, exactly as after a click.
+            let early = later + Duration::from_millis(599);
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Escape, false, early),
+                None
+            );
+            assert_eq!(dialog.action_area_input(true, early), None);
+            // Pressing the chord again, even once armed, still answers nothing
+            // and does not restart the delay.
+            let armed = later + UPGRADE_ARMING_DELAY;
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Engage, false, armed),
+                None
+            );
+            assert_eq!(
+                dialog.key_input(TrustedDialogKey::Escape, false, armed),
+                Some(TrustedInput::Answer(false))
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialog_built_without_the_shortcut_has_none() {
+        let (decision, _answers) = std::sync::mpsc::channel();
+        assert_eq!(TrustedConsentUi::upgrade(decision).shortcut(), None);
+        assert_eq!(consent_dialog().with_shortcut(None).shortcut(), None);
     }
 }
