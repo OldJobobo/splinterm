@@ -308,16 +308,19 @@ pub(in crate::app) fn run_dialog_client<P: DialogPrompt>(
         bail!("the command that asked has exited");
     }
     let (decision, receiver) = std_mpsc::channel();
-    run_trusted_dialog_window(prompt.window_options(decision, shortcut))?;
+    let registration = run_trusted_dialog_window(prompt.window_options(decision, shortcut))?;
     let proceed = receiver.try_recv().unwrap_or(false);
-    write_private_frame_bounded(
+    let written = write_private_frame_bounded(
         &mut io::stdout().lock(),
         &DialogReply {
             capability: prompt.capability().to_vec(),
             proceed,
         },
         MAX_UPGRADE_DIALOG_FRAME_BYTES,
-    )
+    );
+    // The answer goes first; the shortcut registration ends after it.
+    registration.finish();
+    written
 }
 
 /// Whether `parent` (from `getppid`) is the command that sent the prompt.
@@ -339,6 +342,7 @@ struct DialogChild<H: Hyprctl = SystemHyprctl> {
 
 impl DialogChild {
     fn new(child: Child) -> Self {
+        asking().push(child.id());
         let shortcut = DialogShortcutLease::for_child(child.id());
         Self {
             child: Some(child),
@@ -375,7 +379,10 @@ impl<H: Hyprctl + Send + 'static> DialogChild<H> {
                     let _ = child.kill();
                     let _ = child.wait();
                 }
-                drop(shortcut);
+                if let Some(shortcut) = shortcut {
+                    stop_asking(shortcut.pid());
+                    drop(shortcut);
+                }
             });
     }
 }
@@ -386,8 +393,58 @@ impl<H: Hyprctl> Drop for DialogChild<H> {
             let _ = child.kill();
             let _ = child.wait();
         }
-        drop(self.shortcut.take());
+        if let Some(shortcut) = self.shortcut.take() {
+            stop_asking(shortcut.pid());
+            drop(shortcut);
+        }
     }
+}
+
+/// Dialog children this command is asking now, by PID, so a termination
+/// signal can remove their dialog shortcut entries before the command exits.
+static ASKING: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn asking() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    ASKING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Forgets a dialog child once its entry is being removed by its lease.
+fn stop_asking(pid: u32) {
+    asking().retain(|asked| *asked != pid);
+}
+
+/// Ctrl+C or `SIGTERM` would otherwise end this command before a dialog
+/// child's guard runs: the dialog dies with it (`PR_SET_PDEATHSIG`) and its
+/// dialog shortcut entry stays behind. From the first dialog on, for the
+/// rest of the process, either signal first removes the entries of the
+/// dialogs being asked and then exits as the signal would (128 + signal).
+fn install_dialog_signal_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::signal::unix::{SignalKind, signal};
+
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let mut terminate = signal(SignalKind::terminate()).ok();
+    let mut interrupt = signal(SignalKind::interrupt()).ok();
+    if terminate.is_none() && interrupt.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let signal_number = tokio::select! {
+            Some(()) = async { terminate.as_mut()?.recv().await } => libc::SIGTERM,
+            Some(()) = async { interrupt.as_mut()?.recv().await } => libc::SIGINT,
+            else => return,
+        };
+        let pids = asking().clone();
+        for pid in pids {
+            splinterd::dialog_shortcut::unregister_with(&SystemHyprctl, pid);
+        }
+        std::process::exit(128 + signal_number);
+    });
 }
 
 /// A fresh random capability for one dialog prompt.
@@ -432,6 +489,7 @@ pub(in crate::app) async fn ask_dialog_child<P: DialogPrompt>(
     budget: Duration,
 ) -> Result<bool> {
     request.validate()?;
+    install_dialog_signal_cleanup();
     let capability = request.capability().to_vec();
     let (mut parent, child) = UnixStream::pair().context("create private dialog socket")?;
     let child_read = child
@@ -726,6 +784,18 @@ mod tests {
                 || std::fs::read_to_string(format!("/proc/{pid}/stat"))
                     .is_ok_and(|stat| !stat.contains("(sleep)"))
         );
+    }
+
+    /// A termination signal removes the entries of the dialogs being asked,
+    /// and only of those.
+    #[test]
+    fn a_dialog_is_listed_for_signal_cleanup_until_it_is_reaped() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let guard = DialogChild::new(child);
+        assert!(asking().contains(&pid));
+        drop(guard);
+        assert!(!asking().contains(&pid));
     }
 
     #[test]

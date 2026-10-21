@@ -442,13 +442,14 @@ restarts in the launcher's question) while `D`, `Escape`, or `Enter` deny or
 cancel. Held or repeating keys never count, and no key answers while Ctrl,
 Alt, or Super is held. The dialog's last line names the shortcut.
 
-Splinterm binds Ctrl+Alt+G in Hyprland only while a dialog waits and removes
-the binding when the last one closes, however it closes, so applications keep
-the chord the rest of the time. The binding also lets the chord through to the
-focused application whenever no dialog is on screen. When your own Hyprland
-configuration already binds Ctrl+Alt+G, Splinterm leaves it alone and binds
-nothing; the chord then still engages a dialog that has focus. Choose another
-chord, or turn it off, with
+Splinterm enables its Ctrl+Alt+G binding in Hyprland only while a dialog waits
+and disables it when the last one closes, however it closes, so applications
+keep the chord the rest of the time. Even while enabled, the binding lets the
+chord through to the focused application whenever no dialog is on screen, and
+it only ever focuses a Splinterm trusted dialog. When your own Hyprland
+configuration already binds Ctrl+Alt+G, in any submap, Splinterm leaves it
+alone and binds nothing; the chord then still engages a dialog that has focus.
+Choose another Ctrl+Alt chord, or turn the shortcut off, with
 [`[integration] dialog-shortcut`](configuration.md#supported-keys).
 
 ## Exit, restore, and relaunch

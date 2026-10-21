@@ -129,7 +129,7 @@ substitution, but do not sandbox hostile processes running as your own user.
 | `multiplexer.divider-style` | `line`, `frame`, or `none` pane chrome | line |
 | `multiplexer.frame-title` | top-frame title source: `splint` or `none`; inert outside frame style | splint |
 | `explorer.agent-status` | show explicitly reported agent status in the Explorer, on Dojo tabs, and in navigation accessibility; `no` hides it all; configuration reload applies it | yes |
-| `integration.dialog-shortcut` | the chord that engages a waiting trusted dialog's keyboard, as a click inside does, without answering it: `ctrl`, `alt`, or `super` (at least one, no `shift`) with one letter or digit, joined by `+`, or `none` to turn it off. When Hyprland maps dialogs without focus (the Omarchy integration), Splinterm also binds it while a dialog waits, so it reaches the dialog from any Window ([Trusted dialogs](usage.md#trusted-dialogs)); read when a dialog starts | ctrl+alt+g |
+| `integration.dialog-shortcut` | the chord that engages a waiting trusted dialog's keyboard, as a click inside does, without answering it: `ctrl+alt+` and one letter or digit (modifiers in any order; no `shift`, and no Super chords), or `none` to turn it off. When Hyprland maps dialogs without focus (the Omarchy integration), Splinterm also binds it while a dialog waits, so it reaches the dialog from any Window ([Trusted dialogs](usage.md#trusted-dialogs)); read when a dialog starts | ctrl+alt+g |
 
 The protocol grid is bounded at 480×128. The shipped 14 px output-scale profile
 uses the complete natural grid on validated 2560×1440 and 3840×2160 surfaces.

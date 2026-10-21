@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use splinterd::dialog_shortcut::{DialogShortcut, DialogShortcutLease};
+use splinterd::dialog_shortcut::{BackgroundRegistration, DialogShortcut};
 use splinterm::{AccessConsentView, TrustedConsentUi, WindowOptions, run_window};
 use splinterm_protocol::{
     AccessLevel, ActiveScreen, CellAttributes, ColorSource, ConsentDecision, ConsentPrompt,
@@ -560,23 +560,27 @@ pub(in crate::app) fn keyboard_hint(noun: &str, shortcut: Option<DialogShortcut>
     )
 }
 
-/// Shows a trusted dialog Window.
+/// Shows a trusted dialog Window and returns once it closes.
 ///
 /// When Hyprland maps trusted dialogs without keyboard focus (the Omarchy
 /// integration's module, or the same rule in the person's own file), the
-/// dialog shortcut is also registered with Hyprland while the Window is
-/// open, so it reaches the dialog from any Window
-/// (`splinterd::dialog_shortcut`). The registration goes when the Window
-/// closes, and the process that reaps this one removes it again. Otherwise
-/// the shortcut works only inside the dialog once it has focus.
-pub(in crate::app) fn run_trusted_dialog_window(options: WindowOptions) -> Result<()> {
+/// dialog shortcut is also registered with Hyprland, in the background while
+/// the Window maps, so it reaches the dialog from any Window
+/// (`splinterd::dialog_shortcut`). The caller writes its answer first and
+/// then finishes the returned registration; the process that reaps this one
+/// removes it again. Otherwise the shortcut works only inside the dialog
+/// once it has focus.
+pub(in crate::app) fn run_trusted_dialog_window(
+    options: WindowOptions,
+) -> Result<BackgroundRegistration> {
     let shortcut = options
         .trusted_consent
         .as_ref()
         .and_then(TrustedConsentUi::shortcut)
         .filter(|_| global_dialog_shortcut());
-    let _shortcut = DialogShortcutLease::register(shortcut);
-    run_window(options)
+    let registration = BackgroundRegistration::start(shortcut);
+    run_window(options)?;
+    Ok(registration)
 }
 
 /// Whether trusted dialogs map without keyboard focus here, so they need the
@@ -603,7 +607,7 @@ pub(in crate::app) fn run_consent_client(shortcut: Option<DialogShortcut>) -> Re
     let trusted_consent = trusted_consent.with_shortcut(shortcut);
     let columns = u16::try_from(snapshot.columns).unwrap_or(u16::MAX);
     let rows = u16::try_from(snapshot.rows).unwrap_or(u16::MAX);
-    run_trusted_dialog_window(WindowOptions {
+    let registration = run_trusted_dialog_window(WindowOptions {
         snapshot: Some(snapshot),
         trusted_consent: Some(trusted_consent),
         initial_columns: columns,
@@ -612,13 +616,16 @@ pub(in crate::app) fn run_consent_client(shortcut: Option<DialogShortcut>) -> Re
     })?;
     // Closing the Window, or any way out without an answer, denies.
     let decision = receiver.try_recv().unwrap_or(ConsentDecision::Deny);
-    write_private_frame(
+    let written = write_private_frame(
         &mut io::stdout().lock(),
         &ConsentReply {
             capability,
             decision,
         },
-    )
+    );
+    // The answer goes first; the shortcut registration ends after it.
+    registration.finish();
+    written
 }
 
 #[cfg(test)]
@@ -650,8 +657,11 @@ mod tests {
             "Click inside this prompt or press Ctrl+Alt+G first to answer with the keyboard."
         );
         assert_eq!(
-            keyboard_hint("dialog", DialogShortcut::parse_setting("super+7").unwrap()),
-            "Click inside this dialog or press Super+7 first to answer with the keyboard."
+            keyboard_hint(
+                "dialog",
+                DialogShortcut::parse_setting("ctrl+alt+7").unwrap()
+            ),
+            "Click inside this dialog or press Ctrl+Alt+7 first to answer with the keyboard."
         );
         assert_eq!(
             keyboard_hint("dialog", None),

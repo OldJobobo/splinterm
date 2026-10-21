@@ -34,7 +34,7 @@ pub const APP_ID: &str = "com.oldjobobo.splinterm";
 /// The Wayland app ID of every trusted dialog (access consent, upgrade,
 /// restart), so the desktop can map them without keyboard focus: the Omarchy
 /// integration's Hyprland module gives it `no_initial_focus`.
-pub const TRUSTED_DIALOG_APP_ID: &str = "com.oldjobobo.splinterm.trusted-dialog";
+pub const TRUSTED_DIALOG_APP_ID: &str = splinterd::dialog_shortcut::TRUSTED_DIALOG_APP_ID;
 pub const DEFAULT_FONT: &str = "monospace:style=Regular";
 pub const STARTUP_FONT_FALLBACK: &str = "JetBrains Mono Nerd Font:style=Regular";
 
@@ -2531,16 +2531,25 @@ mod tests {
         let loaded = parse("[integration]\ndialog-shortcut=Ctrl+Alt+G\n").unwrap();
         assert_eq!(loaded.config.dialog_shortcut, default);
         assert_eq!(loaded.diagnostics, Vec::<String>::new());
-        let changed = parse("[integration]\ndialog-shortcut=super+alt+7\n").unwrap();
+        let changed = parse("[integration]\ndialog-shortcut=alt+ctrl+7\n").unwrap();
         assert_eq!(
             changed.config.dialog_shortcut.map(DialogShortcut::label),
-            Some("Alt+Super+7".to_owned())
+            Some("Ctrl+Alt+7".to_owned())
         );
         for off in ["none", "NONE", " none "] {
             let loaded = parse(&format!("[integration]\ndialog-shortcut={off}\n")).unwrap();
             assert_eq!(loaded.config.dialog_shortcut, None, "{off:?}");
         }
-        for invalid in ["g", "shift+g", "ctrl+alt+enter", "ctrl+alt+", ""] {
+        for invalid in [
+            "g",
+            "ctrl+c",
+            "alt+g",
+            "super+alt+g",
+            "ctrl+alt+shift+g",
+            "ctrl+alt+enter",
+            "ctrl+alt+",
+            "",
+        ] {
             let error = parse(&format!("[integration]\ndialog-shortcut={invalid}\n"))
                 .expect_err(invalid)
                 .to_string();

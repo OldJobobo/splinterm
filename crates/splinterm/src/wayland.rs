@@ -14295,13 +14295,17 @@ mod tests {
             TrustedDialogKey::Escape
         );
         // A configured chord engages only itself.
-        let super_seven = DialogShortcut::parse_setting("super+7").unwrap();
+        let seven = DialogShortcut::parse_setting("ctrl+alt+7").unwrap();
         assert_eq!(
-            trusted_dialog_press(Keysym::_7, held(false, false, false, true), super_seven),
+            trusted_dialog_press(Keysym::_7, ctrl_alt, seven),
             TrustedDialogKey::Engage
         );
         assert_eq!(
-            trusted_dialog_press(Keysym::g, ctrl_alt, super_seven),
+            trusted_dialog_press(Keysym::g, ctrl_alt, seven),
+            TrustedDialogKey::Other
+        );
+        assert_eq!(
+            trusted_dialog_press(Keysym::_7, held(true, true, false, true), seven),
             TrustedDialogKey::Other
         );
     }
